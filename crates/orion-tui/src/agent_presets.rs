@@ -27,10 +27,10 @@ pub struct AgentPreset {
     /// Registry id when `kind` is [`AgentKind::Custom`].
     #[serde(default)]
     pub custom_harness: Option<String>,
-    /// Launch model; None = follow the Settings → Agents default.
+    /// Launch model; None = follow the Settings → Accounts default.
     #[serde(default)]
     pub model: Option<String>,
-    /// Launch effort; None = follow the Settings → Agents default.
+    /// Launch effort; None = follow the Settings → Accounts default.
     #[serde(default)]
     pub effort: Option<String>,
     /// Text sent before the task (may be empty).
@@ -258,7 +258,7 @@ impl AgentPreset {
 
 /// Which side of the task a preset's text goes: a PREFIX before it, a
 /// POSTFIX after it, or both. The PRESET EDITOR shows one box per side —
-/// its Text row picks — and **Preset text** (Settings → Sessions,
+/// its Text row picks — and `preset_text` (a hand-edited key,
 /// [`crate::config::Config::preset_text`]) is what a new preset starts on:
 /// prefix alone by default, the framing most people reach for and one box
 /// to fill. Never stored on the preset — a side is what it holds, so the

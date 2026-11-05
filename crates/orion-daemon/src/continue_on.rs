@@ -174,7 +174,7 @@ fn not_a_target(target: &HarnessDescriptor) -> String {
     }
     format!(
         "{label} keeps its sessions where orion can't see — add its config dir as a Claude \
-         account (Settings → Agents), or set CLAUDE_CONFIG_DIR in its `env`"
+         account (Settings → Accounts), or set CLAUDE_CONFIG_DIR in its `env`"
     )
 }
 

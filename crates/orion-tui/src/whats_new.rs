@@ -166,7 +166,7 @@ pub fn open(app: &mut App) {
 pub fn dismiss(app: &mut App) {
     app.overlay = None;
     app.dirty = true;
-    crate::onboard::persist(|cfg| {
+    crate::config::persist(|cfg| {
         stamp_seen(cfg);
     });
 }
@@ -399,7 +399,7 @@ mod tests {
     fn the_sheet_shows_the_unseen_releases_once() {
         let dir = tempfile::tempdir().unwrap();
         crate::config::with_config_path(dir.path().join("config.json"), || {
-            crate::onboard::persist(|cfg| {
+            crate::config::persist(|cfg| {
                 cfg.onboarded = true;
                 cfg.seen_version = "1.0.0".into();
             });

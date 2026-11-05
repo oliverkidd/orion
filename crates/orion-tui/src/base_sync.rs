@@ -1,5 +1,5 @@
 //! BASE SYNC: every project's base branch kept current without a keypress.
-//! On the **Fetch base branch** beat (Settings → Review), and at once after
+//! Every five minutes, and at once after
 //! a merge from the PULL REQUESTS MODAL, each project's ROOT WORKTREE
 //! fetches origin — which brings every worktree of the project current
 //! too, since they share its remote-tracking refs — and, when the root is
@@ -27,20 +27,9 @@ use crate::app::App;
 use crate::flash::Flash;
 use crate::git_proc::{head_branch, remote_git, run, FETCH_TIMEOUT};
 
-/// The **Fetch base branch** choices (Settings → Review), the default
-/// first: how often each project's root fetches origin.
-pub const INTERVALS: &[&str] = &["5m", "15m", "off"];
-
-/// The beat a **Fetch base branch** value names; None for `off`, which
-/// leaves only the fetch after a merge. Anything off the list reads as
-/// the default.
-pub fn interval(setting: &str) -> Option<Duration> {
-    match setting {
-        "off" => None,
-        "15m" => Some(Duration::from_secs(15 * 60)),
-        _ => Some(Duration::from_secs(5 * 60)),
-    }
-}
+/// How often each project's root fetches origin: every 5 minutes, and
+/// at once after a merge from the PULL REQUESTS MODAL.
+pub const EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// How a sync ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,8 +62,6 @@ pub struct Shared {
     /// When each project is next due. A project not in here is due now —
     /// every project syncs once soon after the TUI starts.
     pub due: HashMap<ProjectId, Instant>,
-    /// The **Fetch base branch** beat; None is `off`.
-    pub every: Option<Duration>,
 }
 
 // ---- git ----
@@ -134,13 +121,8 @@ fn next_due(app: &App) -> Option<(ProjectId, PathBuf, bool)> {
         .projects
         .iter()
         .filter_map(|p| {
-            let due = app.base_sync.due.get(&p.id).copied();
-            // Never synced, with no beat: only a merge asks.
-            let due = match (due, app.base_sync.every) {
-                (Some(at), _) => at,
-                (None, Some(_)) => now,
-                (None, None) => return None,
-            };
+            // Never synced: due now.
+            let due = app.base_sync.due.get(&p.id).copied().unwrap_or(now);
             (due <= now).then_some((due, p))
         })
         .min_by_key(|(due, _)| *due)
@@ -188,16 +170,9 @@ pub(crate) fn tick(app: &mut App) {
 pub(crate) fn land(app: &mut App, answer: Answer) {
     let Answer { project, outcome } = answer;
     app.base_sync.inflight = None;
-    match app.base_sync.every {
-        Some(every) => {
-            app.base_sync
-                .due
-                .insert(project.clone(), Instant::now() + every);
-        }
-        None => {
-            app.base_sync.due.remove(&project);
-        }
-    }
+    app.base_sync
+        .due
+        .insert(project.clone(), Instant::now() + EVERY);
     match &outcome {
         Outcome::Skipped(why) => {
             tracing::debug!(project = %project.0, "base sync skipped: {why}");
@@ -388,12 +363,5 @@ mod tests {
             std::fs::read_to_string(r.root.join("theirs-0")).unwrap(),
             "local edit"
         );
-    }
-
-    #[test]
-    fn the_interval_reads_off_as_none_and_junk_as_the_default() {
-        assert_eq!(interval("off"), None);
-        assert_eq!(interval("15m"), Some(Duration::from_secs(900)));
-        assert_eq!(interval("yolo"), Some(Duration::from_secs(300)));
     }
 }

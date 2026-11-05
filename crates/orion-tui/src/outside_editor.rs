@@ -1,5 +1,5 @@
 //! OPEN IN APP: the GUI editor `⌘O` hands a file to — and the OPEN MENU a
-//! checkout — outside orion. Settings → Tools **Open in app**
+//! checkout — outside orion. Settings → General **Open files in**
 //! (`outside_editor`) picks Cursor, VS Code or Sublime Text; `auto`, the
 //! default, is the first of the three that is installed, else whatever
 //! macOS's `open` hands the file to.
@@ -23,7 +23,7 @@ use std::time::Duration;
 /// How much of a CLI script is read to tell the agent shim from the app's own.
 const SHIM_SNIFF_BYTES: u64 = 16 * 1024;
 
-/// The apps **Open in app** names, in the order `auto` tries them.
+/// The apps **Open files in** names, in the order `auto` tries them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum App {
     Cursor,
@@ -90,7 +90,7 @@ fn spec(app: App) -> &'static Spec {
         .expect("every app has a spec")
 }
 
-/// The **Open in app** setting.
+/// The **Open files in** setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Choice {
     /// The first of Cursor, VS Code and Sublime Text installed, else
@@ -103,7 +103,7 @@ pub enum Choice {
 /// The setting's word for [`Choice::Auto`].
 pub const AUTO: &str = "auto";
 
-/// The **Open in app** row's choices, in the order it cycles them.
+/// The **Open files in** row's choices, in the order it cycles them.
 pub const CHOICES: &[&str] = &[AUTO, "cursor", "vscode", "sublime"];
 
 impl Choice {
@@ -236,7 +236,12 @@ pub fn resolve(choice: Choice, places: &Places) -> Result<Target, String> {
             let spec = spec(app);
             find(app, places)
                 .map(|launcher| target(spec, launcher))
-                .ok_or_else(|| format!("{} isn't installed (Settings → Open in app)", spec.name))
+                .ok_or_else(|| {
+                    format!(
+                        "{} isn't installed (Settings → General → Open files in)",
+                        spec.name
+                    )
+                })
         }
     }
 }
@@ -249,7 +254,7 @@ fn system() -> Target {
     }
 }
 
-/// The **Open in app** setting as this machine resolves it.
+/// The **Open files in** setting as this machine resolves it.
 pub fn configured() -> Result<Target, String> {
     resolve(
         Choice::parse(&crate::config::Config::load().outside_editor),
@@ -257,8 +262,16 @@ pub fn configured() -> Result<Target, String> {
     )
 }
 
+/// How long [`hint_name`] and [`row_label`] keep an answer: they are drawn
+/// every frame, and the answer reads the Applications folders and `PATH`.
+const KEEP: Duration = Duration::from_secs(5);
+
 /// [`hint_name`]'s last answer and when it was worked out.
 static HINT_NAME: std::sync::Mutex<Option<(std::time::Instant, &'static str)>> =
+    std::sync::Mutex::new(None);
+
+/// [`row_label`]'s last answer: when, for which stored word, and the label.
+static ROW_LABEL: std::sync::Mutex<Option<(std::time::Instant, String, String)>> =
     std::sync::Mutex::new(None);
 
 /// What a hint calls the configured app: its name, or the one the setting
@@ -267,7 +280,6 @@ static HINT_NAME: std::sync::Mutex<Option<(std::time::Instant, &'static str)>> =
 /// than the config and the Applications folders read each time — or until
 /// the setting changes ([`forget_hint_name`]).
 pub fn hint_name() -> &'static str {
-    const KEEP: Duration = Duration::from_secs(5);
     let mut kept = HINT_NAME.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, name)) = *kept {
         if at.elapsed() < KEEP {
@@ -284,10 +296,30 @@ pub fn hint_name() -> &'static str {
     name
 }
 
-/// The **Open in app** row changed: the hints name the new app on the
-/// next frame rather than up to five seconds on.
+/// The **Open files in** row changed: the hints and the row name the new
+/// app on the next frame rather than up to five seconds on.
 pub fn forget_hint_name() {
     *HINT_NAME.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *ROW_LABEL.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// [`value_label`] on this machine, for the **Open files in** row — on
+/// the tab the settings overlay opens on, so drawn every frame — kept
+/// like [`hint_name`]'s answer. A test reads the machine each time, its
+/// `PATH` being its own.
+pub fn row_label(stored: &str) -> String {
+    if cfg!(test) {
+        return value_label(stored, &Places::here());
+    }
+    let mut kept = ROW_LABEL.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, word, label)) = kept.as_ref() {
+        if at.elapsed() < KEEP && word == stored {
+            return label.clone();
+        }
+    }
+    let label = value_label(stored, &Places::here());
+    *kept = Some((std::time::Instant::now(), stored.to_string(), label.clone()));
+    label
 }
 
 /// What the settings row shows: the choice, `auto` with the app it lands
@@ -577,7 +609,7 @@ mod tests {
 
         assert_eq!(
             resolve(Choice::App(App::Cursor), &m.places()),
-            Err("Cursor isn't installed (Settings → Open in app)".into())
+            Err("Cursor isn't installed (Settings → General → Open files in)".into())
         );
         assert_eq!(installed_names(&m.places()), ["VS Code", "Sublime Text"]);
         assert_eq!(value_label("auto", &m.places()), "auto · VS Code");

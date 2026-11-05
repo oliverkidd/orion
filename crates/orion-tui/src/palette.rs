@@ -143,10 +143,6 @@ pub struct Palette {
     pub matches: Vec<PaletteMatch>,
     /// Index into `matches` (not `items`).
     pub selected: usize,
-    /// Whether Enter (and a click) on a session row attaches to it, or only
-    /// lands on its Sessions-panel row. Snapshot of the config setting at
-    /// open time; Ctrl+O / Ctrl+F pick explicitly either way.
-    pub enter_attaches: bool,
     /// Whole modal rect, written back during draw so clicks outside close.
     pub area: Rect,
     /// Screen rect of the result rows (query row excluded), written back
@@ -157,7 +153,6 @@ pub struct Palette {
 impl Palette {
     pub fn new(
         tree: &Tree,
-        enter_attaches: bool,
         open_prs: &HashMap<ProjectId, OpenPrs>,
         prs: &PrStore,
         hide_draft_prs: bool,
@@ -167,7 +162,6 @@ impl Palette {
             query: TextInput::new(),
             matches: Vec::new(),
             selected: 0,
-            enter_attaches,
             area: Rect::default(),
             list_area: Rect::default(),
         };
@@ -518,7 +512,7 @@ mod tests {
     /// crumb then its own name (`demo/ask`), and the row the cursor starts
     /// on marked `▶`.
     fn rows(tree: &Tree, query: &str) -> Vec<String> {
-        let mut palette = Palette::new(tree, false, &HashMap::new(), &PrStore::default(), false);
+        let mut palette = Palette::new(tree, &HashMap::new(), &PrStore::default(), false);
         palette.query = TextInput::from(query);
         palette.apply_filter();
         palette
@@ -582,7 +576,7 @@ mod tests {
     #[test]
     fn a_query_reaches_the_rows_the_overview_leaves_out() {
         let tree = tree();
-        let palette = Palette::new(&tree, false, &HashMap::new(), &PrStore::default(), false);
+        let palette = Palette::new(&tree, &HashMap::new(), &PrStore::default(), false);
         assert!(
             palette.matches.iter().all(|m| matches!(
                 palette.items[m.item].target,
@@ -611,7 +605,7 @@ mod tests {
     #[test]
     fn every_visible_row_counts_as_a_hit() {
         let tree = tree();
-        let mut palette = Palette::new(&tree, false, &HashMap::new(), &PrStore::default(), false);
+        let mut palette = Palette::new(&tree, &HashMap::new(), &PrStore::default(), false);
         palette.query = TextInput::from("read");
         palette.apply_filter();
         assert_eq!(palette.matches.len(), 2);
@@ -681,7 +675,7 @@ mod tests {
             },
         );
         let texts = |hide: bool| -> Vec<String> {
-            Palette::new(&tree, false, &open_prs, &observed(&open_prs), hide)
+            Palette::new(&tree, &open_prs, &observed(&open_prs), hide)
                 .items
                 .iter()
                 .map(|i| i.text.clone())
@@ -759,7 +753,7 @@ mod tests {
                 step: std::time::Duration::from_secs(1),
             },
         );
-        let palette = Palette::new(&tree, false, &open_prs, &observed(&open_prs), false);
+        let palette = Palette::new(&tree, &open_prs, &observed(&open_prs), false);
         let troubles: Vec<(&str, Option<Trouble>)> = palette
             .items
             .iter()
@@ -820,7 +814,7 @@ mod tests {
                 step: std::time::Duration::from_secs(1),
             },
         );
-        let palette = Palette::new(&tree, false, &open_prs, &observed(&open_prs), false);
+        let palette = Palette::new(&tree, &open_prs, &observed(&open_prs), false);
         let standings: Vec<(&str, Option<Standing>)> = palette
             .items
             .iter()

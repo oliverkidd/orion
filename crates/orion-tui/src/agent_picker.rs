@@ -63,7 +63,7 @@ impl KindPicker {
     /// harness is asked first, and Enter on a row OPENS the QUICK PROMPT
     /// set to it (`back.from_box` is false: Esc closes the picker and
     /// opens nothing). The cursor starts on the harness the box would
-    /// have opened on — the Settings → Agents one — so `Enter` at once
+    /// have opened on — the Settings → Accounts one — so `Enter` at once
     /// is `p`.
     pub fn new_session_box(worktree: WorktreeId, back: QuickReturn) -> Self {
         Self {
@@ -335,10 +335,10 @@ mod tests {
         });
     }
 
-    /// The Agents tab's per-entry Enabled row is the toggle now: flip
+    /// The Accounts tab's per-entry Enabled row is the toggle now: flip
     /// it, save, and the picker drops the entry until it flips back.
     #[test]
-    fn agents_tab_toggles_custom_entries_off_the_picker() {
+    fn accounts_tab_toggles_custom_entries_off_the_picker() {
         use crate::config::{locate_agent, HarnessField};
         let json = r#"{"harnesses": {
             "agy": {"label": "Agy", "program": "agy"}

@@ -974,8 +974,8 @@ impl Daemon {
     /// ENV LINKS for a checkout just added to the project cloned at
     /// `repo`: the main checkout — git's first worktree, which is `repo`
     /// itself unless the project was added from a linked one — lends its
-    /// ignored `.env*` files to `worktree`. Off with the `link_env_files`
-    /// SETTING; a failure is a client warning, never a failed create.
+    /// ignored `.env*` files to `worktree`, always; a failure is a client
+    /// warning, never a failed create.
     async fn link_env_files(&self, repo: &Path, worktree: &Path) {
         let main = git::list_worktrees(repo)
             .await
@@ -987,9 +987,6 @@ impl Daemon {
 
     /// [`Daemon::link_env_files`] with the main checkout already known.
     async fn link_env_files_from(&self, main: &Path, worktree: &Path) {
-        if !crate::config::Config::load().link_env_files {
-            return;
-        }
         match crate::env_links::link(main, worktree).await {
             Ok(linked) if !linked.is_empty() => tracing::info!(
                 worktree = %worktree.display(),
@@ -2368,9 +2365,6 @@ impl Daemon {
         cols: u16,
         rows: u16,
     ) {
-        if !crate::config::Config::load().prewarm_sessions {
-            return;
-        }
         let daemon = self.clone();
         let worktree_id = worktree_id.clone();
         let handle = tokio::spawn(async move {

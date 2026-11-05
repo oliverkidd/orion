@@ -14,13 +14,13 @@ walk (`.` / `,`), archiving and deleting.
 
 Run **New agent — choose harness** from the command palette (`⌘⇧P`, or `:`). A menu asks what to
 run — **Claude**, **Codex**, **Cursor**, **Grok Build**, or **OpenCode** (a plain shell is `t` — see [Keys](keys.md)); a CLI you never use can be
-switched off on the settings overlay's Agents tab and drops out of the menu entirely. Claude is
+switched off on the settings overlay's Accounts tab and drops out of the menu entirely. Claude is
 listed by the account it is signed in as, `Claude (you@example.com)`, and every other CLAUDE
 ACCOUNT you have added has a row of its own right after it ([below](#usage-limits-and-a-second-account)). The menu
 lists only enabled harnesses whose CLI is found on PATH (the daemon still
 checks through the login shell at launch). Your own CLIs join the menu too: add them to config.json
 `harnesses` (see [Configuration](configuration.md)) and they appear after the built-ins under their
-own labels, each toggled in its own section on the Agents tab, with the session card wearing the
+own labels, each toggled in its own section on the Accounts tab, with the session card wearing the
 entry's label as its badge. An entry with only a `program` launches with it and a `--model` flag,
 boots fresh every time (no resume mapping), and — unless it names a built-in hook dialect — stays
 process-based: working while the PTY is live, done when it ends, never needing you. `→` on any row drills
@@ -34,10 +34,10 @@ that harness, model and effort, aimed at the checkout under the cursor: type the
 launches it, or send the box empty and the CLI starts bare, and you type the agent's first prompt
 there. Nothing asks for a name — the
 session titles itself from that first prompt (AUTO-TITLE); `r` renames it whenever you like. `⌘N`
-opens the same box straight away, on the Agents tab's harness (see [Keys](keys.md)).
+opens the same box straight away, on the Accounts tab's harness (see [Keys](keys.md)).
 
-The picker opens on the Agents tab's **Quick prompt › Agent** harness — the one `⌘N` launches — so
-`Enter` at once is `⌘N`, whatever you picked last: a pick is one session's, and the Agents tab is
+The picker opens on the Accounts tab's **New agents on** harness — the one `⌘N` launches — so
+`Enter` at once is `⌘N`, whatever you picked last: a pick is one session's, and the Accounts tab is
 where the defaults are set.
 
 The rows do not run under the same permissions, and the picker is where you decide that. Claude
@@ -80,8 +80,8 @@ narrow the list to the fuzzy matches, `↑`/`↓` move, `Backspace` widens and `
 model and effort submenus. `Ctrl+a` opens a small form — name, harness, model, effort, **Text**
 (which side of the task the preset's text goes: `prefix`, `postfix` or `prefix & postfix`, with a
 box for each side it names) and **Task** (`ask` or `skip`) — and `Ctrl+e` / `Ctrl+d` edit or
-delete; they are chords because plain letters type. A new preset starts on the side **Preset text**
-in Settings → Sessions names (`preset_text` in CONFIG.JSON) — `prefix` unless you change it: one
+delete; they are chords because plain letters type. A new preset starts on the side
+`preset_text` in CONFIG.JSON names, by hand — `prefix` unless you change it: one
 box, sent before your task — and cycling the row shows the other box or both; a side the row leaves
 out saves blank. Editing a preset also shows any side that already holds text, so one saved with
 both never loses either. `Enter` on a
@@ -100,7 +100,7 @@ refuses with the reason when its entry is switched off or gone.
 Three presets are **system presets**, on every list and marked `system` — the agents orion starts
 itself:
 
-- **PR autofix** wraps what broke for the agent **Auto-fix PRs** sends to a broken pull request.
+- **PR autofix** wraps what broke for the agent **Auto-fix my PRs** sends to a broken pull request.
   That agent runs on the PR's own agent — the session that did the work on its branch — and, with
   none, on your default agent at this preset's model and effort. orion's text: fix only what is
   listed; resolve conflicts; reproduce each failing unit test locally and fix it; re-run only the
@@ -260,7 +260,7 @@ before the next read.
 See [Keys](keys.md#the-grid).
 
 A second Claude account is one more Claude Code config dir with a login of its own: **Add
-account** under **Claude accounts** on the settings overlay's Agents tab (or **Claude accounts** in
+account** under **Claude accounts** on the settings overlay's Accounts tab (or **Claude accounts** in
 the COMMAND PALETTE, or the step first-run onboarding has right after Agents) makes the dir, offers to
 share your setup with it — `CLAUDE.md`, settings, skills, agents, commands, plugins, as links — and
 `Enter` on its row signs it in with Claude Code's own `claude auth login`. Every account goes by the
@@ -274,7 +274,7 @@ to take back. See [Configuration](configuration.md#claude-accounts) for the
 
 Two accounts signed in to the same claude.ai login are one subscription with one limit — the
 browser sign-in approves whichever account the browser is signed in to, so it is easy to end up
-there. The Agents tab and onboarding flag it under the accounts, with the fix: sign one in again from
+there. The Accounts tab and onboarding flag it under the accounts, with the fix: sign one in again from
 a private browser window, or with the other email.
 
 With a second account set up, a Claude session can go on there: **Continue on Claude
@@ -303,7 +303,7 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
 
 - **The box** starts on the selected project and in the checkout under the cursor — the worktree
   whose band the cursor is on, open or collapsed; the root branch with nothing selected —
-  launching the harness, model and effort the Agents tab defaults name. Its header spells them out,
+  launching the harness, model and effort the Accounts tab defaults name. Its header spells them out,
   each field beside the key that changes it, where the launch runs over what runs it:
   `project demo ⌘P   worktree main ⌘.` over
   `agent Claude (you@example.com) Tab   model opus · latest ⌘/   effort high ⌘Y`. The effort is
@@ -336,8 +336,8 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   opens — on
   `effort`, the model's effort list — box and task still in front of you. Enter
   launches, and the cursor and the pane land on the new card as it goes up in its band, the grid
-  scrolling to it and the keys still on the grid. Turn off **Follow new** under **Quick prompt** in
-  Settings → Agents and nothing you were looking at moves instead: the cursor and the pane stay on
+  scrolling to it and the keys still on the grid. Turn off **Follow new session** in
+  Settings → General and nothing you were looking at moves instead: the cursor and the pane stay on
   the card you were on, and the footer names the branch the new session went to (`started a session
   in feat`). Esc leaves the box for the grid, keeping what you typed — `⌘N`
   opens on it again.
@@ -401,19 +401,16 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   header's cursor reach them too, each drawn in the lit tab's place. The lit tab is always drawn,
   its name whole wherever there is room for it. A tab's name, its `×`, the chip and the `+` all mark
   themselves while the pointer rests on them. The cards are grouped
-  into **BANDS**, one per checkout that has something running in it — the root first, then the
-  rest most recently worked in first; a checkout with nothing running has no band — unless
-  **Show all worktrees** (Settings → Sessions, on by default) is on, when every checkout gets
-  one: an EMPTY BAND, its rule over a single line, `nothing running` — what can be done there is
+  into **BANDS**, one per checkout — the root first, then the rest most recently worked in first.
+  A checkout with nothing running in it is an EMPTY BAND, its rule over a single line,
+  `nothing running` — what can be done there is
   the footer's to say once the cursor is on it (`⌘N new agent · t terminal · ⌫ delete worktree`,
   and `→ focus PR` beside the pull request the pane reads). `↑`/`↓` walk onto it like any band, `⌘N`/`t` start work in
   that checkout, and `Backspace` (or **Delete worktree** in its right-click menu) deletes it behind the
   worktree's own confirm — and `⌘⌫` (`⇧D`) does the same from any card on a band, taking every
   session in it down with the checkout behind one confirm that names them; the root's band offers
-  no delete, since the root is never deleted. With the
-  setting on, deleting a worktree's last card never asks about the worktree: the band stays,
-  empty, until its own `Backspace` — unless **Delete emptied worktree** is on, which still deletes the
-  worktree with its last card. Each band is a
+  no delete, since the root is never deleted. Deleting a worktree's last card never asks about
+  the worktree: the band stays, empty, until its own `Backspace`. Each band is a
   titled rule over its entries, a line apiece: the rule names the checkout by its SCOPE MARK (`⎇ feat`,
   `⌂ main` for the root, the purple `●` once its pull request has merged — the project is the
   grid's own scope, named once in the header; the root's branch is bright, a worktree's muted), and
@@ -522,21 +519,10 @@ diff, `⌘K` jumps, `s` opens Settings. `⌘⇧A` asks first, always: a CONFIRM 
 the session, `Enter` or `y` archives it and `Esc` or `n` keeps it, so a letter aimed at an agent
 that lands on the grid archives nothing — and saying yes is cheap, since `⌘⇧U` (`^U`) brings it back. The
 cursor lands on the card after the one archived in its band — the one that slides up into its
-place — or, when the band's last card went, on the one before it; a band's only card leaving takes
-the band with it, and the cursor lands on the one that slid up into its slot. `Backspace` lands
-the same way — and when the card is the last one in a linked worktree (a lone terminal counts too,
-and so does a **Delete all sessions** that takes every row), its confirm asks about the checkout in the same breath,
-before anything is deleted: `Delete agent 'x'? Its session and history go away.` and under it
-`Nothing else is left in worktree 'feature': delete it from disk too?`, with three answers. `Enter`
-or `y` deletes the card and then the worktree, the way `Backspace` on its band would; `n` deletes the card
-and keeps the checkout standing empty; `Esc` cancels, and the card stays alive. The ROOT WORKTREE
-is never offered, and an archive (`⌘⇧A`) never asks: an archived card is still filed under its
-checkout, so the dialog on a worktree that still holds archived sessions counts them, since the
-delete takes their history with it. **Delete emptied worktree** (Settings → Sessions, off by
-default) skips the question: the card's ordinary confirm says the worktree goes with it and `Enter`
-deletes both — except when archived sessions are still filed under it, which always get the
-three-way question. **Show all worktrees** takes the question away, not the setting: with both on,
-the worktree still goes with its last card. A held `⌘⇧A` opens one dialog and
+place — or, when the band's last card went, on the one before it; a band's only card leaving leaves
+the band, empty, under the cursor. `Backspace` lands the same way, and its confirm is the card's
+own: deleting a worktree's last card never asks about the worktree, which stays as an empty band
+until its own `Backspace`. A held `⌘⇧A` opens one dialog and
 archives nothing by itself; a held `⌘⇧U` in the ARCHIVED VIEW unarchives one card, and the next needs
 the key let go and pressed again (on a terminal with the kitty keyboard protocol, which is what
 tells a held key's repeats from a fresh press; without it a long hold still walks the row).

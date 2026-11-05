@@ -1772,7 +1772,7 @@ fn submit(app: &mut App) {
         let Some(through) = &through else {
             return notice(
                 app,
-                "no Claude account is switched on — Settings → Agents, or Claude accounts in the palette",
+                "no Claude account is switched on — Settings → Accounts, or Claude accounts in the palette",
             );
         };
         if !crate::config::program_installed(&through.program) {

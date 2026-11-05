@@ -84,7 +84,7 @@ See [Configuration](configuration.md#backup-restore-and-other-machines).
 ```sh
 orion doctor             # one line for each thing orion leans on, with the fix for a missing one:
                           # git, gh (installed and signed in: `gh auth status`), fresh (or the
-                          # editor ORION_EDITOR names), the Open in app editor,
+                          # editor ORION_EDITOR names), the editor app files open in,
                           # Orion.app and the Ghostty it is made from, the CLI of every
                           # agent turned on, and the LINEAR_API_KEY of the project you are
                           # standing in — where it was found, never the key — and the docker
@@ -102,7 +102,7 @@ orion doctor --json      # the same report as {"ok": …, "checks": [{name, stat
   ✓ gh                signed in to GitHub
   ✗ File editor       fresh isn't installed — no file can open
                       fix: brew install fresh-editor
-  ✓ Open in app       auto → Cursor
+  ✓ Open files in     auto → Cursor
   ✗ Orion.app         not made yet — orion's ⌘ shortcuts work in it
                       fix: orion app
   ✓ Agent claude      ~/.local/bin/claude

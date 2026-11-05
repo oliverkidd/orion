@@ -2500,10 +2500,10 @@ fn pr_modal_under(app: &App) -> Option<Box<crate::pr_modal::PullRequestsView>> {
 }
 
 /// Dress a DIFF VIEWER about to go up the way every one opens: its column
-/// at the width it was last dragged to; the **Review** SETTINGS — the
-/// files as a tree, the panel with the keys (the commits only where there
-/// are any to tick: `commits`); and, opened from the PULL REQUESTS MODAL,
-/// the modal to go back to. Before its files are
+/// at the width it was last dragged to; its files as a tree when `⌘B`
+/// last left one that way; the keys on the commits when there are any to
+/// tick (`commits`), else on the files; and, opened from the PULL
+/// REQUESTS MODAL, the modal to go back to. Before its files are
 /// selected or filled in: a tree toggled after would land elsewhere.
 fn dress_viewer(app: &App, view: &mut DiffView, commits: bool) {
     use crate::app::DiffFocus;
@@ -2511,9 +2511,10 @@ fn dress_viewer(app: &App, view: &mut DiffView, commits: bool) {
     if app.diff_tree && view.tree.is_none() {
         view.toggle_tree();
     }
-    view.focus = match app.diff_start {
-        DiffFocus::Commits if !commits => DiffFocus::Files,
-        focus => focus,
+    view.focus = if commits {
+        DiffFocus::Commits
+    } else {
+        DiffFocus::Files
     };
     view.back = pr_modal_under(app);
 }
@@ -2848,7 +2849,7 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
         app.diff_files_width = w.clamp(crate::app::MIN_DIFF_FILES_W, MAX_RESTORED_WIDTH);
     }
     // `diff_tree` in the blob is what `Ctrl+t` was last left on, from
-    // builds before the **Files as a tree** SETTING: the setting decides
+    // builds before `diff_tree_view` remembered it: config.json decides
     // now (`apply_config`).
     // The next draw re-fits it to the body actually on screen
     // (`launcher::pane_height`); the cap here only keeps a nonsense blob
@@ -4258,12 +4259,10 @@ fn dispatch_action(
             }
         }
         // Fuzzy-search palette over every project / worktree / session.
-        // The config read is per-open so edits apply without restarting.
         Action::Palette => {
             if app.focus != Focus::Terminal {
                 app.overlay = Some(Overlay::Palette(Palette::new(
                     &app.tree,
-                    crate::config::Config::load().palette_enter_attaches,
                     &app.open_prs,
                     &app.prs,
                     app.hide_draft_prs,
@@ -4272,16 +4271,10 @@ fn dispatch_action(
         }
         // `.` / `,`: the palette's attention order as a ring, no modal —
         // one press lands on the next session that needs you, in whatever
-        // project it lives, the way `/` Enter would (same setting, same
-        // landing, same always-attach on a red row). Live from any panel.
-        Action::NextAttention => {
-            let attaches = crate::config::Config::load().palette_enter_attaches;
-            jump_attention(app, 1, attaches, out);
-        }
-        Action::PrevAttention => {
-            let attaches = crate::config::Config::load().palette_enter_attaches;
-            jump_attention(app, -1, attaches, out);
-        }
+        // project it lives, the way `/` Enter would (same landing, same
+        // always-attach on a red row). Live from any panel.
+        Action::NextAttention => jump_attention(app, 1, out),
+        Action::PrevAttention => jump_attention(app, -1, out),
         Action::Delete => open_delete_confirm(app),
         Action::ClosePane => close_pane(app),
         // Delete EVERY row of the focused panel (behind a confirm that
@@ -4475,7 +4468,7 @@ pub(crate) fn cycle_mode(app: &mut App) {
 /// Cycle effort (`⌘Y` / `^Y`): the next effort on the model the box is
 /// set to — `default`, then the harness's list, round again — shown at
 /// once in the box's header. Over one of the box's pickers it hands the
-/// box back stepped, the box never closing under the key. The Agents tab
+/// box back stepped, the box never closing under the key. The Accounts tab
 /// default follows where the harness's default model offers the same
 /// effort, so the next box starts where this one was left; with no box
 /// up, the key steps that default alone.
@@ -4532,7 +4525,7 @@ fn cycle_box_effort(app: &mut App, back: crate::quick_prompt::QuickReturn) {
     }
 }
 
-/// [`cycle_effort`] with no box up: the Agents tab default of the harness
+/// [`cycle_effort`] with no box up: the Accounts tab default of the harness
 /// `⌘N` launches.
 fn cycle_default_effort(app: &mut App) {
     let mut cfg = crate::config::Config::load();
@@ -4666,9 +4659,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::config::SettingKind::BaseBranch => {
                     "branch this project's new worktrees start from (empty = auto: origin's default branch)"
                 }
-                crate::config::SettingKind::LinearAccount => {
-                    "email of the Linear user whose issues ⌘L lists (empty = the LINEAR_API_KEY's owner)"
-                }
                 crate::config::SettingKind::RunCommand => {
                     "shell line Start stack runs in a worktree's run terminal, e.g. just start (empty = none)"
                 }
@@ -4679,7 +4669,7 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             };
             let value = match project {
                 Some(path) => cfg.project_text_value(path, *kind),
-                None => cfg.text_value(*kind),
+                None => String::new(),
             };
             (title.into(), hint.into(), value)
         }
@@ -5693,10 +5683,8 @@ fn land_diff_listing(
 
 /// Enter on a grep hit: spawn the editor at `path:line` inside the modal
 /// terminal — a markdown file as its MARKDOWN PAGE, with the hit in view
-/// and Enter there editing at its line. With `close_finder_on_open` the
-/// grep overlay closes as the file opens, so closing it is a single Esc;
-/// with it off the overlay stays open underneath and closing lands back
-/// on the results.
+/// and Enter there editing at its line. The grep overlay closes as the
+/// file opens, so closing it is a single Esc.
 fn open_selected_hit_in_editor(app: &mut App) {
     let Some(Overlay::Grep(view)) = &app.overlay else {
         return;
@@ -5744,14 +5732,13 @@ pub(crate) fn open_file(
     opened
 }
 
-/// Drop the finder overlay the editor was just launched from, when the
-/// setting asks for it. Only called after a spawn actually succeeded — a
-/// failed spawn (or a unit test with no reader channel) must leave the
-/// results on screen rather than dismiss them for nothing.
+/// Drop the finder overlay the editor was just launched from, so quitting
+/// the editor lands on the grid, not on the finder. Only called after a
+/// spawn actually succeeded — a failed spawn (or a unit test with no
+/// reader channel) must leave the results on screen rather than dismiss
+/// them for nothing.
 fn close_finder_behind_editor(app: &mut App) {
-    if crate::config::Config::load().close_finder_on_open {
-        app.overlay = None;
-    }
+    app.overlay = None;
 }
 
 /// Boot `editor` on `file` at `line` (cwd `root`) into the editor modal at
@@ -5834,10 +5821,8 @@ fn take_editor_install(app: &mut App, key: &KeyEvent) -> Option<crate::install::
 }
 
 /// Enter on a file-finder row: spawn the editor at the file's first line
-/// inside the modal terminal — a markdown file as its MARKDOWN PAGE. With
-/// `close_finder_on_open` the finder closes as the file opens, so closing
-/// it is a single Esc; with it off the finder stays open underneath and
-/// closing lands back on the results.
+/// inside the modal terminal — a markdown file as its MARKDOWN PAGE. The
+/// finder closes as the file opens, so closing it is a single Esc.
 fn open_selected_file(app: &mut App) {
     let Some(Overlay::Files(finder)) = &app.overlay else {
         return;
@@ -6416,10 +6401,10 @@ fn open_delete_confirm(app: &mut App) {
             Some(id) => activate::delete_worktree(app, &id),
             None => match app.selected_session_row() {
                 Some(SessionRow::Agent(a)) => {
-                    app.overlay = Some(Overlay::Confirm(confirm_delete_agent_in(app, &a)));
+                    app.overlay = Some(Overlay::Confirm(confirm_delete_agent(&a)));
                 }
                 Some(SessionRow::Terminal(t)) => {
-                    app.overlay = Some(Overlay::Confirm(confirm_close_terminal_in(app, &t)));
+                    app.overlay = Some(Overlay::Confirm(confirm_close_terminal(&t)));
                 }
                 Some(SessionRow::Link(l)) => delete_link(app, &l),
                 None => {}
@@ -6482,10 +6467,10 @@ fn close_pane(app: &mut App) {
         .flatten();
     match row {
         Some(SessionRow::Agent(a)) => {
-            app.overlay = Some(Overlay::Confirm(confirm_delete_agent_in(app, &a)));
+            app.overlay = Some(Overlay::Confirm(confirm_delete_agent(&a)));
         }
         Some(SessionRow::Terminal(t)) => {
-            app.overlay = Some(Overlay::Confirm(confirm_close_terminal_in(app, &t)));
+            app.overlay = Some(Overlay::Confirm(confirm_close_terminal(&t)));
         }
         _ => {}
     }
@@ -6493,21 +6478,24 @@ fn close_pane(app: &mut App) {
 
 /// The confirm before an agent is deleted — from the `d` key and the row
 /// menu alike, so the two never drift apart in wording.
-fn confirm_delete_agent(name: &str, id: AgentId) -> ConfirmDialog {
+fn confirm_delete_agent(agent: &orion_core::Agent) -> ConfirmDialog {
     ConfirmDialog {
         title: "Delete agent".into(),
-        message: format!("Delete agent '{name}'? Its session and history go away."),
-        action: PendingAction::DeleteAgent(id),
+        message: format!(
+            "Delete agent '{}'? Its session and history go away.",
+            agent.name
+        ),
+        action: PendingAction::DeleteAgent(agent.id.clone()),
         area: ratatui::layout::Rect::default(),
     }
 }
 
 /// The confirm before a terminal tab is closed (key and menu).
-fn confirm_close_terminal(name: &str, id: TerminalId) -> ConfirmDialog {
+fn confirm_close_terminal(terminal: &orion_core::TerminalTab) -> ConfirmDialog {
     ConfirmDialog {
         title: "Close terminal".into(),
-        message: format!("Close terminal '{name}'? Its shell is killed."),
-        action: PendingAction::CloseTerminal(id),
+        message: format!("Close terminal '{}'? Its shell is killed.", terminal.name),
+        action: PendingAction::CloseTerminal(terminal.id.clone()),
         area: ratatui::layout::Rect::default(),
     }
 }
@@ -6746,11 +6734,8 @@ fn open_delete_all_confirm(app: &mut App) {
                     SessionRow::Link(_) => unreachable!("filtered out above"),
                 }
             }
-            // The rows are the selected worktree's: a `D` that takes every
-            // live card there asks about the checkout in the same dialog.
-            let worktree = app.selected_worktree().map(|w| w.id.clone());
             let title = format!("Delete ALL {} session(s)", names.len());
-            let dialog = confirm_delete_sessions(app, title, &names, agents, terminals, worktree);
+            let dialog = confirm_delete_sessions(title, &names, agents, terminals);
             app.overlay = Some(Overlay::Confirm(dialog));
         }
         Focus::Projects | Focus::Terminal => {}
@@ -6758,23 +6743,15 @@ fn open_delete_all_confirm(app: &mut App) {
 }
 
 /// The confirm before several sessions go at once — **Delete all
-/// sessions**, and `⌫` on a MULTI-SELECT — itemizing them. When they are
-/// all one checkout's (`worktree`) and take every live card there, the
-/// dialog asks about the checkout too ([`with_worktree_offer`]).
+/// sessions**, and `⌫` on a MULTI-SELECT — itemizing them. Emptying a
+/// worktree asks nothing about the worktree: its band stays.
 fn confirm_delete_sessions(
-    app: &App,
     title: String,
     names: &[String],
     agents: Vec<AgentId>,
     terminals: Vec<TerminalId>,
-    worktree: Option<WorktreeId>,
 ) -> ConfirmDialog {
-    let live_taken = agents
-        .iter()
-        .filter(|id| app.tree.agents.iter().any(|a| &a.id == *id && !a.archived))
-        .count()
-        + terminals.len();
-    let dialog = ConfirmDialog {
+    ConfirmDialog {
         title,
         message: format!(
             "Delete these {} session(s)? Their history goes away.\n{}",
@@ -6783,10 +6760,6 @@ fn confirm_delete_sessions(
         ),
         action: PendingAction::DeleteAllSessions { agents, terminals },
         area: ratatui::layout::Rect::default(),
-    };
-    match worktree {
-        Some(wt) => with_worktree_offer(app, dialog, &wt, live_taken),
-        None => dialog,
     }
 }
 
@@ -6802,15 +6775,14 @@ fn open_delete_marked_confirm(app: &mut App) -> bool {
     let mut names = Vec::new();
     let mut agents = Vec::new();
     let mut terminals = Vec::new();
-    let mut worktrees = Vec::new();
     for sref in marked {
-        let (name, worktree) = match &sref {
+        let name = match &sref {
             SessionRef::Agent(id) => match app.tree.agents.iter().find(|a| &a.id == id) {
-                Some(a) => (a.name.clone(), a.worktree_id.clone()),
+                Some(a) => a.name.clone(),
                 None => continue,
             },
             SessionRef::Terminal(id) => match app.tree.terminals.iter().find(|t| &t.id == id) {
-                Some(t) => (t.name.clone(), t.worktree_id.clone()),
+                Some(t) => t.name.clone(),
                 None => continue,
             },
         };
@@ -6819,16 +6791,12 @@ fn open_delete_marked_confirm(app: &mut App) -> bool {
             SessionRef::Terminal(id) => terminals.push(id),
         }
         names.push(name);
-        if !worktrees.contains(&worktree) {
-            worktrees.push(worktree);
-        }
     }
     if names.is_empty() {
         return false;
     }
-    let one_checkout = (worktrees.len() == 1).then(|| worktrees.remove(0));
     let title = format!("Delete {} selected session(s)", names.len());
-    let dialog = confirm_delete_sessions(app, title, &names, agents, terminals, one_checkout);
+    let dialog = confirm_delete_sessions(title, &names, agents, terminals);
     app.overlay = Some(Overlay::Confirm(dialog));
     true
 }
@@ -7381,7 +7349,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
             // `?` (and `s` where no filter eats letters) on a row that
-            // starts a session jumps to that harness's Agents section,
+            // starts a session jumps to that harness's Accounts section,
             // where its defaults live. Ahead of type-ahead on purpose:
             // `?` is a jump on these rows, never a filter letter (no row
             // contains one); `s` only jumps without a filter, since in
@@ -7584,20 +7552,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             }
         },
         Overlay::Confirm(confirm) => match key.code {
-            // The three-way dialog's "no": the card goes, the emptied
-            // worktree stays. Esc below is the "cancel" that keeps both.
-            _ if ui::confirm_keys::NO.matches(&key)
-                && matches!(
-                    confirm.action,
-                    PendingAction::ThenDeleteWorktree { offered: true, .. }
-                ) =>
-            {
-                let PendingAction::ThenDeleteWorktree { first, .. } = confirm.action.clone() else {
-                    unreachable!("guarded above");
-                };
-                app.overlay = None;
-                run_pending_action(app, *first, out);
-            }
             // **Add account**'s "no": add it, sharing nothing.
             _ if ui::confirm_keys::NO.matches(&key)
                 && matches!(confirm.action, PendingAction::AddClaudeAccount(_)) =>
@@ -7690,9 +7644,14 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
                 // ⌘B flips the file list between flat paths and the
                 // directory tree (`diff_tree`), the cursor staying on its
-                // file — this viewer's alone: the **Files as a tree**
-                // SETTING is how the next one opens.
-                _ if TREE.matches(&key) => activate::diff_tree_toggled(view),
+                // file — and the next viewer, here and after a restart,
+                // opens the way this one was left (`diff_tree_view`).
+                _ if TREE.matches(&key) => {
+                    activate::diff_tree_toggled(view);
+                    let tree = view.tree.is_some();
+                    app.diff_tree = tree;
+                    crate::config::persist(|cfg| cfg.diff_tree_view = tree);
+                }
                 // The COMMIT LIST's own: tick, all or none, where its
                 // cursor is.
                 _ if TICK.matches(&key) && on(DiffFocus::Commits) => activate::diff_tick(view),
@@ -7794,9 +7753,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // j/k stay typeable in the query.
                 KeyCode::Down => finder.select(finder.selected as i64 + 1),
                 KeyCode::Up => finder.select(finder.selected as i64 - 1),
-                // Enter opens the selected file in the editor modal, which
-                // closes the finder unless `close_finder_on_open` is off —
-                // a markdown file beside its rendered page.
+                // Enter opens the selected file in the editor modal and
+                // closes the finder — a markdown file as its rendered page.
                 KeyCode::Enter => open_selected_file(app),
                 // ⌘N (^N) makes the typed path — `.env.local` in a fresh
                 // checkout — and opens it the way Enter would.
@@ -7826,8 +7784,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // j/k stay typeable in the query.
                 KeyCode::Down => view.select(view.selected as i64 + 1),
                 KeyCode::Up => view.select(view.selected as i64 - 1),
-                // Enter opens the hit in the editor modal, which closes this
-                // overlay unless `close_finder_on_open` is off.
+                // Enter opens the hit in the editor modal and closes this
+                // overlay.
                 _ if ui::finder_keys::OPEN.matches(&key) => open_selected_hit_in_editor(app),
                 // ⌘C (^Y) copies the hit's path, as Go to file's does —
                 // unless the query holds a selection to copy.
@@ -7949,7 +7907,7 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     // A CLAUDE ACCOUNTS row's own verbs: `r` renames it, `o` signs it
     // out, `⌫` removes it.
     let account_row = || {
-        (!on_tabs && tab == crate::config::agents_tab())
+        (!on_tabs && tab == crate::config::accounts_tab())
             .then(|| crate::config::Config::load().account_row(selected))
             .flatten()
     };
@@ -8152,7 +8110,7 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
     // the email that fills Claude's login page; ←/→ are its switch, which
     // the cycle below flips like any harness's. **Add account** asks for
     // the new one's name.
-    if tab == crate::config::agents_tab() {
+    if tab == crate::config::accounts_tab() {
         use crate::config::AccountRow;
         match (crate::config::Config::load().account_row(index), delta) {
             (Some(AccountRow::Account(id)), 0) => {
@@ -8169,21 +8127,26 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         }
     }
     if let Some(spec) = crate::config::setting_at(tab, index) {
-        // The Tools tab's Setup row opens setup over the grid; its git and
-        // gh rows install on Enter as on `i`, there being nothing to cycle.
-        use crate::config::SettingKind;
-        match spec.kind {
-            SettingKind::RunSetup if delta == 0 => {
-                app.overlay = None;
-                crate::onboard::open(app);
-                return;
+        // The Presets tab's row opens the AGENT PRESETS list in the
+        // overlay's place, there being nothing to cycle.
+        if spec.kind == crate::config::SettingKind::AgentPresets {
+            match (delta, app.selected_worktree().map(|w| w.id.clone())) {
+                (0, Some(worktree)) => {
+                    close_settings(app);
+                    crate::preset_overlays::reopen_agent_presets(app, worktree, 0);
+                }
+                (0, None) => {
+                    if let Some(view) = settings_mut(app) {
+                        view.warn("open a project first: presets launch into its checkout");
+                    }
+                }
+                _ => {
+                    if let Some(view) = settings_mut(app) {
+                        view.info("Enter: open the presets");
+                    }
+                }
             }
-            SettingKind::Git | SettingKind::Gh if delta == 0 => {
-                ask_install(app, tab, index);
-                return;
-            }
-            SettingKind::RunSetup | SettingKind::Git | SettingKind::Gh => return,
-            _ => {}
+            return;
         }
         // A PROJECTS TAB row edits the entry of the project whose block
         // it is in. With no project to edit — an empty tree — say so
@@ -8272,12 +8235,8 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
 fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.theme = cfg.theme();
     app.animations = cfg.animations;
-    app.black_background = cfg.black_background;
-    app.show_all_worktrees = cfg.show_all_worktrees;
     app.diff_tree = cfg.diff_tree_view;
-    app.diff_start = cfg.diff_start();
     app.autofix_mode = cfg.autofix_mode();
-    app.base_sync.every = crate::base_sync::interval(&cfg.base_fetch);
     // Turned off, the readout goes at once; the poll stops with it.
     app.spotify_enabled = cfg.spotify;
     if !cfg.spotify && app.spotify.take().is_some() {
@@ -8366,7 +8325,7 @@ fn open_settings(app: &mut App) {
     reopen_settings(app);
 }
 
-/// The settings overlay on the Agents tab's CLAUDE ACCOUNTS section, the
+/// The settings overlay on the Accounts tab's CLAUDE ACCOUNTS section, the
 /// cursor on account `id`'s row — the default account's when None or
 /// gone. **Claude accounts** in the COMMAND PALETTE, and where an add or a
 /// removal lands.
@@ -8397,7 +8356,7 @@ fn confirm_sign_out(app: &mut App, index: usize) {
     let entry = cfg.effective_harness_by_id(&id);
     let dir = crate::claude_accounts::dir_of(&entry)
         .map_or_else(|| id.clone(), |d| crate::claude_accounts::tilde(&d));
-    app.remember_settings_row(crate::config::agents_tab(), index);
+    app.remember_settings_row(crate::config::accounts_tab(), index);
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Sign out".into(),
         message: format!(
@@ -8466,7 +8425,7 @@ fn confirm_remove_account(app: &mut App, index: usize) {
     } else {
         stranded
     };
-    app.remember_settings_row(crate::config::agents_tab(), index);
+    app.remember_settings_row(crate::config::accounts_tab(), index);
     app.overlay = Some(Overlay::Confirm(ConfirmDialog {
         title: "Remove account".into(),
         message: format!(
@@ -8585,15 +8544,15 @@ fn rename_claude_account(app: &mut App, id: &str, name: &str) {
 }
 
 /// Swap a session picker for the settings overlay parked on that
-/// harness's Agents section, cursor on its Enabled row. The remembered
+/// harness's Accounts section, cursor on its Enabled row. The remembered
 /// tab and row update too, so an Esc-then-`s` lands back where `?` left.
 fn open_harness_settings(app: &mut App, kind: AgentKind, custom: Option<String>) {
-    use crate::config::{agents_tab, locate_agent, HarnessField};
+    use crate::config::{accounts_tab, locate_agent, HarnessField};
     let id = match kind {
         AgentKind::Custom => custom.unwrap_or_default(),
         _ => kind.as_str().to_string(),
     };
-    let tab = agents_tab();
+    let tab = accounts_tab();
     app.settings_tab = tab;
     if let Some((_, row)) = locate_agent(&id, HarnessField::Enabled) {
         if let Some(slot) = app.settings_selected.get_mut(tab) {
@@ -8815,10 +8774,9 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             // row's value goes into the entry of the project the prompt
             // was opened on, and the notice reads that entry back.
             let mut cfg = crate::config::Config::load();
-            match &project {
-                Some(path) => cfg.set_project_text(path, kind, &value),
-                None => cfg.set_text(kind, &value),
-            };
+            if let Some(path) = &project {
+                cfg.set_project_text(path, kind, &value);
+            }
             let saved = save_config(app, &cfg);
             if saved {
                 apply_config(app, &cfg);
@@ -8876,14 +8834,6 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
         PendingAction::DeleteWorktree(id) => delete_worktree_and_settle(app, id, out),
         PendingAction::PullWorktree(id) => {
             crate::git_sync::start(app, id, crate::git_sync::Op::Pull)
-        }
-        PendingAction::ThenDeleteWorktree {
-            first, worktree, ..
-        } => {
-            // The row's own delete drops its card; the worktree delete
-            // then takes the emptied band and settles the cursor once.
-            run_pending_action(app, *first, out);
-            delete_worktree_and_settle(app, worktree, out);
         }
         PendingAction::DeleteAllWorktrees(ids) => delete_worktrees(app, ids, out),
         PendingAction::ForceDeleteWorktrees(ids) => {
@@ -8990,98 +8940,6 @@ pub(crate) fn delete_worktrees(app: &mut App, ids: Vec<WorktreeId>, out: &mut Ve
     reconcile_selection(app, before, out);
 }
 
-/// Live cards a worktree still holds: its unarchived agents and its
-/// terminals — what its band on the grid shows.
-fn live_cards_in(app: &App, id: &WorktreeId) -> usize {
-    app.tree
-        .agents
-        .iter()
-        .filter(|a| &a.worktree_id == id && !a.archived)
-        .count()
-        + app
-            .tree
-            .terminals
-            .iter()
-            .filter(|t| &t.worktree_id == id)
-            .count()
-}
-
-/// A row delete's confirm, with the checkout's fate folded in when the
-/// delete would empty a linked worktree. `dialog` is the row's ordinary
-/// confirm; `live_taken` how many live cards it removes from `worktree`
-/// (one for a card, zero for an archived row, the doomed count for a
-/// `D`). When that is every live card the worktree has — and it is not
-/// the ROOT WORKTREE or a stand-in git is still cutting — the dialog asks
-/// in the same breath whether the worktree goes too: `Enter`/`y` deletes
-/// the card and then the checkout, `n` deletes the card alone, `Esc`
-/// keeps the card. Archived sessions still filed under the worktree are
-/// counted in the question, since the delete takes their history. With
-/// the **Delete emptied worktree** SETTING on and nothing archived left
-/// the question is skipped: the dialog stays two-way, says the worktree
-/// goes with the card, and `Enter` does both. With **Show all worktrees**
-/// on the question is never asked — the emptied checkout keeps its band
-/// on the grid, and `d` on that band is the way to delete it — but
-/// **Delete emptied worktree** still deletes: that setting is the user
-/// saying an emptied worktree goes, whether or not the grid would have
-/// kept a band for it. Anything else leaves the dialog as it came.
-fn with_worktree_offer(
-    app: &App,
-    mut dialog: ConfirmDialog,
-    worktree: &WorktreeId,
-    live_taken: usize,
-) -> ConfirmDialog {
-    let Some(w) = app.tree.worktrees.iter().find(|w| &w.id == worktree) else {
-        return dialog;
-    };
-    if w.is_main
-        || app.is_placeholder_worktree(worktree)
-        || live_cards_in(app, worktree) != live_taken
-    {
-        return dialog;
-    }
-    let force = crate::config::Config::load().delete_empty_worktree;
-    if app.show_all_worktrees && !force {
-        return dialog;
-    }
-    let archived = app
-        .tree
-        .agents
-        .iter()
-        .filter(|a| &a.worktree_id == worktree && a.archived)
-        .count();
-    let offered = !(force && archived == 0);
-    let branch = &w.branch;
-    dialog.message.push('\n');
-    dialog.message.push_str(&match (offered, archived) {
-        (false, _) => format!("Worktree '{branch}' goes with it: nothing else is left there."),
-        (true, 0) => format!("Nothing else is left in worktree '{branch}': delete it from disk too?"),
-        (true, n) => format!(
-            "Nothing live is left in worktree '{branch}': delete it from disk too?\nIts {n} archived session(s) would go with it."
-        ),
-    });
-    dialog.action = PendingAction::ThenDeleteWorktree {
-        first: Box::new(dialog.action),
-        worktree: worktree.clone(),
-        offered,
-    };
-    dialog
-}
-
-/// The confirm before an agent is deleted, with the worktree question
-/// folded in when the agent is the last card of a linked worktree
-/// ([`with_worktree_offer`]). From the `d` key and the row menu alike.
-fn confirm_delete_agent_in(app: &App, a: &orion_core::Agent) -> ConfirmDialog {
-    let dialog = confirm_delete_agent(&a.name, a.id.clone());
-    with_worktree_offer(app, dialog, &a.worktree_id, usize::from(!a.archived))
-}
-
-/// The confirm before a terminal is closed, with the worktree question
-/// folded in when the terminal is the last card of a linked worktree.
-fn confirm_close_terminal_in(app: &App, t: &orion_core::TerminalTab) -> ConfirmDialog {
-    let dialog = confirm_close_terminal(&t.name, t.id.clone());
-    with_worktree_offer(app, dialog, &t.worktree_id, 1)
-}
-
 /// Delete a worktree optimistically: drop its rows now (the daemon deletes
 /// in the background — `git worktree remove` can take seconds). The
 /// eventual EntityRemoved is a no-op; an Error for this req_id restores the
@@ -9168,7 +9026,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         MenuAction::UnarchiveAgent(id) => activate::unarchive(app, id, out),
         MenuAction::DeleteAgent(id) => {
             if let Some(a) = app.tree.agents.iter().find(|a| a.id == id).cloned() {
-                app.overlay = Some(Overlay::Confirm(confirm_delete_agent_in(app, &a)));
+                app.overlay = Some(Overlay::Confirm(confirm_delete_agent(&a)));
             }
         }
         MenuAction::NewAgent(worktree) => open_new_agent_picker(app, worktree),
@@ -9176,7 +9034,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         MenuAction::RenameTerminal(id) => open_prompt(app, PromptKind::RenameTerminal { id }),
         MenuAction::CloseTerminal(id) => {
             if let Some(t) = app.tree.terminals.iter().find(|t| t.id == id).cloned() {
-                app.overlay = Some(Overlay::Confirm(confirm_close_terminal_in(app, &t)));
+                app.overlay = Some(Overlay::Confirm(confirm_close_terminal(&t)));
             }
         }
         MenuAction::NewAgentOfKind {
@@ -9729,38 +9587,26 @@ enum Landing {
 }
 
 impl Landing {
-    /// The palette's Enter: attaches when the setting says so.
-    fn for_enter(attaches: bool) -> Self {
-        if attaches {
-            Landing::Attach
-        } else {
-            Landing::FocusOnly
-        }
-    }
-
-    /// The palette's Enter on `target`: a session attaches when the setting
-    /// says so; a pull request only ever lands on its row with the pane
-    /// reading it — the setting is about attaching, and a pull request has
-    /// nothing to attach — so `Ctrl+O` stays the one palette key that also
-    /// hands it to the browser.
+    /// The palette's Enter on `target`: the cursor lands on its row with
+    /// the pane reading it, and nothing attaches — `Ctrl+O` is the palette
+    /// key that opens a session, and hands a pull request to the browser.
     ///
-    /// One target overrides the setting: a session that NEEDS FEEDBACK —
-    /// the red dot, a permission prompt or a question sitting unanswered —
-    /// always attaches, because the only thing to do with a jump to a
-    /// question is answer it, and the quiet landing would leave it asking.
-    /// `Ctrl+O` / `Ctrl+F` still name their own landing, so this is Enter's
-    /// rule alone.
-    fn for_enter_on(app: &App, target: &PaletteTarget, attaches: bool) -> Self {
+    /// One target is the exception: a session that NEEDS FEEDBACK — the
+    /// red dot, a permission prompt or a question sitting unanswered —
+    /// attaches, because the only thing to do with a jump to a question is
+    /// answer it, and the quiet landing would leave it asking. `Ctrl+O` /
+    /// `Ctrl+F` still name their own landing, so this is Enter's rule
+    /// alone.
+    fn for_enter_on(app: &App, target: &PaletteTarget) -> Self {
         match target {
-            PaletteTarget::PullRequest { .. } => Landing::FocusOnly,
             PaletteTarget::Session(id) if session_needs_feedback(app, id) => Landing::Attach,
-            _ => Landing::for_enter(attaches),
+            _ => Landing::FocusOnly,
         }
     }
 }
 
 /// Whether `id` is a live session waiting on the user — the red row that
-/// [`Landing::for_enter_on`] attaches whatever the setting says.
+/// [`Landing::for_enter_on`] attaches.
 fn session_needs_feedback(app: &App, id: &AgentId) -> bool {
     app.tree
         .agents
@@ -9780,7 +9626,7 @@ fn session_needs_feedback(app: &App, id: &AgentId) -> bool {
 /// selected (a terminal, a link, an archived row, an empty worktree) `.`
 /// starts at the top and `,` at the bottom, so the two stay each other's
 /// reverse.
-fn jump_attention(app: &mut App, step: i64, attaches: bool, out: &mut Vec<ClientRequest>) {
+fn jump_attention(app: &mut App, step: i64, out: &mut Vec<ClientRequest>) {
     let current = crate::palette::attention_sessions(&app.tree);
     // A walk in progress keeps the ring it started on (`App::attention_walk`)
     // while the cursor is where it last landed and nothing joined or left.
@@ -9808,7 +9654,7 @@ fn jump_attention(app: &mut App, step: i64, attaches: bool, out: &mut Vec<Client
     };
     let landed = ring[next as usize].clone();
     let target = PaletteTarget::Session(landed.clone());
-    let landing = Landing::for_enter_on(app, &target, attaches);
+    let landing = Landing::for_enter_on(app, &target);
     jump_to_target(app, target, landing, out);
     app.attention_walk = Some((landed, ring));
 }
@@ -11422,9 +11268,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         return;
     }
     // File finder: the wheel moves the selection, a click on a result row
-    // opens it in the editor (closing the finder unless
-    // `close_finder_on_open` is off); everything else inside the box is
-    // swallowed.
+    // opens it in the editor (closing the finder); everything else inside
+    // the box is swallowed.
     if let Some(Overlay::Files(finder)) = &mut app.overlay {
         match mouse.kind {
             MouseEventKind::ScrollUp => {
@@ -11461,9 +11306,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         return;
     }
     // Find-in-files: the wheel moves the selection, a click on a result row
-    // opens it in the editor (closing this overlay unless
-    // `close_finder_on_open` is off); everything else inside the box is
-    // swallowed.
+    // opens it in the editor (closing this overlay); everything else inside
+    // the box is swallowed.
     if let Some(Overlay::Grep(view)) = &mut app.overlay {
         match mouse.kind {
             MouseEventKind::ScrollUp => {
@@ -12135,7 +11979,7 @@ fn adopt_project_keys(app: &App) {
     let mut cfg = crate::config::Config::load();
     if cfg.adopt_project_keys(&repos) {
         if let Err(err) = cfg.try_save() {
-            tracing::warn!(%err, "couldn't save the projects' base branch and containers");
+            tracing::warn!(%err, "couldn't save the projects' moved settings");
         }
     }
 }
@@ -12432,7 +12276,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                         launch,
                         text,
                         placeholder,
-                        focus,
                     }),
                     Some(EntityId::Worktree(id)),
                 ) => quick_launch::launch_in_created_worktree(
@@ -12442,7 +12285,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                     placeholder,
                     id,
                     follow,
-                    focus,
                     out,
                 ),
                 // An OPTIMISTIC UPDATE the DAEMON went along with.
@@ -12714,9 +12556,8 @@ fn attach_created(
     // now, or on the upsert otherwise.
     land_pending_selection(app, out);
     attach_now(app, sref, out);
-    // Without `focus` the row is selected and the pane shows it, but the
-    // cursor stays where the create was fired from — see
-    // `quick_prompt_focus`.
+    // Without `focus` — every QUICK PROMPT — the row is selected and the
+    // pane shows it, but the cursor stays where the create was fired from.
     if focus {
         app.focus = Focus::Terminal;
         app.term_locked = true;
@@ -15138,10 +14979,8 @@ mod tests {
                 "drawn with its project in front: `demo/#9 Number the lines`"
             );
         }
-        // Enter lands on the row whether or not "Enter attaches" is on: the
-        // setting is about attaching sessions, and a pull request has
-        // nothing to attach — the browser is never the quiet default.
-        set_enter_attaches(&mut app, true);
+        // Enter lands on the row: a pull request has nothing to attach,
+        // and the browser is never the quiet default.
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "the palette closes");
         assert_eq!(app.flash, None, "no browser opened: {:?}", app.flash);
@@ -16312,7 +16151,8 @@ mod tests {
 
     /// An app with the DIFF modal up on [`pr_repo`]'s pull request, flat
     /// or as the tree per `app.diff_tree` — which `tree` sets before
-    /// opening. The repo lives as long as the dir handed back.
+    /// opening — and the keys moved off its commits onto its files. The
+    /// repo lives as long as the dir handed back.
     fn pr_diff_app(tree: bool) -> (tempfile::TempDir, App) {
         let mut app = App::new();
         let repo = pr_repo(&mut app);
@@ -16324,6 +16164,14 @@ mod tests {
             "#7 Attach links".into(),
             PrReviewAt::Top,
         );
+        if let Some(Overlay::Diff(view)) = &mut app.overlay {
+            assert_eq!(
+                view.focus,
+                crate::app::DiffFocus::Commits,
+                "⌘E starts on commits"
+            );
+            view.focus = crate::app::DiffFocus::Files;
+        }
         (repo, app)
     }
 
@@ -16340,10 +16188,11 @@ mod tests {
             .collect()
     }
 
-    /// `Ctrl+t` folds the pull request's file list into a directory tree
-    /// and back. The reader keeps their file and their place in it both
-    /// ways; a directory's row reads as the list of what changed under it,
-    /// and leaving the tree from one lands on that directory's first file.
+    /// `⌘B` folds the pull request's file list into a directory tree and
+    /// back, and the next viewer opens the way it was left. The reader
+    /// keeps their file and their place in it both ways; a directory's row
+    /// reads as the list of what changed under it, and leaving the tree
+    /// from one lands on that directory's first file.
     #[test]
     fn ctrl_b_flips_the_pr_diff_file_list_between_flat_and_tree() {
         let (_repo, mut app) = pr_diff_app(false);
@@ -16363,10 +16212,7 @@ mod tests {
         );
         assert!(diff_view(&app).diff.contains("+new-b"));
         assert_eq!(diff_view(&app).scroll, 3, "same file: the place is kept");
-        assert!(
-            !app.diff_tree,
-            "this viewer's alone: the setting decides the next open"
-        );
+        assert!(app.diff_tree, "and the next viewer opens as a tree");
 
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
@@ -16411,6 +16257,21 @@ mod tests {
         assert!(view.diff.contains("+new-keys"), "{}", view.diff);
         assert!(!app.diff_tree);
         assert!(out.is_empty(), "the list's shape is orion's own business");
+    }
+
+    /// `⌘B` writes how it left the list to `diff_tree_view`, so the next
+    /// viewer — this run's or the next launch's — opens the same way.
+    #[test]
+    fn cmd_b_is_remembered_in_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::config::with_config_path(dir.path().join("config.json"), || {
+            let (_repo, mut app) = pr_diff_app(true);
+            let mut out = Vec::new();
+            ctrl(&mut app, 'b', &mut out);
+            assert!(!crate::config::Config::load().diff_tree_view, "flat");
+            ctrl(&mut app, 'b', &mut out);
+            assert!(crate::config::Config::load().diff_tree_view, "a tree again");
+        });
     }
 
     /// INPUT PARITY: Enter on a tree directory's row and a click on it are
@@ -16507,9 +16368,9 @@ mod tests {
     }
 
     /// A fresh listing landing under the tree keeps what the reader folded
-    /// and the file they were on. How the next launch opens is the
-    /// **Files as a tree** SETTING's to say, not the UI state blob's: a
-    /// blob from before the setting no longer flips it either way.
+    /// and the file they were on. How the next launch opens is what `⌘B`
+    /// last left in `diff_tree_view`, not the UI state blob's: a blob from
+    /// before the key no longer flips it either way.
     #[test]
     fn the_diff_tree_survives_a_refresh_and_a_relaunch() {
         let (_repo, mut app) = pr_diff_app(true);
@@ -16544,7 +16405,7 @@ mod tests {
         seed_tree(&mut next);
         let cfg = crate::config::Config::default();
         apply_config(&mut next, &cfg);
-        assert!(next.diff_tree, "the setting's default is the tree");
+        assert!(next.diff_tree, "out of the box, the tree");
         let mut flat = cfg.clone();
         flat.diff_tree_view = false;
         apply_config(&mut next, &flat);
@@ -19423,11 +19284,11 @@ mod tests {
     }
 
     /// `?` on a New session row swaps the picker for settings parked on
-    /// that harness's Agents section; `?` in a model submenu lands on
+    /// that harness's Accounts section; `?` in a model submenu lands on
     /// the same section. Esc, then `s`, comes back where `?` left.
     #[test]
     fn question_mark_jumps_from_picker_to_harness_settings() {
-        use crate::config::{agents_tab, locate_agent, HarnessField};
+        use crate::config::{accounts_tab, locate_agent, HarnessField};
         with_default_config(|| {
             let mut app = App::new();
             seed_tree(&mut app);
@@ -19435,7 +19296,7 @@ mod tests {
             let mut out = Vec::new();
 
             open_picker(&mut app);
-            // Down to Codex, `?`: settings on the Agents tab, cursor on
+            // Down to Codex, `?`: settings on the Accounts tab, cursor on
             // Codex's Enabled row.
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, &mut out);
@@ -19443,7 +19304,7 @@ mod tests {
                 panic!("expected settings, got {:?}", app.overlay);
             };
             let (tab, row) = locate_agent("codex", HarnessField::Enabled).unwrap();
-            assert_eq!(tab, agents_tab());
+            assert_eq!(tab, accounts_tab());
             assert_eq!(view.tab, tab);
             assert_eq!(view.selected, row);
             assert!(!view.on_tabs);
@@ -19473,7 +19334,7 @@ mod tests {
     /// model submenu, where it narrows the list instead.
     #[test]
     fn s_jumps_on_the_picker_and_types_in_submenus() {
-        use crate::config::{agents_tab, locate_agent, HarnessField};
+        use crate::config::{accounts_tab, locate_agent, HarnessField};
         with_default_config(|| {
             let mut app = App::new();
             seed_tree(&mut app);
@@ -19487,7 +19348,7 @@ mod tests {
                 panic!("expected settings, got {:?}", app.overlay);
             };
             let (tab, row) = locate_agent("codex", HarnessField::Enabled).unwrap();
-            assert_eq!(tab, agents_tab());
+            assert_eq!(tab, accounts_tab());
             assert_eq!((view.tab, view.selected), (tab, row));
 
             // In a model submenu `s` is a filter letter, not a jump.
@@ -19846,7 +19707,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_tab_toggles_a_harness_and_refuses_the_last_one() {
+    fn accounts_tab_toggles_a_harness_and_refuses_the_last_one() {
         use crate::config::{locate_agent, HarnessField};
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -24506,7 +24367,7 @@ mod tests {
             .collect()
     }
 
-    /// Opened as a tree (the **Files as a tree** SETTING), a checkout's
+    /// Opened as a tree (as `⌘B` last left one), a checkout's
     /// viewer lands on the first file not yet reviewed, as the flat list
     /// does — not on a directory, and not on the file a ✓ already covers —
     /// with that file's diff on screen.
@@ -24581,6 +24442,9 @@ mod tests {
 
             // Ctrl+r on the reviewed row unmarks it; the file pops back up
             // to git order, stays selected, and the store forgets the mark.
+            // The viewer opens on its commits: Tab hands the keys to the
+            // files first.
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(
                 &mut app,
@@ -24775,7 +24639,6 @@ mod tests {
             .to_string();
             let mut app = App::new();
             seed_repo_tree(&mut app, &repo);
-            app.diff_start = DiffFocus::Commits;
             seed_open_prs(&mut app, &[(7, "Attach links")]);
             let mut detail = a_detail(7, "Adds b, edits a.", vec![]);
             detail.head_sha = tip.clone();
@@ -24863,7 +24726,7 @@ mod tests {
         });
     }
 
-    /// The COMMIT LIST's keys: `⇧Tab` gives it the keys, `^A` unticks
+    /// The COMMIT LIST's keys: the viewer opens on it, `^A` unticks
     /// everything so the cursor's commit is on screen, `↓` walks it, each
     /// commit's own files up as the cursor lands; `Space` ticks, and the
     /// ticked read together with nothing for `⇧←`/`⇧→` to step; `Enter`
@@ -24882,8 +24745,11 @@ mod tests {
             let mut out = Vec::new();
             open_changes(&mut app, &mut out);
 
-            press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
-            assert_eq!(diff_view(&app).focus, DiffFocus::Commits);
+            assert_eq!(
+                diff_view(&app).focus,
+                DiffFocus::Commits,
+                "⌘E opens on them"
+            );
             press(
                 &mut app,
                 KeyCode::Char('a'),
@@ -25007,7 +24873,6 @@ mod tests {
             };
             let mut by_key = open();
             let mut by_click = open();
-            press(&mut by_key, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
             press(&mut by_key, KeyCode::Down, KeyModifiers::NONE, &mut out);
 
             let mut terminal = Terminal::new(TestBackend::new(120, 34)).unwrap();
@@ -25388,15 +25253,6 @@ mod tests {
         }
     }
 
-    /// Pin the open palette's Enter behavior: `/` snapshots it from the
-    /// machine's real config.json, which tests must not depend on.
-    fn set_enter_attaches(app: &mut App, v: bool) {
-        match &mut app.overlay {
-            Some(Overlay::Palette(p)) => p.enter_attaches = v,
-            other => panic!("expected palette overlay, got {other:?}"),
-        }
-    }
-
     #[test]
     fn ctrl_k_opens_palette_listing_projects_then_worktrees_then_sessions() {
         let mut app = App::new();
@@ -25495,13 +25351,12 @@ mod tests {
     }
 
     #[test]
-    fn palette_enter_on_session_selects_the_chain_and_attaches() {
+    fn palette_enter_on_a_session_selects_the_chain_and_lands_on_it() {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        set_enter_attaches(&mut app, true);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -25510,31 +25365,6 @@ mod tests {
         assert!(app.overlay.is_none());
         assert_eq!(app.selected_project().unwrap().name, "orion");
         assert_eq!(app.selected_worktree().unwrap().branch, "feat-x");
-        assert_eq!(app.selected_session().unwrap().name, "codex-1");
-        assert_eq!(app.focus, Focus::Terminal);
-        assert!(app.term_locked, "a session pick locks input immediately");
-        assert!(
-            out.iter()
-                .any(|r| matches!(r, ClientRequest::Attach { session, .. }
-                    if *session == SessionRef::Agent(AgentId("a2".into())))),
-            "a session pick attaches: {out:?}"
-        );
-    }
-
-    #[test]
-    fn palette_enter_only_focuses_the_row_when_auto_attach_is_off() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        seed_second_project(&mut app);
-        let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        set_enter_attaches(&mut app, false);
-        for c in "codex".chars() {
-            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
-        }
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-
-        assert!(app.overlay.is_none());
         assert_eq!(app.selected_session().unwrap().name, "codex-1");
         assert_eq!(
             app.focus,
@@ -25550,12 +25380,11 @@ mod tests {
         );
     }
 
-    /// A session waiting on you — the red dot — is the one row the setting
-    /// does not get a say over: the whole point of jumping to a question is
-    /// to answer it, so Enter attaches and takes the input lock even with
-    /// auto-attach off.
+    /// A session waiting on you — the red dot — is the one row Enter
+    /// attaches: the whole point of jumping to a question is to answer it,
+    /// so it takes the input lock too.
     #[test]
-    fn palette_enter_attaches_a_red_session_with_auto_attach_off() {
+    fn palette_enter_attaches_a_red_session() {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_project(&mut app);
@@ -25570,7 +25399,6 @@ mod tests {
             },
         );
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        set_enter_attaches(&mut app, false);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -25600,7 +25428,6 @@ mod tests {
             },
         );
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        set_enter_attaches(&mut app, true);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -25618,13 +25445,12 @@ mod tests {
     }
 
     #[test]
-    fn palette_ctrl_o_opens_the_session_regardless_of_the_setting() {
+    fn palette_ctrl_o_opens_the_session() {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        set_enter_attaches(&mut app, false);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -25642,13 +25468,12 @@ mod tests {
     }
 
     #[test]
-    fn palette_ctrl_f_focuses_the_row_regardless_of_the_setting() {
+    fn palette_ctrl_f_focuses_the_row() {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_project(&mut app);
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        set_enter_attaches(&mut app, true);
         for c in "codex".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -25715,7 +25540,7 @@ mod tests {
         let mut out = Vec::new();
         (0..n)
             .map(|_| {
-                jump_attention(app, step, false, &mut out);
+                jump_attention(app, step, &mut out);
                 app.selected_session().expect("landed on a session").name
             })
             .collect()
@@ -25800,8 +25625,8 @@ mod tests {
     }
 
     /// The keys are wired: `.` and `,` are the panel chords, live from any
-    /// panel, and the landing is the palette's — with the default setting
-    /// on, the pick attaches and locks input exactly like `/` Enter.
+    /// panel, and the landing is the palette's Enter: the cursor on the
+    /// row and the pane previewing it, no input lock.
     #[test]
     fn attention_keys_jump_and_land_like_the_palettes_enter() {
         let mut app = App::new();
@@ -25817,21 +25642,15 @@ mod tests {
         });
         assert!(app.overlay.is_none(), "no modal opened");
         assert_eq!(app.selected_session().unwrap().name, "codex-1");
-        assert_eq!(app.focus, Focus::Terminal);
-        assert!(
-            app.term_locked,
-            "the default landing attaches, like / Enter"
-        );
+        assert_eq!(app.focus, Focus::Sessions, "lands on the list");
+        assert!(!app.term_locked, "no input lock");
         assert!(
             out.iter()
                 .any(|r| matches!(r, ClientRequest::Attach { session, .. }
                     if *session == SessionRef::Agent(AgentId("a2".into())))),
-            "the pick attaches: {out:?}"
+            "the pane previews the picked session: {out:?}"
         );
 
-        // From the locked pane, `,` is forwarded to the agent, so unlock
-        // first — then it walks back to where we came from.
-        leave_terminal_lock(&mut app);
         out.clear();
         with_default_config(|| {
             press(&mut app, KeyCode::Char(','), KeyModifiers::NONE, &mut out);
@@ -25839,10 +25658,11 @@ mod tests {
         assert_eq!(app.selected_session().unwrap().name, "agent-1");
     }
 
-    /// `palette_enter_attaches` off lands the cursor on the row and
-    /// previews it, no input lock — the palette's quieter Enter.
+    /// `.` carries the palette's rule with it: the never-run row only
+    /// lands, and the next press — onto the session waiting on you —
+    /// attaches anyway.
     #[test]
-    fn attention_keys_only_focus_the_row_when_auto_attach_is_off() {
+    fn bracket_keys_attach_a_red_session() {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_project(&mut app);
@@ -25851,41 +25671,14 @@ mod tests {
         app.set_sel_session(row_of(&app, "a1"));
         let mut out = Vec::new();
 
-        with_config_json(r#"{"palette_enter_attaches": false}"#, || {
-            press(&mut app, KeyCode::Char('.'), KeyModifiers::NONE, &mut out);
-        });
-        assert_eq!(app.selected_session().unwrap().name, "codex-1");
-        assert_eq!(app.focus, Focus::Sessions, "lands on the list");
-        assert!(!app.term_locked, "no input lock");
-        assert!(
-            out.iter()
-                .any(|r| matches!(r, ClientRequest::Attach { session, .. }
-                    if *session == SessionRef::Agent(AgentId("a2".into())))),
-            "the pane still previews the picked session: {out:?}"
-        );
-    }
-
-    /// `.` carries the palette's rule with it: with auto-attach off the
-    /// never-run row only lands, and the next press — onto the session
-    /// waiting on you — attaches anyway.
-    #[test]
-    fn bracket_keys_attach_a_red_session_with_auto_attach_off() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        seed_second_project(&mut app);
-        seed_attention_ring(&mut app);
-        app.focus = Focus::Sessions;
-        app.set_sel_session(row_of(&app, "a1"));
-        let mut out = Vec::new();
-
-        with_config_json(r#"{"palette_enter_attaches": false}"#, || {
+        with_default_config(|| {
             press(&mut app, KeyCode::Char('.'), KeyModifiers::NONE, &mut out);
         });
         assert_eq!(app.selected_session().unwrap().name, "codex-1");
         assert_eq!(app.focus, Focus::Sessions, "a never-run row only lands");
         assert!(!app.term_locked);
 
-        with_config_json(r#"{"palette_enter_attaches": false}"#, || {
+        with_default_config(|| {
             press(&mut app, KeyCode::Char('.'), KeyModifiers::NONE, &mut out);
         });
         assert_eq!(app.selected_session().unwrap().name, "ask");
@@ -25907,7 +25700,7 @@ mod tests {
         app.set_sel_session(row_of(&app, "a1"));
         let mut out = Vec::new();
 
-        jump_attention(&mut app, 1, false, &mut out);
+        jump_attention(&mut app, 1, &mut out);
         assert_eq!(app.selected_project().unwrap().name, "secret");
         assert_eq!(app.selected_worktree().unwrap().branch, "main");
         assert_eq!(app.selected_session().unwrap().name, "bg-run");
@@ -25920,7 +25713,7 @@ mod tests {
         );
 
         out.clear();
-        jump_attention(&mut app, 1, false, &mut out);
+        jump_attention(&mut app, 1, &mut out);
         assert_eq!(app.selected_project().unwrap().name, "demo");
         assert_eq!(app.selected_session().unwrap().name, "agent-1");
     }
@@ -25954,7 +25747,7 @@ mod tests {
         assert_eq!(app.worktree_unseen(&w1), 1, "one terminal to go read");
 
         let mut out = Vec::new();
-        jump_attention(&mut app, 1, false, &mut out);
+        jump_attention(&mut app, 1, &mut out);
         assert_eq!(app.selected_session().unwrap().name, "agent-2");
         assert_eq!(app.worktree_unseen(&w1), 0, "landing on the row reads it");
         assert_eq!(app.project_unseen(&p1), 0);
@@ -26223,7 +26016,7 @@ mod tests {
         assert_eq!(terminal.backend().buffer()[(x, y)].fg, th.dim);
     }
 
-    /// **Open in app** on an app that isn't installed: `i` and Enter run
+    /// **Open files in** on an app that isn't installed: `i` and Enter run
     /// its Homebrew cask in the install modal.
     #[test]
     fn settings_installs_a_missing_open_in_app_app() {
@@ -26473,12 +26266,12 @@ mod tests {
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let cfg = crate::config::Config::load();
             assert!(
-                !cfg.palette_enter_attaches,
+                !cfg.follow_new_session,
                 "Enter toggles the first setting off"
             );
             let saved: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(saved["palette_enter_attaches"], false);
+            assert_eq!(saved["follow_new_session"], false);
             assert!(
                 matches!(app.overlay, Some(Overlay::Settings(_))),
                 "toggle keeps the overlay open"
@@ -26667,52 +26460,51 @@ mod tests {
 
     #[test]
     fn settings_overlay_renders_labels() {
-        let mut app = App::new();
-        let mut out = Vec::new();
-        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, &mut out);
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("Settings"), "title rendered:\n{text}");
-        assert!(
-            text.contains("Search Enter attaches"),
-            "bool setting rendered:\n{text}"
-        );
-        // Settings live on their own tab now, so a row from another tab
-        // is only on screen once you switch to it.
-        assert!(
-            !text.contains("Idle session timeout"),
-            "another tab's rows stay off screen:\n{text}"
-        );
-        // Past Tools, Tab reaches Sessions.
-        press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let sessions_text = buffer_text(&terminal);
-        assert!(
-            sessions_text.contains("Idle session timeout"),
-            "Tab reaches the Sessions tab:\n{sessions_text}"
-        );
-        for tab in crate::config::SETTINGS_TABS {
-            assert!(text.contains(tab.title), "tab strip rendered:\n{text}");
-        }
-        assert!(
-            text.contains("Enter in the ⌘K jump list opens the session"),
-            "the selected setting's explanation, its key from the keymap:\n{text}"
-        );
-        let Some(Overlay::Settings(view)) = &app.overlay else {
-            panic!("settings closed");
-        };
-        assert!(view.area.width > 0, "draw writes hit-test area");
-        assert_eq!(
-            view.tab_hits.len(),
-            crate::config::tab_count(),
-            "draw records a click target per tab"
-        );
+        with_default_config(|| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, &mut out);
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains("Settings"), "title rendered:\n{text}");
+            // General opens first, its rows under their groups.
+            for needle in ["Launching", "Follow new session", "Sounds", "Look", "Theme"] {
+                assert!(text.contains(needle), "{needle} rendered:\n{text}");
+            }
+            // Each tab's rows are only on screen once you switch to it.
+            assert!(
+                !text.contains("New agents on"),
+                "another tab's rows stay off screen:\n{text}"
+            );
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let accounts_text = buffer_text(&terminal);
+            assert!(
+                accounts_text.contains("New agents on"),
+                "Tab reaches the Accounts tab:\n{accounts_text}"
+            );
+            for tab in crate::config::SETTINGS_TABS {
+                assert!(text.contains(tab.title), "tab strip rendered:\n{text}");
+            }
+            assert!(
+                text.contains("A new agent's card comes under the cursor"),
+                "the selected setting's explanation:\n{text}"
+            );
+            let Some(Overlay::Settings(view)) = &app.overlay else {
+                panic!("settings closed");
+            };
+            assert!(view.area.width > 0, "draw writes hit-test area");
+            assert_eq!(
+                view.tab_hits.len(),
+                crate::config::tab_count(),
+                "draw records a click target per tab"
+            );
+        });
     }
 
     #[test]
-    fn agents_tab_renders_its_harness_groups() {
+    fn accounts_tab_renders_its_harness_groups() {
         // The tab lists the configured harnesses: pin the config so a dev's
         // own accounts or harness edits can't add sections.
         with_default_config(|| {
@@ -26730,10 +26522,7 @@ mod tests {
             // name is no longer repeated on every row under it.
             let mut pos = 0;
             for needle in [
-                "Quick prompt",
-                "Agent",
-                "Focus",
-                "Follow new",
+                "New agents on",
                 "Claude accounts",
                 "Claude",
                 "Add account",
@@ -26760,10 +26549,10 @@ mod tests {
                 "the old flat labels are gone:\n{text}"
             );
 
-            // Headers and blanks are not rows the cursor can land on: six
-            // ↓ from the first row — the head's four, the CLAUDE ACCOUNTS
+            // Headers and blanks are not rows the cursor can land on: three
+            // ↓ from the first row — the head's one, the CLAUDE ACCOUNTS
             // section's two — reach Claude's Enabled row, not a header.
-            for _ in 0..6 {
+            for _ in 0..3 {
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
             let (_, claude_enabled) = locate_agent("claude", HarnessField::Enabled).unwrap();
@@ -26776,7 +26565,7 @@ mod tests {
         });
     }
 
-    // ---- CLAUDE ACCOUNTS on the Agents tab ----
+    // ---- CLAUDE ACCOUNTS on the Accounts tab ----
 
     /// A temp home holding the default account (signed in as `a@b.co`, its
     /// record in `~/.claude.json`) and `claude-2` in `~/.claude-2`, the
@@ -26863,7 +26652,7 @@ mod tests {
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert_eq!(
                 settings_view(&app).selected,
-                crate::config::AGENTS_HEAD.len() + 1
+                crate::config::ACCOUNTS_HEAD.len() + 1
             );
             assert!(crate::claude_accounts::take_ran().is_empty());
         });
@@ -26917,7 +26706,7 @@ mod tests {
             assert!(root.join(".claude-2").is_dir(), "kept unless asked");
             assert_eq!(
                 settings_view(&app).selected,
-                crate::config::AGENTS_HEAD.len(),
+                crate::config::ACCOUNTS_HEAD.len(),
                 "back on the section"
             );
         });
@@ -26949,7 +26738,7 @@ mod tests {
             );
             assert_eq!(
                 settings_view(&app).selected,
-                crate::config::AGENTS_HEAD.len() + 2,
+                crate::config::ACCOUNTS_HEAD.len() + 2,
                 "on its own row"
             );
             // A name the registry already holds is refused in the notice.
@@ -27034,7 +26823,7 @@ mod tests {
             assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
             assert_eq!(
                 settings_view(&app).selected,
-                crate::config::AGENTS_HEAD.len() + 1,
+                crate::config::ACCOUNTS_HEAD.len() + 1,
                 "back on its row"
             );
             let cfg = crate::config::Config::load();
@@ -27093,8 +26882,8 @@ mod tests {
             assert_eq!(
                 (view.tab, view.selected, view.on_tabs),
                 (
-                    crate::config::agents_tab(),
-                    crate::config::AGENTS_HEAD.len(),
+                    crate::config::accounts_tab(),
+                    crate::config::ACCOUNTS_HEAD.len(),
                     false
                 )
             );
@@ -27166,7 +26955,7 @@ mod tests {
         crate::config::with_config_path(dir.path().join("config.json"), || {
             let mut app = App::new();
             let mut out = Vec::new();
-            // The Open in app row, found by name: the Tools tab's rows
+            // The Open files in row, found by name: the General tab's rows
             // above it are free to change.
             let (tab, editor_row) =
                 crate::config::locate(crate::config::SettingKind::OutsideEditor).unwrap();
@@ -27217,14 +27006,14 @@ mod tests {
     }
 
     #[test]
-    fn hotkeys_tab_lists_every_action_with_its_chords() {
+    fn keys_tab_lists_every_action_with_its_chords() {
         let mut app = App::new();
         let mut out = Vec::new();
-        open_settings_on(&mut app, crate::config::hotkeys_tab(), &mut out);
+        open_settings_on(&mut app, crate::config::keys_tab(), &mut out);
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains("Hotkeys"), "tab strip:\n{text}");
+        assert!(text.contains("Keys"), "tab strip:\n{text}");
         assert!(text.contains("NAVIGATE"), "group header:\n{text}");
         assert!(
             text.contains("Open / fold checkout"),
@@ -27236,15 +27025,51 @@ mod tests {
         );
     }
 
-    /// The Hotkeys tab is a reference: no key on one of its rows changes
+    /// The Presets tab's one row opens the AGENT PRESETS list in the
+    /// overlay's place — which needs a checkout to launch into, and says
+    /// so without one.
+    #[test]
+    fn the_presets_tab_opens_the_presets_list() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::agent_presets::with_presets_path(dir.path().join("presets.json"), || {
+            with_default_config(|| {
+                let (presets, _) =
+                    crate::config::locate(crate::config::SettingKind::AgentPresets).unwrap();
+                let mut out = Vec::new();
+                let mut bare = App::new();
+                open_settings_on(&mut bare, presets, &mut out);
+                press(&mut bare, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(
+                    settings_view(&bare)
+                        .notice
+                        .as_ref()
+                        .is_some_and(|(t, _)| t.contains("open a project first")),
+                    "{:?}",
+                    settings_view(&bare).notice
+                );
+
+                let mut app = App::new();
+                seed_tree(&mut app);
+                open_settings_on(&mut app, presets, &mut out);
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(
+                    matches!(app.overlay, Some(Overlay::AgentPresets(_))),
+                    "{:?}",
+                    app.overlay.as_ref().map(overlay_label)
+                );
+            });
+        });
+    }
+
+    /// The Keys tab is a reference: no key on one of its rows changes
     /// a binding, and `←`/`→` say where one does.
     #[test]
-    fn the_hotkeys_tab_changes_no_binding() {
+    fn the_keys_tab_changes_no_binding() {
         let dir = tempfile::tempdir().unwrap();
         crate::config::with_config_path(dir.path().join("config.json"), || {
             let mut app = App::new();
             let mut out = Vec::new();
-            open_settings_on(&mut app, crate::config::hotkeys_tab(), &mut out);
+            open_settings_on(&mut app, crate::config::keys_tab(), &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             let before = app.keymap.label(crate::keymap::Action::FocusNext);
             for code in [
@@ -27266,8 +27091,8 @@ mod tests {
     }
 
     #[test]
-    fn hotkeys_tab_includes_the_cursor_launch_chords() {
-        let ids: Vec<&str> = crate::config::settings_rows(crate::config::hotkeys_tab(), 0)
+    fn keys_tab_includes_the_cursor_launch_chords() {
+        let ids: Vec<&str> = crate::config::settings_rows(crate::config::keys_tab(), 0)
             .into_iter()
             .filter_map(|row| match row {
                 crate::config::SettingsRow::Hotkey(i) => crate::keymap::spec_at(i).map(|s| s.id),
@@ -27688,10 +27513,7 @@ mod tests {
 
     #[test]
     fn f_opens_file_finder_listing_tracked_and_untracked() {
-        // Pinned to the legacy behavior: with `close_finder_on_open`
-        // (the default) the finder would be gone under the editor, and
-        // the Ctrl+y at the end would have nothing to copy from.
-        with_config_json(r#"{"close_finder_on_open": false}"#, || {
+        with_default_config(|| {
             let dir = tempfile::tempdir().unwrap();
             let repo = test_repo(&dir);
             std::fs::write(repo.join("fresh.txt"), "hello\n").unwrap();
@@ -27716,8 +27538,8 @@ mod tests {
             assert_eq!(finder(&app).matches.len(), 1, "fr matches only fresh.txt");
             assert_eq!(finder(&app).selected_path(), Some("fresh.txt"));
 
-            // Enter opens the selection in the editor modal; the finder stays
-            // open underneath. A shell stands in for vim (`sh +1 fresh.txt`
+            // Enter opens the selection in the editor modal, and the finder
+            // closes behind it. A shell stands in for vim (`sh +1 fresh.txt`
             // still spawns fine).
             if let Some(Overlay::Files(f)) = &mut app.overlay {
                 f.editor = "/bin/sh".into();
@@ -27725,13 +27547,10 @@ mod tests {
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let vim = app.editor.as_ref().expect("enter spawns the editor modal");
             assert_eq!(vim.title, "fresh.txt:1");
-            assert!(
-                matches!(&app.overlay, Some(Overlay::Files(_))),
-                "the finder stays open under the editor"
-            );
+            assert!(app.overlay.is_none(), "the finder closed on the open");
 
-            // Ctrl+Q closes the editor, landing back on the finder; Ctrl+y
-            // copies the selected path and closes.
+            // Ctrl+Q closes the editor; back in the finder, Ctrl+y copies
+            // the selected path and closes.
             press(
                 &mut app,
                 KeyCode::Char('q'),
@@ -27739,6 +27558,10 @@ mod tests {
                 &mut out,
             );
             assert!(app.editor.is_none(), "Ctrl+Q force-closes the editor");
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER, &mut out);
+            for c in ['f', 'r'] {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+            }
             press(
                 &mut app,
                 KeyCode::Char('y'),
@@ -28445,10 +28268,10 @@ mod tests {
     }
 
     #[test]
-    fn close_finder_on_open_leaves_only_the_editor_modal() {
+    fn opening_from_the_finder_leaves_only_the_editor_modal() {
         let dir = tempfile::tempdir().unwrap();
         let repo = test_repo(&dir);
-        // Default-on: the finder is gone by the time the editor is up, so
+        // The finder is gone by the time the editor is up, so
         // quitting the editor lands on the panels with nothing left to Esc.
         with_default_config(|| {
             let mut app = App::new();
@@ -28781,7 +28604,7 @@ mod tests {
     /// ⌘P shows, listed once.
     #[test]
     fn a_file_opened_from_the_finder_leads_it_next_time() {
-        with_config_json(r#"{"close_finder_on_open": true}"#, || {
+        with_default_config(|| {
             let dir = tempfile::tempdir().unwrap();
             let repo = test_repo(&dir);
             std::fs::write(repo.join("fresh.txt"), "hello\n").unwrap();
@@ -29228,12 +29051,11 @@ mod tests {
         assert_eq!(app.flash, None);
     }
 
+    /// Enter on a find-in-files hit opens it in the editor modal, and the
+    /// results close behind it; keys go to the editor until `Ctrl+Q`.
     #[test]
     fn grep_enter_spawns_editor_and_ctrl_q_closes_it() {
-        // Pinned to the legacy behavior — the "lands back on the
-        // results" half of this test is what `close_finder_on_open`
-        // off buys you.
-        with_config_json(r#"{"close_finder_on_open": false}"#, || {
+        with_default_config(|| {
             let dir = tempfile::tempdir().unwrap();
             let repo = test_repo(&dir);
             let mut app = App::new();
@@ -29262,8 +29084,8 @@ mod tests {
             assert_eq!(vim.title, "a.txt:1");
             assert_eq!(vim.generation, 1);
             assert!(
-                matches!(&app.overlay, Some(Overlay::Grep(_))),
-                "the grep overlay stays open under the editor"
+                app.overlay.is_none(),
+                "find-in-files closes as the editor opens"
             );
 
             // With the modal open, keys forward to the editor — q must not quit.
@@ -29279,43 +29101,7 @@ mod tests {
                 &mut out,
             );
             assert!(app.editor.is_none(), "Ctrl+Q force-closes the editor");
-            assert!(
-                matches!(&app.overlay, Some(Overlay::Grep(_))),
-                "closing the editor lands back on the results"
-            );
-        });
-    }
-
-    #[test]
-    fn close_finder_on_open_also_closes_the_grep_overlay() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(&dir);
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_repo_tree(&mut app, &repo);
-            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            app.editor_tx = Some(tx);
-            let mut out = Vec::new();
-
-            press(
-                &mut app,
-                KeyCode::Char('F'),
-                KeyModifiers::SUPER | KeyModifiers::SHIFT,
-                &mut out,
-            );
-            for c in "orig".chars() {
-                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
-            }
-            // A shell stands in for vim (`sh +1 a.txt` still spawns fine).
-            if let Some(Overlay::Grep(v)) = &mut app.overlay {
-                v.editor = "/bin/sh".into();
-            }
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(app.editor.is_some(), "enter spawns the editor modal");
-            assert!(
-                app.overlay.is_none(),
-                "find-in-files closes as the editor opens"
-            );
+            assert!(app.overlay.is_none(), "and nothing is left under it");
         });
     }
 
@@ -30184,7 +29970,7 @@ mod tests {
         seed_other_project(&mut app);
         assert_eq!(app.project_rows().len(), 2, "demo and secret");
 
-        let palette = Palette::new(&app.tree, false, &app.open_prs, &app.prs, false);
+        let palette = Palette::new(&app.tree, &app.open_prs, &app.prs, false);
         let texts: Vec<&str> = palette.items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(
             texts,
@@ -32166,8 +31952,7 @@ mod tests {
 
     /// A QUICK PROMPT is fire-and-forget: its Ack selects the new SESSION's
     /// row (so the pane previews it and it is marked seen) but leaves FOCUS
-    /// on the panel the prompt was fired from. `quick_prompt_focus` puts the
-    /// old behaviour — enter the pane and lock it — back.
+    /// on the panel the prompt was fired from.
     #[test]
     fn a_quick_prompt_lands_the_row_without_taking_the_pane() {
         use orion_core::{Agent, AgentStatus, Entity, WorktreeId};
@@ -32234,20 +32019,6 @@ mod tests {
                 );
                 assert_eq!(app.focus, Focus::Sessions, "but focus stays put");
                 assert!(!app.term_locked, "and the pane is not locked");
-            },
-        );
-
-        with_config_json(
-            r#"{"quick_prompt_kind": "codex", "quick_prompt_focus": true}"#,
-            || {
-                let mut app = App::new();
-                launch(&mut app);
-                assert_eq!(
-                    app.focus,
-                    Focus::Terminal,
-                    "opted in: straight into the pane"
-                );
-                assert!(app.term_locked, "typing goes to the new agent");
             },
         );
     }
@@ -32445,9 +32216,9 @@ mod tests {
             assert!(app.overlay.is_none(), "^q closes the box");
             assert!(!app.quick_draft.is_empty(), "and parks it");
 
-            // The cursor on a checkout with nothing running in it has no
-            // band to be on, so it moves nothing: the box still lands on
-            // the root branch, so it is the same box and comes back whole.
+            // The cursor on another checkout's band — one with nothing
+            // running in it — aims the box there: another place, an empty
+            // box, and the root's draft left where it is.
             let root =
                 crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w1".into()));
             app.set_sel_worktree(1);
@@ -32455,6 +32226,22 @@ mod tests {
                 app.selected_worktree().map(|w| w.branch.as_str()),
                 Some("feat")
             );
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+                panic!("p should open the box, got {:?}", app.overlay);
+            };
+            assert_eq!(prompt.input.as_str(), "", "feat's own box");
+            assert!(matches!(&prompt.kind, PromptKind::QuickPrompt(launch)
+                if launch.target == crate::quick_prompt::QuickTarget::Worktree(
+                    orion_core::WorktreeId("w2".into()))));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(
+                !app.quick_draft.is_empty(),
+                "the root's draft is still parked"
+            );
+
+            // Back on the root, the same box comes back whole.
+            app.set_sel_worktree(0);
             press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("p should open the box, got {:?}", app.overlay);
@@ -36135,18 +35922,7 @@ mod tests {
         );
     }
 
-    // ---- DELETE EMPTIED WORKTREE -------------------------------------
-
-    fn terminal_entity(id: &str, wt: &str, name: &str) -> orion_core::Entity {
-        orion_core::Entity::Terminal(orion_core::TerminalTab {
-            id: TerminalId(id.into()),
-            worktree_id: WorktreeId(wt.into()),
-            name: name.into(),
-            sort_order: 0,
-            alive: true,
-            run_command: None,
-        })
-    }
+    // ---- A WORKTREE'S LAST CARD -------------------------------------
 
     /// p1 / w1 (main, a1) plus a linked worktree w2 on `feature`, holding
     /// whatever rows the test upserts next.
@@ -36174,6 +35950,21 @@ mod tests {
         }
     }
 
+    /// The row menu's Delete worktree on `id`, which opens its confirm.
+    fn menu_delete_worktree(app: &mut App, id: &str) {
+        let mut out = Vec::new();
+        run_menu_action(
+            app,
+            MenuAction::DeleteWorktree(WorktreeId(id.into())),
+            &mut out,
+        );
+        assert!(
+            matches!(app.overlay, Some(Overlay::Confirm(_))),
+            "{:?}",
+            app.overlay
+        );
+    }
+
     fn upsert_agent(app: &mut App, id: &str, wt: &str, name: &str, archived: bool) {
         hse(
             app,
@@ -36183,11 +35974,11 @@ mod tests {
         );
     }
 
-    /// The last card of a linked worktree: `d`'s confirm asks about the
-    /// checkout in the same dialog, BEFORE anything is deleted — and the
+    /// The last card of a linked worktree: `d`'s confirm is the card's
+    /// own, and Enter keeps the emptied worktree and its band — and the
     /// key and the row menu build the very same dialog (INPUT PARITY).
     #[test]
-    fn deleting_the_last_card_asks_about_the_worktree_first() {
+    fn deleting_the_last_card_asks_nothing_about_the_worktree() {
         with_default_config(|| {
             let mut app = App::new();
             seed_emptiable_tree(&mut app);
@@ -36217,25 +36008,20 @@ mod tests {
 
             assert_eq!(
                 by_key.action,
-                PendingAction::ThenDeleteWorktree {
-                    first: Box::new(PendingAction::DeleteAgent(AgentId("a2".into()))),
-                    worktree: WorktreeId("w2".into()),
-                    offered: true,
-                }
+                PendingAction::DeleteAgent(AgentId("a2".into())),
+                "the card's own delete, nothing about the worktree"
             );
-            assert_eq!(by_key.title, "Delete agent", "still the card's own delete");
-            assert!(
-                by_key.message.contains("Delete agent 'agent-2'?")
-                    && by_key.message.contains("worktree 'feature'")
-                    && by_key.message.contains("delete it from disk too?"),
-                "one dialog carries both questions: {}",
-                by_key.message
-            );
+            assert!(!by_key.message.contains("worktree"), "{}", by_key.message);
             assert!(
                 out.is_empty(),
                 "nothing is deleted before the answer: {out:?}"
             );
-            assert!(app.tree.agents.iter().any(|a| a.id.0 == "a2"));
+            press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
+            assert!(delete_worktree_requests(&out).is_empty(), "{out:?}");
+            assert!(
+                app.tree.worktrees.iter().any(|w| w.id.0 == "w2"),
+                "the emptied worktree keeps its band"
+            );
         });
     }
 
@@ -36248,7 +36034,7 @@ mod tests {
             let mut app = App::new();
             seed_emptiable_tree(&mut app);
             upsert_agent(&mut app, "a2", "w2", "agent-2", false);
-            menu_delete(&mut app, "a2");
+            menu_delete_worktree(&mut app, "w2");
             let mut out = Vec::new();
             press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
             let req_id = out
@@ -36360,7 +36146,7 @@ mod tests {
                     .unwrap(),
             );
 
-            menu_delete(&mut app, "a2");
+            menu_delete_worktree(&mut app, "w2");
             let mut out = Vec::new();
             press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
             let req_id = out
@@ -36389,61 +36175,6 @@ mod tests {
         });
     }
 
-    /// `Enter`/`y` is yes: the card's delete goes out, then the same
-    /// worktree delete the band's own `d` sends, and the band drops.
-    #[test]
-    fn yes_deletes_the_card_and_then_the_worktree() {
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
-            menu_delete(&mut app, "a2");
-            let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('y'), KeyModifiers::NONE, &mut out);
-            assert!(app.overlay.is_none(), "y answered it: {:?}", app.overlay);
-            let kinds: Vec<&str> = out
-                .iter()
-                .filter_map(|r| match r {
-                    ClientRequest::DeleteAgent { id, .. } if id.0 == "a2" => Some("delete-agent"),
-                    ClientRequest::DeleteWorktree {
-                        force: false, id, ..
-                    } if id.0 == "w2" => Some("delete-worktree"),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(kinds, ["delete-agent", "delete-worktree"], "{out:?}");
-            assert!(!app.tree.agents.iter().any(|a| a.id.0 == "a2"));
-            assert!(
-                !app.tree.worktrees.iter().any(|w| w.id.0 == "w2"),
-                "the band drops optimistically"
-            );
-        });
-    }
-
-    /// `n` is no: the card goes, the emptied checkout stays.
-    #[test]
-    fn no_deletes_the_card_and_keeps_the_worktree() {
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
-            menu_delete(&mut app, "a2");
-            let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
-            assert!(app.overlay.is_none(), "n answered it: {:?}", app.overlay);
-            assert!(
-                out.iter()
-                    .any(|r| matches!(r, ClientRequest::DeleteAgent { id, .. } if id.0 == "a2")),
-                "the card's own delete goes out: {out:?}"
-            );
-            assert!(
-                delete_worktree_requests(&out).is_empty(),
-                "the worktree stays: {out:?}"
-            );
-            assert!(app.tree.worktrees.iter().any(|w| w.id.0 == "w2"));
-        });
-    }
-
     /// `Esc` is cancel: the card stays alive and nothing is sent.
     #[test]
     fn esc_keeps_the_last_card_alive() {
@@ -36461,279 +36192,6 @@ mod tests {
                 "the card lives"
             );
             assert!(app.tree.worktrees.iter().any(|w| w.id.0 == "w2"));
-        });
-    }
-
-    /// The last terminal of a linked worktree asks the same way.
-    #[test]
-    fn closing_the_last_terminal_asks_about_the_worktree() {
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            hse(
-                &mut app,
-                ServerEvent::EntityUpserted {
-                    entity: terminal_entity("t1", "w2", "shell-1"),
-                },
-            );
-            let mut out = Vec::new();
-            run_menu_action(
-                &mut app,
-                MenuAction::CloseTerminal(TerminalId("t1".into())),
-                &mut out,
-            );
-            match &app.overlay {
-                Some(Overlay::Confirm(c)) => {
-                    assert_eq!(c.title, "Close terminal");
-                    assert_eq!(
-                        c.action,
-                        PendingAction::ThenDeleteWorktree {
-                            first: Box::new(PendingAction::CloseTerminal(TerminalId("t1".into()))),
-                            worktree: WorktreeId("w2".into()),
-                            offered: true,
-                        }
-                    );
-                }
-                other => panic!("expected the close confirm, got {other:?}"),
-            }
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                out.iter()
-                    .any(|r| matches!(r, ClientRequest::CloseTerminal { .. })),
-                "{out:?}"
-            );
-            assert_eq!(delete_worktree_requests(&out), ["w2"]);
-        });
-    }
-
-    /// A card left behind, or the ROOT WORKTREE, and the confirm is the
-    /// plain one: `n` cancels as it does everywhere else.
-    #[test]
-    fn a_card_left_behind_or_the_root_worktree_asks_nothing_extra() {
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
-            upsert_agent(&mut app, "a3", "w2", "agent-3", false);
-            let c = menu_delete(&mut app, "a2");
-            assert_eq!(
-                c.action,
-                PendingAction::DeleteAgent(AgentId("a2".into())),
-                "agent-3 still holds the worktree"
-            );
-            assert!(!c.message.contains("worktree"), "{}", c.message);
-            let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
-            assert!(out.is_empty(), "n on a plain confirm cancels: {out:?}");
-            assert!(app.tree.agents.iter().any(|a| a.id.0 == "a2"));
-
-            // a1 is the root worktree's only session: the root is never offered.
-            let c = menu_delete(&mut app, "a1");
-            assert_eq!(c.action, PendingAction::DeleteAgent(AgentId("a1".into())));
-        });
-    }
-
-    /// A `D` that takes every live row of a worktree asks about the
-    /// checkout in its own dialog, the same way.
-    #[test]
-    fn deleting_all_sessions_asks_about_the_worktree() {
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
-            hse(
-                &mut app,
-                ServerEvent::EntityUpserted {
-                    entity: terminal_entity("t1", "w2", "shell-1"),
-                },
-            );
-            app.focus = Focus::Sessions;
-            app.set_sel_worktree(
-                app.visible_worktrees()
-                    .iter()
-                    .position(|w| w.id.0 == "w2")
-                    .unwrap(),
-            );
-            open_delete_all_confirm(&mut app);
-            let action = match &app.overlay {
-                Some(Overlay::Confirm(c)) => c.action.clone(),
-                other => panic!("expected the delete-all confirm, got {other:?}"),
-            };
-            match action {
-                PendingAction::ThenDeleteWorktree {
-                    first,
-                    worktree,
-                    offered: true,
-                } => {
-                    assert_eq!(worktree, WorktreeId("w2".into()));
-                    assert!(
-                        matches!(*first, PendingAction::DeleteAllSessions { .. }),
-                        "{first:?}"
-                    );
-                }
-                other => panic!("expected the worktree question, got {other:?}"),
-            }
-            let mut out = Vec::new();
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                out.iter()
-                    .filter(|r| matches!(
-                        r,
-                        ClientRequest::DeleteAgent { .. } | ClientRequest::CloseTerminal { .. }
-                    ))
-                    .count(),
-                2,
-                "both rows' own deletes went out: {out:?}"
-            );
-            assert_eq!(delete_worktree_requests(&out), ["w2"]);
-        });
-    }
-
-    /// With **Delete emptied worktree** on, the question is not asked: the
-    /// card's ordinary confirm says the worktree goes with it, `Enter`
-    /// deletes both, and `n` cancels like any two-way confirm.
-    #[test]
-    fn delete_empty_worktree_setting_skips_the_question() {
-        with_config_json(r#"{"delete_empty_worktree": true}"#, || {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
-            let c = menu_delete(&mut app, "a2");
-            assert_eq!(
-                c.action,
-                PendingAction::ThenDeleteWorktree {
-                    first: Box::new(PendingAction::DeleteAgent(AgentId("a2".into()))),
-                    worktree: WorktreeId("w2".into()),
-                    offered: false,
-                }
-            );
-            let last = c.message.lines().last().unwrap();
-            assert!(
-                last.contains("goes with it") && !last.contains('?'),
-                "a statement, not a question, after the card's own one: {last}"
-            );
-            let mut out = Vec::new();
-            press(&mut app, KeyCode::Char('n'), KeyModifiers::NONE, &mut out);
-            assert!(out.is_empty(), "n cancels a two-way confirm: {out:?}");
-
-            menu_delete(&mut app, "a2");
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                out.iter()
-                    .any(|r| matches!(r, ClientRequest::DeleteAgent { id, .. } if id.0 == "a2")),
-                "{out:?}"
-            );
-            assert_eq!(delete_worktree_requests(&out), ["w2"]);
-            assert!(!app.tree.worktrees.iter().any(|w| w.id.0 == "w2"));
-        });
-    }
-
-    /// Archived sessions still filed under the worktree hold history the
-    /// delete would take, so even the forcing setting asks — and the
-    /// dialog says how many.
-    #[test]
-    fn archived_sessions_keep_the_question_even_when_forced() {
-        with_config_json(r#"{"delete_empty_worktree": true}"#, || {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
-            upsert_agent(&mut app, "a3", "w2", "agent-3", true);
-            let c = menu_delete(&mut app, "a2");
-            assert!(
-                matches!(
-                    c.action,
-                    PendingAction::ThenDeleteWorktree { offered: true, .. }
-                ),
-                "{:?}",
-                c.action
-            );
-            assert!(
-                c.message.contains("1 archived session"),
-                "names the history at stake: {}",
-                c.message
-            );
-        });
-    }
-
-    /// **Show all worktrees** drops the question, not the setting: with
-    /// both on, the last session's delete and the last terminal's close
-    /// each take the worktree with them, the way they do with it off.
-    #[test]
-    fn delete_empty_worktree_setting_holds_with_show_all_worktrees_on() {
-        with_config_json(r#"{"delete_empty_worktree": true}"#, || {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            app.show_all_worktrees = true;
-            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
-            let c = menu_delete(&mut app, "a2");
-            assert_eq!(
-                c.action,
-                PendingAction::ThenDeleteWorktree {
-                    first: Box::new(PendingAction::DeleteAgent(AgentId("a2".into()))),
-                    worktree: WorktreeId("w2".into()),
-                    offered: false,
-                }
-            );
-            assert!(c.message.contains("goes with it"), "{}", c.message);
-            let mut out = Vec::new();
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                out.iter()
-                    .any(|r| matches!(r, ClientRequest::DeleteAgent { id, .. } if id.0 == "a2")),
-                "{out:?}"
-            );
-            assert_eq!(delete_worktree_requests(&out), ["w2"]);
-            assert!(
-                !app.tree.worktrees.iter().any(|w| w.id.0 == "w2"),
-                "no empty band is left behind"
-            );
-        });
-        with_config_json(r#"{"delete_empty_worktree": true}"#, || {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            app.show_all_worktrees = true;
-            hse(
-                &mut app,
-                ServerEvent::EntityUpserted {
-                    entity: terminal_entity("t1", "w2", "shell-1"),
-                },
-            );
-            let mut out = Vec::new();
-            run_menu_action(
-                &mut app,
-                MenuAction::CloseTerminal(TerminalId("t1".into())),
-                &mut out,
-            );
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                out.iter()
-                    .any(|r| matches!(r, ClientRequest::CloseTerminal { .. })),
-                "{out:?}"
-            );
-            assert_eq!(delete_worktree_requests(&out), ["w2"]);
-            assert!(!app.tree.worktrees.iter().any(|w| w.id.0 == "w2"));
-        });
-    }
-
-    /// Both settings on, and archived sessions still filed under the
-    /// worktree: their history is at stake, so the question comes back.
-    #[test]
-    fn archived_sessions_keep_the_question_with_show_all_worktrees_on() {
-        with_config_json(r#"{"delete_empty_worktree": true}"#, || {
-            let mut app = App::new();
-            seed_emptiable_tree(&mut app);
-            app.show_all_worktrees = true;
-            upsert_agent(&mut app, "a2", "w2", "agent-2", false);
-            upsert_agent(&mut app, "a3", "w2", "agent-3", true);
-            let c = menu_delete(&mut app, "a2");
-            assert!(
-                matches!(
-                    c.action,
-                    PendingAction::ThenDeleteWorktree { offered: true, .. }
-                ),
-                "{:?}",
-                c.action
-            );
         });
     }
 
@@ -37683,7 +37141,6 @@ mod tests {
                     launch.clone(),
                     orion_core::WorktreeId("w1".into()),
                     "go".into(),
-                    false,
                     None,
                 );
                 assert_eq!(draft.todo.map(|t| t.item), Some(id));

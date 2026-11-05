@@ -233,7 +233,7 @@ pub(crate) enum Command {
     /// Check what orion needs on this machine.
     ///
     /// One line each for git, gh and its sign-in, fresh (or the editor
-    /// `ORION_EDITOR` names), the Open in app editor, Orion.app and the
+    /// `ORION_EDITOR` names), the editor app files open in, Orion.app and the
     /// Ghostty it is made from, the CLI of every agent turned on, and this
     /// project's LINEAR_API_KEY (where it was found, never the key) — with
     /// the command that fixes whatever is missing. It never installs

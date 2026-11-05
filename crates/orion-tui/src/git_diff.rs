@@ -498,7 +498,7 @@ fn count_lines(bytes: &[u8]) -> u64 {
 /// Every file in the checkout (tracked + untracked, gitignore respected) in
 /// git listing order, for the fuzzy file finder — plus the ignored `.env*`
 /// files after them: `.env.local` and its kind are gitignored by design,
-/// yet they are files you open (and the ones `link_env_files` symlinks into
+/// yet they are files you open (and the ones the daemon symlinks into
 /// every worktree). `Err` is a user-facing flash message.
 pub fn list_files(root: &Path) -> Result<Vec<String>, String> {
     let output = run_git(

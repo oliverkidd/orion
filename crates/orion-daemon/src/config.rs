@@ -16,11 +16,6 @@ pub struct Config {
     /// Pre-spawn agent CLIs while the user is still naming the session so
     /// creation feels instant. Costs one idle CLI process per warm slot.
     pub prewarm_agents: bool,
-    /// Pre-spawn a worktree's dead sessions when the user's selection rests
-    /// on it, so attaching shows an already-booted screen instead of a
-    /// booting shell. Costs idle shell/CLI processes for sessions the user
-    /// may never open.
-    pub prewarm_sessions: bool,
     /// Kill idle session PTYs in worktrees no client is looking at once
     /// they've gone unwatched this long: "1m" | "5m" | "15m" | "30m" | "1h"
     /// ("off" disables reaping entirely; any `<n>s`/`<n>m`/`<n>h` works).
@@ -30,12 +25,6 @@ pub struct Config {
     /// reaped session revives on the next attach or prewarm (agents resume
     /// their conversation). Malformed values fall back to the 5m default.
     pub session_idle_timeout: String,
-    /// ENV LINKS: symlink the main checkout's git-ignored `.env*` files
-    /// into every other WORKTREE of the project — one orion creates, one an
-    /// agent moves into, and one made outside orion that the sync adopts —
-    /// so each checkout runs against the clone's secrets. On by default; a
-    /// file already in the worktree is never replaced (see `env_links`).
-    pub link_env_files: bool,
     /// Per-harness deltas over the compiled-in registry (`harnesses` in
     /// config.json): repoint a program, rename a flag, switch a harness
     /// off, or define a whole new CLI. Merged by
@@ -86,9 +75,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             prewarm_agents: true,
-            prewarm_sessions: true,
             session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT.into(),
-            link_env_files: true,
             harnesses: BTreeMap::new(),
             claude_accounts: Vec::new(),
             projects: BTreeMap::new(),
@@ -185,13 +172,11 @@ mod tests {
         let obj = serde_json::json!({
             "prewarm_agents": "nope",
             "session_idle_timeout": "1h",
-            "prewarm_sessions": false,
         });
         let (cfg, skipped) =
             orion_core::settings::parse_lenient::<Config>(obj.as_object().unwrap());
         assert!(cfg.prewarm_agents, "the unreadable key takes its default");
         assert_eq!(cfg.session_idle_timeout, "1h");
-        assert!(!cfg.prewarm_sessions);
         assert_eq!(skipped.len(), 1);
     }
 
@@ -203,7 +188,7 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw).unwrap();
         let (cfg, skipped) = orion_core::settings::parse_lenient::<Config>(&obj);
         assert!(skipped.is_empty(), "{skipped:?}");
-        assert!(!cfg.prewarm_agents && !cfg.prewarm_sessions);
+        assert!(!cfg.prewarm_agents);
         assert_eq!(cfg.session_idle_timeout, "30m");
         assert!(cfg.harnesses.contains_key("grok"), "the registry map reads");
         assert_eq!(
@@ -333,15 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn env_links_default_on_and_allow_opt_out() {
-        assert!(Config::default().link_env_files);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.link_env_files);
-        let cfg: Config = serde_json::from_str(r#"{"link_env_files": false}"#).unwrap();
-        assert!(!cfg.link_env_files);
-    }
-
-    #[test]
     fn worktree_containers_default_off_and_read_the_policy_per_project() {
         let demo = Path::new("/tmp/demo");
         assert_eq!(
@@ -368,14 +344,5 @@ mod tests {
             WorktreeContainers::Off,
             "the old global key is the TUI's to move, never read here"
         );
-    }
-
-    #[test]
-    fn defaults_enable_session_prewarm_and_allow_opt_out() {
-        assert!(Config::default().prewarm_sessions);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.prewarm_sessions);
-        let cfg: Config = serde_json::from_str(r#"{"prewarm_sessions": false}"#).unwrap();
-        assert!(!cfg.prewarm_sessions);
     }
 }

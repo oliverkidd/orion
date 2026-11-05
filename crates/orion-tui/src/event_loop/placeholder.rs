@@ -835,7 +835,7 @@ mod tests {
                     .any(|r| matches!(r, ClientRequest::Detach { .. })),
                 "nothing was ever attached to let go of: {out:?}"
             );
-            assert_eq!(app.focus, Focus::Worktrees, "quick_prompt_focus is off");
+            assert_eq!(app.focus, Focus::Worktrees, "the box never takes the pane");
             // Both badges are gone; the pane header's own "starting…" is
             // the real session booting.
             let text = screen(&mut app);
@@ -2258,7 +2258,7 @@ mod tests {
                 app.selected_session_row().and_then(|r| r.sref()),
                 Some(SessionRef::Agent(AgentId("a9".into())))
             );
-            assert_eq!(app.focus, Focus::Projects, "quick_prompt_focus is off");
+            assert_eq!(app.focus, Focus::Projects, "the box never takes the pane");
         });
     }
 }

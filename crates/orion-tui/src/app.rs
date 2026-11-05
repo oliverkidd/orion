@@ -592,20 +592,6 @@ pub enum PendingAction {
     DeleteWorktree(WorktreeId),
     /// `p` on a checkout an agent is working in: pull it anyway.
     PullWorktree(WorktreeId),
-    /// A row delete that empties a linked worktree — the last card of the
-    /// band going — with the checkout's fate decided in the same dialog:
-    /// `Enter`/`y` runs `first` (the row's own delete) and then deletes
-    /// `worktree`. `offered` is the three-way dialog: `n` runs `first`
-    /// alone and keeps the empty checkout, `Esc` keeps the card too. With
-    /// the **Delete emptied worktree** SETTING on the question is not
-    /// asked (`offered == false`): the dialog is the row's ordinary
-    /// confirm, its message saying the worktree goes with it, and `n`
-    /// cancels as it does everywhere else.
-    ThenDeleteWorktree {
-        first: Box<PendingAction>,
-        worktree: WorktreeId,
-        offered: bool,
-    },
     /// **Delete all sessions** in the worktrees panel: every deletable
     /// worktree of the selected project.
     DeleteAllWorktrees(Vec<WorktreeId>),
@@ -790,7 +776,7 @@ pub enum PromptKind {
     EditLink {
         id: LinkId,
     },
-    /// Enter on a CLAUDE ACCOUNTS row (Settings → Agents): the email to
+    /// Enter on a CLAUDE ACCOUNTS row (Settings → Accounts): the email to
     /// sign account `id` in as, which fills Claude's login page — empty
     /// leaves the choice to the browser. Enter runs `claude auth login` in
     /// the editor modal over the settings overlay; Esc puts the overlay
@@ -2100,7 +2086,7 @@ impl SettingsView {
     }
 
     pub fn is_hotkeys(&self) -> bool {
-        self.tab == crate::config::hotkeys_tab()
+        self.tab == crate::config::keys_tab()
     }
 
     pub fn warn(&mut self, text: impl Into<String>) {
@@ -2215,8 +2201,8 @@ pub struct AgentLaunchDraft {
     /// pull request and run in a checkout of its head branch.
     pub pr: Option<crate::pull_request::PrLaunch>,
     /// Enter and lock the TERMINAL PANE once the create is acked. True for
-    /// every launch the user walked a picker to reach; the QUICK PROMPT
-    /// passes the `quick_prompt_focus` SETTING, which is off by default.
+    /// every launch the user walked a picker to reach; never for the QUICK
+    /// PROMPT.
     pub focus_pane: bool,
     /// The stand-in session row already on screen for this create (a
     /// QUICK PROMPT into a worktree that did not exist, a launch that
@@ -2339,9 +2325,6 @@ pub enum PendingIntent {
         text: String,
         /// The stand-in rows on screen meanwhile.
         placeholder: PlaceholderRows,
-        /// The session's Ack takes the pane — the `quick_prompt_focus`
-        /// SETTING, as the box's Enter found it.
-        focus: bool,
     },
     /// A PR SESSION whose head branch had no checkout yet: the DAEMON
     /// fetches the branch, cuts the worktree and spawns the CLI in it
@@ -4032,13 +4015,10 @@ pub struct App {
     pub term_file_links: Vec<crate::links::FileLink>,
     /// File-list width of the diff modal, remembered across opens.
     pub diff_files_width: u16,
-    /// The diff modal opens with its files as a directory tree: the
-    /// **Files as a tree** SETTING (Settings → Review), mirrored by
-    /// `apply_config`. `Ctrl+t` flips the open viewer alone.
+    /// The diff modal opens with its files as a directory tree, as `⌘B`
+    /// last left a viewer (`diff_tree_view` in config.json, mirrored by
+    /// `apply_config`).
     pub diff_tree: bool,
-    /// The diff modal's panel with the keys as it opens — the **Start
-    /// on** SETTING. Mirrored by `apply_config`.
-    pub diff_start: DiffFocus,
     /// Selected tab of the settings modal, remembered across opens.
     pub settings_tab: usize,
     /// Cursor row of the settings modal, one per tab, remembered across
@@ -4307,7 +4287,7 @@ pub struct App {
     /// AUTOFIX: the ledger, the watched pull requests and the queued asks
     /// (`crate::autofix`).
     pub autofix: crate::autofix::State,
-    /// **When a PR breaks** (Settings → Review), mirrored.
+    /// **Auto-fix my PRs** (Settings → General), mirrored.
     pub autofix_mode: crate::autofix::Mode,
     /// Where a file dropped onto a prompt box bound for an agent is copied
     /// before macOS deletes it (`dropped_files`), and where `^V` keeps the
@@ -4353,7 +4333,7 @@ pub struct App {
     /// What `⌘X`/`⌘C` last took in the TODOS MODAL: pasted back into it,
     /// the items themselves go in.
     pub todo_clip: Option<crate::todos::view::TodoClip>,
-    /// The last **Test connection** (Settings → Linear): the checkout
+    /// The last **Linear key** test (Settings → Projects): the checkout
     /// whose key it tried, where that key was found, and what Linear said
     /// — what the row says while that is still the key on show.
     pub linear_test: Option<(
@@ -4416,17 +4396,6 @@ pub struct App {
     /// and the splash's motion (off = fewer repaints). Mirrors the config,
     /// refreshed at startup and when the settings overlay applies a change.
     pub animations: bool,
-    /// The `black_background` setting: every cell still on the terminal's
-    /// default background is painted pure black at the end of a frame
-    /// (`ui::draw`). On in the config by default; off here until startup
-    /// applies it. Mirrors the config, refreshed at startup and when the
-    /// settings overlay applies a change.
-    pub black_background: bool,
-    /// The `show_all_worktrees` setting: every checkout of the project
-    /// gets a BAND on the grid, one with nothing running in it too
-    /// (`launcher::bands`). Mirrors the config, refreshed at startup and
-    /// when the settings overlay applies a change.
-    pub show_all_worktrees: bool,
     /// The ROWS MEMO, armed by the frame and by [`App::reading_url`].
     pub rows_memo: RowsMemo,
 }
@@ -4528,7 +4497,6 @@ impl App {
             term_file_links: Vec::new(),
             diff_files_width: DEFAULT_DIFF_FILES_W,
             diff_tree: false,
-            diff_start: DiffFocus::Files,
             settings_tab: 0,
             settings_selected: vec![0; crate::config::tab_count()],
             settings_on_tabs: true,
@@ -4620,8 +4588,6 @@ impl App {
             confetti: None,
             welcome_on_screen: false,
             animations: true,
-            show_all_worktrees: false,
-            black_background: false,
             rows_memo: RowsMemo::default(),
         }
     }
@@ -5813,7 +5779,7 @@ impl App {
 
     /// Every checkout with a live session in it, in one pass over the
     /// sessions: a sort asks once per comparison.
-    fn live_worktrees(&self) -> HashSet<&WorktreeId> {
+    pub(crate) fn live_worktrees(&self) -> HashSet<&WorktreeId> {
         let mut live: HashSet<&WorktreeId> = self
             .tree
             .agents

@@ -1843,7 +1843,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
         });
     }
 
-    /// `⌘N` can start on any account: the Agents tab's **Agent** row
+    /// `⌘N` can start on any account: the Accounts tab's **New agents on** row
     /// steps through them right after `claude`, names one by its email,
     /// and one switched off steps aside to Claude.
     #[test]
@@ -1894,7 +1894,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
     }
 
     /// An account takes Claude's model and effort defaults — the legacy
-    /// keys the Agents tab writes included — until it is given its own.
+    /// keys the Accounts tab writes included — until it is given its own.
     #[test]
     fn an_account_follows_claudes_defaults_until_it_has_its_own() {
         let m = Machine::new("{}");
@@ -1922,7 +1922,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
                 .position(|(id, f)| id == "claude-2" && *f == crate::config::HarnessField::Model)
                 .map(|i| (0, cfg.agent_rows_from() + i))
                 .unwrap();
-            cfg.cycle(crate::config::agents_tab(), model, 1);
+            cfg.cycle(crate::config::accounts_tab(), model, 1);
             let row = cfg.effective_harness_by_id("claude-2");
             assert_ne!(row.default_model(), Some("opus"), "its own now");
             assert_eq!(
@@ -1938,13 +1938,13 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
                 .position(|(id, f)| id == "claude-2" && *f == crate::config::HarnessField::Enabled)
                 .map(|i| (0, cfg.agent_rows_from() + i))
                 .unwrap();
-            cfg.cycle(crate::config::agents_tab(), enabled, 0);
+            cfg.cycle(crate::config::accounts_tab(), enabled, 0);
             assert!(!cfg.claude_accounts[0].enabled);
             assert!(cfg.harnesses["claude-2"].enabled.is_none());
         });
     }
 
-    /// The Agents tab lists every account under its own section, each
+    /// The Accounts tab lists every account under its own section, each
     /// harness section of an added account headed with its dir, and the
     /// same-account warning under the accounts it is about.
     #[test]
@@ -1970,8 +1970,8 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
                 "on · ~/.claude-2 · same as ~/.claude · tag a3"
             );
             assert_eq!(cfg.account_value(&AccountRow::Add), "~/.claude-3");
-            let rows = crate::config::settings_rows(crate::config::agents_tab(), 0);
-            let add = crate::config::AGENTS_HEAD.len() + 2;
+            let rows = crate::config::settings_rows(crate::config::accounts_tab(), 0);
+            let add = crate::config::ACCOUNTS_HEAD.len() + 2;
             let at = rows
                 .iter()
                 .position(|row| *row == SettingsRow::Setting(add))

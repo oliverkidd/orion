@@ -303,26 +303,24 @@ pub fn drawer_cursor(app: &App, band: &Band) -> Option<usize> {
     band.drawer().iter().position(|r| r.agent.id == id)
 }
 
-/// The grid's BANDS: one per checkout of the SELECTED PROJECT that has
-/// something running in it — a session on the list `rows` builds, or a
-/// terminal — the root first, then the rest most recently worked in
-/// first (`App::visible_worktrees`). A checkout with nothing running has
-/// no band: the grid is what is running, not what is checked out — unless
-/// the **Show all worktrees** SETTING is on (`App::show_all_worktrees`),
-/// when every checkout gets one, an empty band with no cards on it. The
+/// The grid's BANDS: one per checkout of the SELECTED PROJECT, its cards
+/// the sessions on the list `rows` builds and its terminals — the root
+/// first, then the rest most recently worked in first
+/// (`App::visible_worktrees`). A checkout with nothing running in it has
+/// an empty band, a place to aim a launch at and `d` to delete it. The
 /// ARCHIVED VIEW's bands hold the archived sessions alone; a terminal is
 /// never archived, so none is listed there, and no empty band is either.
 ///
 /// On the live grid every band carries its checkout's archived sessions
-/// for the ARCHIVED DRAWER under it. A checkout with only archived
-/// sessions gets no band of its own — unless its drawer is unfolded, so
-/// archiving a band's last card with the drawer open leaves the band
-/// standing, holding the session just filed.
+/// for the ARCHIVED DRAWER under it.
 pub fn bands(app: &App) -> Vec<Band> {
     let Some(project) = app.selected_project() else {
         return Vec::new();
     };
     let rows = rows(app);
+    // Asked once: every checkout has a band, and the grid asks for its
+    // bands several times a frame.
+    let live = app.live_worktrees();
     let mut out = Vec::new();
     for w in app.visible_worktrees() {
         let mut cards: Vec<Card> = rows
@@ -343,10 +341,10 @@ pub fn bands(app: &App) -> Vec<Band> {
             );
             archived = archived_in(app, &w.id, &project.id);
         }
-        let drawer_open = !archived.is_empty() && app.archived_open.contains(&w.id);
-        if cards.is_empty() && !drawer_open && (app.show_archived || !app.show_all_worktrees) {
+        if cards.is_empty() && app.show_archived {
             continue;
         }
+        let drawer_open = !archived.is_empty() && app.archived_open.contains(&w.id);
         out.push(Band {
             worktree: w.id.clone(),
             branch: w.branch.clone(),
@@ -355,7 +353,7 @@ pub fn bands(app: &App) -> Vec<Band> {
             cards,
             archived,
             drawer_open,
-            dormant: !w.is_main && !app.show_archived && app.worktree_dormant(&w.id),
+            dormant: !w.is_main && !app.show_archived && !live.contains(&w.id),
         });
     }
     out
@@ -492,7 +490,7 @@ pub const BAND_RULE_H: u16 = 1;
 /// One entry of the LIST: a session or a terminal on a single line.
 pub const LIST_ROW_H: u16 = 1;
 /// The line under an EMPTY BAND's rule — a checkout with nothing running
-/// in it, on the grid only with **Show all worktrees** on — saying what
+/// in it — saying what
 /// can be done there, in place of the entries it has none of.
 pub const EMPTY_BAND_ROW_H: u16 = 1;
 /// The blank row between one band and the next.
@@ -1747,28 +1745,21 @@ mod tests {
         rows.iter().map(|r| r.agent.name.as_str()).collect()
     }
 
-    /// A checkout with nothing running in it has no band — until **Show
-    /// all worktrees** is on, when it gets an EMPTY BAND: no cards, and
-    /// only a rule and a line of height. The ARCHIVED VIEW never lists
-    /// one, whatever the setting says.
+    /// A checkout with nothing running in it gets an EMPTY BAND: no
+    /// cards, and only a rule and a line of height. The ARCHIVED VIEW
+    /// never lists one.
     #[test]
-    fn an_empty_checkout_gets_a_band_only_with_show_all_worktrees() {
+    fn an_empty_checkout_gets_an_empty_band() {
         let mut app = app();
         app.tree.worktrees.push(worktree("w5", "p1", "idle", false));
         let branches = |app: &App| -> Vec<String> {
             super::bands(app).into_iter().map(|b| b.branch).collect()
         };
-        assert!(
-            !branches(&app).contains(&"idle".to_string()),
-            "off: what runs"
-        );
-
-        app.show_all_worktrees = true;
         let bands = super::bands(&app);
         let idle = bands
             .iter()
             .position(|b| b.branch == "idle")
-            .expect("on: every checkout");
+            .expect("every checkout");
         assert!(bands[idle].cards.is_empty());
         assert_eq!(branches(&app).len(), 3, "main, feat and idle");
         let body = Rect::new(0, 0, 120, 60);
@@ -1791,12 +1782,11 @@ mod tests {
     fn dormant_checkouts_stand_below_a_divider() {
         let mut app = app();
         app.tree.worktrees.push(worktree("w5", "p1", "idle", false));
-        app.show_all_worktrees = true;
         let bands = super::bands(&app);
         let idle = bands
             .iter()
             .position(|b| b.branch == "idle")
-            .expect("on: every checkout");
+            .expect("every checkout");
         assert!(bands[idle].dormant, "no sessions: dormant");
         assert_eq!(idle, bands.len() - 1, "dormant last");
         assert_eq!(super::dormant_divider_at(&bands), Some(idle));
@@ -2363,6 +2353,8 @@ mod tests {
     /// grid is ten rows tall — short of the band's thirteen.
     fn crowded() -> (App, Rect) {
         let mut app = app();
+        // The one checkout: any other would stand under it as an empty band.
+        app.tree.worktrees.retain(|w| w.id.0 == "w1");
         app.tree.agents = (0..9)
             .map(|i| agent(&format!("s{i}"), "w1", &format!("session {i}")))
             .collect();

@@ -24,33 +24,11 @@ use std::path::{Path, PathBuf};
 /// is reaped).
 pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1h"];
 
-/// The **Start on** choices (Settings → Review): the DIFF VIEWER panel
-/// that has the keys when it opens, the default first.
-pub const DIFF_STARTS: &[&str] = &["commits", START_ON_FILES, START_ON_DIFF];
-const START_ON_FILES: &str = "files";
-const START_ON_DIFF: &str = "diff";
-
-/// The **Merge method** choices (Settings → Review), the default first
-/// (`pr_actions::MergeMethod`).
-pub const MERGE_METHODS: &[&str] = &[
-    crate::pr_actions::MergeMethod::Squash.as_str(),
-    crate::pr_actions::MergeMethod::Merge.as_str(),
-    crate::pr_actions::MergeMethod::Rebase.as_str(),
-];
-
-/// The **Auto-fix PRs** words (Settings → Review), off and on, in the
+/// The **Auto-fix my PRs** words (Settings → General), off and on, in the
 /// order the row cycles them (`crate::autofix::Mode`).
 pub const AUTOFIX_MODES: &[&str] = &[
     crate::autofix::Mode::Off.as_str(),
     crate::autofix::Mode::Auto.as_str(),
-];
-
-/// The **Preset text** choices (Settings → Sessions), in the order the row
-/// cycles them: the [`PresetText`] sides by label.
-pub const PRESET_TEXTS: &[&str] = &[
-    PresetText::Prefix.as_str(),
-    PresetText::Postfix.as_str(),
-    PresetText::Both.as_str(),
 ];
 
 /// Values the settings overlay cycles through for `done_sound` (what rings
@@ -91,9 +69,6 @@ pub use orion_core::harness::DEFAULT_CHOICE;
 /// holds nothing, never this word.
 pub const AUTO_CHOICE: &str = "auto";
 
-/// What the Linear account row shows while it names nobody: the owner of
-/// the project's `LINEAR_API_KEY`.
-pub const LINEAR_KEY_OWNER: &str = "the key's owner";
 /// The Projects tab with no project to list.
 pub const NO_PROJECTS: &str = "no projects yet — each one you add gets its rows here";
 
@@ -127,7 +102,7 @@ pub fn model_choices(kind: AgentKind, custom: Option<&str>) -> Vec<String> {
     model_choices_in(&describe(kind, custom))
 }
 
-/// How a model id is shown in Agents and the pickers: Claude family
+/// How a model id is shown in Accounts and the pickers: Claude family
 /// aliases are the CLI's "latest of that family" names, so the row says so.
 pub fn model_row_label(
     model: &str,
@@ -143,7 +118,7 @@ pub fn model_row_label(
 }
 
 /// [`model_choices`] against an explicit descriptor, for callers that
-/// already resolved one (the Agents tab, the launch sites).
+/// already resolved one (the Accounts tab, the launch sites).
 pub fn model_choices_in(descriptor: &orion_core::harness::HarnessDescriptor) -> Vec<String> {
     match descriptor.model.catalog {
         Some(orion_core::harness::HarnessCatalog::Claude) => crate::claude_catalogue::models()
@@ -175,7 +150,7 @@ pub fn effort_choices(kind: AgentKind, model: Option<&str>, custom: Option<&str>
 }
 
 /// [`effort_choices`] against an explicit descriptor, for callers that
-/// already resolved one (the Agents tab, the launch sites).
+/// already resolved one (the Accounts tab, the launch sites).
 pub fn effort_choices_in(
     descriptor: &orion_core::harness::HarnessDescriptor,
     model: Option<&str>,
@@ -276,7 +251,7 @@ pub fn fit_effort(
 }
 
 /// [`fit_effort`] against an explicit descriptor, for callers that
-/// already resolved one (the Agents tab, the launch sites).
+/// already resolved one (the Accounts tab, the launch sites).
 pub fn fit_effort_in(
     descriptor: &orion_core::harness::HarnessDescriptor,
     model: Option<&str>,
@@ -354,7 +329,7 @@ pub struct SettingSpec {
     pub label: &'static str,
     pub hint: &'static str,
     /// Section header the row sits under, as `keymap::ActionSpec::group`
-    /// is for the Hotkeys tab. Empty means the tab lists the row bare;
+    /// is for the Keys tab. Empty means the tab lists the row bare;
     /// a tab whose rows all say so stays a flat list.
     pub group: &'static str,
 }
@@ -363,19 +338,19 @@ pub struct SettingSpec {
 /// Projects tab is a list too, but of every project in turn: each one's
 /// name, then these rows, which read and write that project's entry
 /// instead of a top-level key ([`project_at`]). The
-/// Hotkeys tab is generated from [`crate::keymap::ACTIONS`] instead, so a
-/// new action shows up there without being declared twice — and the Agents
+/// Keys tab is generated from [`crate::keymap::ACTIONS`] instead, so a
+/// new action shows up there without being declared twice — and the Accounts
 /// tab is generated from the harness registry, so a new CLI shows up
 /// there without being declared twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBody {
     Values(&'static [SettingSpec]),
     Project(&'static [SettingSpec]),
-    Hotkeys,
-    Agents,
+    Keys,
+    Accounts,
 }
 
-/// The Agents tab's section listing every CLAUDE ACCOUNT, between the
+/// The Accounts tab's section listing every CLAUDE ACCOUNT, between the
 /// head and the per-harness sections ([`Config::account_rows`]).
 pub const ACCOUNTS_GROUP: &str = "Claude accounts";
 
@@ -383,39 +358,19 @@ pub const ACCOUNTS_GROUP: &str = "Claude accounts";
 /// own email ([`Config::continue_targets`]).
 pub const SAME_ACCOUNT: &str = " · same account";
 
-/// The Agents tab's static head: the cross-harness quick-prompt rows. The
-/// CLAUDE ACCOUNTS section and the per-harness sections below them are
+/// The Accounts tab's static head: which account `⌘N` starts on. The
+/// CLAUDE ACCOUNTS section and the per-harness sections below it are
 /// generated from the registry (see [`Config::account_rows`] and
 /// [`Config::agent_rows`]).
-pub const AGENTS_HEAD: &[SettingSpec] = &[
-    SettingSpec {
-        kind: SettingKind::QuickPromptKind,
-        label: "Agent",
-        hint: "Harness a new agent starts on, with that kind's model/effort",
-        group: "Quick prompt",
-    },
-    SettingSpec {
-        kind: SettingKind::QuickPromptFocus,
-        label: "Focus",
-        hint: "Enter the new agent's terminal on launch (off = just select its row)",
-        group: "Quick prompt",
-    },
-    SettingSpec {
-        kind: SettingKind::FollowNewSession,
-        label: "Follow new",
-        hint: "Move the cursor onto the new agent's card, the grid scrolled to it, without entering it (off = stay on the card you're on)",
-        group: "Quick prompt",
-    },
-    SettingSpec {
-        kind: SettingKind::QuickPromptNewWorktree,
-        label: "New worktree",
-        hint: "A new agent's box starts on a fresh worktree (off = the checkout under the cursor); {select_launch_worktree} picks another for one box",
-        group: "Quick prompt",
-    },
-];
+pub const ACCOUNTS_HEAD: &[SettingSpec] = &[SettingSpec {
+    kind: SettingKind::QuickPromptKind,
+    label: "New agents on",
+    hint: "The account {quick_prompt} starts a new agent on, at that account's model and effort — or another harness",
+    group: "",
+}];
 
 /// One tab of the settings overlay. Selection indices are per-tab: within
-/// a `Values` tab they index its settings, within `Hotkeys` they index
+/// a `Values` tab they index its settings, within `Keys` they index
 /// `keymap::ACTIONS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsTab {
@@ -425,58 +380,33 @@ pub struct SettingsTab {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingKind {
-    PaletteEnterAttaches,
+    FollowNewSession,
+    SessionIdleTimeout,
+    PrAutofix,
+    OutsideEditor,
+    DoneSound,
+    FeedbackSound,
+    Theme,
+    Animations,
+    Spotify,
+    /// The account (or harness) `⌘N` starts a new agent on.
+    QuickPromptKind,
     /// A project's base branch: what its new worktrees start from.
     BaseBranch,
-    LinkEnvFiles,
+    RunCommand,
+    OpenCommand,
     /// A project's ON WORKTREE DELETE: what deleting one of its worktrees
     /// does to the docker compose projects started in it.
     WorktreeContainers,
-    OutsideEditor,
-    CloseFinderOnOpen,
-    /// The Tools tab's action row: Enter opens ORION SETUP, every step.
-    RunSetup,
-    /// The Tools tab's read-only git row: installed or not, `i` installs.
-    Git,
-    /// The Tools tab's read-only gh row: installed and signed in or not.
-    Gh,
-    LinearAccount,
-    LinearAutoAttach,
     /// A project's read-only Linear row: where its `LINEAR_API_KEY` was
     /// found, if anywhere, and what the last test said
     /// (`linear::key_status`); Enter asks Linear whose key it is.
     LinearKey,
-    SessionIdleTimeout,
-    PrewarmAgents,
-    PrewarmSessions,
-    UsageClaude,
-    UsageCursor,
-    DoneSound,
-    FeedbackSound,
-    PresetText,
-    DeleteEmptyWorktree,
-    ShowAllWorktrees,
-    Theme,
-    Animations,
-    Spotify,
-    BlackBackground,
-    HideDraftPrs,
-    QuickPromptKind,
-    QuickPromptFocus,
-    FollowNewSession,
-    QuickPromptNewWorktree,
-    RunCommand,
-    OpenCommand,
-    DiffTreeView,
-    DiffStart,
-    PrMergeMethod,
-    PrDeleteBranch,
-    PrDraft,
-    BaseFetch,
-    PrAutofix,
+    /// The Presets tab's one row: Enter opens the AGENT PRESETS list.
+    AgentPresets,
 }
 
-/// One harness field row in the Agents tab. The tab renders one section
+/// One harness field row in the Accounts tab. The tab renders one section
 /// per registry entry — built-ins, Claude accounts and `harnesses` map ids
 /// alike — with an Enabled row, a Model row, and an Effort row while the
 /// harness offers effort.
@@ -487,7 +417,7 @@ pub enum HarnessField {
     Effort,
 }
 
-/// One row of the Agents tab's CLAUDE ACCOUNTS section.
+/// One row of the Accounts tab's CLAUDE ACCOUNTS section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountRow {
     /// A Claude account, by registry id: built-in Claude (the default
@@ -512,14 +442,11 @@ impl SettingKind {
     /// A row whose value is typed, not toggled or cycled: Enter on it opens
     /// a one-line prompt pre-filled with the current value, and ←/→ have
     /// nothing to step through. [`Config::cycle`] leaves such a row alone;
-    /// [`Config::set_text`] is what writes it.
+    /// [`Config::set_project_text`] is what writes it.
     pub fn is_text(self) -> bool {
         matches!(
             self,
-            SettingKind::BaseBranch
-                | SettingKind::LinearAccount
-                | SettingKind::RunCommand
-                | SettingKind::OpenCommand
+            SettingKind::BaseBranch | SettingKind::RunCommand | SettingKind::OpenCommand
         )
     }
 
@@ -560,224 +487,21 @@ pub fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// The tab strip, left to right. Ordered by how often a setting gets
-/// touched, with Hotkeys last because it is the biggest and the least
-/// casual.
+/// The tab strip, left to right: what orion does, the accounts it runs
+/// agents on, each project's own settings, the presets, and the keys —
+/// last because it is the biggest and the least casual.
 pub const SETTINGS_TABS: &[SettingsTab] = &[
     SettingsTab {
         title: "General",
-        body: TabBody::Values(&[
-            SettingSpec {
-                kind: SettingKind::PaletteEnterAttaches,
-                label: "Search Enter attaches",
-                hint: "Enter in the {palette} jump list opens the session in the terminal (a red one always does)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::LinkEnvFiles,
-                label: "Link .env files",
-                hint: "New and adopted worktrees get the main checkout's ignored .env files as symlinks (existing files are kept)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::CloseFinderOnOpen,
-                label: "Finder closes on open",
-                hint: "Opening a file closes the file finder behind the editor, so quitting the editor lands on the grid",
-                group: "",
-            },
-        ]),
+        body: TabBody::Values(GENERAL_SETTINGS),
     },
+    // Generated from the harness registry: the head first, then the
+    // CLAUDE ACCOUNTS, then one section per entry holding its model /
+    // effort defaults, in registry order. A new CLI in the `harnesses`
+    // map grows its own section with no code change.
     SettingsTab {
-        title: "Tools",
-        body: TabBody::Values(&[
-            SettingSpec {
-                kind: SettingKind::RunSetup,
-                label: "Setup",
-                hint: "Enter opens Orion setup again, every step: agents and their CLIs, Claude accounts, the Open in app editor, worktrees, Linear and autofix",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::OutsideEditor,
-                label: "Open in app",
-                hint: "What {open_outside} opens a file or checkout in; auto is the first installed of Cursor, VS Code, Sublime Text",
-                group: "Editors",
-            },
-            SettingSpec {
-                kind: SettingKind::Git,
-                label: "git",
-                hint: "Worktrees, diffs and every branch action run git; orion can't work without it",
-                group: "Command line",
-            },
-            SettingSpec {
-                kind: SettingKind::Gh,
-                label: "GitHub CLI",
-                hint: "gh lists pull requests and their checks, and opens, merges and reviews them; signed in with gh auth login",
-                group: "Command line",
-            },
-        ]),
-    },
-    SettingsTab {
-        title: "Sessions",
-        body: TabBody::Values(&[
-            SettingSpec {
-                kind: SettingKind::SessionIdleTimeout,
-                label: "Idle session timeout",
-                hint: "Kill idle sessions in unviewed worktrees (busy ones spared; off disables)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::PrewarmAgents,
-                label: "Warm spare agent",
-                hint: "Boot a spare CLI in the selected worktree for instant creates (a peer in /list-agents)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::PrewarmSessions,
-                label: "Prewarm dead sessions",
-                hint: "Boot a worktree's dead sessions while the cursor rests on it, so attaching is instant",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::UsageClaude,
-                label: "Claude usage",
-                hint: "{usage} reads each Claude account's session and weekly limits every 15 minutes with its Claude Code login",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::UsageCursor,
-                label: "Cursor usage",
-                hint: "{usage} reads the cursor-agent login's monthly allowance every 15 minutes",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::DoneSound,
-                label: "Done sound",
-                hint: "Ding, and notify an unfocused window, when a turn you haven't seen finishes (←/→ plays each; off silences both)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::FeedbackSound,
-                label: "Feedback sound",
-                hint: "Ring, and notify an unfocused window, when a turn stops to ask you or crashes (←/→ plays each; off silences both)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::PresetText,
-                label: "Preset text",
-                hint: "Where a new agent preset's text goes: a prefix before the task, a postfix after it, or both (its Text row can change one)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::DeleteEmptyWorktree,
-                label: "Delete emptied worktree",
-                hint: "Deleting a worktree's last session or terminal deletes the worktree with it, no question asked (off = that delete's confirm asks first)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::ShowAllWorktrees,
-                label: "Show all worktrees",
-                hint: "Every worktree gets a band on the grid, even an empty one (Backspace deletes it); deleting a last card keeps the worktree unless Delete emptied worktree is on",
-                group: "",
-            },
-        ]),
-    },
-    SettingsTab {
-        title: "Appearance",
-        body: TabBody::Values(&[
-            SettingSpec {
-                kind: SettingKind::Theme,
-                label: "Color theme",
-                hint: "Accent colors used across the grid and overlays",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::Animations,
-                label: "Animations",
-                hint: "Status text sweep and splash motion (off = fewer repaints)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::Spotify,
-                label: "Spotify in footer",
-                hint: "Show what Spotify is playing, with ⏮  ⏸ ⏭ buttons (macOS)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::BlackBackground,
-                label: "Black background",
-                hint: "Paint the window pure black instead of the terminal's own background (off keeps the terminal's, transparency included)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::HideDraftPrs,
-                label: "Draft pull requests",
-                hint: "Show or hide draft pull requests in the {palette} jump list; checkouts always stay",
-                group: "",
-            },
-        ]),
-    },
-    // Generated from the harness registry: the static quick-prompt head
-    // first, then one section per entry holding its enabled toggle and
-    // its model / effort defaults, in registry order. A new CLI in the
-    // `harnesses` map grows its own section with no code change.
-    SettingsTab {
-        title: "Agents",
-        body: TabBody::Agents,
-    },
-    // How the DIFF VIEWER opens, and the PULL REQUESTS MODAL's create and
-    // merge forms: the choices a review would otherwise make by hand
-    // every time.
-    SettingsTab {
-        title: "Review",
-        body: TabBody::Values(&[
-            SettingSpec {
-                kind: SettingKind::DiffTreeView,
-                label: "Files as a tree",
-                hint: "The changes viewer ({git_diff}) lists files as a directory tree (^B flips one open viewer)",
-                group: "Changes",
-            },
-            SettingSpec {
-                kind: SettingKind::DiffStart,
-                label: "Start on",
-                hint: "Which panel has the keys when the changes viewer opens: the commits to tick, the files, or the diff (Tab moves on from there)",
-                group: "Changes",
-            },
-            SettingSpec {
-                kind: SettingKind::PrMergeMethod,
-                label: "Merge method",
-                hint: "How a pull request's merge (^X in the pull requests modal) lands: squash, a merge commit or a rebase — the first the repo allows when it refuses this one",
-                group: "Pull requests",
-            },
-            SettingSpec {
-                kind: SettingKind::PrDeleteBranch,
-                label: "Delete merged branch",
-                hint: "The merge deletes the pull request's branch from GitHub once it lands (never a fork's; the local branch and its worktree stay)",
-                group: "Pull requests",
-            },
-            SettingSpec {
-                kind: SettingKind::PrDraft,
-                label: "New PRs as drafts",
-                hint: "A new pull request (^N in the pull requests modal) opens with its Draft box ticked",
-                group: "Pull requests",
-            },
-            SettingSpec {
-                kind: SettingKind::BaseFetch,
-                label: "Fetch base branch",
-                hint: "How often each project's root worktree fetches origin, and fast-forwards when it sits on the base branch with nothing in the way (never while an agent works there). A merge from the pull requests modal fetches at once, whatever this says",
-                group: "Pull requests",
-            },
-            SettingSpec {
-                kind: SettingKind::PrAutofix,
-                label: "Auto-fix PRs",
-                hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work — with none, your default agent at the PR autofix preset's model and effort. It is told that preset's text. ^G in the pull requests modal sends one whatever this says",
-                group: "Autofix",
-            },
-        ]),
-    },
-    // Every Linear option in one place (`LINEAR_SETTINGS`).
-    SettingsTab {
-        title: "Linear",
-        body: TabBody::Values(LINEAR_SETTINGS),
+        title: "Accounts",
+        body: TabBody::Accounts,
     },
     // Settings that belong to one project rather than to orion. The tab
     // lists every project under its own name, each with these rows, and a
@@ -788,26 +512,76 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
         body: TabBody::Project(PROJECT_SETTINGS),
     },
     SettingsTab {
-        title: "Hotkeys",
-        body: TabBody::Hotkeys,
+        title: "Presets",
+        body: TabBody::Values(&[SettingSpec {
+            kind: SettingKind::AgentPresets,
+            label: "Agent presets",
+            hint: "Enter opens the presets: orion's own — PR autofix, Linear Ticket, Week review — and yours",
+            group: "",
+        }]),
+    },
+    SettingsTab {
+        title: "Keys",
+        body: TabBody::Keys,
     },
 ];
 
-/// The LINEAR TAB's rows, top to bottom. Linking pull requests leads: it
-/// is on by default and the one most people only ever check. Each
-/// project's key is on the PROJECTS TAB, under that project.
-pub const LINEAR_SETTINGS: &[SettingSpec] = &[
+/// The GENERAL TAB's rows, under their groups: how a launch goes, what
+/// rings, and how orion looks.
+pub const GENERAL_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
-        kind: SettingKind::LinearAutoAttach,
-        label: "Link PRs to Linear",
-        hint: "Attach the PR a {linear} launch opens to its Linear issues via the API — no issue ID needed in the branch name, and no duplicates: Linear keeps one attachment per PR",
-        group: "",
+        kind: SettingKind::FollowNewSession,
+        label: "Follow new session",
+        hint: "A new agent's card comes under the cursor, the grid scrolled to it, without entering it (off = stay on the card you're on)",
+        group: "Launching",
     },
     SettingSpec {
-        kind: SettingKind::LinearAccount,
-        label: "Linear account",
-        hint: "Whose issues {linear} lists; Enter types an email (empty = the owner of the project's LINEAR_API_KEY). Kept in config.local.json",
-        group: "",
+        kind: SettingKind::SessionIdleTimeout,
+        label: "Idle session timeout",
+        hint: "Kill idle sessions in unviewed worktrees (busy ones spared; off disables)",
+        group: "Launching",
+    },
+    SettingSpec {
+        kind: SettingKind::PrAutofix,
+        label: "Auto-fix my PRs",
+        hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work — with none, your default agent at the PR autofix preset's model and effort. It is told that preset's text. ^G in the pull requests modal sends one whatever this says",
+        group: "Launching",
+    },
+    SettingSpec {
+        kind: SettingKind::OutsideEditor,
+        label: "Open files in",
+        hint: "What {open_outside} opens a file or checkout in; auto is the first installed of Cursor, VS Code, Sublime Text",
+        group: "Launching",
+    },
+    SettingSpec {
+        kind: SettingKind::DoneSound,
+        label: "Turn finished",
+        hint: "Ding, and notify an unfocused window, when a turn you haven't seen finishes (←/→ plays each; off silences both)",
+        group: "Sounds",
+    },
+    SettingSpec {
+        kind: SettingKind::FeedbackSound,
+        label: "Needs you",
+        hint: "Ring, and notify an unfocused window, when a turn stops to ask you or crashes (←/→ plays each; off silences both)",
+        group: "Sounds",
+    },
+    SettingSpec {
+        kind: SettingKind::Theme,
+        label: "Theme",
+        hint: "Accent colors used across the grid and overlays",
+        group: "Look",
+    },
+    SettingSpec {
+        kind: SettingKind::Animations,
+        label: "Animations",
+        hint: "Status text sweep and splash motion (off = fewer repaints)",
+        group: "Look",
+    },
+    SettingSpec {
+        kind: SettingKind::Spotify,
+        label: "Spotify in footer",
+        hint: "Show what Spotify is playing, with ⏮  ⏸ ⏭ buttons (macOS)",
+        group: "Look",
     },
 ];
 
@@ -847,57 +621,57 @@ pub const PROJECT_SETTINGS: &[SettingSpec] = &[
     },
 ];
 
-/// Index of the Hotkeys tab, which the overlay special-cases.
-pub fn hotkeys_tab() -> usize {
+/// Index of the Keys tab, which the overlay special-cases.
+pub fn keys_tab() -> usize {
     SETTINGS_TABS
         .iter()
-        .position(|t| t.body == TabBody::Hotkeys)
-        .expect("SETTINGS_TABS declares a Hotkeys tab")
+        .position(|t| t.body == TabBody::Keys)
+        .expect("SETTINGS_TABS declares a Keys tab")
 }
 
-/// Index of the Agents tab, generated from the harness registry.
-pub fn agents_tab() -> usize {
+/// Index of the Accounts tab, generated from the harness registry.
+pub fn accounts_tab() -> usize {
     SETTINGS_TABS
         .iter()
-        .position(|t| t.body == TabBody::Agents)
-        .expect("SETTINGS_TABS declares an Agents tab")
+        .position(|t| t.body == TabBody::Accounts)
+        .expect("SETTINGS_TABS declares an Accounts tab")
 }
 
 pub fn tab_count() -> usize {
     SETTINGS_TABS.len()
 }
 
-/// The static value settings of a tab: the declared list, or the Agents
+/// The static value settings of a tab: the declared list, or the Accounts
 /// head (its per-harness sections are generated — see
-/// [`Config::agent_rows`]). Empty for the Hotkeys tab.
+/// [`Config::agent_rows`]). Empty for the Keys tab.
 pub fn tab_settings(tab: usize) -> &'static [SettingSpec] {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
         Some(TabBody::Values(settings) | TabBody::Project(settings)) => settings,
-        Some(TabBody::Agents) => AGENTS_HEAD,
+        Some(TabBody::Accounts) => ACCOUNTS_HEAD,
         _ => &[],
     }
 }
 
 /// How many selectable rows a tab holds, with `projects` in the tree —
-/// the Projects tab has its rows once for each. The Agents tab reads the
+/// the Projects tab has its rows once for each. The Accounts tab reads the
 /// registry, so a new CLI grows it without a code change.
 pub fn tab_len(tab: usize, projects: usize) -> usize {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
         Some(TabBody::Values(settings)) => settings.len(),
         Some(TabBody::Project(settings)) => settings.len() * projects,
-        Some(TabBody::Hotkeys) => crate::keymap::ACTIONS.len(),
-        Some(TabBody::Agents) => {
+        Some(TabBody::Keys) => crate::keymap::ACTIONS.len(),
+        Some(TabBody::Accounts) => {
             let cfg = Config::load();
-            AGENTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
+            ACCOUNTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
         }
         None => 0,
     }
 }
 
 /// The static value setting at a tab-local index, if the tab declares one
-/// there: the full list on ordinary tabs, the head on the Agents tab
+/// there: the full list on ordinary tabs, the head on the Accounts tab
 /// (its harness rows resolve through [`Config::agent_row`]), never on
-/// Hotkeys. On the Projects tab, the same row in every project's block
+/// Keys. On the Projects tab, the same row in every project's block
 /// ([`project_at`] says whose).
 pub fn setting_at(tab: usize, index: usize) -> Option<&'static SettingSpec> {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
@@ -916,10 +690,10 @@ pub fn project_at(tab: usize, index: usize) -> Option<usize> {
     }
 }
 
-/// Where an Agents tab harness row lives, as `(tab, row)`. Reads the
+/// Where an Accounts tab harness row lives, as `(tab, row)`. Reads the
 /// registry, like the tab itself.
 pub fn locate_agent(id: &str, field: HarnessField) -> Option<(usize, usize)> {
-    let tab = agents_tab();
+    let tab = accounts_tab();
     let cfg = Config::load();
     cfg.agent_rows()
         .iter()
@@ -927,10 +701,10 @@ pub fn locate_agent(id: &str, field: HarnessField) -> Option<(usize, usize)> {
         .map(|i| (tab, cfg.agent_rows_from() + i))
 }
 
-/// Where the Agents tab's CLAUDE ACCOUNTS section starts, as `(tab, row)`:
+/// Where the Accounts tab's CLAUDE ACCOUNTS section starts, as `(tab, row)`:
 /// its first row, the default account's, right under the head.
 pub fn locate_accounts() -> (usize, usize) {
-    (agents_tab(), AGENTS_HEAD.len())
+    (accounts_tab(), ACCOUNTS_HEAD.len())
 }
 
 /// The row declared for `kind`, wherever it sits — for anything that
@@ -942,7 +716,7 @@ pub fn spec_for(kind: SettingKind) -> Option<&'static SettingSpec> {
 }
 
 /// Every static value setting, tab by tab, for coverage checks. The
-/// Agents tab contributes its head; its harness rows are covered through
+/// Accounts tab contributes its head; its harness rows are covered through
 /// [`Config::agent_rows`].
 pub fn all_settings() -> impl Iterator<Item = (usize, usize, &'static SettingSpec)> {
     SETTINGS_TABS.iter().enumerate().flat_map(|(t, tab)| {
@@ -954,17 +728,17 @@ pub fn all_settings() -> impl Iterator<Item = (usize, usize, &'static SettingSpe
 }
 
 /// The one-line hint under the selected row, whatever kind of row it is.
-/// The Agents tab reads the registry for its harness rows.
+/// The Accounts tab reads the registry for its harness rows.
 pub fn hint_at(tab: usize, index: usize) -> String {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
         Some(TabBody::Values(_) | TabBody::Project(_)) => {
             setting_at(tab, index).map(setting_hint).unwrap_or_default()
         }
-        Some(TabBody::Hotkeys) => crate::keymap::spec_at(index)
+        Some(TabBody::Keys) => crate::keymap::spec_at(index)
             .map(|s| s.hint)
             .unwrap_or("")
             .to_string(),
-        Some(TabBody::Agents) => Config::load().agent_hint_by_index(index),
+        Some(TabBody::Accounts) => Config::load().agent_hint_by_index(index),
         None => String::new(),
     }
 }
@@ -999,7 +773,7 @@ pub enum SettingsRow {
     Setting(usize),
     /// Label + chord list for `keymap::ACTIONS[index]`.
     Hotkey(usize),
-    /// A line of warning under the rows it is about — the Agents tab's
+    /// A line of warning under the rows it is about — the Accounts tab's
     /// same-account note under its CLAUDE ACCOUNTS. Not selectable.
     Note(String),
 }
@@ -1038,13 +812,13 @@ pub fn settings_rows(tab: usize, projects: usize) -> Vec<SettingsRow> {
             }
             rows
         }
-        Some(TabBody::Hotkeys) => grouped(
+        Some(TabBody::Keys) => grouped(
             crate::keymap::ACTIONS.iter().map(|s| s.group.to_string()),
             SettingsRow::Hotkey,
         ),
-        Some(TabBody::Agents) => {
+        Some(TabBody::Accounts) => {
             let cfg = Config::load();
-            let head = AGENTS_HEAD.iter().map(|s| s.group.to_string());
+            let head = ACCOUNTS_HEAD.iter().map(|s| s.group.to_string());
             let accounts = cfg.account_rows();
             let section = accounts.iter().map(|_| ACCOUNTS_GROUP.to_string());
             let rows = cfg.agent_rows();
@@ -1056,7 +830,7 @@ pub fn settings_rows(tab: usize, projects: usize) -> Vec<SettingsRow> {
                 .iter()
                 .position(|row| *row == AccountRow::Add)
                 .unwrap_or(accounts.len() - 1);
-            let last = SettingsRow::Setting(AGENTS_HEAD.len() + add);
+            let last = SettingsRow::Setting(ACCOUNTS_HEAD.len() + add);
             if let Some(at) = out.iter().position(|row| *row == last) {
                 let notes = cfg.account_notes().into_iter().map(SettingsRow::Note);
                 out.splice(at + 1..at + 1, notes);
@@ -1107,12 +881,6 @@ pub struct AccountTagOverride {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
-    /// `/` palette: Enter on a session attaches and focuses the terminal.
-    /// When false, Enter only lands on the session's row in the Sessions
-    /// panel (previewing it in the pane) — except on a session that NEEDS
-    /// FEEDBACK, the red row, which always attaches. Ctrl+O / Ctrl+F
-    /// always pick open / focus explicitly, regardless of this setting.
-    pub palette_enter_attaches: bool,
     /// RETIRED with every project a git repository. Through 0.37 the
     /// daemon-owned **git init new projects** SETTING (Settings → General,
     /// on by default) could leave a directory the open-project prompt
@@ -1129,11 +897,6 @@ pub struct Config {
     /// every project once the tree is known, and the save after drops it.
     #[serde(skip_serializing)]
     pub worktree_base_branch: Option<String>,
-    /// ENV LINKS: the main checkout's git-ignored `.env*` files are
-    /// symlinked into every other WORKTREE of the project as it appears.
-    /// Owned by the daemon (`env_links`); the TUI writes it so the
-    /// settings overlay can toggle it.
-    pub link_env_files: bool,
     /// MOVED to each project's **On worktree delete**
     /// (`projects.<repo>.worktree_containers`), as `worktree_base_branch`.
     #[serde(skip_serializing)]
@@ -1143,29 +906,13 @@ pub struct Config {
     /// Sublime Text, else what macOS's `open` picks), `cursor`, `vscode`
     /// or `sublime`. See `outside_editor`.
     pub outside_editor: String,
-    /// Opening a file from the file finder (`f`) or find-in-files (`F`)
-    /// closes that overlay as the editor modal opens, so quitting the
-    /// editor lands back on the panels instead of on the finder the user
-    /// then has to Esc a second time. When false the finder stays open
-    /// underneath and quitting the editor returns to the results. Does not
-    /// touch the tree browser (`b`), whose editor is embedded in its own
-    /// preview pane, or ⌥click, which has no overlay to close.
-    pub close_finder_on_open: bool,
     /// LINEAR ACCOUNT: whose issues ⌘L lists. Empty — the default — is
     /// the owner of the project's `LINEAR_API_KEY`, which for a personal
     /// key is the user; an email names another member of the workspace,
     /// for a key a team shares. Always written to `config.local.json`
     /// ([`LOCAL_KEYS`]), so `orion ssh` never carries it to a remote.
+    /// Hand-edited: no Settings row.
     pub linear_assignee_email: String,
-    /// LINEAR AUTO-ATTACH (Settings → Linear → **Link PRs to Linear**, on
-    /// by default): a branch a ⌘L launch cut is remembered
-    /// (`linear::LinkStore`), and when OPEN PRS first shows a pull request
-    /// on it the PR is attached to each of its Linear issues through the
-    /// API — the link does not depend on the branch name carrying an issue
-    /// ID, and Linear keeps one attachment per pull request, so attaching
-    /// twice never duplicates. Issues linked to a worktree by hand (`⌘.`
-    /// in the LINEAR VIEW) are attached whatever this says.
-    pub linear_auto_attach: bool,
     /// FIRST-RUN ONBOARDING has been finished or skipped. Local-only so a
     /// shared `config.json` does not skip the wizard on a new machine.
     #[serde(default)]
@@ -1180,23 +927,6 @@ pub struct Config {
     /// disables. Owned by the daemon (which does the parsing and reaping);
     /// the TUI writes it so the settings overlay can cycle it.
     pub session_idle_timeout: String,
-    /// PREWARM POOL: keep one booted agent CLI standing by in the selected
-    /// worktree, so creating a session there adopts it instead of waiting
-    /// on a cold start. Owned by the daemon (which spawns, adopts and reaps
-    /// the spare); the TUI writes it so the settings overlay can toggle it.
-    /// A spare is a real CLI process — Claude's own `/list-agents` lists
-    /// it beside the sessions you made, named after the directory — and
-    /// switching this off drains the pool on the daemon's next sweep.
-    pub prewarm_agents: bool,
-    /// SESSION PREWARM: boot a worktree's dead sessions while the selection
-    /// rests on it, so attaching lands on a booted screen. Daemon-owned and
-    /// TUI-written, same as above.
-    pub prewarm_sessions: bool,
-    /// ACCOUNT USAGE (`usage`) reads each Claude account's limits with its
-    /// own Claude Code login. Off: no Claude rows, and nothing is asked.
-    pub usage_claude: bool,
-    /// ACCOUNT USAGE reads the `cursor-agent` login's monthly allowance.
-    pub usage_cursor: bool,
     /// What rings when a turn reaches FINISHED with nobody watching it:
     /// "off", "bell" (terminal BEL) or the name of a macOS system sound
     /// (`Glass` by default, `Ping`, …; see [`SOUNDS`]). Resolved by
@@ -1221,30 +951,8 @@ pub struct Config {
     /// opens a new preset on the box(es) named here, and its Text row
     /// changes one preset; a stored side with text always shows. Resolved
     /// by [`Config::preset_text`]; `prefix` by default, the framing most
-    /// people reach for and one box to fill.
+    /// people reach for and one box to fill. Hand-edited: no Settings row.
     pub preset_text: String,
-    /// DELETE EMPTIED WORKTREE: what the delete of a linked worktree's
-    /// last live card asks — its last session's `d`, its last terminal's
-    /// close, or a `D` that takes them all. Off (the default), the card's
-    /// own CONFIRM DIALOG carries the question too, before anything is
-    /// deleted: `Enter`/`y` deletes the card and then the worktree, `n`
-    /// the card alone, `Esc` nothing. On, the question is skipped and the
-    /// card's ordinary confirm deletes both — as long as no archived
-    /// session is still filed under the checkout: those hold history the
-    /// delete would take, so they always get the question. The ROOT
-    /// WORKTREE is never offered, whatever this says. On holds with
-    /// [`Config::show_all_worktrees`] on too: only the question is that
-    /// setting's to drop.
-    pub delete_empty_worktree: bool,
-    /// SHOW ALL WORKTREES: every checkout of the project gets a BAND on
-    /// the grid, one with nothing running in it too — an overview of the
-    /// checkouts, any of them a place to aim `p`/`n` at. On by default.
-    /// Off, the grid is only what is running. On, deleting a
-    /// worktree's last card never asks about the worktree: the emptied
-    /// band stays, and `d` on it — behind its own confirm — is the way to
-    /// delete it. [`Config::delete_empty_worktree`] on still takes the
-    /// worktree with its last card.
-    pub show_all_worktrees: bool,
     /// Color theme name (see `theme::THEMES`). Unknown names fall back to
     /// the default theme.
     pub theme: String,
@@ -1258,12 +966,6 @@ pub struct Config {
     /// default, and nothing shows while Spotify is closed. Off, the poll
     /// stops too.
     pub spotify: bool,
-    /// BLACK BACKGROUND: paint every cell nothing else colored pure black
-    /// — the grid, the cards, the session pane, the overlays — instead of
-    /// leaving it on the terminal's own background, which in a stock
-    /// Ghostty is a dark gray. On by default; off lets a transparency or
-    /// image configured in the terminal show through.
-    pub black_background: bool,
     /// RETIRED with every card carrying its last prompt. Through 0.40 the
     /// **Card prompt** SETTING (Settings → Appearance, `shown` by default)
     /// could leave the last prompt off every session card on the GRID.
@@ -1279,33 +981,20 @@ pub struct Config {
     /// marked ready on GitHub joins the rows on the next refresh. Never
     /// touches a checkout, its sessions, or the checkout's own PR ROW in
     /// the SESSIONS PANEL — those describe work you have, not work you are
-    /// browsing. Off by default: a config predating the key hides nothing.
+    /// browsing. Off by default; hand-edited, with no Settings row.
     pub hide_draft_prs: bool,
-    /// How the DIFF VIEWER opens (Settings → Review): its file list as
-    /// the directory tree rather than flat paths (`Ctrl+t` still flips
-    /// one open viewer), on by default.
-    pub diff_tree_view: bool,
-    /// Which of the DIFF VIEWER's panels has the keys when it opens:
-    /// `commits` (the COMMIT LIST, where there is one — the default, so
-    /// the ticks come first), `files` or `diff`. Read through
-    /// [`Config::diff_start`]; a word off the list is the commits.
-    pub diff_start: String,
-    /// How the PULL REQUESTS MODAL's merge form opens (Settings →
-    /// Review): `squash`, `merge` or `rebase` — the first the repo allows
-    /// when it refuses this one.
-    pub pr_merge_method: String,
-    /// The merge form opens with the pull request's branch deleted from
-    /// GitHub once it merges. On by default; a fork's branch is never
-    /// ours to delete.
-    pub pr_delete_branch: bool,
-    /// The new pull request form opens with its Draft box ticked. Off by
+    /// Whether the DIFF VIEWER lists its files as the directory tree
+    /// rather than flat paths — no Settings row: `⌘B` flips an open viewer
+    /// and remembers it here, so the next `⌘E` opens the same way. On by
     /// default.
-    pub pr_draft: bool,
-    /// **Fetch base branch** (Settings → Review): how often each project's
-    /// root fetches origin and fast-forwards on its base branch — `5m`,
-    /// `15m` or `off` (`crate::base_sync`).
-    pub base_fetch: String,
-    /// **Auto-fix PRs** (Settings → Review): when one of your pull
+    pub diff_tree_view: bool,
+    /// MOVED to each project's remembered merge method
+    /// (`projects.<repo>.merge_method`, written by every merge), as
+    /// `worktree_base_branch`: through 2.x the one method every merge form
+    /// opened on.
+    #[serde(skip_serializing)]
+    pub pr_merge_method: Option<String>,
+    /// **Auto-fix my PRs** (Settings → General): when one of your pull
     /// requests hits merge conflicts or failing checks, send an agent to
     /// fix it at once — `auto`, the default — or not, `off`. An older
     /// orion's `ask` is rewritten to `auto` on load ([`Config::migrate`]).
@@ -1450,14 +1139,14 @@ pub struct Config {
     pub cursor_effort: String,
     /// OpenCode's `--model` id (`provider/model`, passed verbatim). No
     /// effort key: OpenCode has no effort flag — reasoning is a per-model
-    /// variant picked inside its own TUI — so its Agents section has no
+    /// variant picked inside its own TUI — so its Accounts section has no
     /// Effort row and nothing to store for one.
     pub opencode_model: String,
     /// Which AGENT KINDS the NEW AGENT PICKER offers. Off leaves that
     /// harness out of the picker and the PR SESSION picker (and, for
     /// Claude, out of the standing PREWARM POOL slot); sessions that already
     /// exist keep attaching, resuming and restarting as before. Off until
-    /// first-run onboarding or Settings → Agents turns one on. Tests keep
+    /// first-run onboarding or Settings → Accounts turns one on. Tests keep
     /// them on so an empty `{}` fixture still offers every built-in.
     pub claude_enabled: bool,
     pub codex_enabled: bool,
@@ -1466,7 +1155,7 @@ pub struct Config {
     /// Per-harness deltas over the compiled-in registry (`harnesses` in
     /// config.json): disable a built-in, repoint a program, rename a
     /// flag, or define a whole new CLI. Merged by
-    /// [`Config::harness_registry`]; the Agents tab, the `n` picker, the
+    /// [`Config::harness_registry`]; the Accounts tab, the `n` picker, the
     /// `e` presets, spawn and hooks all read the merged rows. A hand edit
     /// that breaks one entry refuses its launches with the reason, never
     /// the whole file (see `orion_core::settings`). Written even when
@@ -1480,7 +1169,7 @@ pub struct Config {
     /// Claude Code config dir under a stable id, `{"id": "claude-2",
     /// "config_dir": "~/.claude-2"}`, launched as Claude's own row with
     /// `CLAUDE_CONFIG_DIR` pointing there ([`Config::harness_registry`]).
-    /// The Agents tab's **Claude accounts** section and first-run
+    /// The Accounts tab's **Claude accounts** section and first-run
     /// onboarding add and remove them; empty by default.
     pub claude_accounts: Vec<orion_core::claude_account::ClaudeAccount>,
     /// The ACCOUNT TAG a Claude account's rows wear, set by hand: by
@@ -1496,37 +1185,17 @@ pub struct Config {
     /// [`Config::quick_prompt_kind`], which steps around a harness that has
     /// since been switched off.
     pub quick_prompt_kind: String,
-    /// Whether a QUICK PROMPT launch takes FOCUS into the TERMINAL PANE and
-    /// locks it. Off by default: FOCUS stays on the panel the prompt was
-    /// fired from, so firing one off does not interrupt what you were
-    /// doing — and where the cursor goes is [`Config::follow_new_session`]'s
-    /// to say. Only the QUICK PROMPT reads this — every other launch
-    /// (the NEW AGENT PICKER, an AGENT PRESET, a PR SESSION) still enters
-    /// the pane.
-    pub quick_prompt_focus: bool,
     /// FOLLOW NEW SESSION: a QUICK PROMPT launch lands the cursor on the
     /// new session's card — the grid scrolled to it, the pane showing it,
     /// the keys still on the cards — so a run of launches can be watched
-    /// going up. It selects the card and no more: entering its terminal
-    /// is [`Config::quick_prompt_focus`]'s to say. On by default, a
-    /// config predating the key too. Off, the cursor, the pane and FOCUS
-    /// stay on the session the user was on while the new card goes up in
-    /// its band, as a BACKGROUND LAUNCH already does for another project.
-    /// Only a launch fired from a session card holds still: with no card
-    /// under the cursor there is nothing to keep, and the cursor lands on
-    /// the new session either way. [`Config::quick_prompt_focus`] on
-    /// outranks it — a launch that enters the new session's pane has to
-    /// go there.
+    /// going up. It selects the card and never enters its terminal. On by
+    /// default, a config predating the key too. Off, the cursor, the pane
+    /// and FOCUS stay on the session the user was on while the new card
+    /// goes up in its band, as a BACKGROUND LAUNCH already does for
+    /// another project. Only a launch fired from a session card holds
+    /// still: with no card under the cursor there is nothing to keep, and
+    /// the cursor lands on the new session either way.
     pub follow_new_session: bool,
-    /// QUICK PROMPT NEW WORKTREE: every box a plain launch opens (`p`,
-    /// `n`) starts aimed at a fresh worktree of its project rather than
-    /// the checkout under the grid's cursor. The WORKTREE PICKER (`⌘.` /
-    /// `^T`) still re-aims one box either way. A PR SESSION's and an
-    /// ISSUE's box keep their own checkouts. Off by default. Retired in
-    /// 1.0 with the box's `[ ] new worktree` toggle and back as a row on
-    /// the Agents tab under the same key, so a choice an older build
-    /// stored still holds.
-    pub quick_prompt_new_worktree: bool,
     /// Hotkey overrides, keyed by `keymap::ActionSpec::id`; the value is a
     /// comma-separated chord list (`"j, down"`), and an empty string means
     /// deliberately unbound. Only rows that differ from the defaults are
@@ -1579,6 +1248,12 @@ pub struct ProjectSettings {
     /// running. The DAEMON reads it (`containers`); the TUI cycles it.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub worktree_containers: String,
+    /// The method this project's last merge from the PULL REQUESTS MODAL
+    /// took — `squash`, `merge` or `rebase` — which its next merge form
+    /// opens on ([`Config::merge_method`]). No row: every merge writes it.
+    /// Empty is squash.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub merge_method: String,
     /// Keys in the entry this build doesn't know — a newer orion's, most
     /// likely, or the retired `hide_root_worktree` an older one wrote —
     /// carried through a save untouched, as the file's top-level keys
@@ -1648,44 +1323,39 @@ impl ProjectSettings {
         };
         true
     }
+
+    /// Keep `method` as the one this project merges by. Squash, where a
+    /// project with no memory starts, is stored as nothing, so a project
+    /// back on it leaves no entry.
+    pub fn set_merge_method(&mut self, method: crate::pr_actions::MergeMethod) {
+        self.merge_method = match method {
+            crate::pr_actions::MergeMethod::Squash => String::new(),
+            other => other.as_str().to_string(),
+        };
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            palette_enter_attaches: true,
             git_init_on_create: true,
             worktree_base_branch: None,
-            link_env_files: true,
             worktree_containers: None,
             outside_editor: crate::outside_editor::AUTO.into(),
-            close_finder_on_open: true,
             linear_assignee_email: String::new(),
-            linear_auto_attach: true,
             onboarded: false,
             seen_version: String::new(),
             session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
-            prewarm_agents: true,
-            prewarm_sessions: true,
-            usage_claude: true,
-            usage_cursor: true,
             done_sound: "Glass".into(),
             feedback_sound: "Sosumi".into(),
             preset_text: PresetText::DEFAULT.as_str().into(),
-            delete_empty_worktree: false,
-            show_all_worktrees: true,
             theme: "default".into(),
             animations: true,
             spotify: true,
-            black_background: true,
             hide_card_prompt: false,
             hide_draft_prs: false,
             diff_tree_view: true,
-            diff_start: DIFF_STARTS[0].into(),
-            pr_merge_method: MERGE_METHODS[0].into(),
-            pr_delete_branch: true,
-            pr_draft: false,
-            base_fetch: crate::base_sync::INTERVALS[0].into(),
+            pr_merge_method: None,
             pr_autofix: crate::autofix::Mode::Auto.as_str().into(),
             autofix_model: None,
             autofix_effort: None,
@@ -1722,9 +1392,7 @@ impl Default for Config {
             claude_accounts: Vec::new(),
             account_tags: BTreeMap::new(),
             quick_prompt_kind: AgentKind::Claude.as_str().into(),
-            quick_prompt_focus: false,
             follow_new_session: true,
-            quick_prompt_new_worktree: false,
             keybindings: BTreeMap::new(),
             skipped: BTreeSet::new(),
         }
@@ -1759,6 +1427,18 @@ fn default_harnesses() -> BTreeMap<String, orion_core::harness::HarnessOverride>
         },
     );
     harnesses
+}
+
+/// Load the settings, apply `edit` and save them: for a setting an action
+/// changes as it happens (setup's rows, the version what's new was seen
+/// at, the method a merge took, how `⌘B` left the file list). A save that
+/// fails is logged, and nothing waits on it.
+pub fn persist(edit: impl FnOnce(&mut Config)) {
+    let mut cfg = Config::load();
+    edit(&mut cfg);
+    if let Err(err) = cfg.try_save() {
+        tracing::warn!(%err, "couldn't save the settings");
+    }
 }
 
 impl Config {
@@ -1904,10 +1584,11 @@ impl Config {
     /// elsewhere, each with whether its value is still waiting to move
     /// ([`Config::adopt_project_keys`]). Never written; a save drops each
     /// one once it is spent.
-    fn moved_keys(&self) -> [(&'static str, bool); 7] {
+    fn moved_keys(&self) -> [(&'static str, bool); 8] {
         [
             ("worktree_base_branch", self.worktree_base_branch.is_some()),
             ("worktree_containers", self.worktree_containers.is_some()),
+            ("pr_merge_method", self.pr_merge_method.is_some()),
             ("autofix_model", self.autofix_model.is_some()),
             ("autofix_effort", self.autofix_effort.is_some()),
             ("review_account", self.review_account.is_some()),
@@ -1921,22 +1602,6 @@ impl Config {
         crate::theme::Theme::by_name(&self.theme)
     }
 
-    /// `diff_start` as one of [`DIFF_STARTS`]; a word off the list is the
-    /// commits.
-    fn diff_start_word(&self) -> &'static str {
-        DIFF_STARTS[cycled_index(&self.diff_start, DIFF_STARTS, 0)]
-    }
-
-    /// The DIFF VIEWER panel the **Start on** SETTING hands the keys to as
-    /// it opens.
-    pub fn diff_start(&self) -> crate::app::DiffFocus {
-        match self.diff_start_word() {
-            START_ON_FILES => crate::app::DiffFocus::Files,
-            START_ON_DIFF => crate::app::DiffFocus::Diff,
-            _ => crate::app::DiffFocus::Commits,
-        }
-    }
-
     /// The editor the file overlays launch: `ORION_EDITOR` when set,
     /// otherwise fresh ([`crate::editor::command`]).
     pub fn editor_command(&self) -> String {
@@ -1946,7 +1611,7 @@ impl Config {
     /// The effective registry this config reads, every Claude account
     /// named after who it is signed in as — `Claude (a@b.co)`
     /// ([`crate::claude_accounts::label`]) — which is the name every
-    /// picker, the Agents tab, onboarding, presets and **Continue on**
+    /// picker, the Accounts tab, onboarding, presets and **Continue on**
     /// show. See [`Config::raw_harness_registry`] for the rows themselves.
     pub fn harness_registry(&self) -> Vec<HarnessDescriptor> {
         let mut all = self.raw_harness_registry();
@@ -1964,7 +1629,7 @@ impl Config {
     /// ids — plus, for
     /// built-ins, the legacy per-harness keys (`claude_model`,
     /// `codex_enabled`, …) wherever the map stays silent on that field.
-    /// The map wins where both speak; the Agents tab writes the legacy
+    /// The map wins where both speak; the Accounts tab writes the legacy
     /// keys for built-ins, so its edits apply without a migration. An
     /// account takes Claude's model and effort defaults, legacy keys
     /// included, until its own map entry names one. What `orion config
@@ -2141,7 +1806,7 @@ impl Config {
     /// Every harness the picker and presets offer, in registry order:
     /// `(kind, None)` for built-ins, `(Custom, Some(id))` for customs.
     /// Disabled and broken entries are out (broken ones surface in the
-    /// Agents tab with their reason), and so is anything whose program is
+    /// Accounts tab with their reason), and so is anything whose program is
     /// missing from PATH. The daemon stays authoritative at launch: it
     /// re-checks through the login shell, which can see shims PATH misses.
     ///
@@ -2174,7 +1839,7 @@ impl Config {
             .collect()
     }
 
-    /// Whether a preset may launch: its harness's Agents tab switch,
+    /// Whether a preset may launch: its harness's Accounts tab switch,
     /// enabled and valid.
     pub fn preset_harness_usable(&self, preset: &crate::agent_presets::AgentPreset) -> bool {
         let id = match preset.kind {
@@ -2241,7 +1906,7 @@ impl Config {
             .collect()
     }
 
-    /// `(id, field)` rows below the Agents head, in registry order: every
+    /// `(id, field)` rows below the Accounts head, in registry order: every
     /// entry, enabled or not, valid or not (broken rows show their reason
     /// so they can be fixed); Effort only while the harness offers effort.
     pub fn agent_rows(&self) -> Vec<(String, HarnessField)> {
@@ -2256,7 +1921,7 @@ impl Config {
         rows
     }
 
-    /// The harness row at a tab-local Agents index, or None while the
+    /// The harness row at a tab-local Accounts index, or None while the
     /// index lands on the static head or the CLAUDE ACCOUNTS section.
     pub fn agent_row(&self, index: usize) -> Option<(String, HarnessField)> {
         self.agent_rows()
@@ -2264,13 +1929,13 @@ impl Config {
             .nth(index.checked_sub(self.agent_rows_from())?)
     }
 
-    /// The tab-local Agents index the first harness row sits at: under
+    /// The tab-local Accounts index the first harness row sits at: under
     /// the head and the CLAUDE ACCOUNTS section.
     pub fn agent_rows_from(&self) -> usize {
-        AGENTS_HEAD.len() + self.account_rows().len()
+        ACCOUNTS_HEAD.len() + self.account_rows().len()
     }
 
-    /// The CLAUDE ACCOUNTS section's rows, below the Agents head — and the
+    /// The CLAUDE ACCOUNTS section's rows, below the Accounts head — and the
     /// Claude page of setup: every Claude account in registry order —
     /// the default one, built-in Claude, first; on or off — then **Add
     /// account**.
@@ -2285,15 +1950,15 @@ impl Config {
         rows
     }
 
-    /// The CLAUDE ACCOUNTS row at a tab-local Agents index, or None off
+    /// The CLAUDE ACCOUNTS row at a tab-local Accounts index, or None off
     /// the section.
     pub fn account_row(&self, index: usize) -> Option<AccountRow> {
         self.account_rows()
             .into_iter()
-            .nth(index.checked_sub(AGENTS_HEAD.len())?)
+            .nth(index.checked_sub(ACCOUNTS_HEAD.len())?)
     }
 
-    /// The Agents tab's section title for a harness: its label, and for a
+    /// The Accounts tab's section title for a harness: its label, and for a
     /// CLAUDE ACCOUNT other than the default one its config dir too, so
     /// two accounts signed in as one email still head two sections.
     pub fn section_title(&self, id: &str) -> String {
@@ -2429,7 +2094,7 @@ impl Config {
         left_out.chain(same).collect()
     }
 
-    /// The value an Agents harness row shows.
+    /// The value an Accounts harness row shows.
     pub fn agent_value(&self, id: &str, field: HarnessField) -> String {
         let descriptor = self.effective_harness_by_id(id);
         match field {
@@ -2452,7 +2117,7 @@ impl Config {
         }
     }
 
-    /// The hint an Agents harness row shows: what the row edits, with the
+    /// The hint an Accounts harness row shows: what the row edits, with the
     /// entry's problem appended while it is broken.
     pub fn agent_hint(&self, id: &str, field: HarnessField) -> String {
         let descriptor = self.effective_harness_by_id(id);
@@ -2493,10 +2158,10 @@ impl Config {
         hint
     }
 
-    /// The hint for a tab-local Agents index: the head row's own hint, or
+    /// The hint for a tab-local Accounts index: the head row's own hint, or
     /// the harness row's.
     pub fn agent_hint_by_index(&self, index: usize) -> String {
-        if let Some(spec) = AGENTS_HEAD.get(index) {
+        if let Some(spec) = ACCOUNTS_HEAD.get(index) {
             return spec.hint.to_string();
         }
         if let Some(row) = self.account_row(index) {
@@ -2508,7 +2173,7 @@ impl Config {
         }
     }
 
-    /// Cycle an Agents harness row: toggle Enabled, step Model / Effort
+    /// Cycle an Accounts harness row: toggle Enabled, step Model / Effort
     /// through the rows the pickers offer. A composing harness refits its
     /// effort against the new model, so the row never holds an id the CLI
     /// would refuse.
@@ -2551,7 +2216,7 @@ impl Config {
         }
     }
 
-    /// The Agents tab's Effort row for harness `id`, set to `effort` —
+    /// The Accounts tab's Effort row for harness `id`, set to `effort` —
     /// what Cycle effort writes as it steps the new-agent box, so the next
     /// box starts where this one was left. Only an effort the harness's
     /// default model offers (a Cursor box on another family steps itself
@@ -2691,7 +2356,7 @@ impl Config {
         (self.quick_prompt_kind(), None)
     }
 
-    /// What the Agents tab's **Agent** row cycles through: every built-in
+    /// What the Accounts tab's **New agents on** row cycles through: every built-in
     /// harness by the name the file stores, with the other CLAUDE
     /// ACCOUNTS — by registry id — right after `claude`.
     pub fn quick_prompt_choices(&self) -> Vec<String> {
@@ -2712,7 +2377,7 @@ impl Config {
         out
     }
 
-    /// **Auto-fix PRs**, read: anything but `off` is on.
+    /// **Auto-fix my PRs**, read: anything but `off` is on.
     pub fn autofix_mode(&self) -> crate::autofix::Mode {
         crate::autofix::Mode::parse(&self.pr_autofix)
     }
@@ -2846,14 +2511,13 @@ impl Config {
     }
 
     /// The stored text of a typed PROJECTS TAB row for the project at
-    /// `repo_path` — what [`Config::text_value`] is for a top-level row.
+    /// `repo_path`.
     pub fn project_text_value(&self, repo_path: &Path, kind: SettingKind) -> String {
         self.project(repo_path).text_value(kind)
     }
 
-    /// Write a typed PROJECTS TAB row for the project at `repo_path` — what
-    /// [`Config::set_text`] is for a top-level row. False for a row that
-    /// is not a typed project row.
+    /// Write a typed PROJECTS TAB row for the project at `repo_path`.
+    /// False for a row that is not a typed project row.
     pub fn set_project_text(&mut self, repo_path: &Path, kind: SettingKind, value: &str) -> bool {
         self.edit_project(repo_path, |settings| settings.set_text(kind, value))
     }
@@ -2881,9 +2545,10 @@ impl Config {
     }
 
     /// Hand each project the settings an older release kept once for all
-    /// of them — `worktree_base_branch` and `worktree_containers` — so a
-    /// project that has no value of its own goes on starting worktrees
-    /// where it did, and deleting them does what it did. `repos` is every
+    /// of them — `worktree_base_branch`, `worktree_containers` and
+    /// `pr_merge_method` — so a project that has no value of its own goes
+    /// on starting worktrees where it did, deleting them does what it did,
+    /// and its merge form opens on the method it did. `repos` is every
     /// project the tree holds; the ones `projects` names are taken too.
     /// The old keys are spent after, and the next save drops them from
     /// the file. They wait while the tree names no project — an empty
@@ -2898,29 +2563,48 @@ impl Config {
         every.extend(repos.iter().cloned());
         let base = self.worktree_base_branch.take();
         let containers = self.worktree_containers.take();
-        if base.is_none() && containers.is_none() {
+        let merge = self.pr_merge_method.take();
+        if base.is_none() && containers.is_none() && merge.is_none() {
             return false;
         }
         let base = base.unwrap_or_default();
         let base = base.trim();
-        let containers = containers.map(|word| WorktreeContainers::parse(&word));
+        let containers = containers
+            .map(|word| WorktreeContainers::parse(&word))
+            .filter(|policy| *policy != WorktreeContainers::Off);
+        let merge = merge.map(|word| crate::pr_actions::MergeMethod::parse(&word));
         for repo in every {
             let mut settings = self.project(&repo);
             if settings.base_branch.is_empty() {
                 settings.base_branch = base.to_string();
             }
-            match containers {
-                Some(policy)
-                    if policy != WorktreeContainers::Off
-                        && settings.worktree_containers.is_empty() =>
-                {
-                    settings.worktree_containers = policy.as_str().to_string();
-                }
-                _ => {}
+            if let Some(policy) = containers.filter(|_| settings.worktree_containers.is_empty()) {
+                settings.worktree_containers = policy.as_str().to_string();
+            }
+            if let Some(method) = merge.filter(|_| settings.merge_method.is_empty()) {
+                settings.set_merge_method(method);
             }
             self.set_project(&repo, settings);
         }
         true
+    }
+
+    /// The method the merge form of the project at `repo_path` opens on:
+    /// the one its last merge took, squash before its first.
+    pub fn merge_method(&self, repo_path: &Path) -> crate::pr_actions::MergeMethod {
+        crate::pr_actions::MergeMethod::parse(&self.project(repo_path).merge_method)
+    }
+
+    /// Remember `method` as the one the project at `repo_path` merges by.
+    pub fn remember_merge_method(
+        &mut self,
+        repo_path: &Path,
+        method: crate::pr_actions::MergeMethod,
+    ) {
+        self.edit_project(repo_path, |settings| {
+            settings.set_merge_method(method);
+            true
+        });
     }
 
     /// The overlay's label for `kind`. A PROJECTS TAB row read here shows
@@ -2928,59 +2612,17 @@ impl Config {
     /// [`Config::project`] instead.
     pub fn value_label(&self, kind: SettingKind) -> String {
         match kind {
-            SettingKind::PaletteEnterAttaches => on_off(self.palette_enter_attaches).into(),
-            SettingKind::LinkEnvFiles => on_off(self.link_env_files).into(),
-            SettingKind::RunSetup => "Enter opens it".into(),
-            SettingKind::Git => installed_label("git"),
-            SettingKind::Gh => installed_label("gh"),
-            SettingKind::OutsideEditor => crate::outside_editor::value_label(
-                &self.outside_editor,
-                &crate::outside_editor::Places::here(),
-            ),
-            SettingKind::CloseFinderOnOpen => on_off(self.close_finder_on_open).into(),
-            SettingKind::LinearAccount => match self.linear_assignee_email.trim() {
-                "" => LINEAR_KEY_OWNER.into(),
-                email => email.to_string(),
-            },
-            SettingKind::LinearAutoAttach => on_off(self.linear_auto_attach).into(),
+            SettingKind::FollowNewSession => on_off(self.follow_new_session).into(),
             SettingKind::SessionIdleTimeout => self.session_idle_timeout.clone(),
-            SettingKind::PrewarmAgents => on_off(self.prewarm_agents).into(),
-            SettingKind::PrewarmSessions => on_off(self.prewarm_sessions).into(),
-            SettingKind::UsageClaude => on_off(self.usage_claude).into(),
-            SettingKind::UsageCursor => on_off(self.usage_cursor).into(),
-            SettingKind::DoneSound => self.done_sound.clone(),
-            SettingKind::FeedbackSound => self.feedback_sound.clone(),
-            SettingKind::PresetText => self.preset_text().as_str().into(),
-            SettingKind::DeleteEmptyWorktree => on_off(self.delete_empty_worktree).into(),
-            SettingKind::ShowAllWorktrees => on_off(self.show_all_worktrees).into(),
-            SettingKind::Theme => self.theme.clone(),
-            SettingKind::Animations => on_off(self.animations).into(),
-            SettingKind::Spotify => on_off(self.spotify).into(),
-            SettingKind::BlackBackground => on_off(self.black_background).into(),
-            SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
-            SettingKind::DiffTreeView => on_off(self.diff_tree_view).into(),
-            SettingKind::DiffStart => self.diff_start_word().into(),
-            SettingKind::PrMergeMethod => {
-                crate::pr_actions::MergeMethod::parse(&self.pr_merge_method)
-                    .as_str()
-                    .into()
-            }
-            SettingKind::PrDeleteBranch => on_off(self.pr_delete_branch).into(),
-            SettingKind::PrDraft => on_off(self.pr_draft).into(),
-            SettingKind::BaseFetch => {
-                cycle_choice(&self.base_fetch, crate::base_sync::INTERVALS, 0).into()
-            }
             SettingKind::PrAutofix => {
                 on_off(self.autofix_mode() == crate::autofix::Mode::Auto).into()
             }
-            // A project row with no project to speak of: what one without
-            // an entry would show. The Linear key is the app's to tell
-            // (`linear::key_status`), not the file's.
-            SettingKind::BaseBranch
-            | SettingKind::RunCommand
-            | SettingKind::OpenCommand
-            | SettingKind::WorktreeContainers
-            | SettingKind::LinearKey => ProjectSettings::default().value_label(kind),
+            SettingKind::OutsideEditor => crate::outside_editor::row_label(&self.outside_editor),
+            SettingKind::DoneSound => self.done_sound.clone(),
+            SettingKind::FeedbackSound => self.feedback_sound.clone(),
+            SettingKind::Theme => self.theme.clone(),
+            SettingKind::Animations => on_off(self.animations).into(),
+            SettingKind::Spotify => on_off(self.spotify).into(),
             // A CLAUDE ACCOUNT — the default one too — reads as the name
             // it goes by, with its email.
             SettingKind::QuickPromptKind => match self.quick_prompt_harness() {
@@ -2997,21 +2639,28 @@ impl Config {
                 }
                 _ => self.quick_prompt_kind.clone(),
             },
-            SettingKind::QuickPromptFocus => on_off(self.quick_prompt_focus).into(),
-            SettingKind::FollowNewSession => on_off(self.follow_new_session).into(),
-            SettingKind::QuickPromptNewWorktree => on_off(self.quick_prompt_new_worktree).into(),
+            // A project row with no project to speak of: what one without
+            // an entry would show. The Linear key is the app's to tell
+            // (`linear::key_status`), not the file's.
+            SettingKind::BaseBranch
+            | SettingKind::RunCommand
+            | SettingKind::OpenCommand
+            | SettingKind::WorktreeContainers
+            | SettingKind::LinearKey => ProjectSettings::default().value_label(kind),
+            SettingKind::AgentPresets => "orion's and yours".into(),
         }
     }
 
     /// `delta == 0` means activate (toggle a bool, cycle a choice forward).
     /// Non-zero delta cycles a choice; bools still toggle. `index` is
-    /// tab-local — the Hotkeys tab has no cyclable values and no-ops here,
+    /// tab-local — the Keys tab has no cyclable values and no-ops here,
     /// and so does a PROJECTS TAB row, which is one project's
-    /// ([`Config::set_project_text`], [`Config::cycle_project`]). The Agents tab resolves its head rows
-    /// statically and its harness rows through the registry.
+    /// ([`Config::set_project_text`], [`Config::cycle_project`]). The
+    /// Accounts tab resolves its head rows statically and its harness
+    /// rows through the registry.
     pub fn cycle(&mut self, tab: usize, index: usize, delta: i32) {
-        if tab == agents_tab() {
-            if let Some(spec) = AGENTS_HEAD.get(index) {
+        if tab == accounts_tab() {
+            if let Some(spec) = ACCOUNTS_HEAD.get(index) {
                 self.cycle_kind(spec.kind, delta);
             } else if let Some(row) = self.account_row(index) {
                 // An account row's ←/→ is its switch; its Enter signs it
@@ -3030,23 +2679,21 @@ impl Config {
         self.cycle_kind(spec.kind, delta);
     }
 
-    /// Cycle one static setting row. The Agents tab's harness rows cycle
+    /// Cycle one static setting row. The Accounts tab's harness rows cycle
     /// through [`Config::cycle_agent_row`] instead.
     pub(crate) fn cycle_kind(&mut self, kind: SettingKind, delta: i32) {
         let step = if delta == 0 { 1 } else { delta };
         match kind {
-            SettingKind::PaletteEnterAttaches => {
-                self.palette_enter_attaches = !self.palette_enter_attaches;
+            SettingKind::FollowNewSession => {
+                self.follow_new_session = !self.follow_new_session;
             }
-            // Typed, not cycled: see `SettingKind::is_text` / `set_text`.
-            SettingKind::LinearAccount => {}
-            // Status, not a setting: nothing to cycle.
-            SettingKind::RunSetup | SettingKind::Git | SettingKind::Gh => {}
-            SettingKind::LinearAutoAttach => {
-                self.linear_auto_attach = !self.linear_auto_attach;
+            SettingKind::SessionIdleTimeout => {
+                self.session_idle_timeout =
+                    cycle_choice(&self.session_idle_timeout, SESSION_IDLE_TIMEOUTS, step).into();
             }
-            SettingKind::LinkEnvFiles => {
-                self.link_env_files = !self.link_env_files;
+            SettingKind::PrAutofix => {
+                let on = self.autofix_mode() == crate::autofix::Mode::Auto;
+                self.pr_autofix = AUTOFIX_MODES[usize::from(!on)].into();
             }
             SettingKind::OutsideEditor => {
                 let current = crate::outside_editor::Choice::parse(&self.outside_editor);
@@ -3054,38 +2701,11 @@ impl Config {
                     cycle_choice(current.as_str(), crate::outside_editor::CHOICES, step).into();
                 crate::outside_editor::forget_hint_name();
             }
-            SettingKind::CloseFinderOnOpen => {
-                self.close_finder_on_open = !self.close_finder_on_open;
-            }
-            SettingKind::SessionIdleTimeout => {
-                self.session_idle_timeout =
-                    cycle_choice(&self.session_idle_timeout, SESSION_IDLE_TIMEOUTS, step).into();
-            }
-            SettingKind::PrewarmAgents => {
-                self.prewarm_agents = !self.prewarm_agents;
-            }
-            SettingKind::PrewarmSessions => {
-                self.prewarm_sessions = !self.prewarm_sessions;
-            }
-            SettingKind::UsageClaude => self.usage_claude = !self.usage_claude,
-            SettingKind::UsageCursor => self.usage_cursor = !self.usage_cursor,
             SettingKind::DoneSound => {
                 self.done_sound = cycle_choice(&self.done_sound, SOUNDS, step).into();
             }
             SettingKind::FeedbackSound => {
                 self.feedback_sound = cycle_choice(&self.feedback_sound, SOUNDS, step).into();
-            }
-            SettingKind::PresetText => {
-                // Cycled from the resolved side, so a hand edit off the
-                // list steps on from the default it reads as.
-                self.preset_text =
-                    cycle_choice(self.preset_text().as_str(), PRESET_TEXTS, step).into();
-            }
-            SettingKind::DeleteEmptyWorktree => {
-                self.delete_empty_worktree = !self.delete_empty_worktree;
-            }
-            SettingKind::ShowAllWorktrees => {
-                self.show_all_worktrees = !self.show_all_worktrees;
             }
             SettingKind::Theme => {
                 self.theme = cycle_choice(&self.theme, crate::theme::THEMES, step).into();
@@ -3096,81 +2716,18 @@ impl Config {
             SettingKind::Spotify => {
                 self.spotify = !self.spotify;
             }
-            SettingKind::BlackBackground => {
-                self.black_background = !self.black_background;
-            }
-            SettingKind::HideDraftPrs => {
-                self.hide_draft_prs = !self.hide_draft_prs;
-            }
-            SettingKind::DiffTreeView => {
-                self.diff_tree_view = !self.diff_tree_view;
-            }
-            // A hand edit off the list steps on from the first, the word
-            // it reads as.
-            SettingKind::DiffStart => {
-                self.diff_start = cycle_choice(&self.diff_start, DIFF_STARTS, step).into();
-            }
-            SettingKind::PrMergeMethod => {
-                self.pr_merge_method =
-                    cycle_choice(&self.pr_merge_method, MERGE_METHODS, step).into();
-            }
-            SettingKind::PrDeleteBranch => {
-                self.pr_delete_branch = !self.pr_delete_branch;
-            }
-            SettingKind::PrDraft => {
-                self.pr_draft = !self.pr_draft;
-            }
-            SettingKind::BaseFetch => {
-                self.base_fetch =
-                    cycle_choice(&self.base_fetch, crate::base_sync::INTERVALS, step).into();
-            }
-            SettingKind::PrAutofix => {
-                let on = self.autofix_mode() == crate::autofix::Mode::Auto;
-                self.pr_autofix = AUTOFIX_MODES[usize::from(!on)].into();
-            }
-            // One project's, not the file's: see `set_project_text` and
-            // `cycle_project`.
-            SettingKind::BaseBranch
-            | SettingKind::RunCommand
-            | SettingKind::OpenCommand
-            | SettingKind::WorktreeContainers
-            | SettingKind::LinearKey => {}
             SettingKind::QuickPromptKind => {
                 self.quick_prompt_kind =
                     cycle_owned(&self.quick_prompt_kind, &self.quick_prompt_choices(), step);
             }
-            SettingKind::QuickPromptFocus => {
-                self.quick_prompt_focus = !self.quick_prompt_focus;
-            }
-            SettingKind::FollowNewSession => {
-                self.follow_new_session = !self.follow_new_session;
-            }
-            SettingKind::QuickPromptNewWorktree => {
-                self.quick_prompt_new_worktree = !self.quick_prompt_new_worktree;
-            }
-        }
-    }
-
-    /// The stored text of a typed row ([`SettingKind::is_text`]) as the
-    /// prompt should pre-fill it — `""` for an unset row, never the `auto`
-    /// the overlay shows in its place. Empty for a row that is not typed.
-    pub fn text_value(&self, kind: SettingKind) -> String {
-        match kind {
-            SettingKind::LinearAccount => self.linear_assignee_email.clone(),
-            _ => String::new(),
-        }
-    }
-
-    /// Write a typed value into a text row ([`SettingKind::is_text`]),
-    /// trimmed. Empty puts the row back on its default. False for a row
-    /// that is not typed — nothing changes.
-    pub fn set_text(&mut self, kind: SettingKind, value: &str) -> bool {
-        match kind {
-            SettingKind::LinearAccount => {
-                self.linear_assignee_email = value.trim().to_string();
-                true
-            }
-            _ => false,
+            // One project's, not the file's: see `set_project_text` and
+            // `cycle_project`. The presets row opens a list.
+            SettingKind::BaseBranch
+            | SettingKind::RunCommand
+            | SettingKind::OpenCommand
+            | SettingKind::WorktreeContainers
+            | SettingKind::LinearKey
+            | SettingKind::AgentPresets => {}
         }
     }
 }
@@ -3291,14 +2848,6 @@ fn on_off(v: bool) -> &'static str {
         "on"
     } else {
         "off"
-    }
-}
-
-fn shown_hidden(hidden: bool) -> &'static str {
-    if hidden {
-        "hidden"
-    } else {
-        "shown"
     }
 }
 
@@ -3452,8 +3001,8 @@ pub fn locate(kind: SettingKind) -> Option<(usize, usize)> {
             TabBody::Values(settings) | TabBody::Project(settings) => {
                 settings.iter().position(|s| s.kind == kind)
             }
-            TabBody::Agents => AGENTS_HEAD.iter().position(|s| s.kind == kind),
-            TabBody::Hotkeys => None,
+            TabBody::Accounts => ACCOUNTS_HEAD.iter().position(|s| s.kind == kind),
+            TabBody::Keys => None,
         }
         .map(|i| (t, i))
     })
@@ -3466,15 +3015,6 @@ pub fn project_tab() -> usize {
         .iter()
         .position(|t| matches!(t.body, TabBody::Project(_)))
         .expect("SETTINGS_TABS declares a Projects tab")
-}
-
-/// A Tools tab program row's value: `installed`, or `install…` for `i`.
-fn installed_label(program: &str) -> String {
-    if crate::install::installed(program) {
-        "installed".into()
-    } else {
-        "install…".into()
-    }
 }
 
 #[cfg(test)]
@@ -3595,7 +3135,7 @@ mod tests {
     }
 
     /// Run `f` with the config pinned to an empty temp file, so every
-    /// registry read (Agents rows, choice lists, tab lengths) sees a
+    /// registry read (Accounts rows, choice lists, tab lengths) sees a
     /// fresh install — never the dev's own file.
     fn with_empty_config<T>(f: impl FnOnce() -> T) -> T {
         let dir = tempfile::tempdir().unwrap();
@@ -3604,11 +3144,11 @@ mod tests {
         with_config_path(path, f)
     }
 
-    /// Where an Agents harness row lives in `cfg`'s own rows, without
+    /// Where an Accounts harness row lives in `cfg`'s own rows, without
     /// loading anything: [`locate_agent`] reads the live file, which a
     /// test's in-memory config may have left behind.
     fn locate_in(cfg: &Config, id: &str, field: HarnessField) -> Option<(usize, usize)> {
-        let tab = agents_tab();
+        let tab = accounts_tab();
         cfg.agent_rows()
             .iter()
             .position(|(row_id, row_field)| row_id == id && *row_field == field)
@@ -3668,7 +3208,7 @@ mod tests {
             TabBody::Values(rows) | TabBody::Project(rows) => {
                 rows.iter().all(|row| row.label != "Skip starting prompt")
             }
-            TabBody::Hotkeys | TabBody::Agents => true,
+            TabBody::Keys | TabBody::Accounts => true,
         }));
 
         let dir = tempfile::tempdir().unwrap();
@@ -3678,7 +3218,7 @@ mod tests {
         assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
         assert!(cfg.skip_session_naming);
 
-        cfg.black_background = false;
+        cfg.spotify = false;
         cfg.save_to(&path).unwrap();
         assert_eq!(read_json_file(&path)["skip_session_naming"], true);
     }
@@ -3692,7 +3232,7 @@ mod tests {
             TabBody::Values(rows) | TabBody::Project(rows) => {
                 rows.iter().all(|row| row.label != "Confirm on archive")
             }
-            TabBody::Hotkeys | TabBody::Agents => true,
+            TabBody::Keys | TabBody::Accounts => true,
         }));
         assert!(!Config::default().confirm_on_archive);
         let cfg: Config = serde_json::from_str("{}").unwrap();
@@ -3718,7 +3258,7 @@ mod tests {
             TabBody::Values(rows) | TabBody::Project(rows) => {
                 rows.iter().all(|row| row.label != "Workspaces bar")
             }
-            TabBody::Hotkeys | TabBody::Agents => true,
+            TabBody::Keys | TabBody::Accounts => true,
         }));
 
         let dir = tempfile::tempdir().unwrap();
@@ -3728,7 +3268,7 @@ mod tests {
         assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
         assert!(!cfg.show_workspaces);
 
-        cfg.black_background = false;
+        cfg.spotify = false;
         cfg.save_to(&path).unwrap();
         assert_eq!(read_json_file(&path)["show_workspaces"], false);
     }
@@ -3742,7 +3282,7 @@ mod tests {
             TabBody::Values(rows) | TabBody::Project(rows) => {
                 rows.iter().all(|row| row.label != "Focused panel tint")
             }
-            TabBody::Hotkeys | TabBody::Agents => true,
+            TabBody::Keys | TabBody::Accounts => true,
         }));
 
         let dir = tempfile::tempdir().unwrap();
@@ -3752,7 +3292,7 @@ mod tests {
         assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
         assert!(!cfg.focus_tint);
 
-        cfg.black_background = false;
+        cfg.spotify = false;
         cfg.save_to(&path).unwrap();
         assert_eq!(read_json_file(&path)["focus_tint"], false);
     }
@@ -3771,7 +3311,7 @@ mod tests {
             TabBody::Values(rows) | TabBody::Project(rows) => {
                 rows.iter().all(|row| row.label != "Hide root worktree")
             }
-            TabBody::Hotkeys | TabBody::Agents => true,
+            TabBody::Keys | TabBody::Accounts => true,
         }));
 
         let demo = Path::new("/tmp/demo");
@@ -3829,28 +3369,28 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(
             &path,
-            r#"{"theme": "ocean", "hide_draft_prs": "auto", "animations": false}"#,
+            r#"{"theme": "ocean", "spotify": "auto", "animations": false}"#,
         )
         .unwrap();
         let mut cfg = load_from(&path);
         assert_eq!(cfg.theme, "ocean");
         assert!(!cfg.animations);
-        assert!(!cfg.hide_draft_prs);
-        assert_eq!(cfg.skipped, BTreeSet::from(["hide_draft_prs".to_string()]));
+        assert!(cfg.spotify);
+        assert_eq!(cfg.skipped, BTreeSet::from(["spotify".to_string()]));
 
-        cfg.black_background = false;
+        cfg.done_sound = "Ping".into();
         cfg.save_to(&path).unwrap();
         let saved = read_json_file(&path);
-        assert_eq!(saved["hide_draft_prs"], "auto", "left as stored");
-        assert_eq!(saved["black_background"], false);
+        assert_eq!(saved["spotify"], "auto", "left as stored");
+        assert_eq!(saved["done_sound"], "Ping");
         assert_eq!(saved["theme"], "ocean");
 
-        let (t, r) = locate(SettingKind::HideDraftPrs).unwrap();
+        let (t, r) = locate(SettingKind::Spotify).unwrap();
         cfg.cycle(t, r, 1);
         cfg.save_to(&path).unwrap();
         assert_eq!(
-            read_json_file(&path)["hide_draft_prs"],
-            true,
+            read_json_file(&path)["spotify"],
+            false,
             "changing it here is a real edit"
         );
     }
@@ -3899,129 +3439,6 @@ mod tests {
             assert!(!local.exists());
             assert_eq!(Config::load().theme, Config::default().theme);
         });
-    }
-
-    /// Every Linear option is on the LINEAR TAB, in one place and nowhere
-    /// else — linking pull requests first, on by default, then the
-    /// account — but each project's key, which is under that project on
-    /// the PROJECTS TAB.
-    #[test]
-    fn the_linear_tab_gathers_every_linear_option() {
-        let tab = SETTINGS_TABS
-            .iter()
-            .position(|t| t.title == "Linear")
-            .expect("a Linear tab");
-        assert_eq!(tab_settings(tab), LINEAR_SETTINGS);
-        let kinds: Vec<SettingKind> = LINEAR_SETTINGS.iter().map(|s| s.kind).collect();
-        assert_eq!(
-            kinds,
-            [SettingKind::LinearAutoAttach, SettingKind::LinearAccount]
-        );
-        for kind in kinds {
-            assert_eq!(
-                locate(kind).map(|(t, _)| t),
-                Some(tab),
-                "{kind:?} lives on one tab"
-            );
-            let others = all_settings().filter(|(t, _, s)| s.kind == kind && *t != tab);
-            assert_eq!(others.count(), 0, "{kind:?} on another tab too");
-        }
-        assert!(
-            all_settings()
-                .filter(|(t, _, s)| *t != tab && s.kind != SettingKind::LinearKey)
-                .all(|(_, _, s)| !s.label.contains("Linear")),
-            "no Linear row left elsewhere"
-        );
-        assert_eq!(
-            locate(SettingKind::LinearKey).map(|(t, _)| t),
-            Some(project_tab())
-        );
-
-        // The defaults, as the rows read them.
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(
-            cfg.linear_auto_attach,
-            "linking pull requests is on by default"
-        );
-        assert_eq!(cfg.value_label(SettingKind::LinearAutoAttach), "on");
-        assert_eq!(
-            cfg.value_label(SettingKind::LinearAccount),
-            LINEAR_KEY_OWNER
-        );
-        assert!(SettingKind::LinearKey.is_status() && SettingKind::LinearKey.is_project());
-        assert!(!SettingKind::LinearKey.is_text());
-
-        // The switch toggles from its row; the key's row cycles nothing.
-        let mut cfg = Config::default();
-        let (t, r) = locate(SettingKind::LinearAutoAttach).unwrap();
-        cfg.cycle(t, r, 0);
-        assert!(!cfg.linear_auto_attach);
-        let before = serde_json::to_value(&cfg).unwrap();
-        let (t, r) = locate(SettingKind::LinearKey).unwrap();
-        cfg.cycle(t, r, 1);
-        assert!(!cfg.cycle_project(Path::new("/tmp/demo"), SettingKind::LinearKey, 1));
-        assert_eq!(serde_json::to_value(&cfg).unwrap(), before);
-    }
-
-    #[test]
-    fn defaults_close_the_finder_on_open() {
-        assert!(Config::default().close_finder_on_open);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.close_finder_on_open);
-        let cfg: Config = serde_json::from_str(r#"{"close_finder_on_open": false}"#).unwrap();
-        assert!(!cfg.close_finder_on_open);
-        // The overlay toggle round-trips through the saved file.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut cfg = Config::default();
-        let (t, r) = locate(SettingKind::CloseFinderOnOpen).unwrap();
-        cfg.cycle(t, r, 1);
-        cfg.save_to(&path).unwrap();
-        assert!(!load_from(&path).close_finder_on_open);
-    }
-
-    /// The two prewarm keys are daemon-owned but overlay-toggled: on by
-    /// default, a missing key reads as on, and
-    /// the Sessions-tab rows round-trip through the saved file.
-    #[test]
-    fn prewarm_toggles_default_on_and_round_trip() {
-        let cfg = Config::default();
-        assert!(cfg.prewarm_agents && cfg.prewarm_sessions);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.prewarm_agents && cfg.prewarm_sessions);
-        let cfg: Config =
-            serde_json::from_str(r#"{"prewarm_agents": false, "prewarm_sessions": false}"#)
-                .unwrap();
-        assert!(!cfg.prewarm_agents && !cfg.prewarm_sessions);
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut cfg = Config::default();
-        let (t, r) = locate(SettingKind::PrewarmAgents).unwrap();
-        assert_eq!(SETTINGS_TABS[t].title, "Sessions");
-        cfg.cycle(t, r, 0);
-        let (t, r) = locate(SettingKind::PrewarmSessions).unwrap();
-        assert_eq!(SETTINGS_TABS[t].title, "Sessions");
-        cfg.cycle(t, r, 0);
-        assert_eq!(cfg.value_label(SettingKind::PrewarmAgents), "off");
-        assert_eq!(cfg.value_label(SettingKind::PrewarmSessions), "off");
-        cfg.save_to(&path).unwrap();
-        let saved: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        // Written under the daemon's own key names, since it is the reader.
-        assert_eq!(saved["prewarm_agents"], false);
-        assert_eq!(saved["prewarm_sessions"], false);
-        let loaded = load_from(&path);
-        assert!(!loaded.prewarm_agents && !loaded.prewarm_sessions);
-    }
-
-    #[test]
-    fn defaults_enter_attaches() {
-        assert!(Config::default().palette_enter_attaches);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.palette_enter_attaches);
-        let cfg: Config = serde_json::from_str(r#"{"palette_enter_attaches": false}"#).unwrap();
-        assert!(!cfg.palette_enter_attaches);
     }
 
     #[test]
@@ -4079,7 +3496,6 @@ mod tests {
         let path = dir.path().join("config.json");
         std::fs::write(&path, r#"{"git_init_on_create": false}"#).unwrap();
         let cfg = load_from(&path);
-        assert!(cfg.palette_enter_attaches);
         assert!(!cfg.git_init_on_create);
         cfg.save_to(&path).unwrap();
         assert_eq!(read_json_file(&path)["git_init_on_create"], false);
@@ -4211,6 +3627,45 @@ mod tests {
         assert!(!cfg.adopt_project_keys(&[PathBuf::from("/src/app")]));
     }
 
+    /// The old global **Merge method** becomes every project's memory of
+    /// its last merge, so the merge form opens where it did; a project
+    /// that already merged its own way keeps that. After, each merge
+    /// writes its own project's method — squash, the default, as nothing.
+    #[test]
+    fn the_old_merge_method_moves_into_every_project_and_merges_remember_theirs() {
+        use crate::pr_actions::MergeMethod;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "pr_merge_method": "rebase",
+              "projects": { "/src/own": { "merge_method": "merge" } }
+            }"#,
+        )
+        .unwrap();
+        let mut cfg = load_from(&path);
+        let (app, own) = (Path::new("/src/app"), Path::new("/src/own"));
+        assert!(cfg.adopt_project_keys(&[app.to_path_buf()]));
+        assert_eq!(cfg.merge_method(app), MergeMethod::Rebase);
+        assert_eq!(cfg.merge_method(own), MergeMethod::Merge, "its own wins");
+        cfg.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        assert!(saved.get("pr_merge_method").is_none(), "{saved}");
+        assert_eq!(saved["projects"]["/src/app"]["merge_method"], "rebase");
+
+        // A merge by squash is the default again: nothing to keep.
+        cfg.remember_merge_method(app, MergeMethod::Squash);
+        assert_eq!(cfg.merge_method(app), MergeMethod::Squash);
+        cfg.save_to(&path).unwrap();
+        assert!(read_json_file(&path)["projects"].get("/src/app").is_none());
+
+        // A squash global moves nothing: squash is where a project starts.
+        let mut squash: Config = serde_json::from_str(r#"{"pr_merge_method": "squash"}"#).unwrap();
+        assert!(squash.adopt_project_keys(&[app.to_path_buf()]));
+        assert!(squash.projects.is_empty(), "{:?}", squash.projects);
+    }
+
     #[test]
     fn done_sound_defaults_to_bell_cycles_persists_and_resolves() {
         let mut cfg = Config::default();
@@ -4272,10 +3727,10 @@ mod tests {
         assert_eq!(old.done_sound, "Ping");
         assert_eq!(old.feedback_sound, "Sosumi");
 
-        // Its row sits right after the done sound on the Sessions tab.
+        // Its row sits right after the done sound on the General tab.
         let (tab, row) = locate(SettingKind::FeedbackSound).unwrap();
         assert_eq!(locate(SettingKind::DoneSound).unwrap(), (tab, row - 1));
-        assert_eq!(SETTINGS_TABS[tab].title, "Sessions");
+        assert_eq!(SETTINGS_TABS[tab].title, "General");
         cfg.cycle(tab, row, 1);
         assert_eq!(cfg.feedback_sound, "Basso");
         cfg.cycle(tab, row, 1);
@@ -4307,12 +3762,12 @@ mod tests {
     #[test]
     fn cycle_toggles_bools_and_walks_session_idle_timeout() {
         let mut cfg = Config::default();
-        let (t, r) = locate(SettingKind::PaletteEnterAttaches).unwrap();
-        assert!(cfg.palette_enter_attaches);
+        let (t, r) = locate(SettingKind::FollowNewSession).unwrap();
+        assert!(cfg.follow_new_session);
         cfg.cycle(t, r, 0);
-        assert!(!cfg.palette_enter_attaches);
+        assert!(!cfg.follow_new_session);
         cfg.cycle(t, r, 1);
-        assert!(cfg.palette_enter_attaches);
+        assert!(cfg.follow_new_session);
 
         assert_eq!(cfg.session_idle_timeout, "5m");
         let (t, r) = locate(SettingKind::SessionIdleTimeout).unwrap();
@@ -4322,50 +3777,6 @@ mod tests {
         assert_eq!(cfg.session_idle_timeout, "5m");
         cfg.cycle(t, r, -1);
         assert_eq!(cfg.session_idle_timeout, "1m");
-    }
-
-    /// DELETE EMPTIED WORKTREE starts off — the last card's delete asks
-    /// before the checkout goes — sits on the Sessions tab, toggles like
-    /// any bool, and a config predating the key reads as off.
-    #[test]
-    fn delete_empty_worktree_is_off_by_default_and_toggles() {
-        let mut cfg = Config::default();
-        assert!(!cfg.delete_empty_worktree);
-        let (tab, row) = locate(SettingKind::DeleteEmptyWorktree).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Sessions");
-        assert_eq!(cfg.value_label(SettingKind::DeleteEmptyWorktree), "off");
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.delete_empty_worktree);
-        assert_eq!(cfg.value_label(SettingKind::DeleteEmptyWorktree), "on");
-        cfg.cycle(tab, row, -1);
-        assert!(!cfg.delete_empty_worktree, "←/→ toggle it like Enter does");
-
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(!cfg.delete_empty_worktree, "a missing key reads as off");
-        let cfg: Config = serde_json::from_str(r#"{"delete_empty_worktree": true}"#).unwrap();
-        assert!(cfg.delete_empty_worktree);
-    }
-
-    /// SHOW ALL WORKTREES starts on — every checkout gets a band — sits
-    /// on the Sessions tab beside the delete it changes, toggles like any
-    /// bool, and a config predating the key reads as on.
-    #[test]
-    fn show_all_worktrees_is_on_by_default_and_toggles() {
-        let mut cfg = Config::default();
-        assert!(cfg.show_all_worktrees);
-        let (tab, row) = locate(SettingKind::ShowAllWorktrees).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Sessions");
-        assert_eq!(cfg.value_label(SettingKind::ShowAllWorktrees), "on");
-        cfg.cycle(tab, row, 0);
-        assert!(!cfg.show_all_worktrees);
-        assert_eq!(cfg.value_label(SettingKind::ShowAllWorktrees), "off");
-        cfg.cycle(tab, row, 1);
-        assert!(cfg.show_all_worktrees, "←/→ toggle it like Enter does");
-
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.show_all_worktrees, "a missing key reads as on");
-        let cfg: Config = serde_json::from_str(r#"{"show_all_worktrees": false}"#).unwrap();
-        assert!(!cfg.show_all_worktrees);
     }
 
     /// A `config.json` without a `harnesses` key — `{}`, or a file from
@@ -4476,7 +3887,7 @@ mod tests {
         assert!(cfg.animations);
     }
 
-    /// **Auto-fix PRs** is on by default, toggling off and back on; with
+    /// **Auto-fix my PRs** is on by default, toggling off and back on; with
     /// no session to copy, the agent runs on the default agent at the PR
     /// autofix preset's model — one that harness no longer offers falls
     /// back to its own default.
@@ -4585,111 +3996,6 @@ mod tests {
         assert_eq!(review.custom_harness.as_deref(), Some("claude-work"));
     }
 
-    /// The REVIEW TAB: how the changes viewer opens — the tree, the keys
-    /// on the commits — and how the pull request
-    /// forms open — a squash, the branch deleted, not a draft — each row
-    /// cycling its own words and a word off the list reading as the
-    /// default.
-    #[test]
-    fn the_review_tab_holds_the_viewer_and_pull_request_defaults() {
-        use crate::app::DiffFocus;
-        let mut cfg = Config::default();
-        assert!(cfg.diff_tree_view);
-        assert_eq!(cfg.diff_start(), DiffFocus::Commits);
-        assert_eq!(cfg.value_label(SettingKind::PrMergeMethod), "squash");
-        assert!(cfg.pr_delete_branch && !cfg.pr_draft);
-        for kind in [
-            SettingKind::DiffTreeView,
-            SettingKind::DiffStart,
-            SettingKind::PrMergeMethod,
-            SettingKind::PrDeleteBranch,
-            SettingKind::PrDraft,
-        ] {
-            let (tab, _) = locate(kind).unwrap();
-            assert_eq!(SETTINGS_TABS[tab].title, "Review", "{kind:?}");
-        }
-        let (tab, row) = locate(SettingKind::DiffStart).unwrap();
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.diff_start(), DiffFocus::Files);
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.diff_start(), DiffFocus::Diff);
-        assert_eq!(cfg.value_label(SettingKind::DiffStart), "diff");
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.diff_start(), DiffFocus::Commits, "round again");
-        let (tab, row) = locate(SettingKind::PrMergeMethod).unwrap();
-        cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.pr_merge_method, "rebase");
-
-        let odd: Config =
-            serde_json::from_str(r#"{"diff_start": "sideways", "pr_merge_method": "yolo"}"#)
-                .unwrap();
-        assert_eq!(odd.diff_start(), DiffFocus::Commits);
-        assert_eq!(odd.value_label(SettingKind::PrMergeMethod), "squash");
-    }
-
-    /// DRAFT PULL REQUESTS: an Appearance row that reads `shown` / `hidden`
-    /// like the panel rows beside it, shown by default so a config that
-    /// predates the key keeps every draft on screen, and persisted under
-    /// `hide_draft_prs`.
-    #[test]
-    fn draft_pull_requests_default_shown_toggle_on_the_appearance_tab_and_persist() {
-        let mut cfg = Config::default();
-        assert!(!cfg.hide_draft_prs, "drafts stay on screen until asked");
-        assert_eq!(cfg.value_label(SettingKind::HideDraftPrs), "shown");
-
-        let (tab, row) = locate(SettingKind::HideDraftPrs).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.hide_draft_prs);
-        assert_eq!(cfg.value_label(SettingKind::HideDraftPrs), "hidden");
-        cfg.cycle(tab, row, 1);
-        assert!(!cfg.hide_draft_prs, "←/→ toggle a bool like Enter does");
-        cfg.cycle(tab, row, 0);
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains(r#""hide_draft_prs": true"#), "{raw}");
-        assert!(load_from(&path).hide_draft_prs);
-
-        let legacy: Config = serde_json::from_str("{}").unwrap();
-        assert!(!legacy.hide_draft_prs);
-    }
-
-    /// QUICK PROMPT NEW WORKTREE starts off, sits under Follow new on the
-    /// Agents tab, toggles like any bool and persists under the key the
-    /// pre-1.0 row wrote, so a choice an older build stored still holds.
-    #[test]
-    fn quick_prompt_new_worktree_is_off_by_default_on_the_agents_tab_and_persists() {
-        let mut cfg = Config::default();
-        assert!(!cfg.quick_prompt_new_worktree, "a box starts in a checkout");
-        assert_eq!(cfg.value_label(SettingKind::QuickPromptNewWorktree), "off");
-        let (tab, row) = locate(SettingKind::QuickPromptNewWorktree).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Agents");
-        assert_eq!(locate(SettingKind::FollowNewSession), Some((tab, row - 1)));
-
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.quick_prompt_new_worktree);
-        assert_eq!(cfg.value_label(SettingKind::QuickPromptNewWorktree), "on");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            raw.contains(r#""quick_prompt_new_worktree": true"#),
-            "{raw}"
-        );
-        assert!(
-            load_from(&path).quick_prompt_new_worktree,
-            "on survives a save"
-        );
-
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(!cfg.quick_prompt_new_worktree, "a missing key reads as off");
-    }
-
     /// CARD PROMPT: retired with every card carrying its last prompt. The
     /// key an older build wrote (`hide_card_prompt`, off by default) still
     /// loads to what it wrote and is written back as stored, but no tab
@@ -4717,79 +4023,15 @@ mod tests {
         );
     }
 
-    /// CARD LINE COUNTS: retired with every card counting its lines. The
-    /// key an older build wrote (`card_line_changes`, off by default) still
-    /// loads to what it wrote and is written back as stored, but no tab
-    /// shows it any more — Appearance ends on DRAFT PULL REQUESTS.
-    #[test]
-    fn card_line_counts_is_retired_but_still_round_trips() {
-        assert!(
-            !Config::default().card_line_changes,
-            "the default an older build reads"
-        );
-        let cfg: Config = serde_json::from_str(r#"{"card_line_changes": true}"#).unwrap();
-        assert!(cfg.card_line_changes, "loaded to what an older build wrote");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(load_from(&path).card_line_changes, "written back as stored");
-
-        let appearance = SETTINGS_TABS
-            .iter()
-            .position(|t| t.title == "Appearance")
-            .unwrap();
-        let TabBody::Values(rows) = SETTINGS_TABS[appearance].body else {
-            panic!("Appearance lists switches");
-        };
-        assert!(
-            rows.iter().all(|r| r.label != "Card line counts"),
-            "no row edits it"
-        );
-        assert_eq!(
-            rows.last().map(|r| r.kind),
-            Some(SettingKind::HideDraftPrs),
-            "Appearance ends on DRAFT PULL REQUESTS"
-        );
-    }
-
-    /// The BLACK BACKGROUND: on out of the box, toggled off from its
-    /// Appearance row (the terminal's own background shows), persisted
-    /// under `black_background`; a config predating the key turns it on,
-    /// and a saved `false` is honoured.
-    #[test]
-    fn black_background_default_on_toggle_and_persist() {
-        let mut cfg = Config::default();
-        assert!(cfg.black_background);
-        let (tab, row) = locate(SettingKind::BlackBackground).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        cfg.cycle(tab, row, 0);
-        assert!(!cfg.black_background);
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(!load_from(&path).black_background);
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("black_background"), Some(&serde_json::json!(false)));
-
-        let older: Config = serde_json::from_str("{}").unwrap();
-        assert!(
-            older.black_background,
-            "a config predating the key turns it on"
-        );
-    }
-
     /// SPOTIFY IN FOOTER: on out of the box, toggled off from its
-    /// Appearance row, persisted under `spotify`; a config predating the
+    /// General row, persisted under `spotify`; a config predating the
     /// key turns it on, and a saved `false` is honoured.
     #[test]
     fn spotify_default_on_toggle_and_persist() {
         let mut cfg = Config::default();
         assert!(cfg.spotify);
         let (tab, row) = locate(SettingKind::Spotify).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
+        assert_eq!(SETTINGS_TABS[tab].title, "General");
         cfg.cycle(tab, row, 0);
         assert!(!cfg.spotify);
 
@@ -4805,48 +4047,16 @@ mod tests {
         assert!(older.spotify, "a config predating the key turns it on");
     }
 
-    /// The QUICK PROMPT's focus toggle: off unless the user turns it on,
-    /// and persisted under its own key (a missed `obj.insert` would let the
-    /// row toggle on screen and read back off on the next launch).
-    #[test]
-    fn quick_prompt_focus_toggles_off_by_default_and_persists() {
-        let mut cfg = Config::default();
-        assert!(
-            !cfg.quick_prompt_focus,
-            "a quick prompt stays out of the way"
-        );
-        assert_eq!(cfg.value_label(SettingKind::QuickPromptFocus), "off");
-
-        let (tab, row) = locate(SettingKind::QuickPromptFocus).unwrap();
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.quick_prompt_focus);
-        assert_eq!(cfg.value_label(SettingKind::QuickPromptFocus), "on");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(load_from(&path).quick_prompt_focus);
-
-        // A config predating the key reads as off.
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(!cfg.quick_prompt_focus);
-    }
-
-    /// FOLLOW NEW SESSION starts on, sits under the QUICK PROMPT's Focus
-    /// row on the Agents tab, toggles like any bool and persists under its
-    /// own key; a config predating the key reads as on.
+    /// FOLLOW NEW SESSION starts on, leads General's Launching rows,
+    /// toggles like any bool and persists under its own key; a config
+    /// predating the key reads as on.
     #[test]
     fn follow_new_session_is_on_by_default_and_persists() {
         let mut cfg = Config::default();
         assert!(cfg.follow_new_session, "a launch lands on its new card");
         assert_eq!(cfg.value_label(SettingKind::FollowNewSession), "on");
         let (tab, row) = locate(SettingKind::FollowNewSession).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Agents");
-        assert_eq!(
-            locate(SettingKind::QuickPromptFocus),
-            Some((tab, row - 1)),
-            "beside the Focus row that outranks it"
-        );
+        assert_eq!((SETTINGS_TABS[tab].title, row), ("General", 0));
 
         cfg.cycle(tab, row, 0);
         assert!(!cfg.follow_new_session);
@@ -4891,10 +4101,6 @@ mod tests {
             cfg.cycle(tab, row, delta);
         }
         assert!(cfg.projects.is_empty());
-        assert!(
-            !cfg.set_text(SettingKind::RunCommand, "npm run dev"),
-            "not a top-level row"
-        );
         assert!(
             !cfg.set_project_text(demo, SettingKind::Theme, "dark"),
             "not a project row"
@@ -4974,11 +4180,9 @@ mod tests {
         );
         assert_eq!(cfg.value_label(SettingKind::OpenCommand), "not set");
 
-        // A typed row: cycling its tab row changes nothing, and the
-        // top-level setter is not its.
+        // A typed row: cycling its tab row changes nothing.
         cfg.cycle(tab, row, 0);
         assert!(cfg.projects.is_empty());
-        assert!(!cfg.set_text(SettingKind::OpenCommand, "open x"));
 
         assert!(cfg.set_project_text(
             demo,
@@ -5023,7 +4227,7 @@ mod tests {
         use SettingsRow::{Blank, Project, Setting};
         let tab = project_tab();
         assert_eq!(SETTINGS_TABS[tab].title, "Projects");
-        assert!(tab < hotkeys_tab());
+        assert!(tab < keys_tab());
         let n = PROJECT_SETTINGS.len();
         let mut rows = vec![Project(0)];
         rows.extend((0..n).map(Setting));
@@ -5073,7 +4277,7 @@ mod tests {
             TabBody::Values(rows) | TabBody::Project(rows) => {
                 rows.iter().all(|row| row.label != "Key combo display")
             }
-            TabBody::Hotkeys | TabBody::Agents => true,
+            TabBody::Keys | TabBody::Accounts => true,
         }));
 
         let dir = tempfile::tempdir().unwrap();
@@ -5149,71 +4353,6 @@ mod tests {
         assert_eq!(cfg.project(demo).worktree_containers, "stop");
     }
 
-    /// PRESET TEXT: a Sessions row after the sounds, `prefix` by default,
-    /// cycling the three sides and persisted under `preset_text`; a hand
-    /// edit off the list reads as the default, and `both` as the long
-    /// label.
-    #[test]
-    fn preset_text_is_prefix_by_default_on_the_sessions_tab_and_cycles_the_sides() {
-        let mut cfg = Config::default();
-        assert_eq!(
-            cfg.preset_text(),
-            PresetText::Prefix,
-            "one box, before the task"
-        );
-        assert_eq!(cfg.value_label(SettingKind::PresetText), "prefix");
-        assert_eq!(
-            PRESET_TEXTS.to_vec(),
-            PresetText::ALL.map(PresetText::as_str).to_vec(),
-            "the row cycles every side, in the enum's order"
-        );
-
-        let (tab, row) = locate(SettingKind::PresetText).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Sessions");
-        let (sound_tab, sound_row) = locate(SettingKind::FeedbackSound).unwrap();
-        assert_eq!((sound_tab, sound_row + 1), (tab, row), "after the sounds");
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.preset_text(), PresetText::Postfix);
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.preset_text(), PresetText::Both);
-        assert_eq!(cfg.value_label(SettingKind::PresetText), "prefix & postfix");
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.preset_text(), PresetText::Prefix, "wraps");
-        cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.preset_text(), PresetText::Both, "← steps back");
-        cfg.cycle(tab, row, 0);
-        assert_eq!(cfg.preset_text(), PresetText::Prefix, "Enter steps on");
-
-        cfg.cycle(tab, row, -1);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(load_from(&path).preset_text, "prefix & postfix");
-        assert_eq!(load_from(&path).preset_text(), PresetText::Both);
-
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(
-            cfg.preset_text(),
-            PresetText::Prefix,
-            "unknown to an older file"
-        );
-        let cfg: Config = serde_json::from_str(r#"{"preset_text": "both"}"#).unwrap();
-        assert_eq!(cfg.preset_text(), PresetText::Both);
-        assert_eq!(cfg.value_label(SettingKind::PresetText), "prefix & postfix");
-        let mut cfg: Config = serde_json::from_str(r#"{"preset_text": "suffix"}"#).unwrap();
-        assert_eq!(
-            cfg.preset_text(),
-            PresetText::Prefix,
-            "an unknown value is the default"
-        );
-        cfg.cycle(tab, row, 1);
-        assert_eq!(
-            cfg.preset_text(),
-            PresetText::Postfix,
-            "and cycles on from it"
-        );
-    }
-
     /// PR & ISSUE COUNTS: retired with the header always counting. The
     /// key an older build wrote (`pr_issue_counts`, on by default) still
     /// loads to what it wrote and is written back as stored, but no tab
@@ -5234,7 +4373,7 @@ mod tests {
             TabBody::Values(rows) | TabBody::Project(rows) => {
                 rows.iter().all(|r| r.label != "PR & issue counts")
             }
-            TabBody::Hotkeys | TabBody::Agents => true,
+            TabBody::Keys | TabBody::Accounts => true,
         }));
     }
 
@@ -5369,7 +4508,7 @@ mod tests {
         assert_eq!(saved["harnesses"]["grok"]["effort_default"], "high");
     }
 
-    /// A second Claude account's `env` survives the Agents tab saving its
+    /// A second Claude account's `env` survives the Accounts tab saving its
     /// section — the map is written back typed — and makes it a place a
     /// Claude session can be carried to; a Codex row has nowhere to go.
     #[test]
@@ -5790,14 +4929,14 @@ mod tests {
         let mut cfg = load_from(&path);
         assert!(!cfg.git_init_on_create);
         assert_eq!(cfg.session_idle_timeout, "15m");
-        cfg.palette_enter_attaches = false;
+        cfg.spotify = false;
         cfg.git_init_on_create = true;
         cfg.session_idle_timeout = "1h".into();
         cfg.save_to(&path).unwrap();
 
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["palette_enter_attaches"], false);
+        assert_eq!(saved["spotify"], false);
         assert_eq!(saved["git_init_on_create"], true);
         assert_eq!(saved["session_idle_timeout"], "1h");
         assert_eq!(saved["future_daemon_flag"], true);
@@ -5828,7 +4967,7 @@ mod tests {
             }
 
             // A value tab carries headers exactly when its rows name
-            // groups; Hotkeys and Agents always do.
+            // groups; Keys and Accounts always do.
             for (t, tab) in SETTINGS_TABS.iter().enumerate() {
                 let headers = settings_rows(t, 1)
                     .into_iter()
@@ -5839,43 +4978,82 @@ mod tests {
                         let grouped = settings.iter().any(|s| !s.group.is_empty());
                         assert_eq!(headers > 0, grouped, "{}", tab.title);
                     }
-                    TabBody::Hotkeys => assert!(headers > 0, "hotkeys tab groups its rows"),
-                    TabBody::Agents => assert!(headers > 0, "agents tab groups its rows"),
+                    TabBody::Keys => assert!(headers > 0, "the Keys tab groups its rows"),
+                    TabBody::Accounts => assert!(headers > 0, "the Accounts tab groups its rows"),
                 }
             }
         });
     }
 
+    /// Settings is five tabs, and General holds what is left of orion's
+    /// own switches under three groups.
     #[test]
-    fn agents_tab_groups_its_rows_per_harness() {
+    fn settings_is_five_tabs_and_general_has_three_groups() {
+        let titles: Vec<&str> = SETTINGS_TABS.iter().map(|t| t.title).collect();
+        assert_eq!(
+            titles,
+            ["General", "Accounts", "Projects", "Presets", "Keys"]
+        );
+        let general: Vec<(&str, &str)> = GENERAL_SETTINGS
+            .iter()
+            .map(|s| (s.group, s.label))
+            .collect();
+        assert_eq!(
+            general,
+            [
+                ("Launching", "Follow new session"),
+                ("Launching", "Idle session timeout"),
+                ("Launching", "Auto-fix my PRs"),
+                ("Launching", "Open files in"),
+                ("Sounds", "Turn finished"),
+                ("Sounds", "Needs you"),
+                ("Look", "Theme"),
+                ("Look", "Animations"),
+                ("Look", "Spotify in footer"),
+            ]
+        );
+        let project: Vec<&str> = PROJECT_SETTINGS.iter().map(|s| s.label).collect();
+        assert_eq!(
+            project,
+            [
+                "Base branch",
+                "Run command",
+                "Open command",
+                "On worktree delete",
+                "Linear key"
+            ]
+        );
+    }
+
+    #[test]
+    fn accounts_tab_groups_its_rows_per_harness() {
         with_empty_config(|| {
-            let tab = agents_tab();
-            assert_eq!(SETTINGS_TABS[tab].title, "Agents");
+            let tab = accounts_tab();
+            assert_eq!(SETTINGS_TABS[tab].title, "Accounts");
             let cfg = Config::load();
 
-            // Read the rows back the way the screen shows them: a header,
-            // then the labels under it, with a blank between sections.
-            let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+            // Read the rows back the way the screen shows them: the head's
+            // rows first, under no header, then a header and the labels
+            // under it, with a blank between sections.
+            let mut sections: Vec<(String, Vec<String>)> = vec![(String::new(), Vec::new())];
             for row in settings_rows(tab, 1) {
                 match row {
                     SettingsRow::Header(title) => sections.push((title, Vec::new())),
                     SettingsRow::Setting(i) => {
-                        let label = match (AGENTS_HEAD.get(i), cfg.account_row(i)) {
+                        let label = match (ACCOUNTS_HEAD.get(i), cfg.account_row(i)) {
                             (Some(spec), _) => spec.label.to_string(),
                             (None, Some(AccountRow::Account(id))) => id,
                             (None, Some(AccountRow::Add)) => "Add account".to_string(),
                             (None, None) => cfg
                                 .agent_row(i)
                                 .map(|(_, field)| field.label().to_string())
-                                .expect("every Agents row resolves"),
+                                .expect("every Accounts row resolves"),
                         };
-                        sections
-                            .last_mut()
-                            .expect("every Agents row sits under a header")
-                            .1
-                            .push(label);
+                        sections.last_mut().unwrap().1.push(label);
                     }
-                    SettingsRow::Blank => assert!(!sections.is_empty(), "no leading blank"),
+                    SettingsRow::Blank => {
+                        assert!(!sections[0].1.is_empty(), "no leading blank")
+                    }
                     SettingsRow::Project(_) | SettingsRow::Hotkey(_) | SettingsRow::Note(_) => {
                         unreachable!()
                     }
@@ -5884,15 +5062,7 @@ mod tests {
             assert_eq!(
                 sections,
                 vec![
-                    (
-                        "Quick prompt".to_string(),
-                        vec![
-                            "Agent".to_string(),
-                            "Focus".to_string(),
-                            "Follow new".to_string(),
-                            "New worktree".to_string()
-                        ]
-                    ),
+                    (String::new(), vec!["New agents on".to_string()]),
                     (
                         "Claude accounts".to_string(),
                         vec!["claude".to_string(), "Add account".to_string()]
@@ -5945,11 +5115,11 @@ mod tests {
         });
     }
 
-    /// A new CLI in the registry grows its own Agents section — model and
+    /// A new CLI in the registry grows its own Accounts section — model and
     /// effort rows included — with no code change, and the picker offers
     /// it in the same order.
     #[test]
-    fn agents_tab_grows_a_section_per_registry_entry() {
+    fn accounts_tab_grows_a_section_per_registry_entry() {
         with_empty_config(|| {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.json");
@@ -5968,7 +5138,7 @@ mod tests {
             )
             .unwrap();
             with_config_path(path, || {
-                let tab = agents_tab();
+                let tab = accounts_tab();
                 let cfg = Config::load();
                 let sections: Vec<String> = settings_rows(tab, 1)
                     .into_iter()
@@ -5980,7 +5150,6 @@ mod tests {
                 assert_eq!(
                     sections,
                     vec![
-                        "Quick prompt",
                         "Claude accounts",
                         "Claude",
                         "Codex",
@@ -5998,7 +5167,7 @@ mod tests {
                 assert_eq!(cfg.agent_value("agy", HarnessField::Effort), "default");
                 assert_eq!(
                     tab_len(tab, 1),
-                    AGENTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
+                    ACCOUNTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
                 );
                 // ... and the picker offers it after the built-ins.
                 let offered = cfg.offered_harnesses();
@@ -6030,7 +5199,7 @@ mod tests {
                 assert!(tab_len(t, 1) > 0, "{} is empty", tab.title);
                 assert!(!tab.title.is_empty());
             }
-            assert_eq!(tab_len(hotkeys_tab(), 1), crate::keymap::ACTIONS.len());
+            assert_eq!(tab_len(keys_tab(), 1), crate::keymap::ACTIONS.len());
         });
     }
 
@@ -6070,8 +5239,8 @@ mod tests {
         Config::default().save_to(&path).unwrap();
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["palette_enter_attaches"], true);
-        assert_eq!(saved["git_init_on_create"], true);
+        assert_eq!(saved["follow_new_session"], true);
+        assert_eq!(saved["spotify"], true);
         assert_eq!(saved["session_idle_timeout"], "5m");
     }
 }

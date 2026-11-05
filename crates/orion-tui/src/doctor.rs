@@ -1,7 +1,7 @@
 //! `orion doctor`: what this machine has of what orion leans on, a line
 //! each — git, gh and its sign-in, fresh (or the editor `ORION_EDITOR`
-//! names), the **Open in app** editor, Orion.app and the Ghostty it is made
-//! from, the CLI of every agent turned on, and the project's
+//! names), the editor app files open in (**Open files in**), Orion.app
+//! and the Ghostty it is made from, the CLI of every agent turned on, and the project's
 //! `LINEAR_API_KEY` (where it was found, never the key), and the docker
 //! compose projects whose checkout is gone — with the command that fixes
 //! whatever is missing. It never installs anything itself:
@@ -178,8 +178,8 @@ pub fn checks(cfg: &Config, m: &Machine) -> Vec<Check> {
     out
 }
 
-/// What a check's `fix:` says for an install: the line Settings → Tools
-/// and setup run on `i`, else the page to get it from.
+/// What a check's `fix:` says for an install: the line setup and the
+/// settings rows run on `i`, else the page to get it from.
 fn plan_fix(plan: crate::install::Plan) -> String {
     if plan.line.is_empty() {
         plan.link.into()
@@ -257,7 +257,7 @@ fn editor(m: &Machine) -> Check {
     }
 }
 
-/// **Open in app**: the app `⌘O` hands a file to, as this machine
+/// **Open files in**: the app `⌘O` hands a file to, as this machine
 /// resolves the setting.
 fn open_in_app(cfg: &Config, m: &Machine) -> Check {
     use crate::outside_editor::{resolve, Choice, Places};
@@ -268,18 +268,18 @@ fn open_in_app(cfg: &Config, m: &Machine) -> Check {
     let choice = Choice::parse(&cfg.outside_editor);
     match resolve(choice, &places) {
         Ok(target) => Check::new(
-            "Open in app",
+            "Open files in",
             Status::Ok,
             match choice {
                 Choice::Auto => format!("auto → {}", target.name),
                 _ => target.name.to_string(),
             },
         ),
-        Err(why) => Check::new("Open in app", Status::Missing, why).fix(
+        Err(why) => Check::new("Open files in", Status::Missing, why).fix(
             m.tools()
                 .app_plan(choice.as_str())
                 .map(plan_fix)
-                .unwrap_or_else(|| "set Open in app to auto in Settings → Tools".into()),
+                .unwrap_or_else(|| "set Open files in to auto in Settings → General".into()),
         ),
     }
 }
@@ -331,7 +331,7 @@ fn agents(cfg: &Config, m: &Machine) -> Vec<Check> {
         return vec![Check::new(
             "Agents",
             Status::Skipped,
-            "none turned on — Settings → Agents",
+            "none turned on — Settings → Accounts",
         )];
     }
     let tools = m.tools();

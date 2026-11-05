@@ -331,7 +331,7 @@ pub struct FormError {
 /// The PRESET EDITOR: one form for creating (`editing == None`) or editing
 /// (`editing == Some(index)`) an AGENT PRESET. Model and effort hold a
 /// choice label from `config::model_choices` / `effort_choices`, so
-/// `DEFAULT_CHOICE` means "follow Settings → Agents" and becomes None on save.
+/// `DEFAULT_CHOICE` means "follow Settings → Accounts" and becomes None on save.
 #[derive(Debug, Clone)]
 pub struct AgentPresetEditor {
     /// Where the list this form came from launches into; Esc and save
@@ -773,7 +773,7 @@ pub(crate) fn reopen_presets_list(
 /// The PRESET EDITOR: blank for `Ctrl+a`, pre-filled from the list's row
 /// for `Ctrl+e` — from the manager or a picker alike; `quick` is the
 /// picker's box, to come back to (`AgentPresetEditor::quick`). Its boxes
-/// are the side(s) **Preset text** (Settings → Sessions) names, plus any a
+/// are the side(s) `preset_text` (a hand-edited key) names, plus any a
 /// stored preset already holds text on.
 pub(crate) fn open_agent_preset_editor(
     app: &mut App,
@@ -902,7 +902,7 @@ pub(crate) fn open_delete_preset_confirm(app: &mut App, view: &AgentPresetsView)
 /// The list's Enter: ask for the optional task that the preset's prefix and
 /// postfix will wrap — or, for a `skip_task` preset, launch on them at once,
 /// through the same submit an empty task box takes. A harness switched off
-/// in Settings → Agents is refused here, where the row is, rather than by a
+/// in Settings → Accounts is refused here, where the row is, rather than by a
 /// failed spawn later.
 pub(crate) fn open_agent_preset_task(
     app: &mut App,
@@ -914,7 +914,7 @@ pub(crate) fn open_agent_preset_task(
     };
     if !crate::config::Config::load().preset_harness_usable(&preset) {
         app.flash = Some(crate::flash::Flash::setup(format!(
-            "{} is turned off in Settings → Agents",
+            "{} is turned off in Settings → Accounts",
             preset
                 .custom_harness
                 .as_deref()
@@ -946,7 +946,7 @@ pub(crate) fn open_agent_preset_task(
 /// round its text (`QuickLaunch::inline_preset`) — or, for a `skip_task`
 /// preset picked over an empty box, launch it as Enter on that box would;
 /// typed text stays the user's to send. A harness switched off in
-/// Settings → Agents is refused here, where the row is, rather than by a
+/// Settings → Accounts is refused here, where the row is, rather than by a
 /// failed spawn later.
 fn apply_preset_to_quick_prompt(
     app: &mut App,
@@ -961,7 +961,7 @@ fn apply_preset_to_quick_prompt(
     let cfg = crate::config::Config::load();
     if !cfg.preset_harness_usable(&preset) {
         app.flash = Some(crate::flash::Flash::setup(format!(
-            "{} is turned off in Settings → Agents",
+            "{} is turned off in Settings → Accounts",
             preset
                 .custom_harness
                 .as_deref()

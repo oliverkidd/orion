@@ -977,7 +977,7 @@ fn draw_dormant_divider(buf: &mut Buffer, r: Rect, th: Theme) {
 }
 
 /// The line under an EMPTY BAND's rule — a checkout with nothing running
-/// in it, drawn only with **Show all worktrees** on — in place of the row
+/// in it — in place of the row
 /// of cards it has none of: [`EMPTY_BAND`], dim, and in the accent while
 /// the cursor is on the band with the keys on the grid. A click on it is
 /// a click on the band (the band's whole area).

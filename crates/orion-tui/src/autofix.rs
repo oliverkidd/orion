@@ -19,7 +19,7 @@
 //!   session at work in a checkout of the PR's branch — any, not only an
 //!   `autofix-<n>` — holds the ask back until it is done, and a PR already
 //!   being asked about is not asked about twice.
-//! * **Sending, unasked.** **Auto-fix PRs** (`Config::pr_autofix`, on by
+//! * **Sending, unasked.** **Auto-fix my PRs** (`Config::pr_autofix`, on by
 //!   default) sends the agent the moment a breakage has settled — no modal,
 //!   nothing to confirm — until [`AUTO_ATTEMPTS`] tries in a row have not
 //!   turned the PR green, when it stops and says so (a flash, and a desktop
@@ -76,7 +76,7 @@ pub const SETTLE_LIMIT: Duration = Duration::from_secs(20 * 60);
 /// asks.
 pub const AUTO_ATTEMPTS: u8 = 3;
 
-/// **Auto-fix PRs** (Settings → Review): on or off.
+/// **Auto-fix my PRs** (Settings → General): on or off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
     #[default]

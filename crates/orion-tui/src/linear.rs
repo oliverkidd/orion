@@ -30,10 +30,10 @@
 //! The key is the project's `LINEAR_API_KEY` (`.env.local`, then `.env`,
 //! then the process env). Only that one name is read. It is never logged,
 //! never stored, never shown, and sent only to `api.linear.app` through
-//! `curl --config -`. Settings → Linear holds **Link PRs to Linear** and
-//! **Linear account** (whose issues are listed; empty = the owner of that
-//! key); each project's **Linear key** on Settings → Projects says where
-//! its key was found, and `Enter` there asks Linear whose key it is
+//! `curl --config -`. A PR is always linked to its ticket; the hand-edited
+//! `linear_assignee_email` says whose issues are listed (empty = the owner
+//! of that key); each project's **Linear key** on Settings → Projects
+//! says where its key was found, and `Enter` there asks Linear whose key it is
 //! ([`key_status`], [`test_connection`]).
 
 use std::borrow::Cow;
@@ -711,7 +711,7 @@ pub struct LinearList {
     pub list: Vec<LinearIssue>,
     pub states: HashMap<String, Vec<LinearState>>,
     /// The configured user — who `⌘I`'s `Me` assigns to. `None` when
-    /// Linear knows nobody by Settings → Linear account.
+    /// Linear knows nobody by `linear_assignee_email`.
     pub me: Option<LinearUser>,
     /// The members of each of the configured user's teams, by team id and
     /// then by name: who else `⌘I` can assign to.
@@ -2175,9 +2175,6 @@ pub(crate) fn remember_submit(app: &mut App, launch: &QuickLaunch) {
         return;
     };
     start_issues(app, launch, &batch.issues);
-    if !crate::config::Config::load().linear_auto_attach {
-        return;
-    }
     let (project, branch) = match &launch.target {
         QuickTarget::NewWorktree {
             project, branch, ..
@@ -3892,7 +3889,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     }
     if in_tab == 0 {
         let text = if failed {
-            "couldn't list Linear issues — check LINEAR_API_KEY and Settings → Linear account"
+            "couldn't list Linear issues — check LINEAR_API_KEY and linear_assignee_email"
         } else if inflight || app.linear_tx.is_some() && !app.linear.contains_key(&view.project) {
             "asking Linear…"
         } else if view.tab == LinearTab::Mine {
@@ -4794,7 +4791,7 @@ fn done_states() -> String {
 }
 
 /// Both tabs' issues in one ask, as aliased lists: `mine`, assigned to
-/// the key's owner — or to `email`, when Settings → Linear account names
+/// the key's owner — or to `email`, when `linear_assignee_email` names
 /// someone — and `others`, open issues in that person's teams assigned to
 /// someone else or to nobody; then `mineDone` and `othersDone`, the same
 /// two cut to the issues done lately ([`done_states`]). With them `me`,
@@ -5017,7 +5014,7 @@ fn user_at(value: &serde_json::Value) -> Option<LinearUser> {
 }
 
 /// The configured user in a [`fetch_lists`] answer: the `viewer`, or the
-/// one user Settings → Linear account's email found.
+/// one user `linear_assignee_email`'s email found.
 fn parse_me(json: &serde_json::Value) -> Option<LinearUser> {
     let me = json.pointer("/data/me")?;
     user_at(me.pointer("/nodes/0").unwrap_or(me))
@@ -6801,7 +6798,7 @@ pub(crate) mod tests {
             fetched.members["t1"],
             [user("u2", "Bo"), user("u3", "cy"), user("u1", "me")]
         );
-        // With Settings → Linear account set, `me` is the one user found.
+        // With `linear_assignee_email` set, `me` is the one user found.
         let by_email = serde_json::json!({"data": {
             "mine": {"nodes": []}, "others": {"nodes": []},
             "me": {"nodes": [{"id": "u2", "displayName": "Bo"}]}
@@ -6847,7 +6844,7 @@ pub(crate) mod tests {
         assert!(fetched.list[0].completed_at.is_empty(), "open");
     }
 
-    /// The one ask names both lists; with Settings → Linear account set,
+    /// The one ask names both lists; with `linear_assignee_email` set,
     /// that person stands in for the key's owner on both.
     #[test]
     fn the_lists_query_asks_for_mine_and_the_teams_others() {

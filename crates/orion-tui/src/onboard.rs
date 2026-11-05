@@ -28,7 +28,7 @@ use ratatui::Frame;
 
 use crate::app::{App, Overlay};
 use crate::claude_accounts::NewAccount;
-use crate::config::{program_installed, AccountRow, Config, SettingKind};
+use crate::config::{persist, program_installed, AccountRow, Config, SettingKind};
 use crate::install::{Plan, Tools};
 use crate::keymap::{Action, Keymap};
 use crate::text_input::TextInput;
@@ -1214,12 +1214,6 @@ fn toggle(app: &mut App, out: &mut Vec<ClientRequest>) {
         Page::Welcome | Page::Project | Page::Ready => {}
     }
     app.dirty = true;
-}
-
-pub(crate) fn persist(edit: impl FnOnce(&mut Config)) {
-    let mut cfg = Config::load();
-    edit(&mut cfg);
-    let _ = cfg.try_save();
 }
 
 #[cfg(test)]

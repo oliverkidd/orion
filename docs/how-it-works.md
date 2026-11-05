@@ -345,10 +345,10 @@
   Bash or Monitor, a Codex shell command; the clock restarts when it ends), and terminals with a
   command running are all spared, and a reaped agent revives on the next attach with its
   conversation resumed. Until then its row's STATUS DOT is gray,
-  whatever its last status was — a cold session shows what it last did, not what it is doing. Both halves of the PREWARM POOL are
-  switchable — `prewarm_agents` and `prewarm_sessions`, `true` by default, on the SETTINGS OVERLAY's
-  Sessions tab or by hand in CONFIG.JSON (see [Configuration](configuration.md)); switching the pool
-  off drains its spares on the next sweep — and a warm spare nobody claims inside 15 min is reaped on
+  whatever its last status was — a cold session shows what it last did, not what it is doing. A
+  worktree's dead sessions always boot when the selection rests on it; the warm spare is
+  `prewarm_agents`, `true` by default and switched off by hand in CONFIG.JSON (see
+  [Configuration](configuration.md)), which drains its spares on the next sweep — and a warm spare nobody claims inside 15 min is reaped on
   its own, because it holds real memory and its context goes stale. A spare is a bare CLI at its
   prompt, so the CLI's own session list (Claude's `/list-agents`) shows it beside your sessions,
   named after the directory. The IDLE REAPER's check is a 15 s sweep (`ORION_IDLE_REAP_MS`), so the real
