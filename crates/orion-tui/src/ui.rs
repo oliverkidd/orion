@@ -1684,17 +1684,16 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         } else {
                             let spec = crate::config::setting_at(tab, *i)
                                 .expect("settings_rows indexes this tab's settings");
-                            let value = if spec.kind.is_project() {
-                                app.settings_project(tab, *i)
-                                    .map(|p| cfg.project(&p.repo_path).value_label(spec.kind))
-                                    .unwrap_or_else(|| "n/a".into())
-                            } else if let Some(status) = crate::linear::status_value(app, spec.kind)
-                            {
-                                // The LINEAR TAB's status rows: the app's
-                                // to say, never the file's.
-                                status
-                            } else {
-                                cfg.value_label(spec.kind)
+                            // A PROJECTS TAB row is its project's; the
+                            // Linear key's status is the app's to say,
+                            // never the file's.
+                            let value = match app.settings_project(tab, *i) {
+                                Some(p) if spec.kind.is_status() => {
+                                    crate::linear::key_status(app, &p.repo_path)
+                                }
+                                Some(p) => cfg.project(&p.repo_path).value_label(spec.kind),
+                                None if spec.kind.is_project() => "n/a".into(),
+                                None => cfg.value_label(spec.kind),
                             };
                             (spec.label.to_string(), value, "")
                         };

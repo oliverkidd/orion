@@ -56,7 +56,7 @@ orion worktree [name] [--base <ref>]  # move the current session into a worktree
                           # creating the branch if it's new (agents run this when you ask for a
                           # worktree; no name invents one; --base picks a new branch's start point,
                           # a branch name meaning origin's fetched copy — main is origin/main;
-                          # without it the worktree_base_branch setting, else origin's default)
+                          # without it the project's Base branch, else origin's default)
 orion spawn <task> [--kind <claude|codex|cursor|grok|opencode>]  # start a new agent session beside the current
                           # one, in the same worktree, opening on <task> (agents run this when you
                           # ask for a new orion session; --kind defaults to this session's harness;

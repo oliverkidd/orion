@@ -1,6 +1,6 @@
 //! WORKTREE CONTAINERS: after orion deletes a worktree, stop or tear down
 //! the docker compose projects that were started in it, as the
-//! `worktree_containers` SETTING says (`orion_core::compose`). Off by
+//! project's **On worktree delete** says (`orion_core::compose`). Off by
 //! default. Projects are found by the directory compose recorded on their
 //! containers, never by name, so a project only goes when every one of its
 //! containers was started inside the deleted checkout.

@@ -175,8 +175,8 @@ pub(crate) fn tick(app: &mut App) {
         return;
     };
     let quit = app.git_sync.quit.clone();
+    let base = app.tree.base_branch_at(&root);
     tokio::task::spawn_blocking(move || {
-        let base = crate::config::Config::load().worktree_base_branch;
         let outcome = sync(&root, &base, may_move, &quit);
         let _ = tx.send(Answer { project, outcome });
     });

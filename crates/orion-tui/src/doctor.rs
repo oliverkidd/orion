@@ -389,14 +389,30 @@ fn linear(m: &Machine) -> Check {
 }
 
 /// docker compose projects whose every container was started in a
-/// directory that is gone — a worktree deleted while **Worktree
-/// containers** was off, or outside orion — with the commands that tear
-/// them down. Never required: only checkouts that run compose have any.
+/// directory that is gone — a worktree deleted while its project's **On
+/// worktree delete** was off, or outside orion — with the commands that
+/// tear them down. Never required: only checkouts that run compose have
+/// any.
 fn containers(cfg: &Config, m: &Machine) -> Check {
     use orion_core::compose;
     const NAME: &str = "Containers";
-    let policy = compose::WorktreeContainers::parse(&cfg.worktree_containers);
-    let setting = format!("Worktree containers: {}", policy.as_str());
+    let cleaning: Vec<String> = cfg
+        .projects
+        .iter()
+        .map(|(repo, project)| (repo, project.containers()))
+        .filter(|(_, policy)| *policy != compose::WorktreeContainers::Off)
+        .map(|(repo, policy)| {
+            format!(
+                "{} {}",
+                orion_core::Project::folder_name(repo),
+                policy.as_str()
+            )
+        })
+        .collect();
+    let setting = match cleaning.as_slice() {
+        [] => "On worktree delete: off".to_string(),
+        some => format!("On worktree delete: {}", some.join(", ")),
+    };
     let Some(docker) = m.find("docker") else {
         return Check::new(NAME, Status::Skipped, "no docker CLI on PATH");
     };
@@ -424,8 +440,8 @@ fn containers(cfg: &Config, m: &Machine) -> Check {
         .map(|p| format!("docker compose -p {p} down --volumes"))
         .collect::<Vec<_>>()
         .join("; ");
-    let hint = if policy == compose::WorktreeContainers::Off {
-        " — Settings → General → Worktree containers cleans up on delete"
+    let hint = if cleaning.is_empty() {
+        " — Settings → Projects → On worktree delete cleans up on delete"
     } else {
         ""
     };
@@ -581,11 +597,14 @@ mod tests {
 
         let stubs = Stubs::new();
         stubs.program("docker", "printf 'live\\t/\\n'");
-        let cfg: Config = serde_json::from_str(r#"{"worktree_containers": "remove"}"#).unwrap();
+        let cfg: Config = serde_json::from_str(
+            r#"{"projects": {"/src/app": {"worktree_containers": "remove"}}}"#,
+        )
+        .unwrap();
         let check = containers(&cfg, &stubs.machine());
         assert_eq!(check.status, Status::Ok);
         assert!(
-            check.detail.ends_with("(Worktree containers: remove)"),
+            check.detail.ends_with("(On worktree delete: app remove)"),
             "{}",
             check.detail
         );

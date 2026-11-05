@@ -200,7 +200,7 @@ fn mark_seen(cfg: &mut Config) -> bool {
 }
 
 /// The Worktrees page's rows: Settings → General's, by kind.
-const WORKTREE_ROWS: &[SettingKind] = &[SettingKind::WorktreeBaseBranch, SettingKind::LinkEnvFiles];
+const WORKTREE_ROWS: &[SettingKind] = &[SettingKind::LinkEnvFiles];
 
 /// The Autofix page's rows: Settings → Review's Autofix group.
 const AUTOFIX_ROWS: &[SettingKind] = &[
@@ -455,7 +455,6 @@ pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint>
         Page::App => vec![keys::ENTER.hint_as("open as an app").kept()],
         Page::Worktrees | Page::Linear | Page::Autofix => {
             match setting_rows(page).get(view.row).map(|spec| spec.kind) {
-                Some(kind) if kind.is_status() => vec![keys::ENTER.hint_as("test").kept()],
                 Some(kind) if kind.is_text() => vec![keys::ENTER.hint_as("type it").kept()],
                 Some(kind) if is_switch(kind) => vec![keys::TOGGLE.hint().kept()],
                 _ => vec![keys::ENTER.hint_as("change").kept()],
@@ -1254,7 +1253,7 @@ fn settings_page(
         .iter()
         .map(|spec| match editing {
             Some((kind, input)) if *kind == spec.kind => format!("{}▌", input.as_str()),
-            _ => setting_value(app, cfg, spec.kind),
+            _ => cfg.value_label(spec.kind),
         })
         .collect();
     let cells: Vec<Vec<String>> = specs
@@ -1296,21 +1295,6 @@ fn settings_page(
             width,
             dim,
         );
-    }
-}
-
-/// A settings row's value in words: the LINEAR TAB's status rows as the
-/// app tells them, the rest as the overlay reads them.
-fn setting_value(app: &App, cfg: &Config, kind: SettingKind) -> String {
-    if let Some(status) = crate::linear::status_value(app, kind) {
-        return status;
-    }
-    match kind {
-        SettingKind::WorktreeBaseBranch => match cfg.worktree_base_branch.trim() {
-            "" => "auto — origin's default branch".into(),
-            name => name.to_string(),
-        },
-        _ => cfg.value_label(kind),
     }
 }
 
@@ -1392,11 +1376,9 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
             warn: missing,
         }
     };
-    let base = match cfg.worktree_base_branch.trim() {
-        "" => "origin's default branch".to_string(),
-        name => name.to_string(),
-    };
-    let key = crate::linear::status_value(app, SettingKind::LinearKey)
+    let key = app
+        .selected_project()
+        .map(|project| crate::linear::key_status(app, &project.repo_path))
         .filter(|status| status.starts_with("found"))
         .map(|status| format!(" · LINEAR_API_KEY {status}"))
         .unwrap_or_default();
@@ -1409,14 +1391,11 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
         },
         Chosen {
             what: "Worktrees",
-            value: format!(
-                "{} · new ones branch from {base}",
-                if cfg.link_env_files {
-                    ".env files linked"
-                } else {
-                    ".env files not linked"
-                }
-            ),
+            value: if cfg.link_env_files {
+                ".env files linked".into()
+            } else {
+                ".env files not linked".into()
+            },
             warn: false,
         },
         Chosen {
@@ -1611,11 +1590,9 @@ fn activate(app: &mut App) {
         Page::Editor => choose_editor_row(app, row),
         Page::App => app_step(app),
         // The overlay's rows, doing what Enter does there: a typed row
-        // opens for typing, a status row tests the connection, the rest
-        // flip or step.
+        // opens for typing, the rest flip or step.
         Page::Worktrees | Page::Linear | Page::Autofix => {
             match setting_rows(page).get(row).map(|spec| spec.kind) {
-                Some(kind) if kind.is_status() => crate::linear::test_connection(app),
                 Some(kind) if kind.is_text() => {
                     let input = TextInput::with_text(cfg.text_value(kind));
                     if let Some(Overlay::Onboard(view)) = &mut app.overlay {
@@ -2114,11 +2091,10 @@ mod tests {
         });
     }
 
-    /// The Worktrees page mirrors Settings → General's rows — the base
-    /// branch and linking `.env` files — and says where a fresh worktree
-    /// comes from: the box's own toggle is gone, and
-    /// `quick_prompt_new_worktree` is the Agents tab's, neither shown nor
-    /// flipped here.
+    /// The Worktrees page mirrors Settings → General's row — linking
+    /// `.env` files — and says where a fresh worktree comes from: the
+    /// box's own toggle is gone, and `quick_prompt_new_worktree` is the
+    /// Agents tab's, neither shown nor flipped here.
     #[test]
     fn the_worktrees_page_offers_its_settings_and_points_at_the_picker() {
         with_temp_config(|| {
@@ -2126,42 +2102,26 @@ mod tests {
             open(&mut app, &Config::load(), 0);
             to_page(&mut app, Page::Worktrees);
             let cfg = Config::load();
-            assert_eq!(page_rows(Page::Worktrees, &cfg), 2);
+            assert_eq!(page_rows(Page::Worktrees, &cfg), 1);
             let keymap = crate::keymap::Keymap::default();
             let shot = draw_text(&mut app);
             let text = words(&shot);
-            assert!(
-                text.contains("› Worktree base branch auto — origin's default branch"),
-                "{text}"
-            );
-            assert!(text.contains("Link .env files on"), "{text}");
+            assert!(text.contains("› Link .env files on"), "{text}");
             let key = crate::hints::key(&keymap, crate::keymap::Action::SelectLaunchWorktree)
                 .expect("bound by default");
             assert!(
                 text.contains(&format!("{key} in its box and pick + new worktree")),
                 "{text}"
             );
-            assert!(
-                text.contains("Branch new worktrees start from"),
-                "the row's own explanation: {text}"
-            );
-            assert!(shot.contains("Enter type it"), "{shot}");
+            assert!(shot.contains("Space toggle"), "{shot}");
 
-            press(&mut app, KeyCode::Down);
             press(&mut app, KeyCode::Char(' '));
             let cfg = Config::load();
-            assert!(!cfg.link_env_files, "row 1 is the .env link");
+            assert!(!cfg.link_env_files, "the row is the .env link");
             assert!(
                 !cfg.quick_prompt_new_worktree,
                 "the Agents tab's key is left alone"
             );
-            press(&mut app, KeyCode::Up);
-            press(&mut app, KeyCode::Enter);
-            for c in "develop".chars() {
-                press(&mut app, KeyCode::Char(c));
-            }
-            press(&mut app, KeyCode::Enter);
-            assert_eq!(Config::load().worktree_base_branch, "develop");
         });
     }
 
@@ -2310,12 +2270,7 @@ mod tests {
                 at += found;
             }
             let inner = words(&shot);
-            for needle in [
-                "Link PRs to Linear on",
-                "Linear account the key's owner",
-                "Connection",
-                "API key no project selected",
-            ] {
+            for needle in ["Link PRs to Linear on", "Linear account the key's owner"] {
                 assert!(inner.contains(needle), "{needle}:\n{shot}");
             }
             assert!(

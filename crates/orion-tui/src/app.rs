@@ -2994,6 +2994,19 @@ impl Tree {
                     .any(|w| w.project_id == p.id && w.path == path)
         })
     }
+
+    /// The repo of the project the checkout at `path` belongs to.
+    pub fn repo_of(&self, path: &std::path::Path) -> Option<std::path::PathBuf> {
+        self.project_at_path(path).map(|p| p.repo_path.clone())
+    }
+
+    /// The **Base branch** (Settings → Projects) of the project the
+    /// checkout at `path` belongs to, read fresh from the file — for a
+    /// one-off press; a beat reads it off the loop
+    /// ([`crate::config::base_branch_of`]).
+    pub fn base_branch_at(&self, path: &std::path::Path) -> String {
+        crate::config::base_branch_of(self.repo_of(path).as_deref())
+    }
 }
 
 /// What the pane's terminal emulation reports back beyond the screen

@@ -86,18 +86,18 @@ const MACOS_SOUNDS_DIR: &str = "/System/Library/Sounds";
 
 pub use orion_core::harness::DEFAULT_CHOICE;
 
-/// What the overlay shows for an empty `worktree_base_branch`: the daemon
-/// picks origin's default branch itself. Display only — the file holds
-/// `""`, never this word.
+/// What the overlay shows for a project's empty **Base branch**: the
+/// daemon picks origin's default branch itself. Display only — the file
+/// holds nothing, never this word.
 pub const AUTO_CHOICE: &str = "auto";
 
 /// What the Linear account row shows while it names nobody: the owner of
 /// the project's `LINEAR_API_KEY`.
 pub const LINEAR_KEY_OWNER: &str = "the key's owner";
-/// The Project tab with no project to list.
+/// The Projects tab with no project to list.
 pub const NO_PROJECTS: &str = "no projects yet — each one you add gets its rows here";
 
-/// What the Project tab's **Run command** and **Open command** rows show
+/// What the Projects tab's **Run command** and **Open command** rows show
 /// while they are empty: there is nothing to run then.
 pub const NO_COMMAND: &str = "not set";
 
@@ -360,7 +360,7 @@ pub struct SettingSpec {
 }
 
 /// What a tab shows. Ordinary tabs are a list of value settings. The
-/// Project tab is a list too, but of every project in turn: each one's
+/// Projects tab is a list too, but of every project in turn: each one's
 /// name, then these rows, which read and write that project's entry
 /// instead of a top-level key ([`project_at`]). The
 /// Hotkeys tab is generated from [`crate::keymap::ACTIONS`] instead, so a
@@ -426,8 +426,11 @@ pub struct SettingsTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingKind {
     PaletteEnterAttaches,
-    WorktreeBaseBranch,
+    /// A project's base branch: what its new worktrees start from.
+    BaseBranch,
     LinkEnvFiles,
+    /// A project's ON WORKTREE DELETE: what deleting one of its worktrees
+    /// does to the docker compose projects started in it.
     WorktreeContainers,
     OutsideEditor,
     CloseFinderOnOpen,
@@ -439,11 +442,10 @@ pub enum SettingKind {
     Gh,
     LinearAccount,
     LinearAutoAttach,
-    /// The Linear tab's read-only row: where the selected project's
-    /// `LINEAR_API_KEY` was found, if anywhere (`linear::status_value`).
+    /// A project's read-only Linear row: where its `LINEAR_API_KEY` was
+    /// found, if anywhere, and what the last test said
+    /// (`linear::key_status`); Enter asks Linear whose key it is.
     LinearKey,
-    /// The Linear tab's action row: Enter asks Linear whose key it is.
-    LinearTest,
     SessionIdleTimeout,
     PrewarmAgents,
     PrewarmSessions,
@@ -519,7 +521,7 @@ impl SettingKind {
     pub fn is_text(self) -> bool {
         matches!(
             self,
-            SettingKind::WorktreeBaseBranch
+            SettingKind::BaseBranch
                 | SettingKind::LinearAccount
                 | SettingKind::RunCommand
                 | SettingKind::OpenCommand
@@ -528,19 +530,26 @@ impl SettingKind {
 
     /// A row that says how things stand rather than holding a setting:
     /// nothing in the file behind it, nothing to cycle. Its value is the
-    /// app's to tell (`linear::status_value`), and Enter is its one verb.
+    /// app's to tell (`linear::key_status`), and Enter is its one verb.
     pub fn is_status(self) -> bool {
-        matches!(self, SettingKind::LinearKey | SettingKind::LinearTest)
+        matches!(self, SettingKind::LinearKey)
     }
 
-    /// A row on the PROJECT TAB: its value is the focused project's, kept
-    /// in that project's `projects` entry rather than at the top level of
-    /// the file. Every one of them is typed ([`SettingKind::is_text`]):
-    /// [`Config::cycle`] leaves such a row alone,
-    /// [`Config::set_project_text`] is what writes it, and
-    /// [`ProjectSettings::value_label`] what reads it.
+    /// A row on the PROJECTS TAB: its value is that project's, kept in
+    /// its `projects` entry rather than at the top level of the file. A
+    /// typed one ([`SettingKind::is_text`]) is written by
+    /// [`Config::set_project_text`], a cycled one by
+    /// [`Config::cycle_project`], and [`ProjectSettings::value_label`]
+    /// reads both; the status row is the app's to tell.
     pub fn is_project(self) -> bool {
-        matches!(self, SettingKind::RunCommand | SettingKind::OpenCommand)
+        matches!(
+            self,
+            SettingKind::BaseBranch
+                | SettingKind::RunCommand
+                | SettingKind::OpenCommand
+                | SettingKind::WorktreeContainers
+                | SettingKind::LinearKey
+        )
     }
 }
 
@@ -570,21 +579,9 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 group: "",
             },
             SettingSpec {
-                kind: SettingKind::WorktreeBaseBranch,
-                label: "Worktree base branch",
-                hint: "Branch new worktrees start from; Enter types one (empty = origin's default)",
-                group: "",
-            },
-            SettingSpec {
                 kind: SettingKind::LinkEnvFiles,
                 label: "Link .env files",
                 hint: "New and adopted worktrees get the main checkout's ignored .env files as symlinks (existing files are kept)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::WorktreeContainers,
-                label: "Worktree containers",
-                hint: "What deleting a worktree does to the docker compose projects started in it: stop them, remove them, or remove them with their volumes (data included)",
                 group: "",
             },
             SettingSpec {
@@ -823,21 +820,8 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
     // row edits that project's entry in `projects` — so none of them reads
     // as a switch for every project at once.
     SettingsTab {
-        title: "Project",
-        body: TabBody::Project(&[
-            SettingSpec {
-                kind: SettingKind::RunCommand,
-                label: "Run command",
-                hint: "Shell line {toggle_stack} (Start stack) runs in a worktree's run terminal, e.g. just start",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::OpenCommand,
-                label: "Open command",
-                hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000",
-                group: "",
-            },
-        ]),
+        title: "Projects",
+        body: TabBody::Project(PROJECT_SETTINGS),
     },
     SettingsTab {
         title: "Hotkeys",
@@ -847,8 +831,8 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
 
 /// The LINEAR TAB's rows, top to bottom — and the onboarding wizard's
 /// Linear page, which mirrors them. Linking pull requests leads: it is on
-/// by default and the one most people only ever check. The key's status
-/// and the connection test are the selected project's.
+/// by default and the one most people only ever check. Each project's key
+/// is on the PROJECTS TAB, under that project.
 pub const LINEAR_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::LinearAutoAttach,
@@ -862,17 +846,41 @@ pub const LINEAR_SETTINGS: &[SettingSpec] = &[
         hint: "Whose issues {linear} lists; Enter types an email (empty = the owner of the project's LINEAR_API_KEY). Kept in config.local.json",
         group: "",
     },
+];
+
+/// The PROJECTS TAB's rows, once under each project: where its worktrees
+/// start, what runs and opens them, what deleting one does, and its
+/// Linear key.
+pub const PROJECT_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
-        kind: SettingKind::LinearKey,
-        label: "API key",
-        hint: "Where the selected project's LINEAR_API_KEY comes from: its .env.local, then its .env, then orion's own environment. The key itself is never shown",
-        group: "Connection",
+        kind: SettingKind::BaseBranch,
+        label: "Base branch",
+        hint: "Branch this project's new worktrees start from; Enter types one (empty = origin's default branch)",
+        group: "",
     },
     SettingSpec {
-        kind: SettingKind::LinearTest,
-        label: "Test connection",
-        hint: "Enter asks Linear whose key it is — the account's name and email, or why it could not",
-        group: "Connection",
+        kind: SettingKind::RunCommand,
+        label: "Run command",
+        hint: "Shell line {toggle_stack} (Start stack) runs in a worktree's run terminal, e.g. just start",
+        group: "",
+    },
+    SettingSpec {
+        kind: SettingKind::OpenCommand,
+        label: "Open command",
+        hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000",
+        group: "",
+    },
+    SettingSpec {
+        kind: SettingKind::WorktreeContainers,
+        label: "On worktree delete",
+        hint: "What deleting one of this project's worktrees does to the docker compose projects started in it: leave them, stop them, remove them, or remove them with their volumes (data included)",
+        group: "",
+    },
+    SettingSpec {
+        kind: SettingKind::LinearKey,
+        label: "Linear key",
+        hint: "Where this project's LINEAR_API_KEY comes from — its .env.local, then its .env, then orion's own environment — never the key itself. Enter asks Linear whose key it is",
+        group: "",
     },
 ];
 
@@ -908,7 +916,7 @@ pub fn tab_settings(tab: usize) -> &'static [SettingSpec] {
 }
 
 /// How many selectable rows a tab holds, with `projects` in the tree —
-/// the Project tab has its rows once for each. The Agents tab reads the
+/// the Projects tab has its rows once for each. The Agents tab reads the
 /// registry, so a new CLI grows it without a code change.
 pub fn tab_len(tab: usize, projects: usize) -> usize {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
@@ -926,7 +934,7 @@ pub fn tab_len(tab: usize, projects: usize) -> usize {
 /// The static value setting at a tab-local index, if the tab declares one
 /// there: the full list on ordinary tabs, the head on the Agents tab
 /// (its harness rows resolve through [`Config::agent_row`]), never on
-/// Hotkeys. On the Project tab, the same row in every project's block
+/// Hotkeys. On the Projects tab, the same row in every project's block
 /// ([`project_at`] says whose).
 pub fn setting_at(tab: usize, index: usize) -> Option<&'static SettingSpec> {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
@@ -935,7 +943,7 @@ pub fn setting_at(tab: usize, index: usize) -> Option<&'static SettingSpec> {
     }
 }
 
-/// Which project a Project tab row is: its index in the tree's project
+/// Which project a Projects tab row is: its index in the tree's project
 /// list, each project's rows following the one before's. None on every
 /// other tab.
 pub fn project_at(tab: usize, index: usize) -> Option<usize> {
@@ -1020,7 +1028,7 @@ fn setting_hint(spec: &SettingSpec) -> String {
 pub enum SettingsRow {
     Blank,
     Header(String),
-    /// A Project tab heading: the name and repo path of the tree's
+    /// A Projects tab heading: the name and repo path of the tree's
     /// project at this index, which the renderer reads off the app — the
     /// row map only knows how many there are. Not selectable.
     Project(usize),
@@ -1045,7 +1053,7 @@ impl SettingsRow {
 }
 
 /// A tab's rows top to bottom, with `projects` in the tree for the
-/// Project tab to give each its own block.
+/// Projects tab to give each its own block.
 pub fn settings_rows(tab: usize, projects: usize) -> Vec<SettingsRow> {
     match SETTINGS_TABS.get(tab).map(|t| t.body) {
         Some(TabBody::Values(settings)) => grouped(
@@ -1152,26 +1160,21 @@ pub struct Config {
     /// as stored, so an older build sharing the file keeps the choice its
     /// user made.
     pub git_init_on_create: bool,
-    /// The branch every new WORKTREE nobody named a base for starts from
-    /// (a project's **New worktree**, a bare `orion worktree`, the QUICK
-    /// PROMPT's auto-created one). Empty — the default, shown as `auto` —
-    /// is origin's own default branch, `origin/HEAD` freshly fetched; a
-    /// name (`master`, `develop`) is origin's fetched copy of that branch
-    /// when origin has one, else the checkout's local branch of that name,
-    /// else the default again. Owned by the daemon, which does the
-    /// resolving (`git::add_worktree_off_configured`); the TUI writes it so
-    /// the settings overlay can edit every key in the shared file.
-    pub worktree_base_branch: String,
+    /// MOVED to each project's **Base branch** (`projects.<repo>.base_branch`):
+    /// through 2.x one branch every project's new worktrees started from.
+    /// Read, never written; [`Config::adopt_project_keys`] copies it into
+    /// every project once the tree is known, and the save after drops it.
+    #[serde(skip_serializing)]
+    pub worktree_base_branch: Option<String>,
     /// ENV LINKS: the main checkout's git-ignored `.env*` files are
     /// symlinked into every other WORKTREE of the project as it appears.
     /// Owned by the daemon (`env_links`); the TUI writes it so the
     /// settings overlay can toggle it.
     pub link_env_files: bool,
-    /// WORKTREE CONTAINERS: what deleting a worktree does to the docker
-    /// compose projects started in it — `off` (the default), `stop`,
-    /// `remove`, or `remove+volumes`. Owned by the daemon (`containers`);
-    /// the TUI writes it so the settings overlay can cycle it.
-    pub worktree_containers: String,
+    /// MOVED to each project's **On worktree delete**
+    /// (`projects.<repo>.worktree_containers`), as `worktree_base_branch`.
+    #[serde(skip_serializing)]
+    pub worktree_containers: Option<String>,
     /// OPEN IN APP: the GUI editor ⌘O hands a file or a checkout to —
     /// `auto` (the default: the first installed of Cursor, VS Code,
     /// Sublime Text, else what macOS's `open` picks), `cursor`, `vscode`
@@ -1447,7 +1450,7 @@ pub struct Config {
     pub show_key_combos: bool,
     /// PROJECT SETTINGS: one [`ProjectSettings`] per project set up
     /// differently from the rest, keyed by the project's repo path as the
-    /// DAEMON stores it — what the Settings → Project tab edits for the
+    /// DAEMON stores it — what the Settings → Projects tab edits for the
     /// selected project. A project with no entry reads as the defaults
     /// ([`ProjectSettings::default`]), and an entry that says nothing they
     /// don't is dropped on save ([`Config::set_project`]), so
@@ -1576,15 +1579,24 @@ pub struct Config {
     pub skipped: BTreeSet<String>,
 }
 
-/// One project's own settings — the PROJECT TAB's rows — kept under the
+/// One project's own settings — the PROJECTS TAB's rows — kept under the
 /// project's repo path in [`Config::projects`]. Read through
 /// [`Config::project`], which supplies the defaults for a project with no
 /// entry; written through [`Config::set_project`].
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ProjectSettings {
+    /// The branch this project's new WORKTREES start from when nobody
+    /// named a base (a bare `orion worktree`, the QUICK PROMPT's **+ new
+    /// worktree**). Empty — shown as `auto` — is origin's own default
+    /// branch, `origin/HEAD` freshly fetched; a name (`dev`, `master`) is
+    /// origin's fetched copy of that branch when origin has one, else the
+    /// checkout's local branch of that name, else the default again. The
+    /// DAEMON reads it (`orion-daemon/src/config.rs`); the TUI edits it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub base_branch: String,
     /// The RUN COMMAND a menu's **Run** starts in this project's
-    /// worktrees, typed on the Project tab. Empty — the default, shown as
+    /// worktrees, typed on the Projects tab. Empty — the default, shown as
     /// `not set` — is none. The DAEMON reads it
     /// (`orion-daemon/src/config.rs`); the TUI only edits it. Left out
     /// of the file while empty, so an entry written before the row reads
@@ -1592,13 +1604,19 @@ pub struct ProjectSettings {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub run_command: String,
     /// The OPEN COMMAND `Shift+Enter` / `Shift+O` fires on this project's
-    /// worktrees, typed on the Project tab — `open http://localhost:3000`,
+    /// worktrees, typed on the Projects tab — `open http://localhost:3000`,
     /// say. Empty (shown as `not set`) is none. The TUI both edits and runs it
     /// (`event_loop::open_worktree`): what it opens belongs on the machine
     /// the user sits at, never the DAEMON's. Left out of the file while
     /// empty, like `run_command`.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub open_command: String,
+    /// ON WORKTREE DELETE: what deleting one of this project's worktrees
+    /// does to the docker compose projects started in it — `stop`,
+    /// `remove` or `remove+volumes`; empty (shown as `off`) leaves them
+    /// running. The DAEMON reads it (`containers`); the TUI cycles it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub worktree_containers: String,
     /// Keys in the entry this build doesn't know — a newer orion's, most
     /// likely, or the retired `hide_root_worktree` an older one wrote —
     /// carried through a save untouched, as the file's top-level keys
@@ -1608,48 +1626,65 @@ pub struct ProjectSettings {
 }
 
 impl ProjectSettings {
-    /// The overlay's label for a PROJECT TAB row ([`SettingKind::is_project`]);
-    /// empty for a row that is not one.
+    /// The overlay's label for a PROJECTS TAB row
+    /// ([`SettingKind::is_project`]); empty for a row that is not one, and
+    /// for the status row, which is the app's to tell.
     pub fn value_label(&self, kind: SettingKind) -> String {
         match kind {
-            SettingKind::RunCommand => match self.run_command.trim() {
-                "" => NO_COMMAND.into(),
-                command => command.to_string(),
-            },
-            SettingKind::OpenCommand => match self.open_command.trim() {
-                "" => NO_COMMAND.into(),
-                command => command.to_string(),
-            },
+            SettingKind::BaseBranch => blank_as(&self.base_branch, AUTO_CHOICE),
+            SettingKind::RunCommand => blank_as(&self.run_command, NO_COMMAND),
+            SettingKind::OpenCommand => blank_as(&self.open_command, NO_COMMAND),
+            SettingKind::WorktreeContainers => self.containers().as_str().into(),
             _ => String::new(),
         }
     }
 
-    /// The stored text of a typed PROJECT TAB row as its prompt pre-fills
+    /// The **On worktree delete** policy; a word this build doesn't know
+    /// is `off`.
+    pub fn containers(&self) -> WorktreeContainers {
+        WorktreeContainers::parse(&self.worktree_containers)
+    }
+
+    /// The stored text of a typed PROJECTS TAB row as its prompt pre-fills
     /// it — `""` for an unset row, never the `not set` the overlay shows
     /// in its place. Empty for a row that is not typed.
     pub fn text_value(&self, kind: SettingKind) -> String {
         match kind {
+            SettingKind::BaseBranch => self.base_branch.clone(),
             SettingKind::RunCommand => self.run_command.clone(),
             SettingKind::OpenCommand => self.open_command.clone(),
             _ => String::new(),
         }
     }
 
-    /// Write a typed value into a typed PROJECT TAB row, trimmed. Empty
+    /// Write a typed value into a typed PROJECTS TAB row, trimmed. Empty
     /// puts the row back on its default. False for a row that is not a
     /// typed project row — nothing changes.
     pub fn set_text(&mut self, kind: SettingKind, value: &str) -> bool {
-        match kind {
-            SettingKind::RunCommand => {
-                self.run_command = value.trim().to_string();
-                true
-            }
-            SettingKind::OpenCommand => {
-                self.open_command = value.trim().to_string();
-                true
-            }
-            _ => false,
+        let field = match kind {
+            SettingKind::BaseBranch => &mut self.base_branch,
+            SettingKind::RunCommand => &mut self.run_command,
+            SettingKind::OpenCommand => &mut self.open_command,
+            _ => return false,
+        };
+        *field = value.trim().to_string();
+        true
+    }
+
+    /// Step a cycled PROJECTS TAB row; false for any other row. `off` is
+    /// stored as nothing, so a project back on the defaults leaves no
+    /// entry.
+    pub fn cycle(&mut self, kind: SettingKind, delta: i32) -> bool {
+        if kind != SettingKind::WorktreeContainers {
+            return false;
         }
+        let step = if delta == 0 { 1 } else { delta };
+        let next = cycle_choice(self.containers().as_str(), WORKTREE_CONTAINERS, step);
+        self.worktree_containers = match WorktreeContainers::parse(next) {
+            WorktreeContainers::Off => String::new(),
+            _ => next.to_string(),
+        };
+        true
     }
 }
 
@@ -1658,9 +1693,9 @@ impl Default for Config {
         Self {
             palette_enter_attaches: true,
             git_init_on_create: true,
-            worktree_base_branch: String::new(),
+            worktree_base_branch: None,
             link_env_files: true,
-            worktree_containers: WorktreeContainers::Off.as_str().into(),
+            worktree_containers: None,
             outside_editor: crate::outside_editor::AUTO.into(),
             close_finder_on_open: true,
             linear_assignee_email: String::new(),
@@ -1891,11 +1926,33 @@ impl Config {
                 }
             }
         }
+        // A key that moved elsewhere goes once its value has: until then
+        // the file keeps it for the move to read.
+        for (key, waiting) in self.moved_keys() {
+            if waiting {
+                continue;
+            }
+            root.remove(key);
+            if let Some(held) = local_root.as_mut() {
+                local_changed |= held.remove(key).is_some();
+            }
+        }
         settings::write_json(path, &serde_json::Value::Object(root))?;
         if let (true, Some(held)) = (local_changed, local_root) {
             settings::write_json(local, &serde_json::Value::Object(held))?;
         }
         Ok(())
+    }
+
+    /// The top-level keys an older release kept that this one keeps
+    /// elsewhere, each with whether its value is still waiting to move
+    /// ([`Config::adopt_project_keys`]). Never written; a save drops each
+    /// one once it is spent.
+    fn moved_keys(&self) -> [(&'static str, bool); 2] {
+        [
+            ("worktree_base_branch", self.worktree_base_branch.is_some()),
+            ("worktree_containers", self.worktree_containers.is_some()),
+        ]
     }
 
     /// `theme` resolved to the palette the UI draws with.
@@ -2818,38 +2875,91 @@ impl Config {
         }
     }
 
-    /// The stored text of a typed PROJECT TAB row for the project at
+    /// The stored text of a typed PROJECTS TAB row for the project at
     /// `repo_path` — what [`Config::text_value`] is for a top-level row.
     pub fn project_text_value(&self, repo_path: &Path, kind: SettingKind) -> String {
         self.project(repo_path).text_value(kind)
     }
 
-    /// Write a typed PROJECT TAB row for the project at `repo_path` — what
+    /// Write a typed PROJECTS TAB row for the project at `repo_path` — what
     /// [`Config::set_text`] is for a top-level row. False for a row that
     /// is not a typed project row.
     pub fn set_project_text(&mut self, repo_path: &Path, kind: SettingKind, value: &str) -> bool {
+        self.edit_project(repo_path, |settings| settings.set_text(kind, value))
+    }
+
+    /// Step a cycled PROJECTS TAB row for the project at `repo_path` —
+    /// what [`Config::cycle_kind`] is for a top-level row. False for a row
+    /// that is not one.
+    pub fn cycle_project(&mut self, repo_path: &Path, kind: SettingKind, delta: i32) -> bool {
+        self.edit_project(repo_path, |settings| settings.cycle(kind, delta))
+    }
+
+    /// Apply `edit` to the entry of the project at `repo_path` and store
+    /// it, when `edit` says it applied.
+    fn edit_project(
+        &mut self,
+        repo_path: &Path,
+        edit: impl FnOnce(&mut ProjectSettings) -> bool,
+    ) -> bool {
         let mut settings = self.project(repo_path);
-        if !settings.set_text(kind, value) {
+        if !edit(&mut settings) {
             return false;
         }
         self.set_project(repo_path, settings);
         true
     }
 
-    /// The overlay's label for `kind`. A PROJECT TAB row read here shows
+    /// Hand each project the settings an older release kept once for all
+    /// of them — `worktree_base_branch` and `worktree_containers` — so a
+    /// project that has no value of its own goes on starting worktrees
+    /// where it did, and deleting them does what it did. `repos` is every
+    /// project the tree holds; the ones `projects` names are taken too.
+    /// The old keys are spent after, and the next save drops them from
+    /// the file. They wait while the tree names no project — an empty
+    /// snapshot says nothing about which there are — and while `projects`
+    /// is a map this build can't read, which a save would write over.
+    /// Whether anything moved.
+    pub fn adopt_project_keys(&mut self, repos: &[PathBuf]) -> bool {
+        if repos.is_empty() || self.skipped.contains("projects") {
+            return false;
+        }
+        let mut every: BTreeSet<PathBuf> = self.projects.keys().cloned().collect();
+        every.extend(repos.iter().cloned());
+        let base = self.worktree_base_branch.take();
+        let containers = self.worktree_containers.take();
+        if base.is_none() && containers.is_none() {
+            return false;
+        }
+        let base = base.unwrap_or_default();
+        let base = base.trim();
+        let containers = containers.map(|word| WorktreeContainers::parse(&word));
+        for repo in every {
+            let mut settings = self.project(&repo);
+            if settings.base_branch.is_empty() {
+                settings.base_branch = base.to_string();
+            }
+            match containers {
+                Some(policy)
+                    if policy != WorktreeContainers::Off
+                        && settings.worktree_containers.is_empty() =>
+                {
+                    settings.worktree_containers = policy.as_str().to_string();
+                }
+                _ => {}
+            }
+            self.set_project(&repo, settings);
+        }
+        true
+    }
+
+    /// The overlay's label for `kind`. A PROJECTS TAB row read here shows
     /// the fallback — the overlay reads the selected project's through
     /// [`Config::project`] instead.
     pub fn value_label(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::PaletteEnterAttaches => on_off(self.palette_enter_attaches).into(),
-            SettingKind::WorktreeBaseBranch => match self.worktree_base_branch.trim() {
-                "" => AUTO_CHOICE.into(),
-                name => name.to_string(),
-            },
             SettingKind::LinkEnvFiles => on_off(self.link_env_files).into(),
-            SettingKind::WorktreeContainers => WorktreeContainers::parse(&self.worktree_containers)
-                .as_str()
-                .into(),
             SettingKind::RunSetup => "Enter opens it".into(),
             SettingKind::Git => installed_label("git"),
             SettingKind::Gh => installed_label("gh"),
@@ -2863,8 +2973,6 @@ impl Config {
                 email => email.to_string(),
             },
             SettingKind::LinearAutoAttach => on_off(self.linear_auto_attach).into(),
-            // The app's to tell (`linear::status_value`), not the file's.
-            SettingKind::LinearKey | SettingKind::LinearTest => String::new(),
             SettingKind::SessionIdleTimeout => self.session_idle_timeout.clone(),
             SettingKind::PrewarmAgents => on_off(self.prewarm_agents).into(),
             SettingKind::PrewarmSessions => on_off(self.prewarm_sessions).into(),
@@ -2911,10 +3019,13 @@ impl Config {
             SettingKind::ReviewModel => self.review_launch().0,
             SettingKind::ReviewEffort => self.review_launch().1,
             // A project row with no project to speak of: what one without
-            // an entry would show.
-            SettingKind::RunCommand | SettingKind::OpenCommand => {
-                ProjectSettings::default().value_label(kind)
-            }
+            // an entry would show. The Linear key is the app's to tell
+            // (`linear::key_status`), not the file's.
+            SettingKind::BaseBranch
+            | SettingKind::RunCommand
+            | SettingKind::OpenCommand
+            | SettingKind::WorktreeContainers
+            | SettingKind::LinearKey => ProjectSettings::default().value_label(kind),
             // A CLAUDE ACCOUNT — the default one too — reads as the name
             // it goes by, with its email.
             SettingKind::QuickPromptKind => match self.quick_prompt_harness() {
@@ -2940,8 +3051,8 @@ impl Config {
     /// `delta == 0` means activate (toggle a bool, cycle a choice forward).
     /// Non-zero delta cycles a choice; bools still toggle. `index` is
     /// tab-local — the Hotkeys tab has no cyclable values and no-ops here,
-    /// and so does a PROJECT TAB row, which is typed for one project
-    /// ([`Config::set_project_text`]). The Agents tab resolves its head rows
+    /// and so does a PROJECTS TAB row, which is one project's
+    /// ([`Config::set_project_text`], [`Config::cycle_project`]). The Agents tab resolves its head rows
     /// statically and its harness rows through the registry.
     pub fn cycle(&mut self, tab: usize, index: usize, delta: i32) {
         if tab == agents_tab() {
@@ -2973,25 +3084,14 @@ impl Config {
                 self.palette_enter_attaches = !self.palette_enter_attaches;
             }
             // Typed, not cycled: see `SettingKind::is_text` / `set_text`.
-            SettingKind::WorktreeBaseBranch | SettingKind::LinearAccount => {}
+            SettingKind::LinearAccount => {}
             // Status, not a setting: nothing to cycle.
-            SettingKind::LinearKey
-            | SettingKind::LinearTest
-            | SettingKind::RunSetup
-            | SettingKind::Git
-            | SettingKind::Gh => {}
+            SettingKind::RunSetup | SettingKind::Git | SettingKind::Gh => {}
             SettingKind::LinearAutoAttach => {
                 self.linear_auto_attach = !self.linear_auto_attach;
             }
             SettingKind::LinkEnvFiles => {
                 self.link_env_files = !self.link_env_files;
-            }
-            SettingKind::WorktreeContainers => {
-                // From the resolved side, so a hand edit off the list
-                // steps on from `off`, which it reads as.
-                let current = WorktreeContainers::parse(&self.worktree_containers);
-                self.worktree_containers =
-                    cycle_choice(current.as_str(), WORKTREE_CONTAINERS, step).into();
             }
             SettingKind::OutsideEditor => {
                 let current = crate::outside_editor::Choice::parse(&self.outside_editor);
@@ -3099,8 +3199,13 @@ impl Config {
                 self.review_effort =
                     cycle_choice(&current, crate::week_review::EFFORTS, step).into();
             }
-            // One project's, not the file's, and typed: see `set_project_text`.
-            SettingKind::RunCommand | SettingKind::OpenCommand => {}
+            // One project's, not the file's: see `set_project_text` and
+            // `cycle_project`.
+            SettingKind::BaseBranch
+            | SettingKind::RunCommand
+            | SettingKind::OpenCommand
+            | SettingKind::WorktreeContainers
+            | SettingKind::LinearKey => {}
             SettingKind::QuickPromptKind => {
                 self.quick_prompt_kind =
                     cycle_owned(&self.quick_prompt_kind, &self.quick_prompt_choices(), step);
@@ -3122,21 +3227,16 @@ impl Config {
     /// the overlay shows in its place. Empty for a row that is not typed.
     pub fn text_value(&self, kind: SettingKind) -> String {
         match kind {
-            SettingKind::WorktreeBaseBranch => self.worktree_base_branch.clone(),
             SettingKind::LinearAccount => self.linear_assignee_email.clone(),
             _ => String::new(),
         }
     }
 
     /// Write a typed value into a text row ([`SettingKind::is_text`]),
-    /// trimmed. Empty puts the row back on its default (`auto`). False for
-    /// a row that is not typed — nothing changes.
+    /// trimmed. Empty puts the row back on its default. False for a row
+    /// that is not typed — nothing changes.
     pub fn set_text(&mut self, kind: SettingKind, value: &str) -> bool {
         match kind {
-            SettingKind::WorktreeBaseBranch => {
-                self.worktree_base_branch = value.trim().to_string();
-                true
-            }
             SettingKind::LinearAccount => {
                 self.linear_assignee_email = value.trim().to_string();
                 true
@@ -3197,6 +3297,13 @@ fn resolve_sound(configured: &str, remote: bool) -> Option<Sound> {
     } else {
         Some(Sound::Bell)
     }
+}
+
+/// The **Base branch** of the project at `repo`, read fresh from the
+/// file: empty for origin's default branch, and with no project to say.
+pub fn base_branch_of(repo: Option<&Path>) -> String {
+    repo.map(|repo| Config::load().project(repo).base_branch)
+        .unwrap_or_default()
 }
 
 /// Whether `kind`'s CLI resolves on this process's PATH right now. A fast
@@ -3424,12 +3531,12 @@ pub fn locate(kind: SettingKind) -> Option<(usize, usize)> {
 }
 
 #[cfg(test)]
-/// Index of the Project tab, whose rows are the selected project's.
+/// Index of the Projects tab, whose rows are the selected project's.
 pub fn project_tab() -> usize {
     SETTINGS_TABS
         .iter()
         .position(|t| matches!(t.body, TabBody::Project(_)))
-        .expect("SETTINGS_TABS declares a Project tab")
+        .expect("SETTINGS_TABS declares a Projects tab")
 }
 
 /// A Tools tab program row's value: `installed`, or `install…` for `i`.
@@ -3866,8 +3973,9 @@ mod tests {
     }
 
     /// Every Linear option is on the LINEAR TAB, in one place and nowhere
-    /// else: linking pull requests first — on by default — the account,
-    /// then the key's status and the connection test.
+    /// else — linking pull requests first, on by default, then the
+    /// account — but each project's key, which is under that project on
+    /// the PROJECTS TAB.
     #[test]
     fn the_linear_tab_gathers_every_linear_option() {
         let tab = SETTINGS_TABS
@@ -3878,12 +3986,7 @@ mod tests {
         let kinds: Vec<SettingKind> = LINEAR_SETTINGS.iter().map(|s| s.kind).collect();
         assert_eq!(
             kinds,
-            [
-                SettingKind::LinearAutoAttach,
-                SettingKind::LinearAccount,
-                SettingKind::LinearKey,
-                SettingKind::LinearTest,
-            ]
+            [SettingKind::LinearAutoAttach, SettingKind::LinearAccount]
         );
         for kind in kinds {
             assert_eq!(
@@ -3896,9 +3999,13 @@ mod tests {
         }
         assert!(
             all_settings()
-                .filter(|(t, ..)| *t != tab)
+                .filter(|(t, _, s)| *t != tab && s.kind != SettingKind::LinearKey)
                 .all(|(_, _, s)| !s.label.contains("Linear")),
             "no Linear row left elsewhere"
+        );
+        assert_eq!(
+            locate(SettingKind::LinearKey).map(|(t, _)| t),
+            Some(project_tab())
         );
 
         // The defaults, as the rows read them.
@@ -3912,19 +4019,18 @@ mod tests {
             cfg.value_label(SettingKind::LinearAccount),
             LINEAR_KEY_OWNER
         );
-        assert!(SettingKind::LinearKey.is_status() && SettingKind::LinearTest.is_status());
+        assert!(SettingKind::LinearKey.is_status() && SettingKind::LinearKey.is_project());
         assert!(!SettingKind::LinearKey.is_text());
 
-        // The switch toggles from its row; the status rows cycle nothing.
+        // The switch toggles from its row; the key's row cycles nothing.
         let mut cfg = Config::default();
         let (t, r) = locate(SettingKind::LinearAutoAttach).unwrap();
         cfg.cycle(t, r, 0);
         assert!(!cfg.linear_auto_attach);
         let before = serde_json::to_value(&cfg).unwrap();
-        for kind in [SettingKind::LinearKey, SettingKind::LinearTest] {
-            let (t, r) = locate(kind).unwrap();
-            cfg.cycle(t, r, 1);
-        }
+        let (t, r) = locate(SettingKind::LinearKey).unwrap();
+        cfg.cycle(t, r, 1);
+        assert!(!cfg.cycle_project(Path::new("/tmp/demo"), SettingKind::LinearKey, 1));
         assert_eq!(serde_json::to_value(&cfg).unwrap(), before);
     }
 
@@ -4050,61 +4156,130 @@ mod tests {
         assert_eq!(read_json_file(&path)["git_init_on_create"], false);
     }
 
+    /// A project's **Base branch** is a typed row of its own on the
+    /// PROJECTS TAB, `auto` until typed, kept in that project's entry and
+    /// nowhere else.
     #[test]
-    fn worktree_base_branch_is_a_typed_row_that_defaults_to_auto() {
-        assert_eq!(Config::default().worktree_base_branch, "");
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.worktree_base_branch, "");
+    fn base_branch_is_a_typed_project_row_that_defaults_to_auto() {
+        let demo = Path::new("/tmp/demo");
+        let other = Path::new("/tmp/other");
+        let mut cfg = Config::default();
         assert_eq!(
-            cfg.value_label(SettingKind::WorktreeBaseBranch),
+            cfg.project(demo).value_label(SettingKind::BaseBranch),
             AUTO_CHOICE
         );
-        assert!(SettingKind::WorktreeBaseBranch.is_text());
-
-        let (tab, row) = locate(SettingKind::WorktreeBaseBranch).unwrap();
+        assert!(SettingKind::BaseBranch.is_text() && SettingKind::BaseBranch.is_project());
+        let (tab, _) = locate(SettingKind::BaseBranch).unwrap();
+        assert_eq!(tab, project_tab(), "sits on the Projects tab");
         assert_eq!(
-            SETTINGS_TABS[tab].title, "General",
-            "sits on the General tab"
+            spec_for(SettingKind::BaseBranch).map(|s| s.label),
+            Some("Base branch")
         );
-        // Enter / ←/→ on a typed row change nothing; the prompt does.
-        let mut cfg = Config::default();
-        for delta in [0, 1, -1] {
-            cfg.cycle(tab, row, delta);
-            assert_eq!(cfg.worktree_base_branch, "");
-        }
 
-        assert_eq!(cfg.text_value(SettingKind::WorktreeBaseBranch), "");
-        assert!(cfg.set_text(SettingKind::WorktreeBaseBranch, "  master "));
-        assert_eq!(cfg.worktree_base_branch, "master", "trimmed");
-        assert_eq!(cfg.value_label(SettingKind::WorktreeBaseBranch), "master");
-        assert_eq!(cfg.text_value(SettingKind::WorktreeBaseBranch), "master");
-        assert_eq!(
-            spec_for(SettingKind::WorktreeBaseBranch).map(|s| s.label),
-            Some("Worktree base branch")
-        );
-        assert!(
-            !cfg.set_text(SettingKind::Theme, "ocean"),
-            "a cycled row is not a typed one"
-        );
+        assert!(cfg.set_project_text(demo, SettingKind::BaseBranch, "  dev "));
+        assert_eq!(cfg.project(demo).base_branch, "dev", "trimmed");
+        assert_eq!(cfg.project_text_value(demo, SettingKind::BaseBranch), "dev");
+        assert_eq!(cfg.project(other).base_branch, "", "another project's own");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         cfg.save_to(&path).unwrap();
-        let saved: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["worktree_base_branch"], "master");
-        assert_eq!(load_from(&path).worktree_base_branch, "master");
+        let saved = read_json_file(&path);
+        assert_eq!(saved["projects"]["/tmp/demo"]["base_branch"], "dev");
+        assert!(saved.get("worktree_base_branch").is_none());
+        assert_eq!(load_from(&path).project(demo).base_branch, "dev");
 
-        // Empty is the way back to auto, and is stored as "", not "auto".
-        assert!(cfg.set_text(SettingKind::WorktreeBaseBranch, "   "));
+        // Empty is the way back to auto, and leaves no entry behind.
+        assert!(cfg.set_project_text(demo, SettingKind::BaseBranch, "   "));
         cfg.save_to(&path).unwrap();
-        let saved: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(saved["worktree_base_branch"], "");
+        assert_eq!(read_json_file(&path)["projects"], serde_json::json!({}));
+    }
+
+    /// The global `worktree_base_branch` and `worktree_containers` an
+    /// older release kept move into every project once the tree is known —
+    /// a project's own value wins — and the save after drops both keys.
+    /// Until then a save leaves them in the file for the move to read.
+    #[test]
+    fn the_old_global_base_branch_and_containers_move_into_every_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "worktree_base_branch": "dev",
+              "worktree_containers": "remove+volumes",
+              "projects": {
+                "/src/riplo-os": { "run_command": "just start" },
+                "/src/pinned": { "base_branch": "main", "worktree_containers": "stop" }
+              }
+            }"#,
+        )
+        .unwrap();
+        let mut cfg = load_from(&path);
+        assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
+
+        // A save before the tree is known keeps both for later.
+        cfg.theme = "ocean".into();
+        cfg.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        assert_eq!(saved["worktree_base_branch"], "dev");
+        assert_eq!(saved["worktree_containers"], "remove+volumes");
+
+        let mut cfg = load_from(&path);
+        let tree = [PathBuf::from("/src/riplo-os"), PathBuf::from("/src/new")];
+        assert!(cfg.adopt_project_keys(&tree));
+        let riplo = cfg.project(Path::new("/src/riplo-os"));
+        assert_eq!(riplo.base_branch, "dev");
+        assert_eq!(riplo.containers(), WorktreeContainers::RemoveVolumes);
         assert_eq!(
-            load_from(&path).value_label(SettingKind::WorktreeBaseBranch),
-            AUTO_CHOICE
+            riplo.run_command, "just start",
+            "the rest of the entry kept"
         );
+        assert_eq!(cfg.project(Path::new("/src/new")).base_branch, "dev");
+        let pinned = cfg.project(Path::new("/src/pinned"));
+        assert_eq!(pinned.base_branch, "main", "a project's own value wins");
+        assert_eq!(pinned.containers(), WorktreeContainers::Stop);
+        assert!(!cfg.adopt_project_keys(&tree), "once");
+
+        cfg.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        assert!(saved.get("worktree_base_branch").is_none(), "{saved}");
+        assert!(saved.get("worktree_containers").is_none(), "{saved}");
+        assert_eq!(saved["projects"]["/src/new"]["base_branch"], "dev");
+        assert_eq!(
+            saved["projects"]["/src/riplo-os"]["worktree_containers"],
+            "remove+volumes"
+        );
+        let mut again = load_from(&path);
+        assert!(!again.adopt_project_keys(&tree), "nothing left to move");
+        assert_eq!(again.project(Path::new("/src/new")).base_branch, "dev");
+    }
+
+    /// The old keys wait for a tree that names a project — an empty
+    /// snapshot spends nothing, even with `projects` naming some — and for
+    /// a `projects` map this build can read.
+    #[test]
+    fn the_old_global_keys_wait_for_a_project() {
+        let mut cfg: Config = serde_json::from_str(
+            r#"{"worktree_base_branch": "dev", "projects": {"/src/old": {"run_command": "x"}}}"#,
+        )
+        .unwrap();
+        assert!(!cfg.adopt_project_keys(&[]));
+        assert_eq!(cfg.worktree_base_branch.as_deref(), Some("dev"));
+        assert!(cfg.adopt_project_keys(&[PathBuf::from("/src/app")]));
+        assert_eq!(cfg.project(Path::new("/src/app")).base_branch, "dev");
+        assert_eq!(cfg.project(Path::new("/src/old")).base_branch, "dev");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"worktree_base_branch": "dev", "projects": {"/src/app": {"run_command": 7}}}"#,
+        )
+        .unwrap();
+        let mut cfg = load_from(&path);
+        assert!(cfg.skipped.contains("projects"));
+        assert!(!cfg.adopt_project_keys(&[PathBuf::from("/src/app")]));
     }
 
     #[test]
@@ -4680,7 +4855,7 @@ mod tests {
         assert!(cfg.follow_new_session, "a missing key reads as on");
     }
 
-    /// **Run command** on the Project tab: a typed row (Enter prompts,
+    /// **Run command** on the Projects tab: a typed row (Enter prompts,
     /// ←/→ and cycle change nothing) kept per repo path as `run_command`,
     /// shown as `not set` while empty and left out of the file while
     /// empty, so an entry with nothing else in
@@ -4694,7 +4869,7 @@ mod tests {
         assert!(SettingKind::RunCommand.is_project());
         let (tab, row) = locate(SettingKind::RunCommand).unwrap();
         assert_eq!(tab, project_tab());
-        assert_eq!(row, 0, "the first row of the tab");
+        assert_eq!(row, 1, "under the base branch");
         assert_eq!(cfg.project(demo).run_command, "");
         assert_eq!(
             cfg.project(demo).value_label(SettingKind::RunCommand),
@@ -4766,7 +4941,7 @@ mod tests {
         );
     }
 
-    /// **Open command** on the Project tab: the same typed per-project row
+    /// **Open command** on the Projects tab: the same typed per-project row
     /// as Run command, right under it, kept as `open_command` — what
     /// `Shift+Enter` / `Shift+O` runs.
     /// Its own key, so setting it leaves `run_command` alone; empty drops
@@ -4832,33 +5007,37 @@ mod tests {
         assert!(cfg.projects.is_empty());
     }
 
-    /// The Project tab: every project in turn, a line naming it then its
+    /// The Projects tab: every project in turn, a line naming it then its
     /// rows — each of them a project row, and no project row anywhere
     /// else. A row knows its project and setting by index alone.
     #[test]
     fn the_project_tab_lists_every_project_under_its_name() {
         use SettingsRow::{Blank, Project, Setting};
         let tab = project_tab();
-        assert_eq!(SETTINGS_TABS[tab].title, "Project");
+        assert_eq!(SETTINGS_TABS[tab].title, "Projects");
         assert!(tab < hotkeys_tab());
+        let n = PROJECT_SETTINGS.len();
+        let mut rows = vec![Project(0)];
+        rows.extend((0..n).map(Setting));
+        rows.extend([Blank, Project(1)]);
+        rows.extend((n..2 * n).map(Setting));
+        assert_eq!(settings_rows(tab, 2), rows);
+        assert_eq!(tab_len(tab, 2), 2 * n);
+        let kind = |i| setting_at(tab, i).map(|s| s.kind);
         assert_eq!(
-            settings_rows(tab, 2),
+            PROJECT_SETTINGS.iter().map(|s| s.kind).collect::<Vec<_>>(),
             [
-                Project(0),
-                Setting(0),
-                Setting(1),
-                Blank,
-                Project(1),
-                Setting(2),
-                Setting(3)
+                SettingKind::BaseBranch,
+                SettingKind::RunCommand,
+                SettingKind::OpenCommand,
+                SettingKind::WorktreeContainers,
+                SettingKind::LinearKey,
             ]
         );
-        assert_eq!(tab_len(tab, 2), 4);
-        let kind = |i| setting_at(tab, i).map(|s| s.kind);
-        assert_eq!(kind(2), Some(SettingKind::RunCommand));
-        assert_eq!(kind(3), Some(SettingKind::OpenCommand));
-        assert_eq!(project_at(tab, 1), Some(0));
-        assert_eq!(project_at(tab, 2), Some(1));
+        assert_eq!(kind(n + 1), Some(SettingKind::RunCommand));
+        assert_eq!(kind(n + 2), Some(SettingKind::OpenCommand));
+        assert_eq!(project_at(tab, n - 1), Some(0));
+        assert_eq!(project_at(tab, n), Some(1));
         assert_eq!(project_at(0, 2), None);
         assert_eq!(
             settings_rows(tab, 0),
@@ -4907,45 +5086,65 @@ mod tests {
         );
     }
 
-    /// PRESET TEXT: a Sessions row after the sounds, `prefix` by default,
-    /// cycling the three sides and persisted under `preset_text`; a hand
-    /// edit off the list reads as the default, and `both` as the long
-    /// label.
-    /// **Worktree containers** sits under **Link .env files** on the
-    /// General tab, starts `off`, cycles the four policies and saves the
-    /// word the daemon reads; a hand edit off the list reads, and steps
+    /// A project's **On worktree delete** is a row of its own on the
+    /// PROJECTS TAB: it starts `off`, cycles the four policies for that
+    /// project alone and saves the word the daemon reads in its entry —
+    /// `off` as nothing at all; a hand edit off the list reads, and steps
     /// on, as `off`.
     #[test]
-    fn worktree_containers_is_off_by_default_and_cycles_the_policies() {
+    fn on_worktree_delete_is_off_by_default_and_cycles_per_project() {
+        let demo = Path::new("/tmp/demo");
         let mut cfg = Config::default();
-        assert_eq!(cfg.value_label(SettingKind::WorktreeContainers), "off");
-        let (tab, row) = locate(SettingKind::WorktreeContainers).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "General");
         assert_eq!(
-            locate(SettingKind::LinkEnvFiles),
-            Some((tab, row - 1)),
-            "after the .env links"
+            cfg.project(demo)
+                .value_label(SettingKind::WorktreeContainers),
+            "off"
+        );
+        assert_eq!(
+            locate(SettingKind::WorktreeContainers).map(|(t, _)| t),
+            Some(project_tab())
         );
         let mut seen = Vec::new();
         for _ in 0..WORKTREE_CONTAINERS.len() {
-            cfg.cycle(tab, row, 1);
-            seen.push(cfg.value_label(SettingKind::WorktreeContainers));
+            assert!(cfg.cycle_project(demo, SettingKind::WorktreeContainers, 1));
+            seen.push(
+                cfg.project(demo)
+                    .value_label(SettingKind::WorktreeContainers),
+            );
         }
         assert_eq!(seen, ["stop", "remove", "remove+volumes", "off"], "wraps");
-        cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.worktree_containers, "remove+volumes", "← steps back");
+        assert!(cfg.projects.is_empty(), "off leaves no entry");
+        cfg.cycle_project(demo, SettingKind::WorktreeContainers, -1);
+        assert_eq!(cfg.project(demo).worktree_containers, "remove+volumes");
+        assert_eq!(
+            cfg.project(Path::new("/tmp/other")).containers(),
+            WorktreeContainers::Off
+        );
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         cfg.save_to(&path).unwrap();
-        assert_eq!(load_from(&path).worktree_containers, "remove+volumes");
+        assert_eq!(
+            read_json_file(&path)["projects"]["/tmp/demo"]["worktree_containers"],
+            "remove+volumes"
+        );
+        assert_eq!(
+            load_from(&path).project(demo).containers(),
+            WorktreeContainers::RemoveVolumes
+        );
 
-        let mut cfg: Config = serde_json::from_str(r#"{"worktree_containers": "nuke"}"#).unwrap();
-        assert_eq!(cfg.value_label(SettingKind::WorktreeContainers), "off");
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.worktree_containers, "stop");
+        let mut cfg: Config =
+            serde_json::from_str(r#"{"projects": {"/tmp/demo": {"worktree_containers": "nuke"}}}"#)
+                .unwrap();
+        assert_eq!(cfg.project(demo).containers(), WorktreeContainers::Off);
+        cfg.cycle_project(demo, SettingKind::WorktreeContainers, 1);
+        assert_eq!(cfg.project(demo).worktree_containers, "stop");
     }
 
+    /// PRESET TEXT: a Sessions row after the sounds, `prefix` by default,
+    /// cycling the three sides and persisted under `preset_text`; a hand
+    /// edit off the list reads as the default, and `both` as the long
+    /// label.
     #[test]
     fn preset_text_is_prefix_by_default_on_the_sessions_tab_and_cycles_the_sides() {
         let mut cfg = Config::default();

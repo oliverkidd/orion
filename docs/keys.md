@@ -500,7 +500,7 @@ worktree keys swap the picker in front, the effort key hands the box back steppe
 
 A new worktree's branch is your sentence slugified (`fix login redirect` → `fix-login-redirect`),
 or a random `<adj>-<noun>-<verb>` when empty, started at the freshly fetched `origin/HEAD` — or
-the **Worktree base branch** setting. The project's ignored `.env` files are linked into it from
+the project's **Base branch** (Settings → Projects). The project's ignored `.env` files are linked into it from
 the main checkout (**Link .env files**, Settings → General).
 
 A `⎇` row checks out a branch that already exists instead — someone else's work, or yours from

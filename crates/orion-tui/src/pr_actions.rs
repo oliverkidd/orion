@@ -399,7 +399,7 @@ pub(crate) fn open_create(app: &mut App) {
     form.fetching = tx.is_some();
     put_form(app, PrForm::Create(form));
     if let Some(tx) = tx {
-        let base_setting = config.worktree_base_branch.clone();
+        let base_setting = config.project(&dir).base_branch;
         let quit = app.git_sync.quit.clone();
         // What the repo knows now, at once; then again once origin is
         // fetched, so a branch moved on there — a `dev` merged from
@@ -1152,7 +1152,7 @@ async fn merge(
     let Some(branch) = branch.filter(|_| !auto) else {
         return Ok(BranchFate::Kept);
     };
-    let setting = crate::config::Config::load().worktree_base_branch;
+    let setting = crate::config::Config::load().project(dir).base_branch;
     Ok(retire_merged_branch(dir, branch, base, &setting).await)
 }
 
@@ -1214,8 +1214,8 @@ async fn guard(dir: &Path, branch: &str, setting: &str) -> Option<BranchFate> {
 /// Why `branch` outlives any pull request merged from it: it is what other
 /// work is based on, so "stacked on it" means every open pull request of
 /// the repo's and deleting it is never what merging it meant. `dev` merged
-/// into `main` is the shape. `setting` is the `worktree_base_branch`
-/// SETTING, which names such a branch on a repo that doesn't protect it.
+/// into `main` is the shape. `setting` is the project's **Base branch**,
+/// which names such a branch on a repo that doesn't protect it.
 /// `Err` when GitHub could not say.
 async fn long_lived(dir: &Path, branch: &str, setting: &str) -> Result<Option<String>, String> {
     if branch == crate::commit_list::base_name(setting) {
@@ -1260,7 +1260,7 @@ fn ask_long_lived(app: &mut App) {
         return;
     };
     tokio::spawn(async move {
-        let setting = crate::config::Config::load().worktree_base_branch;
+        let setting = crate::config::Config::load().project(&dir).base_branch;
         if let Ok(Some(why)) = long_lived(&dir, &branch, &setting).await {
             let _ = tx.send(Answer::BranchStays { ticket, why });
         }
@@ -1544,7 +1544,7 @@ async fn close(
     let Some(branch) = branch else {
         return Ok(BranchFate::Kept);
     };
-    let setting = crate::config::Config::load().worktree_base_branch;
+    let setting = crate::config::Config::load().project(dir).base_branch;
     Ok(retire_closed_branch(dir, branch, &setting).await)
 }
 

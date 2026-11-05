@@ -198,12 +198,13 @@ fn inspect(id: WorktreeId, path: &Path, base_setting: &str) -> Option<Found> {
     })
 }
 
-/// Read every candidate at once; the clean ones, in the order given.
-fn check(candidates: Vec<(WorktreeId, PathBuf)>, base_setting: &str) -> Vec<Found> {
+/// Read every candidate at once — each against its project's base
+/// branch — and return the clean ones, in the order given.
+fn check(candidates: Vec<Candidate>) -> Vec<Found> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = candidates
             .into_iter()
-            .map(|(id, path)| scope.spawn(move || inspect(id, &path, base_setting)))
+            .map(|(id, path, base)| scope.spawn(move || inspect(id, &path, &base)))
             .collect();
         handles
             .into_iter()
@@ -312,9 +313,16 @@ pub(crate) mod keys {
 /// The palette row: open the modal on the idle worktrees and read them off
 /// the loop, or say there are none.
 pub(crate) fn start(app: &mut App) {
-    let candidates: Vec<(WorktreeId, PathBuf)> = idle(app)
+    let cfg = crate::config::Config::load();
+    let base_of = |path: &Path| {
+        app.tree
+            .repo_of(path)
+            .map(|repo| cfg.project(&repo).base_branch)
+            .unwrap_or_default()
+    };
+    let candidates: Vec<Candidate> = idle(app)
         .into_iter()
-        .map(|w| (w.id.clone(), w.path.clone()))
+        .map(|w| (w.id.clone(), w.path.clone(), base_of(&w.path)))
         .collect();
     app.dirty = true;
     if candidates.is_empty() {
@@ -327,24 +335,27 @@ pub(crate) fn start(app: &mut App) {
         checking: candidates.len(),
         ..CleanView::default()
     }));
-    let base = crate::config::Config::load().worktree_base_branch;
     let checks = &mut app.clean_worktrees.checks;
     checks.clear();
     let Some(ticket) = checks.begin((), std::time::Instant::now()) else {
         return;
     };
     let Some(tx) = app.clean_worktrees.tx.clone() else {
-        let found = check(candidates, &base);
+        let found = check(candidates);
         land(app, Answer::Checked { ticket, found });
         return;
     };
     tokio::task::spawn_blocking(move || {
         let _ = tx.send(Answer::Checked {
             ticket,
-            found: check(candidates, &base),
+            found: check(candidates),
         });
     });
 }
+
+/// A worktree to check: its id, its checkout, and its project's base
+/// branch (empty for origin's default).
+type Candidate = (WorktreeId, PathBuf, String);
 
 /// An answer landed: the check fills the modal, if it is still up; a
 /// branch delete counts toward the flash, or says why it failed.

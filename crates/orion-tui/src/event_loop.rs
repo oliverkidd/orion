@@ -971,8 +971,9 @@ fn request_git_changes(app: &mut App, git_tx: &tokio::sync::mpsc::UnboundedSende
         return;
     };
     let git_tx = git_tx.clone();
+    let repo = app.tree.repo_of(&path);
     tokio::task::spawn_blocking(move || {
-        let (files, lines, ahead) = read_checkout(&path);
+        let (files, lines, ahead) = read_checkout(&path, repo.as_deref());
         let _ = git_tx.send((ticket, files, lines, ahead));
     });
 }
@@ -1006,13 +1007,13 @@ type CheckoutRead = (
 
 /// One read of a checkout for the badge and its band's rule: its changed
 /// files, the lines behind them, and its commits ahead of and behind the
-/// base it is measured against — the `worktree_base_branch` setting's,
-/// read fresh like every other (`commit_list::ahead_behind`). Blocking:
-/// run off the loop.
-fn read_checkout(path: &std::path::Path) -> CheckoutRead {
+/// base it is measured against — the **Base branch** of `repo`, its
+/// project, read fresh like every other setting
+/// (`commit_list::ahead_behind`). Blocking: run off the loop.
+fn read_checkout(path: &std::path::Path, repo: Option<&std::path::Path>) -> CheckoutRead {
     let files = crate::git_diff::changed_files(path).ok();
     let lines = line_changes_of(path, files.as_deref());
-    let base = crate::config::Config::load().worktree_base_branch;
+    let base = crate::config::base_branch_of(repo);
     (files, lines, crate::commit_list::ahead_behind(path, &base))
 }
 
@@ -1179,8 +1180,9 @@ fn sweep_git_changes(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<Swep
         return;
     };
     let tx = tx.clone();
+    let repo = app.tree.repo_of(&path);
     tokio::task::spawn_blocking(move || {
-        let (files, lines, ahead) = read_checkout(&path);
+        let (files, lines, ahead) = read_checkout(&path, repo.as_deref());
         let _ = tx.send((ticket, files.map(|f| f.len()), lines, ahead));
     });
 }
@@ -4662,8 +4664,8 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 None => label.to_string(),
             };
             let hint = match kind {
-                crate::config::SettingKind::WorktreeBaseBranch => {
-                    "branch new worktrees start from (empty = auto: origin's default branch)"
+                crate::config::SettingKind::BaseBranch => {
+                    "branch this project's new worktrees start from (empty = auto: origin's default branch)"
                 }
                 crate::config::SettingKind::LinearAccount => {
                     "email of the Linear user whose issues ⌘L lists (empty = the LINEAR_API_KEY's owner)"
@@ -5397,7 +5399,7 @@ fn open_diff_view(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
     };
-    let base = crate::config::Config::load().worktree_base_branch;
+    let base = app.tree.base_branch_at(&path);
     let Some(jobs) = app.view_jobs.clone() else {
         // No loop to land an answer on (unit tests): read inline.
         match crate::git_diff::read_opening(&path, &base) {
@@ -8183,20 +8185,9 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
             SettingKind::RunSetup | SettingKind::Git | SettingKind::Gh => return,
             _ => {}
         }
-        // A LINEAR TAB status row: Enter asks Linear whose the selected
-        // project's key is; there is nothing to cycle.
-        if spec.kind.is_status() {
-            if delta == 0 {
-                crate::linear::test_connection(app);
-            } else if let Some(view) = settings_mut(app) {
-                view.info("Enter: test the connection");
-            }
-            return;
-        }
-        // A PROJECT TAB row edits the entry of the project whose block
-        // it is in — every one of them typed. With no project to edit —
-        // an empty tree — say so rather than open a prompt with nowhere
-        // to write.
+        // A PROJECTS TAB row edits the entry of the project whose block
+        // it is in. With no project to edit — an empty tree — say so
+        // rather than open a prompt with nowhere to write.
         let project = if spec.kind.is_project() {
             let Some(path) = app
                 .settings_project(tab, index)
@@ -8211,6 +8202,19 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         } else {
             None
         };
+        // A project's Linear key: Enter asks Linear whose it is; there is
+        // nothing to cycle.
+        if spec.kind.is_status() {
+            match (delta, project) {
+                (0, Some(dir)) => crate::linear::test_connection(app, dir),
+                _ => {
+                    if let Some(view) = settings_mut(app) {
+                        view.info("Enter: test the connection");
+                    }
+                }
+            }
+            return;
+        }
         if spec.kind.is_text() {
             // Enter (and a second click) on a typed row opens its prompt in
             // the overlay's place; Enter and Esc there both bring the
@@ -8226,6 +8230,14 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
                 );
             } else if let Some(view) = settings_mut(app) {
                 view.info("Enter: type a value   (empty puts the default back)");
+            }
+            return;
+        }
+        // A cycled PROJECTS TAB row steps that project's entry alone.
+        if let Some(path) = project {
+            let mut cfg = crate::config::Config::load();
+            if cfg.cycle_project(&path, spec.kind, delta) {
+                save_config(app, &cfg);
             }
             return;
         }
@@ -12099,6 +12111,25 @@ fn connection_lost(app: &mut App, out: &mut Vec<ClientRequest>) {
     app.dirty = true;
 }
 
+/// A snapshot names every project: hand each the settings an older
+/// release kept once for all of them ([`crate::config::Config::adopt_project_keys`]).
+/// Once spent, the old keys are gone from the file and this reads nothing
+/// to move.
+fn adopt_project_keys(app: &App) {
+    let repos: Vec<std::path::PathBuf> = app
+        .tree
+        .projects
+        .iter()
+        .map(|p| p.repo_path.clone())
+        .collect();
+    let mut cfg = crate::config::Config::load();
+    if cfg.adopt_project_keys(&repos) {
+        if let Err(err) = cfg.try_save() {
+            tracing::warn!(%err, "couldn't save the projects' base branch and containers");
+        }
+    }
+}
+
 pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut Vec<ClientRequest>) {
     match event {
         ServerEvent::Snapshot {
@@ -12116,6 +12147,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             app.tree.terminals = terminals;
             app.tree.links = links;
             app.pr_seen = pr_seen.into_iter().map(|s| (s.url, s.marker)).collect();
+            adopt_project_keys(app);
             // The cache painted rows for whatever the last run's tree had;
             // the ones this tree no longer has go, before they could be
             // written back.
@@ -26466,16 +26498,11 @@ mod tests {
         });
     }
 
-    /// The WORKTREE BASE BRANCH row is typed, not cycled: Enter opens a
-    /// prompt in the overlay's place, pre-filled with the stored value;
-    /// Enter there saves the name and lands back on the same row, Esc
-    /// keeps the old value and lands there too, and an empty Enter puts
-    /// `auto` back. ←/→ only explain themselves.
-    /// The LINEAR TAB's keys: Enter on **Test connection** asks Linear
-    /// (stubbed — no test reaches it) with the selected project's key and
-    /// the row reads whose it is; ←/→ there only explain.
+    /// A project's **Linear key** (Settings → Projects): Enter asks Linear
+    /// (stubbed — no test reaches it) with that project's key and the row
+    /// reads whose it is; ←/→ there only explain.
     #[test]
-    fn the_linear_tab_tests_the_connection() {
+    fn the_projects_tab_tests_a_projects_linear_key() {
         use crate::config::SettingKind;
         let config = tempfile::tempdir().unwrap();
         crate::config::with_config_path(config.path().join("config.json"), || {
@@ -26485,8 +26512,8 @@ mod tests {
             seed_tree(&mut app);
             app.tree.projects[0].repo_path = repo.path().into();
             let mut out = Vec::new();
-            let (tab, row) = crate::config::locate(SettingKind::LinearTest).unwrap();
-            assert_eq!(crate::config::SETTINGS_TABS[tab].title, "Linear");
+            let (tab, row) = crate::config::locate(SettingKind::LinearKey).unwrap();
+            assert_eq!(crate::config::SETTINGS_TABS[tab].title, "Projects");
             open_settings_on(&mut app, tab, &mut out);
             for _ in 0..row {
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
@@ -26518,25 +26545,27 @@ mod tests {
                 },
             );
             assert_eq!(
-                crate::linear::status_value(&app, SettingKind::LinearTest).as_deref(),
-                Some("✓ Ada · ada@x.dev")
-            );
-            assert_eq!(
-                crate::linear::status_value(&app, SettingKind::LinearKey).as_deref(),
-                Some("found in .env.local · demo")
+                crate::linear::key_status(&app, repo.path()),
+                "found in .env.local · ✓ Ada · ada@x.dev"
             );
         });
     }
 
+    /// A project's **Base branch** on the PROJECTS TAB: Enter opens a
+    /// prompt in the overlay's place, pre-filled with the stored value;
+    /// Enter there saves it into that project's entry and lands back on
+    /// the same row, Esc keeps the old value and lands there too, and an
+    /// empty Enter puts `auto` back. ←/→ only explain themselves.
     #[test]
-    fn settings_worktree_base_branch_is_typed_through_a_prompt() {
-        use crate::config::SettingKind::WorktreeBaseBranch;
+    fn a_projects_base_branch_is_typed_through_a_prompt() {
+        use crate::config::SettingKind::BaseBranch;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         crate::config::with_config_path(path.clone(), || {
             let mut app = App::new();
+            seed_tree(&mut app);
             let mut out = Vec::new();
-            let (tab, row) = crate::config::locate(WorktreeBaseBranch).unwrap();
+            let (tab, row) = crate::config::locate(BaseBranch).unwrap();
             open_settings_on(&mut app, tab, &mut out);
             for _ in 0..row {
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
@@ -26544,6 +26573,8 @@ mod tests {
             let saved = |path: &std::path::Path| -> serde_json::Value {
                 serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
             };
+            let demo = std::path::Path::new("/tmp/demo");
+            let base = || crate::config::Config::load().project(demo).base_branch;
 
             // ←/→: nothing to cycle, the overlay stays and explains.
             press(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, &mut out);
@@ -26556,24 +26587,31 @@ mod tests {
                 "→ on a typed row says Enter types it: {:?}",
                 view.notice
             );
-            assert_eq!(crate::config::Config::load().worktree_base_branch, "");
+            assert_eq!(base(), "");
 
             // Enter: a prompt in the overlay's place, empty like the value.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("expected the branch prompt, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.title, "Worktree base branch");
+            assert_eq!(prompt.title, "Base branch · demo");
             assert_eq!(prompt.input.as_str(), "");
-            assert!(
-                matches!(prompt.kind, PromptKind::SettingText { kind, .. } if kind == WorktreeBaseBranch)
-            );
+            assert!(matches!(
+                prompt.kind,
+                PromptKind::SettingText {
+                    kind: BaseBranch,
+                    project: Some(_)
+                }
+            ));
 
             type_text(&mut app, "master", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(out.is_empty(), "a setting is a file write, not a request");
-            assert_eq!(crate::config::Config::load().worktree_base_branch, "master");
-            assert_eq!(saved(&path)["worktree_base_branch"], "master");
+            assert_eq!(base(), "master");
+            assert_eq!(
+                saved(&path)["projects"]["/tmp/demo"]["base_branch"],
+                "master"
+            );
             let view = settings_view(&app);
             assert_eq!((view.tab, view.selected, view.on_tabs), (tab, row, false));
             assert!(
@@ -26592,19 +26630,19 @@ mod tests {
             assert_eq!(prompt.input.as_str(), "master");
             type_text(&mut app, "-typo", &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert_eq!(crate::config::Config::load().worktree_base_branch, "master");
+            assert_eq!(base(), "master");
             let view = settings_view(&app);
             assert_eq!((view.tab, view.selected), (tab, row));
 
-            // An empty Enter is the way back to auto — stored as "".
+            // An empty Enter is the way back to auto — the entry goes.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             for _ in 0.."master".len() {
                 press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             }
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(out.is_empty());
-            assert_eq!(crate::config::Config::load().worktree_base_branch, "");
-            assert_eq!(saved(&path)["worktree_base_branch"], "");
+            assert_eq!(base(), "");
+            assert_eq!(saved(&path)["projects"], serde_json::json!({}));
             let view = settings_view(&app);
             assert_eq!(view.selected, row);
             assert!(
@@ -31939,7 +31977,7 @@ mod tests {
 
             // No project at all: no prompt, and the row says why.
             let mut app = App::new();
-            open_on_row(&mut app, &mut out);
+            open_at(&mut app, &mut out, 0);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let view = settings(&app).unwrap();
             assert!(

@@ -82,13 +82,13 @@
   `<repo>/../<repo-name>-worktrees/<branch>` and branched from the freshly fetched `origin/HEAD`
   unless `orion worktree --base` names another start — a branch origin has means origin's fetched
   copy, so `--base main` is `origin/main` and never the checkout's local `main` (no `origin`, or a
-  fetch that fails: the checkout's HEAD). The `worktree_base_branch` SETTING (Settings → General)
-  is a standing `--base` for every worktree nobody names one for — `master` for a repo whose
+  fetch that fails: the checkout's HEAD). A project's **Base branch** (Settings → Projects)
+  is a standing `--base` for its every worktree nobody names one for — `dev`, or `master` for a repo whose
   default branch is not what origin says, or that has no origin — resolved the same way, and
   falling back to `origin/HEAD` in a repo that has no branch of that name.
 - **A branch reads as what it added — the COMMIT LIST.** The DIFF VIEWER (`⌘E`) lists the
   checkout's own commits, newest first: `git log --first-parent --no-merges <merge-base>..HEAD`,
-  measured against the base worktrees are cut from — the `worktree_base_branch` SETTING's branch
+  measured against the base worktrees are cut from — the project's **Base branch**
   (origin's copy first), else `origin/HEAD`, else the branch the ROOT WORKTREE is on — as the
   checkout last fetched it, since the list never fetches. First parents walk the line the branch was
   committed on and never into a merged branch's history; `--no-merges` drops the merges themselves:
@@ -150,7 +150,7 @@
   releasing it — and under a 30 s timeout that kills the hook and everything it started; a failure is
   a warning in every client, never a rolled-back create or delete. Per repo in git config rather than in CONFIG.JSON, and never a file inside the
   checkout. See [Configuration](configuration.md#worktree-hooks).
-- **A worktree runs its own project — the RUN COMMAND.** The Project tab of the SETTINGS OVERLAY
+- **A worktree runs its own project — the RUN COMMAND.** The Projects tab of the SETTINGS OVERLAY
   holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a card's or the
   project tab's right-click menu, has the DAEMON start `run` in a RUN TERMINAL — a terminal row
   that carries its command and spawns `$SHELL -l -i -c '<run>'` instead of an interactive shell — so the

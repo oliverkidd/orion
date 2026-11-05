@@ -277,17 +277,17 @@ pub async fn add_worktree_off_ref(repo: &Path, branch: &str, base: &str) -> Resu
 }
 
 /// `add_worktree` for a branch nobody named a base for when the
-/// `worktree_base_branch` SETTING names one (`master`, `develop`): the
+/// project's **Base branch** names one (`dev`, `master`): the
 /// stand-in for `origin/HEAD` in repos whose default branch is not what
 /// origin says, or that have no origin at all. Resolved like `--base`:
 /// `origin` is fetched first, and origin's copy of the branch
 /// (`origin/master`) wins over the checkout's local one, which is whatever
 /// it last pulled — cut with `--no-track`, for the reason
 /// `add_worktree_off_default` gives. A branch origin lacks that the
-/// checkout has locally is used as named. The setting is one name for
-/// every project, so a repo with no branch of that name at all does not
-/// fail the `n`: it falls back to the fetched `origin/HEAD` exactly as if
-/// the setting were empty, and the daemon log says which repo ignored it.
+/// checkout has locally is used as named. A repo with no branch of that
+/// name at all — one renamed since it was set — does not fail the `n`: it
+/// falls back to the fetched `origin/HEAD` exactly as if the setting were
+/// empty, and the daemon log says which repo ignored it.
 /// A name origin already has is checked out, as `add_worktree_off_default`
 /// does.
 pub async fn add_worktree_off_configured(
@@ -1422,7 +1422,7 @@ mod tests {
         assert_ne!(head, landed);
     }
 
-    /// The `worktree_base_branch` SETTING says `main` while the checkout's
+    /// A project's **Base branch** says `main` while the checkout's
     /// `main` is a commit behind origin's: the branch starts at origin's
     /// main, untracked — the same answer `--base main` gives.
     #[tokio::test]

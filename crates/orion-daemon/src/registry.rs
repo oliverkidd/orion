@@ -805,12 +805,13 @@ impl Daemon {
         // against the fetched origin — `main` means `origin/main`, never
         // this checkout's local branch; every other new WORKTREE — `n` in
         // the WORKTREES PANEL, a bare `orion worktree`, the QUICK PROMPT's
-        // auto-created one — starts at the `worktree_base_branch` SETTING
-        // when one is set (`master`, resolved the same way), else at the
-        // fetched `origin/HEAD`; never at this checkout's HEAD.
+        // auto-created one — starts at the project's **Base branch** when
+        // one is set (`dev`, resolved the same way), else at the fetched
+        // `origin/HEAD`; never at this checkout's HEAD.
+        let config = crate::config::Config::load();
         let path = match base {
             Some(base) => git::add_worktree_off_ref(&project.repo_path, branch, base).await?,
-            None => match crate::config::Config::load().worktree_base_branch() {
+            None => match config.base_branch(&project.repo_path) {
                 Some(configured) => {
                     git::add_worktree_off_configured(&project.repo_path, branch, configured).await?
                 }
@@ -949,7 +950,8 @@ impl Daemon {
         // and the hook's "still on disk" check sees the delete's result,
         // not a recreate's. WORKTREE CONTAINERS go first, on the same
         // terms, so a hook that releases ports finds them already free.
-        self.release_containers(&worktree.path).await;
+        self.release_containers(&project.repo_path, &worktree.path)
+            .await;
         self.run_worktree_hook(WorktreeHook::Delete, &project.repo_path, &worktree)
             .await;
         drop(ops);
@@ -1003,10 +1005,10 @@ impl Daemon {
     }
 
     /// Stop or tear down the compose projects started in a just-deleted
-    /// checkout, as the `worktree_containers` SETTING says; whatever goes
-    /// wrong is a client warning.
-    async fn release_containers(&self, worktree: &Path) {
-        let policy = crate::config::Config::load().worktree_containers();
+    /// checkout of the project at `repo`, as its **On worktree delete**
+    /// says; whatever goes wrong is a client warning.
+    async fn release_containers(&self, repo: &Path, worktree: &Path) {
+        let policy = crate::config::Config::load().worktree_containers(repo);
         for warning in crate::containers::release(worktree, policy).await {
             self.warn_clients(warning);
         }

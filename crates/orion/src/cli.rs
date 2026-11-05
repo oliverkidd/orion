@@ -131,8 +131,8 @@ pub(crate) enum Command {
         /// Branch name; several words are joined with hyphens, none at all
         /// gets a random `<adj>-<noun>-<verb>` one.
         name: Vec<String>,
-        /// Start point for a new branch (default: the `worktree_base_branch`
-        /// setting, else origin's default branch, fetched).
+        /// Start point for a new branch (default: the project's Base branch,
+        /// else origin's default branch, fetched).
         ///
         /// A branch name origin has means origin's copy of it, fetched first:
         /// `main` is `origin/main`, never this checkout's local branch. A tag,
@@ -164,7 +164,7 @@ pub(crate) enum Command {
         #[arg(long, value_name = "NAME")]
         worktree: Option<String>,
         /// Start point for a new --worktree branch (default: the
-        /// `worktree_base_branch` setting, else origin's default branch).
+        /// project's Base branch, else origin's default branch).
         #[arg(long, value_name = "REF", requires = "worktree")]
         base: Option<String>,
     },

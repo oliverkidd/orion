@@ -97,7 +97,7 @@ pub(super) fn submit(
                 out,
             );
 
-            // `base: None` is the DAEMON's `worktree_base_branch` SETTING,
+            // `base: None` is the project's **Base branch** (the DAEMON reads it),
             // else its fetched `origin/HEAD` (`git::add_worktree_off_default`)
             // — never this checkout's HEAD. An `existing` branch (a WORKTREE
             // PICKER branch row) is checked out as it is instead.

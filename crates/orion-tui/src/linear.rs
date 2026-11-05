@@ -30,10 +30,11 @@
 //! The key is the project's `LINEAR_API_KEY` (`.env.local`, then `.env`,
 //! then the process env). Only that one name is read. It is never logged,
 //! never stored, never shown, and sent only to `api.linear.app` through
-//! `curl --config -`. Settings → Linear gathers every option: **Link PRs
-//! to Linear**, **Linear account** (whose issues are listed; empty = the
-//! owner of that key), and where the selected project's key was found, with **Test connection** asking Linear whose
-//! key it is ([`status_value`], [`test_connection`]).
+//! `curl --config -`. Settings → Linear holds **Link PRs to Linear** and
+//! **Linear account** (whose issues are listed; empty = the owner of that
+//! key); each project's **Linear key** on Settings → Projects says where
+//! its key was found, and `Enter` there asks Linear whose key it is
+//! ([`key_status`], [`test_connection`]).
 
 use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
@@ -782,7 +783,7 @@ pub enum LinearAnswer {
         moved: bool,
         refused: Option<(String, String)>,
     },
-    /// **Test connection**: who the key in `dir` belongs to.
+    /// A project's **Linear key** tested: who the key in `dir` belongs to.
     Viewer {
         dir: PathBuf,
         result: Result<Viewer, String>,
@@ -939,7 +940,7 @@ pub struct Viewer {
     pub email: String,
 }
 
-/// Where **Test connection** stands for one project's key.
+/// Where the test of one project's **Linear key** stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinearTest {
     Testing,
@@ -5416,8 +5417,8 @@ pub fn read_linear_key(dir: &Path) -> Option<String> {
     find_key(dir).map(|(key, _)| key)
 }
 
-/// Where [`read_linear_key`] would find the key — what the LINEAR TAB's
-/// **API key** row says. The key is read to know it is there, and dropped.
+/// Where [`read_linear_key`] would find the key — what a project's
+/// **Linear key** row says. The key is read to know it is there, and dropped.
 pub fn key_source(dir: &Path) -> Option<KeySource> {
     find_key(dir).map(|(_, source)| source)
 }
@@ -5440,35 +5441,23 @@ fn find_key(dir: &Path) -> Option<(String, KeySource)> {
         .map(|key| (key, KeySource::Environment))
 }
 
-/// The value the LINEAR TAB (and the onboarding wizard's Linear page)
-/// shows on a status row ([`SettingKind::is_status`]) for the selected
-/// project: where its key comes from, and what the last **Test
-/// connection** said. None for any other row. Never the key.
-///
-/// [`SettingKind::is_status`]: crate::config::SettingKind::is_status
-pub fn status_value(app: &App, kind: crate::config::SettingKind) -> Option<String> {
-    use crate::config::SettingKind;
-    if !kind.is_status() {
-        return None;
-    }
-    let Some(project) = app.selected_project() else {
-        return Some("no project selected".into());
+/// What a project's **Linear key** row (Settings → Projects) says for the
+/// checkout at `dir`: where its key comes from, and what the last test of
+/// it said — while it is still the key it tested: one found, moved or
+/// dropped since says nothing. Never the key.
+pub fn key_status(app: &App, dir: &Path) -> String {
+    let source = key_source(dir);
+    let found = match source {
+        Some(source) => source.label(),
+        None => "not found".into(),
     };
-    let dir = &project.repo_path;
-    Some(match kind {
-        SettingKind::LinearKey => match key_source(dir) {
-            Some(source) => format!("{} · {}", source.label(), project.name),
-            None => format!("not found for {}", project.name),
-        },
-        // The last test of this project's key — while it is still the
-        // key it tested: one found, moved or dropped since says nothing.
-        _ => match &app.linear_test {
-            Some((tested, source, test)) if tested == dir && *source == key_source(dir) => {
-                test_label(test)
-            }
-            _ => "not tested".into(),
-        },
-    })
+    match &app.linear_test {
+        Some((tested, was, test)) if tested == dir && *was == source => {
+            format!("{found} · {}", test_label(test))
+        }
+        _ if source.is_some() => format!("{found} · Enter tests it"),
+        _ => found,
+    }
 }
 
 /// A test's word for the row: `testing…`, `✓ Jane Doe · jane@acme.com`,
@@ -5485,14 +5474,11 @@ fn test_label(test: &LinearTest) -> String {
     }
 }
 
-/// **Test connection**: ask Linear, with the selected project's key, who
-/// that key belongs to — the `viewer` query, off the loop. The row says
-/// `testing…` until the answer lands ([`land_answer`]). No key is an
-/// answer at once, with no call made.
-pub(crate) fn test_connection(app: &mut App) {
-    let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
-        return;
-    };
+/// Enter on a project's **Linear key**: ask Linear, with the key of the
+/// checkout at `dir`, who that key belongs to — the `viewer` query, off
+/// the loop. The row says `testing…` until the answer lands
+/// ([`land_answer`]). No key is an answer at once, with no call made.
+pub(crate) fn test_connection(app: &mut App, dir: PathBuf) {
     let Some((key, source)) = find_key(&dir) else {
         if let Some(Overlay::Settings(view)) = &mut app.overlay {
             view.warn(format!("Linear: {NO_KEY}"));
@@ -6478,60 +6464,43 @@ pub(crate) mod tests {
     /// `.env`, then orion's environment — and no key says so.
     #[test]
     fn the_key_row_says_where_the_key_is_and_never_what() {
-        use crate::config::SettingKind;
         let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
-        let (app, _dir) = app_on(&[(".env", &line), (".env.local", &line)]);
-        let shown = status_value(&app, SettingKind::LinearKey).unwrap();
-        assert_eq!(shown, "found in .env.local · demo");
-        let (app, _dir) = app_on(&[(".env", &line), (".env.local", "OTHER=1\n")]);
-        let shown = status_value(&app, SettingKind::LinearKey).unwrap();
-        assert_eq!(shown, "found in .env · demo");
+        let (app, dir) = app_on(&[(".env", &line), (".env.local", &line)]);
+        let shown = key_status(&app, dir.path());
+        assert_eq!(shown, "found in .env.local · Enter tests it");
+        let (app, dir) = app_on(&[(".env", &line), (".env.local", "OTHER=1\n")]);
+        let shown = key_status(&app, dir.path());
+        assert_eq!(shown, "found in .env · Enter tests it");
         assert!(!shown.contains(FAKE_KEY));
         let (app, dir) = app_on(&[(".env", "OTHER=1\n")]);
-        let shown = status_value(&app, SettingKind::LinearKey).unwrap();
+        let shown = key_status(&app, dir.path());
         match std::env::var(KEY_NAME)
             .ok()
             .filter(|v| !v.trim().is_empty())
         {
             Some(_) => assert_eq!(key_source(dir.path()), Some(KeySource::Environment)),
-            None => assert_eq!(shown, "not found for demo"),
+            None => assert_eq!(shown, "not found"),
         }
-        assert_eq!(
-            status_value(&app, SettingKind::LinearTest).as_deref(),
-            Some("not tested")
-        );
-        assert_eq!(
-            status_value(&app, SettingKind::LinearAccount),
-            None,
-            "not a status row"
-        );
-        assert_eq!(
-            status_value(&App::new(), SettingKind::LinearKey).as_deref(),
-            Some("no project selected")
-        );
     }
 
-    /// **Test connection** asks Linear's `viewer` with the project's key
+    /// Testing a **Linear key** asks Linear's `viewer` with the project's key
     /// — stubbed here: no test reaches Linear — and the row says whose it
     /// is, or Linear's own error, the settings overlay saying it in full.
     #[test]
     fn test_connection_names_the_keys_account_or_the_error() {
-        use crate::config::SettingKind;
         let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
         let (mut app, dir) = app_on(&[(".env", &line)]);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
+        let path = dir.path().to_path_buf();
         let run = |app: &mut App| {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             app.linear_tx = Some(tx);
             rt.block_on(async {
-                test_connection(app);
-                assert_eq!(
-                    status_value(app, SettingKind::LinearTest).as_deref(),
-                    Some("testing…")
-                );
+                test_connection(app, path.clone());
+                assert_eq!(key_status(app, &path), "found in .env · testing…");
                 let answer = rx.recv().await.expect("an answer");
                 land_answer(app, answer);
             });
@@ -6547,8 +6516,8 @@ pub(crate) mod tests {
             || run(&mut app),
         );
         assert_eq!(
-            status_value(&app, SettingKind::LinearTest).as_deref(),
-            Some("✓ Jane Doe · jane@acme.dev")
+            key_status(&app, dir.path()),
+            "found in .env · ✓ Jane Doe · jane@acme.dev"
         );
         assert_eq!(
             app.linear_test.as_ref().map(|(d, ..)| d.as_path()),
@@ -6557,8 +6526,8 @@ pub(crate) mod tests {
         // A key moved since says nothing about this one.
         std::fs::rename(dir.path().join(".env"), dir.path().join(".env.local")).unwrap();
         assert_eq!(
-            status_value(&app, SettingKind::LinearTest).as_deref(),
-            Some("not tested")
+            key_status(&app, dir.path()),
+            "found in .env.local · Enter tests it"
         );
         std::fs::rename(dir.path().join(".env.local"), dir.path().join(".env")).unwrap();
 
@@ -6570,8 +6539,8 @@ pub(crate) mod tests {
             || run(&mut app),
         );
         assert_eq!(
-            status_value(&app, SettingKind::LinearTest).as_deref(),
-            Some("✗ Authentication required")
+            key_status(&app, dir.path()),
+            "found in .env · ✗ Authentication required"
         );
         let Some(Overlay::Settings(view)) = &app.overlay else {
             panic!("the overlay stays");
@@ -6582,27 +6551,23 @@ pub(crate) mod tests {
         );
 
         // No key at all is an answer on the spot, with nothing sent.
-        let (mut bare, _dir) = app_on(&[]);
+        let (mut bare, dir) = app_on(&[]);
         if std::env::var(KEY_NAME).is_err() {
-            test_connection(&mut bare);
+            test_connection(&mut bare, dir.path().to_path_buf());
             assert_eq!(
-                status_value(&bare, SettingKind::LinearTest),
-                Some(format!("✗ {NO_KEY}"))
+                key_status(&bare, dir.path()),
+                format!("not found · ✗ {NO_KEY}")
             );
         }
     }
 
-    /// The LINEAR TAB drawn: every row — the switch on by default, the
-    /// account, where the key is and the test — and the
-    /// key's value nowhere on screen.
+    /// The PROJECTS TAB drawn: the project's Linear key row says where its
+    /// key is, and the key's value is nowhere on screen.
     #[test]
-    fn the_linear_tab_draws_every_row_and_never_the_key() {
+    fn the_projects_tab_draws_the_linear_key_and_never_the_key() {
         let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
         let (mut app, _dir) = app_on(&[(".env", &line)]);
-        let tab = crate::config::SETTINGS_TABS
-            .iter()
-            .position(|t| t.title == "Linear")
-            .expect("a Linear tab");
+        let tab = crate::config::project_tab();
         let config = tempfile::tempdir().unwrap();
         crate::config::with_config_path(config.path().join("config.json"), || {
             app.overlay = Some(Overlay::Settings(crate::app::SettingsView::new(
@@ -6621,17 +6586,14 @@ pub(crate) mod tests {
                 })
                 .collect();
             for needle in [
-                " Linear ",
-                "Link PRs to Linear",
-                "[on]",
-                "Linear account",
-                "[the key's owner]",
-                "Connection",
-                "API key",
-                "[found in .env · demo]",
-                "Test connection",
-                "[not tested]",
-                "Enter toggle",
+                " Projects ",
+                "demo",
+                "Base branch",
+                "[auto]",
+                "On worktree delete",
+                "[off]",
+                "Linear key",
+                "[found in .env · Enter tests it]",
             ] {
                 assert!(screen.contains(needle), "{needle}:\n{screen}");
             }

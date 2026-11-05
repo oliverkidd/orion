@@ -307,7 +307,7 @@ fn send(root: &Path, rest: &[&str], quit: &AtomicBool, log: Option<&GitLog>) -> 
 }
 
 /// The whole PUSH of the checkout at `root`. `base_setting` is the
-/// `worktree_base_branch` SETTING, naming the branch a push is held back
+/// project's **Base branch**, naming the branch a push is held back
 /// from until confirmed: `confirmed` is the commit the held push was shown
 /// at, and it goes only while HEAD is still that commit. Blocking: run off
 /// the loop.
@@ -482,11 +482,11 @@ pub(crate) fn start(app: &mut App, worktree: WorktreeId, op: Op) {
         return;
     };
     let quit = app.git_sync.quit.clone();
+    let base = app.tree.base_branch_at(&root);
     tokio::task::spawn_blocking(move || {
         let outcome = match op {
             Op::Pull => pull(&root, &quit),
             Op::Push { ref confirmed } => {
-                let base = crate::config::Config::load().worktree_base_branch;
                 push(&root, &base, confirmed.as_deref(), &quit, log.as_ref())
             }
         };

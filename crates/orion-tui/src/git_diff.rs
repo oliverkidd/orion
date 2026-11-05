@@ -724,7 +724,7 @@ pub fn read_listing(root: &Path) -> Result<crate::view_jobs::DiffListing, String
 
 /// What opening the DIFF VIEWER on a checkout reads: [`read_listing`], and
 /// the COMMIT LIST beside it (`commit_list::read`), measured against the
-/// `worktree_base_branch` SETTING's `base_setting`. One job rather than
+/// project's **Base branch**, `base_setting`. One job rather than
 /// two, so the view never has to decide what an empty `git status` means
 /// before it knows whether the branch has commits to show instead.
 pub fn read_opening(
