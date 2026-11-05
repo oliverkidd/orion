@@ -176,7 +176,6 @@ const APPS: &[(&str, &str, &str)] = &[
         "sublime-text",
         "https://www.sublimetext.com/download",
     ),
-    ("zed", "zed", "https://zed.dev/download"),
 ];
 
 /// The **Open in app** app `program` names, when it names one of [`APPS`].
@@ -189,7 +188,7 @@ fn outside_app(program: &str) -> Option<crate::outside_editor::App> {
 }
 
 /// How the **Open in app** choice `word` gets onto a Mac: its cask. None
-/// for `auto` or `system`.
+/// for `auto`.
 pub fn app_plan(word: &str, brew: Option<&Path>) -> Option<Plan> {
     let (word, cask, link) = APPS.iter().find(|(name, _, _)| *name == word)?;
     Some(brew_plan(word, cask, true, link, brew))

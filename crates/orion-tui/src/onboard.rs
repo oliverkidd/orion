@@ -569,13 +569,10 @@ fn editor_explanation(row: usize, keymap: &Keymap) -> String {
     let opens = crate::hints::key_or(keymap, Action::OpenOutside, "Open outside");
     match (choice, crate::outside_editor::resolve(choice, &places)) {
         (crate::outside_editor::Choice::Auto, Ok(target)) => format!(
-            "The first installed of Cursor, VS Code, Sublime Text and Zed — {opens} opens \
+            "The first installed of Cursor, VS Code and Sublime Text — {opens} opens \
              files and checkouts in {} here",
             target.name
         ),
-        (crate::outside_editor::Choice::System, _) => {
-            format!("{opens} hands a file to whatever the system opens that kind of file with")
-        }
         (_, Ok(target)) => format!("{opens} opens files and checkouts in {}", target.name),
         (_, Err(why)) => why,
     }
@@ -1176,9 +1173,6 @@ fn editors(
         let (state, style) = match (choice, crate::outside_editor::resolve(choice, &places)) {
             (crate::outside_editor::Choice::Auto, Ok(target)) => {
                 (format!("opens {}", target.name), text)
-            }
-            (crate::outside_editor::Choice::System, _) => {
-                ("the system's own pick".to_string(), dim)
             }
             (_, Ok(_)) => ("installed".to_string(), Style::default().fg(th.ok)),
             (_, Err(_)) => ("not installed".to_string(), dim),
@@ -2535,14 +2529,14 @@ mod tests {
             assert!(inner.contains("Open in app — "), "{shot}");
             assert!(inner.contains("● auto"), "{shot}");
             assert!(!inner.contains("File editor"), "{shot}");
-            let zed = editor_rows().iter().position(|w| *w == "zed").unwrap();
-            for _ in view(&app).row..zed {
+            let sublime = editor_rows().iter().position(|w| *w == "sublime").unwrap();
+            for _ in view(&app).row..sublime {
                 press(&mut app, KeyCode::Down);
             }
             press(&mut app, KeyCode::Char(' '));
-            assert_eq!(Config::load().outside_editor, "zed");
+            assert_eq!(Config::load().outside_editor, "sublime");
             to_page(&mut app, Page::Editor);
-            assert_eq!(editor_rows()[view(&app).row], "zed", "on the choice");
+            assert_eq!(editor_rows()[view(&app).row], "sublime", "on the choice");
         });
     }
 

@@ -29069,6 +29069,29 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(terminal.backend().buffer()[(x, y)].fg, th.dim);
     }
 
+    /// **Open in app** on an app that isn't installed: `i` and Enter run
+    /// its Homebrew cask in the install modal.
+    #[test]
+    fn settings_installs_a_missing_open_in_app_app() {
+        with_config_json(r#"{"outside_editor": "vscode"}"#, || {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("brew"), "#!/bin/sh\n").unwrap();
+            let path = std::env::join_paths([dir.path()]).unwrap();
+            crate::config::with_search_path(path, || {
+                let (tab, row) =
+                    crate::config::locate(crate::config::SettingKind::OutsideEditor).unwrap();
+                let mut app = App::new();
+                let mut out = Vec::new();
+                app.overlay = Some(Overlay::Settings(SettingsView::new(tab, row, false)));
+                press(&mut app, KeyCode::Char('i'), KeyModifiers::NONE, &mut out);
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                let ran = crate::install::take_ran();
+                assert_eq!(ran.len(), 1, "{ran:?}");
+                assert_eq!(ran[0].args, ["install", "--cask", "visual-studio-code"]);
+            });
+        });
+    }
+
     /// An agent's Enabled row, its CLI missing: `i` asks to run its
     /// installer (the question in the explanation's place, Enter the run
     /// on the border), Enter runs it in the modal, and Esc leaves it unrun.

@@ -764,7 +764,7 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::OutsideEditor,
                 label: "Open in app",
-                hint: "What {open_outside} opens a file or checkout in; auto is the first installed of Cursor, VS Code, Sublime Text, Zed",
+                hint: "What {open_outside} opens a file or checkout in; auto is the first installed of Cursor, VS Code, Sublime Text",
                 group: "Editors",
             },
             SettingSpec {
@@ -1390,8 +1390,8 @@ pub struct Config {
     pub worktree_containers: String,
     /// OPEN IN APP: the GUI editor ⌘O hands a file or a checkout to —
     /// `auto` (the default: the first installed of Cursor, VS Code,
-    /// Sublime Text and Zed, else the system default), `cursor`,
-    /// `vscode`, `sublime`, `zed` or `default`. See `outside_editor`.
+    /// Sublime Text, else what macOS's `open` picks), `cursor`, `vscode`
+    /// or `sublime`. See `outside_editor`.
     pub outside_editor: String,
     /// Opening a file from the file finder (`f`) or find-in-files (`F`)
     /// closes that overlay as the editor modal opens, so quitting the
@@ -4936,7 +4936,7 @@ mod tests {
         let mut cfg = Config::default();
         assert_eq!(cfg.outside_editor, "auto");
         let (tab, row) = locate(SettingKind::OutsideEditor).unwrap();
-        for next in ["cursor", "vscode", "sublime", "zed", "default", "auto"] {
+        for next in ["cursor", "vscode", "sublime", "auto"] {
             cfg.cycle(tab, row, 1);
             assert_eq!(cfg.outside_editor, next);
         }
