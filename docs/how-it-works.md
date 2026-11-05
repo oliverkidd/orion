@@ -454,6 +454,17 @@ unable to say, it falls back to the ones merged after `main`'s tip was committed
 are the ones Linear has it attached to, then any its title or head branch names (`rip-412-…`) of a
 team orion's Linear list knows. A promotion already open is one `gh pr list --head dev --base main`.
 
+The **Edit pull request** form (`⌘;`) asks GitHub once as it opens — one GraphQL query for the pull
+request as it stands (its labels, requested reviewers, assignees, whether its base and head branches
+still exist) and what the repo offers (its labels, the people it can assign) — and starts every
+field on what the row already knew, each taking GitHub's word when it lands unless it was changed
+meanwhile. Enter sends only the difference, in the order GitHub allows: a closed pull request can't
+be retargeted and one whose base branch was deleted can't be reopened, so a reopen goes first, a
+deleted base (or head) branch put back first at the commit it last pointed at
+(`POST git/refs`), then `gh pr edit` with every change as flags, then `gh pr ready`, then `gh pr
+close` and the branch's delete. A base put back only to reopen on is deleted again once the pull
+request has moved off it and nothing open is based on it.
+
 The open list, the failing-checks recheck, a checkout's own lookup and the page the cursor rests on
 all say where the same pull request stands, on their own beats, and land in whatever order the
 network gives. So none of them is drawn directly: each answer goes into one store of what is known

@@ -39,11 +39,13 @@
 //!   a protected one, the base new worktrees start from — is never deleted,
 //!   so a `dev` merged into `main` leaves what is based on it alone
 //!   ([`long_lived`]). It opens on the method the project last merged by.
-//! * **Close** (`⌘W`): the pull request under the cursor closed
-//!   without merging — a comment left on it first if one is written, and
-//!   its branch deleted on GitHub if that is ticked (only a branch of this
-//!   repo's; a fork's lives elsewhere, and never a long-lived one), and
-//!   kept while pull requests are stacked on it. Enter runs `gh pr close`.
+//! * **Edit pull request** ([`edit`], `⌘;`): the pull request under the
+//!   cursor in one form — title, base, draft or ready, labels, reviewers,
+//!   assignees — and closed (`⌘W` opens it there) with a comment and its
+//!   branch deleted on GitHub if that is ticked (only a branch of this
+//!   repo's; a fork's lives elsewhere, and never a long-lived one, and kept
+//!   while pull requests are stacked on it), or reopened. Enter runs `gh
+//!   pr edit`, `gh pr ready`, `gh pr close` or `gh pr reopen`.
 //!
 //! And one verb with no form: `⌘D` ([`toggle_draft`]) marks a draft
 //! ready for review, or turns a ready one back into a draft (`gh pr
@@ -54,6 +56,7 @@
 //! matched to the form by ticket, so an answer for a form since closed is
 //! only flashed.
 
+pub mod edit;
 pub mod promote;
 
 use std::path::{Path, PathBuf};
@@ -99,7 +102,7 @@ use crate::pr_preview::INDENT;
 pub enum PrForm {
     Create(CreateForm),
     Merge(MergeForm),
-    Close(CloseForm),
+    Edit(edit::EditForm),
 }
 
 impl PrForm {
@@ -109,7 +112,7 @@ impl PrForm {
         match self {
             PrForm::Create(f) => f.ticket,
             PrForm::Merge(f) => f.ticket,
-            PrForm::Close(f) => f.ticket,
+            PrForm::Edit(f) => f.ticket,
         }
     }
 
@@ -117,7 +120,7 @@ impl PrForm {
     fn keep_branch(&mut self, why: String) {
         let (stays, delete_branch) = match self {
             PrForm::Merge(f) => (&mut f.stays, &mut f.delete_branch),
-            PrForm::Close(f) => (&mut f.stays, &mut f.delete_branch),
+            PrForm::Edit(f) => (&mut f.stays, &mut f.delete_branch),
             PrForm::Create(_) => return,
         };
         *stays = Some(why);
@@ -129,7 +132,7 @@ impl PrForm {
         match self {
             PrForm::Create(f) => f.saving.is_some(),
             PrForm::Merge(f) => f.saving.is_some(),
-            PrForm::Close(f) => f.saving.is_some(),
+            PrForm::Edit(f) => f.saving.is_some(),
         }
     }
 
@@ -139,7 +142,7 @@ impl PrForm {
         let (saving, notice) = match self {
             PrForm::Create(f) => (&mut f.saving, &mut f.notice),
             PrForm::Merge(f) => (&mut f.saving, &mut f.notice),
-            PrForm::Close(f) => (&mut f.saving, &mut f.notice),
+            PrForm::Edit(f) => (&mut f.saving, &mut f.notice),
         };
         *saving = None;
         *notice = Some(why);
@@ -305,14 +308,7 @@ impl CreateForm {
 
     /// The field after `field` (or the one before), round either end.
     pub fn step(&self, field: CreateField, forward: bool) -> CreateField {
-        let order = self.fields();
-        let n = order.len();
-        let at = order.iter().position(|f| *f == field).unwrap_or(0);
-        order[if forward {
-            (at + 1) % n
-        } else {
-            (at + n - 1) % n
-        }]
+        step_round(self.fields(), field, forward)
     }
 
     /// The Promote mode's pair — the base into the default — once both are
@@ -1135,6 +1131,19 @@ impl MergeRow {
     }
 }
 
+/// The one after (`forward`) or before `at` in `order`, round either end
+/// — Tab through a form's fields, ←/→ through a row's choices. The first
+/// when `at` is not in it.
+pub(crate) fn step_round<T: Copy + PartialEq>(order: &[T], at: T, forward: bool) -> T {
+    let n = order.len();
+    let i = order.iter().position(|x| *x == at).unwrap_or(0);
+    order[if forward {
+        (i + 1) % n
+    } else {
+        (i + n - 1) % n
+    }]
+}
+
 /// The row after (`down`) or before `at` in a form's `order`, staying put
 /// at either end — ↑/↓ through a form's rows.
 pub(crate) fn step_clamped<T: Copy + PartialEq>(order: &[T], at: T, down: bool) -> T {
@@ -1301,17 +1310,13 @@ fn deletable_branch(pr: &OpenPr, detail: Option<&PrDetail>) -> Option<String> {
         .map(|d| d.head.clone())
 }
 
-/// A pull request's body landed: a merge or close form opened on it
-/// before it did takes its branch and its base from it — and a merge form,
-/// what stands in the way. A merge form opened on a body already here (the
-/// cache's, say) keeps its branch and its ticks, but its warnings follow
-/// every body that lands: the one it opened on may be hours behind.
+/// A pull request's body landed: a merge form opened on it before it did
+/// takes its branch, its base and what stands in the way from it. One
+/// opened on a body already here (the cache's, say) keeps its branch and
+/// its ticks, but its warnings follow every body that lands: the one it
+/// opened on may be hours behind.
 pub(crate) fn detail_landed(app: &mut App, url: &str) {
-    let waiting = match form(app) {
-        Some(PrForm::Merge(f)) => f.url == url,
-        Some(PrForm::Close(f)) => f.pending && f.url == url,
-        _ => false,
-    };
+    let waiting = matches!(form(app), Some(PrForm::Merge(f)) if f.url == url);
     if !waiting {
         return;
     }
@@ -1328,10 +1333,6 @@ pub(crate) fn detail_landed(app: &mut App, url: &str) {
             ask_long_lived(app);
         }
         Some(PrForm::Merge(form)) => form.warnings = merge_warnings(&status, Some(&detail)),
-        Some(PrForm::Close(form)) => {
-            form.apply_detail(&pr, Some(&detail));
-            ask_long_lived(app);
-        }
         _ => {}
     }
     app.dirty = true;
@@ -1548,7 +1549,7 @@ fn ask_long_lived(app: &mut App) {
     };
     let (dir, branch, ticket) = match form(app) {
         Some(PrForm::Merge(f)) => (f.dir.clone(), f.branch.clone(), f.ticket),
-        Some(PrForm::Close(f)) => (f.dir.clone(), f.branch.clone(), f.ticket),
+        Some(PrForm::Edit(f)) => (f.dir.clone(), f.deletable(), f.ticket),
         _ => return,
     };
     let Some(branch) = branch else {
@@ -1684,142 +1685,6 @@ fn merged_message(
 }
 
 // ---- closing ----
-
-/// The close form's rows, in Tab order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloseRow {
-    DeleteBranch,
-    Comment,
-}
-
-impl CloseRow {
-    /// Two rows: either way round lands on the other one.
-    fn other(self) -> Self {
-        match self {
-            CloseRow::DeleteBranch => CloseRow::Comment,
-            CloseRow::Comment => CloseRow::DeleteBranch,
-        }
-    }
-}
-
-/// `⌘W`: the pull request under the cursor closed without merging.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloseForm {
-    pub project: ProjectId,
-    pub dir: PathBuf,
-    pub number: u64,
-    pub url: String,
-    pub title: String,
-    /// The branch it would have merged into, and the one it comes from —
-    /// the latter only when it is a branch of this repo ([`deletable_branch`]).
-    pub base: String,
-    pub branch: Option<String>,
-    /// The row's own name for the branch, while the body has not landed.
-    pub head: String,
-    /// The pull request's body had not landed when the form opened: the
-    /// branch and the base are filled in when it does ([`detail_landed`]).
-    pub pending: bool,
-    pub delete_branch: bool,
-    /// Why the branch can't go with it, once GitHub has said
-    /// ([`long_lived`]): the box stays off.
-    pub stays: Option<String>,
-    /// Left on the pull request as it closes, when anything is written.
-    pub comment: TextInput,
-    pub row: CloseRow,
-    pub ticket: u64,
-    pub saving: Option<String>,
-    pub notice: Option<String>,
-    /// As of the last draw: each row's rect, for the mouse.
-    pub rows: Vec<(Rect, CloseRow)>,
-}
-
-impl CloseForm {
-    /// Take the branch and the base from the pull request's row and, once
-    /// it has landed, its body. A tick stays only on a branch that is ours.
-    fn apply_detail(&mut self, pr: &OpenPr, detail: Option<&PrDetail>) {
-        self.pending = detail.is_none();
-        self.branch = deletable_branch(pr, detail);
-        self.base = detail.map(|d| d.base.clone()).unwrap_or_default();
-        self.delete_branch &= self.branch.is_some();
-    }
-
-    fn toggle_delete(&mut self) {
-        if self.branch.is_some() && self.stays.is_none() {
-            self.delete_branch = !self.delete_branch;
-            self.notice = None;
-        }
-    }
-}
-
-/// `⌘W`: the close form for the pull request under the cursor, the
-/// caret in its comment and the branch kept unless it is ticked.
-pub(crate) fn open_close(app: &mut App) {
-    let Some(view) = modal(app) else {
-        return;
-    };
-    let (project, dir) = (view.project.clone(), view.dir.clone());
-    let Some(pr) = crate::pr_modal::selected_open_pr(app) else {
-        return;
-    };
-    let mut form = CloseForm {
-        project,
-        dir,
-        number: pr.number,
-        url: pr.url.clone(),
-        title: pr.title.clone(),
-        base: String::new(),
-        branch: None,
-        head: pr.head.clone(),
-        pending: true,
-        delete_branch: false,
-        stays: None,
-        comment: TextInput::multiline(),
-        row: CloseRow::Comment,
-        ticket: crate::view_jobs::ticket(),
-        saving: None,
-        notice: None,
-        rows: Vec::new(),
-    };
-    form.apply_detail(&pr, app.pr_detail.get(&pr.url));
-    put_form(app, PrForm::Close(form));
-    ask_long_lived(app);
-    app.dirty = true;
-}
-
-/// Enter on the close form: `gh pr close` off the loop, the form held
-/// until the answer lands.
-fn submit_close(app: &mut App) {
-    let tx = app.pr_actions_tx.clone();
-    let Some(form) = close_pr_form(app) else {
-        return;
-    };
-    if form.saving.is_some() {
-        return;
-    }
-    let Some(tx) = tx else {
-        return;
-    };
-    form.notice = None;
-    form.saving = Some(format!("closing #{}…", form.number));
-    let (project, dir, ticket, number) = (
-        form.project.clone(),
-        form.dir.clone(),
-        form.ticket,
-        form.number,
-    );
-    let comment = form.comment.trim().to_string();
-    let delete = form.delete_branch.then(|| form.branch.clone()).flatten();
-    tokio::spawn(async move {
-        let result = close(&dir, number, &comment, delete.as_deref())
-            .await
-            .map(|fate| closed_message(number, &fate));
-        let _ = tx.send(Answer::Closed {
-            project,
-            ticket,
-            result,
-        });
-    });
-}
 
 /// Close pull request `number` — `comment` left on it first, when there
 /// is one — and delete `branch` on GitHub once it is closed, unless pull
@@ -1999,10 +1864,19 @@ pub enum Answer {
         landed: Option<(u64, String)>,
         method: (PathBuf, MergeMethod),
     },
-    /// `gh pr close`: what to flash, or why it refused.
-    Closed {
+    /// The edit form's one ask: the pull request as GitHub has it, and
+    /// what the repo offers.
+    EditRead {
+        ticket: u64,
+        result: Result<Box<(edit::Facts, edit::Offers)>, String>,
+    },
+    /// Origin's branches, for the edit form's base.
+    EditBranches { ticket: u64, bases: Vec<String> },
+    /// The edit form's Enter: what changed, or where it stopped and why.
+    Edited {
         project: ProjectId,
         ticket: u64,
+        url: String,
         result: Result<String, String>,
     },
     /// `gh pr ready`: pull request `number` marked `ready` for review (or
@@ -2072,13 +1946,6 @@ fn create_form_and_linear(
 fn merge_form(app: &mut App) -> Option<&mut MergeForm> {
     match form(app)? {
         PrForm::Merge(f) => Some(f),
-        _ => None,
-    }
-}
-
-fn close_pr_form(app: &mut App) -> Option<&mut CloseForm> {
-    match form(app)? {
-        PrForm::Close(f) => Some(f),
         _ => None,
     }
 }
@@ -2179,11 +2046,14 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
             }
             land_done(app, &project, ticket, result, "merge")
         }
-        Answer::Closed {
+        Answer::EditRead { ticket, result } => edit::land_read(app, ticket, result),
+        Answer::EditBranches { ticket, bases } => edit::land_branches(app, ticket, bases),
+        Answer::Edited {
             project,
             ticket,
+            url,
             result,
-        } => land_done(app, &project, ticket, result, "close the pull request"),
+        } => edit::land_saved(app, &project, ticket, url, result),
         Answer::Readied {
             project,
             url,
@@ -2273,7 +2143,7 @@ fn land_promotion(
     }
 }
 
-/// A merge or a close answered: done, the form closes onto the list —
+/// A merge answered: done, the form closes onto the list —
 /// asked for again, the row about to leave it — and the footer says what
 /// happened; refused, the form says why (`what` it was trying to do).
 fn land_done(
@@ -2363,7 +2233,7 @@ fn land_created(app: &mut App, project: &ProjectId, ticket: u64, url: String) {
     }));
 }
 
-/// A create, merge or close refused (`what` it was trying to do): the form that
+/// A create, update or merge refused (`what` it was trying to do): the form that
 /// sent it says why, or — closed since — the footer does.
 fn refused(app: &mut App, ticket: u64, why: String, what: &str) {
     match form_for(app, ticket) {
@@ -2395,8 +2265,9 @@ pub(crate) mod keys {
     pub const OPTION: Key = Key::new(&["up", "down"], "option").show(2);
     pub const CHANGE: Key = Key::new(&["left", "right", "space"], "change").show(2);
     pub const MERGE: Key = Key::new(&["enter"], "merge");
-    /// The close form's.
-    pub const CLOSE: Key = Key::new(&["enter"], "close PR");
+    /// The edit form's.
+    pub const SAVE: Key = Key::new(&["enter"], "save");
+    pub const TICK: Key = Key::new(&["space"], "tick");
     pub const DELETE: Key = Key::new(&["space"], "delete branch");
     #[cfg(test)]
     pub const ALL: &[Key] = &[
@@ -2409,7 +2280,8 @@ pub(crate) mod keys {
         OPTION,
         CHANGE,
         MERGE,
-        CLOSE,
+        SAVE,
+        TICK,
         DELETE,
         crate::ui::task_keys::NEWLINE,
     ];
@@ -2460,17 +2332,7 @@ pub(crate) fn hints(form: &PrForm) -> Vec<Hint> {
             keys::CHANGE.hint(),
             Hint::new("Esc", "cancel"),
         ],
-        PrForm::Close(form) => {
-            let mut hints = vec![keys::CLOSE.hint().kept()];
-            match form.row {
-                CloseRow::DeleteBranch if form.branch.is_some() => hints.push(keys::DELETE.hint()),
-                CloseRow::DeleteBranch => {}
-                CloseRow::Comment => hints.push(crate::ui::task_keys::NEWLINE.hint()),
-            }
-            hints.push(keys::FIELD.hint());
-            hints.push(Hint::new("Esc", "cancel"));
-            hints
-        }
+        PrForm::Edit(form) => edit::hints(form),
     }
 }
 
@@ -2488,7 +2350,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         match form {
             PrForm::Create(_) => create_key(app, key),
             PrForm::Merge(_) => merge_key(app, key),
-            PrForm::Close(_) => close_key(app, key),
+            PrForm::Edit(_) => edit::handle_key(app, key),
         }
     }
     app.dirty = true;
@@ -2592,48 +2454,15 @@ fn merge_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-/// Keys on the close form: Tab between the box and the comment, Space
-/// ticks the box, ↑/↓ step between them past the comment's first line, and
-/// Enter closes — a line break in the comment on the NEWLINE chords.
-fn close_key(app: &mut App, key: KeyEvent) {
-    let Some(form) = close_pr_form(app) else {
-        return;
-    };
-    let on_comment = form.row == CloseRow::Comment;
-    match key.code {
-        _ if keys::FIELD.matches(&key) => form.row = form.row.other(),
-        KeyCode::Char(' ') if !on_comment => form.toggle_delete(),
-        KeyCode::Down if !on_comment => form.row = CloseRow::Comment,
-        KeyCode::Up if on_comment && !form.comment.handle_key(&key).consumed() => {
-            form.row = CloseRow::DeleteBranch
-        }
-        KeyCode::Enter if !(on_comment && form.comment.takes_newline(&key)) => submit_close(app),
-        _ if on_comment && form.comment.handle_key(&key).changed() => form.notice = None,
-        _ => {}
-    }
-}
-
 /// `←`/`→`/Space on a merge row: the next method the repo allows, or the
 /// box flipped.
 fn change_merge_row(form: &mut MergeForm, forward: bool) {
     form.notice = None;
     match form.row {
-        MergeRow::Method => {
-            let n = form.allowed.len().max(1);
-            let at = form
-                .allowed
-                .iter()
-                .position(|m| *m == form.method)
-                .unwrap_or(0);
-            let next = if forward {
-                (at + 1) % n
-            } else {
-                (at + n - 1) % n
-            };
-            if let Some(method) = form.allowed.get(next) {
-                form.method = *method;
-            }
+        MergeRow::Method if !form.allowed.is_empty() => {
+            form.method = step_round(&form.allowed, form.method, forward);
         }
+        MergeRow::Method => {}
         MergeRow::DeleteBranch if form.branch.is_some() && form.stays.is_none() => {
             form.delete_branch = !form.delete_branch;
         }
@@ -2657,10 +2486,9 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(form) = form(app) else {
         return false;
     };
-    if let PrForm::Close(form) = form {
+    if let PrForm::Edit(form) = form {
         if form.saving.is_none() {
-            form.row = CloseRow::Comment;
-            form.comment.insert_str(text);
+            edit::paste(form, text);
         }
         return true;
     }
@@ -2756,16 +2584,8 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, at: Position) {
             form.row = row;
             change_merge_row(form, true);
         }
-    } else if let Some(form) = close_pr_form(app) {
-        if !clicked {
-            return;
-        }
-        if let Some(&(_, row)) = form.rows.iter().find(|(r, _)| r.contains(at)) {
-            if row == CloseRow::DeleteBranch {
-                form.toggle_delete();
-            }
-            form.row = row;
-        }
+    } else if matches!(form(app), Some(PrForm::Edit(_))) {
+        edit::handle_mouse(app, mouse, at);
     }
     app.dirty = true;
 }
@@ -2781,10 +2601,9 @@ pub struct Drawn {
     create_rows: Vec<(Rect, CreateField)>,
     mode_hits: Vec<(Rect, CreateMode)>,
     merge_rows: Vec<(Rect, MergeRow)>,
-    close_rows: Vec<(Rect, CloseRow)>,
+    edit: edit::EditDrawn,
     picks: Vec<(Rect, usize)>,
-    /// The view the description — or the close form's comment — was
-    /// drawn with.
+    /// The view the description was drawn with.
     body_view: Option<TextView>,
 }
 
@@ -2801,12 +2620,7 @@ pub(crate) fn write_back(form: &mut PrForm, drawn: Drawn) {
             }
         }
         PrForm::Merge(form) => form.rows = drawn.merge_rows,
-        PrForm::Close(form) => {
-            form.rows = drawn.close_rows;
-            if let Some(view) = drawn.body_view {
-                form.comment.set_view(view);
-            }
-        }
+        PrForm::Edit(form) => edit::write_back(form, drawn.edit),
     }
 }
 
@@ -2815,7 +2629,14 @@ pub(crate) fn draw(f: &mut Frame, area: Rect, form: &PrForm, focused: bool, th: 
     match form {
         PrForm::Create(form) => draw_create(f, area, form, focused, th),
         PrForm::Merge(form) => draw_merge(f, area, form, focused, th),
-        PrForm::Close(form) => draw_close(f, area, form, focused, th),
+        PrForm::Edit(form) => {
+            let (foot_w, edit) = edit::draw(f, area, form, focused, th);
+            Drawn {
+                foot_w,
+                edit,
+                ..Drawn::default()
+            }
+        }
     }
 }
 
@@ -3389,96 +3210,6 @@ fn draw_merge(f: &mut Frame, area: Rect, form: &MergeForm, focused: bool, th: Th
             drawn.merge_rows.push((rect, row));
         }
     }
-    drawn
-}
-
-/// The rows over the close form's comment box — the title, the branches,
-/// a gap and the delete box.
-const CLOSE_ROWS: u16 = 4;
-
-fn draw_close(f: &mut Frame, area: Rect, form: &CloseForm, focused: bool, th: Theme) -> Drawn {
-    let (inner, foot_w) = form_frame(
-        f,
-        area,
-        &format!("Close #{}", form.number),
-        form.notice.as_deref(),
-        form.saving.as_deref(),
-        focused,
-        th,
-    );
-    let mut drawn = Drawn {
-        foot_w,
-        ..Drawn::default()
-    };
-    let width = usize::from(inner.width);
-    let dim = Style::default().fg(th.dim);
-    let text = Style::default().fg(th.text);
-    let on = |row: CloseRow| focused && form.row == row && form.saving.is_none();
-    let into = if form.base.is_empty() {
-        "its base".to_string()
-    } else {
-        form.base.clone()
-    };
-    let from = form.branch.clone().unwrap_or_else(|| form.head.clone());
-    let delete_note = match (&form.stays, &form.branch) {
-        (Some(why), _) => stays_note(why),
-        (_, None) if form.pending => "  known once its details are in".to_string(),
-        (_, None) => "  not a branch of this repo — it stays".to_string(),
-        (_, Some(branch)) if form.delete_branch => format!("  {branch} on GitHub, once closed"),
-        (_, Some(_)) => "  the branch stays on GitHub".to_string(),
-    };
-    let lines: [(Option<CloseRow>, Vec<Span<'static>>); CLOSE_ROWS as usize] = [
-        (
-            None,
-            vec![Span::styled(
-                format!("{INDENT}{}", form.title),
-                text.add_modifier(Modifier::BOLD),
-            )],
-        ),
-        (
-            None,
-            vec![Span::styled(
-                format!("{INDENT}{from} → {into} · closes without merging"),
-                dim,
-            )],
-        ),
-        (None, Vec::new()),
-        (
-            Some(CloseRow::DeleteBranch),
-            vec![
-                form_label("Delete", on(CloseRow::DeleteBranch), th),
-                Span::styled(check(form.delete_branch), text),
-                Span::styled(delete_note, dim),
-            ],
-        ),
-    ];
-    for (i, (row, spans)) in lines.into_iter().enumerate() {
-        let Some(rect) = row_rect(inner, i) else {
-            break;
-        };
-        f.render_widget(Paragraph::new(crate::pr_preview::fit(spans, width)), rect);
-        if let Some(row) = row {
-            drawn.close_rows.push((rect, row));
-        }
-    }
-    let box_area = Rect {
-        y: inner.y.saturating_add(CLOSE_ROWS),
-        height: inner.height.saturating_sub(CLOSE_ROWS),
-        ..inner
-    };
-    if box_area.height < 3 || box_area.width < 4 {
-        return drawn;
-    }
-    drawn.close_rows.push((box_area, CloseRow::Comment));
-    drawn.body_view = form_text_box(
-        f,
-        box_area,
-        "Comment",
-        &form.comment,
-        on(CloseRow::Comment),
-        "(optional — left on the pull request as it closes)",
-        th,
-    );
     drawn
 }
 

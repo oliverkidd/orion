@@ -37,8 +37,9 @@
 //! group row's `y` opens, which comes back to the modal on its row),
 //! `⌘E` reads the diff, `⌘O` opens the pull request in the
 //! browser, `⌘R` asks GitHub again, `⌘N` opens a new pull request,
-//! `⌘X` merges this one and `⌘W` closes it (`pr_actions`, each
-//! form in the reading pane's place), and `⌘D` marks a draft ready for
+//! `⌘X` merges this one, `⌘;` edits it all in one form and `⌘W` closes it
+//! through that form (`pr_actions`, each form in the reading pane's
+//! place), and `⌘D` marks a draft ready for
 //! review or a ready one a draft again, and `⌘⇧R` reviews it in the PR
 //! REVIEW (`pr_review`, as Enter on the Reviews tab does). Each verb is
 //! one ⌘ chord — the
@@ -1158,6 +1159,7 @@ fn act(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// — and the verbs are chords. Esc steps back: off the page, then the
 /// filter, then the modal.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    use crate::pr_actions::edit::EditStart;
     use crate::pr_preview::keys as page;
     if crate::pr_actions::form_up(app) {
         crate::pr_actions::handle_key(app, key);
@@ -1231,7 +1233,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::MERGE.matches(&key) && view.query.selected().is_none() => {
             crate::pr_actions::open_merge(app)
         }
-        _ if keys::CLOSE.matches(&key) => crate::pr_actions::open_close(app),
+        _ if keys::EDIT.matches(&key) => crate::pr_actions::edit::open(app, EditStart::Title),
+        _ if keys::CLOSE.matches(&key) => crate::pr_actions::edit::open(app, EditStart::Close),
         _ if keys::READY.matches(&key) => crate::pr_actions::toggle_draft(app),
         _ if keys::AUTOFIX.matches(&key) => autofix(app),
         _ if keys::CHECKOUT.matches(&key) => crate::pr_checkout::from_modal(app, out),
@@ -1466,9 +1469,16 @@ pub(crate) mod keys {
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new PR");
     /// Merge the pull request under the cursor.
     pub const MERGE: Key = Key::new(&["cmd+x", "ctrl+x"], "merge");
-    /// Close the pull request under the cursor without merging it.
-    /// ⌘W, the close every modal's remove verb shares — it asks first.
+    /// Close the pull request under the cursor without merging it: the
+    /// EDIT form, at its State row set to close. ⌘W, the close every
+    /// modal's remove verb shares — it asks first.
     pub const CLOSE: Key = Key::new(&["cmd+w", "ctrl+w"], "close PR");
+    /// The EDIT form on the pull request under the cursor: its title,
+    /// base, draft state, labels, reviewers, assignees, and close or
+    /// reopen, in one place (`pr_actions::edit`). ⌘; — a chord nothing
+    /// else binds, that Orion.app's Ghostty hands on (`ghostty_config`)
+    /// and macOS keeps no command on.
+    pub const EDIT: Key = Key::new(&["cmd+;", "ctrl+;"], "edit PR");
     /// Review the pull request under the cursor: the PR REVIEW
     /// (`pr_review`). ⌘R's letter, held with ⇧ — ⌘R itself is refresh
     /// everywhere.
@@ -1495,7 +1505,8 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, TABS, ROWS, FILTER, JUMP,
+        MERGE, EDIT, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, TABS, ROWS, FILTER,
+        JUMP,
     ];
 }
 
@@ -1533,6 +1544,7 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
             keys::REVIEW.hint(),
             keys::COMMENT.hint(),
             keys::MERGE.hint(),
+            keys::EDIT.hint(),
             keys::CLOSE.hint(),
             keys::READY.hint(),
             keys::AUTOFIX.hint(),
@@ -1564,6 +1576,7 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
     hints.extend([
         keys::NEW.hint(),
         keys::MERGE.hint(),
+        keys::EDIT.hint(),
         keys::CLOSE.hint(),
         keys::READY.hint(),
         keys::AUTOFIX.hint(),
@@ -2634,10 +2647,49 @@ mod tests {
         });
     }
 
-    /// GitHub says the branch is long-lived: on either form the box goes
-    /// off and stays off, and the row says why.
+    /// The edit form's one ask, answered: pull request #42 open on
+    /// `head` into `main`, the repo offering two labels and two people.
+    fn read_answer(ticket: u64, head: &str) -> crate::pr_actions::Answer {
+        use crate::pr_actions::edit::{Facts, Offers};
+        let facts = Facts {
+            title: "Fix login".into(),
+            state: crate::pull_request::STATE_OPEN.into(),
+            base: "main".into(),
+            base_oid: "abc1234".into(),
+            head: head.into(),
+            head_oid: "def5678".into(),
+            author: "oliver".into(),
+            labels: vec!["bug".into()],
+            ..Facts::default()
+        };
+        let offers = Offers {
+            labels: ["bug", "pdf"]
+                .map(|name| crate::pull_request::PrLabel {
+                    name: name.into(),
+                    color: "d73a4a".into(),
+                })
+                .to_vec(),
+            people: vec!["oliver".into(), "sam".into()],
+        };
+        crate::pr_actions::Answer::EditRead {
+            ticket,
+            result: Ok(Box::new((facts, offers))),
+        }
+    }
+
+    fn edit_form(app: &App) -> crate::pr_actions::edit::EditForm {
+        match view(app).form.as_deref() {
+            Some(crate::pr_actions::PrForm::Edit(form)) => form.clone(),
+            other => panic!("no edit form: {other:?}"),
+        }
+    }
+
+    /// GitHub says the branch is long-lived: on the merge form and on the
+    /// edit form's close the box goes off and stays off, and the row says
+    /// why.
     #[test]
     fn a_long_lived_branch_keeps_the_delete_box_off() {
+        use crate::pr_actions::edit::EditRow;
         use crate::pr_actions::{Answer, PrForm};
         pinned(|| {
             let (mut app, project) = app_with(vec![pr(42, "Promote", false)], true);
@@ -2677,13 +2729,12 @@ mod tests {
 
             handle_key(&mut app, key(KeyCode::Esc), &mut out);
             handle_key(&mut app, ctrl('w'), &mut out);
+            let ticket = edit_form(&app).ticket;
+            crate::pr_actions::land_answer(&mut app, read_answer(ticket, "dev"));
             handle_key(&mut app, key(KeyCode::Tab), &mut out);
+            assert_eq!(edit_form(&app).row, EditRow::Delete);
             handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
-            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
-                panic!("no close form");
-            };
-            assert!(close.delete_branch, "ticked by hand");
-            let ticket = close.ticket;
+            assert!(edit_form(&app).delete_branch, "ticked by hand");
             crate::pr_actions::land_answer(&mut app, Answer::BranchStays { ticket, why });
             let shot = screen(&mut app, 140, 34);
             assert!(
@@ -2691,85 +2742,78 @@ mod tests {
                 "{shot}"
             );
             handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
-            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
-                panic!("the form stays");
-            };
-            assert!(!close.delete_branch, "Space can't tick it back on");
+            assert!(
+                !edit_form(&app).delete_branch,
+                "Space can't tick it back on"
+            );
         });
     }
 
-    /// `⌘W` opens the close form on the row: the caret in its comment,
-    /// the branch kept until it is known to be ours and ticked. A close
-    /// that lands puts the page back and says so; a refused one says why
-    /// on the form.
+    /// `⌘W` opens the EDIT form on the row at its State row, set to close:
+    /// the branch kept until it is known to be ours and ticked, a comment
+    /// below. A close that lands puts the page back and says so; a refused
+    /// one says why on the form, nothing typed lost.
     #[test]
-    fn cmd_w_closes_the_row_through_its_form() {
-        use crate::pr_actions::{Answer, CloseRow, PrForm};
+    fn cmd_w_closes_the_row_through_the_edit_form() {
+        use crate::pr_actions::edit::{EditRow, StateChange};
+        use crate::pr_actions::Answer;
         pinned(|| {
             let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
             open(&mut app);
             let mut out = Vec::new();
             handle_key(&mut app, ctrl('w'), &mut out);
-            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
-                panic!("no close form");
-            };
-            assert_eq!(close.number, 42);
-            assert_eq!(close.row, CloseRow::Comment);
+            let form = edit_form(&app);
+            assert_eq!(form.number, 42);
+            assert_eq!(form.row, EditRow::State);
+            assert_eq!(form.state, StateChange::Close);
+            // Space on the box does nothing while the branch is unknown.
+            handle_key(&mut app, key(KeyCode::Tab), &mut out);
+            handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+            assert!(!edit_form(&app).delete_branch);
+            handle_key(&mut app, key(KeyCode::Tab), &mut out);
             for c in "dup".chars() {
                 handle_key(&mut app, key(KeyCode::Char(c)), &mut out);
             }
             assert!(view(&app).query.is_empty(), "the form took the letters");
-            // Space on the box does nothing while the branch is unknown.
-            handle_key(&mut app, key(KeyCode::Tab), &mut out);
-            handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
-            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
-                panic!("the form stays");
-            };
-            assert_eq!(close.comment.as_str(), "dup");
-            assert_eq!(close.row, CloseRow::DeleteBranch);
-            assert!(!close.delete_branch);
-            let shot = screen(&mut app, 140, 34);
-            assert!(shot.contains("Close #42"), "{shot}");
-            assert!(shot.contains("closes without merging"), "{shot}");
+            assert_eq!(edit_form(&app).comment.as_str(), "dup");
+            let shot = screen(&mut app, 140, 40);
+            assert!(shot.contains("Edit #42"), "{shot}");
+            assert!(shot.contains("◂ close it ▸"), "{shot}");
             assert!(shot.contains("known once its details are in"), "{shot}");
-            assert!(shot.contains("Enter close PR"), "{shot}");
+            assert!(shot.contains("Enter save"), "{shot}");
 
-            // The body lands: the branch is ours, and Space ticks it.
-            let url = "https://github.com/o/r/pull/42".to_string();
-            let mut d = detail(42, "Fix login");
-            d.head = "branch-42".into();
-            app.pr_detail.insert(url.clone(), d);
-            crate::pr_actions::detail_landed(&mut app, &url);
+            // GitHub's answer lands: the branch is ours, and Space ticks it.
+            let ticket = edit_form(&app).ticket;
+            crate::pr_actions::land_answer(&mut app, read_answer(ticket, "branch-42"));
+            handle_key(&mut app, shifted(KeyCode::Tab), &mut out);
             handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
-            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
-                panic!("the form stays");
-            };
-            assert_eq!(close.branch.as_deref(), Some("branch-42"));
-            assert!(close.delete_branch);
-            let ticket = close.ticket;
-            let shot = screen(&mut app, 140, 34);
-            assert!(shot.contains("branch-42 → main"), "{shot}");
+            let form = edit_form(&app);
+            assert!(form.delete_branch);
+            assert_eq!(form.plan().map(|p| p.delete), Ok(Some("branch-42".into())));
+            let shot = screen(&mut app, 140, 40);
+            assert!(shot.contains("branch-42 → main · open"), "{shot}");
             assert!(shot.contains("branch-42 on GitHub, once closed"), "{shot}");
+            assert!(shot.contains("Saves     close"), "{shot}");
 
             crate::pr_actions::land_answer(
                 &mut app,
-                Answer::Closed {
+                Answer::Edited {
                     project: project.clone(),
                     ticket,
+                    url: "https://github.com/o/r/pull/42".into(),
                     result: Err("not allowed".into()),
                 },
             );
-            let Some(PrForm::Close(close)) = view(&app).form.as_deref() else {
-                panic!("a refused close keeps the form");
-            };
-            assert_eq!(close.notice.as_deref(), Some("not allowed"));
-            assert_eq!(close.comment.as_str(), "dup", "nothing typed is lost");
+            let form = edit_form(&app);
+            assert_eq!(form.notice.as_deref(), Some("not allowed"));
+            assert_eq!(form.comment.as_str(), "dup", "nothing typed is lost");
 
             crate::pr_actions::land_answer(
                 &mut app,
-                Answer::Closed {
+                Answer::Edited {
                     project,
                     ticket,
+                    url: "https://github.com/o/r/pull/42".into(),
                     result: Ok("closed #42, branch deleted".into()),
                 },
             );
@@ -2777,6 +2821,52 @@ mod tests {
             assert!(app.pr_refresh_requested, "the list is asked for again");
             let flash = format!("{:?}", app.flash);
             assert!(flash.contains("closed #42, branch deleted"), "{flash}");
+        });
+    }
+
+    /// `⌘;` opens the EDIT form on the row's title — each row as it
+    /// stands, filled from GitHub's answer — and every list's change is
+    /// spelled out on the Saves row before Enter.
+    #[test]
+    fn cmd_semicolon_edits_the_row_in_one_place() {
+        use crate::pr_actions::edit::{EditRow, StateChange};
+        pinned(|| {
+            let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
+            open(&mut app);
+            let mut out = Vec::new();
+            handle_key(&mut app, cmd(';'), &mut out);
+            let form = edit_form(&app);
+            assert_eq!((form.row, form.state), (EditRow::Title, StateChange::Keep));
+            let ticket = form.ticket;
+            crate::pr_actions::land_answer(&mut app, read_answer(ticket, "branch-42"));
+            for c in " now".chars() {
+                handle_key(&mut app, key(KeyCode::Char(c)), &mut out);
+            }
+            // Down to Labels, past Base and Draft: Space ticks `pdf`.
+            for _ in 0..3 {
+                handle_key(&mut app, key(KeyCode::Tab), &mut out);
+            }
+            assert_eq!(edit_form(&app).row, EditRow::Labels);
+            let shot = screen(&mut app, 140, 40);
+            assert!(shot.contains("The repo's labels"), "{shot}");
+            handle_key(&mut app, key(KeyCode::Down), &mut out);
+            handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+            assert_eq!(edit_form(&app).labels, ["bug", "pdf"]);
+            handle_key(&mut app, key(KeyCode::Tab), &mut out);
+            handle_key(&mut app, key(KeyCode::Char(' ')), &mut out);
+            assert_eq!(
+                edit_form(&app).reviewers,
+                ["sam"],
+                "the author is not offered"
+            );
+            let shot = screen(&mut app, 140, 40);
+            assert!(
+                shot.contains("Saves     title · +pdf · review +sam"),
+                "{shot}"
+            );
+            crate::hints::assert_hints_from(&hints(view(&app)), crate::pr_actions::keys::ALL);
+            handle_key(&mut app, key(KeyCode::Esc), &mut out);
+            assert!(view(&app).form.is_none(), "Esc puts the page back");
         });
     }
 

@@ -24,7 +24,7 @@ enum Field {
     Preset(crate::preset_overlays::PresetField),
     PrQuery,
     PrCreate(crate::pr_actions::CreateField),
-    PrClose,
+    PrEdit(crate::pr_actions::edit::EditRow),
     LinearQuery,
     DiffFilter,
     AutofixNote,
@@ -57,7 +57,19 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
                 (Field::PrCreate(CreateField::Title), &mut form.title),
                 (Field::PrCreate(CreateField::Body), &mut form.body),
             ],
-            Some(PrForm::Close(form)) => vec![(Field::PrClose, &mut form.comment)],
+            Some(PrForm::Edit(form)) => {
+                use crate::pr_actions::edit::{EditRow, StateChange};
+                // The comment box is drawn only while closing or reopening.
+                let commenting = form.state != StateChange::Keep;
+                let mut fields = vec![
+                    (Field::PrEdit(EditRow::Title), &mut form.title),
+                    (Field::PrEdit(EditRow::Base), &mut form.base),
+                ];
+                if commenting {
+                    fields.push((Field::PrEdit(EditRow::Comment), &mut form.comment));
+                }
+                fields
+            }
             Some(PrForm::Merge(_)) => Vec::new(),
             None => vec![(Field::PrQuery, &mut v.query)],
         },
@@ -105,10 +117,8 @@ fn focus(app: &mut App, field: Field) {
         (Some(Overlay::PullRequests(_)), Field::PrCreate(to)) => {
             crate::pr_actions::focus_create(app, to);
         }
-        (Some(Overlay::PullRequests(v)), Field::PrClose) => {
-            if let Some(crate::pr_actions::PrForm::Close(form)) = v.form.as_deref_mut() {
-                form.row = crate::pr_actions::CloseRow::Comment;
-            }
+        (Some(Overlay::PullRequests(_)), Field::PrEdit(row)) => {
+            crate::pr_actions::edit::focus(app, row);
         }
         (Some(Overlay::Linear(v)), Field::LinearQuery) => {
             v.focus = crate::linear::LinearFocus::Search;

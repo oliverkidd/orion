@@ -14894,7 +14894,7 @@ mod tests {
                         (&up, want),
                         (Some(PrForm::Create(_)), "new")
                             | (Some(PrForm::Merge(_)), "merge")
-                            | (Some(PrForm::Close(_)), "close")
+                            | (Some(PrForm::Edit(_)), "close")
                     );
                     assert!(matched, "{mods:?}+{letter}: expected {want}, got {up:?}");
                     press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
