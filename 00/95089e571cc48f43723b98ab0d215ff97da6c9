@@ -44,12 +44,14 @@ crates/orion-tui/src/app.rs
   s_61e50232cdb2f2::t_b47ac0bff4032f 306-307,848-849,952,2410-2412,2526,2552,2946,3715-3716,5509,5954,5961,6364-6366,6368
   s_61e50232cdb2f2::t_76402b4a0123f8 2938
   s_61e50232cdb2f2::t_50c30865fde4dd 769-771
+  s_61e50232cdb2f2::t_9cfbd50e1980fb 946
 crates/orion-daemon/src/server.rs
   s_61e50232cdb2f2::t_2305ea88ce0cd3 357-362
 crates/orion-tui/src/ui/footer.rs
   s_61e50232cdb2f2::t_099497d3eed409 394
 crates/orion-tui/src/ui/launcher_view.rs
   s_61e50232cdb2f2::t_89b14b5e86e5c4 2095,2774,2933
+  s_61e50232cdb2f2::t_604b272c6fc15c 2123-2125
 crates/orion-tui/src/ui.rs
   s_61e50232cdb2f2::t_7020d00e8b1418 5759,5784,5801
   s_61e50232cdb2f2::t_0ec1d911dad974 47-48,624,631,969,971-973,997-1000
