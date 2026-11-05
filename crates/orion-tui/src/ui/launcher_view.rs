@@ -7,21 +7,21 @@
 //! header of its fields, each with its key) and the PROJECT PICKER.
 
 use super::{
-    ago_badge, below_first_row, centered_rect, empty_list_row, fit_ago, fuzzy_highlight_spans,
+    ago_badge, below_first_row, centered_rect, empty_list_row, fuzzy_highlight_spans,
     over_box_rect, render_modal_frame, render_row, row_rect, search_line, status_color, status_dot,
     status_name_spans, sweep_ramp, truncate, visible_positions, wants_you, NO_MATCHES,
     OVER_BOX_INSET, PENDING_SESSION_BADGE,
 };
 use crate::app::{App, Focus, HitTarget, Overlay};
 use crate::keymap::Action;
-use crate::launcher::{BoxField, Hidden, LauncherRow, ProjectPicker, ProjectTab, Tally};
+use crate::launcher::{BoxField, Hidden, ProjectPicker, ProjectTab, Tally};
 use crate::quick_prompt::QuickLaunch;
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget};
 use ratatui::Frame;
 
 /// Width of the view's QUICK PROMPT, and its height: wider and taller than
@@ -51,10 +51,10 @@ const ADD: &str = "+";
 const ADD_EMPTY: &str = "+ open a project";
 
 /// The view's area, with the view on: the PROJECT TABS header, then the
-/// GRID of the lit project's session cards under it. `body` is what
-/// `crate::launcher::split` left over the PANE along the bottom, which
-/// `ui::draw` fills with the card under the cursor; Enter on a session
-/// card steps down into that pane (`event_loop::launcher::enter_pane`);
+/// GRID of the lit project's sessions under it. `body` is what
+/// `crate::launcher::split` left over the PANE, which `ui::draw` fills
+/// with the entry under the cursor; Enter on a session steps down into
+/// that pane (`event_loop::launcher::enter_pane`);
 /// on a body too short to draw one it full-screens the session over the
 /// lot instead (`event_loop::launcher::open_session`, the `collapsed` arm
 /// of `ui::draw`).
@@ -65,7 +65,7 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, body: Rect) {
     // opened, before the header lays the tabs out.
     app.settle_project_tabs();
     let bands = crate::launcher::bands(app);
-    let g = crate::launcher::bands_layout(body);
+    let area = crate::launcher::grid_area(body);
     let cursor = wearing(app, crate::launcher::band_cursor(app, &bands));
     let count = HeadCount::of(&bands);
     if bands.is_empty() {
@@ -74,39 +74,33 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, body: Rect) {
         // task" would be advice about the wrong list, so the ARCHIVED
         // VIEW gets the plain empty line and the way back out of it.
         if app.show_archived {
-            draw_list_empty(f, app, g.area, NO_ARCHIVED);
+            draw_list_empty(f, app, area, NO_ARCHIVED);
         } else {
-            draw_empty(f, app, g.area);
+            draw_empty(f, app, area);
         }
         return;
     }
-    // The ACCORDION: at most one band's cards wrapped into rows in place
-    // (`App::launcher_expanded`) — pushing the bands after it down, so
-    // the whole panel, not just that band, may run taller than the
-    // screen and scrolls as one list.
-    // In the compact LIST every band is its entries stacked a line
-    // apiece instead (Settings → Appearance → **Worktree layout**), and
-    // with **Expand all worktrees** on every band is open at once.
+    // Every band its entries stacked a line apiece, so the whole panel
+    // may run taller than the screen and scrolls as one list.
     let panel = app.panel_layout(&bands);
     let scroll = settle_panel_scroll(app, &panel, &bands, cursor);
     draw_head(f, app, body, count, panel.hidden(scroll));
-    draw_bands(f, app, &g, &panel, &bands, cursor, scroll);
+    draw_bands(f, app, area, &panel, &bands, cursor, scroll);
     draw_marks(f, app, &bands);
 }
 
-/// What a card picked out for the MULTI-SELECT wears at its top-left,
-/// one cell in.
+/// What an entry picked out for the MULTI-SELECT wears at its left, one
+/// cell in.
 const MARKED_MARK: &str = "✓";
-/// How much of the accent a picked-out card's fill keeps: well over the
+/// How much of the accent a picked-out entry's fill keeps: well over the
 /// cursor's own wash ([`TINT_STILL`]), so a run of them reads as one
-/// selection under the cursor's heavy frame.
+/// selection.
 const MARKED_TINT: f32 = 0.28;
 
-/// The MULTI-SELECT over what the bands drew: every picked-out card, list
-/// entry and drawer line washed in the accent, with a `✓` at its top-left
-/// — found by the hit rect each was drawn into, so one pass covers
-/// every layout. Marks left on a card no longer on the grid are dropped
-/// here, as the frame is the one place that knows.
+/// The MULTI-SELECT over what the bands drew: every picked-out entry and
+/// drawer line washed in the accent, with a `✓` at its left — found by
+/// the hit rect each was drawn into. Marks left on an entry no longer on
+/// the grid are dropped here, as the frame is the one place that knows.
 fn draw_marks(f: &mut Frame, app: &mut App, bands: &[crate::launcher::Band]) {
     if app.marked.is_empty() {
         return;
@@ -138,8 +132,8 @@ fn draw_marks(f: &mut Frame, app: &mut App, bands: &[crate::launcher::Band]) {
         }
         let area = rect.intersection(buf.area);
         buf.set_style(area, Style::default().bg(fill));
-        // One in: past a card's corner, and onto the air after a LIST
-        // entry's cursor mark rather than over it.
+        // One in: onto the air after an entry's cursor mark rather than
+        // over it.
         if let Some(cell) = buf
             .cell_mut((area.x + 1, area.y))
             .filter(|_| area.width > 1)
@@ -151,13 +145,10 @@ fn draw_marks(f: &mut Frame, app: &mut App, bands: &[crate::launcher::Band]) {
 
 /// The scroll this frame draws the GRID at, settled from what the last
 /// frame left and what has happened since — the rule
-/// [`App::launcher_scroll`] spells out. Opening or closing a band as the
-/// ACCORDION starts from the top again rather than wherever the last
-/// layout's scroll was left; a scroll the wheel set is kept unless a key
+/// [`App::launcher_scroll`] spells out. A scroll the wheel set is kept unless a key
 /// asked for the cursor's card ([`App::launcher_reveal`]) or the cursor
-/// is on another card than the one it was set under; any other scroll
-/// keeps in step with the cursor — its band whole on screen, or on the
-/// open band its card with the row over it
+/// is on another entry than the one it was set under; any other scroll
+/// keeps in step with the cursor — its entry with the line over it
 /// ([`crate::launcher::PanelLayout::reveal`]). Whatever it lands on is
 /// held within the panel, so a window that grew or a list that shrank
 /// never scrolls past the last row.
@@ -167,11 +158,6 @@ fn settle_panel_scroll(
     bands: &[crate::launcher::Band],
     cursor: Option<usize>,
 ) -> u16 {
-    if app.launcher_scroll_in != app.launcher_expanded {
-        app.launcher_scroll = 0;
-        app.launcher_scroll_held = false;
-        app.launcher_scroll_in = app.launcher_expanded.clone();
-    }
     let mut scroll = panel.clamp(app.launcher_scroll);
     if let Some(index) = cursor {
         let band = &bands[index];
@@ -839,15 +825,13 @@ fn pad_x(r: Rect) -> Rect {
     }
 }
 
-/// The GRID: one band per checkout, top to bottom — a collapsed one its
-/// rule and one row of cards, the ACCORDION's open one its rule and
-/// every card wrapped into rows under it — the whole panel scrolled by
-/// rows so the cursor's card is always drawn, a band that straddles the
-/// window's edge drawn cut ([`draw_cut`]) rather than left out.
+/// The GRID: one band per checkout, top to bottom — its rule and its
+/// entries a line apiece under it — the whole panel scrolled by rows so
+/// the cursor's entry is always drawn.
 fn draw_bands(
     f: &mut Frame,
     app: &mut App,
-    g: &crate::launcher::BandsLayout,
+    area: Rect,
     panel: &crate::launcher::PanelLayout,
     bands: &[crate::launcher::Band],
     cursor: Option<usize>,
@@ -855,22 +839,22 @@ fn draw_bands(
 ) {
     let th = app.theme;
     let window = panel.window();
-    // One CONFIG.JSON read for the whole frame, and only if some card on
+    // One CONFIG.JSON read for the whole frame, and only if some entry on
     // it runs a CUSTOM harness whose label lives in there — a screenful
-    // of cards must not reload the file once per card.
+    // of sessions must not reload the file once per row.
     let mut cfg = None;
     // The keys are up on the PROJECT TABS, or down in the pane: the band
     // under the cursor keeps its bold branch — it still says which
     // checkout the pane reads — but the accent goes with the keys, so
     // only the one thing holding them is lit.
     let keys = app.focus != Focus::Terminal && app.launcher_tab_cursor.is_none();
-    // The band the selection is on, aimed at or let go of: its row
-    // follows its remembered card either way, so Esc scrolls nothing.
+    // The band the selection is on, aimed at or let go of: its lines
+    // follow its remembered entry either way, so Esc scrolls nothing.
     let aimed = crate::launcher::band_cursor(app, bands);
-    // Each band's whole rectangle, rule to last row of cards: a click on
-    // the air around its cards picks the band as a click on its rule
-    // does. Pushed after every card, rule and arrow so they keep their
-    // own targets under `hit_at`'s first-match scan.
+    // Each band's whole rectangle, rule to last line: a click on the air
+    // around its entries picks the band as a click on its rule does.
+    // Pushed after every entry and rule so they keep their own targets
+    // under `hit_at`'s first-match scan.
     let mut band_areas = Vec::with_capacity(bands.len());
     let facts: Vec<RuleFacts> = bands.iter().map(|b| rule_facts(app, b, th)).collect();
     let cols = RuleColumns::of(&facts);
@@ -878,7 +862,7 @@ fn draw_bands(
         let line = Rect {
             y,
             height: 1,
-            ..g.area
+            ..area
         };
         if let Some(placed) = crate::launcher::place(window, scroll, line) {
             draw_dormant_divider(f.buffer_mut(), placed.rect, th);
@@ -889,7 +873,7 @@ fn draw_bands(
         let whole = Rect {
             y: pb.rule_y,
             height: pb.height,
-            ..g.area
+            ..area
         };
         if let Some(placed) = crate::launcher::place(window, scroll, whole) {
             band_areas.push((placed.rect, HitTarget::LauncherBand(index)));
@@ -898,27 +882,13 @@ fn draw_bands(
         let at = (aimed == Some(index))
             .then(|| crate::launcher::card_cursor(app, band))
             .flatten();
-        // Collapsed: the STRIP's one row of cards under the rule, its
-        // `y` wherever the panel put the band.
-        let strip = pb.content.is_none().then(|| {
-            g.strip_at(
-                Rect {
-                    y: pb.rule_y,
-                    height: crate::launcher::BAND_H,
-                    ..g.area
-                },
-                index,
-                band,
-                at,
-            )
-        });
         let rule = Rect {
             y: pb.rule_y,
             height: crate::launcher::BAND_RULE_H,
-            ..g.area
+            ..area
         };
         // A one-row rule is on screen whole or not at all
-        // ([`crate::launcher::place`]), so it needs no [`draw_cut`].
+        // ([`crate::launcher::place`]).
         if let Some(placed) = crate::launcher::place(window, scroll, rule) {
             let hits = draw_band_rule(
                 f.buffer_mut(),
@@ -930,10 +900,6 @@ fn draw_bands(
                     index,
                     on,
                     lit: on && keys,
-                    more: match &strip {
-                        Some(strip) => strip.hidden(),
-                        None => pb.content.as_ref().map_or(0, |c| c.more),
-                    },
                     cols,
                 },
             );
@@ -945,7 +911,7 @@ fn draw_bands(
         draw_drawer(
             f,
             app,
-            g,
+            area,
             pb,
             DrawerBand {
                 index,
@@ -960,155 +926,33 @@ fn draw_bands(
             &mut cfg,
         );
         if band.cards.is_empty() {
-            draw_empty_band(f, app, g, pb, (window, scroll), on && keys);
+            draw_empty_band(f, app, area, pb, (window, scroll), on && keys);
             continue;
         }
-        // The cards under the rule: on the band the cursor is on, the
+        // The entries under the rule: on the band the cursor is on, the
         // one it remembers — what the pane reads, and what the keys walk
-        // — is raised out of the row ([`selected_card_block`]), its fill
-        // brighter while the keys are on the grid; the rest are a preview. A click on any lands the
-        // cursor on it (`HitTarget::LauncherCard`), and a card drawn cut
-        // is clicked on the rows of it there are: the landing scrolls
-        // the rest of it into view (`settle_panel_scroll`).
-        if app.launcher_list {
-            draw_list_band(
-                f,
-                app,
-                g,
-                pb,
-                ListBand {
-                    index,
-                    band,
-                    window,
-                    scroll,
-                    on,
-                    at,
-                    lit: on && keys,
-                },
-                &mut cfg,
-            );
-            continue;
-        }
-        match &strip {
-            None => {
-                // Open: every card, wrapped into rows, the terminals
-                // under a section rule of their own. The sessions' rule
-                // is the band's, drawn above.
-                for (y, label) in pb.rules() {
-                    if label == crate::launcher::SESSIONS_RULE {
-                        continue;
-                    }
-                    let rule = Rect {
-                        y,
-                        height: crate::launcher::BAND_RULE_H,
-                        ..g.area
-                    };
-                    let Some(placed) = crate::launcher::place(window, scroll, rule) else {
-                        continue;
-                    };
-                    let fill = "─".repeat(
-                        usize::from(placed.rect.width).saturating_sub(label.chars().count() + 4),
-                    );
-                    f.render_widget(
-                        Paragraph::new(Line::from(vec![
-                            Span::styled("── ", Style::default().fg(th.edge)),
-                            Span::styled(label.to_string(), Style::default().fg(th.dim)),
-                            Span::styled(format!(" {fill}"), Style::default().fg(th.edge)),
-                        ])),
-                        placed.rect,
-                    );
-                }
-                for (i, card) in band.cards.iter().enumerate() {
-                    let Some(placed) = pb
-                        .cell(i)
-                        .and_then(|cell| crate::launcher::place(window, scroll, cell))
-                    else {
-                        continue;
-                    };
-                    let selected = on && at == Some(i);
-                    draw_cut(f, placed, |buf, r| {
-                        draw_any_card(buf, &*app, r, card, selected, keys, th, &mut cfg)
-                    });
-                    note_tail_card(app, card);
-                    app.hits.extend(card_issue_hit(app, card, placed));
-                    app.hits.push((
-                        placed.rect,
-                        HitTarget::LauncherCard(crate::launcher::CardRef {
-                            band: index,
-                            card: i,
-                        }),
-                    ));
-                }
-            }
-            Some(strip) => {
-                let row = Rect {
-                    y: pb.rule_y + crate::launcher::BAND_RULE_H,
-                    height: crate::launcher::CARD_H,
-                    ..g.area
-                };
-                let Some(row_placed) = crate::launcher::place(window, scroll, row) else {
-                    continue;
-                };
-                for slot in &strip.cards {
-                    let placed = crate::launcher::Placed {
-                        rect: Rect {
-                            x: slot.rect.x,
-                            width: slot.rect.width,
-                            ..row_placed.rect
-                        },
-                        cut_top: row_placed.cut_top,
-                        cut_bottom: row_placed.cut_bottom,
-                    };
-                    let card = &band.cards[slot.at.card];
-                    draw_cut(f, placed, |buf, r| {
-                        draw_any_card(
-                            buf,
-                            &*app,
-                            r,
-                            card,
-                            on && at == Some(slot.at.card),
-                            keys,
-                            th,
-                            &mut cfg,
-                        )
-                    });
-                    note_tail_card(app, card);
-                    app.hits.extend(card_issue_hit(app, card, placed));
-                    app.hits
-                        .push((placed.rect, HitTarget::LauncherCard(slot.at)));
-                }
-                // The arrows only on a row drawn whole: they stand beside
-                // the cards' full height.
-                if row_placed.whole() {
-                    draw_strip_arrows(f, app, strip, row_placed.rect.y, index, on && keys, th);
-                }
-                if strip.hidden() > 0 {
-                    // The band's own row under the cards
-                    // ([`crate::launcher::MORE_H`]), the gap to the next
-                    // band's rule under it.
-                    let row = Rect {
-                        y: pb.rule_y + crate::launcher::BAND_H,
-                        height: crate::launcher::MORE_H,
-                        ..g.area
-                    };
-                    if let Some(placed) = crate::launcher::place(window, scroll, row) {
-                        let more = StripMore {
-                            index,
-                            hidden: strip.hidden(),
-                            lit: on && keys,
-                            centered: true,
-                        };
-                        draw_strip_more(f, app, placed.rect, band, more);
-                    }
-                }
-            }
-        }
+        // — wears the cursor. A click on any lands the cursor on it
+        // (`HitTarget::LauncherCard`).
+        draw_list_band(
+            f,
+            app,
+            pb,
+            ListBand {
+                index,
+                band,
+                window,
+                scroll,
+                on,
+                at,
+            },
+            &mut cfg,
+        );
     }
     draw_panel_edge_marks(f, panel, scroll, th);
     app.hits.extend(band_areas);
     // Last, so the bands themselves win `hit_at`'s first-match scan and
     // only the air between them falls through to the grid.
-    app.hits.push((g.area, HitTarget::PanelBg(Focus::Sessions)));
+    app.hits.push((area, HitTarget::PanelBg(Focus::Sessions)));
 }
 
 /// What an EMPTY BAND says under its rule: only that. What can be done
@@ -1142,7 +986,7 @@ fn draw_dormant_divider(buf: &mut Buffer, r: Rect, th: Theme) {
 fn draw_empty_band(
     f: &mut Frame,
     app: &App,
-    g: &crate::launcher::BandsLayout,
+    area: Rect,
     pb: &crate::launcher::PanelBand,
     (window, scroll): (Rect, u16),
     lit: bool,
@@ -1151,7 +995,7 @@ fn draw_empty_band(
     let row = Rect {
         y: pb.rule_y + crate::launcher::BAND_RULE_H,
         height: crate::launcher::EMPTY_BAND_ROW_H,
-        ..g.area
+        ..area
     };
     let Some(placed) = crate::launcher::place(window, scroll, row) else {
         return;
@@ -1167,14 +1011,10 @@ fn draw_empty_band(
 }
 
 /// The EDGE MARKERS on a grid taller than its window: `↑ 2 more above`
-/// on the header's row of air over the cards, `↓ 3 more below` on the
+/// on the header's row of air over the entries, `↓ 3 more below` on the
 /// row kept under them ([`crate::launcher::PanelLayout::window`]) —
 /// each where the eye looks for the rest, so the grid says it scrolls,
-/// and which way, without a word painted over a card. With every band
-/// collapsed what is past the edge is whole checkouts, and the marker
-/// says so (`↓ 3 more worktrees below`), so a screenful that happens to
-/// end on a band does not read as the whole project; with one open its
-/// cards are in the count too, and the marker just counts. The header's
+/// and which way, without a word painted over an entry. The header's
 /// `↑↓ 5 hidden` says the same once more. A grid that fits has neither
 /// row marked, and a panel scrolled to an end leaves that end's row as
 /// plain air.
@@ -1188,13 +1028,6 @@ fn draw_panel_edge_marks(
         return;
     }
     let hidden = panel.hidden(scroll);
-    let what = |n: usize| {
-        if panel.open().is_some() {
-            String::new()
-        } else {
-            format!(" worktree{}", plural(n))
-        }
-    };
     let mark = |f: &mut Frame, r: Rect, words: String| {
         f.render_widget(
             Paragraph::new(Span::styled(words, Style::default().fg(th.muted)))
@@ -1209,7 +1042,7 @@ fn draw_panel_edge_marks(
             ..panel.area
         };
         let n = hidden.above;
-        mark(f, r, format!("↑ {n} more{} above", what(n)));
+        mark(f, r, format!("↑ {n} more above"));
     }
     if hidden.below > 0 {
         let window = panel.window();
@@ -1219,144 +1052,8 @@ fn draw_panel_edge_marks(
             ..panel.area
         };
         let n = hidden.below;
-        mark(f, r, format!("↓ {n} more{} below", what(n)));
+        mark(f, r, format!("↓ {n} more below"));
     }
-}
-
-/// The `❮` and `❯` beside a band's row.
-const STRIP_LEFT: &str = "❮";
-const STRIP_RIGHT: &str = "❯";
-
-/// What stands beside a band's row when it holds more cards than it
-/// shows: `❮` in the margin before its first card for the ones scrolled
-/// past the left edge, `❯` after its last card for the ones past the
-/// right, each on the row's middle line — in the accent while the band
-/// holds the keys, muted on any other band, so a glance says the row
-/// goes on without lighting it up. Each is a button: its hit is the
-/// two-cell gap the glyph stands in, the cards' full height, and a click
-/// on it is the step `h` / `l` take that way
-/// (`HitTarget::LauncherStripLeft`, `LauncherStripRight`). Under the
-/// pointer the glyph takes the accent whichever band it is on.
-fn draw_strip_arrows(
-    f: &mut Frame,
-    app: &mut App,
-    strip: &crate::launcher::Strip,
-    top: u16,
-    index: usize,
-    lit: bool,
-    th: Theme,
-) {
-    use crate::launcher::{CARD_H, PAD_X};
-    let (Some(first), Some(last)) = (strip.cards.first(), strip.cards.last()) else {
-        return;
-    };
-    let frame = f.area();
-    // `top` is the row's line on screen: the slots' own `y` counts from
-    // the top of the whole panel, before the window and its scroll.
-    let y = top + CARD_H / 2;
-    let mut arrow = |hit: HitTarget, x: u16, glyph_x: u16, glyph: &str| {
-        let hovered = app.hover_crumb.as_ref() == Some(&hit);
-        let style = if lit || hovered {
-            Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(th.muted)
-        };
-        let cell = Rect {
-            x: glyph_x,
-            y,
-            width: 1,
-            height: 1,
-        }
-        .intersection(frame);
-        if cell.width > 0 {
-            f.render_widget(Paragraph::new(Span::styled(glyph.to_string(), style)), cell);
-        }
-        let target = Rect {
-            x,
-            y: top,
-            width: PAD_X,
-            height: CARD_H,
-        }
-        .intersection(frame);
-        if target.width > 0 {
-            app.hits.push((target, hit));
-        }
-    };
-    if strip.before > 0 {
-        // The margin before the row: the glyph, then a cell of air
-        // against the first card.
-        let x = first.rect.x.saturating_sub(PAD_X);
-        arrow(HitTarget::LauncherStripLeft(index), x, x, STRIP_LEFT);
-    }
-    if strip.after > 0 {
-        // The gap after the last card drawn — between cards or the
-        // margin, whichever the row ends in: a cell of air, then the
-        // glyph.
-        let x = last.rect.x + last.rect.width;
-        arrow(HitTarget::LauncherStripRight(index), x, x + 1, STRIP_RIGHT);
-    }
-}
-
-/// The MORE BUTTON under a collapsed band's row that left cards off its
-/// edges: `▾ 6 more · see all 8`, centered on the band's own row under
-/// the cards ([`crate::launcher::MORE_H`]), so a band hiding sessions
-/// says so where the eye leaves the cards rather than only at the far end
-/// of its rule. Muted, its verb in the accent while the band holds the
-/// keys or the pointer is on it. A button: a click opens the band as the
-/// ACCORDION, the very toggle Tab runs (`HitTarget::LauncherBandMore`) —
-/// the key itself is the FOOTER's to name.
-fn draw_strip_more(
-    f: &mut Frame,
-    app: &mut App,
-    r: Rect,
-    band: &crate::launcher::Band,
-    more: StripMore,
-) {
-    let StripMore {
-        index,
-        hidden,
-        lit,
-        centered,
-    } = more;
-    let th = app.theme;
-    let hit = HitTarget::LauncherBandMore(index);
-    let hovered = app.hover_crumb.as_ref() == Some(&hit);
-    let (words, does) = (
-        format!("▾ {hidden} more · "),
-        format!("see all {}", band.cards.len()),
-    );
-    let key_style = if lit || hovered {
-        Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(th.dim)
-    };
-    let text = Style::default().fg(if hovered { th.accent } else { th.muted });
-    let line = Line::from(vec![
-        Span::styled(words, text),
-        Span::styled(does, key_style),
-    ]);
-    let w = (line.width() as u16).min(r.width);
-    // Centered under a row of cards; under a LIST, in the column its
-    // entries' names start in.
-    let x = if centered {
-        r.x + (r.width - w) / 2
-    } else {
-        r.x + LIST_LEAD.min(r.width - w)
-    };
-    let at = Rect { x, width: w, ..r };
-    f.render_widget(Paragraph::new(line), at);
-    app.hits.push((at, hit));
-}
-
-/// What [`draw_strip_more`] says, and where: the band it is under, how
-/// many it counts, whether the band holds the keys, and whether it
-/// centers under a row of cards or starts where a LIST's names do.
-#[derive(Debug, Clone, Copy)]
-struct StripMore {
-    index: usize,
-    hidden: usize,
-    lit: bool,
-    centered: bool,
 }
 
 /// One band's ARCHIVED DRAWER as [`draw_drawer`] draws it.
@@ -1386,7 +1083,7 @@ const DRAWER_INDENT: u16 = 2;
 fn draw_drawer(
     f: &mut Frame,
     app: &mut App,
-    g: &crate::launcher::BandsLayout,
+    area: Rect,
     pb: &crate::launcher::PanelBand,
     d: DrawerBand<'_>,
     cfg: &mut Option<crate::config::Config>,
@@ -1404,9 +1101,9 @@ fn draw_drawer(
     }
     let th = app.theme;
     let inset = Rect {
-        x: g.area.x + DRAWER_INDENT.min(g.area.width),
-        width: g.area.width.saturating_sub(DRAWER_INDENT),
-        ..g.area
+        x: area.x + DRAWER_INDENT.min(area.width),
+        width: area.width.saturating_sub(DRAWER_INDENT),
+        ..area
     };
     if let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_head(inset)) {
         let hit = HitTarget::LauncherDrawer(index);
@@ -1455,13 +1152,12 @@ fn draw_drawer(
         let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_row(inset, i)) else {
             continue;
         };
-        let selected = at == Some(i);
         draw_list_row(
             f.buffer_mut(),
             app,
             placed.rect,
             card,
-            (selected, selected && lit),
+            at == Some(i),
             cols,
             cfg,
         );
@@ -1482,7 +1178,7 @@ const LIST_RUNS_MAX: usize = 24;
 /// Air between a LIST entry's columns.
 const LIST_GAP: usize = 2;
 
-/// One band of the compact LIST as [`draw_list_band`] draws it.
+/// One band of the LIST as [`draw_list_band`] draws it.
 struct ListBand<'a> {
     index: usize,
     band: &'a crate::launcher::Band,
@@ -1491,20 +1187,15 @@ struct ListBand<'a> {
     /// The cursor is on the band, and `at` is its card.
     on: bool,
     at: Option<usize>,
-    /// The keys are on the band too.
-    lit: bool,
 }
 
-/// A band in the compact LIST: under its rule, one line per entry the
-/// layout shows — its most recent sessions, or every card once it is
-/// open (`launcher::list_layout`) — the names and what each runs on in
-/// columns shared down the band, then the MORE HINT on the line under
-/// them when it leaves any off. A click on a line lands the cursor on its
-/// card (`HitTarget::LauncherCard`), exactly as a click on a card does.
+/// A band in the LIST: under its rule, one line per entry
+/// (`launcher::list_layout`), the names and what each runs on in columns
+/// shared down the band. A click on a line lands the cursor on its entry
+/// (`HitTarget::LauncherCard`).
 fn draw_list_band(
     f: &mut Frame,
     app: &mut App,
-    g: &crate::launcher::BandsLayout,
     pb: &crate::launcher::PanelBand,
     list: ListBand<'_>,
     cfg: &mut Option<crate::config::Config>,
@@ -1516,11 +1207,8 @@ fn draw_list_band(
         scroll,
         on,
         at,
-        lit,
     } = list;
-    let Some(content) = pb.content.as_ref() else {
-        return;
-    };
+    let content = &pb.content;
     let shown: Vec<usize> = content
         .rows
         .iter()
@@ -1548,18 +1236,15 @@ fn draw_list_band(
         else {
             continue;
         };
-        let card = &band.cards[i];
-        let selected = on && at == Some(i);
         draw_list_row(
             f.buffer_mut(),
             app,
             placed.rect,
-            card,
-            (selected, selected && lit),
+            &band.cards[i],
+            on && at == Some(i),
             cols,
             cfg,
         );
-        note_tail_card(app, card);
         app.hits.push((
             placed.rect,
             HitTarget::LauncherCard(crate::launcher::CardRef {
@@ -1568,38 +1253,21 @@ fn draw_list_band(
             }),
         ));
     }
-    if let Some(y) = content.more_y() {
-        let row = Rect {
-            y: pb.rule_y + y,
-            height: crate::launcher::MORE_H,
-            ..g.area
-        };
-        if let Some(placed) = crate::launcher::place(window, scroll, row) {
-            let more = StripMore {
-                index,
-                hidden: content.more,
-                lit,
-                centered: false,
-            };
-            draw_strip_more(f, app, placed.rect, band, more);
-        }
-    }
 }
 
-/// One entry of the compact LIST, on one line: the cursor mark, the
-/// status dot and name a card heads with, what it runs on, and the last
-/// thing it was asked — `›` as on the card — or, for a terminal, the last
-/// line its shell printed; how long since it moved (or `exited`) at the
-/// right. `cols` are the band's name and runs-on column widths, so the
-/// entries line up. `(selected, lit)`: the cursor's entry wears the mark,
-/// ([`LIST_MARK`]), and the FOCUSED PANEL TINT across the line while the
-/// grid holds the keys.
+/// One entry of the LIST, on one line: the cursor mark, the status dot
+/// and name, what it runs on, and the last thing it was asked — or, for a
+/// terminal, what runs in it; how long since it moved (or `exited`) at
+/// the right. `cols` are the band's name and runs-on column widths, so the
+/// entries line up. The cursor's entry (`selected`) wears the mark
+/// ([`LIST_MARK`]) and a wash of its status color across the line
+/// ([`card_tint`]).
 fn draw_list_row(
     buf: &mut Buffer,
     app: &App,
     r: Rect,
     card: &crate::launcher::Card,
-    (selected, lit): (bool, bool),
+    selected: bool,
     (name_col, runs_col): (usize, usize),
     cfg: &mut Option<crate::config::Config>,
 ) {
@@ -1625,6 +1293,9 @@ fn draw_list_row(
         text_style: Style,
         badge: String,
         badge_style: Style,
+        /// The color the cursor's wash takes: the status's while it
+        /// wants you ([`card_edge`]), else none — the accent's.
+        status: Option<Color>,
     }
     let e = match card {
         crate::launcher::Card::Session(row) => {
@@ -1655,6 +1326,11 @@ fn draw_list_row(
                 text_style: Style::default().fg(look.prompt),
                 badge: look.ago,
                 badge_style: look.ago_style,
+                status: card_edge(
+                    a,
+                    a.archived || app.is_placeholder_agent(&a.id) || crate::app::drawn_cold(a),
+                    th,
+                ),
             }
         }
         crate::launcher::Card::Terminal(t) => Entry {
@@ -1666,12 +1342,7 @@ fn draw_list_row(
             runs: t.run_command.clone().unwrap_or_else(|| "shell".into()),
             runs_style: Style::default().fg(th.dim),
             text_mark: "",
-            text: terminal_tail_lines(app, t)
-                .iter()
-                .map(crate::terminal_tail::TailRow::text)
-                .rev()
-                .find(|l| !l.trim().is_empty())
-                .unwrap_or_default(),
+            text: String::new(),
             text_style: Style::default().fg(th.muted),
             badge: if t.alive {
                 String::new()
@@ -1679,6 +1350,7 @@ fn draw_list_row(
                 EXITED_BADGE.into()
             },
             badge_style: Style::default().fg(th.exited),
+            status: None,
         },
     };
     let mut spans = vec![mark, e.lead];
@@ -1734,8 +1406,8 @@ fn draw_list_row(
         spans.push(Span::styled(badge, e.badge_style));
     }
     let mut line = Paragraph::new(Line::from(spans));
-    if lit {
-        line = line.style(Style::default().bg(th.focus_tint));
+    if selected {
+        line = line.style(Style::default().bg(card_tint(app, e.status, th)));
     }
     line.render(r, buf);
 }
@@ -1790,71 +1462,7 @@ pub(crate) fn account_tag_span(a: &orion_core::Agent, quiet: Color) -> Option<Sp
     ))
 }
 
-/// Draw something the window's edges may cut — a card half scrolled off
-/// the top — as the terminal draws a line half scrolled off: the rows of
-/// it inside the window, and only those. `draw` paints the whole thing
-/// into the rect it is handed; one drawn whole paints straight onto the
-/// frame, one that is cut paints onto a scratch buffer its own size and
-/// the rows on screen are copied across. So a card's top border is
-/// never drawn on a card whose top is off screen — a whole-looking card
-/// where a cut one stands would say the wrong thing about what is
-/// above it.
-fn draw_cut(f: &mut Frame, placed: crate::launcher::Placed, draw: impl FnOnce(&mut Buffer, Rect)) {
-    if placed.whole() {
-        draw(f.buffer_mut(), placed.rect);
-        return;
-    }
-    let full = Rect {
-        y: 0,
-        height: placed.rect.height + placed.cut_top + placed.cut_bottom,
-        ..placed.rect
-    };
-    let mut scratch = Buffer::empty(full);
-    draw(&mut scratch, full);
-    let buf = f.buffer_mut();
-    for dy in 0..placed.rect.height {
-        for x in placed.rect.left()..placed.rect.right() {
-            let Some(from) = scratch.cell((x, placed.cut_top + dy)) else {
-                continue;
-            };
-            if let Some(to) = buf.cell_mut((x, placed.rect.y + dy)) {
-                *to = from.clone();
-            }
-        }
-    }
-}
-
-/// A card of either kind, in `area`.
-#[allow(clippy::too_many_arguments)]
-fn draw_any_card(
-    buf: &mut Buffer,
-    app: &App,
-    area: Rect,
-    card: &crate::launcher::Card,
-    selected: bool,
-    focused: bool,
-    th: Theme,
-    cfg: &mut Option<crate::config::Config>,
-) {
-    match card {
-        crate::launcher::Card::Session(row) => {
-            draw_card(buf, app, area, row, selected, focused, th, cfg)
-        }
-        crate::launcher::Card::Terminal(t) => draw_chip(buf, app, area, t, selected, focused, th),
-    }
-}
-
-/// A terminal card just drawn: the grid's beat asks the daemon what its
-/// shell printed since ([`App::tail_cards`], `event_loop::request_terminal_tails`).
-fn note_tail_card(app: &mut App, card: &crate::launcher::Card) {
-    if let crate::launcher::Card::Terminal(t) = card {
-        app.tail_cards.push(t.id.clone());
-    }
-}
-
-/// Where a band's rule is being drawn: always on the grid over its
-/// cards — the ACCORDION opens a band in place rather than replacing
-/// the grid with it, so there is only ever the one kind now.
+/// What a band's rule needs to know of the band beyond the band itself.
 #[derive(Debug, Clone, Copy)]
 struct BandRule {
     /// The band's place in `launcher::bands` — what its hit names.
@@ -1864,8 +1472,6 @@ struct BandRule {
     /// The keys are on the band too — not up on the PROJECT TABS nor
     /// down in the pane: the rule takes the accent and the cursor mark.
     lit: bool,
-    /// Cards its row had no room for — always 0 once the band is open.
-    more: usize,
     /// The widths the right-hand columns take on every rule of the grid.
     cols: RuleColumns,
 }
@@ -1878,8 +1484,8 @@ const GIT_COLUMNS: usize = 5;
 /// gives way.
 const MIN_BRANCH_CELLS: usize = 8;
 
-/// The gap between the parts of a rule's right end: `▸ N more`, the pull
-/// request, the counts.
+/// The gap between the parts of a rule's right end: the pull request and
+/// the counts.
 const COLUMN_GAP: usize = 2;
 
 /// What a band's rule says at its right end ([`rule_facts`]): its pull
@@ -2015,11 +1621,10 @@ fn folder_if_differs(app: &App, band: &crate::launcher::Band) -> Option<String> 
 /// (`feat/ui-redesign in pawy`) — then the rule, and at the right end the
 /// pull request and the git counts in columns as wide on every band
 /// ([`RuleColumns`]), so the eye reads them down the grid and nothing
-/// shifts when one band's count changes. Cards hanging off the band's
-/// edges are counted just ahead of them (`▸ 2 more`).
+/// shifts when one band's count changes.
 ///
 /// On the band the cursor is on the branch is bold — this is what says
-/// which checkout the pane reads, since no card under it wears the
+/// which checkout the pane reads, since no entry under it may wear the
 /// cursor — and for as long as the keys are on it the rule wears the
 /// accent and opens on the CURSOR MARK `❯` instead of `──`; gray and
 /// unmarked like the rest once the keys are up on the PROJECT TABS or
@@ -2031,7 +1636,7 @@ fn folder_if_differs(app: &App, band: &crate::launcher::Band) -> Option<String> 
 /// after orion sees the merge land, then holds still.
 ///
 /// A rule too narrow for all of it lets the folder go first, then the
-/// pull request's column, then the counts', then `▸ N more`, before the
+/// pull request's column, then the counts', before the
 /// branch shortens past eight letters.
 /// Returns the rule's hits: the pull request ahead of the rule itself,
 /// so a click on `#42` opens it and one anywhere else lands on the band.
@@ -2046,11 +1651,7 @@ fn draw_band_rule(
     let th = app.theme;
     let width = usize::from(r.width);
     let BandRule {
-        on,
-        lit,
-        more,
-        mut cols,
-        ..
+        on, lit, mut cols, ..
     } = rule;
     let edge = if lit { th.accent } else { th.edge };
     let dash = |n: usize| Span::styled("─".repeat(n), Style::default().fg(edge));
@@ -2083,29 +1684,18 @@ fn draw_band_rule(
         dash(2)
     };
     let lead_w = 2 + 1 + 2;
-    let mut more_label = (more > 0).then(|| format!("▸ {more} more"));
-    // What the right end takes: the `▸ N more` and the columns, with the
-    // tail around them; and the words need ` ` and two dashes after them.
-    let right_w = |cols: &RuleColumns, more: Option<&String>| {
-        let gap = if cols.width() > 0 { COLUMN_GAP } else { 0 };
-        let more_w = more.map_or(0, |m| m.chars().count() + gap);
-        1 + 2 + rule_tail_width(more_w + cols.width())
-    };
+    // What the right end takes: the columns, with the tail around them;
+    // and the words need ` ` and two dashes after them.
+    let right_w = |cols: &RuleColumns| 1 + 2 + rule_tail_width(cols.width());
     let keep = band.branch.chars().count().min(MIN_BRANCH_CELLS);
-    let crowded =
-        |cols: &RuleColumns, more: Option<&String>| lead_w + keep + right_w(cols, more) > width;
-    if crowded(&cols, more_label.as_ref()) {
+    let crowded = |cols: &RuleColumns| lead_w + keep + right_w(cols) > width;
+    if crowded(&cols) {
         cols.pr = 0;
     }
-    if crowded(&cols, more_label.as_ref()) {
+    if crowded(&cols) {
         cols.git = [0; GIT_COLUMNS];
     }
-    if crowded(&cols, more_label.as_ref()) {
-        more_label = None;
-    }
-    let room = width
-        .saturating_sub(lead_w + right_w(&cols, more_label.as_ref()))
-        .max(1);
+    let room = width.saturating_sub(lead_w + right_w(&cols)).max(1);
     let branch = truncate(&band.branch, room);
     let folder = folder_if_differs(app, band)
         .map(|dir| format!(" in {dir}"))
@@ -2126,15 +1716,9 @@ fn draw_band_rule(
         left.push(Span::styled(folder, Style::default().fg(th.dim)));
     }
 
-    // The right end: what hangs off the band's edges, then the columns.
+    // The right end: the columns.
     let mut right = Vec::new();
     let gap = || Span::raw(" ".repeat(COLUMN_GAP));
-    if let Some(more) = more_label {
-        right.push(Span::styled(more, Style::default().fg(th.muted)));
-        if cols.width() > 0 {
-            right.push(gap());
-        }
-    }
     let mut hits = Vec::new();
     let mut pr_at = None;
     if cols.pr > 0 {
@@ -2269,206 +1853,27 @@ pub(super) fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'sta
     )
 }
 
-/// A TERMINAL's card: what a session's card is to a session, and the
-/// same size — its name behind the glyph the SESSIONS PANEL gave the row
-/// (`▶` for a RUN TERMINAL, `❯` for a plain shell, in `th.muted` while its
-/// PTY is alive, with `exited` at the row's right once the shell is
-/// gone), what runs in it, then the last lines it printed where a
-/// session's card has its prompt ([`terminal_tail_lines`]) — so a glance
-/// down the grid says what each shell is up to, and an exited one what it
-/// was doing when it went. Those lines are a small terminal
-/// ([`draw_tail_row`]): the shell's own colours, clipped at the card's
-/// edge, and a live shell's cursor. Framed and filled as a session's card
-/// is when the cursor is on it ([`selected_card_block`]).
-fn draw_chip(
-    buf: &mut Buffer,
-    app: &App,
-    area: Rect,
-    t: &orion_core::TerminalTab,
-    selected: bool,
-    focused: bool,
-    th: Theme,
-) {
-    let block = if selected {
-        selected_card_block(app, focused, None, th)
-    } else {
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(th.edge))
-    };
-    let dim = if selected { th.muted } else { th.dim };
-    let inner = block.inner(area);
-    block.render(area, buf);
-    let inner = Rect {
-        x: inner.x + 1,
-        width: inner.width.saturating_sub(2),
-        ..inner
-    };
-    let width = usize::from(inner.width);
-    if width == 0 {
-        return;
-    }
-    // HIDE CARD MARKS drops the glyph, and the name starts where it was.
-    let glyph = if app.hide_card_marks {
-        Span::raw("")
-    } else {
-        terminal_mark(t, th)
-    };
-    let glyph_w = glyph.width();
-    // `exited` sits where a session card keeps its ago badge, and the
-    // name gives it the room, as a session's does.
-    let badge = if t.alive { "" } else { EXITED_BADGE };
-    let (badge, name_max) = fit_ago(badge.to_string(), width);
-    let name = truncate(&t.name, name_max.saturating_sub(glyph_w));
-    let mut first = vec![
-        glyph,
-        Span::styled(
-            name.clone(),
-            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if !badge.is_empty() {
-        let badge = badge.trim_start().to_string();
-        let pad = width.saturating_sub(name.chars().count() + glyph_w + badge.chars().count());
-        first.push(Span::raw(" ".repeat(pad)));
-        first.push(Span::styled(badge, Style::default().fg(th.exited)));
-    }
-    let runs = t.run_command.as_deref().unwrap_or("shell");
-    let second = vec![Span::styled(
-        truncate(runs, width),
-        Style::default().fg(dim),
-    )];
-    for (i, spans) in [first, second].into_iter().enumerate() {
-        let Some(r) = row_rect(inner, i) else { break };
-        Paragraph::new(Line::from(spans)).render(r, buf);
-    }
-    let head = usize::from(crate::launcher::CARD_HEAD_H);
-    for (i, row) in terminal_tail_lines(app, t)
-        .iter()
-        .take(crate::launcher::PROMPT_LINES)
-        .enumerate()
-    {
-        let Some(r) = row_rect(inner, head + i) else {
-            break;
-        };
-        draw_tail_row(buf, r, row, t.alive, th);
-    }
-}
-
-/// One row of a terminal card's tail, painted as the pane would paint
-/// it: each run in the look the shell printed it in over the card's own
-/// text colour and background — which is what a terminal's default is
-/// on a card — cut at the card's right edge the way a narrower terminal
-/// cuts, no `…`, and the shell's cursor a reversed cell while it lives:
-/// over a character it reverses that character's own colours, past the
-/// text it is a block in the card's text colour.
-fn draw_tail_row(
-    buf: &mut Buffer,
-    r: Rect,
-    row: &crate::terminal_tail::TailRow,
-    alive: bool,
-    th: Theme,
-) {
-    let base = Style::default().fg(th.text);
-    let (mut x, right) = (r.x, r.right());
-    for (text, look) in &row.runs {
-        if x >= right {
-            break;
-        }
-        x = buf
-            .set_stringn(x, r.y, text, usize::from(right - x), base.patch(*look))
-            .0;
-    }
-    let Some(col) = row.cursor.filter(|&c| alive && c < r.width) else {
-        return;
-    };
-    let at = r.x + col;
-    let look = if at < x { Style::default() } else { base };
-    if let Some(cell) = buf.cell_mut((at, r.y)) {
-        cell.set_style(look.add_modifier(Modifier::REVERSED));
-    }
-}
-
-/// What a dead terminal's card says at its name row's right.
+/// What a dead terminal's entry says at its right.
 const EXITED_BADGE: &str = " exited";
 
-/// The lines under a terminal card's head: the pane's own screen while the
-/// pane is on this terminal — live, on the frame it changes — and
-/// otherwise the tail the daemon last answered with
-/// ([`App::terminal_tails`]), which a card keeps once its shell is gone.
-fn terminal_tail_lines(
-    app: &App,
-    t: &orion_core::TerminalTab,
-) -> Vec<crate::terminal_tail::TailRow> {
-    let sref = orion_core::SessionRef::Terminal(t.id.clone());
-    if let Some(term) = app
-        .term
-        .as_ref()
-        .filter(|term| term.sref == sref && term.painted)
-    {
-        return crate::terminal_tail::screen_tail(
-            term.parser.screen(),
-            crate::launcher::PROMPT_LINES,
-        );
-    }
-    app.terminal_tails
-        .get(&t.id)
-        .map(|tail| tail.lines.clone())
-        .unwrap_or_default()
-}
-
-/// A card's frame color when its status wants you: crimson for a turn
-/// waiting on you or a crash, the done color for a finish nobody has read
-/// — each in the color its STATUS MARK wears, and no other. A working
-/// card keeps the plain edge (its spinner says it is busy, and a busy
-/// card asks nothing of you), as do a read finish, a fresh session and a
-/// `quiet` card (pending or archived, or cold with nothing left that wants
-/// you). The cursor's card outranks them all ([`selected_card_block`]).
+/// The color an entry's cursor wash takes when its status wants you:
+/// crimson for a turn waiting on you or a crash, the done color for a
+/// finish nobody has read — each in the color its STATUS MARK wears, and
+/// no other. A working session has none (its spinner says it is busy, and
+/// a busy session asks nothing of you), nor do a read finish, a fresh
+/// session and a `quiet` one (pending or archived, or cold with nothing
+/// left that wants you).
 fn card_edge(a: &orion_core::Agent, quiet: bool, th: Theme) -> Option<Color> {
     let status = Some(a.status);
     (!quiet && wants_you(status, a.unseen)).then(|| status_color(status, a.unseen, th))
 }
 
-/// The frame of the card under the cursor, session or terminal: a heavy
-/// accent border — a weight no status frame ([`card_edge`]) ever takes,
-/// so an unread finish or a crimson question beside it can't be read as
-/// the selection, color or no color — over the raised fill every selected
-/// row in orion wears, frame and all: `sel_bg` while the grid has the
-/// keys, `sel_bg_dim` while the pane or the PROJECT TABS do, so the card
-/// stays picked out as the one the pane reads.
-///
-/// HIGHLIGHT CURRENT CARD trades the gray fill for a faint wash of the
-/// card's own light ([`card_tint`]), kept while the pane has the keys.
-/// `status` is the color its frame would wear were it not selected
-/// ([`card_edge`]); none for a quiet card or a terminal's.
-fn selected_card_block(
-    app: &App,
-    focused: bool,
-    status: Option<Color>,
-    th: Theme,
-) -> Block<'static> {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Thick)
-        .border_style(Style::default().fg(th.accent));
-    let fill = if app.highlight_current_card {
-        card_tint(app, status, th)
-    } else if focused {
-        th.sel_bg
-    } else {
-        th.sel_bg_dim
-    };
-    block.style(Style::default().bg(fill))
-}
-
-/// HIGHLIGHT CURRENT CARD's fill: the card's status color taken nearly to
-/// black, so the card is only just washed in it. A card with something
-/// going on — running, asking, finished and unread — breathes, the wash
-/// rising and falling on the sweep's clock ([`tint_level`]); a quiet
-/// card or a terminal's holds a still wash of the accent, as every card
-/// does with the ANIMATIONS off. Fainter still while the PROJECT TABS
-/// hold the keys.
+/// The cursor's entry's wash: its status color ([`card_edge`]) taken
+/// nearly to black, so the line is only just washed in it. An entry that
+/// wants you breathes, the wash rising and falling on the sweep's clock
+/// ([`tint_level`]); a quiet one or a terminal holds a still wash of the
+/// accent, as every entry does with the ANIMATIONS off. Fainter still
+/// while the PROJECT TABS hold the keys.
 fn card_tint(app: &App, status: Option<Color>, th: Theme) -> Color {
     let (color, level) = match status {
         Some(c) if app.animations => (c, tint_level(app.sweep_phase())),
@@ -2483,7 +1888,7 @@ fn card_tint(app: &App, status: Option<Color>, th: Theme) -> Color {
     dim_toward_black(color, level * away)
 }
 
-/// How much of its status color a breathing card's fill keeps at its
+/// How much of its status color a breathing entry's wash keeps at its
 /// brightest, and how much a still one keeps of the accent.
 const TINT_PEAK: f32 = 0.20;
 const TINT_STILL: f32 = 0.13;
@@ -2509,223 +1914,14 @@ fn dim_toward_black(c: Color, level: f32) -> Color {
     })
 }
 
-/// What an ARCHIVED card wears where a live one wears its STATUS DOT: the
-/// round dot squared off. Two columns wide like the dot it stands in for,
-/// so the name behind it starts in the same column on both grids.
+/// What an ARCHIVED session wears where a live one wears its STATUS DOT:
+/// the round dot squared off. Two columns wide like the dot it stands in
+/// for, so the name behind it starts in the same column on both grids.
 const ARCHIVED_MARK: &str = "▪ ";
 
-/// One session's card: its name and how long since it last moved, what
-/// it runs on, and the last thing it was asked to do. Where it runs —
-/// the checkout, its changes, its pull request — is on its BAND's rule,
-/// said once for every card in the checkout. The cursor's card is raised
-/// out of the grid wherever the keys are ([`selected_card_block`]); every
-/// other card's frame answers to its status ([`card_edge`]).
-#[allow(clippy::too_many_arguments)]
-fn draw_card(
-    buf: &mut Buffer,
-    app: &App,
-    area: Rect,
-    row: &LauncherRow,
-    selected: bool,
-    focused: bool,
-    th: Theme,
-    cfg: &mut Option<crate::config::Config>,
-) {
-    let a = &row.agent;
-    let pending = app.is_placeholder_agent(&a.id);
-    let cold = crate::app::drawn_cold(a);
-    let archived = a.archived;
-    let SessionLook {
-        dot,
-        quiet,
-        name_style,
-        prompt: prompt_color,
-        ramp,
-        ago,
-        ago_style,
-    } = session_look(app, a, selected, th);
-    let quiet_or = |live: Color| if archived { quiet } else { live };
-    // On the raised fill the dim parts step up to muted and the prompt to
-    // text, so nothing on the cursor's card sinks into its background.
-    let (dim, prompt) = if selected {
-        (th.muted, th.text)
-    } else {
-        (th.dim, th.muted)
-    };
-    let edge = card_edge(a, archived || pending || cold, th);
-    let block = if selected {
-        selected_card_block(app, focused, edge, th)
-    } else {
-        Block::default()
-            .borders(Borders::ALL)
-            // Square corners on an archived card, round on a live one: the
-            // one difference between the two grids that survives a
-            // terminal with no color at all.
-            .border_type(if archived {
-                BorderType::Plain
-            } else {
-                BorderType::Rounded
-            })
-            .border_style(Style::default().fg(edge.unwrap_or(th.edge)))
-    };
-    let inner = block.inner(area);
-    block.render(area, buf);
-    // One cell of air inside the border, so the text never touches it.
-    let inner = Rect {
-        x: inner.x + 1,
-        width: inner.width.saturating_sub(2),
-        ..inner
-    };
-    let width = inner.width as usize;
-    if width == 0 {
-        return;
-    }
-
-    let (ago, name_max) = fit_ago(ago, width);
-    // The ACCOUNT TAG between the dot and the name, as on a LIST row.
-    let tag = account_tag_span(a, quiet).filter(|_| name_max > ACCOUNT_TAG_W + 6);
-    let tag_w = tag.as_ref().map_or(0, |_| ACCOUNT_TAG_W);
-    let name = truncate(&a.name, name_max.saturating_sub(2 + tag_w));
-    let mut first = vec![dot];
-    first.extend(tag);
-    let used = name.chars().count() + 2 + tag_w;
-    first.extend(status_name_spans(name, name_style, ramp, app.sweep_phase()));
-    if !ago.is_empty() {
-        let ago = ago.trim_start().to_string();
-        let pad = width.saturating_sub(used + ago.chars().count());
-        first.push(Span::raw(" ".repeat(pad)));
-        first.push(Span::styled(ago, ago_style));
-    }
-
-    // What it runs on: the harness, the model and the reasoning effort
-    // the session was launched with, dim. Where it runs — the checkout,
-    // its changes, its pull request — is the BAND's rule over the card,
-    // said once for every card in the checkout rather than on each. The
-    // project is not on the card either: the grid is one project's,
-    // named in the header.
-    let harness = runs_on_line(a, cfg);
-    let mut second = if harness.is_empty() {
-        Vec::new()
-    } else {
-        vec![Span::styled(
-            truncate(&harness, width),
-            Style::default().fg(quiet_or(dim)),
-        )]
-    };
-    // The issue it was started from, at the row's right end — a link, and
-    // the only thing on the card under the pointer that is not the card
-    // (`HitTarget::LauncherCardIssue`, placed by `card_issue_rect`).
-    if let Some(label) = card_issue_label(app, a) {
-        let label_w = label.chars().count();
-        if card_issue_rect(area, label_w).is_some() {
-            let room = width - label_w - 1;
-            let harness = truncate(&harness, room);
-            let pad = width - label_w - harness.chars().count();
-            let mut style = Style::default().fg(quiet_or(th.accent));
-            if app.hover_crumb == Some(HitTarget::LauncherCardIssue(a.id.clone())) {
-                style = style.add_modifier(Modifier::UNDERLINED);
-            }
-            second = vec![
-                Span::styled(harness, Style::default().fg(quiet_or(dim))),
-                Span::raw(" ".repeat(pad)),
-                Span::styled(label, style),
-            ];
-        }
-    }
-
-    // The last thing it was asked to do, on the prompt's own `›` (which
-    // `hide_card_marks` leaves off), over the card's last rows rather than
-    // clipped at the first. A session stopped on a usage limit says what
-    // Claude said about it there instead, and how to carry it on.
-    let mut lines = vec![first, second];
-    lines.resize(crate::launcher::CARD_HEAD_H as usize, Vec::new());
-    let mark = (!app.hide_card_marks).then(|| quiet_or(dim));
-    match a.limit_reached().filter(|_| !pending) {
-        Some(limit) => lines.extend(limit_lines(app, a, limit, width, cfg, (mark, dim, prompt))),
-        None => lines.extend(prompt_lines(
-            crate::launcher::last_prompt(a).unwrap_or_default(),
-            width,
-            mark,
-            prompt_color,
-            crate::launcher::PROMPT_LINES,
-        )),
-    }
-
-    for (i, spans) in lines.into_iter().enumerate() {
-        if spans.is_empty() {
-            continue;
-        }
-        let Some(r) = row_rect(inner, i) else { break };
-        Paragraph::new(Line::from(spans)).render(r, buf);
-    }
-}
-
-/// The `#15` an ISSUE SESSION's card shows for the GitHub issue it was
-/// started from, while the `card_issue_number` setting is on. None on
-/// every other card, and on every card with the setting off.
-fn card_issue_label(_app: &App, _a: &orion_core::Agent) -> Option<String> {
-    None
-}
-
-/// Where a card drawn whole at `area` puts its issue number `label_w`
-/// cells wide: the right end of the row saying what it runs on, inside
-/// the border and its cell of air (`draw_card`). None on a card too
-/// small to hold it with a cell to spare.
-fn card_issue_rect(area: Rect, label_w: usize) -> Option<Rect> {
-    let inner = Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
-    };
-    let label_w = u16::try_from(label_w).ok()?;
-    if inner.height < 2 || inner.width <= label_w {
-        return None;
-    }
-    Some(Rect {
-        x: inner.x + inner.width - label_w,
-        y: inner.y + 1,
-        width: label_w,
-        height: 1,
-    })
-}
-
-/// The click target of the issue number on the session card `card`,
-/// placed at `placed` (cut or whole): the chip's cell when that row of
-/// the card is on screen, for [`draw_bands`] to register ahead of the
-/// card so the chip wins.
-fn card_issue_hit(
-    app: &App,
-    card: &crate::launcher::Card,
-    placed: crate::launcher::Placed,
-) -> Option<(Rect, HitTarget)> {
-    let crate::launcher::Card::Session(row) = card else {
-        return None;
-    };
-    let label = card_issue_label(app, &row.agent)?;
-    // The chip on the whole card laid out from row 0, then its row moved
-    // to the screen — kept only while the window shows that row.
-    let full = Rect {
-        y: 0,
-        height: placed.rect.height + placed.cut_top + placed.cut_bottom,
-        ..placed.rect
-    };
-    let chip = card_issue_rect(full, label.chars().count())?;
-    let row_on_screen = chip.y.checked_sub(placed.cut_top)?;
-    (row_on_screen < placed.rect.height).then(|| {
-        (
-            Rect {
-                y: placed.rect.y + row_on_screen,
-                ..chip
-            },
-            HitTarget::LauncherCardIssue(row.agent.id.clone()),
-        )
-    })
-}
-
-/// How a session shows its state wherever orion draws it — a card's head,
-/// a LIST entry, the pane's header, the full-screen breadcrumb — so they
-/// never disagree.
+/// How a session shows its state wherever orion draws it — a LIST entry,
+/// the pane's header, the full-screen breadcrumb — so they never
+/// disagree.
 struct SessionLook {
     /// The STATUS MARK, or an archived card's square.
     dot: Span<'static>,
@@ -2758,10 +1954,10 @@ struct SessionLook {
 /// it takes `quiet` — dim on its own, lifted to muted on the one the
 /// cursor is on, so it reads a step brighter than its neighbours — its
 /// name the plain `muted`, its STATUS DOT gives way to `ARCHIVED_MARK`,
-/// and a card's frame squares off (`draw_card`). The colors say it at a
+/// and the colors off still leave its square mark. The colors say it at a
 /// glance and the shapes say it again with the colors off, which is the
 /// whole grid's answer to "which of the two lists am I looking at" without
-/// a word repeated on every card - the header's `n archived sessions` says
+/// a word repeated on every row - the header's `n archived sessions` says
 /// that once.
 fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> SessionLook {
     use orion_core::AgentStatus;
@@ -2857,24 +2053,24 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
     }
 }
 
-/// A session's STATUS MARK as its card draws it, and its name's style on
-/// the card the cursor is on ([`session_look`]): what the FOOTER's
+/// A session's STATUS MARK as its entry draws it, and its name's style on
+/// the entry the cursor is on ([`session_look`]): what the FOOTER's
 /// breadcrumb names the selected session with, so the two agree.
 pub(super) fn session_crumb(app: &App, a: &orion_core::Agent) -> (Span<'static>, Style) {
     let look = session_look(app, a, true, app.theme);
     (look.dot, look.name_style)
 }
 
-/// Which card wears the cursor: the one the cursor is on, or none at all
+/// Which entry wears the cursor: the one the cursor is on, or none at all
 /// once the aim has been let go of (`event_loop::launcher::clear_aim` —
-/// a click on the air between the cards, or the first Esc). The grid
-/// still knows where the cursor is; it simply draws no card as selected,
+/// a click on the air between the entries, or the first Esc). The grid
+/// still knows where the cursor is; it simply draws no entry as selected,
 /// which is what says the box `p` opens will ask where its session lands.
 fn wearing(app: &App, cursor: Option<usize>) -> Option<usize> {
     (!app.launcher_unaimed).then_some(cursor).flatten()
 }
 
-/// What the ARCHIVED VIEW shows with no cards at all — one line where the
+/// What the ARCHIVED VIEW shows with nothing in it — one line where the
 /// grid would be, rather than the live list's hero, which is about
 /// starting a session and has nothing to say here.
 fn draw_list_empty(f: &mut Frame, app: &mut App, area: Rect, what: &str) {
@@ -2895,105 +2091,15 @@ fn draw_list_empty(f: &mut Frame, app: &mut App, area: Rect, what: &str) {
     }
 }
 
-/// The prompt block at the foot of a card: the `›` on its first row and
-/// the sentence wrapped under it, indented to the same column, over at
-/// most `keep` rows — [`crate::launcher::PROMPT_LINES`] for a prompt, so a
-/// card is a fixed height whatever it was asked to do. A prompt longer
-/// than that is cut on the last of them with an ellipsis; an empty one
-/// draws nothing. `mark` is the `›`'s color, `None` (HIDE CARD MARKS, or
-/// text that is not a prompt) to leave it off and start every row in its
-/// column.
-fn prompt_lines(
-    prompt: &str,
-    width: usize,
-    mark: Option<Color>,
-    text: Color,
-    keep: usize,
-) -> Vec<Vec<Span<'static>>> {
-    const MARK: &str = "› ";
-    let indent = if mark.is_some() {
-        MARK.chars().count()
-    } else {
-        0
-    };
-    let body = width.saturating_sub(indent);
-    if prompt.is_empty() || body == 0 {
-        return Vec::new();
-    }
-    let wrapped = crate::pr_preview::wrap(prompt, body);
-    let cut = wrapped.len() > keep;
-    wrapped
-        .into_iter()
-        .take(keep)
-        .enumerate()
-        .map(|(i, line)| {
-            let last = i + 1 == keep;
-            let line_text = if last && cut {
-                truncate(&format!("{line}…"), body)
-            } else {
-                line
-            };
-            let lead = match mark {
-                Some(mark) if i == 0 => Span::styled(MARK, Style::default().fg(mark)),
-                _ => Span::raw(" ".repeat(indent)),
-            };
-            vec![lead, Span::styled(line_text, Style::default().fg(text))]
-        })
-        .collect()
-}
-
-/// Where a card stopped on a usage limit puts its prompt: Claude's own
-/// words about the limit — the reset time, when it named one — else the
-/// last prompt as ever, and on the row under them the way out, the key
-/// that carries the session onto another account
-/// ([`crate::launcher::continue_hint`]) when there is one to go to.
-/// `mark`, `dim` and `text` are the card's prompt colors.
-fn limit_lines(
-    app: &App,
-    a: &orion_core::Agent,
-    limit: &orion_core::UsageLimit,
-    width: usize,
-    cfg: &mut Option<crate::config::Config>,
-    (mark, dim, text): (Option<Color>, Color, Color),
-) -> Vec<Vec<Span<'static>>> {
-    let targets = cfg
-        .get_or_insert_with(crate::config::Config::load)
-        .continue_targets(a);
-    let hint = crate::launcher::continue_hint(&app.keymap, &targets);
-    let keep = crate::launcher::PROMPT_LINES - usize::from(hint.is_some());
-    let mut lines = match limit.message.as_deref() {
-        Some(message) => prompt_lines(message, width, None, text, keep),
-        None => prompt_lines(
-            crate::launcher::last_prompt(a).unwrap_or_default(),
-            width,
-            mark,
-            text,
-            keep,
-        ),
-    };
-    if let Some(hint) = hint {
-        lines.push(vec![Span::styled(
-            truncate(&hint, width),
-            Style::default().fg(dim),
-        )]);
-    }
-    lines
-}
-
 /// The harness (and model) a session runs on, as the PANE's breadcrumb
-/// names it: `claude opus`. A Claude Cloud row says `cloud` — the sandbox
-/// is the harness that matters there — and a CLAUDE ACCOUNT, on a machine
-/// with more than one, the email it is signed in as: `a@b.co opus`. The
-/// card adds the reasoning effort through [`runs_on_line`].
+/// names it: `claude opus` — and a CLAUDE ACCOUNT, on a machine
+/// with more than one, the email it is signed in as: `a@b.co opus`.
 ///
-/// `cfg` is the frame's CONFIG.JSON slot, filled on the first card that
+/// `cfg` is the frame's CONFIG.JSON slot, filled on the first entry that
 /// needs it: only a CUSTOM harness's label comes out of the file — an
 /// account's email is the last read's — so a grid of built-ins never
 /// opens it at all.
 fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
-    if a.cloud_session_id.is_some() {
-        return "cloud".into();
-    }
     let short = crate::claude_accounts::short_name(a.kind, a.custom_harness.as_deref());
     let mut out = match short {
         Some(name) => name,
@@ -3010,30 +2116,15 @@ fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) 
     out
 }
 
-/// What a session's card says it runs on: [`harness_line`] with the
-/// reasoning effort the session was launched with after the model —
-/// `claude opus high`, `codex gpt-5.5 xhigh`. A session on the CLI's own
-/// default effort names none, so the line is the harness line alone
-/// rather than one with a hole in it.
-fn runs_on_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
-    let mut out = harness_line(a, cfg);
-    if let Some(effort) = a.effort.as_deref().filter(|e| !e.is_empty()) {
-        out.push(' ');
-        out.push_str(effort);
-    }
-    out
-}
-
 /// What a LIST row says a session runs on: the model and the effort —
 /// `opus high`, `gpt-5.5 xhigh` — which is what tells one row from the
-/// next. A CLAUDE ACCOUNT's name or email is the card's to show, never the
-/// row's: on a line that narrow it pushed the model and effort out of
-/// sight. A session with no model named says its harness in the model's
-/// place (`claude high`), a Claude account's as plain `claude`; a cloud
-/// row names the sandbox in place of the model, as [`harness_line`] does.
+/// next. A CLAUDE ACCOUNT's name or email is never the row's to show:
+/// on a line that narrow it pushed the model and effort out of sight (the
+/// ACCOUNT TAG says which account). A session with no model named says
+/// its harness in the model's place (`claude high`), a Claude account's
+/// as plain `claude`.
 fn list_runs_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
     let mut out = match a.model.as_deref().filter(|m| !m.is_empty()) {
-        _ if a.cloud_session_id.is_some() => "cloud".into(),
         Some(model) => model.to_string(),
         None if is_claude_account(a, cfg) => orion_core::AgentKind::Claude.as_str().into(),
         None => harness_line(a, cfg),
@@ -3167,14 +2258,7 @@ impl PaneTab {
 /// folds the pane away, as `^~` does. A cell of air either side, so the
 /// target is wider than the glyph.
 const PANE_CLOSE: &str = " × ";
-/// The PANE's SIDE BUTTON, just before the CLOSE BUTTON: a picture of the
-/// layout one click moves it to — the pane down the right of the cards on
-/// a pane along the bottom, the pane along the bottom on one down the
-/// right. The click writes Settings → Appearance → **Session pane**, so
-/// the move lasts. Aired like the close button.
-const PANE_TO_RIGHT: &str = " ◨ ";
-const PANE_TO_BOTTOM: &str = " ⬓ ";
-/// The PANE's FULL-SCREEN BUTTON, before the SIDE BUTTON: one click gives
+/// The PANE's FULL-SCREEN BUTTON, before the CLOSE BUTTON: one click gives
 /// the session the whole screen, as `^F` does. A full-screen session's
 /// header ends in the NORMAL-SIZE BUTTON, which brings it back down.
 const PANE_FULL_SCREEN: &str = " ⤢ ";
@@ -3205,7 +2289,7 @@ fn header_button(
 /// The PANE's own header in the LAUNCHER VIEW: what the pane is reading
 /// — the card under the cursor, session or terminal, and the checkout
 /// it runs in — then the state tag (`scroll 4`, `exited`) right-aligned
-/// before the FULL-SCREEN, SIDE and CLOSE BUTTONS. A rule under it, and the rect the
+/// before the FULL-SCREEN and CLOSE BUTTONS. A rule under it, and the rect the
 /// PTY draws in returned, exactly as `ui::terminal_frame` does for the
 /// panels' pane. Opening a terminal is `t`'s alone: the grid offers no
 /// `+` for it.
@@ -3219,19 +2303,13 @@ pub(super) fn pane_frame(
     let th = app.theme;
     if let Some(r) = row_rect(area, 1) {
         let r = pad_x(r);
-        // The CLOSE BUTTON holds the right end of the row, the SIDE
-        // BUTTON stands before it — unless there is nowhere to move the
-        // pane (`App::launcher_pane_move_to`) — and the state tag
+        // The CLOSE BUTTON holds the right end of the row, the
+        // FULL-SCREEN BUTTON stands before it, and the state tag
         // (`scroll 4`, exited) is right-aligned before those: the title
-        // gets what the three leave.
-        let side_button = app.launcher_pane_move_to().map(|to| match to {
-            crate::launcher::PaneSide::Right => PANE_TO_RIGHT,
-            crate::launcher::PaneSide::Bottom => PANE_TO_BOTTOM,
-        });
-        let side_w = side_button.map_or(0, |b| b.chars().count() as u16);
+        // gets what they leave.
         let zoom_w = PANE_FULL_SCREEN.chars().count() as u16;
         let close_w = PANE_CLOSE.chars().count() as u16;
-        let buttons_w = zoom_w + side_w + close_w;
+        let buttons_w = zoom_w + close_w;
         let taken = usize::from(buttons_w)
             + right
                 .as_ref()
@@ -3283,26 +2361,6 @@ pub(super) fn pane_frame(
                 th.accent,
             );
             x += zoom_w;
-            if let Some(glyph) = side_button {
-                let side = Rect {
-                    x,
-                    width: side_w,
-                    ..r
-                };
-                // Lit under the pointer as the header's other buttons are:
-                // a half-filled square does not say it is one until then.
-                let fg = if app.hover_crumb == Some(HitTarget::LauncherPaneSide) {
-                    th.accent
-                } else {
-                    th.muted
-                };
-                f.render_widget(
-                    Paragraph::new(Span::styled(glyph, Style::default().fg(fg))),
-                    side,
-                );
-                app.hits.push((side, HitTarget::LauncherPaneSide));
-                x += side_w;
-            }
             let close = Rect {
                 x,
                 width: close_w,
@@ -3713,11 +2771,7 @@ fn header_fields(
     let harness = cfg.effective_harness(launch.kind, launch.custom.as_deref());
     // Cut to a fixed width, so a CLAUDE ACCOUNT's long label leaves the
     // row room for the mode, the model and the effort beside it.
-    let mut agent = super::truncate(harness.display_label(), AGENT_W);
-    // A CLAUDE CLOUD box says so on the field that toggles it.
-    if launch.cloud {
-        agent.push_str(crate::app::CLOUD_LABEL);
-    }
+    let agent = super::truncate(harness.display_label(), AGENT_W);
     let model = crate::config::model_row_label(
         launch
             .model
@@ -3876,7 +2930,7 @@ fn launch_project(app: &App, launch: &QuickLaunch) -> String {
 /// TERMINAL is `t`, never this box). The harness, the model, the
 /// effort and an AGENT PRESET are in [`box_header`] under it, beside the
 /// keys that change them; what is left here is what the box is *for* — an
-/// issue, a pull request, a Claude Cloud task.
+/// issue, a pull request, a Linear batch.
 pub(super) fn box_title(launch: &QuickLaunch) -> String {
     let mut head = vec!["New agent".to_string()];
     if let Some(issue) = &launch.issue {
@@ -3887,9 +2941,6 @@ pub(super) fn box_title(launch: &QuickLaunch) -> String {
     }
     if let Some(linear) = &launch.linear {
         head.push(linear.title());
-    }
-    if launch.cloud {
-        head.push("Claude Cloud".into());
     }
     head.join(" · ")
 }
@@ -3991,27 +3042,15 @@ pub(super) fn draw_project_picker(f: &mut Frame, app: &mut App, picker: &Project
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::launcher::LauncherRow;
 
-    /// [`draw_card`] for the tests that draw one card alone.
-    fn draw_one(
-        f: &mut Frame,
-        app: &App,
-        area: Rect,
-        row: &LauncherRow,
-        selected: bool,
-        focused: bool,
-        th: Theme,
-    ) {
-        draw_card(
-            f.buffer_mut(),
-            app,
-            area,
-            row,
-            selected,
-            focused,
-            th,
-            &mut None,
-        );
+    /// [`draw_list_row`] for the tests that draw one entry alone, its
+    /// columns 12 wide.
+    fn draw_one(app: &App, area: Rect, row: &LauncherRow, selected: bool) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        let card = crate::launcher::Card::Session(row.clone());
+        draw_list_row(&mut buf, app, area, &card, selected, (12, 12), &mut None);
+        buf
     }
 
     /// `^P` opens the PROJECT PICKER *over* the box, so the rect it takes
@@ -4245,7 +3284,7 @@ mod tests {
         for kind in [
             orion_core::AgentKind::Claude,
             orion_core::AgentKind::Codex,
-            orion_core::AgentKind::Pi,
+            orion_core::AgentKind::Grok,
         ] {
             let launch = QuickLaunch::of_kind(target.clone(), kind, None, None, None, &cfg);
             let effort = cells_of(&header(&app, &launch, 200), BoxField::Effort);
@@ -4421,7 +3460,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: true,
@@ -4464,30 +3502,28 @@ mod tests {
         );
     }
 
-    /// The whole view, drawn with its one band open on the ACCORDION: a
-    /// body too short for every card says so on the worktree's rule, and
-    /// says it about exactly the cards the grid left off. This is what a
-    /// PANE dragged up over the grid looks like — the cards that lost
-    /// their room are counted rather than simply gone — and the grid's
-    /// own edge says it again where the eye looks for the rest.
+    /// The whole view: a body too short for every entry says so in the
+    /// header, and says it
+    /// about exactly the entries the grid left off. This is what a PANE
+    /// dragged up over the grid looks like — the entries that lost their
+    /// room are counted rather than simply gone — and the grid's own edge
+    /// says it again where the eye looks for the rest.
     #[test]
-    fn a_body_too_short_for_its_cards_counts_them_in_the_header() {
-        use crate::launcher::{BAND_RULE_H, BELOW_MARK_H, CARD_H, GAP_Y, HEAD_H};
+    fn a_body_too_short_for_its_entries_counts_them_in_the_header() {
+        use crate::launcher::{BAND_RULE_H, BELOW_MARK_H, HEAD_H, LIST_ROW_H};
         let mut app = a_crowded_tree(9);
         select(&mut app, "api");
-        app.launcher_expanded = Some(orion_core::WorktreeId("w0".into()));
         // The cursor on the grid's first card, the way a project opens:
         // everything missing is under the fold.
         let first = crate::launcher::rows(&app)[0].agent.id.0.clone();
         aim_at(&mut app, &first);
-        // One column, the `sessions` rule, room for two rows of cards and
-        // the row under them the `↓` marker takes: seven of the nine are
-        // under the fold.
+        // The band's rule, room for two entries and the row under them
+        // the `↓` marker takes: seven of the nine are under the fold.
         let body = Rect::new(
             0,
             0,
             60,
-            HEAD_H + BAND_RULE_H + CARD_H * 2 + GAP_Y + BELOW_MARK_H,
+            HEAD_H + BAND_RULE_H + LIST_ROW_H * 2 + BELOW_MARK_H,
         );
         let lines = drawn_lines(&mut app, body);
         let head = &lines[1];
@@ -4500,9 +3536,9 @@ mod tests {
             .iter()
             .filter(|line| line.contains("session "))
             .count();
-        assert_eq!(drawn, 2, "two cards on screen, seven hidden: {lines:#?}");
+        assert_eq!(drawn, 2, "two entries on screen, seven hidden: {lines:#?}");
 
-        // The EDGE MARKERS: the row under the cards says what is below;
+        // The EDGE MARKERS: the row under the entries says what is below;
         // nothing is scrolled off the top, so the row of air over them
         // says nothing.
         let last = lines.last().unwrap();
@@ -4511,21 +3547,17 @@ mod tests {
         assert!(air.trim().is_empty(), "nothing above: {air:?}");
     }
 
-    /// The screenshot: nine sessions and three terminals, the cursor
-    /// walked down onto the first terminal in a body two rows short of
-    /// the lot. The window scrolls two rows, and the first row of
-    /// sessions — one row too far up to be drawn whole — is drawn to the
-    /// edge, its top border off screen and its name row on the window's
-    /// first, where a card-sized hole used to stand. The row of air over
-    /// the grid says what is above, the row kept under it what is below,
-    /// and the header counts both.
+    /// Nine sessions and three terminals, the cursor walked down onto the
+    /// first terminal in a body too short for the lot: the window scrolls
+    /// the least that shows the cursor's entry, the row of air over the
+    /// grid says what is above, the row kept under it what is below, and
+    /// the header counts both.
     #[test]
-    fn a_card_cut_by_the_top_edge_is_drawn_to_the_edge_not_dropped() {
+    fn the_window_scrolls_the_least_that_shows_the_cursors_entry() {
         use crate::launcher::HEAD_H;
         use orion_core::{TerminalId, TerminalTab, WorktreeId};
         let mut app = a_crowded_tree(9);
         select(&mut app, "api");
-        app.launcher_expanded = Some(WorktreeId("w0".into()));
         for i in 1..=3 {
             app.tree.terminals.push(TerminalTab {
                 id: TerminalId(format!("t{i}")),
@@ -4544,192 +3576,45 @@ mod tests {
                 )
                 .expect("a row for the terminal"),
         );
-        let body = Rect::new(0, 0, 100, 58);
+        // Ten rows of grid: nine in the window, the last for the marker.
+        let body = Rect::new(0, 0, 100, HEAD_H + 10);
         let lines = drawn_lines(&mut app, body);
         assert_eq!(
             app.launcher_scroll, 2,
-            "two rows, the least that shows the cursor's card"
+            "two rows, the least that shows the cursor's entry"
         );
         let head = &lines[1];
-        assert!(head.contains("↑↓ 4 hidden"), "{head:?}");
+        assert!(head.contains("↑↓ 3 hidden"), "{head:?}");
         let air = &lines[usize::from(HEAD_H) - 1];
-        assert!(air.contains("↑ 2 more above"), "{air:?}");
-        let top = &lines[usize::from(HEAD_H)];
-        assert!(
-            top.contains("session "),
-            "the cut card's name row is the window's first: {top:?}"
-        );
-        assert!(!top.contains('╭'), "its top border is off screen: {top:?}");
+        assert!(air.contains("↑ 1 more above"), "{air:?}");
         let last = lines.last().unwrap();
         assert!(last.contains("↓ 2 more below"), "{last:?}");
-        // The cursor's card is whole: its heavy bottom border on the
-        // window's last row, just over the marker.
+        // The cursor's entry is on the window's last row, just over the
+        // marker.
         let bottom = &lines[lines.len() - 2];
-        assert!(bottom.contains('┗'), "{bottom:?}");
-        assert!(lines.iter().any(|l| l.contains("term-1")), "{lines:#?}");
+        assert!(bottom.contains("term-1"), "{lines:#?}");
     }
 
-    /// A grid with room for every card keeps the rule it has today —
+    /// A grid with room for every entry keeps the rule it has today —
     /// the marker is a thing that appears, not a thing that is always
     /// there saying zero.
     #[test]
     fn a_grid_that_fits_says_nothing_about_hiding() {
-        use crate::launcher::{BAND_RULE_H, CARD_H, GAP_Y, HEAD_H};
+        use crate::launcher::{BAND_RULE_H, HEAD_H, LIST_ROW_H};
         let mut app = a_crowded_tree(2);
         select(&mut app, "api");
-        let body = Rect::new(0, 0, 60, HEAD_H + BAND_RULE_H + CARD_H * 2 + GAP_Y);
+        let body = Rect::new(0, 0, 60, HEAD_H + BAND_RULE_H + LIST_ROW_H * 2);
         let lines = drawn_lines(&mut app, body);
         let head = &lines[1];
         assert!(head.contains("2 sessions"), "{head:?}");
         assert!(!head.contains("hidden"), "{head:?}");
     }
 
-    /// A terminal's card is two session cards wide and carries, under its
-    /// name and what runs in it, the last lines its shell printed — the
-    /// tail the daemon answered with — and the frame notes the card for
-    /// the next ask. Once the shell is gone the lines stay and `exited`
-    /// sits at the name row's right: the card says what it was doing
-    /// when it went.
+    /// A terminal's line opens on its mark — `❯` for a shell, `▶` for a
+    /// RUN TERMINAL — and names what runs in it, and a session's prompt
+    /// opens on `›`; once a shell is gone `exited` sits at the right.
     #[test]
-    fn a_terminal_card_shows_what_its_shell_last_printed() {
-        use crate::app::TerminalTail;
-        use orion_core::{TerminalId, TerminalTab, WorktreeId};
-        let mut app = a_tree();
-        select(&mut app, "api");
-        app.tree.terminals.push(TerminalTab {
-            id: TerminalId("t1".into()),
-            worktree_id: WorktreeId("w0".into()),
-            name: "shell-1".into(),
-            sort_order: 0,
-            alive: true,
-            run_command: None,
-        });
-        app.terminal_tails.insert(
-            TerminalId("t1".into()),
-            TerminalTail {
-                lines: vec!["$ npm test".into(), "ok 12 tests".into()],
-                end_seq: 9,
-            },
-        );
-        // The band open: the terminal's card is under the session's
-        // rather than off the end of its one-column strip.
-        app.launcher_expanded = Some(WorktreeId("w0".into()));
-        let body = Rect::new(0, 0, 100, 30);
-        let lines = drawn_lines(&mut app, body);
-        let row = lines
-            .iter()
-            .position(|l| l.contains("shell-1"))
-            .expect("the terminal's card");
-        assert!(
-            lines[row + 1].contains("shell"),
-            "what runs in it: {:?}",
-            lines[row + 1]
-        );
-        assert!(
-            lines[row + 2].contains("$ npm test"),
-            "{:?}",
-            lines[row + 2]
-        );
-        assert!(
-            lines[row + 3].contains("ok 12 tests"),
-            "{:?}",
-            lines[row + 3]
-        );
-        assert!(!lines[row].contains("exited"), "alive: {:?}", lines[row]);
-        let widths: Vec<u16> = app
-            .hits
-            .iter()
-            .filter(|(_, h)| matches!(h, HitTarget::LauncherCard(_)))
-            .map(|(r, _)| r.width)
-            .collect();
-        assert_eq!(widths.len(), 2, "the session and the terminal: {widths:?}");
-        assert_eq!(
-            widths[1],
-            widths[0] * 2 + crate::launcher::GAP_X,
-            "the terminal's card spans two columns"
-        );
-        assert_eq!(
-            app.tail_cards,
-            vec![TerminalId("t1".into())],
-            "the frame notes the terminal for the grid's next ask"
-        );
-
-        app.tree.terminals[0].alive = false;
-        let lines = drawn_lines(&mut app, body);
-        let row = lines
-            .iter()
-            .position(|l| l.contains("shell-1"))
-            .expect("the terminal's card");
-        assert!(lines[row].contains("exited │"), "{:?}", lines[row]);
-        assert!(
-            lines[row + 2].contains("$ npm test"),
-            "the lines stay: {:?}",
-            lines[row + 2]
-        );
-    }
-
-    /// A terminal card's tail is a small terminal: the shell's colours
-    /// and weights per run, its defaults in the card's text colour over
-    /// the card's own background (the focus tint shows through), a row
-    /// cut at the card's edge with no `…`, and the cursor a reversed
-    /// cell — a block past the text, the character's own colours
-    /// flipped over one — only while the shell lives.
-    #[test]
-    fn a_terminal_cards_tail_paints_like_a_small_terminal() {
-        use crate::terminal_tail::parse_tail;
-        let th = App::new().theme;
-        let r = Rect::new(0, 0, 12, 1);
-        let paint = |data: &[u8], alive: bool| {
-            let mut buf = Buffer::empty(r);
-            buf.set_style(r, Style::default().bg(th.focus_tint));
-            let rows = parse_tail(data, 80, 24, 4);
-            draw_tail_row(&mut buf, r, rows.last().unwrap(), alive, th);
-            buf
-        };
-        let text = |buf: &Buffer| -> String {
-            (0..r.width)
-                .map(|x| buf[(x, 0)].symbol().to_string())
-                .collect()
-        };
-
-        let buf = paint(b"\x1b[1;32mok\x1b[0m done \x1b[33mwith a long tail", true);
-        assert_eq!(text(&buf), "ok done with", "cut at the edge, no ellipsis");
-        assert_eq!(buf[(0, 0)].fg, Color::Indexed(2));
-        assert!(buf[(0, 0)].modifier.contains(Modifier::BOLD));
-        assert_eq!(buf[(3, 0)].fg, th.text, "the default is the card's text");
-        assert_eq!(buf[(3, 0)].bg, th.focus_tint, "the tint shows through");
-        assert_eq!(buf[(8, 0)].fg, Color::Indexed(3));
-        assert!(
-            !buf[(11, 0)].modifier.contains(Modifier::REVERSED),
-            "the cursor is past the edge"
-        );
-
-        let buf = paint(b"\x1b[31m$\x1b[0m ", true);
-        assert_eq!(buf[(2, 0)].fg, th.text, "past the text: a block");
-        assert!(buf[(2, 0)].modifier.contains(Modifier::REVERSED));
-        assert!(!buf[(0, 0)].modifier.contains(Modifier::REVERSED));
-
-        let buf = paint(b"\x1b[31mabc\x1b[2D", true);
-        assert_eq!(
-            buf[(1, 0)].fg,
-            Color::Indexed(1),
-            "over a character: its own colour"
-        );
-        assert!(buf[(1, 0)].modifier.contains(Modifier::REVERSED));
-
-        let buf = paint(b"$ ", false);
-        assert!(
-            !buf[(2, 0)].modifier.contains(Modifier::REVERSED),
-            "an exited shell has no cursor"
-        );
-    }
-
-    /// HIDE CARD MARKS: off, a shell's card opens on `❯`, a RUN
-    /// TERMINAL's on `▶` and a session card's prompt on `›`; on, none of
-    /// them is drawn and each name or prompt starts in the column its mark
-    /// held.
-    #[test]
-    fn hide_card_marks_drops_the_mark_before_the_name_and_the_prompt() {
+    fn a_terminal_line_says_what_runs_in_it_and_when_it_has_exited() {
         use orion_core::{TerminalId, TerminalTab, WorktreeId};
         let mut app = a_tree();
         select(&mut app, "api");
@@ -4750,81 +3635,60 @@ mod tests {
                 run_command: run.map(Into::into),
             });
         }
-        app.launcher_expanded = Some(WorktreeId("w0".into()));
-        let body = Rect::new(0, 0, 100, 40);
+        let body = Rect::new(0, 0, 100, 30);
         let row_of = |lines: &[String], name: &str| -> String {
             lines
                 .iter()
                 .find(|l| l.contains(name))
-                .unwrap_or_else(|| panic!("{name}'s card: {lines:?}"))
+                .unwrap_or_else(|| panic!("{name}'s line: {lines:?}"))
                 .clone()
         };
-
-        let lines = drawn_lines(&mut app, body);
-        assert!(row_of(&lines, "shell-1").contains("❯ shell-1"));
-        assert!(row_of(&lines, "dev-srv").contains("▶ dev-srv"));
-        let shown_col = row_of(&lines, "shell-1").find("❯").unwrap();
-        let prompt = row_of(&lines, "fix the login redirect");
-        assert!(prompt.contains("› fix the login redirect"), "{prompt:?}");
-        let mark_col = prompt.find('›').unwrap();
-
-        app.hide_card_marks = true;
         let lines = drawn_lines(&mut app, body);
         let shell = row_of(&lines, "shell-1");
+        assert!(shell.contains("❯ shell-1"), "{shell:?}");
+        assert!(!shell.contains("exited"), "alive: {shell:?}");
         let run = row_of(&lines, "dev-srv");
-        assert!(
-            !shell.contains('❯') && !run.contains('▶'),
-            "{shell:?} {run:?}"
-        );
-        assert_eq!(shell.find("shell-1"), Some(shown_col), "{shell:?}");
+        assert!(run.contains("▶ dev-srv"), "{run:?}");
+        assert!(run.contains("npm run dev"), "{run:?}");
         let prompt = row_of(&lines, "fix the login redirect");
-        assert!(!prompt.contains('›'), "{prompt:?}");
-        assert_eq!(
-            prompt.find("fix the login redirect"),
-            Some(mark_col),
-            "{prompt:?}"
-        );
+        assert!(prompt.contains("› fix the login redirect"), "{prompt:?}");
+
+        app.tree.terminals[0].alive = false;
+        let lines = drawn_lines(&mut app, body);
+        assert!(row_of(&lines, "shell-1").contains("exited"), "{lines:#?}");
     }
 
-    /// A session card's second row says what the session runs on — the
-    /// harness, the model and the reasoning effort it was launched with,
-    /// `claude opus high` — and a session on the CLI's own default effort
-    /// ends at the model.
+    /// A session's line says what it runs on — the model and the
+    /// reasoning effort it was launched with, `opus high` — and a session
+    /// on the CLI's own default effort ends at the model.
     #[test]
-    fn a_session_card_names_its_effort_beside_the_model() {
+    fn a_session_line_names_its_effort_beside_the_model() {
         let mut app = a_tree();
         select(&mut app, "api");
         app.tree.agents[0].model = Some("opus".into());
         app.tree.agents[0].effort = Some("high".into());
         let body = Rect::new(0, 0, 100, 30);
-        let lines = drawn_lines(&mut app, body);
-        let row = lines
-            .iter()
-            .position(|l| l.contains("s0"))
-            .expect("the session's card");
-        assert!(
-            lines[row + 1].contains("claude opus high"),
-            "what it runs on: {:?}",
-            lines[row + 1]
-        );
+        let line = |app: &mut App| {
+            drawn_lines(app, body)
+                .into_iter()
+                .find(|l| l.contains("s0"))
+                .expect("the session's line")
+        };
+        let runs = line(&mut app);
+        assert!(runs.contains("opus high"), "what it runs on: {runs:?}");
 
         app.tree.agents[0].effort = None;
-        let lines = drawn_lines(&mut app, body);
-        let row = lines
-            .iter()
-            .position(|l| l.contains("s0"))
-            .expect("the session's card");
+        let runs = line(&mut app);
         assert!(
-            lines[row + 1].contains("claude opus") && !lines[row + 1].contains("high"),
-            "the CLI's default effort is unnamed: {:?}",
-            lines[row + 1]
+            runs.contains("opus") && !runs.contains("high"),
+            "the CLI's default effort is unnamed: {runs:?}"
         );
     }
 
-    /// Every card carries its session's last prompt under the name and
-    /// harness — there is no setting to leave it off any more.
+    /// Every session's line carries its last prompt after what it runs on
+    /// — there is no setting to leave it off any more.
     #[test]
-    fn every_card_shows_its_last_prompt() {
+    fn every_line_shows_its_last_prompt() {
         let mut app = a_tree();
         select(&mut app, "api");
         app.tree.agents[0].recent_prompts = vec![orion_core::PromptEntry {
@@ -4836,18 +3700,17 @@ mod tests {
 
         let lines = drawn_lines(&mut app, body);
         assert!(shows(&lines), "{lines:#?}");
-        let row = lines
+        let line = lines
             .iter()
-            .position(|l| l.contains("s0"))
-            .expect("the session's card");
-        assert!(lines[row + 1].contains("claude"), "{:?}", lines[row + 1]);
+            .find(|l| l.contains("s0"))
+            .expect("the session's line");
+        assert!(line.contains("› fix the login redirect"), "{line:?}");
     }
 
-    /// A session stopped on a usage limit says so wherever the grid draws
-    /// it: `limit reached` where its age goes, in the red its frame is,
-    /// Claude's own words where its prompt goes, and on a card the key
-    /// that carries it onto the other account under them. A limit the
-    /// row still records once it has left red says nothing.
+    /// A session stopped on a usage limit says so on its line: `limit
+    /// reached` where its age goes, in the needs-you red, and Claude's own
+    /// words where its prompt goes. A limit the row still records once it
+    /// has left red says nothing.
     #[test]
     fn a_session_at_a_usage_limit_names_it_and_the_way_on() {
         let dir = tempfile::tempdir().unwrap();
@@ -4877,21 +3740,17 @@ mod tests {
             let row = lines
                 .iter()
                 .position(|l| l.contains("s0"))
-                .expect("the session's card");
+                .expect("the session's line");
             assert!(lines[row].contains("limit reached"), "{:?}", lines[row]);
-            let card = &lines[row..row + crate::launcher::CARD_TEXT_H as usize];
             assert!(
-                card.iter()
-                    .any(|l| l.contains("session limit · resets 3:45pm")),
-                "{card:#?}"
+                lines[row].contains("session limit · resets 3:45pm"),
+                "{:?}",
+                lines[row]
             );
             assert!(
-                card.iter().any(|l| l.contains("⇧C continue on Claude B")),
-                "{card:#?}"
-            );
-            assert!(
-                !card.iter().any(|l| l.contains("fix the login redirect")),
-                "Claude's words stand where the prompt was: {card:#?}"
+                !lines[row].contains("fix the login redirect"),
+                "Claude's words stand where the prompt was: {:?}",
+                lines[row]
             );
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
@@ -4902,21 +3761,9 @@ mod tests {
             assert_eq!(
                 buf.cell((x, row as u16)).unwrap().fg,
                 th.err,
-                "the label is the frame's red"
+                "the label is the needs-you red"
             );
 
-            app.launcher_list = true;
-            let lines = drawn_lines(&mut app, body);
-            let line = lines
-                .iter()
-                .find(|l| l.contains("s0"))
-                .expect("the session's line");
-            assert!(
-                line.contains("limit reached") && line.contains("session limit"),
-                "{line:?}"
-            );
-
-            app.launcher_list = false;
             app.tree.agents[0].status = orion_core::AgentStatus::Running;
             let lines = drawn_lines(&mut app, body);
             assert!(!lines.iter().any(|l| l.contains("limit reached")));
@@ -4924,46 +3771,10 @@ mod tests {
         });
     }
 
-    /// GitHub issue numbers on cards are retired: even with the stored
-    /// flag on, an ISSUE SESSION does not paint `#15` or register a click.
-    #[test]
-    fn card_issue_number_is_not_drawn() {
-        let mut app = a_tree();
-        select(&mut app, "api");
-        app.tree.agents[0].issue_url = Some("https://github.com/o/r/issues/15".into());
-        app.card_issue_number = true;
-        let body = Rect::new(0, 0, 100, 30);
-        let lines = drawn_lines(&mut app, body);
-        let row = lines
-            .iter()
-            .position(|l| l.contains("s0"))
-            .expect("the session's card drawn");
-        assert!(!lines[row + 1].contains("#15"), "{:?}", lines[row + 1]);
-        assert!(!app
-            .hits
-            .iter()
-            .any(|(_, h)| matches!(h, HitTarget::LauncherCardIssue(_))));
-    }
-
-    /// The runs-on line is the harness, then the model, then the effort,
-    /// each only while the row carries it; a cloud row names the sandbox
-    /// in place of harness and model and keeps the effort, as the pane's
-    /// breadcrumb does.
-    #[test]
-    fn the_runs_on_line_is_harness_model_effort() {
-        let mut a = a_tree().tree.agents[0].clone();
-        assert_eq!(runs_on_line(&a, &mut None), "claude");
-        a.effort = Some("high".into());
-        assert_eq!(runs_on_line(&a, &mut None), "claude high");
-        a.model = Some("opus".into());
-        assert_eq!(runs_on_line(&a, &mut None), "claude opus high");
-        a.cloud_session_id = Some("c1".into());
-        assert_eq!(runs_on_line(&a, &mut None), "cloud high");
-    }
-
     /// A LIST row says the model and effort a session runs on and never
-    /// the CLAUDE ACCOUNT it runs as — the card keeps the account — and
-    /// with no model named says the harness, an account's as `claude`.
+    /// the CLAUDE ACCOUNT it runs as — the pane's breadcrumb keeps the
+    /// account — and with no model named says the harness, an account's
+    /// as `claude`.
     #[test]
     fn a_list_row_names_the_model_and_effort_not_the_account() {
         let home = tempfile::tempdir().unwrap();
@@ -5000,20 +3811,16 @@ mod tests {
                 a.custom_harness = Some("claude-2".into());
                 a.model = Some("opus".into());
                 a.effort = Some("high".into());
-                assert!(runs_on_line(&a, &mut None).contains("b@b.co"));
+                assert!(harness_line(&a, &mut None).contains("b@b.co"));
                 assert_eq!(list_runs_line(&a, &mut None), "opus high");
                 a.model = None;
                 assert_eq!(list_runs_line(&a, &mut None), "claude high");
-                a.cloud_session_id = Some("c1".into());
-                a.model = Some("opus".into());
-                assert_eq!(list_runs_line(&a, &mut None), "cloud high");
             })
         });
     }
 
-    /// With two Claude accounts every LIST row and card wears its
-    /// account's two-letter tag right after the status dot; with one, no
-    /// row does.
+    /// With two Claude accounts every LIST row wears its account's
+    /// two-letter tag right after the status dot; with one, no row does.
     #[test]
     fn rows_wear_their_accounts_tag_with_two_accounts() {
         let home = tempfile::tempdir().unwrap();
@@ -5050,15 +3857,12 @@ mod tests {
                 app.tree.agents[0].kind = orion_core::AgentKind::Custom;
                 app.tree.agents[0].custom_harness = Some("claude-2".into());
                 let body = Rect::new(0, 0, 100, 30);
-                for list in [true, false] {
-                    app.launcher_list = list;
-                    let lines = drawn_lines(&mut app, body);
-                    let line = lines
-                        .iter()
-                        .find(|l| l.contains("s0"))
-                        .expect("the session's line");
-                    assert!(line.contains("rk s0"), "list {list}: {line:?}");
-                }
+                let lines = drawn_lines(&mut app, body);
+                let line = lines
+                    .iter()
+                    .find(|l| l.contains("s0"))
+                    .expect("the session's line");
+                assert!(line.contains("rk s0"), "{line:?}");
             })
         });
     }
@@ -5108,7 +3912,6 @@ mod tests {
                 ..one.clone()
             })
             .collect();
-        app.launcher_expanded = None;
         app
     }
 
@@ -5118,7 +3921,6 @@ mod tests {
             app.worktree_row_of(&orion_core::WorktreeId(id.into()))
                 .expect("a row for the checkout"),
         );
-        app.launcher_expanded = None;
     }
 
     /// The air under the last whole band says how many more are down
@@ -5126,23 +3928,24 @@ mod tests {
     /// the walk down has brought the last one on screen the cue is the
     /// header's row of air pointing back up at the ones scrolled off.
     #[test]
-    fn the_air_under_the_cards_says_how_many_more_are_below() {
-        use crate::launcher::{BAND_H, GAP_Y, HEAD_H};
+    fn the_air_under_the_bands_says_how_many_more_are_below() {
+        use crate::launcher::{BAND_RULE_H, GAP_Y, HEAD_H, LIST_ROW_H};
         let mut app = a_tree_with_worktrees(9);
         select(&mut app, "api");
         aim_at_band(&mut app, "wt0");
-        // Room for two bands and four rows of air under them.
-        let bands_end = HEAD_H + BAND_H * 2 + GAP_Y;
-        let body = Rect::new(0, 0, 60, bands_end + 4);
+        // Room for two bands of a line each, the gap after them, and the
+        // marker's row.
+        let band_h = BAND_RULE_H + LIST_ROW_H;
+        let bands_end = HEAD_H + band_h * 2 + GAP_Y;
+        let body = Rect::new(0, 0, 60, bands_end + 2);
         let lines = drawn_lines(&mut app, body);
         let cue: Vec<usize> = (0..lines.len())
-            .filter(|&y| lines[y].contains("more worktree"))
+            .filter(|&y| lines[y].contains("more below"))
             .collect();
         assert_eq!(cue.len(), 1, "{lines:#?}");
-        // Seven bands are past the two whole ones — the third's rule fits
-        // in the air, its cards cut, and a band drawn cut still counts.
+        // Seven bands, an entry each, are past the two on screen.
         assert!(
-            lines[cue[0]].contains("↓ 7 more worktrees below"),
+            lines[cue[0]].contains("↓ 7 more below"),
             "{:?}",
             lines[cue[0]]
         );
@@ -5154,13 +3957,11 @@ mod tests {
         aim_at_band(&mut app, "wt8");
         let lines = drawn_lines(&mut app, body);
         assert!(
-            lines
-                .iter()
-                .all(|line| !line.contains("more worktrees below")),
+            lines.iter().all(|line| !line.contains("more below")),
             "{lines:#?}"
         );
         assert!(
-            lines[usize::from(HEAD_H) - 1].contains("↑ 7 more worktrees above"),
+            lines[usize::from(HEAD_H) - 1].contains("↑ 7 more above"),
             "{lines:#?}"
         );
     }
@@ -5169,14 +3970,19 @@ mod tests {
     /// much of it there is.
     #[test]
     fn a_grid_that_fits_leaves_its_air_empty() {
-        use crate::launcher::{BAND_H, HEAD_H};
+        use crate::launcher::{BAND_RULE_H, GAP_Y, HEAD_H, LIST_ROW_H};
         let mut app = a_tree_with_worktrees(2);
         select(&mut app, "api");
         aim_at_band(&mut app, "wt0");
-        let body = Rect::new(0, 0, 60, HEAD_H + BAND_H * 2 + 6);
+        let body = Rect::new(
+            0,
+            0,
+            60,
+            HEAD_H + (BAND_RULE_H + LIST_ROW_H) * 2 + GAP_Y + 6,
+        );
         let lines = drawn_lines(&mut app, body);
         assert!(
-            lines.iter().all(|line| !line.contains("more worktree")),
+            lines.iter().all(|line| !line.contains("more below")),
             "{lines:#?}"
         );
     }
@@ -5793,7 +4599,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -5822,7 +4627,6 @@ mod tests {
                 index: 0,
                 on: false,
                 lit: false,
-                more: 0,
                 cols: RuleColumns::default(),
             },
         )
@@ -6078,7 +4882,6 @@ mod tests {
                 index: 0,
                 on: false,
                 lit: false,
-                more: 0,
                 cols: RuleColumns::of([&facts]),
             },
         );
@@ -6139,7 +4942,6 @@ mod tests {
                 index: 0,
                 on: false,
                 lit: false,
-                more: 0,
                 cols,
             };
             draw_band_rule(&mut buf, &app, area, band, facts, rule);
@@ -6174,12 +4976,10 @@ mod tests {
     }
 
     /// The band the keys are on says so: its rule opens on the CURSOR
-    /// MARK `❯` in the accent where every other band's opens on `──`, and
-    /// counts what hangs past its edge. It spells no key: what Tab does
-    /// to the band under the cursor is the FOOTER's to say
-    /// (`ui::footer`), not a word on one rule of many. With the cursor on
-    /// the band but the keys elsewhere (up on the PROJECT TABS, down in
-    /// the pane) the rule is the plain gray one again.
+    /// MARK `❯` in the accent where every other band's opens on `──`. It
+    /// spells no key. With the cursor on the band but the keys elsewhere
+    /// (up on the PROJECT TABS, down in the pane) the rule is the plain
+    /// gray one again.
     #[test]
     fn the_band_the_keys_are_on_marks_itself_and_spells_no_key() {
         let app = App::new();
@@ -6188,18 +4988,16 @@ mod tests {
         let mut band = a_band(true, "main");
         let card = band.cards[0].clone();
         band.cards.extend(std::iter::repeat_n(card, 7));
-        let lit = |more| BandRule {
+        let lit = BandRule {
             index: 0,
             on: true,
             lit: true,
-            more,
             cols: RuleColumns::default(),
         };
 
-        let buf = rule_row_as(&app, &band, 96, lit(6));
+        let buf = rule_row_as(&app, &band, 96, lit);
         let text = row_string(&buf, 0);
         assert!(text.starts_with("❯  ⌂ main"), "{text:?}");
-        assert!(text.ends_with(" ▸ 6 more ──"), "{text:?}");
         assert!(!text.contains(&key) && !text.contains("expand"), "{text:?}");
         // The mark in the accent, the checkout as on any band.
         let accent = painted(&buf, 0, th.accent);
@@ -6207,7 +5005,7 @@ mod tests {
         assert_eq!(painted(&buf, 0, th.text), "main");
 
         // The cursor's band with the keys elsewhere: bold branch, and
-        // that is all — no mark, the count as on any band.
+        // that is all — no mark.
         let buf = rule_row_as(
             &app,
             &band,
@@ -6216,20 +5014,17 @@ mod tests {
                 index: 0,
                 on: true,
                 lit: false,
-                more: 6,
                 cols: RuleColumns::default(),
             },
         );
         let text = row_string(&buf, 0);
         assert!(text.starts_with("── ⌂ main"), "keys elsewhere: {text:?}");
-        assert!(text.ends_with(" ▸ 6 more ──"), "{text:?}");
         assert_eq!(painted(&buf, 0, th.accent), "", "{text:?}");
     }
 
-    /// A narrow rule keeps the cursor mark and the count of what hangs
-    /// past the edge before the branch gives way.
+    /// A narrow rule keeps the cursor mark before the branch gives way.
     #[test]
-    fn a_narrow_rule_keeps_the_cursor_mark_and_the_count() {
+    fn a_narrow_rule_keeps_the_cursor_mark() {
         let app = App::new();
         let mut band = a_band(false, "feat-x");
         let card = band.cards[0].clone();
@@ -6238,22 +5033,20 @@ mod tests {
             index: 0,
             on: true,
             lit: true,
-            more: 2,
             cols: RuleColumns::default(),
         };
 
         let buf = rule_row_as(&app, &band, 40, rule);
         let text = row_string(&buf, 0);
         assert!(text.starts_with("❯  ⎇ feat-x"), "{text:?}");
-        assert!(text.ends_with(" ▸ 2 more ──"), "{text:?}");
     }
 
-    /// A card's frame carries its status — red asking, blue done unread,
-    /// the faint running yellow — and nothing else does: a read finish, a
-    /// cold or archived card keeps the edge, and the focused card's accent
-    /// outranks every status, so focus and running never look alike.
+    /// The cursor's wash takes its status's color while it wants you —
+    /// red asking, the done color unread, red for a crash, cold or not —
+    /// and none otherwise: a working, read, fresh, cold or archived
+    /// session washes in the accent.
     #[test]
-    fn a_cards_frame_answers_to_its_status_under_the_focus() {
+    fn the_cursors_wash_takes_the_status_that_wants_you() {
         use orion_core::{Agent, AgentId, AgentKind, AgentStatus, WorktreeId};
         let base = Agent {
             id: AgentId("a1".into()),
@@ -6268,7 +5061,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
@@ -6277,164 +5069,50 @@ mod tests {
             usage_limit: None,
         };
         let th = Theme::by_name("amber");
-        let mut app = App::new();
-        app.theme = th;
-        let frame = |agent: Agent, selected: bool, focused: bool| {
-            let row = LauncherRow {
-                agent,
-                project: "orion".into(),
-                branch: "feat-x".into(),
-                pr: None,
-            };
-            let area = Rect::new(0, 0, 40, crate::launcher::CARD_H);
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
-                    .unwrap();
-            terminal
-                .draw(|f| draw_one(f, &app, area, &row, selected, focused, th))
-                .unwrap();
-            let buf = terminal.backend().buffer().clone();
-            let corner = buf.cell((0, 0)).unwrap().fg;
-            let side = buf.cell((0, 1)).unwrap().fg;
-            assert_eq!(corner, side, "one color all the way round");
-            corner
-        };
+        let wash = |a: Agent| card_edge(&a, a.archived || crate::app::drawn_cold(&a), th);
         let with = |status: AgentStatus, unseen: bool| Agent {
             status,
             unseen,
             ..base.clone()
         };
-
+        assert_eq!(wash(with(AgentStatus::NeedsFeedback, false)), Some(th.err));
+        assert_eq!(wash(with(AgentStatus::Finished, true)), Some(th.done));
         assert_eq!(
-            frame(with(AgentStatus::NeedsFeedback, false), false, true),
-            th.err
+            wash(with(AgentStatus::Running, false)),
+            None,
+            "working asks nothing of you: the spinner says it"
         );
         assert_eq!(
-            frame(with(AgentStatus::Finished, true), false, true),
-            th.done
-        );
-        assert_eq!(
-            frame(with(AgentStatus::Running, false), false, true),
-            th.edge,
-            "working asks nothing of you: the spinner says it, not the frame"
-        );
-        assert_eq!(
-            frame(with(AgentStatus::Terminated, false), false, true),
-            th.err,
+            wash(with(AgentStatus::Terminated, false)),
+            Some(th.err),
             "a crash wants you"
         );
-        assert_eq!(
-            frame(with(AgentStatus::Finished, false), false, true),
-            th.edge
-        );
-        assert_eq!(frame(with(AgentStatus::Fresh, false), false, true), th.edge);
+        assert_eq!(wash(with(AgentStatus::Finished, false)), None);
+        assert_eq!(wash(with(AgentStatus::Fresh, false)), None);
         let cold = Agent {
             alive: false,
             ..with(AgentStatus::Running, false)
         };
-        assert_eq!(frame(cold, false, true), th.edge);
-        // A crash's PTY is gone too, but the crash is still true: it keeps
-        // the frame that says it wants you.
+        assert_eq!(wash(cold), None);
+        // A crash's PTY is gone too, but the crash is still true.
         let crashed = Agent {
             alive: false,
             ..with(AgentStatus::Terminated, false)
         };
-        assert_eq!(
-            frame(crashed, false, true),
-            th.err,
-            "a cold crash still wants you"
-        );
+        assert_eq!(wash(crashed), Some(th.err), "a cold crash still wants you");
         let archived = Agent {
             archived: true,
             ..with(AgentStatus::NeedsFeedback, false)
         };
-        assert_eq!(frame(archived, false, true), th.edge);
-
-        // The cursor wins over every status, and keeps winning with the
-        // keys off the grid: the outline still says which card the pane
-        // reads while the wash has moved to the pane.
-        assert_eq!(
-            frame(with(AgentStatus::Running, false), true, true),
-            th.accent
-        );
-        assert_eq!(
-            frame(with(AgentStatus::NeedsFeedback, false), true, true),
-            th.accent
-        );
-        assert_eq!(
-            frame(with(AgentStatus::Running, false), true, false),
-            th.accent
-        );
-        assert_eq!(
-            frame(with(AgentStatus::Finished, false), true, false),
-            th.accent
-        );
-        assert_ne!(th.warn, th.accent);
+        assert_eq!(wash(archived), None);
     }
 
-    /// The cursor's card is raised out of the grid, frame and all: a heavy
-    /// accent border no status frame takes, over the selection fill —
-    /// `sel_bg` while the grid has the keys, `sel_bg_dim` while they are
-    /// elsewhere. Every other card keeps its round, thin frame on the
-    /// terminal's background.
+    /// The cursor's entry is washed, very faintly, in its status color —
+    /// breathing while it wants you, still in the accent once nothing is
+    /// going on — and keeps the wash while the pane has the keys. Every
+    /// other entry keeps the terminal's background.
     #[test]
-    fn the_cursor_s_card_is_raised_with_a_heavy_frame_and_a_fill() {
-        use orion_core::{Agent, AgentId, AgentKind, AgentStatus, WorktreeId};
-        let row = LauncherRow {
-            agent: Agent {
-                id: AgentId("a1".into()),
-                worktree_id: WorktreeId("w1".into()),
-                name: "fix login".into(),
-                status: AgentStatus::Finished,
-                archived: false,
-                archived_at: 0,
-                unseen: false,
-                kind: AgentKind::Claude,
-                custom_harness: None,
-                model: None,
-                effort: None,
-                session_id: None,
-                cloud_session_id: None,
-                sort_order: 0,
-                status_changed_at: 0,
-                alive: true,
-                issue_url: None,
-                recent_prompts: Vec::new(),
-                usage_limit: None,
-            },
-            project: "orion".into(),
-            branch: "feat-x".into(),
-            pr: None,
-        };
-        let th = Theme::by_name("coral");
-        let mut app = App::new();
-        app.theme = th;
-        let fill = |app: &App, selected: bool, focused: bool| {
-            let area = Rect::new(0, 0, 40, crate::launcher::CARD_H);
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
-                    .unwrap();
-            terminal
-                .draw(|f| draw_one(f, app, area, &row, selected, focused, th))
-                .unwrap();
-            let buf = terminal.backend().buffer().clone();
-            let corner = buf.cell((0, 0)).unwrap();
-            let inside = buf.cell((20, area.height - 2)).unwrap().bg;
-            assert_eq!(corner.bg, inside, "one fill, frame and all");
-            (corner.symbol().to_string(), inside)
-        };
-        assert_eq!(fill(&app, true, true), ("┏".into(), th.sel_bg));
-        assert_eq!(fill(&app, true, false), ("┏".into(), th.sel_bg_dim));
-        assert_eq!(fill(&app, false, true), ("╭".into(), Color::Reset));
-        assert_eq!(fill(&app, false, false), ("╭".into(), Color::Reset));
-    }
-
-    /// HIGHLIGHT CURRENT CARD: the cursor's card is washed, very faintly,
-    /// in its status color — breathing while it runs, still in the accent
-    /// once nothing is going on — and keeps the wash while the pane has
-    /// the keys.
-    #[test]
-    fn highlight_current_card_washes_the_card_faintly_in_its_status_color() {
+    fn the_cursors_entry_is_washed_faintly_in_its_status_color() {
         use orion_core::{Agent, AgentId, AgentKind, AgentStatus, WorktreeId};
         let row = LauncherRow {
             agent: Agent {
@@ -6450,7 +5128,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: true,
@@ -6465,28 +5142,21 @@ mod tests {
         let th = Theme::by_name("coral");
         let mut app = App::new();
         app.theme = th;
-        let draw = |app: &App, focused: bool| {
-            let area = Rect::new(0, 0, 40, crate::launcher::CARD_H);
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
-                    .unwrap();
-            terminal
-                .draw(|f| draw_one(f, app, area, &row, true, focused, th))
-                .unwrap();
-            terminal.backend().buffer().clone()
+        let area = Rect::new(0, 0, 60, 1);
+        let bg = |app: &App, row: &LauncherRow, selected: bool| {
+            draw_one(app, area, row, selected).cell((40, 0)).unwrap().bg
         };
 
-        // Off: the plain gray fill, dimmed off the grid.
-        app.focus = Focus::Terminal;
-        let buf = draw(&app, false);
-        assert_eq!(buf.cell((20, 1)).unwrap().bg, th.sel_bg_dim);
+        assert_eq!(bg(&app, &row, false), Color::Reset, "only the cursor's");
 
-        // On: a faint wash of the needs-you crimson, frame and all, while
-        // the pane has the keys.
-        app.highlight_current_card = true;
-        let buf = draw(&app, false);
-        let fill = buf.cell((20, 2)).unwrap().bg;
-        assert_eq!(buf.cell((0, 0)).unwrap().bg, fill);
+        // A faint wash of the needs-you crimson, the whole line, while the
+        // pane has the keys.
+        app.focus = Focus::Terminal;
+        let fill = bg(&app, &row, true);
+        assert_eq!(
+            draw_one(&app, area, &row, true).cell((0, 0)).unwrap().bg,
+            fill
+        );
         let Color::Rgb(r, g, b) = fill else {
             panic!("{fill:?}")
         };
@@ -6504,38 +5174,32 @@ mod tests {
             Color::Rgb(128, 68, 48)
         );
 
-        // A quiet card holds a still wash of the accent; the animations
+        // A quiet entry holds a still wash of the accent; the animations
         // off hold a live one still at its peak.
         let mut idle = row.clone();
         idle.agent.status = AgentStatus::Fresh;
-        let idle_card = |app: &App| {
-            let area = Rect::new(0, 0, 40, crate::launcher::CARD_H);
-            let mut buf = Buffer::empty(area);
-            draw_card(&mut buf, app, area, &idle, true, false, th, &mut None);
-            buf.cell((20, 2)).unwrap().bg
-        };
-        assert_eq!(idle_card(&app), dim_toward_black(th.accent, TINT_STILL));
-        app.animations = false;
         assert_eq!(
-            draw(&app, false).cell((20, 2)).unwrap().bg,
-            dim_toward_black(th.err, TINT_PEAK)
+            bg(&app, &idle, true),
+            dim_toward_black(th.accent, TINT_STILL)
         );
+        app.animations = false;
+        assert_eq!(bg(&app, &row, true), dim_toward_black(th.err, TINT_PEAK));
 
         // The PROJECT TABS holding the keys fade it further.
         app.launcher_tab_cursor = Some(orion_core::ProjectId("p1".into()));
         assert_eq!(
-            draw(&app, false).cell((20, 2)).unwrap().bg,
+            bg(&app, &row, true),
             dim_toward_black(th.err, TINT_PEAK * 0.6)
         );
     }
 
-    /// An ARCHIVED card is the live card put away rather than the live card
-    /// with a word added: its frame squares off, the round STATUS DOT gives
-    /// way to the square ARCHIVED MARK, the name drops to muted, the SCOPE
-    /// COLOR goes with the rest of the color, and the badge counts from when
-    /// it was filed rather than from its last turn.
+    /// An ARCHIVED session's line is the live one put away rather than the
+    /// live one with a word added: the round STATUS DOT gives way to the
+    /// square ARCHIVED MARK, the name drops to muted, the color goes with
+    /// the rest of it, and the badge counts from when it was filed rather
+    /// than from its last turn.
     #[test]
-    fn an_archived_card_is_the_live_card_put_away() {
+    fn an_archived_line_is_the_live_line_put_away() {
         use orion_core::{Agent, AgentId, AgentKind, AgentStatus, WorktreeId};
 
         fn card(archived: bool) -> LauncherRow {
@@ -6555,7 +5219,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: crate::app::now_ms() - 60_000,
                     alive: true,
@@ -6571,18 +5234,9 @@ mod tests {
 
         let th = Theme::default();
         let app = App::new();
-        let area = Rect::new(0, 0, 44, crate::launcher::CARD_H);
-        let drawn = |row: &LauncherRow| {
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(area.width, area.height))
-                    .unwrap();
-            terminal
-                .draw(|f| draw_one(f, &app, area, row, false, true, th))
-                .unwrap();
-            terminal.backend().buffer().clone()
-        };
-        // One row of the card as text, the frame and its air trimmed off
-        // both ends.
+        let area = Rect::new(0, 0, 44, 1);
+        let drawn = |row: &LauncherRow| draw_one(&app, area, row, false);
+        // The line as text, its air trimmed off both ends.
         let line = |buf: &ratatui::buffer::Buffer, y: u16| -> String {
             let row: String = (0..area.width)
                 .filter_map(|x| buf.cell((x, y)))
@@ -6606,43 +5260,30 @@ mod tests {
         let live = drawn(&card(false));
         let gone = drawn(&card(true));
 
-        // The frame: round corners live, square once filed \u{2014} the one part of
-        // this a terminal with no color at all still says.
+        // The mark stands where the dot stood — the one part of this a
+        // terminal with no color at all still says — the name behind it
+        // starting in the same column on both.
         assert!(
-            line(&live, 0).starts_with('\u{256d}'),
+            line(&live, 0).starts_with("\u{25cf} fix login"),
             "{:?}",
             line(&live, 0)
         );
         assert!(
-            line(&gone, 0).starts_with('\u{250c}'),
+            line(&gone, 0).starts_with("\u{25aa} fix login"),
             "{:?}",
             line(&gone, 0)
         );
 
-        // The mark stands where the dot stood, the name behind it starting
-        // in the same column on both.
-        assert!(
-            line(&live, 1).starts_with("\u{25cf} fix login"),
-            "{:?}",
-            line(&live, 1)
-        );
-        assert!(
-            line(&gone, 1).starts_with("\u{25aa} fix login"),
-            "{:?}",
-            line(&gone, 1)
-        );
-
-        // The archived name is muted, never the live card's text color.
-        assert_eq!(colored(&gone, 1, th.muted), "fix login");
-        assert_eq!(colored(&gone, 1, th.text), "");
+        // The archived name is muted, never the live line's text color.
+        assert_eq!(colored(&gone, 0, th.muted), "fix login");
+        assert_eq!(colored(&gone, 0, th.text), "");
 
         // The badge counts from the archiving, not from the last turn.
-        assert!(line(&live, 1).ends_with("1m ago"), "{:?}", line(&live, 1));
-        assert!(line(&gone, 1).ends_with("2h ago"), "{:?}", line(&gone, 1));
+        assert!(line(&live, 0).ends_with("1m ago"), "{:?}", line(&live, 0));
+        assert!(line(&gone, 0).ends_with("2h ago"), "{:?}", line(&gone, 0));
 
-        // And the harness row is quiet on both: where the session runs is
-        // its band's rule, not the card's.
-        assert_eq!(colored(&live, 2, th.dim), "claude");
-        assert_eq!(colored(&gone, 2, th.dim), "claude");
+        // And what it runs on is quiet on both.
+        assert!(colored(&live, 0, th.dim).contains("claude"));
+        assert!(colored(&gone, 0, th.dim).contains("claude"));
     }
 }

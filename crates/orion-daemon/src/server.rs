@@ -15,10 +15,6 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 
-/// The most of a ring one `TailOutput` copies, whatever the client asked:
-/// the answer is built on the request loop, ahead of the next Input frame.
-const TAIL_MAX_BYTES: u32 = 64 * 1024;
-
 pub async fn accept_loop(daemon: Arc<Daemon>, listener: UnixListener) {
     loop {
         tokio::select! {
@@ -260,23 +256,6 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         }
                     });
                 }
-                ClientRequest::TailOutput {
-                    req_id,
-                    session,
-                    max_bytes,
-                    after_seq,
-                } => {
-                    // A few KB copied out of a ring: cheap enough inline.
-                    let max = max_bytes.min(TAIL_MAX_BYTES) as usize;
-                    let tail = daemon.session(&session).map(|s| s.tail(max, after_seq));
-                    let _ = out_tx
-                        .send(ServerEvent::OutputTail {
-                            req_id,
-                            session,
-                            tail,
-                        })
-                        .await;
-                }
                 // ---- entity CRUD: run the op, reply Ack/Error ----
                 ClientRequest::AddProject {
                     req_id,
@@ -371,18 +350,16 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     model,
                     effort,
                     auto_title,
-                    cloud_prompt,
                     starting_prompt,
                     issue_url,
                     mode,
                 } => {
-                    // Logged by mode only — never the task, prompt text or
-                    // issue URL.
-                    let launch_mode = match (&cloud_prompt, &starting_prompt, &issue_url) {
-                        (Some(_), _, _) => Some("cloud"),
-                        (None, _, Some(_)) => Some("issue"),
-                        (None, Some(_), None) => Some("preset"),
-                        (None, None, None) => None,
+                    // Logged by mode only — never the prompt text or issue
+                    // URL.
+                    let launch_mode = match (&starting_prompt, &issue_url) {
+                        (_, Some(_)) => Some("issue"),
+                        (Some(_), None) => Some("preset"),
+                        (None, None) => None,
                     };
                     let result = daemon
                         .create_agent(CreateAgentSpec {
@@ -393,7 +370,6 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             model,
                             effort,
                             auto_title,
-                            cloud_prompt,
                             starting_prompt,
                             pr_url: None,
                             issue_url,
@@ -642,29 +618,6 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             Err(anyhow::anyhow!("continuing the session failed: {e}"))
                         });
                         reply_done(&out_tx, req_id, result).await;
-                    });
-                }
-                ClientRequest::SendCloudMessage {
-                    req_id,
-                    id,
-                    message,
-                } => {
-                    tracing::info!(agent = %id, bytes = message.len(), "send to cloud session");
-                    // `claude -p … --cloud` is a login shell and a network
-                    // round trip — seconds. Off the request loop, like the
-                    // worktree ops above: run inline, every keystroke and
-                    // every session switch on this connection waited for
-                    // it, and the pane the user went back to typing in
-                    // looked hung until the message was sent.
-                    let daemon = daemon.clone();
-                    let out_tx = out_tx.clone();
-                    tokio::spawn(async move {
-                        reply_done(
-                            &out_tx,
-                            req_id,
-                            daemon.send_cloud_message(&id, &message).await,
-                        )
-                        .await;
                     });
                 }
                 ClientRequest::CreateTerminal {

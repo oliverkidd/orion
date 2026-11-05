@@ -1722,7 +1722,6 @@ mod tests {
             model: Some("gpt-5.5".into()),
             effort: Some("high".into()),
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 1,
             alive: true,

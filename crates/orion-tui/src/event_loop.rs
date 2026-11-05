@@ -210,15 +210,6 @@ pub(crate) const PR_DETAIL_FRESH: Duration = Duration::from_secs(30);
 /// How often the footer's memory/session readout is refreshed.
 const FOOTER_METRICS_POLL: Duration = Duration::from_secs(5);
 
-/// How often the grid asks the daemon what each TERMINAL on it last
-/// printed, for the lines on its card (`request_terminal_tails`).
-const TAIL_POLL: Duration = Duration::from_secs(1);
-
-/// How much of a terminal's ring one such ask brings back: enough to lay
-/// its last screenful out, little enough that a grid of shells asking once
-/// a second is nothing on the socket — and an idle one answers with none.
-const TAIL_BYTES: u32 = 16 * 1024;
-
 /// The one hotkey that isn't only a hotkey. Whatever the user binds to
 /// [`crate::keymap::Action::UnlockTerminal`], Ctrl+q also unlocks a locked
 /// pane, force-closes the VIM MODAL and closes any OVERLAY outright — the
@@ -433,7 +424,6 @@ async fn main_loop(
     let spotify_interval = crate::spotify::interval();
     let mut next_spotify = tokio::time::Instant::now();
     let mut next_metrics_poll = tokio::time::Instant::now();
-    let mut next_tail_poll = tokio::time::Instant::now();
     let mut next_splash_frame = tokio::time::Instant::now();
     let mut next_confetti_frame = tokio::time::Instant::now();
     let mut next_sweep_frame = tokio::time::Instant::now();
@@ -560,16 +550,6 @@ async fn main_loop(
             _ = tokio::time::sleep_until(next_metrics_poll), if matches!(app.conn, ConnState::Connected) => {
                 request_metrics(&mut app, &mut out);
                 next_metrics_poll = tokio::time::Instant::now() + FOOTER_METRICS_POLL;
-            }
-            // The grid's TERMINAL cards: what each shell last printed, asked
-            // on a beat of its own for as long as any is on screen — with
-            // the grid folded away or no terminal drawn there is nothing
-            // to ask after, and the beat sleeps with it.
-            _ = tokio::time::sleep_until(next_tail_poll),
-                if !app.tail_cards.is_empty() && matches!(app.conn, ConnState::Connected) =>
-            {
-                request_terminal_tails(&mut app, &mut out);
-                next_tail_poll = tokio::time::Instant::now() + TAIL_POLL;
             }
             // First-run splash, or the empty grid's welcome drawn over the
             // same sky: while either is on screen nothing else repaints an
@@ -3228,64 +3208,6 @@ fn request_metrics(app: &mut App, out: &mut Vec<ClientRequest>) {
     send(app, out, |req_id| ClientRequest::GetMetrics { req_id });
 }
 
-/// Ask the daemon what each TERMINAL whose card the last frame drew has
-/// printed since its card last heard ([`App::tail_cards`],
-/// [`App::terminal_tails`]), for the lines under its name. The one the
-/// pane is on is skipped — its screen is right here, live — and so is a
-/// dead one: its ring went with its shell, and the card keeps the lines
-/// it had. Each ask carries the ring end the card has, so an idle shell
-/// answers with no bytes. The frame's notes are read, not taken: a grid
-/// nothing repaints keeps asking after the same cards until the next
-/// frame says otherwise. The reply is `ServerEvent::OutputTail`.
-fn request_terminal_tails(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let attached = app.term.as_ref().map(|t| t.sref.clone());
-    let mut asked = std::collections::HashSet::new();
-    for id in app.tail_cards.clone() {
-        if !asked.insert(id.clone()) {
-            continue;
-        }
-        let sref = SessionRef::Terminal(id.clone());
-        if attached.as_ref() == Some(&sref) {
-            continue;
-        }
-        if !app.tree.terminals.iter().any(|t| t.id == id && t.alive) {
-            continue;
-        }
-        let after_seq = app.terminal_tails.get(&id).map(|t| t.end_seq);
-        send(app, out, |req_id| ClientRequest::TailOutput {
-            req_id,
-            session: sref,
-            max_bytes: TAIL_BYTES,
-            after_seq,
-        });
-    }
-}
-
-/// The daemon's answer to [`request_terminal_tails`]: the end of the ring,
-/// laid out through a throwaway screen the PTY's size and kept as the
-/// card's lines. No bytes means nothing new since the card last heard,
-/// and no tail at all that the shell is gone — either way the lines stay.
-/// A frame only when they changed.
-fn land_terminal_tail(app: &mut App, id: TerminalId, tail: Option<orion_core::OutputTail>) {
-    let Some(tail) = tail else { return };
-    let entry = app.terminal_tails.entry(id).or_default();
-    if tail.data.is_empty() {
-        entry.end_seq = tail.end_seq;
-        return;
-    }
-    let lines = crate::terminal_tail::parse_tail(
-        &tail.data,
-        tail.cols,
-        tail.rows,
-        crate::launcher::PROMPT_LINES,
-    );
-    if entry.lines != lines {
-        entry.lines = lines;
-        app.dirty = true;
-    }
-    entry.end_seq = tail.end_seq;
-}
-
 fn land_client_rss(app: &mut App, bytes: u64) {
     app.client_rss_bytes = bytes;
 }
@@ -3348,8 +3270,6 @@ fn ui_state_json(app: &App) -> String {
         launcher_pane_h: app.launcher_pane_h,
         launcher_pane_w: app.launcher_pane_w,
         launcher_pane_hidden: app.launcher_pane_hidden,
-        launcher_expanded: app.launcher_expanded.as_ref().map(|w| w.to_string()),
-        launcher_open_bands: saved_open_bands(app),
         launcher_tabs: app.launcher_tabs.iter().map(|id| id.to_string()).collect(),
         projects_closed: app.projects_closed,
         archived_open: app
@@ -3360,30 +3280,6 @@ fn ui_state_json(app: &App) -> String {
             .collect(),
     };
     serde_json::to_string(&state).unwrap_or_else(|_| "{}".into())
-}
-
-/// The band every project was left with open, for the blob: the other
-/// projects' ([`App::launcher_open_bands`]) with the one on screen filed
-/// under its own project, less any project or checkout the tree no
-/// longer has.
-fn saved_open_bands(app: &App) -> std::collections::HashMap<String, String> {
-    let mut bands = app.launcher_open_bands.clone();
-    if let Some(pid) = app.selected_project().map(|p| p.id.clone()) {
-        match &app.launcher_expanded {
-            Some(open) => bands.insert(pid, open.clone()),
-            None => bands.remove(&pid),
-        };
-    }
-    bands
-        .into_iter()
-        .filter(|(pid, wid)| {
-            app.tree
-                .worktrees
-                .iter()
-                .any(|w| &w.id == wid && &w.project_id == pid)
-        })
-        .map(|(pid, wid)| (pid.to_string(), wid.to_string()))
-        .collect()
 }
 
 /// Re-seat the cursor from the persisted blob. Returns whether the
@@ -3421,15 +3317,6 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
     // height does. Nothing is unselected on the way back in: the restore
     // lands on the cards either way.
     app.launcher_pane_hidden = state.launcher_pane_hidden;
-    app.launcher_expanded = state.launcher_expanded.map(orion_core::WorktreeId::from);
-    // Every other project's open band too; the restored project's own is
-    // `launcher_expanded` above, which the next switch away files here.
-    app.launcher_open_bands = state
-        .launcher_open_bands
-        .into_iter()
-        .filter(|(pid, _)| state.project.as_ref() != Some(pid))
-        .map(|(pid, wid)| (ProjectId(pid), WorktreeId(wid)))
-        .collect();
     // The PROJECT TABS come back in the order they were left, less any
     // project the tree no longer has; the draw's settle gives the
     // restored project its tab if it had none.
@@ -4563,7 +4450,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     if action.is_none() && app.launcher_grid() && key.code == KeyCode::Esc {
         if app.launcher_tab_cursor.is_some() {
             crate::key_combo::note(app, &[chord], Some("Back to the cards"));
-        } else if app.show_archived && app.open_band(&crate::launcher::bands(app)).is_none() {
+        } else if app.show_archived {
             crate::key_combo::note(app, &[chord], Some("Back to the live sessions"));
         } else if !app.launcher_unaimed {
             crate::key_combo::note(app, &[chord], Some("Unselect the card"));
@@ -4728,13 +4615,8 @@ fn dispatch_action(
             // browser and stays put; a checkout hands focus one column right.
             Focus::Worktrees => activate::worktrees_row(app, out),
             Focus::Sessions => attach_selected(app, out),
-            // Lock input into an already-focused live pane — or, with the
-            // CLOUD SESSION PANEL up, open the session it points at.
-            Focus::Terminal => {
-                if !activate::cloud_link(app, out) {
-                    enter_terminal_pane(app, out);
-                }
-            }
+            // Lock input into an already-focused live pane.
+            Focus::Terminal => enter_terminal_pane(app, out),
         },
         // Nothing in the tree yet: the SPLASH is on screen and the only
         // thing `n` can mean there is the project it tells you to open.
@@ -4744,9 +4626,7 @@ fn dispatch_action(
         Action::New => match app.focus {
             Focus::Projects => open_prompt(app, PromptKind::AddProject),
             Focus::Worktrees => {
-                if app.selected_worktree_pr().is_some() {
-                    open_pr_agent_picker(app);
-                } else if let Some(p) = app.selected_project() {
+                if let Some(p) = app.selected_project() {
                     let project = p.id.clone();
                     open_new_worktree_prompt(app, project);
                 }
@@ -5170,36 +5050,9 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             format!("branch name (empty = {suggestion})").into(),
             String::new(),
         ),
-        PromptKind::ClaudeCloudTask { .. } => (
-            "Claude Cloud task".into(),
-            "what should Claude do?".into(),
-            String::new(),
-        ),
-        PromptKind::AgentPresetTask { preset, .. } => (
-            format!("Task for {}", preset.name).into(),
-            if preset.has_wrapping() {
-                format!(
-                    "{} — prefix + your task + postfix (empty = prefix + postfix only)",
-                    preset.spec_label()
-                )
-                .into()
-            } else {
-                format!(
-                    "{} — sent as the first prompt (empty = start with no prompt)",
-                    preset.spec_label()
-                )
-                .into()
-            },
-            String::new(),
-        ),
         PromptKind::QuickPrompt(launch) => {
             (launch.title().into(), launch.label().into(), String::new())
         }
-        PromptKind::CloudMessage { .. } => (
-            "Send to cloud session".into(),
-            "message for the cloud agent".into(),
-            String::new(),
-        ),
         PromptKind::FollowUp { id } => (
             format!(
                 "Follow-up · {}",
@@ -5369,11 +5222,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::claude_accounts::current_name(&cfg, id),
             )
         }
-        PromptKind::AdoptClaudeDir { dir } => (
-            format!("Add back · {}", crate::claude_accounts::tilde(dir)).into(),
-            "name it goes by — its login and transcripts come with it (empty = no name)".into(),
-            crate::claude_accounts::suggested_name(dir),
-        ),
     };
     let highlight = matches!(kind, PromptKind::AddProject)
         .then(|| app.launch_repo_name())
@@ -7558,22 +7406,6 @@ fn menu_items_for_link(row: &LinkRow) -> Vec<MenuItem> {
 }
 
 fn menu_items_for_session(a: &orion_core::Agent) -> Vec<MenuItem> {
-    // A Cloud row has no terminal to attach or restart: the agent runs in
-    // the cloud sandbox, so its verbs are the browser and the message
-    // queue, ahead of the row-keeping ones every session has.
-    if let Some(url) = a.cloud_session_url().filter(|_| !a.archived) {
-        return vec![
-            MenuItem::new("Open in browser", MenuAction::OpenLink(url)),
-            MenuItem::new(
-                "Send to cloud session",
-                MenuAction::SendCloudMessage(a.id.clone()),
-            ),
-            MenuItem::new("Duplicate", MenuAction::DuplicateAgent(a.id.clone())),
-            MenuItem::new("Rename", MenuAction::RenameAgent(a.id.clone())),
-            MenuItem::new("Archive", MenuAction::ArchiveAgent(a.id.clone())),
-            MenuItem::destructive("Delete", MenuAction::DeleteAgent(a.id.clone())),
-        ];
-    }
     if a.archived {
         vec![
             MenuItem::new("Unarchive", MenuAction::UnarchiveAgent(a.id.clone())),
@@ -7700,8 +7532,7 @@ pub(super) fn open_menu(app: &mut App, items: Vec<MenuItem>, at: (u16, u16)) {
 /// New-session creation, all of it: pick which CLI the session runs, and
 /// Enter on the row creates it (`MenuAction::NewAgentOfKind`) — no box
 /// follows; the first prompt is typed in the CLI, and a launch that starts
-/// from a typed task is the QUICK PROMPT's (`p`). Only the `Claude · cloud`
-/// row still asks, a cloud launch being nothing without its task.
+/// from a typed task is the QUICK PROMPT's (`p`).
 /// Claude/Codex rows expand (→) into model and effort submenus; Enter
 /// anywhere takes the configured defaults for whatever wasn't drilled into.
 /// A plain TERMINAL SESSION is not offered here: NEW TERMINAL (`t`) and the
@@ -7717,27 +7548,6 @@ fn open_new_agent_picker(app: &mut App, worktree: WorktreeId) {
     agent_picker::open_kind_picker(app, KindPicker::new_session(worktree));
 }
 
-/// ROOT WORKTREE used by PROJECT-scoped actions. An OPEN PRS row has no
-/// checkout of its own, so PR-created AGENTS follow the same established
-/// fallback as PROJECT-scoped TERMINAL SESSION and LINK creation.
-fn selected_project_main_worktree(app: &App) -> Option<WorktreeId> {
-    let project = app.selected_project()?;
-    app.root_worktree(&project.id)
-}
-
-/// `n` on a PROJECT OPEN PRS GROUP row: the NEW AGENT PICKER's harness
-/// rows, every one carrying the PR's URL and — through the same MODEL /
-/// EFFORT submenus, and as directly on Enter — launching a PR SESSION.
-pub(super) fn open_pr_agent_picker(app: &mut App) {
-    let Some(pr) = app.selected_worktree_pr().cloned() else {
-        return;
-    };
-    let Some(worktree) = selected_project_main_worktree(app) else {
-        return;
-    };
-    agent_picker::open_kind_picker(app, KindPicker::pr_session(worktree, &pr));
-}
-
 /// The CONTEXT MENU for a PROJECT ISSUES GROUP row: the browser. The
 /// launches are the row's keys (`p`, `e`), as the footer says.
 fn issue_row_menu_items(issue: &crate::issues::Issue) -> Vec<MenuItem> {
@@ -7747,15 +7557,10 @@ fn issue_row_menu_items(issue: &crate::issues::Issue) -> Vec<MenuItem> {
     )]
 }
 
-/// The CONTEXT MENU for a PROJECT OPEN PRS GROUP row: a PR SESSION row per
-/// enabled harness (none when the PROJECT has no ROOT WORKTREE to launch
-/// in), then **Check out** (`pr_checkout`) and the row's browser and diff
-/// verbs.
+/// The CONTEXT MENU for a PROJECT OPEN PRS GROUP row: **Check out**
+/// (`pr_checkout`) and the row's browser and diff verbs.
 fn pr_row_menu_items(app: &App, pr: &crate::pull_request::OpenPr) -> Vec<MenuItem> {
-    let mut items = match selected_project_main_worktree(app) {
-        Some(worktree) => agent_picker::pr_session_menu_rows(worktree, pr),
-        None => Vec::new(),
-    };
+    let mut items = Vec::new();
     if let Some(project) = app.selected_project().map(|p| p.id.clone()) {
         items.push(MenuItem::new(
             "Check out",
@@ -7784,7 +7589,6 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
         kind,
         custom,
         model,
-        cloud,
         pr,
         quick,
         ..
@@ -7849,7 +7653,6 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
                         SubmenuKind::Models => None,
                         SubmenuKind::Efforts => Some((*choice).to_string()),
                     },
-                    cloud: *cloud,
                     pr: pr.clone(),
                     quick: quick.clone(),
                 },
@@ -8024,16 +7827,15 @@ fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
 fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientRequest>) -> bool {
     match *target {
         HitTarget::LauncherCard(at) => launcher::select_card_row(app, at, out),
-        HitTarget::LauncherBand(i)
-        | HitTarget::LauncherBandMore(i)
-        | HitTarget::LauncherDrawer(i) => launcher::select_band_row(app, i, out),
+        HitTarget::LauncherBand(i) | HitTarget::LauncherDrawer(i) => {
+            launcher::select_band_row(app, i, out)
+        }
         HitTarget::LauncherDrawerEntry(band, entry) => {
             launcher::select_drawer_entry(app, band, entry, out)
         }
         HitTarget::LauncherBandPr(ref wid) | HitTarget::LauncherBandStack(ref wid) => {
             launcher::select_band_of(app, wid, out)
         }
-        HitTarget::LauncherCardIssue(ref id) => launcher::select_issue_card(app, id, out),
         _ => false,
     }
 }
@@ -8213,13 +8015,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     *menu = *parent;
                 }
             }
-            // The NEW AGENT PICKER's Claude row — and the QUICK PROMPT
-            // `Tab` picker's, for a box that can go to the cloud — owns
-            // Tab as a launch-mode toggle, and so do the rows of the
-            // Claude MODEL / EFFORT lists behind it (`→`, or the box's
-            // Select model and effort field). Every other menu leaves it
-            // untouched.
-            _ if ui::menu_keys::CLOUD.matches(&key) && menu.toggle_hovered_claude_cloud() => {}
             _ if ui::menu_keys::CHOOSE.matches(&key) => {
                 let hover = menu.hover;
                 activate::menu_row(app, hover, out);
@@ -8228,14 +8023,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         },
         Overlay::Prompt(prompt) => match key.code {
             KeyCode::Esc => {
-                // Abandoning a preset's task goes back to the list it came
-                // from, on the same row, rather than to the panels.
-                let back_to_presets = match &prompt.kind {
-                    PromptKind::AgentPresetTask { worktree, preset } => {
-                        Some((worktree.clone(), preset.name.clone()))
-                    }
-                    _ => None,
-                };
                 // A typed setting's prompt stood in for the overlay: Esc
                 // keeps the old value and puts the overlay back on its row.
                 let back_to_settings = matches!(
@@ -8244,7 +8031,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::ClaudeSignIn { .. }
                         | PromptKind::AddClaudeAccount
                         | PromptKind::RenameClaudeAccount { .. }
-                        | PromptKind::AdoptClaudeDir { .. }
                 );
                 // The comment box stood in for the ISSUES MODAL: Esc puts
                 // the modal back on its row, the comment unposted.
@@ -8279,12 +8065,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     crate::pr_modal::reopen(app, *view);
                 } else if let Some(under) = back_to_modal {
                     under.reopen(app);
-                } else if let Some((worktree, name)) = back_to_presets {
-                    let index = crate::agent_presets::load()
-                        .iter()
-                        .position(|p| p.name == name)
-                        .unwrap_or(0);
-                    crate::preset_overlays::reopen_agent_presets(app, worktree, index);
                 }
             }
             // A line break in a task box — Shift+Enter, Option+Enter or
@@ -8783,15 +8563,13 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     let hotkeys = view.is_hotkeys();
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     // A CLAUDE ACCOUNTS row's own verbs: `r` renames it, `o` signs it
-    // out, `⌫` removes it — and `⌫` on a dir SAVED ON THIS MACHINE moves
-    // it to the Trash.
+    // out, `⌫` removes it.
     let account_row = || {
         (!on_tabs && tab == crate::config::agents_tab())
             .then(|| crate::config::Config::load().account_row(selected))
             .flatten()
     };
     let account = || matches!(account_row(), Some(crate::config::AccountRow::Account(_)));
-    let on_disk = || matches!(account_row(), Some(crate::config::AccountRow::OnDisk(_)));
 
     use crate::ui::settings_keys as keys;
     let cmd = match key.code {
@@ -8826,9 +8604,7 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         _ if keys::INSTALL.matches(&key) && !hotkeys => SettingsCmd::Install(selected),
         _ if keys::RENAME.matches(&key) && account() => SettingsCmd::RenameAccount(selected),
         _ if keys::SIGN_OUT.matches(&key) && account() => SettingsCmd::SignOut(selected),
-        _ if keys::REMOVE.matches(&key) && (account() || on_disk()) => {
-            SettingsCmd::RemoveAccount(selected)
-        }
+        _ if keys::REMOVE.matches(&key) && account() => SettingsCmd::RemoveAccount(selected),
         _ if keys::ADD.matches(&key) && hotkeys => SettingsCmd::Capture { add: true },
         _ if keys::DEFAULT.matches(&key) && hotkeys => SettingsCmd::ResetHotkey,
         _ if keys::UNBIND.matches(&key) && hotkeys => SettingsCmd::ClearHotkey,
@@ -8991,7 +8767,7 @@ enum SettingsCmd {
     RenameAccount(usize),
     /// `o` on a CLAUDE ACCOUNTS row.
     SignOut(usize),
-    /// `⌫` on a CLAUDE ACCOUNTS row, or on a dir SAVED ON THIS MACHINE.
+    /// `⌫` on a CLAUDE ACCOUNTS row.
     RemoveAccount(usize),
     Capture {
         add: bool,
@@ -9114,24 +8890,6 @@ fn edit_keymap(app: &mut App, edit: impl FnOnce(&mut crate::keymap::Keymap)) -> 
     save_keymap(app, keymap)
 }
 
-/// REMEMBER HARNESS (Settings → Experimental): make a launch's harness —
-/// and a model or effort picked for it — the defaults the next NEW
-/// AGENT PICKER and QUICK PROMPT start from
-/// (`Config::remember_launch`). Nothing is written while the switch is
-/// off or the pick already is the default; a failed write flashes.
-fn remember_launch(
-    app: &mut App,
-    kind: AgentKind,
-    custom: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-) {
-    let mut cfg = crate::config::Config::load();
-    if cfg.remember_launch(kind, custom, model, effort) {
-        save_config(app, &cfg);
-    }
-}
-
 /// Write the config file, flashing the failure. False when it didn't land.
 fn save_config(app: &mut App, cfg: &crate::config::Config) -> bool {
     match cfg.save() {
@@ -9149,8 +8907,7 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
     // A CLAUDE ACCOUNTS row: Enter signs the account in, asking first for
     // the email that fills Claude's login page; ←/→ are its switch, which
     // the cycle below flips like any harness's. **Add account** asks for
-    // the new one's name, and a dir SAVED ON THIS MACHINE for the name to
-    // add it back under.
+    // the new one's name.
     if tab == crate::config::agents_tab() {
         use crate::config::AccountRow;
         match (crate::config::Config::load().account_row(index), delta) {
@@ -9161,16 +8918,6 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
             (Some(AccountRow::Add), _) => {
                 if let Some(view) = settings_mut(app) {
                     view.info("Enter: name a new account");
-                }
-                return;
-            }
-            (Some(AccountRow::OnDisk(dir)), 0) => {
-                app.remember_settings_row(tab, index);
-                return open_prompt(app, PromptKind::AdoptClaudeDir { dir });
-            }
-            (Some(AccountRow::OnDisk(_)), _) => {
-                if let Some(view) = settings_mut(app) {
-                    view.info("Enter: add it back · ⌫: move it to the Trash");
                 }
                 return;
             }
@@ -9274,11 +9021,6 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.black_background = cfg.black_background;
     app.card_issue_number = cfg.card_issue_number;
     app.show_all_worktrees = cfg.show_all_worktrees;
-    app.hide_card_marks = cfg.hide_card_marks;
-    app.highlight_current_card = cfg.highlight_current_card;
-    app.launcher_pane_at = cfg.pane_side();
-    app.launcher_list = cfg.list_layout();
-    app.launcher_all_open = cfg.expand_all_worktrees;
     app.diff_tree = cfg.diff_tree_view;
     app.diff_start = cfg.diff_start();
     app.diff_one_at_a_time = cfg.diff_one_at_a_time();
@@ -9418,16 +9160,13 @@ fn confirm_sign_out(app: &mut App, index: usize) {
 
 /// `⌫` on a CLAUDE ACCOUNTS row: take an added account out of
 /// config.json, behind a confirm asking whether its config dir goes to
-/// the Trash too — kept unless `t` says so, and listed under SAVED ON
-/// THIS MACHINE once kept. The default account and a hand-written
-/// `harnesses` entry are not orion's to remove: the notice says what to
-/// do instead. On a dir SAVED ON THIS MACHINE, the Trash, behind its own
-/// confirm.
+/// the Trash too — kept unless `t` says so. The default account and a
+/// hand-written `harnesses` entry are not orion's to remove: the notice
+/// says what to do instead.
 fn confirm_remove_account(app: &mut App, index: usize) {
     let cfg = crate::config::Config::load();
     let id = match cfg.account_row(index) {
         Some(crate::config::AccountRow::Account(id)) => id,
-        Some(crate::config::AccountRow::OnDisk(dir)) => return confirm_trash_dir(app, index, dir),
         _ => return,
     };
     if !cfg.is_extra_account(&id) {
@@ -9480,8 +9219,8 @@ fn confirm_remove_account(app: &mut App, index: usize) {
         title: "Remove account".into(),
         message: format!(
             "Remove {} ({id}) from orion?\n{sessions}\n{dir} — its login, settings and \
-             transcripts — stays on disk, listed under Saved on this machine\nto add back or \
-             trash later, unless it goes to the Trash now.",
+             transcripts — stays on disk, for an account added by the same name\nto pick \
+             up, unless it goes to the Trash now.",
             entry.display_label()
         ),
         action: PendingAction::RemoveClaudeAccount { id },
@@ -9589,52 +9328,6 @@ fn settings_note(app: &mut App, result: Result<String, String>) {
 fn rename_claude_account(app: &mut App, id: &str, name: &str) {
     let result = crate::claude_accounts::rename(id, name);
     open_claude_accounts(app, Some(id));
-    crate::claude_accounts::request_refresh(app, true);
-    settings_note(app, result);
-}
-
-/// Enter's name typed on a dir SAVED ON THIS MACHINE: add it back as an
-/// account, dir and login as they are — no setup shared into it, which it
-/// has its own of — and land on its row.
-fn adopt_claude_dir(app: &mut App, dir: &std::path::Path, name: &str) {
-    let cfg = crate::config::Config::load();
-    let new = match crate::claude_accounts::plan_adopt(&cfg, dir, name) {
-        Ok(new) => new,
-        Err(why) => {
-            reopen_settings(app);
-            return settings_note(app, Err(why));
-        }
-    };
-    let result = crate::claude_accounts::add(&new, false);
-    open_claude_accounts(app, Some(&new.id));
-    crate::claude_accounts::request_refresh(app, true);
-    settings_note(app, result);
-}
-
-/// `⌫` on a dir SAVED ON THIS MACHINE: move it to the Trash, behind a
-/// confirm that says what goes with it.
-fn confirm_trash_dir(app: &mut App, index: usize, dir: std::path::PathBuf) {
-    let shown = crate::claude_accounts::tilde(&dir);
-    let who = match crate::claude_accounts::dir_state(&dir) {
-        Some(crate::claude_accounts::SignIn::As(email)) => format!("its login as {email}"),
-        _ => "its login".to_string(),
-    };
-    app.remember_settings_row(crate::config::agents_tab(), index);
-    app.overlay = Some(Overlay::Confirm(ConfirmDialog {
-        title: "Move to the Trash".into(),
-        message: format!(
-            "Move {shown} to the Trash?\nNo account runs in it; {who}, its settings and its \
-             transcripts\ngo with it. The Trash can still put it back."
-        ),
-        action: PendingAction::TrashClaudeDir { dir },
-        area: ratatui::layout::Rect::default(),
-    }));
-}
-
-/// Move `dir` to the Trash and land back on the section.
-fn trash_claude_dir(app: &mut App, dir: &std::path::Path) {
-    let result = crate::claude_accounts::trash_dir(dir);
-    open_claude_accounts(app, None);
     crate::claude_accounts::request_refresh(app, true);
     settings_note(app, result);
 }
@@ -9748,69 +9441,41 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         }
         _ => value,
     };
-    // A cloud session cannot start without its task. Keep the multiline
-    // dialog open on validation so the user can correct it in place (the
-    // QUICK PROMPT opts out of the empty half of that — see below).
-    if prompt.is_multiline() {
-        // The cloud prompts and a preset's task share the checks (the text
-        // crosses the same argv), not the wording. No length cap: the OS's
-        // ARG_MAX is the only one, and the daemon's spawn reports it.
-        let (needs, what) = match &prompt.kind {
-            // A preset's task is optional: its prefix and postfix make a
-            // first prompt on their own.
-            PromptKind::AgentPresetTask { .. } => (None, "task"),
-            // An empty quick prompt starts the CLI with no first prompt
-            // (`QuickLaunch::launches_empty`, below). Only its cloud box
-            // needs the task, and that one is a change of mind rather than
-            // a half-finished launch: it falls through to the generic
-            // empty-input cancel below instead of holding the box open.
-            PromptKind::QuickPrompt(_) => (None, "prompt"),
-            // An empty comment is a change of mind too.
-            PromptKind::PrComment { .. } => (None, "comment"),
-            // An empty comment box likewise: the cancel below puts the
-            // ISSUES MODAL back.
-            PromptKind::IssueComment { .. } => (None, "comment"),
-            // And an empty follow-up: the turn is simply not sent.
-            PromptKind::FollowUp { .. } => (None, "follow-up"),
-            // A typed setting over several lines (the Linear task
-            // template): empty is its default, as on every typed row.
-            PromptKind::SettingText { .. } => (None, "text"),
-            _ => (Some("Claude Cloud needs a task"), "Claude Cloud task"),
+    // A NUL in a multiline box's text would truncate the argv it crosses:
+    // keep the dialog open so the user can correct it in place. No length
+    // cap: the OS's ARG_MAX is the only one, and the daemon's spawn reports
+    // it.
+    if prompt.is_multiline() && value.contains('\0') {
+        let what = match &prompt.kind {
+            PromptKind::QuickPrompt(_) => "prompt",
+            PromptKind::PrComment { .. } | PromptKind::IssueComment { .. } => "comment",
+            PromptKind::FollowUp { .. } => "follow-up",
+            _ => "text",
         };
-        let error = if let Some(needs) = needs.filter(|_| value.is_empty()) {
-            Some(needs.to_string())
-        } else if value.contains('\0') {
-            Some(format!("{what} cannot contain NUL bytes"))
-        } else {
-            None
-        };
-        if let Some(error) = error {
-            app.flash = Some(crate::flash::Flash::failed(error));
-            app.overlay = Some(Overlay::Prompt(prompt));
-            return;
-        }
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "{what} cannot contain NUL bytes"
+        )));
+        app.overlay = Some(Overlay::Prompt(prompt));
+        return;
     }
     // An empty worktree name falls back to the random branch the prompt
     // offered, an empty project name undoes the rename — the row goes back
     // to the folder's own name, which is the only way back from a rename —
     // an empty typed setting is that row's default (`auto`), which is the
-    // only way back to it, an AGENT PRESET's task is optional — its box,
-    // or a QUICK PROMPT it is on, launches on prefix + postfix alone — and
+    // only way back to it, an AGENT PRESET's task is optional — a QUICK
+    // PROMPT it is on launches on prefix + postfix alone — and
     // a QUICK PROMPT sent empty starts the CLI with no first prompt, the
-    // way `n` does (its CLAUDE CLOUD box, which needs the task, aside).
-    // For every other prompt an empty field is a cancel.
-    let empty_is_a_default = match &prompt.kind {
+    // way `n` does. For every other prompt an empty field is a cancel.
+    let empty_is_a_default = matches!(
+        &prompt.kind,
         PromptKind::NewWorktree { .. }
-        | PromptKind::RenameProject { .. }
-        | PromptKind::SettingText { .. }
-        | PromptKind::ClaudeSignIn { .. }
-        | PromptKind::AddClaudeAccount
-        | PromptKind::RenameClaudeAccount { .. }
-        | PromptKind::AdoptClaudeDir { .. }
-        | PromptKind::AgentPresetTask { .. } => true,
-        PromptKind::QuickPrompt(launch) => launch.launches_empty(),
-        _ => false,
-    };
+            | PromptKind::RenameProject { .. }
+            | PromptKind::SettingText { .. }
+            | PromptKind::ClaudeSignIn { .. }
+            | PromptKind::AddClaudeAccount
+            | PromptKind::RenameClaudeAccount { .. }
+            | PromptKind::QuickPrompt(_)
+    );
     if value.is_empty() && !empty_is_a_default {
         // An empty comment box goes back to the modal it stood in for, and
         // an empty QUICK PROMPT to the one it stood on.
@@ -9876,47 +9541,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                 },
             );
         }
-        PromptKind::ClaudeCloudTask {
-            worktree,
-            name,
-            model,
-            effort,
-        } => create_agent(
-            app,
-            AgentLaunchDraft {
-                name,
-                cloud_prompt: Some(value),
-                ..AgentLaunchDraft::new(worktree, AgentKind::Claude, model, effort)
-            },
-            out,
-        ),
-        PromptKind::AgentPresetTask { worktree, preset } => {
-            // The launch a QUICK PROMPT with this preset on it sends, built
-            // by the same two functions: `QuickLaunch::of_preset` resolves
-            // the harness (a preset pins a model / effort or follows
-            // Settings → Agents) and `quick_launch::draft` composes prefix
-            // + task + postfix — sized above, so composing cannot fail, and
-            // an empty task on a bare preset composes to no STARTING PROMPT
-            // at all. Only what is this box's own is said here: it was
-            // walked to through the presets list, so it takes the pane, and
-            // a refusal brings this box back, not the quick prompt's.
-            let launch = crate::quick_prompt::QuickLaunch::of_preset(
-                crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
-                preset.clone(),
-                &crate::config::Config::load(),
-            );
-            let draft = AgentLaunchDraft {
-                reopen_on_error: Some((
-                    PromptKind::AgentPresetTask {
-                        worktree: worktree.clone(),
-                        preset,
-                    },
-                    value.clone(),
-                )),
-                ..quick_launch::draft(launch, worktree, value, true, None)
-            };
-            create_agent(app, draft, out);
-        }
         // A box opened over the ISSUES MODAL or the PULL REQUESTS MODAL
         // takes the modal with it when it launches: the grid is where the
         // new session's card goes up — and where the Ack puts the cursor on
@@ -9930,18 +9554,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             label,
             back,
         } => post_pr_comment(app, number, url, label, value, back),
-        PromptKind::CloudMessage { id } => {
-            let intent = PendingIntent::ReopenPromptOnError {
-                kind: PromptKind::CloudMessage { id: id.clone() },
-                text: value.clone(),
-                note: "Sent to the cloud session — the reply lands on its page".into(),
-            };
-            send_with(app, out, intent, |req_id| ClientRequest::SendCloudMessage {
-                req_id,
-                id,
-                message: value,
-            });
-        }
         // The turn goes down the PTY where the session stands: the pane
         // is not swapped, not unfolded and not focused, so one card after
         // another can be prompted without ever stepping into a session.
@@ -10000,7 +9612,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         }
         PromptKind::AddClaudeAccount => ask_to_share(app, &value),
         PromptKind::RenameClaudeAccount { id } => rename_claude_account(app, &id, &value),
-        PromptKind::AdoptClaudeDir { dir } => adopt_claude_dir(app, &dir, &value),
     }
 }
 
@@ -10088,7 +9699,6 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             crate::claude_accounts::sign_out(app, &id);
         }
         PendingAction::RemoveClaudeAccount { id } => remove_claude_account(app, &id, false),
-        PendingAction::TrashClaudeDir { dir } => trash_claude_dir(app, &dir),
         PendingAction::Quit => app.should_quit = true,
         PendingAction::Restart => {
             app.restart = true;
@@ -10309,7 +9919,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                 id,
             });
         }
-        MenuAction::SendCloudMessage(id) => open_prompt(app, PromptKind::CloudMessage { id }),
         MenuAction::DuplicateAgent(id) => launcher::duplicate_agent(app, id),
         MenuAction::ContinueOn { id, harness } => {
             launcher::continue_on_harness(app, id, harness, out)
@@ -10336,7 +9945,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             custom,
             model,
             effort,
-            cloud,
             pr,
             quick,
         } => {
@@ -10370,9 +9978,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                     .with_pr(back.launch.pr.clone())
                     .with_linear(back.launch.linear.clone())
                     .with_todo(back.launch.todo.clone())
-                    // The Claude row's `Tab` toggle rides the pick: the box
-                    // comes back a CLAUDE CLOUD one, where it can be one.
-                    .with_cloud(cloud)
                     .with_mode(back.launch.mode, &crate::config::Config::load())
                     .with_under(back.launch.under.clone());
                 if back.from_box {
@@ -10388,10 +9993,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             // an unexpanded submenu (None) and the explicit "default" row
             // both take the setting; the setting's own "default" means
             // "no flag" and reaches the daemon as None.
-            let mut cfg = crate::config::Config::load();
-            // What the submenus chose, before the defaults fill in the
-            // rest: REMEMBER HARNESS below records a pick, never a fallback.
-            let picked = (model.clone(), effort.clone());
+            let cfg = crate::config::Config::load();
             let resolve = |choice: Option<String>, configured: Option<String>| match choice {
                 None => configured,
                 Some(c) if c == crate::config::DEFAULT_CHOICE => configured,
@@ -10407,20 +10009,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                 resolve(effort, harness.default_effort().map(str::to_string)),
                 custom.as_deref(),
             );
-            // A Claude Cloud launch has its own task box, and nothing to
-            // name first.
-            if cloud {
-                open_prompt(
-                    app,
-                    PromptKind::ClaudeCloudTask {
-                        worktree,
-                        name: String::new(),
-                        model,
-                        effort,
-                    },
-                );
-                return;
-            }
             // The pick is the whole flow: the session starts right here,
             // under the generated name and AUTO-TITLE, its first prompt
             // typed in the CLI. No box stands between the picker and the
@@ -10430,19 +10018,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             // matches (never for a PR SESSION: an unscoped warm CLI cannot
             // be adopted for one), and the refill behind the create
             // re-warms it either way.
-            //
-            // REMEMBER HARNESS (Settings → Experimental): the pick is the
-            // next launch's default — this harness, and a model or effort
-            // only where a submenu chose one. A failed write flashes; the
-            // launch goes ahead regardless.
-            if cfg.remember_launch(
-                kind,
-                custom.as_deref(),
-                picked.0.as_deref(),
-                picked.1.as_deref(),
-            ) {
-                save_config(app, &cfg);
-            }
             create_agent(
                 app,
                 AgentLaunchDraft {
@@ -10743,32 +10318,9 @@ fn select_project_row_by_id(app: &mut App, id: &orion_core::ProjectId) -> bool {
     };
     app.select_worktree_when_seen = None;
     remember_context(app);
-    let left = app.selected_project().map(|p| p.id.clone());
     app.set_sel_project(row);
     app.reopen_projects();
-    carry_open_band(app, left);
     true
-}
-
-/// After the cursor moved from project `left` to whichever is selected
-/// now: the ACCORDION's open band is one per project, so the band open on
-/// the grid being left is filed away under `left`
-/// ([`App::launcher_open_bands`]) and the one the new project was left
-/// with comes back open — switching away and back finds it as it was,
-/// whatever was opened in between. Nothing moves when the project did
-/// not change.
-fn carry_open_band(app: &mut App, left: Option<ProjectId>) {
-    let now = app.selected_project().map(|p| p.id.clone());
-    if now == left {
-        return;
-    }
-    if let Some(pid) = left {
-        match app.launcher_expanded.take() {
-            Some(open) => app.launcher_open_bands.insert(pid, open),
-            None => app.launcher_open_bands.remove(&pid),
-        };
-    }
-    app.launcher_expanded = now.and_then(|pid| app.launcher_open_bands.get(&pid).cloned());
 }
 
 /// Close the overlay and land on session `id` as the palette does a
@@ -11095,7 +10647,6 @@ fn select_project_row(app: &mut App, i: usize, out: &mut Vec<ClientRequest>) {
     let owner_before = app.selected_project().map(|p| p.id.clone());
     app.set_sel_project(i);
     app.reopen_projects();
-    carry_open_band(app, owner_before.clone());
     if app.selected_project().map(|p| p.id.clone()) != owner_before {
         restore_context(app, out);
     }
@@ -11158,25 +10709,7 @@ fn attach_selected(app: &mut App, out: &mut Vec<ClientRequest>) {
         }
         return;
     };
-    // A Cloud row leads out of orion too: there is no PTY to lock into,
-    // only the session's page.
-    if let Some(url) = cloud_session_url_of(app, &sref) {
-        open_link(app, &url, out);
-        return;
-    }
     activate::attach(app, sref, out);
-}
-
-/// The claude.ai page behind `sref`, when it is a Claude Cloud row.
-fn cloud_session_url_of(app: &App, sref: &SessionRef) -> Option<String> {
-    let SessionRef::Agent(id) = sref else {
-        return None;
-    };
-    app.tree
-        .agents
-        .iter()
-        .find(|a| &a.id == id)
-        .and_then(|a| a.cloud_session_url())
 }
 
 /// Full-screen whatever the pane is showing, with the input lock on:
@@ -11283,15 +10816,6 @@ fn attach_inner(app: &mut App, sref: SessionRef, delay: Duration, out: &mut Vec<
     // screen during the debounce just the same.
     if let SessionRef::Agent(id) = &sref {
         mark_agent_seen(app, id, out);
-    }
-    // A Cloud row has nothing to attach: its create PTY is gone seconds
-    // after printing the session id, and the daemon refuses to boot a
-    // local CLI in its name. The pane shows the CLOUD SESSION PANEL from
-    // the row itself (`App::previewed_cloud`), so let go of whatever was
-    // held and leave the pane empty underneath it.
-    if cloud_session_url_of(app, &sref).is_some() {
-        detach_pane(app, out);
-        return;
     }
     let showing = app
         .term
@@ -11524,7 +11048,6 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         model,
         effort,
         name,
-        cloud_prompt,
         starting_prompt,
         reopen_on_error,
         pr,
@@ -11595,31 +11118,20 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         .as_ref()
         .and_then(|id| app.tree.agents.iter().find(|a| &a.id == id))
         .map(|a| a.name.clone());
-    let intent = match (reopen_on_error, &cloud_prompt, pr_rows) {
-        (reopen, _, Some(rows)) => PendingIntent::AttachCreatedPrSession {
+    let intent = match (reopen_on_error, pr_rows) {
+        (reopen, Some(rows)) => PendingIntent::AttachCreatedPrSession {
             focus: focus_pane,
             placeholder: rows,
             reopen,
             pr_url: pr_url.clone().unwrap_or_default(),
         },
-        (Some((kind, task)), _, None) => PendingIntent::AttachCreatedWithCloudRetry {
+        (Some((kind, task)), None) => PendingIntent::AttachCreatedWithRetry {
             kind,
             task,
             focus: focus_pane,
             placeholder,
         },
-        (None, Some(task), None) => PendingIntent::AttachCreatedWithCloudRetry {
-            kind: PromptKind::ClaudeCloudTask {
-                worktree: worktree.clone(),
-                name: name.clone(),
-                model: model.clone(),
-                effort: effort.clone(),
-            },
-            task: task.clone(),
-            focus: focus_pane,
-            placeholder,
-        },
-        (None, None, None) => PendingIntent::AttachCreated {
+        (None, None) => PendingIntent::AttachCreated {
             focus: focus_pane,
             placeholder,
         },
@@ -11630,7 +11142,6 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         (true, Some(name)) => name,
         (true, None) => app.default_session_name("agent"),
     };
-    let cloud = cloud_prompt.is_some();
     let with_first_prompt = starting_prompt.is_some();
     let req_id = app.alloc_req_id(intent);
     if let Some(todo) = todo {
@@ -11642,23 +11153,20 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         app.left_behind.insert(req_id);
     }
     out.push(match pr {
-        Some((project, pr, _)) => {
-            debug_assert!(!cloud);
-            ClientRequest::CreatePrAgent {
-                req_id,
-                project,
-                name,
-                kind,
-                custom_harness: custom.clone(),
-                model,
-                effort,
-                auto_title,
-                pr_url: pr.url,
-                head: pr.head,
-                starting_prompt,
-                mode,
-            }
-        }
+        Some((project, pr, _)) => ClientRequest::CreatePrAgent {
+            req_id,
+            project,
+            name,
+            kind,
+            custom_harness: custom.clone(),
+            model,
+            effort,
+            auto_title,
+            pr_url: pr.url,
+            head: pr.head,
+            starting_prompt,
+            mode,
+        },
         None => ClientRequest::CreateAgent {
             req_id,
             worktree: worktree.clone(),
@@ -11668,21 +11176,20 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             model,
             effort,
             auto_title,
-            cloud_prompt,
             starting_prompt,
             issue_url,
             mode,
         },
     });
     // The create consumes (or, off-spec, discards) the worktree's warm
-    // Claude slot; refill it so the next create is instant too. A cloud
-    // launch, and any launch carrying a STARTING PROMPT (a preset, the
-    // QUICK PROMPT), never touches the slot, so there is nothing to refill.
+    // Claude slot; refill it so the next create is instant too. A launch
+    // carrying a STARTING PROMPT (a preset, the QUICK PROMPT) never
+    // touches the slot, so there is nothing to refill.
     // Nor does a PR SESSION: the DAEMON adopts no unscoped spare for one,
     // and `worktree` there is the ROOT WORKTREE, which only names the
     // project — a refill would boot a Claude in the main checkout for a
     // launch that never runs there.
-    if kind == AgentKind::Claude && !cloud && !with_first_prompt && pr_url.is_none() {
+    if kind == AgentKind::Claude && !with_first_prompt && pr_url.is_none() {
         out.extend(default_claude_prewarm(worktree));
     }
 }
@@ -12328,8 +11835,8 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
     // in `ui::launcher_view`). Only those take it: every other target is
     // a card, which has its own highlight, or the background.
     // The header's PR & ISSUE COUNTS are buttons of the same kind, and
-    // take the same underline; so are the pane's CLOSE and SIDE BUTTONS
-    // and the footer's buttons. A card's PULL REQUEST LINE is a
+    // take the same underline; so are the pane's CLOSE BUTTON and the
+    // footer's buttons. A card's PULL REQUEST LINE is a
     // link on a card whose own highlight marks the cursor, not the
     // pointer, so the line takes it for itself.
     let crumb = hit.filter(|h| {
@@ -12338,14 +11845,9 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
                 | HitTarget::LauncherBandStack(_)
-                | HitTarget::LauncherCardIssue(_)
-                | HitTarget::LauncherStripLeft(_)
-                | HitTarget::LauncherStripRight(_)
-                | HitTarget::LauncherBandMore(_)
                 | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
-                | HitTarget::LauncherPaneSide
                 | HitTarget::LauncherPaneZoom
                 | HitTarget::LauncherTabAdd
                 | HitTarget::LauncherTabMore
@@ -13070,17 +12572,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // A BAND's rule: the cursor lands on the band, as `j`/`k`
                 // walking onto it do.
                 Some(HitTarget::LauncherBand(i)) => launcher::click_band(app, i, out),
-                // The `❮` / `❯` beside a band's row: one card that way
-                // along the band, the very step `h` / `l` take.
-                Some(HitTarget::LauncherStripLeft(i)) => {
-                    launcher::click_strip_arrow(app, i, -1, out)
-                }
-                Some(HitTarget::LauncherStripRight(i)) => {
-                    launcher::click_strip_arrow(app, i, 1, out)
-                }
-                // `▾ 6 more · Tab: see all 8` under a band's row: the band
-                // opens, the very toggle Tab runs.
-                Some(HitTarget::LauncherBandMore(i)) => launcher::click_band_more(app, i, out),
                 // `▸ 3 archived` under a band: its ARCHIVED DRAWER folds
                 // or unfolds, as `z` does.
                 Some(HitTarget::LauncherDrawer(i)) => launcher::click_drawer(app, i, out),
@@ -13098,10 +12589,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::LauncherBandStack(wid)) => {
                     crate::stacks::open_at(app, &wid);
                 }
-                // The ISSUE NUMBER on a session's card: the cursor onto
-                // the card, and the issue in the browser, through the very
-                // `open_issue` `⇧I` runs.
-                Some(HitTarget::LauncherCardIssue(id)) => launcher::click_issue(app, &id, out),
                 // `‹ sessions` in a full-screen session's header: back
                 // down to the pane beside the grid, the same way `^q`
                 // goes back.
@@ -13149,11 +12636,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // is only drawn on a pane that is showing, so the toggle
                 // can only ever fold.
                 Some(HitTarget::LauncherPaneClose) => launcher::toggle_pane(app),
-                // The SIDE BUTTON beside it: the pane moves to the other
-                // side of the cards, written to Settings as the
-                // **Session pane** row's own cycling writes it.
-                Some(HitTarget::LauncherPaneSide) => launcher::move_pane(app),
-                // The FULL-SCREEN BUTTON before them, and the NORMAL-SIZE
+                // The FULL-SCREEN BUTTON before it, and the NORMAL-SIZE
                 // BUTTON in a full-screen session's header: the one
                 // toggle `^F` runs.
                 Some(HitTarget::LauncherPaneZoom) => {
@@ -13174,9 +12657,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     // is Esc's (and `^~` folds the pane outright); a
                     // click that lands on nothing changes nothing.
                     app.focus = focus;
-                }
-                Some(HitTarget::CloudSessionLink) => {
-                    activate::cloud_link(app, out);
                 }
                 // A click on a page the pane reads — a pull request, an
                 // issue — focuses it, to scroll: there is nothing in it to
@@ -13326,10 +12806,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
                             | HitTarget::LauncherBandStack(_)
-                            | HitTarget::LauncherCardIssue(_)
-                            | HitTarget::LauncherStripLeft(_)
-                            | HitTarget::LauncherStripRight(_)
-                            | HitTarget::LauncherBandMore(_)
                             | HitTarget::LauncherDrawer(_)
                             | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)
@@ -13692,7 +13168,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                     attach_created(app, id, focus, placeholder, follow, out);
                 }
                 (
-                    Some(PendingIntent::AttachCreatedWithCloudRetry {
+                    Some(PendingIntent::AttachCreatedWithRetry {
                         focus, placeholder, ..
                     }),
                     Some(id),
@@ -13721,9 +13197,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                         }
                         _ => placeholder::discard_pr(app, &placeholder, out),
                     }
-                }
-                (Some(PendingIntent::ReopenPromptOnError { note, .. }), _) => {
-                    app.flash = Some(crate::flash::Flash::failed(note));
                 }
                 (Some(PendingIntent::SendTurn { id, booting, .. }), _) => {
                     let name = app
@@ -13814,34 +13287,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                 placeholder::adopt_worktree(app, w);
             }
             let before = selection_snapshot(app);
-            // The `claude --cloud <task>` create runs in an ordinary pane
-            // until the id it prints makes the row a Cloud row. That is the
-            // cue to let the create PTY go and give the keyboard back: the
-            // pane is the CLOUD SESSION PANEL from here, and Enter means
-            // "open in the browser", not a keystroke into a process that
-            // has already exited.
-            let became_cloud = match &entity {
-                orion_core::Entity::Agent(a) if a.cloud_session_id.is_some() => {
-                    let shown = app
-                        .term
-                        .as_ref()
-                        .is_some_and(|t| t.sref == SessionRef::Agent(a.id.clone()));
-                    let was_cloud = app
-                        .tree
-                        .agents
-                        .iter()
-                        .any(|x| x.id == a.id && x.cloud_session_id.is_some());
-                    shown && !was_cloud
-                }
-                _ => false,
-            };
             apply_upsert(app, entity);
-            if became_cloud {
-                detach_pane(app, out);
-                if app.focus == Focus::Terminal {
-                    leave_terminal_lock(app);
-                }
-            }
             // Cursors follow the row they were on across re-sorts and
             // re-homes; a row that left its list (archived away,
             // moved elsewhere) hands the cursor — and the terminal pane —
@@ -13893,17 +13339,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             app.last_metrics = Some(snapshot);
             app.dirty = true;
         }
-        ServerEvent::OutputTail {
-            req_id,
-            session,
-            tail,
-        } => {
-            // Answered with OutputTail, not Ack — clear the slot by hand.
-            app.pending.remove(&req_id);
-            if let SessionRef::Terminal(id) = session {
-                land_terminal_tail(app, id, tail);
-            }
-        }
         ServerEvent::WorktreeHasChanges { req_id, id, files } => {
             // The checkout is still there, rows and sessions with it: put
             // the optimistic removal back, then ask about forcing it.
@@ -13917,7 +13352,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
         ServerEvent::Error { req_id, message } => {
             // A failed request's intent never gets an Ack; clear it — and if
             // it was an optimistic worktree delete, put the rows back. A
-            // failed Cloud launch reopens its populated task editor.
+            // failed launch reopens its populated task editor.
             if let Some(id) = &req_id {
                 app.left_behind.remove(id);
                 app.todo_pending.remove(id);
@@ -13930,7 +13365,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                 // A rename, an archive or a delete shown on the keypress
                 // and then refused: the row goes back to what it was.
                 Some(PendingIntent::Undo(undo)) => optimistic::undo(app, undo, out),
-                Some(PendingIntent::AttachCreatedWithCloudRetry {
+                Some(PendingIntent::AttachCreatedWithRetry {
                     kind,
                     task: text,
                     placeholder,
@@ -13941,9 +13376,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                     if let Some(stand_in) = placeholder {
                         placeholder::discard_agent(app, &stand_in, out);
                     }
-                    reopen_prompt_with(app, kind, text);
-                }
-                Some(PendingIntent::ReopenPromptOnError { kind, text, .. }) => {
                     reopen_prompt_with(app, kind, text);
                 }
                 // A refused follow-up comes back to the box it was typed in.
@@ -14234,10 +13666,7 @@ fn apply_removal(app: &mut App, id: &orion_core::EntityId) {
             app.tree.worktrees.retain(|w| &w.id != id);
         }
         EntityId::Agent(id) => app.tree.agents.retain(|a| &a.id != id),
-        EntityId::Terminal(id) => {
-            app.tree.terminals.retain(|t| &t.id != id);
-            app.terminal_tails.remove(id);
-        }
+        EntityId::Terminal(id) => app.tree.terminals.retain(|t| &t.id != id),
         EntityId::Link(id) => app.tree.links.retain(|l| &l.id != id),
     }
 }
@@ -14386,11 +13815,7 @@ fn reconcile_selection_inner(
     if let Some(pid) = &before.project {
         if !app.tree.projects.iter().any(|p| &p.id == pid) {
             // The selected row's project is gone; the cursor landed on a
-            // neighbor — bring up its remembered worktree + session, and
-            // the band it was left with open.
-            app.launcher_open_bands.remove(pid);
-            app.launcher_expanded = None;
-            carry_open_band(app, None);
+            // neighbor — bring up its remembered worktree + session.
             restore_context(app, out);
             return;
         }
@@ -14483,7 +13908,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 9,
                     status_changed_at: 0,
                     alive: true,
@@ -14513,7 +13937,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: true,
@@ -15172,17 +14595,13 @@ mod tests {
     /// did that stopped being true with the process, and its own color
     /// again once it is warm. A finish nobody has read is still true cold:
     /// it keeps its done color and its `done` badge, there still being a
-    /// result to read. A Cloud row has no local PTY to be warm, so it keeps
-    /// its status color.
+    /// result to read.
     #[test]
     fn cold_session_dot_is_gray_until_warm() {
         use orion_core::{AgentStatus, Entity};
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_agent(&mut app, AgentStatus::Finished);
-        // The band open, so both cards are on screen whichever the
-        // cursor's row keeps on its strip.
-        app.launcher_expanded = Some(orion_core::WorktreeId("w1".into()));
         let a2 = AgentId("a2".into());
         // The agent-2 row's dot color, and the row's text.
         let dot = |app: &mut App| {
@@ -15236,150 +14655,6 @@ mod tests {
         upsert(&mut app, &|a| a.alive = true);
         let (fg, row) = dot(&mut app);
         assert_eq!(fg, app.theme.done, "warm again: unread: {row}");
-
-        upsert(&mut app, &|a| {
-            a.alive = false;
-            a.cloud_session_id = Some("session_016SiQW5Lem2LbnUf1A3undt".into());
-        });
-        let (fg, row) = dot(&mut app);
-        assert_eq!(fg, app.theme.done, "a cloud row is never cold: {row}");
-    }
-
-    /// The grid's beat asks the daemon after every terminal the last
-    /// frame drew but the one the pane is on and the dead — each ask
-    /// carrying the ring end its card last heard — and the answer lands
-    /// as the card's lines, laid out at the PTY's width in the colours
-    /// they were printed in. An answer with no bytes, or none at all once
-    /// the shell is gone, leaves them.
-    #[test]
-    fn terminal_tails_are_asked_after_the_drawn_cards_and_land_as_lines() {
-        use crate::app::TerminalTail;
-        use orion_core::{OutputTail, TerminalTab};
-        let mut app = App::new();
-        let tab = |id: &str, alive: bool| TerminalTab {
-            id: TerminalId(id.into()),
-            worktree_id: WorktreeId("w1".into()),
-            name: id.into(),
-            sort_order: 0,
-            alive,
-            run_command: None,
-        };
-        app.tree.terminals = vec![tab("t1", true), tab("t2", true), tab("t3", false)];
-        app.term = Some(AttachedTerm::new(
-            SessionRef::Terminal(TerminalId("t2".into())),
-            80,
-            24,
-        ));
-        app.terminal_tails.insert(
-            TerminalId("t1".into()),
-            TerminalTail {
-                lines: vec!["old".into()],
-                end_seq: 40,
-            },
-        );
-        // As a frame leaves them: t1 twice (a band's strip and the pane's
-        // header could both draw it), the attached t2, the dead t3.
-        app.tail_cards = vec![
-            TerminalId("t1".into()),
-            TerminalId("t1".into()),
-            TerminalId("t2".into()),
-            TerminalId("t3".into()),
-        ];
-        let mut out = Vec::new();
-        request_terminal_tails(&mut app, &mut out);
-        let asks: Vec<(&SessionRef, Option<u64>)> = out
-            .iter()
-            .map(|r| match r {
-                ClientRequest::TailOutput {
-                    session, after_seq, ..
-                } => (session, *after_seq),
-                other => panic!("expected TailOutput, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(
-            asks,
-            vec![(&SessionRef::Terminal(TerminalId("t1".into())), Some(40))],
-            "one ask, for the live terminal the pane is not on, from where it left off"
-        );
-        assert_eq!(
-            app.tail_cards.len(),
-            4,
-            "the frame's notes are read, not taken: an idle grid keeps asking"
-        );
-        let req_id = match &out[0] {
-            ClientRequest::TailOutput { req_id, .. } => *req_id,
-            other => panic!("{other:?}"),
-        };
-        assert!(app.pending.contains_key(&req_id));
-
-        // The answer: a shell's last lines, wrapped at the PTY's width.
-        app.dirty = false;
-        hse(
-            &mut app,
-            ServerEvent::OutputTail {
-                req_id,
-                session: SessionRef::Terminal(TerminalId("t1".into())),
-                tail: Some(OutputTail {
-                    cols: 10,
-                    rows: 5,
-                    end_seq: 70,
-                    data: b"$ npm test\r\n\x1b[32mok\x1b[0m 12\r\n\r\n$ ".to_vec(),
-                }),
-            },
-        );
-        assert!(
-            !app.pending.contains_key(&req_id),
-            "the slot is cleared by hand"
-        );
-        let tail = &app.terminal_tails[&TerminalId("t1".into())];
-        let texts: Vec<String> = tail.lines.iter().map(|r| r.text()).collect();
-        assert_eq!(texts, ["$ npm test", "ok 12", "$"]);
-        assert_eq!(
-            tail.lines[1].runs[0],
-            (
-                "ok".to_string(),
-                ratatui::style::Style::default().fg(ratatui::style::Color::Indexed(2))
-            ),
-            "the lines keep the colours they were printed in"
-        );
-        assert_eq!(tail.end_seq, 70);
-        assert!(app.dirty, "the card changed");
-
-        // Nothing new: the lines stay, the frame is spared.
-        app.dirty = false;
-        hse(
-            &mut app,
-            ServerEvent::OutputTail {
-                req_id: 999,
-                session: SessionRef::Terminal(TerminalId("t1".into())),
-                tail: Some(OutputTail {
-                    cols: 10,
-                    rows: 5,
-                    end_seq: 70,
-                    data: Vec::new(),
-                }),
-            },
-        );
-        assert_eq!(app.terminal_tails[&TerminalId("t1".into())].lines.len(), 3);
-        assert!(!app.dirty);
-        // The shell gone: likewise.
-        hse(
-            &mut app,
-            ServerEvent::OutputTail {
-                req_id: 1000,
-                session: SessionRef::Terminal(TerminalId("t1".into())),
-                tail: None,
-            },
-        );
-        assert_eq!(app.terminal_tails[&TerminalId("t1".into())].lines.len(), 3);
-        // The row removed: the lines go with it.
-        hse(
-            &mut app,
-            ServerEvent::EntityRemoved {
-                id: EntityId::Terminal(TerminalId("t1".into())),
-            },
-        );
-        assert!(!app.terminal_tails.contains_key(&TerminalId("t1".into())));
     }
 
     pub(super) fn hse(app: &mut App, ev: ServerEvent) {
@@ -15556,7 +14831,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -15697,8 +14971,6 @@ mod tests {
         );
     }
 
-    const CLOUD_ID: &str = "session_01SQugK2HDyk33coSrfqFJk4";
-
     /// The CONTEXT MENU of the row under the focused panel's cursor, as a
     /// right-click on that row opens it — these tests never draw, so there
     /// is no cell to click.
@@ -15706,219 +14978,6 @@ mod tests {
         if let Some(items) = context_menu_items(app, app.focus) {
             open_menu(app, items, KEYBOARD_MENU_ANCHOR);
         }
-    }
-
-    /// Turn the seeded row into a Claude Cloud row — the upsert the daemon
-    /// sends once the create has printed its session id.
-    fn make_cloud_row(app: &mut App, out: &mut Vec<ClientRequest>) {
-        let mut agent = app.tree.agents[0].clone();
-        agent.cloud_session_id = Some(CLOUD_ID.into());
-        handle_server_event(
-            app,
-            ServerEvent::EntityUpserted {
-                entity: orion_core::Entity::Agent(agent),
-            },
-            out,
-        );
-    }
-
-    /// A Cloud row can be steered from orion: its menu offers a message to
-    /// queue on the session, in the same multi-row editor the launch task
-    /// uses, and a failed send hands the text back rather than eating it.
-    #[test]
-    fn cloud_row_can_send_a_message_to_its_session() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let mut out = Vec::new();
-        make_cloud_row(&mut app, &mut out);
-        app.focus = Focus::Sessions;
-
-        open_row_menu(&mut app);
-        let Some(Overlay::Menu(menu)) = &app.overlay else {
-            panic!("no menu: {:?}", app.overlay)
-        };
-        let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
-        assert!(
-            labels.contains(&"Open in browser") && labels.contains(&"Send to cloud session"),
-            "cloud rows get both cloud verbs: {labels:?}"
-        );
-        assert!(
-            !labels.contains(&"Attach") && !labels.contains(&"Restart"),
-            "nothing local to attach or restart: {labels:?}"
-        );
-
-        let idx = menu
-            .items
-            .iter()
-            .position(|i| i.label == "Send to cloud session")
-            .unwrap();
-        let Some(Overlay::Menu(menu)) = &mut app.overlay else {
-            unreachable!()
-        };
-        menu.hover = idx;
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        let Some(Overlay::Prompt(prompt)) = &mut app.overlay else {
-            panic!("no message prompt: {:?}", app.overlay)
-        };
-        assert!(
-            prompt.is_multiline(),
-            "steering a cloud agent is rarely one line"
-        );
-        prompt.input.set_text("also update the README");
-        out.clear();
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        let req_id = match &out[..] {
-            [ClientRequest::SendCloudMessage {
-                req_id,
-                id,
-                message,
-            }] => {
-                assert_eq!(id.0, "a1");
-                assert_eq!(message, "also update the README");
-                *req_id
-            }
-            other => panic!("expected a cloud send: {other:?}"),
-        };
-        assert!(app.overlay.is_none(), "the prompt closes on submit");
-
-        // A failed send reopens the editor with the message intact.
-        hse(
-            &mut app,
-            ServerEvent::Error {
-                req_id: Some(req_id),
-                message: "claude could not reach the cloud session".into(),
-            },
-        );
-        let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-            panic!("a lost message should come back: {:?}", app.overlay)
-        };
-        assert_eq!(prompt.input.as_str(), "also update the README");
-    }
-
-    /// A Cloud row has no terminal: the agent runs in the cloud sandbox,
-    /// so the pane is a panel pointing at the session's page rather than
-    /// a PTY orion would have to teleport, and re-teleport, to keep
-    /// fresh. Landing on the row attaches nothing; Enter and a click on
-    /// the link hand the URL to the browser and stay put.
-    #[test]
-    fn cloud_row_pane_links_to_the_session_instead_of_attaching() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let mut out = Vec::new();
-        make_cloud_row(&mut app, &mut out);
-        app.focus = Focus::Sessions;
-        app.set_sel_session(0);
-        out.clear();
-
-        preview_selected_now(&mut app, &mut out);
-        assert!(
-            !out.iter()
-                .any(|r| matches!(r, ClientRequest::Attach { .. })),
-            "a cloud row is never attached: {out:?}"
-        );
-        assert!(app.term.is_none(), "no PTY stands behind the panel");
-
-        let mut terminal = Terminal::new(TestBackend::new(160, 30)).unwrap();
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("CLAUDE CLOUD"), "{text}");
-        assert!(
-            text.contains(&format!("https://claude.ai/code/{CLOUD_ID}")),
-            "the link is on the panel: {text}"
-        );
-        assert!(text.contains(" cloud"), "the row keeps its badge: {text}");
-        assert_eq!(
-            app.hits
-                .iter()
-                .filter(|(_, t)| *t == HitTarget::CloudSessionLink)
-                .count(),
-            1,
-            "a wide pane shows the link on one row"
-        );
-
-        // A pane too narrow for the URL folds it rather than clipping it —
-        // every row of the fold is clickable. Full-screen, so the panel
-        // is the whole body and its width is the frame's.
-        app.collapsed = true;
-        let mut narrow = Terminal::new(TestBackend::new(40, 30)).unwrap();
-        narrow.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&narrow);
-        let rows: Vec<ratatui::layout::Rect> = app
-            .hits
-            .iter()
-            .filter(|(_, t)| *t == HitTarget::CloudSessionLink)
-            .map(|(r, _)| *r)
-            .collect();
-        assert!(rows.len() > 1, "the link folds: {text}");
-        let folded: String = text
-            .lines()
-            .map(|l| l.trim_end().rsplit("  ").next().unwrap_or("").trim())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .concat();
-        assert!(
-            folded.contains(&format!("https://claude.ai/code/{CLOUD_ID}")),
-            "the whole URL is on the panel: {text}"
-        );
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-
-        // Enter opens the page and stays on the panel — nothing to lock into.
-        out.clear();
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert_eq!(
-            take_opened(),
-            [format!("https://claude.ai/code/{CLOUD_ID}")]
-        );
-        assert_eq!(app.focus, Focus::Sessions);
-        assert!(!app.term_locked);
-        assert!(
-            !out.iter()
-                .any(|r| matches!(r, ClientRequest::Attach { .. })),
-            "{out:?}"
-        );
-
-        // So does a click on the link itself.
-        app.flash = None;
-        let (link, _) = app
-            .hits
-            .iter()
-            .find(|(_, t)| *t == HitTarget::CloudSessionLink)
-            .cloned()
-            .expect("the link is a hit target");
-        click(&mut app, link.x + 1, link.y, &mut out);
-        assert_eq!(
-            take_opened(),
-            [format!("https://claude.ai/code/{CLOUD_ID}")]
-        );
-    }
-
-    /// The `claude --cloud <task>` create runs in an ordinary pane — the
-    /// row is attached and locked like any fresh session — until the id it
-    /// prints turns the row into a Cloud row. That upsert lets the dead
-    /// create PTY go and gives the keyboard back: from here the pane is the
-    /// link panel, and Enter opens the browser instead of feeding a process
-    /// that has already exited.
-    #[test]
-    fn a_row_that_gains_its_cloud_session_lets_go_of_the_create_pane() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let mut out = Vec::new();
-        attach_now(&mut app, SessionRef::Agent(AgentId("a1".into())), &mut out);
-        app.focus = Focus::Terminal;
-        app.term_locked = true;
-        assert!(app.attached_sref.is_some());
-        out.clear();
-
-        make_cloud_row(&mut app, &mut out);
-        assert!(
-            out.iter()
-                .any(|r| matches!(r, ClientRequest::Detach { .. })),
-            "the create pane is released: {out:?}"
-        );
-        assert!(app.term.is_none());
-        assert!(!app.term_locked);
-        assert_eq!(app.focus, Focus::Sessions);
-        assert!(app.previewed_cloud().is_some());
     }
 
     /// An empty tree replaces the panel columns with the animated splash
@@ -20818,7 +19877,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: sort,
                     status_changed_at: changed_at,
                     alive: true,
@@ -20874,7 +19932,6 @@ diff --git a/src/c.rs b/src/c.rs
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: sort,
                 status_changed_at: at,
                 alive: true,
@@ -20957,7 +20014,6 @@ diff --git a/src/c.rs b/src/c.rs
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: sort,
                 status_changed_at: at,
                 alive: true,
@@ -21018,7 +20074,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: true,
@@ -21087,7 +20142,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -21487,7 +20541,6 @@ diff --git a/src/c.rs b/src/c.rs
                             model: None,
                             effort: None,
                             auto_title: true,
-                            cloud_prompt: None,
                             starting_prompt: None,
                             ..
                         },
@@ -21563,233 +20616,18 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn tab_on_claude_toggles_cloud_and_collects_a_multiline_task() {
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let mut out = Vec::new();
-
-            open_picker(&mut app);
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("expected new-session picker");
-            };
-            assert_eq!(menu.items[0].label, "Claude · cloud");
-            assert!(matches!(
-                &menu.items[0].action,
-                MenuAction::NewAgentOfKind {
-                    kind: AgentKind::Claude,
-                    custom: None,
-                    cloud: true,
-                    ..
-                }
-            ));
-
-            // Cloud creation is cold on purpose: a bare-Claude warm PTY
-            // cannot be adopted because it never received --cloud + task.
-            // No name step either: the multiline task prompt opens straight
-            // from the picker.
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(out.is_empty(), "cloud task entry must not prewarm: {out:?}");
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("expected Claude Cloud task prompt");
-            };
-            assert_eq!(prompt.title, "Claude Cloud task");
-            assert!(prompt.is_multiline());
-
-            assert!(paste_into_overlay(&mut app, "Fix auth"));
-            press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
-            assert!(paste_into_overlay(&mut app, "Run the tests"));
-            press(
-                &mut app,
-                KeyCode::Char('j'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(paste_into_overlay(&mut app, "Ship it"));
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("task prompt closed while editing");
-            };
-            assert_eq!(prompt.input.as_str(), "Fix auth\nRun the tests\nShip it");
-
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(app.overlay.is_none());
-            assert!(matches!(
-                out.as_slice(),
-                [ClientRequest::CreateAgent {
-                    kind: AgentKind::Claude,
-                    custom_harness: None,
-                    cloud_prompt: Some(task),
-                    auto_title: true,
-                    ..
-                }] if task == "Fix auth\nRun the tests\nShip it"
-            ));
-            assert!(
-                !out.iter()
-                    .any(|request| matches!(request, ClientRequest::PrewarmAgent { .. })),
-                "cloud launch must never consume/refill the local warm slot: {out:?}"
-            );
-
-            let req_id = match &out[0] {
-                ClientRequest::CreateAgent { req_id, .. } => *req_id,
-                other => panic!("expected create request, got {other:?}"),
-            };
-            handle_server_event(
-                &mut app,
-                ServerEvent::Error {
-                    req_id: Some(req_id),
-                    message: "cloud unavailable — retry".into(),
-                },
-                &mut out,
-            );
-            assert_eq!(app.flash.as_deref(), Some("cloud unavailable — retry"));
-            assert!(matches!(
-                &app.overlay,
-                Some(Overlay::Prompt(prompt))
-                    if prompt.is_multiline()
-                        && prompt.input.as_str() == "Fix auth\nRun the tests\nShip it"
-            ));
-        })
-    }
-
-    /// `Tab` is the cloud toggle in the Claude MODEL / EFFORT lists too,
-    /// not only on the picker's Claude row: one launch, one switch. `←`
-    /// backs out to a picker whose Claude row agrees, and the pick asks
-    /// for the cloud task on the model and effort drilled to. Another
-    /// harness's list leaves Tab alone.
-    #[test]
-    fn tab_in_a_claude_submenu_toggles_cloud_for_the_whole_launch() {
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let mut out = Vec::new();
-            fn menu(app: &App) -> &crate::app::ContextMenu {
-                match &app.overlay {
-                    Some(Overlay::Menu(menu)) => menu,
-                    other => panic!("expected a menu, got {other:?}"),
-                }
-            }
-
-            // The menu's keys, as its bottom border spells them.
-            fn keys(app: &App) -> String {
-                crate::hints::text(&ui::menu_hints(menu(app)), usize::MAX)
-            }
-            open_picker(&mut app);
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            assert_eq!(menu(&app).hovered_claude_cloud(), Some(false));
-            let hint = keys(&app);
-            assert!(
-                hint.starts_with("Enter choose · Tab cloud off · "),
-                "{hint}"
-            );
-            for key in ["← back", "? settings", "Esc close"] {
-                assert!(hint.contains(key), "{key}: {hint}");
-            }
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                menu(&app).items[2].label,
-                "opus · latest",
-                "a model row stays one"
-            );
-            assert!(menu(&app).lists_claude_cloud());
-            assert!(keys(&app).contains("Tab cloud on · "), "{}", keys(&app));
-
-            // ← to the picker: its Claude row took the toggle with it.
-            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
-            assert_eq!(menu(&app).items[0].label, "Claude · cloud");
-            assert_eq!(menu(&app).hovered_claude_cloud(), Some(true));
-
-            // → again, down to opus, → to its efforts: still cloud.
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            assert_eq!(menu(&app).title.as_deref(), Some("Claude effort"));
-            assert_eq!(menu(&app).hovered_claude_cloud(), Some(true));
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(out.is_empty(), "the cloud task comes first: {out:?}");
-            assert!(
-                matches!(
-                    &app.overlay,
-                    Some(Overlay::Prompt(p)) if matches!(
-                        &p.kind,
-                        PromptKind::ClaudeCloudTask { model: Some(m), .. } if m == "opus"
-                    )
-                ),
-                "{:?}",
-                app.overlay
-            );
-
-            // Codex's model list: Tab is nobody's, and the footer is the
-            // plain type-ahead one.
-            open_picker(&mut app);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            assert_eq!(menu(&app).title.as_deref(), Some("Codex model"));
-            assert_eq!(menu(&app).hovered_claude_cloud(), None);
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert!(!menu(&app).lists_claude_cloud());
-            assert!(!keys(&app).contains("cloud"), "{}", keys(&app));
-        })
-    }
-
-    /// The one picker row that still asks: a cloud launch is nothing
-    /// without its task.
-    #[test]
-    fn cloud_task_is_still_required_though_the_picker_launches_directly() {
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let mut out = Vec::new();
-
-            open_picker(&mut app);
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-
-            assert!(out.is_empty(), "the task dialog comes before creation");
-            assert!(matches!(
-                &app.overlay,
-                Some(Overlay::Prompt(p)) if p.is_multiline()
-            ));
-
-            // Empty is validation, not dismissal: keep the dialog open so
-            // the user can correct it in place.
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(out.is_empty());
-            assert!(matches!(
-                &app.overlay,
-                Some(Overlay::Prompt(p)) if p.is_multiline()
-            ));
-
-            let Some(Overlay::Prompt(prompt)) = &mut app.overlay else {
-                unreachable!()
-            };
-            prompt.input.set_text("fix\0auth");
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                app.flash.as_deref(),
-                Some("Claude Cloud task cannot contain NUL bytes")
-            );
-            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.is_multiline()));
-        });
-    }
-
-    #[test]
-    fn claude_cloud_task_prompt_soft_wraps_instead_of_horizontally_scrolling() {
+    fn a_multiline_prompt_soft_wraps_instead_of_horizontally_scrolling() {
         let mut app = App::new();
         seed_tree(&mut app);
         app.overlay = Some(Overlay::Prompt(PromptDialog::new(
-            "Claude Cloud task",
-            "what should Claude do?",
+            "Comment on #7",
+            "your comment",
             format!("BEGIN {} END", "word ".repeat(20)),
-            PromptKind::ClaudeCloudTask {
-                worktree: WorktreeId("w1".into()),
-                name: String::new(),
-                model: None,
-                effort: None,
+            PromptKind::PrComment {
+                number: 7,
+                url: "https://github.com/o/r/pull/7".into(),
+                label: "#7 Attach links".into(),
+                back: None,
             },
         )));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -21797,7 +20635,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         let begin = find_cell(&terminal, "BEGIN");
         let end = find_cell(&terminal, "END");
-        assert_ne!(begin.1, end.1, "long task should wrap across rows");
+        assert_ne!(begin.1, end.1, "long text should wrap across rows");
         assert!(buffer_text(&terminal).contains("^J newline"));
 
         let Some(Overlay::Prompt(prompt)) = &mut app.overlay else {
@@ -21813,7 +20651,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
         // Too narrow for every key: the line break's hint goes first,
         // whole; the send and the way out stay.
-        assert!(text.contains("Enter launch · Esc cancel"), "{text}");
+        assert!(text.contains("Enter post · Esc cancel"), "{text}");
     }
 
     /// The submenu picks apply to the direct launch: the model row Enter
@@ -22214,7 +21052,7 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    // ---- REMEMBER HARNESS (Settings → Experimental) ----
+    // ---- a pick is one session's ----
 
     /// A row the hovered menu shows, without the `✓` a default row wears.
     fn hovered_choice(app: &App) -> String {
@@ -22227,124 +21065,10 @@ diff --git a/src/c.rs b/src/c.rs
             .to_string()
     }
 
-    /// The model id the hovered row of a model submenu launches with — not
-    /// its label, which may dress the id up (`opus · latest`).
-    fn hovered_model(app: &App) -> String {
-        let Some(Overlay::Menu(menu)) = &app.overlay else {
-            panic!("expected a menu, got {:?}", app.overlay);
-        };
-        match &menu.items[menu.hover].action {
-            MenuAction::NewAgentOfKind {
-                model: Some(model), ..
-            } => model.clone(),
-            other => panic!("expected a model row, got {other:?}"),
-        }
-    }
-
-    /// With the switch on, the harness picked on `n` — and a model drilled
-    /// into through `→` — become the AGENTS TAB defaults: the next picker
-    /// opens on that harness with its `✓` on that model, and the QUICK
-    /// PROMPT's harness follows.
+    /// A picker launch writes nothing, and the next picker opens on its
+    /// first row as it always has: the AGENTS TAB is where defaults are set.
     #[test]
-    fn a_picker_launch_is_remembered_as_the_next_default_while_the_switch_is_on() {
-        with_config_json(r#"{"remember_harness": true}"#, || {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let mut out = Vec::new();
-
-            // The harness alone: Codex, second row.
-            open_picker(&mut app);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    out.first(),
-                    Some(ClientRequest::CreateAgent {
-                        kind: AgentKind::Codex,
-                        model: None,
-                        ..
-                    })
-                ),
-                "{out:?}"
-            );
-            let cfg = crate::config::Config::load();
-            assert_eq!(
-                cfg.quick_prompt_kind(),
-                AgentKind::Codex,
-                "written to the Agents tab"
-            );
-            assert_eq!(
-                cfg.codex_model, "default",
-                "no model was picked, so none was written"
-            );
-            assert!(app.flash.is_none(), "{:?}", app.flash);
-
-            // The next picker opens on it.
-            out.clear();
-            open_picker(&mut app);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(menu.items[menu.hover].label, "Codex");
-
-            // A model drilled into on the Claude row lands on Claude's
-            // Model row — the pick, not the fallback.
-            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(menu.title.as_deref(), Some("Claude model"));
-            assert!(menu.items.len() >= 2, "{:?}", menu.items);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            let picked = hovered_model(&app);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    out.first(),
-                    Some(ClientRequest::CreateAgent {
-                        kind: AgentKind::Claude,
-                        model: Some(model),
-                        ..
-                    }) if *model == picked
-                ),
-                "{out:?}"
-            );
-            let cfg = crate::config::Config::load();
-            assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude);
-            assert_eq!(cfg.claude_model, picked, "the Agents tab's Claude model");
-            assert_eq!(
-                cfg.codex_model, "default",
-                "another harness's row is its own"
-            );
-
-            // The next picker: Claude, with the ✓ (and the cursor) on it.
-            out.clear();
-            open_picker(&mut app);
-            assert_eq!(hovered_choice(&app), "Claude");
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(
-                menu.items[menu.hover].label,
-                format!(
-                    "{} ✓",
-                    crate::config::model_row_label(
-                        &picked,
-                        Some(orion_core::harness::HarnessCatalog::Claude)
-                    )
-                )
-            );
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        });
-    }
-
-    /// Off — the default — a pick is one session's: nothing is written,
-    /// and the next picker opens on its first row as it always has.
-    #[test]
-    fn a_picker_launch_is_not_remembered_while_the_switch_is_off() {
+    fn a_picker_launch_is_not_remembered() {
         with_default_config(|| {
             let mut app = App::new();
             seed_tree(&mut app);
@@ -22366,131 +21090,10 @@ diff --git a/src/c.rs b/src/c.rs
             );
             let cfg = crate::config::Config::load();
             assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude, "untouched");
-            assert!(!cfg.remember_harness);
 
             open_picker(&mut app);
             assert_eq!(hovered_choice(&app), "Claude", "the first row, as ever");
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        });
-    }
-
-    /// A QUICK PROMPT fired on a harness picked through `Tab` is a change
-    /// of default too — recorded when the box fires, not when the picker
-    /// hands it back — so the next `p` opens on that harness.
-    #[test]
-    fn a_quick_prompt_fired_on_a_tab_picked_harness_is_remembered() {
-        with_config_json(r#"{"remember_harness": true}"#, || {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let mut out = Vec::new();
-
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(paste_into_overlay(&mut app, "Fix auth"));
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                hovered_choice(&app),
-                "Claude",
-                "opens on the box's own harness"
-            );
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the pick should hand the box back, got {:?}", app.overlay);
-            };
-            assert_eq!(prompt.title, "Quick prompt (codex)");
-            assert_eq!(
-                crate::config::Config::load().quick_prompt_kind(),
-                AgentKind::Claude,
-                "handing the box back is not a launch: nothing written yet"
-            );
-
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    out.first(),
-                    Some(ClientRequest::CreateAgent {
-                        kind: AgentKind::Codex,
-                        starting_prompt: Some(text),
-                        ..
-                    }) if text == "Fix auth"
-                ),
-                "{out:?}"
-            );
-            assert_eq!(
-                crate::config::Config::load().quick_prompt_kind(),
-                AgentKind::Codex,
-                "the fire is the change of default"
-            );
-
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(prompt.title, "Quick prompt (codex)", "the next box follows");
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        });
-    }
-
-    /// An AGENT PRESET launch is the preset's harness and model, not a
-    /// change of mind: with the switch on, the AGENTS TAB rows stay put.
-    #[test]
-    fn a_preset_launch_is_not_remembered_as_the_default() {
-        with_seeded_presets(|| {
-            let mut cfg = crate::config::Config::load();
-            cfg.remember_harness = true;
-            cfg.save().unwrap();
-
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let mut out = Vec::new();
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(paste_into_overlay(&mut app, "Fix auth"));
-            // "reviewer": claude · opus · high, the first preset.
-            press(
-                &mut app,
-                KeyCode::Char('x'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    out.first(),
-                    Some(ClientRequest::CreateAgent {
-                        kind: AgentKind::Claude,
-                        model: Some(model),
-                        effort: Some(effort),
-                        ..
-                    }) if model == "opus" && effort == "high"
-                ),
-                "{out:?}"
-            );
-            let cfg = crate::config::Config::load();
-            assert!(cfg.remember_harness);
-            assert_eq!(
-                cfg.claude_model, "default",
-                "the preset's model stays the preset's"
-            );
-            assert_eq!(cfg.claude_effort, "default");
-            assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude);
         });
     }
 
@@ -22511,7 +21114,7 @@ diff --git a/src/c.rs b/src/c.rs
             let labels: Vec<&str> = menu.items.iter().map(|item| item.label.as_str()).collect();
             assert_eq!(
                 labels,
-                ["Claude", "Cursor", "Pi", "Muse", "Grok Build", "OpenCode"],
+                ["Claude", "Cursor", "Grok Build", "OpenCode"],
                 "Codex is absent, not greyed"
             );
 
@@ -22535,7 +21138,7 @@ diff --git a/src/c.rs b/src/c.rs
     #[test]
     fn picker_with_every_harness_disabled_flashes_instead_of_opening() {
         with_config_json(
-            r#"{"claude_enabled": false, "codex_enabled": false, "cursor_enabled": false, "pi_enabled": false, "muse_enabled": false, "opencode_enabled": false, "harnesses":{"grok":{"enabled":false}}}"#,
+            r#"{"claude_enabled": false, "codex_enabled": false, "cursor_enabled": false, "opencode_enabled": false, "harnesses":{"grok":{"enabled":false}}}"#,
             || {
                 let mut app = App::new();
                 seed_tree(&mut app);
@@ -22597,8 +21200,6 @@ diff --git a/src/c.rs b/src/c.rs
             let (tab, claude_row) = locate_agent("claude", HarnessField::Enabled).unwrap();
             let (_, codex_row) = locate_agent("codex", HarnessField::Enabled).unwrap();
             let (_, cursor_row) = locate_agent("cursor", HarnessField::Enabled).unwrap();
-            let (_, pi_row) = locate_agent("pi", HarnessField::Enabled).unwrap();
-            let (_, muse_row) = locate_agent("muse", HarnessField::Enabled).unwrap();
             let (_, grok_row) = locate_agent("grok", HarnessField::Enabled).unwrap();
             let (_, opencode_row) = locate_agent("opencode", HarnessField::Enabled).unwrap();
             let mut app = App::new();
@@ -22625,19 +21226,7 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(!crate::config::Config::load().cursor_enabled);
 
-            for _ in cursor_row..pi_row {
-                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            }
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(!crate::config::Config::load().pi_enabled);
-
-            for _ in pi_row..muse_row {
-                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            }
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(!crate::config::Config::load().muse_enabled);
-
-            for _ in muse_row..grok_row {
+            for _ in cursor_row..grok_row {
                 press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -23341,7 +21930,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: false,
@@ -23867,7 +22455,6 @@ diff --git a/src/c.rs b/src/c.rs
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: sort,
             status_changed_at: 0,
             alive: false,
@@ -25281,18 +23868,18 @@ diff --git a/src/c.rs b/src/c.rs
     /// it.
     #[test]
     fn launcher_pane_edge_drags_the_pane_taller_and_shorter() {
-        use crate::launcher::{pane_height, CARD_H, HEAD_H, PANE_MIN_H};
+        use crate::launcher::{pane_height, GRID_KEEP_H, HEAD_H, PANE_MIN_H};
         let mut app = App::new();
-        // A pane along the bottom, whose edge trades rows; the one beside
-        // the cards has its own drag test in `event_loop::launcher`.
-        app.launcher_pane_at = crate::launcher::PaneSide::Bottom;
-        // Tall enough that the default share, and a drag either side of
-        // it, sit clear of both stops — the stops get their own drags below.
-        let body = ratatui::layout::Rect::new(0, 0, 120, 60);
+        // A pane along the bottom of a window too narrow to stand it
+        // beside the grid, whose edge trades rows; the one beside the grid
+        // has its own drag test in `event_loop::launcher`. Tall enough
+        // that the default share, and a drag either side of it, sit clear
+        // of both stops — the stops get their own drags below.
+        let body = ratatui::layout::Rect::new(0, 0, 70, 60);
         app.launcher_body = body;
         let boundary = body.height - pane_height(body, None).expect("60 rows fits a pane");
         app.hits.push((
-            ratatui::layout::Rect::new(0, boundary - 1, 120, 2),
+            ratatui::layout::Rect::new(0, boundary - 1, 70, 2),
             HitTarget::LauncherPaneSplitter,
         ));
         let mut out = Vec::new();
@@ -25361,7 +23948,10 @@ diff --git a/src/c.rs b/src/c.rs
             mev(MouseEventKind::Drag(MouseButton::Left), 60, 0),
             &mut out,
         );
-        assert_eq!(app.launcher_pane_h, Some(body.height - (HEAD_H + CARD_H)));
+        assert_eq!(
+            app.launcher_pane_h,
+            Some(body.height - (HEAD_H + GRID_KEEP_H))
+        );
 
         // Past the bottom: the pane keeps its own minimum.
         handle_mouse(
@@ -25469,7 +24059,6 @@ diff --git a/src/c.rs b/src/c.rs
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
@@ -25661,7 +24250,6 @@ diff --git a/src/c.rs b/src/c.rs
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: at,
             alive: true,
@@ -28294,7 +26882,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -28320,7 +26907,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: false,
@@ -28684,7 +27270,6 @@ diff --git a/src/c.rs b/src/c.rs
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 5,
             status_changed_at: 500,
             alive: true,
@@ -29168,7 +27753,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -29749,7 +28333,6 @@ diff --git a/src/c.rs b/src/c.rs
                 "Agent",
                 "Focus",
                 "Follow new",
-                "Hide missing CLIs",
                 "Claude accounts",
                 "Claude",
                 "Add account",
@@ -29776,10 +28359,10 @@ diff --git a/src/c.rs b/src/c.rs
                 "the old flat labels are gone:\n{text}"
             );
 
-            // Headers and blanks are not rows the cursor can land on: seven
-            // ↓ from the first row — the head's five, the CLAUDE ACCOUNTS
+            // Headers and blanks are not rows the cursor can land on: six
+            // ↓ from the first row — the head's four, the CLAUDE ACCOUNTS
             // section's two — reach Claude's Enabled row, not a header.
-            for _ in 0..7 {
+            for _ in 0..6 {
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
             let (_, claude_enabled) = locate_agent("claude", HarnessField::Enabled).unwrap();
@@ -30096,111 +28679,6 @@ diff --git a/src/c.rs b/src/c.rs
                 "Claude (a@b.co)"
             );
             assert!(!cfg.harnesses.contains_key("claude"));
-        });
-    }
-
-    /// SAVED ON THIS MACHINE in the overlay: a removed account's dir is
-    /// listed under the accounts with who it is; Enter adds it back under
-    /// the name typed (prefilled from its folder), and `⌫` moves one to
-    /// the Trash behind a confirm.
-    #[test]
-    fn saved_dirs_come_back_or_go_to_the_trash() {
-        with_two_accounts(|root| {
-            std::fs::create_dir_all(root.join(".claude-old")).unwrap();
-            std::fs::write(
-                root.join(".claude-old/.claude.json"),
-                r#"{"oauthAccount": {"emailAddress": "old@b.co"}}"#,
-            )
-            .unwrap();
-            crate::claude_accounts::refresh_now();
-            let bin = root.join(".Trash");
-            let places = crate::paths_util::Places {
-                home: Some(root.to_path_buf()),
-                trash: Some(crate::paths_util::Trash::Mac(bin.clone())),
-                ..Default::default()
-            };
-            crate::paths_util::with_places(places, || {
-                let mut app = App::new();
-                let mut out = Vec::new();
-                // claude, claude-2, Add account, then the saved dir.
-                open_account_row(&mut app, 3, &mut out);
-                let mut terminal = Terminal::new(TestBackend::new(110, 50)).unwrap();
-                terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-                let text = buffer_text(&terminal);
-                for needle in [
-                    "Saved on this machine",
-                    "~/.claude-old",
-                    "[not in orion · signed in as old@b.co]",
-                    "Enter add it back",
-                ] {
-                    assert!(text.contains(needle), "{needle}:\n{text}");
-                }
-
-                // Enter: back as an account, under the name typed.
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                assert!(
-                    matches!(&app.overlay, Some(Overlay::Prompt(p))
-                        if p.kind == PromptKind::AdoptClaudeDir { dir: root.join(".claude-old") }
-                            && p.input.as_str() == "old"),
-                    "{:?}",
-                    app.overlay
-                );
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                type_text(&mut app, "Old Job", &mut out);
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                let cfg = crate::config::Config::load();
-                let back = cfg.claude_accounts.last().unwrap();
-                assert_eq!(
-                    (back.id.as_str(), back.name.as_str()),
-                    ("claude-old", "Old Job")
-                );
-                assert_eq!(back.dir(), root.join(".claude-old"));
-                assert_eq!(
-                    settings_view(&app).selected,
-                    crate::config::AGENTS_HEAD.len() + 2,
-                    "on its own row"
-                );
-                assert!(crate::claude_accounts::on_disk(&cfg).is_empty());
-
-                // Removed again, kept: listed again, and the confirm said so.
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
-                    if c.message.contains("listed under Saved on this machine")));
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                assert_eq!(
-                    crate::claude_accounts::on_disk(&crate::config::Config::load()),
-                    [root.join(".claude-old")]
-                );
-
-                // `⌫` on it: the Trash, behind a confirm; Esc first keeps it.
-                // The removal landed on the section's first row.
-                for _ in 0..3 {
-                    press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
-                }
-                assert_eq!(
-                    settings_view(&app).selected,
-                    crate::config::AGENTS_HEAD.len() + 3
-                );
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
-                    if c.action == PendingAction::TrashClaudeDir { dir: root.join(".claude-old") }
-                        && c.message.contains("its login as old@b.co")));
-                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-                assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
-                assert!(root.join(".claude-old").is_dir());
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
-                assert!(!root.join(".claude-old").exists());
-                assert!(bin.join(".claude-old").is_dir());
-                assert!(crate::claude_accounts::on_disk(&crate::config::Config::load()).is_empty());
-                assert!(
-                    root.join(".claude-2").is_dir(),
-                    "an account's dir never goes"
-                );
-            });
         });
     }
 
@@ -33193,7 +31671,6 @@ diff --git a/src/c.rs b/src/c.rs
                         model: None,
                         effort: None,
                         session_id: None,
-                        cloud_session_id: None,
                         sort_order: 1,
                         status_changed_at: 0,
                         alive: true,
@@ -33270,7 +31747,6 @@ diff --git a/src/c.rs b/src/c.rs
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 1,
             status_changed_at: 0,
             alive: true,
@@ -33918,7 +32394,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -33986,7 +32461,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -34040,6 +32514,19 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// A seeded app with FOCUS on the SESSIONS PANEL and the list open.
+    /// The QUICK PROMPT on screen with an AGENT PRESET on it — what Enter
+    /// on a presets list row opens: the preset's name and where the box
+    /// launches.
+    pub(super) fn preset_box(app: &App) -> Option<(&str, &crate::quick_prompt::QuickTarget)> {
+        let Some(Overlay::Prompt(prompt)) = &app.overlay else {
+            return None;
+        };
+        let PromptKind::QuickPrompt(launch) = &prompt.kind else {
+            return None;
+        };
+        Some((launch.preset.as_ref()?.name.as_str(), &launch.target))
+    }
+
     fn open_presets(app: &mut App, out: &mut Vec<ClientRequest>) {
         seed_tree(app);
         app.focus = Focus::Sessions;
@@ -34819,7 +33306,6 @@ diff --git a/src/c.rs b/src/c.rs
                         model: None,
                         effort: None,
                         session_id: None,
-                        cloud_session_id: None,
                         sort_order: 0,
                         status_changed_at: crate::app::now_ms(),
                         alive: true,
@@ -35414,15 +33900,12 @@ diff --git a/src/c.rs b/src/c.rs
             );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 
-            // Enter launches the filtered row: "scratch" asks for its task.
+            // Enter launches the filtered row: "scratch" on the box.
             type_text(&mut app, "scr", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    &app.overlay,
-                    Some(Overlay::Prompt(p))
-                        if matches!(&p.kind, PromptKind::AgentPresetTask { preset, .. } if preset.name == "scratch")
-                ),
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("scratch"),
                 "{:?}",
                 app.overlay
             );
@@ -35434,12 +33917,9 @@ diff --git a/src/c.rs b/src/c.rs
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let area = list(&app).list_area;
             click(&mut app, area.x + 1, area.y, &mut out);
-            assert!(
-                matches!(
-                    &app.overlay,
-                    Some(Overlay::Prompt(p))
-                        if matches!(&p.kind, PromptKind::AgentPresetTask { preset, .. } if preset.name == "scratch")
-                ),
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("scratch"),
                 "{:?}",
                 app.overlay
             );
@@ -35543,7 +34023,7 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     #[test]
-    fn preset_enter_asks_for_a_task_and_launches_with_the_composed_prompt() {
+    fn preset_enter_opens_the_box_and_launches_with_the_composed_prompt() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
@@ -35551,20 +34031,17 @@ diff --git a/src/c.rs b/src/c.rs
             let worktree = app.selected_worktree().unwrap().id.clone();
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("Enter should ask for the task, got {:?}", app.overlay);
+                panic!("Enter should open the box, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.title, "Task for reviewer");
-            assert!(
-                prompt.label.contains("claude · opus · high"),
-                "{}",
-                prompt.label
+            assert_eq!(
+                prompt.title,
+                "Quick prompt · reviewer (claude · opus · high)"
             );
-            assert!(
-                prompt.label.contains("prefix + your task + postfix"),
-                "{}",
-                prompt.label
+            assert_eq!(
+                prompt.input.as_str(),
+                "Be strict.\n\n\n\nRun the tests.",
+                "the preset's text written round the caret"
             );
-            assert!(prompt.is_multiline());
             assert!(out.is_empty(), "no prewarm for a preset launch: {out:?}");
 
             assert!(paste_into_overlay(&mut app, "Fix auth"));
@@ -35582,7 +34059,6 @@ diff --git a/src/c.rs b/src/c.rs
                         model: Some(model),
                         effort: Some(effort),
                         auto_title: true,
-                        cloud_prompt: None,
                         starting_prompt: Some(text),
                         ..
                     }] if *w == worktree
@@ -35607,20 +34083,25 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert_eq!(app.flash.as_deref(), Some("claude is not installed"));
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("reviewer"),
+                "{:?}",
+                app.overlay
+            );
             assert!(matches!(
                 &app.overlay,
                 Some(Overlay::Prompt(prompt))
-                    if matches!(&prompt.kind, PromptKind::AgentPresetTask { preset, .. } if preset.name == "reviewer")
-                        && prompt.input.as_str() == "Fix auth\nShip it"
+                    if prompt.input.as_str() == "Be strict.\n\nFix auth\nShip it\n\nRun the tests."
             ));
         });
     }
 
-    /// The task is optional: Esc on the box goes back to the list on the
-    /// same row, and an empty Enter launches — prefix + postfix alone for a
-    /// wrapping preset, no STARTING PROMPT at all for a bare one.
+    /// The task is optional: an empty Enter on the box launches — the
+    /// prefix and postfix alone for a wrapping preset, no STARTING PROMPT
+    /// at all for a bare one.
     #[test]
-    fn preset_task_is_optional_and_esc_returns_to_the_list() {
+    fn preset_task_is_optional() {
         with_seeded_presets(|| {
             let mut app = App::new();
             let mut out = Vec::new();
@@ -35628,27 +34109,15 @@ diff --git a/src/c.rs b/src/c.rs
             let worktree = app.selected_worktree().unwrap().id.clone();
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("Enter should ask for the task, got {:?}", app.overlay);
-            };
-            assert_eq!(prompt.title, "Task for scratch");
-            assert!(
-                prompt
-                    .label
-                    .contains("sent as the first prompt (empty = start with no prompt)"),
-                "{}",
-                prompt.label
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("scratch"),
+                "{:?}",
+                app.overlay
             );
-
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            match &app.overlay {
-                Some(Overlay::AgentPresets(view)) => assert_eq!(view.selected, 1, "same row"),
-                other => panic!("Esc goes back to the list, got {other:?}"),
-            }
             assert!(out.is_empty(), "{out:?}");
 
             // The bare preset, sent empty: the CLI starts with no first prompt.
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(
                 app.overlay.is_none(),
@@ -35669,7 +34138,8 @@ diff --git a/src/c.rs b/src/c.rs
                 "one create with no first prompt: {out:?}"
             );
 
-            // The wrapping preset, sent empty: prefix + postfix alone.
+            // The wrapping preset, sent empty: prefix + postfix alone, as
+            // the box shows them round the caret.
             out.clear();
             crate::preset_overlays::reopen_agent_presets(&mut app, worktree, 0);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -35682,7 +34152,7 @@ diff --git a/src/c.rs b/src/c.rs
                         custom_harness: None,
                         starting_prompt: Some(text),
                         ..
-                    }] if text == "Be strict.\n\nRun the tests."
+                    }] if text == "Be strict.\n\n\n\nRun the tests."
                 ),
                 "one create on the wrapping alone: {out:?}"
             );
@@ -35755,7 +34225,7 @@ diff --git a/src/c.rs b/src/c.rs
                 "one create on prefix + postfix: {out:?}"
             );
 
-            // A refused create hands back the (empty) task box rather than
+            // A refused create hands back the (empty) box rather than
             // losing the launch without a word.
             let req_id = match &out[0] {
                 ClientRequest::CreateAgent { req_id, .. } => *req_id,
@@ -35770,11 +34240,12 @@ diff --git a/src/c.rs b/src/c.rs
                 &mut out,
             );
             assert_eq!(app.flash.as_deref(), Some("claude is not installed"));
-            assert!(matches!(
-                &app.overlay,
-                Some(Overlay::Prompt(prompt))
-                    if matches!(&prompt.kind, PromptKind::AgentPresetTask { preset, .. } if preset.skip_task)
-            ));
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("reviewer"),
+                "{:?}",
+                app.overlay
+            );
         });
     }
 
@@ -35828,7 +34299,6 @@ diff --git a/src/c.rs b/src/c.rs
                             model: Some(model),
                             effort: Some(effort),
                             auto_title: true,
-                            cloud_prompt: None,
                             starting_prompt: Some(text),
                             ..
                         }] if *w == worktree
@@ -36193,7 +34663,6 @@ diff --git a/src/c.rs b/src/c.rs
                         kind: AgentKind::Codex,
                         custom_harness: None,
                         auto_title: true,
-                        cloud_prompt: None,
                         starting_prompt: Some(text),
                         ..
                     }] if worktree.0 == "w3" && text == "Fix auth"
@@ -36274,7 +34743,6 @@ diff --git a/src/c.rs b/src/c.rs
                         model: None,
                         effort: None,
                         session_id: None,
-                        cloud_session_id: None,
                         sort_order: 1,
                         status_changed_at: 0,
                         alive: true,
@@ -36361,7 +34829,7 @@ diff --git a/src/c.rs b/src/c.rs
             let (on_claude, lines) = drawn(&mut app);
             let bottom = &lines[(on_claude.y + on_claude.height - 1) as usize];
             assert!(
-                bottom.contains("Enter choose") && bottom.contains("Tab cloud off"),
+                bottom.contains("Enter choose"),
                 "the keys on the bottom border: {bottom}"
             );
             assert!(bottom.contains("Esc back to the box"), "{bottom}");
@@ -36369,15 +34837,12 @@ diff --git a/src/c.rs b/src/c.rs
                 crate::ui::footer::hints(&app).is_empty(),
                 "none in the footer"
             );
-            let footer = lines.last().unwrap();
-            assert!(!footer.contains("cloud"), "{footer}");
 
-            // Down to Codex: Tab is the Claude row's alone, the width holds.
+            // Down to Codex: the width holds.
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             let (on_codex, lines) = drawn(&mut app);
             assert_eq!(on_codex, on_claude, "hovering another row never resizes it");
             let bottom = &lines[(on_codex.y + on_codex.height - 1) as usize];
-            assert!(!bottom.contains("cloud"), "{bottom}");
             assert!(bottom.contains("Esc back to the box"), "{bottom}");
         })
     }
@@ -36444,70 +34909,6 @@ diff --git a/src/c.rs b/src/c.rs
                     }] if *w == worktree && *m == model && text == "Fix auth"
                 ),
                 "the picked harness launches: {out:?}"
-            );
-        });
-    }
-
-    /// `Tab` on the Claude row of the box's own `Tab` picker is the NEW
-    /// AGENT PICKER's cloud toggle: the pick hands back a CLAUDE CLOUD
-    /// box with the text kept, the next `Tab` opens on the toggle as the
-    /// box left it, and Enter sends the text as the cloud task — never as
-    /// a STARTING PROMPT, and with no warm slot consumed or refilled.
-    #[test]
-    fn tab_on_claude_in_the_quick_prompt_picker_launches_in_the_cloud() {
-        with_default_config(|| {
-            let mut app = App::new();
-            let mut out = Vec::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let worktree = app.selected_worktree().unwrap().id.clone();
-
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(paste_into_overlay(&mut app, "Fix auth"));
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("Tab should toggle the row in place, got {:?}", app.overlay);
-            };
-            assert_eq!(menu.title.as_deref(), Some("Quick prompt agent"));
-            assert_eq!(menu.items[menu.hover].label, "Claude · cloud");
-            assert_eq!(menu.hovered_claude_cloud(), Some(true));
-
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the pick should hand the box back, got {:?}", app.overlay);
-            };
-            assert_eq!(prompt.input.as_str(), "Fix auth", "the text came back");
-            assert_eq!(prompt.title, "Quick prompt (claude · cloud)");
-            assert!(out.is_empty(), "nothing sent yet: {out:?}");
-
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(menu.hovered_claude_cloud(), Some(true), "opens as left");
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert!(
-                matches!(
-                    out.as_slice(),
-                    [ClientRequest::CreateAgent {
-                        worktree: w,
-                        kind: AgentKind::Claude,
-                        custom_harness: None,
-                        cloud_prompt: Some(task),
-                        starting_prompt: None,
-                        ..
-                    }] if *w == worktree && task == "Fix auth"
-                ),
-                "a cloud launch, no prewarm behind it: {out:?}"
             );
         });
     }
@@ -37593,8 +35994,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// starts the session the title names — that harness, model and
     /// effort — with no first prompt, the CLI's own input being it, as
     /// `n` does. The create carries no task and the stand-in row goes up
-    /// fresh, since nothing is on its way to the CLI. Only a CLAUDE CLOUD
-    /// box, which cannot start without its task, closes instead.
+    /// fresh, since nothing is on its way to the CLI.
     #[test]
     fn an_empty_quick_prompt_starts_the_cli_with_no_first_prompt() {
         with_default_config(|| {
@@ -37626,7 +36026,6 @@ diff --git a/src/c.rs b/src/c.rs
                         ClientRequest::CreateAgent {
                             worktree: w,
                             kind: AgentKind::Claude,
-                            cloud_prompt: None,
                             starting_prompt: None,
                             issue_url: None,
                             ..
@@ -37641,30 +36040,6 @@ diff --git a/src/c.rs b/src/c.rs
                 Some(orion_core::AgentStatus::Fresh),
                 "the stand-in row goes up fresh: no prompt is on its way"
             );
-
-            // The cloud box is the one that cannot: there is nothing to
-            // send as the task.
-            out.clear();
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!(
-                    "the pick should hand a cloud box back, got {:?}",
-                    app.overlay
-                );
-            };
-            assert_eq!(prompt.title, "Quick prompt (claude · cloud)");
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(app.overlay.is_none(), "{:?}", app.overlay);
-            assert_eq!(app.flash, None);
-            assert!(out.is_empty(), "a cloud box needs its task: {out:?}");
         });
     }
 
@@ -38199,11 +36574,14 @@ diff --git a/src/c.rs b/src/c.rs
             };
             assert!(list.width > 0, "drawn list rect recorded");
             click(&mut app, list.x + 1, list.y + 1, &mut out);
-            match &app.overlay {
-                Some(Overlay::Prompt(prompt)) => assert_eq!(prompt.title, "Task for scratch"),
-                other => panic!("a click on the second row launches it, got {other:?}"),
-            }
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                preset_box(&app).map(|(name, _)| name),
+                Some("scratch"),
+                "a click on the second row launches it: {:?}",
+                app.overlay
+            );
+            app.overlay = None;
+            out.extend(run_action(&mut app, crate::keymap::Action::AgentPresets));
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             assert!(matches!(&app.overlay, Some(Overlay::AgentPresets(_))));
             click(&mut app, 0, 0, &mut out);
@@ -38647,8 +37025,8 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// No image on the clipboard: the footer says so and the box is left
-    /// as it was; and a box whose text goes nowhere local (a cloud
-    /// message, a rename) leaves `^V` alone altogether.
+    /// as it was; and a box whose text goes nowhere local (a rename)
+    /// leaves `^V` alone altogether.
     #[test]
     fn ctrl_v_with_no_image_says_so_and_pastes_nothing() {
         let root = tempfile::tempdir().unwrap();
@@ -38834,9 +37212,8 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// A box with text of its own — a refused launch handed back — keeps
-    /// that text and leaves the draft on disk alone; and the boxes that
-    /// are not the QUICK PROMPT (a preset's task, the FOLLOW-UP) never
-    /// open on it.
+    /// that text and leaves the draft on disk alone; and the FOLLOW-UP,
+    /// which is not the QUICK PROMPT, never opens on it.
     #[test]
     fn the_draft_never_lands_in_a_box_with_text_of_its_own() {
         with_seeded_presets(|| {
@@ -38856,12 +37233,6 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(box_text(&app), "refused");
             assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if !p.draft_restored));
             assert_eq!(saved_text(&path), "my draft");
-            app.overlay = None;
-
-            let worktree = app.selected_worktree().unwrap().id.clone();
-            let preset = crate::agent_presets::load().into_iter().next().unwrap();
-            open_prompt(&mut app, PromptKind::AgentPresetTask { worktree, preset });
-            assert_eq!(box_text(&app), "");
             app.overlay = None;
 
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
@@ -39015,7 +37386,6 @@ diff --git a/src/c.rs b/src/c.rs
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 1,
                     alive: true,
@@ -39131,14 +37501,15 @@ diff --git a/src/c.rs b/src/c.rs
                 }
                 let mut out = Vec::new();
                 // Onto the reaped session: shown, the attach still waiting.
-                // `h` along the band onto it: the newest card leads the
-                // row, so the reaped one sits left of the cursor's.
+                // Down the band's lines onto it, or back up if it is above.
                 let reaped = AgentId("a2".into());
-                for _ in 0..crate::launcher::rows(&app).len() {
-                    if app.selected_session().map(|a| a.id) == Some(reaped.clone()) {
-                        break;
+                for code in [KeyCode::Down, KeyCode::Up] {
+                    for _ in 0..crate::launcher::rows(&app).len() {
+                        if app.selected_session().map(|a| a.id) == Some(reaped.clone()) {
+                            break;
+                        }
+                        press(&mut app, code, KeyModifiers::NONE, &mut out);
                     }
-                    press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
                 }
                 assert_eq!(
                     app.selected_session().map(|a| a.id),

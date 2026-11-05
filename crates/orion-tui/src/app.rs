@@ -105,9 +105,6 @@ pub enum HitTarget {
     /// The GRID's background (registered after the cards, so they win).
     PanelBg(Focus),
     TerminalPane,
-    /// The session URL on the CLOUD SESSION PANEL; a click opens it in the
-    /// browser. Registered ahead of the pane it sits on, so it wins.
-    CloudSessionLink,
     /// A card in the LAUNCHER VIEW's GRID — a session or a terminal — by
     /// its place in `launcher::bands`: a click lands the cursor on it,
     /// inside its worktree.
@@ -125,26 +122,6 @@ pub enum HitTarget {
     /// The STACK MARK `⬡` at a band's right end, registered ahead of the
     /// rule so it wins: a click opens the Stacks modal on that stack.
     LauncherBandStack(WorktreeId),
-    /// The ISSUE NUMBER on a session's card — its `#15`, drawn while the
-    /// `card_issue_number` setting is on — by the card's session,
-    /// registered ahead of the card, so it wins: a click lands the cursor
-    /// on the card and opens the issue in the browser, through the very
-    /// `launcher::open_issue` `⇧I` runs. Only as wide as its text, so the
-    /// rest of the card is still the card's.
-    LauncherCardIssue(AgentId),
-    /// The `❮` / `❯` beside a BAND's row of cards on the grid, by the
-    /// band's place in `launcher::bands` — drawn only while the row has
-    /// cards off that edge: a click steps the cursor one card that way
-    /// along the band, the very step `h` / `l` take on it
-    /// (`event_loop::launcher::walk_band`).
-    LauncherStripLeft(usize),
-    LauncherStripRight(usize),
-    /// The `▾ 6 more · Tab: see all 8` under a collapsed BAND's row that
-    /// left cards off its edges, by the band's place in
-    /// `launcher::bands`: a click puts the cursor on the band and opens
-    /// it as the ACCORDION, the very toggle Tab runs
-    /// (`event_loop::launcher::click_band_more`).
-    LauncherBandMore(usize),
     /// The `▸ 3 archived` line under a BAND, by the band's place in
     /// `launcher::bands`: a click puts the cursor on the band and folds
     /// or unfolds its ARCHIVED DRAWER, as `z` does
@@ -185,11 +162,6 @@ pub enum HitTarget {
     /// the pane away, the same `event_loop::launcher::toggle_pane` `^~`
     /// runs.
     LauncherPaneClose,
-    /// The SIDE BUTTON just before it: a click moves the pane to the
-    /// other side of the cards — under them to the right, the right back
-    /// under them — by writing Settings → Appearance → **Session pane**
-    /// (`event_loop::launcher::move_pane`).
-    LauncherPaneSide,
     /// The FULL-SCREEN BUTTON before those in the pane's header, and the
     /// NORMAL-SIZE BUTTON at the right end of a full-screen session's: a
     /// click toggles between the two, the same
@@ -307,9 +279,6 @@ pub fn clamp_files_width(area: Rect, boundary_x: i32) -> Option<u16> {
 pub enum MenuAction {
     Attach(SessionRef),
     RestartAgent(AgentId),
-    /// Queue a message on the row's Claude Cloud session
-    /// (`ClientRequest::SendCloudMessage`), via a prompt.
-    SendCloudMessage(AgentId),
     RenameAgent(AgentId),
     ArchiveAgent(AgentId),
     UnarchiveAgent(AgentId),
@@ -329,13 +298,10 @@ pub enum MenuAction {
         custom: Option<String>,
         model: Option<String>,
         effort: Option<String>,
-        /// One-shot launch modifier for Claude. The task itself is collected
-        /// in the CLOUD TASK box and crosses IPC only on create.
-        cloud: bool,
         /// OPEN PRS launch context (a PR SESSION): the pull request and
         /// the head branch its worktree is checked out on. Valid for every
-        /// local kind, never with `cloud`, and preserved through
-        /// model/effort submenus and the name prompt.
+        /// kind, and preserved through model/effort submenus and the name
+        /// prompt.
         pr: Option<crate::pull_request::PrLaunch>,
         /// Set when the picker was opened from the QUICK PROMPT's `Tab`:
         /// the box to put back (with its typed text) instead of creating a
@@ -606,43 +572,6 @@ impl ContextMenu {
             .any(|i| matches!(i.action, MenuAction::PickLaunchWorktree { .. }))
     }
 
-    /// Cloud mode is a launch modifier, not another agent kind. Returning
-    /// Some only while a Claude row is highlighted keeps Tab free
-    /// everywhere else: the picker's Claude row, and every row of the
-    /// Claude MODEL / EFFORT lists under it — reached with `→`, or opened
-    /// straight onto by the box's Select model and its effort field.
-    /// Two pickers offer it: the NEW AGENT PICKER (its
-    /// [`crate::agent_picker::NEW_AGENT_PICKER_TITLE`] is the gate — the PR SESSION picker and a PR row's menu share
-    /// these rows but never launch cloud, the daemon refusing a PR launch
-    /// with a cloud task) and the QUICK PROMPT's `Tab` picker, whose pick
-    /// makes the box a cloud one — unless the box is for an issue or a PR
-    /// (`QuickLaunch::takes_cloud`).
-    pub fn hovered_claude_cloud(&self) -> Option<bool> {
-        let mut root = self;
-        while let Some(parent) = &root.parent {
-            root = parent;
-        }
-        match &self.items.get(self.hover)?.action {
-            MenuAction::NewAgentOfKind {
-                kind: AgentKind::Claude,
-                custom: None,
-                cloud,
-                pr: None,
-                quick,
-                ..
-            } => {
-                let offered = match quick {
-                    Some(back) => back.launch.takes_cloud(),
-                    None => {
-                        root.title.as_deref() == Some(crate::agent_picker::NEW_AGENT_PICKER_TITLE)
-                    }
-                };
-                offered.then_some(*cloud)
-            }
-            _ => None,
-        }
-    }
-
     /// The harnessed launch under the cursor, if the hovered row starts
     /// one: the NEW AGENT PICKER, its PR sibling, the quick prompt
     /// picker, and their model/effort submenus all carry it. Gates the
@@ -653,71 +582,7 @@ impl ContextMenu {
             _ => None,
         }
     }
-
-    /// Toggle cloud for the launch the highlighted Claude row belongs to
-    /// and keep the state visible. False means Tab did not belong to this
-    /// menu/row.
-    pub fn toggle_hovered_claude_cloud(&mut self) -> bool {
-        let Some(on) = self.hovered_claude_cloud() else {
-            return false;
-        };
-        self.set_claude_cloud(!on);
-        true
-    }
-
-    /// Cloud is the whole launch's, not one row's: every Claude row of
-    /// this menu takes `on` — the rows a filter has narrowed away too, so
-    /// typing never undoes it — and so do the menus `←` backs out to, so
-    /// the picker's Claude row agrees with the list drilled from it. The
-    /// picker's row says so in its label (`Claude · cloud`); a model or
-    /// effort row keeps its own name, and the list's title carries it
-    /// instead ([`ContextMenu::lists_claude_cloud`]).
-    fn set_claude_cloud(&mut self, on: bool) {
-        let narrowed = self.filter.iter_mut().flat_map(|f| f.all.iter_mut());
-        for item in self.items.iter_mut().chain(narrowed) {
-            let MenuAction::NewAgentOfKind {
-                kind: AgentKind::Claude,
-                custom: None,
-                model,
-                cloud,
-                ..
-            } = &mut item.action
-            else {
-                continue;
-            };
-            *cloud = on;
-            if model.is_none() {
-                let name = item.label.strip_suffix(CLOUD_LABEL).unwrap_or(&item.label);
-                item.label = if on {
-                    format!("{name}{CLOUD_LABEL}")
-                } else {
-                    name.to_string()
-                };
-            }
-        }
-        if let Some(parent) = &mut self.parent {
-            parent.set_claude_cloud(on);
-        }
-    }
-
-    /// Is this a MODEL / EFFORT list whose pick launches in the cloud? Its
-    /// rows are model and effort names, so the title is where it shows.
-    pub fn lists_claude_cloud(&self) -> bool {
-        self.items.iter().any(|item| {
-            matches!(
-                &item.action,
-                MenuAction::NewAgentOfKind {
-                    model: Some(_),
-                    cloud: true,
-                    ..
-                }
-            )
-        })
-    }
 }
-
-/// What a row or a title wears while its launch is a CLAUDE CLOUD one.
-pub(crate) const CLOUD_LABEL: &str = " · cloud";
 
 /// Destructive action waiting behind a confirmation.
 #[derive(Debug, Clone, PartialEq)]
@@ -799,12 +664,6 @@ pub enum PendingAction {
     RemoveClaudeAccount {
         id: String,
     },
-    /// `⌫` on a dir SAVED ON THIS MACHINE: move it — its login and
-    /// transcripts with it — to the Trash. Every answer reopens the
-    /// settings overlay.
-    TrashClaudeDir {
-        dir: std::path::PathBuf,
-    },
     Quit,
     /// **Restart orion** (`⌘⇧R`): quit, stop the daemon and every session
     /// in it, and start the binary again (`App::restart`).
@@ -844,7 +703,6 @@ impl PendingAction {
                 | PendingAction::AddClaudeAccount(_)
                 | PendingAction::SignOutClaude { .. }
                 | PendingAction::RemoveClaudeAccount { .. }
-                | PendingAction::TrashClaudeDir { .. }
         )
     }
 }
@@ -876,22 +734,6 @@ pub enum PromptKind {
         /// empty input, so the name offered is the name created.
         suggestion: String,
     },
-    /// Final task input for a one-shot `claude --cloud <task>` launch,
-    /// opened straight from the picker's `Claude · cloud` row. Multi-row:
-    /// Shift+Enter inserts task newlines where the one-line prompts submit.
-    ClaudeCloudTask {
-        worktree: WorktreeId,
-        name: String,
-        model: Option<String>,
-        effort: Option<String>,
-    },
-    /// The task for an AGENT PRESET launch: Enter composes
-    /// `prefix + task + postfix` into the CLI's starting prompt. Multi-row
-    /// like the cloud task — a framed request is rarely one line.
-    AgentPresetTask {
-        worktree: WorktreeId,
-        preset: crate::agent_presets::AgentPreset,
-    },
     /// The QUICK PROMPT's task: one multi-row box, opened by its hotkey
     /// from anywhere, that launches an AGENT in the selected WORKTREE with
     /// the typed text as its STARTING PROMPT. It carries the whole launch
@@ -900,12 +742,6 @@ pub enum PromptKind {
     /// / `Shift+Tab` pickers. The NEW AGENT PICKER never ends here: its
     /// pick creates the session outright.
     QuickPrompt(crate::quick_prompt::QuickLaunch),
-    /// A message to queue on a row's Claude Cloud session
-    /// (`claude -p <message> --cloud <id>`). Multi-row like the launch task:
-    /// steering a cloud agent is rarely one line.
-    CloudMessage {
-        id: AgentId,
-    },
     /// The next turn for a session already running, typed into a small
     /// modal and sent straight down that session's PTY — the LAUNCHER
     /// VIEW's follow-up, where the SESSIONS PANEL expands the card itself
@@ -919,9 +755,9 @@ pub enum PromptKind {
     /// A comment to post on the pull request under the cursor — a
     /// PROJECT OPEN PRS GROUP row or the Sessions panel's PR ROW — with
     /// `gh pr comment` (`y`, or **Comment…** from the row's menu).
-    /// Multi-row like the cloud message: a review note is rarely one
-    /// line, and it is markdown. Carries the pull request the box was
-    /// opened on, so Enter posts where the title said it would.
+    /// Multi-row: a review note is rarely one line, and it is markdown.
+    /// Carries the pull request the box was opened on, so Enter posts where
+    /// the title said it would.
     PrComment {
         number: u64,
         url: String,
@@ -988,24 +824,16 @@ pub enum PromptKind {
     RenameClaudeAccount {
         id: String,
     },
-    /// Enter on a dir SAVED ON THIS MACHINE: the name to add it back under,
-    /// prefilled from its folder (`~/.claude-work` → `work`). Enter adds
-    /// it, dir and login as they are; Esc puts the overlay back.
-    AdoptClaudeDir {
-        dir: std::path::PathBuf,
-    },
 }
 
 impl PromptKind {
     /// Does this box's text become a turn for an agent on this machine —
-    /// one that can open a file path written into it? A cloud session
-    /// can't, and the rest aren't prompts at all.
+    /// one that can open a file path written into it? The rest aren't
+    /// prompts at all.
     pub fn reaches_local_agent(&self) -> bool {
         matches!(
             self,
-            PromptKind::QuickPrompt(_)
-                | PromptKind::AgentPresetTask { .. }
-                | PromptKind::FollowUp { .. }
+            PromptKind::QuickPrompt(_) | PromptKind::FollowUp { .. }
         )
     }
 
@@ -1015,8 +843,6 @@ impl PromptKind {
     /// one of its own.
     pub fn worktree_mut(&mut self) -> Option<&mut WorktreeId> {
         match self {
-            PromptKind::ClaudeCloudTask { worktree, .. }
-            | PromptKind::AgentPresetTask { worktree, .. } => Some(worktree),
             PromptKind::QuickPrompt(launch) => launch.worktree_mut(),
             _ => None,
         }
@@ -1100,18 +926,14 @@ impl PromptDialog {
         matches!(self.kind, PromptKind::AddProject)
     }
 
-    /// The task prompts — the Claude Cloud launch task, a message to a live
-    /// cloud session, an AGENT PRESET's task and the QUICK PROMPT — an
+    /// The task prompts — the QUICK PROMPT and the FOLLOW-UP — an
     /// issue comment, and a typed setting that runs over lines (the Linear
     /// task template) are the ones with a multi-row editor.
     pub fn is_multiline(&self) -> bool {
         matches!(
             self.kind,
-            PromptKind::ClaudeCloudTask { .. }
-                | PromptKind::CloudMessage { .. }
-                | PromptKind::FollowUp { .. }
+            PromptKind::FollowUp { .. }
                 | PromptKind::PrComment { .. }
-                | PromptKind::AgentPresetTask { .. }
                 | PromptKind::QuickPrompt { .. }
                 | PromptKind::IssueComment { .. }
         )
@@ -2448,7 +2270,6 @@ pub struct AgentLaunchDraft {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub name: String,
-    pub cloud_prompt: Option<String>,
     /// An AGENT PRESET launch's composed first prompt (see
     /// `ClientRequest::CreateAgent::starting_prompt`).
     pub starting_prompt: Option<String>,
@@ -2507,7 +2328,6 @@ impl AgentLaunchDraft {
             model,
             effort,
             name: String::new(),
-            cloud_prompt: None,
             starting_prompt: None,
             reopen_on_error: None,
             pr: None,
@@ -2535,23 +2355,15 @@ pub enum PendingIntent {
         /// into the created row, an Error drops it.
         placeholder: Option<AgentId>,
     },
-    /// Attach on success; on failure, reopen the exact Cloud task so a
-    /// transient daemon/CLI error never makes the user retype it.
-    AttachCreatedWithCloudRetry {
+    /// Attach on success; on failure, reopen the box the task was typed
+    /// into so a transient daemon/CLI error never makes the user retype it.
+    AttachCreatedWithRetry {
         kind: PromptKind,
         task: String,
         focus: bool,
         /// The stand-in session row a QUICK PROMPT put up for this create:
         /// the Ack turns it into the created row, an Error drops it.
         placeholder: Option<AgentId>,
-    },
-    /// Flash `note` on success; on failure, reopen this prompt with `text`
-    /// restored. Same bargain as the Cloud task: a message worth typing into
-    /// a multi-row editor is worth not losing to a transient error.
-    ReopenPromptOnError {
-        kind: PromptKind,
-        text: String,
-        note: String,
     },
     /// A follow-up `text` sent to agent `id` (`ClientRequest::SendTurn`).
     /// The Ack says it went — and, when the session was `booting`, that
@@ -2659,7 +2471,7 @@ impl PendingIntent {
     pub fn follows(&self) -> bool {
         match self {
             PendingIntent::AttachCreated { .. }
-            | PendingIntent::AttachCreatedWithCloudRetry { .. }
+            | PendingIntent::AttachCreatedWithRetry { .. }
             | PendingIntent::AttachCreatedPrSession { .. }
             | PendingIntent::LaunchInCreatedWorktree { .. }
             | PendingIntent::SelectCreatedProject => true,
@@ -2685,7 +2497,7 @@ impl PendingIntent {
         match self {
             PendingIntent::LaunchInCreatedWorktree { placeholder, .. }
             | PendingIntent::AttachCreatedPrSession { placeholder, .. } => Some(&placeholder.agent),
-            PendingIntent::AttachCreatedWithCloudRetry { placeholder, .. }
+            PendingIntent::AttachCreatedWithRetry { placeholder, .. }
             | PendingIntent::AttachCreated { placeholder, .. } => placeholder.as_ref(),
             PendingIntent::SelectCreatedWorktree { launch, .. } => {
                 launch.as_ref().and_then(|draft| draft.placeholder.as_ref())
@@ -3071,10 +2883,7 @@ pub fn unread_finish(agent: &Agent) -> bool {
 /// asking stopped being true with the process, so the row draws gray and
 /// still, and counts on no PROJECT TAB.
 pub fn drawn_cold(agent: &Agent) -> bool {
-    !agent.alive
-        && agent.cloud_session_id.is_none()
-        && agent.status != AgentStatus::Terminated
-        && !unread_finish(agent)
+    !agent.alive && agent.status != AgentStatus::Terminated && !unread_finish(agent)
 }
 
 /// A session put up as working before any PTY is behind it: a QUICK
@@ -3082,7 +2891,7 @@ pub fn drawn_cold(agent: &Agent) -> bool {
 /// filed. A real row is never running without its process for longer
 /// than the daemon takes to say so.
 fn starting(agent: &Agent) -> bool {
-    agent.status == AgentStatus::Running && !agent.alive && agent.cloud_session_id.is_none()
+    agent.status == AgentStatus::Running && !agent.alive
 }
 
 /// A session that is mid-turn or blocked on the user. These count as
@@ -3286,19 +3095,6 @@ impl Tree {
 pub struct TermCallbacks {
     /// Base64 payload of the latest OSC 52 write, until drained.
     pub clipboard: Option<String>,
-}
-
-/// The last lines a TERMINAL printed, as its card on the grid shows them
-/// (`launcher_view::draw_chip`): the end of its ring, asked of the daemon on
-/// the grid's beat (`event_loop::request_terminal_tails`) and laid out
-/// through a throwaway screen (`terminal_tail::parse_tail`), each row in
-/// the colours it was printed in. `end_seq` is the ring end the lines
-/// came from, sent back with the next ask so an idle terminal answers
-/// with nothing.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TerminalTail {
-    pub lines: Vec<crate::terminal_tail::TailRow>,
-    pub end_seq: u64,
 }
 
 impl vt100::Callbacks for TermCallbacks {
@@ -3533,18 +3329,6 @@ pub struct UiState {
     /// blobs, which open with it showing.
     #[serde(default)]
     pub launcher_pane_hidden: bool,
-    /// The band left open as the ACCORDION
-    /// ([`App::launcher_expanded`]), by its worktree id; absent, or None,
-    /// in blobs saved before there was one, which open with every band
-    /// collapsed.
-    #[serde(default)]
-    pub launcher_expanded: Option<String>,
-    /// The band every project was left with open
-    /// ([`App::launcher_open_bands`]), project id to worktree id, the one
-    /// on screen included; absent in older blobs, which remember only
-    /// the one in `launcher_expanded`.
-    #[serde(default)]
-    pub launcher_open_bands: HashMap<String, String>,
     /// The LAUNCHER VIEW's PROJECT TABS, by project id, far left first;
     /// absent in older blobs, which open with the one project restored.
     #[serde(default)]
@@ -3705,18 +3489,6 @@ pub struct PreviewedPr {
     pub url: String,
     /// Row text, `#42 title` — what the pane says while the body loads.
     pub label: String,
-}
-
-/// The Claude Cloud row the pane is describing (`App::previewed_cloud`):
-/// enough to title the CLOUD SESSION PANEL and open the session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloudPreview {
-    pub id: AgentId,
-    pub name: String,
-    /// The `session_…` id the create printed.
-    pub cloud_session_id: String,
-    /// The session's page on claude.ai.
-    pub url: String,
 }
 
 /// How recently a project's open-PR list may have been fetched and still be
@@ -3888,8 +3660,8 @@ pub struct FollowUp {
 /// from — one frame (`ui::draw`), one [`App::reading_url`].
 ///
 /// A frame asks a dozen times: the grid and the pane's strip for the card
-/// under the cursor, the pane for whether it is reading a pull request,
-/// an issue or a cloud row, the footer for its breadcrumb. Every asking
+/// under the cursor, the pane for whether it is reading a pull request
+/// or an issue, the footer for its breadcrumb. Every asking
 /// re-sorted the projects and the selected project's checkouts from a
 /// roll-up of every session on the machine, and cloned the checkout's
 /// session rows to hand back one of them — on a machine with a few
@@ -4010,14 +3782,6 @@ pub struct App {
     /// reaped or exited one comes back as a new process whose ring starts
     /// over, and a QUICK PROMPT stand-in never had a PTY.
     pub term_cache: Vec<AttachedTerm>,
-    /// What each TERMINAL was last seen printing, by id, for its card on
-    /// the grid ([`TerminalTail`]). A terminal that exited keeps its last
-    /// lines: they are what it was doing when it went.
-    pub terminal_tails: HashMap<TerminalId, TerminalTail>,
-    /// The terminals whose cards the last frame drew, in the order drawn:
-    /// the ones the grid's beat asks the daemon about. Cleared with `hits`
-    /// at the top of every frame, so a folded grid asks after none.
-    pub tail_cards: Vec<TerminalId>,
     /// Input lock: keys forward to the attached PTY. Focusing the terminal
     /// pane alone (Tab / arrows) does NOT lock — Enter or a click does.
     pub term_locked: bool,
@@ -4147,25 +3911,6 @@ pub struct App {
     /// kept apart from it so switching sides never reads a height as a
     /// width. Re-clamped the same way (`launcher::pane_width`).
     pub launcher_pane_w: Option<u16>,
-    /// Where the PANE sits against the GRID — along the bottom, or down
-    /// the right side — as Settings → Appearance → **Session pane** has it
-    /// (`event_loop::apply_config`). What a frame lays out
-    /// is [`App::launcher_pane_side`], which falls back to the bottom on a
-    /// window too narrow to stand the pane beside the cards.
-    pub launcher_pane_at: crate::launcher::PaneSide,
-    /// Each BAND is the compact LIST — its sessions stacked a line apiece,
-    /// the most recent few until Tab opens the rest — rather than its row
-    /// of cards: Settings → Appearance → **Worktree layout**
-    /// (`event_loop::apply_config`). What a frame lays out is
-    /// [`App::panel_layout`].
-    pub launcher_list: bool,
-    /// Every BAND is laid out open at once — its cards wrapped into rows,
-    /// or every entry of the LIST listed — and there is no ACCORDION:
-    /// Settings → Appearance → **Expand all worktrees**
-    /// (`event_loop::apply_config`). [`App::launcher_expanded`] is kept
-    /// as it was but read by nothing while this is on, so switching it
-    /// off brings back the band that was open.
-    pub launcher_all_open: bool,
     /// The LAUNCHER VIEW's PANE is folded away (`^~`): the GRID takes the
     /// whole body and no session is read under it. Hiding it also lets
     /// the card under the cursor go (`event_loop::launcher::toggle_pane`
@@ -4173,27 +3918,10 @@ pub struct App {
     /// on their own — nothing selected, nothing being read. It is
     /// remembered across restarts with the pane's height.
     pub launcher_pane_hidden: bool,
-    /// The one BAND open as an ACCORDION, its cards wrapped into rows
-    /// under its rule instead of the one-row STRIP a collapsed band
-    /// shows (`Tab`, `event_loop::launcher::toggle_band_expand`). At
-    /// most one at a time: opening another closes this one first. None
-    /// at the top, where every band is the collapsed row. Remembered
-    /// across restarts, so a project reopens with the checkout it was
-    /// left looking into still open.
-    pub launcher_expanded: Option<WorktreeId>,
-    /// The band each OTHER project was left with open, by project: a
-    /// switch files [`App::launcher_expanded`] away under the project
-    /// being left and brings back the one the new project had
-    /// (`event_loop::carry_open_band`), so switching away and back finds
-    /// the band still open, whatever was opened elsewhere in between.
-    /// Remembered across restarts with the one on screen.
-    pub launcher_open_bands: HashMap<ProjectId, WorktreeId>,
     /// How far the whole GRID is scrolled: rows of its panel layout
     /// (`launcher::panel_layout`) above the window's top edge, the way a
-    /// terminal's screen scrolls through its history. Collapsed bands
-    /// never push the panel past one screen on their own, but the one
-    /// OPEN band can, so the whole list — not just that band — scrolls
-    /// as one. The wheel moves it a few rows a notch
+    /// terminal's screen scrolls through its history, the whole list as
+    /// one. The wheel moves it a few rows a notch
     /// (`event_loop::launcher::wheel_grid`) and the cursor stays where
     /// it is — a trackpad never swaps the pane out from under the card
     /// being read; a cursor move pulls it just far enough to bring the
@@ -4212,10 +3940,6 @@ pub struct App {
     /// The card the scroll last kept on screen: a frame that finds the
     /// cursor on another one scrolls to that, wheel or no wheel.
     pub launcher_scroll_on: Option<SessionRef>,
-    /// Which band's cards the scroll last settled a reveal against:
-    /// opening a different one as the ACCORDION starts its reveal fresh
-    /// rather than wherever the last one's scroll was left.
-    pub launcher_scroll_in: Option<WorktreeId>,
     /// A key asked for the cursor's card whether or not the cursor moved
     /// (`j` against the grid's edge after a wheel away, a landing on the
     /// card already selected): the next frame scrolls to it.
@@ -4879,17 +4603,6 @@ pub struct App {
     /// (`launcher::bands`). Mirrors the config, refreshed at startup and
     /// when the settings overlay applies a change.
     pub show_all_worktrees: bool,
-    /// The `hide_card_marks` setting: a terminal card's name goes without
-    /// the `▶`/`❯` in front of it (`launcher_view::draw_chip`), a session
-    /// card's prompt without its `›` (`launcher_view::prompt_lines`).
-    /// Mirrors the config, refreshed at startup and when the settings
-    /// overlay applies a change.
-    pub hide_card_marks: bool,
-    /// The `highlight_current_card` setting: the cursor's card is washed
-    /// faintly in its status color instead of the gray fill
-    /// (`launcher_view::card_tint`). Mirrors the config, refreshed at
-    /// startup and when the settings overlay applies a change.
-    pub highlight_current_card: bool,
     /// The ROWS MEMO, armed by the frame and by [`App::reading_url`].
     pub rows_memo: RowsMemo,
 }
@@ -4914,8 +4627,6 @@ impl App {
             follow_up: None,
             term: None,
             term_cache: Vec::new(),
-            terminal_tails: HashMap::new(),
-            tail_cards: Vec::new(),
             term_locked: false,
             conn: ConnState::Disconnected,
             hits: Vec::new(),
@@ -4951,16 +4662,10 @@ impl App {
             mark_anchor: None,
             launcher_pane_h: None,
             launcher_pane_w: None,
-            launcher_pane_at: crate::launcher::PaneSide::default(),
-            launcher_list: false,
-            launcher_all_open: false,
             launcher_pane_hidden: false,
-            launcher_expanded: None,
-            launcher_open_bands: HashMap::new(),
             launcher_scroll: 0,
             launcher_scroll_held: false,
             launcher_scroll_on: None,
-            launcher_scroll_in: None,
             launcher_reveal: false,
             launcher_pane_drag: None,
             launcher_tab_drag: None,
@@ -5118,8 +4823,6 @@ impl App {
             card_issue_number: false,
             show_all_worktrees: false,
             black_background: false,
-            hide_card_marks: false,
-            highlight_current_card: false,
             rows_memo: RowsMemo::default(),
         }
     }
@@ -5557,84 +5260,30 @@ impl App {
         !self.launcher_unaimed
     }
 
-    /// The band OPEN as the ACCORDION ([`App::launcher_expanded`]), while
-    /// the checkout it names still has a band on this grid. None with
-    /// every band collapsed, and none while the open checkout is another
-    /// project's, or has nothing running in it any more. None too with
-    /// every band open ([`App::launcher_all_open`]): there is no
-    /// accordion then, so nothing for Esc to close.
-    pub fn open_band(&self, bands: &[crate::launcher::Band]) -> Option<usize> {
-        if self.launcher_all_open {
-            return None;
-        }
-        let open = self.launcher_expanded.as_ref()?;
-        bands.iter().position(|b| &b.worktree == open)
-    }
-
-    /// The band the cursor is on, when it is also the one OPEN as the
-    /// ACCORDION — so its cards walk as rows rather than as the collapsed
-    /// STRIP's single row. None with the cursor on a collapsed band: the
-    /// open one's cards stay open on screen, but the keys are walking
-    /// somewhere else.
-    pub fn cursor_in_open_band(&self, bands: &[crate::launcher::Band]) -> Option<usize> {
-        let index = crate::launcher::band_cursor(self, bands)?;
-        (self.open_band(bands) == Some(index)).then_some(index)
-    }
-
-    /// The whole GRID laid out the way this frame draws it: the bands'
-    /// rows of cards with the ACCORDION's one open
-    /// (`launcher::panel_layout`), or, in the compact LIST
-    /// ([`App::launcher_list`]), every band's entries stacked under its
-    /// rule, the cursor's card among them wherever it sits
-    /// (`launcher::list_panel_layout`). With every band open
-    /// ([`App::launcher_all_open`]) each is laid out as the open one is
-    /// (`launcher::open_panel_layout`). The draw, the wheel and the keys
-    /// all read this one, so what `j`/`k` walk is what is on screen.
+    /// The whole GRID laid out the way this frame draws it: every band's
+    /// entries stacked under its rule (`launcher::panel_layout`). The
+    /// draw, the wheel and the keys all read this one, so what `j`/`k`
+    /// walk is what is on screen.
     pub fn panel_layout(&self, bands: &[crate::launcher::Band]) -> crate::launcher::PanelLayout {
-        if self.launcher_list {
-            crate::launcher::list_panel_layout(
-                self.body_area,
-                bands,
-                self.launcher_expanded
-                    .as_ref()
-                    .filter(|_| !self.launcher_all_open),
-                self.launcher_all_open,
-                crate::launcher::cursor(self, bands),
-            )
-        } else if self.launcher_all_open {
-            crate::launcher::open_panel_layout(self.body_area, bands)
-        } else {
-            crate::launcher::panel_layout(self.body_area, bands, self.launcher_expanded.as_ref())
-        }
+        crate::launcher::panel_layout(self.body_area, bands)
     }
 
-    /// The band whose cards the keys walk as rows, and those rows: the
-    /// ACCORDION's open band while the cursor is on it — or, in the
-    /// compact LIST, whichever band the cursor is on, every band there
-    /// being a column of entries — and, with every band open
-    /// ([`App::launcher_all_open`]), whichever band the cursor is on too.
-    /// None on a collapsed band of cards, where `h`/`l` walk the STRIP
-    /// and `j`/`k` the bands.
+    /// The band the keys walk, and its lines: whichever band the cursor is
+    /// on, every band being a column of entries. None with the cursor on
+    /// no band.
     pub fn walked_band(
         &self,
         bands: &[crate::launcher::Band],
     ) -> Option<(usize, crate::launcher::ExpandedLayout)> {
-        if self.launcher_list || self.launcher_all_open {
-            let index = crate::launcher::band_cursor(self, bands)?;
-            let layout = self.panel_layout(bands).bands.swap_remove(index).content?;
-            return Some((index, layout));
-        }
-        let index = self.cursor_in_open_band(bands)?;
-        Some((
-            index,
-            crate::launcher::expanded_layout(self.body_area, &bands[index]),
-        ))
+        let index = crate::launcher::band_cursor(self, bands)?;
+        let layout = self.panel_layout(bands).bands.swap_remove(index).content;
+        Some((index, layout))
     }
 
     /// `body` in two the way the LAUNCHER VIEW draws it: the grid's half
-    /// and the PANE — along the bottom, or beside the cards on the side
-    /// [`App::launcher_pane_side`] names — or the whole body and no pane
-    /// at all. `launcher::split_at` is the geometry — whether there is
+    /// and the PANE — down the right, or along the bottom of a narrow
+    /// window ([`App::launcher_pane_side`]) — or the whole body and no
+    /// pane at all. `launcher::split_at` is the geometry — whether there is
     /// room for a pane, and how the two share the rows or the columns;
     /// this is the one place the fold (`^~`) and the aim are read, so the
     /// draw, the drag grip and the keys all agree about whether a pane is
@@ -5649,7 +5298,7 @@ impl App {
         if self.launcher_pane_hidden || !self.launcher_aimed() {
             return (body, None);
         }
-        let side = crate::launcher::fitted_side(body, self.launcher_pane_at);
+        let side = crate::launcher::fitted_side(body);
         let want = if side.beside() {
             self.launcher_pane_w
         } else {
@@ -5658,23 +5307,13 @@ impl App {
         crate::launcher::split_at(body, side, want)
     }
 
-    /// The side the PANE is laid out on this frame: the one Settings asks
-    /// for, or the bottom on a body too narrow to stand it beside the cards
+    /// The side the PANE is laid out on this frame: down the right, or
+    /// the bottom on a body too narrow to stand it beside the grid
     /// (`launcher::fitted_side`). The drag, the grip and the pointer's
     /// arrows all read this one, so none of them can disagree with the
     /// draw about which way the pane's edge runs.
     pub fn launcher_pane_side(&self) -> crate::launcher::PaneSide {
-        crate::launcher::fitted_side(self.launcher_body, self.launcher_pane_at)
-    }
-
-    /// Where the PANE's SIDE BUTTON would move it: the side the pane is
-    /// not on this frame. None while it is along the bottom of a body too
-    /// narrow to stand it beside the cards — a move there would change the
-    /// setting and nothing on screen, so no button is drawn for it. The
-    /// draw and the click both read this one.
-    pub fn launcher_pane_move_to(&self) -> Option<crate::launcher::PaneSide> {
-        let to = self.launcher_pane_side().other();
-        (crate::launcher::fitted_side(self.launcher_body, to) == to).then_some(to)
+        crate::launcher::fitted_side(self.launcher_body)
     }
 
     /// Where the edge between the cards and the PANE sits on this frame,
@@ -5806,8 +5445,7 @@ impl App {
     /// whether it wants SGR coordinates. `None` when nothing there can take
     /// a report: no session, one whose process has exited (its last screen
     /// is still worth selecting from), a stand-in pane with no PTY behind
-    /// it, or a pull request or a Cloud session's panel showing in the
-    /// pane instead of a terminal.
+    /// it, or a pull request showing in the pane instead of a terminal.
     pub fn child_mouse_mode(&self) -> (vt100::MouseProtocolMode, bool) {
         let mouseless = (vt100::MouseProtocolMode::None, false);
         let Some(term) = &self.term else {
@@ -5819,7 +5457,6 @@ impl App {
             self.pane_shows_placeholder()
                 || self.previewed_pr().is_some()
                 || self.previewed_issue().is_some()
-                || self.previewed_cloud().is_some()
         });
         if term.exited || reading_something_else {
             return mouseless;
@@ -6253,18 +5890,14 @@ impl App {
     // ---- the FOLLOW-UP COMPOSER ----
 
     /// Can this row grow a FOLLOW-UP COMPOSER? An agent with a local PTY
-    /// behind it, and only that: an ARCHIVED row's turn is over, a CLOUD
-    /// row's agent is in a sandbox with a message queue of its own (its
-    /// menu's **Send to cloud session**), a QUICK PROMPT stand-in has no
-    /// session yet, and a TERMINAL or a PULL REQUEST row was never a
-    /// conversation to follow up on.
+    /// behind it, and only that: an ARCHIVED row's turn is over, a QUICK
+    /// PROMPT stand-in has no session yet, and a TERMINAL or a PULL
+    /// REQUEST row was never a conversation to follow up on.
     pub fn takes_follow_up(&self, row: &SessionRow) -> bool {
         matches!(
             row,
             SessionRow::Agent(a)
-                if !a.archived
-                    && a.cloud_session_id.is_none()
-                    && !self.is_placeholder_agent(&a.id)
+                if !a.archived && !self.is_placeholder_agent(&a.id)
         )
     }
 
@@ -6667,32 +6300,11 @@ impl App {
         })
     }
 
-    /// The pane is reading a page — a pull request, an issue, a Claude
-    /// Cloud session — rather than showing a PTY: FOCUS in it scrolls the
-    /// page, and there is nothing to type into.
+    /// The pane is reading a page — a pull request, an issue — rather than
+    /// showing a PTY: FOCUS in it scrolls the page, and there is nothing to
+    /// type into.
     pub fn pane_reads_page(&self) -> bool {
-        self.reading_url().is_some() || self.previewed_cloud().is_some()
-    }
-
-    /// The Claude Cloud row the pane should be describing: the SESSIONS
-    /// PANEL's cursor on an agent that launched a cloud session. The agent
-    /// runs in the cloud sandbox, so the pane shows the CLOUD SESSION
-    /// PANEL — where it is, and the link to it — instead of a terminal.
-    /// Unlike the PR ROW this is not keyed on focus: there is no terminal
-    /// behind the panel to step back into, so wherever focus goes the pane
-    /// keeps pointing at the session. A pull request under the Worktrees
-    /// cursor still wins (`draw_terminal` asks for it first).
-    pub fn previewed_cloud(&self) -> Option<CloudPreview> {
-        let SessionRow::Agent(agent) = self.selected_session_row()? else {
-            return None;
-        };
-        let url = agent.cloud_session_url()?;
-        Some(CloudPreview {
-            id: agent.id,
-            name: agent.name,
-            cloud_session_id: agent.cloud_session_id.unwrap_or_default(),
-            url,
-        })
+        self.reading_url().is_some()
     }
 
     /// Session rows for the selected worktree: the live agents, then (when
@@ -7109,7 +6721,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 1_000 * (i as i64 + 1),
                 alive: true,
@@ -7399,7 +7010,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             alive: true,
             issue_url: None,
@@ -7632,7 +7242,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 100 * (i as i64 + 1),
                 alive: true,

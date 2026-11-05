@@ -52,14 +52,6 @@ pub enum AgentKind {
     Claude,
     Codex,
     Cursor,
-    /// pi.dev's coding agent: the `pi` CLI (npm
-    /// `@earendil-works/pi-coding-agent`). Status comes from a managed
-    /// TypeScript extension rather than shell hooks.
-    Pi,
-    /// Meta's Muse Spark coding agent: the `muse` CLI. No managed
-    /// hooks yet, so status is process-based (running while the PTY
-    /// is live) until a hook dialect is mapped.
-    Muse,
     /// xAI's Grok Build CLI. Status is process-based until managed hooks
     /// are supported.
     Grok,
@@ -69,10 +61,9 @@ pub enum AgentKind {
     /// its positional is the project path, and a session resumes by
     /// `--session <id>`.
     OpenCode,
-    /// A user-defined harness from the `custom_harnesses` registry: the
-    /// entry id travels beside the session (see `Agent::custom_harness`),
-    /// never in this variant. Launches with the entry's program and model
-    /// flag, with process-based status and no resume — like [`AgentKind::Muse`].
+    /// A harness the `harnesses` map adds, or a Claude account: the
+    /// registry id travels beside the session (see `Agent::custom_harness`),
+    /// never in this variant. Launches as its registry entry describes.
     Custom,
 }
 
@@ -81,12 +72,10 @@ impl AgentKind {
     /// boot-time CLI probe warm) and should fail to compile if one is added.
     /// `Custom` rides along: it never launches without its registry entry,
     /// so loops over ALL skip it explicitly where a bare kind is meaningless.
-    pub const ALL: [AgentKind; 8] = [
+    pub const ALL: [AgentKind; 6] = [
         AgentKind::Claude,
         AgentKind::Codex,
         AgentKind::Cursor,
-        AgentKind::Pi,
-        AgentKind::Muse,
         AgentKind::Grok,
         AgentKind::OpenCode,
         AgentKind::Custom,
@@ -97,8 +86,6 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
             AgentKind::Cursor => "cursor",
-            AgentKind::Pi => "pi",
-            AgentKind::Muse => "muse",
             AgentKind::Grok => "grok",
             AgentKind::OpenCode => "opencode",
             AgentKind::Custom => "custom",
@@ -113,8 +100,6 @@ impl AgentKind {
             "claude" => AgentKind::Claude,
             "codex" => AgentKind::Codex,
             "cursor" => AgentKind::Cursor,
-            "pi" => AgentKind::Pi,
-            "muse" => AgentKind::Muse,
             "grok" => AgentKind::Grok,
             "opencode" => AgentKind::OpenCode,
             _ => return None,
@@ -132,8 +117,6 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::Codex => "codex",
             AgentKind::Cursor => "cursor-agent",
-            AgentKind::Pi => "pi",
-            AgentKind::Muse => "muse",
             AgentKind::Grok => "grok",
             AgentKind::OpenCode => "opencode",
             AgentKind::Custom => "custom",
@@ -217,15 +200,6 @@ pub struct Agent {
     pub effort: Option<String>,
     /// CLI session id used for resume (claude, codex, or cursor, per `kind`).
     pub session_id: Option<String>,
-    /// The Claude Cloud session this row launched (`claude --cloud <task>`
-    /// prints the id as it creates one). Only cloud rows have it. The
-    /// agent runs in the cloud sandbox, never in a local PTY: the row's
-    /// pane is an information panel linking to the session in the browser
-    /// (see [`Agent::cloud_session_url`]), and the daemon refuses to boot a
-    /// local CLI for it — a restart or an attach would only start a bare
-    /// `claude` with no link to the work.
-    #[serde(default)]
-    pub cloud_session_id: Option<String>,
     /// The GitHub issue this session was started from — an ISSUE SESSION,
     /// launched out of the ISSUES MODAL — or None. The daemon folds it into
     /// every spawn's context; the TUI reads it for `⇧I`, which opens the
@@ -336,13 +310,6 @@ impl Agent {
             .filter(|_| self.status == AgentStatus::NeedsFeedback && !self.archived)
     }
 
-    /// Where this row's Claude Cloud session lives in the browser, when it
-    /// has one — the page the CLI printed as `View:` on creation, without
-    /// its tracking query.
-    pub fn cloud_session_url(&self) -> Option<String> {
-        self.cloud_session_id.as_deref().map(cloud_session_url)
-    }
-
     /// The number of the GitHub issue this ISSUE SESSION was started from,
     /// read off `issue_url` (`…/issues/15`, with or without a trailing
     /// path) — None for every other row.
@@ -357,11 +324,6 @@ pub fn url_number_after(url: &str, marker: &str) -> Option<u64> {
     let (_, tail) = url.split_once(marker)?;
     let digits = tail.split(['/', '?', '#']).next().unwrap_or_default();
     digits.parse::<u64>().ok().filter(|n| *n > 0)
-}
-
-/// The claude.ai page of a Claude Cloud session, from its `session_…` id.
-pub fn cloud_session_url(cloud_session_id: &str) -> String {
-    format!("https://claude.ai/code/{cloud_session_id}")
 }
 
 /// How many prompts the daemon keeps per session: the most a TUI can be

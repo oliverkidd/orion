@@ -13,7 +13,7 @@
 
 use crate::agent_presets::PresetText;
 use orion_core::compose::{WorktreeContainers, WORKTREE_CONTAINERS};
-use orion_core::harness::{CustomHarness, HarnessDescriptor};
+use orion_core::harness::HarnessDescriptor;
 use orion_core::AgentKind;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,21 +66,6 @@ impl OutsideTerminal {
         }
     }
 }
-
-/// The **Session pane** choices (Settings → Appearance), in the order the
-/// row cycles them: the [`crate::launcher::PaneSide`] sides by name, the
-/// default first.
-pub const PANE_SIDES: &[&str] = &[
-    crate::launcher::PaneSide::Right.as_str(),
-    crate::launcher::PaneSide::Bottom.as_str(),
-];
-
-/// The **Worktree layout** choices (Settings → Appearance), in the order
-/// the row cycles them: the GRID's row of cards per worktree, the default,
-/// then the compact LIST — each worktree's sessions stacked one line apiece,
-/// the most recent few shown until Tab opens the rest
-/// ([`crate::launcher::LIST_RECENT`]).
-pub const WORKTREE_LAYOUTS: &[&str] = &["cards", "list"];
 
 /// The **Start on** choices (Settings → Review): the DIFF VIEWER panel
 /// that has the keys when it opens, the default first.
@@ -185,9 +170,7 @@ pub fn agent_kind_names() -> Vec<String> {
 /// The model rows for a harness: [`DEFAULT_CHOICE`] first ("don't pass the
 /// flag — let the CLI pick", what the daemon sees as None), then the
 /// runtime catalogue (Claude/Cursor, already headed) or the descriptor's
-/// static list. Pi's `--model` takes a fuzzy pattern across providers, so
-/// its list is families, not ids; a hand-edited `provider/id` passes
-/// through verbatim.
+/// static list.
 pub fn model_choices(kind: AgentKind, custom: Option<&str>) -> Vec<String> {
     model_choices_in(&describe(kind, custom))
 }
@@ -391,9 +374,8 @@ fn static_fallback_effort(efforts: &[String]) -> Option<&str> {
 }
 
 /// The effective descriptor `(kind, custom)` reads as: the registry row
-/// with the `harnesses` map, the legacy list entry, and the legacy
-/// per-harness keys folded in. Loads the config fresh, like every other
-/// reader here. A broken entry still resolves (the picker, not the read,
+/// with the `harnesses` map and the legacy per-harness keys folded in.
+/// Loads the config fresh, like every other reader here. A broken entry still resolves (the picker, not the read,
 /// hides it); launches refuse it with its reason. An id the registry no
 /// longer names degrades to a placeholder under its own name, so rows
 /// outliving their entry still render.
@@ -410,16 +392,7 @@ fn describe(kind: AgentKind, custom: Option<&str>) -> orion_core::harness::Harne
     {
         return descriptor;
     }
-    orion_core::harness::CustomHarness {
-        id: id.to_string(),
-        label: String::new(),
-        program: id.to_string(),
-        enabled: true,
-        model: DEFAULT_CHOICE.into(),
-        model_flag: "--model".into(),
-        hooks: None,
-    }
-    .as_descriptor()
+    orion_core::harness::placeholder(id)
 }
 
 /// One setting row in the overlay; rows live inside a [`SettingsTab`].
@@ -454,11 +427,6 @@ pub enum TabBody {
 /// head and the per-harness sections ([`Config::account_rows`]).
 pub const ACCOUNTS_GROUP: &str = "Claude accounts";
 
-/// The Agents tab's section right under it: SAVED ON THIS MACHINE, the
-/// Claude config dirs no account runs in ([`AccountRow::OnDisk`]). Shown
-/// only while there is one.
-pub const MACHINE_GROUP: &str = "Saved on this machine";
-
 /// What **Continue on** says after an account signed in as the session's
 /// own email ([`Config::continue_targets`]).
 pub const SAME_ACCOUNT: &str = " · same account";
@@ -490,12 +458,6 @@ pub const AGENTS_HEAD: &[SettingSpec] = &[
         kind: SettingKind::QuickPromptNewWorktree,
         label: "New worktree",
         hint: "A new agent's box starts on a fresh worktree (off = the checkout under the cursor); {select_launch_worktree} picks another for one box",
-        group: "Quick prompt",
-    },
-    SettingSpec {
-        kind: SettingKind::HideUninstalledHarnesses,
-        label: "Hide missing CLIs",
-        hint: "List only harnesses found on PATH when you start an agent (daemon still checks at launch)",
         group: "Quick prompt",
     },
 ];
@@ -547,11 +509,6 @@ pub enum SettingKind {
     Animations,
     Spotify,
     BlackBackground,
-    HideCardMarks,
-    HighlightCurrentCard,
-    SessionPane,
-    WorktreeLayout,
-    ExpandAllWorktrees,
     CardIssueNumber,
     HideDraftPrs,
     QuickPromptKind,
@@ -560,8 +517,6 @@ pub enum SettingKind {
     QuickPromptNewWorktree,
     RunCommand,
     OpenCommand,
-    RememberHarness,
-    HideUninstalledHarnesses,
     DiffTreeView,
     DiffStart,
     DiffTicked,
@@ -578,7 +533,7 @@ pub enum SettingKind {
 }
 
 /// One harness field row in the Agents tab. The tab renders one section
-/// per registry entry — built-ins, legacy customs and `harnesses` map ids
+/// per registry entry — built-ins, Claude accounts and `harnesses` map ids
 /// alike — with an Enabled row, a Model row, and an Effort row while the
 /// harness offers effort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -597,10 +552,6 @@ pub enum AccountRow {
     Account(String),
     /// **Add account**: a new config dir and its entry.
     Add,
-    /// SAVED ON THIS MACHINE: a `~/.claude-*` Claude Code config dir no
-    /// account runs in ([`crate::claude_accounts::on_disk`]) — Enter adds
-    /// it back, `⌫` moves it to the Trash.
-    OnDisk(std::path::PathBuf),
 }
 
 impl HarnessField {
@@ -644,99 +595,6 @@ impl SettingKind {
     pub fn is_project(self) -> bool {
         matches!(self, SettingKind::RunCommand | SettingKind::OpenCommand)
     }
-
-    /// The day the row first shipped, `(year, month, day)`: the date of
-    /// the first release tag whose settings overlay lists it, or the day
-    /// it was written for a row no release carries yet. The overlay marks
-    /// a row `(new)` for [`NEW_SETTING_DAYS`] from here. The match is
-    /// exhaustive on purpose — a new row can't compile without its date.
-    pub fn added_on(self) -> (i32, u32, u32) {
-        match self {
-            // v0.1.0
-            SettingKind::PaletteEnterAttaches
-            | SettingKind::Editor
-            | SettingKind::SessionIdleTimeout
-            | SettingKind::Theme
-            | SettingKind::Animations => (2026, 8, 22),
-            // v0.16.0
-            SettingKind::DoneSound => (2026, 8, 28),
-            // v0.19.0 – v0.21.0
-            SettingKind::CloseFinderOnOpen
-            | SettingKind::QuickPromptKind
-            | SettingKind::QuickPromptFocus => (2026, 8, 29),
-            // v0.23.0 / v0.24.0
-            SettingKind::FeedbackSound
-            | SettingKind::WorktreeBaseBranch
-            | SettingKind::PrewarmAgents
-            | SettingKind::PrewarmSessions => (2026, 9, 9),
-            // v0.27.0 / v0.28.0
-            SettingKind::SshSyncConfig
-            | SettingKind::HideDraftPrs
-            | SettingKind::HideUninstalledHarnesses => (2026, 9, 15),
-            // v0.29.0 / v0.31.0
-            SettingKind::RunCommand | SettingKind::OpenCommand | SettingKind::RememberHarness => {
-                (2026, 9, 17)
-            }
-            // v0.33.0
-            SettingKind::PresetText => (2026, 9, 18),
-            // v0.34.0
-            SettingKind::BlackBackground | SettingKind::SessionPane => (2026, 9, 22),
-            // v0.38.0, then rows not yet in a release
-            SettingKind::DeleteEmptyWorktree
-            | SettingKind::ShowAllWorktrees
-            | SettingKind::HideCardMarks
-            | SettingKind::WorktreeLayout
-            | SettingKind::CardIssueNumber => (2026, 9, 24),
-            SettingKind::ExpandAllWorktrees | SettingKind::FollowNewSession => (2026, 9, 26),
-            SettingKind::HighlightCurrentCard => (2026, 9, 28),
-            SettingKind::LinkEnvFiles
-            | SettingKind::OutsideTerminal
-            | SettingKind::LinearAccount
-            | SettingKind::LinearAutoAttach
-            | SettingKind::LinearKey
-            | SettingKind::LinearTest
-            | SettingKind::OutsideEditor => (2026, 10, 3),
-            SettingKind::RunSetup | SettingKind::Git | SettingKind::Gh => (2026, 10, 5),
-            SettingKind::QuickPromptNewWorktree => (2026, 10, 9),
-            SettingKind::DiffTreeView
-            | SettingKind::DiffStart
-            | SettingKind::DiffTicked
-            | SettingKind::PrMergeMethod
-            | SettingKind::PrDeleteBranch
-            | SettingKind::PrDraft => (2026, 10, 4),
-            SettingKind::BaseFetch => (2026, 10, 6),
-            SettingKind::UsageClaude | SettingKind::UsageCursor => (2026, 10, 5),
-            SettingKind::WorktreeContainers => (2026, 10, 5),
-            // Auto-fix PRs went from off / ask / auto to on by default.
-            SettingKind::PrAutofix => (2026, 11, 4),
-            SettingKind::AutofixModel | SettingKind::AutofixEffort | SettingKind::Spotify => {
-                (2026, 10, 6)
-            }
-            SettingKind::ReviewAccount | SettingKind::ReviewModel | SettingKind::ReviewEffort => {
-                (2026, 10, 10)
-            }
-        }
-    }
-
-    /// The row shipped fewer than [`NEW_SETTING_DAYS`] days before
-    /// `today` (days since the Unix epoch, see [`today_days`]).
-    pub fn is_new(self, today: i64) -> bool {
-        let (y, m, d) = self.added_on();
-        (0..NEW_SETTING_DAYS).contains(&(today - days_from_civil(y, m, d)))
-    }
-}
-
-/// How many days a settings row wears its `(new)` prefix.
-pub const NEW_SETTING_DAYS: i64 = 7;
-
-/// What a newly shipped settings row is prefixed with.
-pub const NEW_SETTING_PREFIX: &str = "(new) ";
-
-/// Today as days since the Unix epoch, in UTC.
-pub fn today_days() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| (d.as_secs() / 86_400) as i64)
 }
 
 /// Days since the Unix epoch of a proleptic Gregorian date (Howard
@@ -930,36 +788,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 group: "",
             },
             SettingSpec {
-                kind: SettingKind::SessionPane,
-                label: "Session pane",
-                hint: "Where the session under the cursor is read: beside the cards on the right, or under them",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::WorktreeLayout,
-                label: "Worktree layout",
-                hint: "Each worktree's sessions as a row of cards, or as a compact list of the 3 most recent (Tab shows them all)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::ExpandAllWorktrees,
-                label: "Expand all worktrees",
-                hint: "Show every worktree's sessions and terminals at once, with no Tab to open one (off = one worktree opens at a time, with Tab)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::HighlightCurrentCard,
-                label: "Highlight current card",
-                hint: "Wash the cursor's card faintly in its status color, breathing while it runs, asks or waits unread, and keep it lit while you type in its pane (off = the plain gray fill)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::HideCardMarks,
-                label: "Card marks",
-                hint: "Show or hide the ▶ (run terminal) and ❯ (shell) before a terminal card's name and the › before a session card's prompt",
-                group: "",
-            },
-            SettingSpec {
                 kind: SettingKind::HideDraftPrs,
                 label: "Draft pull requests",
                 hint: "Show or hide draft pull requests in the {palette} jump list; checkouts always stay",
@@ -1084,20 +912,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::OpenCommand,
                 label: "Open command",
                 hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000 (empty = its .orion.json \"open\")",
-                group: "",
-            },
-        ]),
-    },
-    // Behaviors that change how the tree is worked, off by default until
-    // they have earned a tab of their own. Before Hotkeys, which stays last
-    // for the reason above.
-    SettingsTab {
-        title: "Experimental",
-        body: TabBody::Values(&[
-            SettingSpec {
-                kind: SettingKind::RememberHarness,
-                label: "Remember harness",
-                hint: "A harness (and model) picked for a session becomes the Agents tab default the next launch starts on",
                 group: "",
             },
         ]),
@@ -1343,15 +1157,12 @@ pub fn settings_rows(tab: usize, projects: usize) -> Vec<SettingsRow> {
             let cfg = Config::load();
             let head = AGENTS_HEAD.iter().map(|s| s.group.to_string());
             let accounts = cfg.account_rows();
-            let section = accounts.iter().map(|row| match row {
-                AccountRow::OnDisk(_) => MACHINE_GROUP.to_string(),
-                _ => ACCOUNTS_GROUP.to_string(),
-            });
+            let section = accounts.iter().map(|_| ACCOUNTS_GROUP.to_string());
             let rows = cfg.agent_rows();
             let groups = rows.iter().map(|(id, _)| cfg.section_title(id));
             let mut out = grouped(head.chain(section).chain(groups), SettingsRow::Setting);
             // The same-account warning, under the accounts it is about:
-            // after **Add account**, above anything saved on this machine.
+            // after **Add account**.
             let add = accounts
                 .iter()
                 .position(|row| *row == AccountRow::Add)
@@ -1602,40 +1413,6 @@ pub struct Config {
     /// Ghostty is a dark gray. On by default; off lets a transparency or
     /// image configured in the terminal show through.
     pub black_background: bool,
-    /// HIDE CARD MARKS: leave the `▶` (a RUN TERMINAL) and the `❯` (a
-    /// plain shell) off the front of a terminal card's name, and the `›`
-    /// off the front of a session card's prompt, each of which then starts
-    /// where its mark did. Off by default. Read under the key it had
-    /// before, `hide_terminal_glyphs`, too.
-    #[serde(alias = "hide_terminal_glyphs")]
-    pub hide_card_marks: bool,
-    /// HIGHLIGHT CURRENT CARD: the card under the cursor — the one the
-    /// pane reads — trades its gray fill for a faint wash of its status
-    /// color, breathing while something is going on, and keeps it while
-    /// the pane has the keys. On by default; off leaves the gray fill.
-    pub highlight_current_card: bool,
-    /// Where the LAUNCHER VIEW's PANE — the session under the cursor, live
-    /// — sits against the GRID of cards: `right` (down that side of them,
-    /// the default) or `bottom` (under them). Also written by the SIDE
-    /// BUTTON on the pane's own TAB STRIP. Read through
-    /// [`Config::pane_side`], so a word off the list — the `left` older
-    /// builds offered too — is the right; a window too narrow for the
-    /// pane beside the cards lays it out along the bottom until there is
-    /// room (`launcher::fitted_side`).
-    pub session_pane: String,
-    /// How the LAUNCHER VIEW lays out each worktree's BAND: `cards` (a row
-    /// of cards, the default) or `list` (every session one line, stacked
-    /// under the band's rule, the [`crate::launcher::LIST_RECENT`] most
-    /// recent shown until Tab — the ACCORDION — opens the rest). Read
-    /// through [`Config::list_layout`], so a word off the list is the cards.
-    pub worktree_layout: String,
-    /// EXPAND ALL WORKTREES: every BAND on the GRID laid out open at once
-    /// — each worktree's sessions and terminals wrapped into rows under
-    /// its rule, every entry of the compact LIST listed — so there is no
-    /// ACCORDION for Tab to open, and `j`/`k` walk down every card of
-    /// every worktree as one column of rows. Off by default, a config
-    /// predating the key too: one band opens at a time, with Tab.
-    pub expand_all_worktrees: bool,
     /// RETIRED with every card carrying its last prompt. Through 0.40 the
     /// **Card prompt** SETTING (Settings → Appearance, `shown` by default)
     /// could leave the last prompt off every session card on the GRID.
@@ -1794,14 +1571,6 @@ pub struct Config {
     /// rules: a value in here this build can't read costs the whole map,
     /// not one project.
     pub projects: BTreeMap<PathBuf, ProjectSettings>,
-    /// Experimental: REMEMBER HARNESS — a launch walked through the NEW
-    /// AGENT PICKER, the PR SESSION picker or the QUICK PROMPT's `Tab`
-    /// picker writes its harness into `quick_prompt_kind`, and a model or
-    /// effort a submenu chose into that harness's own rows, so the next
-    /// picker starts on it and the next `p` launches it
-    /// ([`Config::remember_launch`]). Off by default: a pick is one
-    /// session's, and the AGENTS TAB is where the defaults are set.
-    pub remember_harness: bool,
     /// RETIRED with the counts always drawn. Through 0.37 the **PR & issue
     /// counts** SETTING (Settings → Experimental, on by default) switched
     /// the GRID header's `3 prs · 2 issues` off, and with it the issue
@@ -1830,13 +1599,6 @@ pub struct Config {
     pub codex_effort: String,
     pub cursor_model: String,
     pub cursor_effort: String,
-    /// Pi's pair: a `--model` pattern and a `--thinking` level.
-    pub pi_model: String,
-    pub pi_effort: String,
-    /// Muse's `--model` id. `muse_effort` is reserved until the CLI
-    /// documents a reasoning flag; it stores but sends nothing.
-    pub muse_model: String,
-    pub muse_effort: String,
     /// OpenCode's `--model` id (`provider/model`, passed verbatim). No
     /// effort key: OpenCode has no effort flag — reasoning is a per-model
     /// variant picked inside its own TUI — so its Agents section has no
@@ -1851,21 +1613,7 @@ pub struct Config {
     pub claude_enabled: bool,
     pub codex_enabled: bool,
     pub cursor_enabled: bool,
-    pub pi_enabled: bool,
-    pub muse_enabled: bool,
     pub opencode_enabled: bool,
-    /// When on, the NEW AGENT PICKER lists only enabled harnesses whose
-    /// CLI is found on this machine's PATH. Off by default: a login shell
-    /// (mise, brew shims) can see CLIs a plain PATH lookup misses, and the
-    /// daemon re-checks through the login shell at launch anyway.
-    pub hide_uninstalled_harnesses: bool,
-    /// User-defined harnesses (`custom_harnesses` in config.json): offered
-    /// in the NEW AGENT PICKER after the built-ins when enabled, launched
-    /// with the entry's program and model flag, with process-based status
-    /// unless the entry names a hook dialect. Empty by default. Legacy:
-    /// new harnesses belong in `harnesses` as full descriptors, where
-    /// they also gain resume, effort, system-prompt and hook-dialect rows.
-    pub custom_harnesses: Vec<CustomHarness>,
     /// Per-harness deltas over the compiled-in registry (`harnesses` in
     /// config.json): disable a built-in, repoint a program, rename a
     /// flag, or define a whole new CLI. Merged by
@@ -1904,8 +1652,8 @@ pub struct Config {
     /// fired from, so firing one off does not interrupt what you were
     /// doing — and where the cursor goes is [`Config::follow_new_session`]'s
     /// to say. Only the QUICK PROMPT reads this — every other launch
-    /// (the NEW AGENT PICKER, an AGENT PRESET, a PR SESSION, a Cloud task)
-    /// still enters the pane.
+    /// (the NEW AGENT PICKER, an AGENT PRESET, a PR SESSION) still enters
+    /// the pane.
     pub quick_prompt_focus: bool,
     /// FOLLOW NEW SESSION: a QUICK PROMPT launch lands the cursor on the
     /// new session's card — the grid scrolled to it, the pane showing it,
@@ -2056,11 +1804,6 @@ impl Default for Config {
             animations: true,
             spotify: true,
             black_background: true,
-            hide_card_marks: false,
-            highlight_current_card: true,
-            session_pane: crate::launcher::PaneSide::default().as_str().into(),
-            worktree_layout: WORKTREE_LAYOUTS[0].into(),
-            expand_all_worktrees: false,
             hide_card_prompt: false,
             card_issue_number: true,
             hide_draft_prs: false,
@@ -2090,7 +1833,6 @@ impl Default for Config {
             recent_prompts_count: 3,
             projects: BTreeMap::new(),
             show_key_combos: false,
-            remember_harness: false,
             pr_issue_counts: true,
             claude_model: DEFAULT_CHOICE.into(),
             claude_models: Vec::new(),
@@ -2099,19 +1841,11 @@ impl Default for Config {
             codex_effort: DEFAULT_CHOICE.into(),
             cursor_model: DEFAULT_CHOICE.into(),
             cursor_effort: DEFAULT_CHOICE.into(),
-            pi_model: DEFAULT_CHOICE.into(),
-            pi_effort: DEFAULT_CHOICE.into(),
-            muse_model: DEFAULT_CHOICE.into(),
-            muse_effort: DEFAULT_CHOICE.into(),
             opencode_model: DEFAULT_CHOICE.into(),
             claude_enabled: cfg!(test),
             codex_enabled: cfg!(test),
             cursor_enabled: cfg!(test),
-            pi_enabled: cfg!(test),
-            muse_enabled: cfg!(test),
             opencode_enabled: cfg!(test),
-            hide_uninstalled_harnesses: false,
-            custom_harnesses: Vec::new(),
             harnesses: default_harnesses(),
             claude_accounts: Vec::new(),
             account_tags: BTreeMap::new(),
@@ -2124,12 +1858,6 @@ impl Default for Config {
         }
     }
 }
-
-/// Keys a field was renamed from, `(old, new)`: the field reads the old key
-/// through a `#[serde(alias)]`, and a save takes the old key out of both
-/// layers. Left in beside the new one, the pair is a `duplicate field` to
-/// serde — a file this build can only read key by key.
-const RENAMED_KEYS: &[(&str, &str)] = &[("hide_terminal_glyphs", "hide_card_marks")];
 
 /// Keys a save always writes to `config.local.json`, never to the
 /// `config.json` that `orion ssh` carries to other machines: who the user
@@ -2249,17 +1977,6 @@ impl Config {
         };
         let defaults = serde_json::to_value(Self::default()).map_err(invalid_data)?;
         let mut local_changed = false;
-        for (old, new) in RENAMED_KEYS {
-            root.remove(*old);
-            // An old key the local layer holds stays local under its new
-            // name, so the loop below writes the value back there.
-            if let Some(held) = local_root.as_mut() {
-                if let Some(value) = held.remove(*old) {
-                    held.entry(new.to_string()).or_insert(value);
-                    local_changed = true;
-                }
-            }
-        }
         for (key, value) in known {
             // A stored value this build couldn't read loaded as its default.
             // Unless it has been changed since, leave the stored one alone.
@@ -2337,20 +2054,9 @@ impl Config {
         self.diff_ticked_word() == ONE_AT_A_TIME
     }
 
-    /// `session_pane` resolved to the side the LAUNCHER VIEW lays its pane
-    /// out on.
-    pub fn pane_side(&self) -> crate::launcher::PaneSide {
-        crate::launcher::PaneSide::parse(&self.session_pane)
-    }
-
     /// `outside_terminal` resolved to the app ⇧T opens.
     pub fn outside_terminal(&self) -> OutsideTerminal {
         OutsideTerminal::parse(&self.outside_terminal)
-    }
-
-    /// `worktree_layout` says the compact LIST rather than the cards.
-    pub fn list_layout(&self) -> bool {
-        self.worktree_layout.trim().eq_ignore_ascii_case("list")
     }
 
     /// The editor the file overlays launch: `ORION_EDITOR` when set,
@@ -2388,8 +2094,8 @@ impl Config {
 
     /// The effective registry as launches read it: the compiled-in known
     /// harnesses with the `harnesses` map applied — Claude's extra
-    /// accounts (`claude_accounts`) right after it — then the legacy
-    /// `custom_harnesses` list, then map-only new ids — plus, for
+    /// accounts (`claude_accounts`) right after it — then map-only new
+    /// ids — plus, for
     /// built-ins, the legacy per-harness keys (`claude_model`,
     /// `codex_enabled`, …) wherever the map stays silent on that field.
     /// The map wins where both speak; the Agents tab writes the legacy
@@ -2398,11 +2104,7 @@ impl Config {
     /// included, until its own map entry names one. What `orion config
     /// harnesses` prints: labels as written, no email.
     pub fn raw_harness_registry(&self) -> Vec<HarnessDescriptor> {
-        let mut all = orion_core::harness::registry(
-            &self.harnesses,
-            &self.custom_harnesses,
-            &self.claude_accounts,
-        );
+        let mut all = orion_core::harness::registry(&self.harnesses, &self.claude_accounts);
         for entry in &mut all {
             if orion_core::harness::builtin(&entry.id).is_none() {
                 continue;
@@ -2470,8 +2172,6 @@ impl Config {
                 &self.cursor_model,
                 &self.cursor_effort,
             ),
-            "pi" => (&self.pi_enabled, &self.pi_model, &self.pi_effort),
-            "muse" => (&self.muse_enabled, &self.muse_model, &self.muse_effort),
             // OpenCode has no effort key: nothing to fall back to there.
             "opencode" => {
                 return (
@@ -2516,16 +2216,7 @@ impl Config {
         {
             return descriptor;
         }
-        CustomHarness {
-            id: id.to_string(),
-            label: String::new(),
-            program: id.to_string(),
-            enabled: true,
-            model: DEFAULT_CHOICE.into(),
-            model_flag: "--model".into(),
-            hooks: None,
-        }
-        .as_descriptor()
+        orion_core::harness::placeholder(id)
     }
 
     /// The configured default model for new sessions of `kind`, as the
@@ -2543,9 +2234,9 @@ impl Config {
 
     /// The configured default effort for new sessions of `kind`;
     /// None = "default" = don't pass the flag. A composing harness fits
-    /// the effort against its configured family ([`fit_effort`]). A
-    /// reserved effort (stored, like Muse's, but with no flag mapped yet)
-    /// is None whatever the file holds — spawn would drop it anyway.
+    /// the effort against its configured family ([`fit_effort`]). An
+    /// effort with no flag mapped is None whatever the file holds — spawn
+    /// would drop it anyway.
     pub fn default_effort(&self, kind: AgentKind) -> Option<String> {
         if kind == AgentKind::Custom {
             return None;
@@ -2584,10 +2275,18 @@ impl Config {
     /// Every harness the picker and presets offer, in registry order:
     /// `(kind, None)` for built-ins, `(Custom, Some(id))` for customs.
     /// Disabled and broken entries are out (broken ones surface in the
-    /// Agents tab with their reason); under `hide_uninstalled_harnesses`
-    /// so is anything whose program is missing from PATH. The daemon
-    /// stays authoritative at launch.
+    /// Agents tab with their reason), and so is anything whose program is
+    /// missing from PATH. The daemon stays authoritative at launch: it
+    /// re-checks through the login shell, which can see shims PATH misses.
+    ///
+    /// A test that names no PATH ([`with_search_path`]) finds every program
+    /// installed, so what a fixture's pickers offer never depends on the
+    /// CLIs the machine running it happens to have.
     pub fn offered_harnesses(&self) -> Vec<(AgentKind, Option<String>)> {
+        #[cfg(test)]
+        if SEARCH_PATH.with(|p| p.borrow().is_none()) {
+            return self.offered_harnesses_where(|_| true);
+        }
         self.offered_harnesses_where(program_installed)
     }
 
@@ -2601,7 +2300,7 @@ impl Config {
         let all = self.harness_registry();
         orion_core::harness::usable(&all)
             .into_iter()
-            .filter(|entry| !self.hide_uninstalled_harnesses || installed(&entry.program))
+            .filter(|entry| installed(&entry.program))
             .map(|entry| match AgentKind::parse(&entry.id) {
                 Some(kind) => (kind, None),
                 None => (AgentKind::Custom, Some(entry.id.clone())),
@@ -2640,28 +2339,19 @@ impl Config {
         {
             return descriptor;
         }
-        CustomHarness {
-            id: id.to_string(),
-            label: String::new(),
-            program: id.to_string(),
-            enabled: true,
-            model: DEFAULT_CHOICE.into(),
-            model_flag: "--model".into(),
-            hooks: None,
-        }
-        .as_descriptor()
+        orion_core::harness::placeholder(id)
     }
 
     /// Where `agent`'s Claude session can be carried on — **Continue on**
     /// another account: `(registry id, label)` for every other enabled
     /// Claude-dialect harness that resumes and keeps its sessions where
     /// orion can see them ([`orion_core::harness::continue_targets`]), in
-    /// registry order. Empty for a session off Claude's dialect, a Cloud
-    /// row and an archived one — none of which has anything to move. An
+    /// registry order. Empty for a session off Claude's dialect and an
+    /// archived one — neither of which has anything to move. An
     /// account signed in as the session's own email is listed as what it
     /// is — `Claude (a@b.co) · same account`, whose limit is this one's.
     pub fn continue_targets(&self, agent: &orion_core::Agent) -> Vec<(String, String)> {
-        if agent.cloud_session_id.is_some() || agent.archived {
+        if agent.archived {
             return Vec::new();
         }
         let from = self.effective_harness(agent.kind, agent.custom_harness.as_deref());
@@ -2714,24 +2404,11 @@ impl Config {
         AGENTS_HEAD.len() + self.account_rows().len()
     }
 
-    /// The CLAUDE ACCOUNTS section's rows, below the Agents head: every
-    /// Claude account in registry order — the default one, built-in
-    /// Claude, first; on or off — then **Add account**, then SAVED ON THIS
-    /// MACHINE: each config dir the last refresh found that no account
-    /// runs in.
+    /// The CLAUDE ACCOUNTS section's rows, below the Agents head — and the
+    /// onboarding wizard's page: every Claude account in registry order —
+    /// the default one, built-in Claude, first; on or off — then **Add
+    /// account**.
     pub fn account_rows(&self) -> Vec<AccountRow> {
-        let mut rows = self.registered_account_rows();
-        rows.extend(
-            crate::claude_accounts::on_disk(self)
-                .into_iter()
-                .map(AccountRow::OnDisk),
-        );
-        rows
-    }
-
-    /// [`Config::account_rows`] without SAVED ON THIS MACHINE: the
-    /// accounts and **Add account** — the onboarding wizard's page.
-    pub fn registered_account_rows(&self) -> Vec<AccountRow> {
         let mut rows: Vec<AccountRow> = self
             .raw_harness_registry()
             .into_iter()
@@ -2767,11 +2444,10 @@ impl Config {
     /// What a CLAUDE ACCOUNTS row says beside its name: on or off, its
     /// config dir, and who it is signed in as — or which account it
     /// shares its email with. The **Add account** row says where a new
-    /// one would go; a dir SAVED ON THIS MACHINE who it is signed in as.
+    /// one would go.
     pub fn account_value(&self, row: &AccountRow) -> String {
         match row {
             AccountRow::Add => self.next_account_dir(),
-            AccountRow::OnDisk(dir) => format!("not in orion · {}", dir_sign_in(dir)),
             AccountRow::Account(id) => match self.account_status(id) {
                 Some((enabled, dir, state)) => {
                     let value = format!("{} · {dir} · {state}", on_off(enabled));
@@ -2794,7 +2470,6 @@ impl Config {
     pub fn account_parts(&self, row: &AccountRow) -> (String, String) {
         match row {
             AccountRow::Add => (self.next_account_dir(), String::new()),
-            AccountRow::OnDisk(dir) => (crate::claude_accounts::tilde(dir), dir_sign_in(dir)),
             AccountRow::Account(id) => match self.account_status(id) {
                 Some((_, dir, state)) => (dir, state),
                 None => ("n/a".into(), String::new()),
@@ -2846,13 +2521,6 @@ impl Config {
                 return format!(
                     "A new config dir with its own login; then asks whether to share {from}'s \
                      CLAUDE.md, settings, skills…"
-                );
-            }
-            AccountRow::OnDisk(dir) => {
-                return format!(
-                    "{}: a Claude Code config dir no account runs in, its login and \
-                     transcripts still in it — add it back under a name, or trash it",
-                    crate::claude_accounts::tilde(dir)
                 );
             }
             AccountRow::Account(id) => id,
@@ -3033,7 +2701,7 @@ impl Config {
     }
 
     /// Write an Enabled toggle: the `harnesses` map where it speaks, else
-    /// the legacy layer (the built-in switch, the list entry).
+    /// the legacy layer (the built-in switch, the account's own).
     fn set_harness_enabled(&mut self, id: &str, enabled: bool) {
         if self.harnesses.get(id).and_then(|o| o.enabled).is_some() {
             self.harness_override_mut(id).enabled = Some(enabled);
@@ -3041,14 +2709,6 @@ impl Config {
         }
         if orion_core::harness::builtin(id).is_some() {
             self.set_legacy_enabled(id, enabled);
-            return;
-        }
-        if let Some(entry) = self
-            .custom_harnesses
-            .iter_mut()
-            .find(|entry| entry.id == id)
-        {
-            entry.enabled = enabled;
             return;
         }
         if let Some(account) = self
@@ -3063,7 +2723,7 @@ impl Config {
     }
 
     /// Write a Model default: the map where it speaks, else the legacy
-    /// layer (the built-in model key, the list entry's model).
+    /// built-in model key.
     fn set_harness_model(&mut self, id: &str, model: String) {
         if self
             .harnesses
@@ -3078,20 +2738,11 @@ impl Config {
             self.set_legacy_model(id, model);
             return;
         }
-        if let Some(entry) = self
-            .custom_harnesses
-            .iter_mut()
-            .find(|entry| entry.id == id)
-        {
-            entry.model = model;
-            return;
-        }
         self.harness_override_mut(id).model_default = Some(model);
     }
 
     /// Write an Effort default: the map where it speaks, else the legacy
-    /// built-in effort key (legacy list entries hold no effort; the map
-    /// owns theirs).
+    /// built-in effort key.
     fn set_harness_effort(&mut self, id: &str, effort: String) {
         if orion_core::harness::builtin(id).is_some()
             && self
@@ -3116,8 +2767,6 @@ impl Config {
             "claude" => self.claude_enabled = enabled,
             "codex" => self.codex_enabled = enabled,
             "cursor" => self.cursor_enabled = enabled,
-            "pi" => self.pi_enabled = enabled,
-            "muse" => self.muse_enabled = enabled,
             "opencode" => self.opencode_enabled = enabled,
             _ => self.harness_override_mut(id).enabled = Some(enabled),
         }
@@ -3128,8 +2777,6 @@ impl Config {
             "claude" => self.claude_model = model,
             "codex" => self.codex_model = model,
             "cursor" => self.cursor_model = model,
-            "pi" => self.pi_model = model,
-            "muse" => self.muse_model = model,
             "opencode" => self.opencode_model = model,
             _ => self.harness_override_mut(id).model_default = Some(model),
         }
@@ -3140,8 +2787,6 @@ impl Config {
             "claude" => self.claude_effort = effort,
             "codex" => self.codex_effort = effort,
             "cursor" => self.cursor_effort = effort,
-            "pi" => self.pi_effort = effort,
-            "muse" => self.muse_effort = effort,
             _ => self.harness_override_mut(id).effort_default = Some(effort),
         }
     }
@@ -3301,77 +2946,6 @@ impl Config {
         )
     }
 
-    /// The harness the NEW AGENT PICKER (and the PR SESSION picker)
-    /// starts on: the last launch's while REMEMBER HARNESS is on — read
-    /// through [`Config::quick_prompt_harness`], so one switched off since
-    /// steps aside — and None, the first row, while it is off.
-    pub fn remembered_harness(&self) -> Option<(AgentKind, Option<String>)> {
-        self.remember_harness.then(|| self.quick_prompt_harness())
-    }
-
-    /// REMEMBER HARNESS (Settings → Experimental): make `kind` — and a
-    /// model or effort a picker chose for it, `None` for one it did not —
-    /// the defaults the next launch starts from, by writing the AGENTS
-    /// TAB's own rows: `quick_prompt_kind`, and that harness's Model /
-    /// Effort (the registry entry's, keyed by the kind name or the
-    /// custom id). An explicit `"default"` pick lands as the row's own
-    /// `default`. The QUICK PROMPT names built-in kinds and CLAUDE
-    /// ACCOUNTS, so any other custom entry is remembered by its Model /
-    /// Effort rows alone. Returns whether anything changed, so the caller
-    /// saves only then; nothing moves while the switch is off.
-    pub fn remember_launch(
-        &mut self,
-        kind: AgentKind,
-        custom: Option<&str>,
-        model: Option<&str>,
-        effort: Option<&str>,
-    ) -> bool {
-        if !self.remember_harness {
-            return false;
-        }
-        let id = match (kind, custom) {
-            (AgentKind::Custom, Some(id)) => id.to_string(),
-            (AgentKind::Custom, None) => return false,
-            (kind, _) => kind.as_str().to_string(),
-        };
-        let mut changed = false;
-        let before = self.effective_harness_by_id(&id);
-        let quick = kind != AgentKind::Custom || before.is_claude_account();
-        if quick && self.quick_prompt_kind != id {
-            self.quick_prompt_kind = id.clone();
-            changed = true;
-        }
-        if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
-            if before.model.default != model {
-                self.set_harness_model(&id, model.into());
-                changed = true;
-            }
-        }
-        if let Some(effort) = effort.map(str::trim).filter(|e| !e.is_empty()) {
-            if before.effort.default != effort {
-                self.set_harness_effort(&id, effort.into());
-                changed = true;
-            }
-        }
-        // A composing harness (Cursor's family-suffix shape) keeps the
-        // stored effort only if the family it now names ships it, as the
-        // AGENTS TAB's own Model cycle does — never an id the CLI would
-        // refuse.
-        if changed {
-            let descriptor = self.effective_harness_by_id(&id);
-            if descriptor.compose_model_effort {
-                let family = descriptor.default_model().map(str::to_string);
-                let choices = effort_choices_in(&descriptor, family.as_deref());
-                if !fits(&descriptor.effort.default, &choices) {
-                    let fitted = fit_effort_in(&descriptor, family.as_deref(), None)
-                        .unwrap_or_else(|| DEFAULT_CHOICE.into());
-                    self.set_harness_effort(&id, fitted);
-                }
-            }
-        }
-        changed
-    }
-
     /// Hotkeys as the event loop dispatches them: defaults with this
     /// config's overrides applied.
     pub fn keymap(&self) -> crate::keymap::Keymap {
@@ -3468,11 +3042,6 @@ impl Config {
             SettingKind::Animations => on_off(self.animations).into(),
             SettingKind::Spotify => on_off(self.spotify).into(),
             SettingKind::BlackBackground => on_off(self.black_background).into(),
-            SettingKind::HideCardMarks => shown_hidden(self.hide_card_marks).into(),
-            SettingKind::HighlightCurrentCard => on_off(self.highlight_current_card).into(),
-            SettingKind::SessionPane => self.pane_side().as_str().into(),
-            SettingKind::WorktreeLayout => WORKTREE_LAYOUTS[usize::from(self.list_layout())].into(),
-            SettingKind::ExpandAllWorktrees => on_off(self.expand_all_worktrees).into(),
             SettingKind::CardIssueNumber => on_off(self.card_issue_number).into(),
             SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
             SettingKind::DiffTreeView => on_off(self.diff_tree_view).into(),
@@ -3511,8 +3080,6 @@ impl Config {
             SettingKind::RunCommand | SettingKind::OpenCommand => {
                 ProjectSettings::default().value_label(kind)
             }
-            SettingKind::RememberHarness => on_off(self.remember_harness).into(),
-            SettingKind::HideUninstalledHarnesses => on_off(self.hide_uninstalled_harnesses).into(),
             // A CLAUDE ACCOUNT — the default one too — reads as the name
             // it goes by, with its email.
             SettingKind::QuickPromptKind => match self.quick_prompt_harness() {
@@ -3652,25 +3219,6 @@ impl Config {
             SettingKind::BlackBackground => {
                 self.black_background = !self.black_background;
             }
-            SettingKind::HideCardMarks => {
-                self.hide_card_marks = !self.hide_card_marks;
-            }
-            SettingKind::HighlightCurrentCard => {
-                self.highlight_current_card = !self.highlight_current_card;
-            }
-            SettingKind::SessionPane => {
-                // Cycled from the resolved side, so a hand edit off the
-                // list steps on from the right it reads as.
-                self.session_pane =
-                    cycle_choice(self.pane_side().as_str(), PANE_SIDES, step).into();
-            }
-            SettingKind::WorktreeLayout => {
-                let now = WORKTREE_LAYOUTS[usize::from(self.list_layout())];
-                self.worktree_layout = cycle_choice(now, WORKTREE_LAYOUTS, step).into();
-            }
-            SettingKind::ExpandAllWorktrees => {
-                self.expand_all_worktrees = !self.expand_all_worktrees;
-            }
             SettingKind::CardIssueNumber => {
                 self.card_issue_number = !self.card_issue_number;
             }
@@ -3734,12 +3282,6 @@ impl Config {
             }
             // One project's, not the file's, and typed: see `set_project_text`.
             SettingKind::RunCommand | SettingKind::OpenCommand => {}
-            SettingKind::RememberHarness => {
-                self.remember_harness = !self.remember_harness;
-            }
-            SettingKind::HideUninstalledHarnesses => {
-                self.hide_uninstalled_harnesses = !self.hide_uninstalled_harnesses;
-            }
             SettingKind::QuickPromptKind => {
                 self.quick_prompt_kind =
                     cycle_owned(&self.quick_prompt_kind, &self.quick_prompt_choices(), step);
@@ -3865,7 +3407,7 @@ fn editor_label(stored: &str, resolved: &crate::editor::Resolved) -> String {
 /// synchronous check for picker filtering only; the daemon re-probes
 /// through the login shell at launch, which can see shims PATH misses.
 /// Whether `program` resolves on this process's PATH right now — the
-/// fast check behind `hide_uninstalled_harnesses`, for built-ins and
+/// fast check behind [`Config::offered_harnesses`], for built-ins and
 /// customs alike.
 pub fn program_installed(program: &str) -> bool {
     program_on(&search_path(), program)
@@ -3917,17 +3459,6 @@ fn on_off(v: bool) -> &'static str {
         "on"
     } else {
         "off"
-    }
-}
-
-/// Who a dir SAVED ON THIS MACHINE is signed in as, as its row says it:
-/// `signed in as a@b.co`, `not signed in`, or `checking…` before the
-/// first read lands — never a read here.
-fn dir_sign_in(dir: &std::path::Path) -> String {
-    match crate::claude_accounts::dir_state(dir) {
-        Some(crate::claude_accounts::SignIn::As(email)) => format!("signed in as {email}"),
-        Some(crate::claude_accounts::SignIn::Out) => "not signed in".into(),
-        None => "checking…".into(),
     }
 }
 
@@ -4127,27 +3658,6 @@ mod tests {
             33
         );
     }
-
-    #[test]
-    fn a_setting_is_new_for_a_week_from_its_release() {
-        let shipped = days_from_civil(2026, 9, 22);
-        let kind = SettingKind::BlackBackground;
-        assert!(!kind.is_new(shipped - 1), "not new before it shipped");
-        assert!(kind.is_new(shipped));
-        assert!(kind.is_new(shipped + NEW_SETTING_DAYS - 1));
-        assert!(!kind.is_new(shipped + NEW_SETTING_DAYS));
-    }
-
-    #[test]
-    fn no_setting_ships_in_the_future_of_its_own_code() {
-        // A date past today is a typo: the row would miss its `(new)` week.
-        for tab in 0..tab_count() {
-            for spec in tab_settings(tab) {
-                let (y, m, d) = spec.kind.added_on();
-                assert!(days_from_civil(y, m, d) <= today_days(), "{}", spec.label);
-            }
-        }
-    }
     use crate::keymap::Keymap;
 
     /// An older orion's `pr_autofix: "ask"` is `auto` once loaded, and a
@@ -4162,10 +3672,6 @@ mod tests {
         cfg.save_to(&path).unwrap();
         assert_eq!(read_json_file(&path)["pr_autofix"], "auto");
     }
-
-    /// Keys an earlier release wrote that this build no longer reads: they
-    /// load as nothing, and a save leaves them in the file as they were.
-    const DROPPED_KEYS: &[&str] = &["linear_task_template"];
 
     /// Config files earlier releases wrote, every value off its default.
     /// Add one per release; see [`config_files_from_earlier_releases_still_load_every_key`].
@@ -4277,22 +3783,13 @@ mod tests {
             .map(|i| (tab, cfg.agent_rows_from() + i))
     }
 
-    /// The first compatibility rule in docs/configuration.md: a key, once
-    /// shipped, keeps its name, its type and its meaning. Every key a
-    /// release wrote must still load to exactly the value it wrote — a
-    /// rename off the `RENAMED_KEYS` table leaves the key unknown, a type
-    /// change leaves it unreadable, and either reads back as something
-    /// else here. A key on that table reads through its alias into the
-    /// field's new name, and a save writes it back under that name alone.
+    /// The compatibility rule in docs/configuration.md: a key this build
+    /// still has keeps its name, its type and its meaning, so every key a
+    /// release wrote loads to exactly the value it wrote — a type change
+    /// leaves it unreadable, and reads back as something else here. A
+    /// retired key loads as nothing, and a save leaves it where it was.
     #[test]
     fn config_files_from_earlier_releases_still_load_every_key() {
-        let current = |key: &str| {
-            RENAMED_KEYS
-                .iter()
-                .find(|(old, _)| *old == key)
-                .map_or(key, |(_, new)| *new)
-                .to_string()
-        };
         for (release, raw) in CONFIG_FIXTURES {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.json");
@@ -4306,30 +3803,25 @@ mod tests {
             let known = serde_json::to_value(&loaded).unwrap();
             let fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
             for (key, value) in fixture.as_object().unwrap() {
-                if DROPPED_KEYS.contains(&key.as_str()) {
-                    assert_eq!(known.get(key), None, "{release}: `{key}` is no longer read");
+                // A retired key loads as nothing; the save below, which
+                // leaves a key it doesn't know where it found it, keeps it.
+                let Some(loaded) = known.get(key) else {
                     continue;
-                }
+                };
                 assert_eq!(
-                    known.get(current(key)),
-                    Some(value),
+                    loaded, value,
                     "{release}: `{key}` no longer loads as that release wrote it"
                 );
             }
-            // A save writes every one of them back unchanged — a renamed
-            // key under its new name, the old one gone.
+            // A save writes every one of them back unchanged.
             loaded.save_to(&path).unwrap();
             let saved = read_json_file(&path);
             for (key, value) in fixture.as_object().unwrap() {
-                let now = current(key);
                 assert_eq!(
-                    saved.get(&now),
+                    saved.get(key),
                     Some(value),
                     "{release}: `{key}` after a save"
                 );
-                if now != *key {
-                    assert_eq!(saved.get(key), None, "{release}: `{key}` after a save");
-                }
             }
         }
     }
@@ -5342,66 +4834,6 @@ mod tests {
         assert!(!loaded.card_issue_number);
     }
 
-    /// HIGHLIGHT CURRENT CARD: an Appearance row that reads `on` / `off`,
-    /// on by default (a config that predates the key too), and persisted
-    /// under `highlight_current_card`.
-    #[test]
-    fn highlight_current_card_default_on_toggle_on_the_appearance_tab_and_persist() {
-        let mut cfg = Config::default();
-        assert!(cfg.highlight_current_card, "on by default");
-        assert_eq!(cfg.value_label(SettingKind::HighlightCurrentCard), "on");
-
-        let (tab, row) = locate(SettingKind::HighlightCurrentCard).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        cfg.cycle(tab, row, 0);
-        assert!(!cfg.highlight_current_card);
-        assert_eq!(cfg.value_label(SettingKind::HighlightCurrentCard), "off");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains(r#""highlight_current_card": false"#), "{raw}");
-        assert!(!load_from(&path).highlight_current_card);
-
-        let legacy: Config = serde_json::from_str("{}").unwrap();
-        assert!(legacy.highlight_current_card);
-    }
-
-    /// EXPAND ALL WORKTREES: an Appearance row under **Worktree layout**
-    /// that reads `on` / `off`, off by default (a config that predates the
-    /// key too), and persisted under `expand_all_worktrees`.
-    #[test]
-    fn expand_all_worktrees_is_off_by_default_toggles_and_persists() {
-        let mut cfg = Config::default();
-        assert!(!cfg.expand_all_worktrees, "off by default");
-        assert_eq!(cfg.value_label(SettingKind::ExpandAllWorktrees), "off");
-
-        let (tab, row) = locate(SettingKind::ExpandAllWorktrees).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        assert_eq!(
-            locate(SettingKind::WorktreeLayout),
-            Some((tab, row - 1)),
-            "under the layout it opens"
-        );
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.expand_all_worktrees);
-        assert_eq!(cfg.value_label(SettingKind::ExpandAllWorktrees), "on");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains(r#""expand_all_worktrees": true"#), "{raw}");
-        assert!(load_from(&path).expand_all_worktrees);
-
-        cfg.cycle(tab, row, 0);
-        assert!(!cfg.expand_all_worktrees);
-
-        let legacy: Config = serde_json::from_str("{}").unwrap();
-        assert!(!legacy.expand_all_worktrees, "a missing key reads as off");
-    }
-
     /// CARD LINE COUNTS: retired with every card counting its lines. The
     /// key an older build wrote (`card_line_changes`, off by default) still
     /// loads to what it wrote and is written back as stored, but no tab
@@ -5488,163 +4920,6 @@ mod tests {
 
         let older: Config = serde_json::from_str("{}").unwrap();
         assert!(older.spotify, "a config predating the key turns it on");
-    }
-
-    /// HIDE CARD MARKS: off out of the box, toggled on from its
-    /// Appearance row, persisted under `hide_card_marks`; a config
-    /// predating the key keeps the marks, and one written under the old
-    /// `hide_terminal_glyphs` key still reads.
-    #[test]
-    fn hide_card_marks_default_off_toggle_and_persist() {
-        let mut cfg = Config::default();
-        assert!(!cfg.hide_card_marks);
-        let (tab, row) = locate(SettingKind::HideCardMarks).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        assert_eq!(cfg.value_label(SettingKind::HideCardMarks), "shown");
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.hide_card_marks);
-        assert_eq!(cfg.value_label(SettingKind::HideCardMarks), "hidden");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(load_from(&path).hide_card_marks);
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("hide_card_marks"), Some(&serde_json::json!(true)));
-        assert_eq!(raw.get("hide_terminal_glyphs"), None);
-
-        let older: Config = serde_json::from_str("{}").unwrap();
-        assert!(
-            !older.hide_card_marks,
-            "a config predating the key keeps the marks"
-        );
-        let renamed: Config = serde_json::from_str(r#"{"hide_terminal_glyphs":true}"#).unwrap();
-        assert!(renamed.hide_card_marks, "the old key still reads");
-    }
-
-    /// A v0.39.0 file says `hide_terminal_glyphs`; the first save of a
-    /// build that renamed it patched `hide_card_marks` in beside it. That
-    /// pair once loaded as every default, so the settings overlay (which
-    /// reads the file each frame) showed defaults whatever was chosen, and
-    /// each save wrote those defaults back. Every other value must survive
-    /// the pair, a toggle must read back, and the save must drop the old key.
-    #[test]
-    fn a_file_holding_both_card_marks_keys_keeps_its_settings_and_heals() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(
-            &path,
-            r#"{"theme": "ocean", "worktree_layout": "list", "hide_card_marks": true, "hide_terminal_glyphs": false}"#,
-        )
-        .unwrap();
-
-        let mut cfg = load_from(&path);
-        assert_eq!(cfg.theme, "ocean", "the clash costs no other value");
-        assert!(cfg.list_layout());
-        assert!(cfg.hide_card_marks, "the new key wins over the old one");
-
-        let (tab, row) = locate(SettingKind::Animations).unwrap();
-        cfg.cycle(tab, row, 0);
-        cfg.save_to(&path).unwrap();
-        let reread = load_from(&path);
-        assert!(!reread.animations, "the toggle reads back");
-        assert_eq!(reread.theme, "ocean");
-        assert!(reread.hide_card_marks);
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("hide_terminal_glyphs"), None, "{raw}");
-
-        // Upgrading straight from v0.39.0: the old key alone carries over
-        // under its new name.
-        std::fs::write(&path, r#"{"hide_terminal_glyphs": true}"#).unwrap();
-        load_from(&path).save_to(&path).unwrap();
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("hide_card_marks"), Some(&serde_json::json!(true)));
-        assert_eq!(raw.get("hide_terminal_glyphs"), None, "{raw}");
-
-        // An old key the local layer holds moves to its new name there.
-        let local = dir.path().join("config.local.json");
-        std::fs::write(&local, r#"{"hide_terminal_glyphs": true}"#).unwrap();
-        std::fs::write(&path, "{}").unwrap();
-        load_from(&path).save_to(&path).unwrap();
-        let held: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&local).unwrap()).unwrap();
-        assert_eq!(held, serde_json::json!({"hide_card_marks": true}));
-        assert!(load_from(&path).hide_card_marks);
-    }
-
-    /// The **Session pane**: down the right out of the box, cycled from
-    /// its Appearance row to the bottom and back, persisted under
-    /// `session_pane`. A config predating the key, or holding a word off
-    /// the list — `left`, which older builds offered, included — reads as
-    /// the right.
-    #[test]
-    fn session_pane_defaults_to_the_right_cycles_and_persists() {
-        use crate::launcher::PaneSide;
-        let mut cfg = Config::default();
-        assert_eq!(cfg.pane_side(), PaneSide::Right);
-        let (tab, row) = locate(SettingKind::SessionPane).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        assert_eq!(cfg.value_label(SettingKind::SessionPane), "right");
-        cfg.cycle(tab, row, 0);
-        assert_eq!(cfg.pane_side(), PaneSide::Bottom);
-        assert_eq!(cfg.value_label(SettingKind::SessionPane), "bottom");
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.pane_side(), PaneSide::Right, "and round again");
-        cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.pane_side(), PaneSide::Bottom, "either arrow walks it");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(load_from(&path).pane_side(), PaneSide::Bottom);
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("session_pane"), Some(&serde_json::json!("bottom")));
-
-        let older: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(older.pane_side(), PaneSide::Right, "predating the key");
-        let mut odd: Config = serde_json::from_str(r#"{"session_pane": "top"}"#).unwrap();
-        assert_eq!(odd.pane_side(), PaneSide::Right, "a word off the list");
-        odd.cycle(tab, row, 0);
-        assert_eq!(odd.pane_side(), PaneSide::Bottom, "steps on from the right");
-        let left: Config = serde_json::from_str(r#"{"session_pane": "left"}"#).unwrap();
-        assert_eq!(left.pane_side(), PaneSide::Right, "the retired left side");
-    }
-
-    /// The **Worktree layout**: the cards out of the box, cycled from its
-    /// Appearance row to the compact list and back, persisted under
-    /// `worktree_layout`. A config predating the key, or holding a word
-    /// off the list, reads as the cards.
-    #[test]
-    fn worktree_layout_defaults_to_cards_cycles_and_persists() {
-        let mut cfg = Config::default();
-        assert!(!cfg.list_layout());
-        let (tab, row) = locate(SettingKind::WorktreeLayout).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        assert_eq!(cfg.value_label(SettingKind::WorktreeLayout), "cards");
-        cfg.cycle(tab, row, 1);
-        assert!(cfg.list_layout());
-        assert_eq!(cfg.value_label(SettingKind::WorktreeLayout), "list");
-        cfg.cycle(tab, row, -1);
-        assert!(!cfg.list_layout(), "and back");
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.list_layout(), "Enter steps it on too");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(load_from(&path).list_layout());
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("worktree_layout"), Some(&serde_json::json!("list")));
-
-        let older: Config = serde_json::from_str("{}").unwrap();
-        assert!(!older.list_layout(), "predating the key");
-        let odd: Config = serde_json::from_str(r#"{"worktree_layout": "grid"}"#).unwrap();
-        assert!(!odd.list_layout(), "a word off the list");
     }
 
     /// The QUICK PROMPT's focus toggle: off unless the user turns it on,
@@ -5921,7 +5196,7 @@ mod tests {
         assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
         assert!(cfg.show_key_combos);
 
-        cfg.remember_harness = true;
+        cfg.follow_new_session = !cfg.follow_new_session;
         cfg.save_to(&path).unwrap();
         assert_eq!(read_json_file(&path)["show_key_combos"], true);
 
@@ -5930,45 +5205,6 @@ mod tests {
             !cfg.show_key_combos,
             "unknown to a config written before it"
         );
-    }
-
-    /// REMEMBER HARNESS: an Experimental switch, off by default, a plain
-    /// toggle persisted under `remember_harness`, unknown to a config
-    /// written before it (which reads as off).
-    #[test]
-    fn remember_harness_is_off_by_default_on_the_experimental_tab_and_persists() {
-        let mut cfg = Config::default();
-        assert!(!cfg.remember_harness, "a pick is one session's by default");
-        assert_eq!(cfg.value_label(SettingKind::RememberHarness), "off");
-        assert_eq!(
-            cfg.remembered_harness(),
-            None,
-            "off: the picker starts on its first row"
-        );
-
-        let (tab, row) = locate(SettingKind::RememberHarness).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Experimental");
-        assert_eq!(tab + 1, hotkeys_tab(), "Hotkeys stays last");
-        assert_eq!(
-            row, 0,
-            "the tab's first row, the KEY COMBO DISPLAY being always on"
-        );
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.remember_harness);
-        assert_eq!(cfg.value_label(SettingKind::RememberHarness), "on");
-        assert_eq!(cfg.remembered_harness(), Some((AgentKind::Claude, None)));
-        cfg.cycle(tab, row, 1);
-        assert!(!cfg.remember_harness, "either arrow toggles it back");
-        cfg.cycle(tab, row, -1);
-        assert!(cfg.remember_harness);
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(load_from(&path).remember_harness);
-
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(!cfg.remember_harness);
     }
 
     /// PRESET TEXT: a Sessions row after the sounds, `prefix` by default,
@@ -6087,103 +5323,12 @@ mod tests {
         cfg.save_to(&path).unwrap();
         assert!(!load_from(&path).pr_issue_counts, "written back as stored");
 
-        let experimental = SETTINGS_TABS
-            .iter()
-            .position(|t| t.title == "Experimental")
-            .unwrap();
-        let TabBody::Values(rows) = SETTINGS_TABS[experimental].body else {
-            panic!("Experimental lists switches");
-        };
-        assert!(
-            rows.iter().all(|r| r.label != "PR & issue counts"),
-            "no row edits it"
-        );
-        assert_eq!(
-            rows.last().map(|r| r.kind),
-            Some(SettingKind::RememberHarness),
-            "Experimental ends on REMEMBER HARNESS again"
-        );
-    }
-
-    /// What a remembered launch writes: the harness into the QUICK
-    /// PROMPT's `quick_prompt_kind`, a picked model or effort into that
-    /// harness's own rows — and nothing at all while the switch is off,
-    /// or when the pick already is the default.
-    #[test]
-    fn remember_launch_writes_the_agents_tab_rows_only_while_on() {
-        let mut cfg = Config::default();
-        assert!(
-            !cfg.remember_launch(AgentKind::Codex, None, Some("gpt-5.5"), Some("high")),
-            "off: nothing moves"
-        );
-        assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude);
-        assert_eq!(cfg.codex_model, DEFAULT_CHOICE);
-        assert_eq!(cfg.codex_effort, DEFAULT_CHOICE);
-
-        cfg.remember_harness = true;
-        // The harness alone: the rows it did not drill into stay put.
-        assert!(cfg.remember_launch(AgentKind::Codex, None, None, None));
-        assert_eq!(cfg.quick_prompt_kind(), AgentKind::Codex);
-        assert_eq!(cfg.remembered_harness(), Some((AgentKind::Codex, None)));
-        assert_eq!(cfg.codex_model, DEFAULT_CHOICE, "no model was picked");
-        assert_eq!(cfg.codex_effort, DEFAULT_CHOICE);
-        assert!(
-            !cfg.remember_launch(AgentKind::Codex, None, None, None),
-            "the same pick again changes nothing, so nothing is saved"
-        );
-
-        // A model and effort drilled into land on that harness's rows.
-        assert!(cfg.remember_launch(AgentKind::Claude, None, Some("opus"), Some("high")));
-        assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude);
-        assert_eq!(
-            cfg.default_model(AgentKind::Claude).as_deref(),
-            Some("opus")
-        );
-        assert_eq!(
-            cfg.default_effort(AgentKind::Claude).as_deref(),
-            Some("high")
-        );
-        assert_eq!(
-            cfg.codex_model, DEFAULT_CHOICE,
-            "another harness's rows are its own"
-        );
-        // The explicit "default" row is a pick too: back to no flag.
-        assert!(cfg.remember_launch(AgentKind::Claude, None, Some("default"), None));
-        assert_eq!(cfg.claude_model, DEFAULT_CHOICE);
-        assert_eq!(
-            cfg.default_effort(AgentKind::Claude).as_deref(),
-            Some("high")
-        );
-        // A blank pick is no pick.
-        assert!(!cfg.remember_launch(AgentKind::Claude, None, Some("  "), Some("")));
-
-        // Cursor: a family picked without an effort refits the stored one
-        // to what the family ships, as the AGENTS TAB's own cycle does.
-        cfg.cursor_effort = "high".into();
-        let family_without_efforts = crate::cursor_catalogue::models()
-            .iter()
-            .find(|m| {
-                !m.eq_ignore_ascii_case(DEFAULT_CHOICE)
-                    && effort_choices(AgentKind::Cursor, Some(m), None).is_empty()
-            })
-            .copied()
-            .expect("the seed catalogue ships a family with no effort variants");
-        assert!(cfg.remember_launch(AgentKind::Cursor, None, Some(family_without_efforts), None));
-        assert_eq!(cfg.cursor_model, family_without_efforts);
-        assert_eq!(
-            cfg.default_effort(AgentKind::Cursor),
-            None,
-            "refitted, never refused"
-        );
-
-        // Round trip: what was remembered is what loads.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let loaded = load_from(&path);
-        assert_eq!(loaded.quick_prompt_kind(), AgentKind::Cursor);
-        assert_eq!(loaded.claude_effort, "high");
-        assert_eq!(loaded.cursor_model, family_without_efforts);
+        assert!(SETTINGS_TABS.iter().all(|tab| match &tab.body {
+            TabBody::Values(rows) | TabBody::Project(rows) => {
+                rows.iter().all(|r| r.label != "PR & issue counts")
+            }
+            TabBody::Hotkeys | TabBody::Agents => true,
+        }));
     }
 
     /// The QUICK PROMPT's harness: one name, cycled over every AGENT KIND,
@@ -6233,7 +5378,7 @@ mod tests {
     fn harness_toggles_default_on_and_persist() {
         let mut cfg = Config::default();
         assert!(cfg.claude_enabled && cfg.codex_enabled && cfg.cursor_enabled);
-        assert!(cfg.pi_enabled && cfg.muse_enabled && cfg.opencode_enabled);
+        assert!(cfg.opencode_enabled);
         let builtin: Vec<AgentKind> = AgentKind::ALL
             .into_iter()
             .filter(|kind| *kind != AgentKind::Custom)
@@ -6253,8 +5398,6 @@ mod tests {
             vec![
                 AgentKind::Claude,
                 AgentKind::Cursor,
-                AgentKind::Pi,
-                AgentKind::Muse,
                 AgentKind::Grok,
                 AgentKind::OpenCode
             ],
@@ -6284,7 +5427,7 @@ mod tests {
 
         // Every kind off is representable (a hand edit), and reads as empty.
         let cfg: Config = serde_json::from_str(
-            r#"{"claude_enabled":false,"codex_enabled":false,"cursor_enabled":false,"pi_enabled":false,"muse_enabled":false,"opencode_enabled":false,"harnesses":{"grok":{"enabled":false}}}"#,
+            r#"{"claude_enabled":false,"codex_enabled":false,"cursor_enabled":false,"opencode_enabled":false,"harnesses":{"grok":{"enabled":false}}}"#,
         )
         .unwrap();
         assert!(cfg.enabled_kinds().is_empty());
@@ -6354,7 +5497,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: Some("sid".into()),
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
@@ -6373,11 +5515,11 @@ mod tests {
         assert!(loaded
             .continue_targets(&agent(AgentKind::Codex, None))
             .is_empty());
-        let cloud = orion_core::Agent {
-            cloud_session_id: Some("session_01".into()),
+        let archived = orion_core::Agent {
+            archived: true,
             ..agent(AgentKind::Claude, None)
         };
-        assert!(loaded.continue_targets(&cloud).is_empty());
+        assert!(loaded.continue_targets(&archived).is_empty());
     }
 
     #[test]
@@ -6389,8 +5531,6 @@ mod tests {
                 (AgentKind::Claude, None),
                 (AgentKind::Codex, None),
                 (AgentKind::Cursor, None),
-                (AgentKind::Pi, None),
-                (AgentKind::Muse, None),
                 (AgentKind::Grok, None),
                 (AgentKind::OpenCode, None),
             ]
@@ -6399,16 +5539,16 @@ mod tests {
         // Disabled and broken entries are out; the tab still lists them
         // (with their reason) so they can be fixed.
         let cfg: Config = serde_json::from_str(
-            r#"{"custom_harnesses": [
-                {"id": "agy", "program": "agy"},
-                {"id": "off", "program": "off", "enabled": false},
-                {"id": "broken", "program": ""}
-            ]}"#,
+            r#"{"harnesses": {
+                "agy": {"program": "agy"},
+                "off": {"program": "off", "enabled": false},
+                "broken": {"program": ""}
+            }}"#,
         )
         .unwrap();
         let offered = cfg.offered_harnesses();
-        assert_eq!(offered.len(), 8);
-        assert_eq!(offered[7], (AgentKind::Custom, Some("agy".into())));
+        assert_eq!(offered.len(), 6);
+        assert_eq!(offered[5], (AgentKind::Custom, Some("agy".into())));
         let rows = cfg.agent_rows();
         assert!(rows.contains(&("off".to_string(), HarnessField::Enabled)));
         assert!(rows.contains(&("broken".to_string(), HarnessField::Enabled)));
@@ -6418,20 +5558,17 @@ mod tests {
             "the tab names the reason"
         );
 
-        // Under the hide switch an entry survives only when its program
-        // is on PATH, built-ins and customs alike.
+        // An entry is offered only when its program is on PATH, built-ins
+        // and customs alike.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("agy"), "").unwrap();
-        let hiding = Config {
-            hide_uninstalled_harnesses: true,
-            ..serde_json::from_str::<Config>(
-                r#"{"custom_harnesses": [
-                    {"id": "agy", "program": "agy"},
-                    {"id": "missing", "program": "definitely-not-on-path"}
-                ]}"#,
-            )
-            .unwrap()
-        };
+        let hiding = serde_json::from_str::<Config>(
+            r#"{"harnesses": {
+                "agy": {"program": "agy"},
+                "missing": {"program": "definitely-not-on-path"}
+            }}"#,
+        )
+        .unwrap();
         let offered =
             hiding.offered_harnesses_where(|program| program_on(dir.path().as_os_str(), program));
         assert_eq!(offered.len(), 1);
@@ -6514,23 +5651,8 @@ mod tests {
             cfg.default_effort(AgentKind::Codex).as_deref(),
             Some("high")
         );
-        // Pi passes both through like Claude: a pattern and a thinking level.
-        assert_eq!(cfg.default_model(AgentKind::Pi), None);
-        assert_eq!(cfg.default_effort(AgentKind::Pi), None);
-        cfg.pi_model = "sonnet".into();
-        cfg.pi_effort = "xhigh".into();
-        assert_eq!(cfg.default_model(AgentKind::Pi).as_deref(), Some("sonnet"));
-        assert_eq!(cfg.default_effort(AgentKind::Pi).as_deref(), Some("xhigh"));
-        // Muse passes --model through verbatim; effort is reserved and
-        // never sent, whatever the file holds.
-        assert_eq!(cfg.default_model(AgentKind::Muse), None);
-        assert_eq!(cfg.default_effort(AgentKind::Muse), None);
-        cfg.muse_model = "spark".into();
-        cfg.muse_effort = "high".into();
-        assert_eq!(cfg.default_model(AgentKind::Muse).as_deref(), Some("spark"));
-        assert_eq!(cfg.default_effort(AgentKind::Muse), None);
-        assert_eq!(AgentKind::parse("muse"), Some(AgentKind::Muse));
-        assert_eq!(AgentKind::Muse.cli_program(), "muse");
+        assert_eq!(AgentKind::parse("pi"), None, "Pi is gone");
+        assert_eq!(AgentKind::parse("muse"), None, "and so is Muse");
         // OpenCode passes a `provider/model` id through verbatim and has
         // no effort key at all: no Effort row to locate.
         assert_eq!(cfg.default_model(AgentKind::OpenCode), None);
@@ -6548,15 +5670,17 @@ mod tests {
             locate_in(&cfg, "opencode", HarnessField::Effort).is_none(),
             "no Effort row"
         );
-        let (tab, row) = locate_in(&cfg, "pi", HarnessField::Effort).unwrap();
+        cfg.claude_effort = "xhigh".into();
+        let (tab, row) = locate_in(&cfg, "claude", HarnessField::Effort).unwrap();
         cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.agent_value("pi", HarnessField::Effort), "max");
+        assert_eq!(cfg.agent_value("claude", HarnessField::Effort), "max");
         cfg.cycle(tab, row, 1);
         assert_eq!(
-            cfg.agent_value("pi", HarnessField::Effort),
+            cfg.agent_value("claude", HarnessField::Effort),
             DEFAULT_CHOICE,
             "wraps"
         );
+        cfg.claude_effort = DEFAULT_CHOICE.into();
         // Cursor: the family is the model; the effort only counts when
         // that family ships it.
         assert_eq!(cfg.default_model(AgentKind::Cursor), None);
@@ -6834,7 +5958,6 @@ mod tests {
                             (Some(spec), _) => spec.label.to_string(),
                             (None, Some(AccountRow::Account(id))) => id,
                             (None, Some(AccountRow::Add)) => "Add account".to_string(),
-                            (None, Some(AccountRow::OnDisk(dir))) => dir.display().to_string(),
                             (None, None) => cfg
                                 .agent_row(i)
                                 .map(|(_, field)| field.label().to_string())
@@ -6861,8 +5984,7 @@ mod tests {
                             "Agent".to_string(),
                             "Focus".to_string(),
                             "Follow new".to_string(),
-                            "New worktree".to_string(),
-                            "Hide missing CLIs".to_string()
+                            "New worktree".to_string()
                         ]
                     ),
                     (
@@ -6887,22 +6009,6 @@ mod tests {
                     ),
                     (
                         "Cursor".to_string(),
-                        vec![
-                            "Enabled".to_string(),
-                            "Model".to_string(),
-                            "Effort".to_string()
-                        ]
-                    ),
-                    (
-                        "Pi".to_string(),
-                        vec![
-                            "Enabled".to_string(),
-                            "Model".to_string(),
-                            "Effort".to_string()
-                        ]
-                    ),
-                    (
-                        "Muse".to_string(),
                         vec![
                             "Enabled".to_string(),
                             "Model".to_string(),
@@ -6973,8 +6079,6 @@ mod tests {
                         "Claude",
                         "Codex",
                         "Cursor",
-                        "Pi",
-                        "Muse",
                         "Grok Build",
                         "OpenCode",
                         "agy"

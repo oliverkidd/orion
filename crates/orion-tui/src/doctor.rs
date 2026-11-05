@@ -595,7 +595,7 @@ mod tests {
     fn claude_only(extra: &str) -> Config {
         let json = format!(
             r#"{{"claude_enabled": true, "codex_enabled": false, "cursor_enabled": false,
-                "pi_enabled": false, "muse_enabled": false, "opencode_enabled": false,
+                "opencode_enabled": false,
                 "harnesses": {{"grok": {{"enabled": false}}}}{extra}}}"#
         );
         serde_json::from_str(&json).unwrap()
@@ -765,7 +765,7 @@ mod tests {
 
         let none: Config = serde_json::from_str(
             r#"{"claude_enabled": false, "codex_enabled": false, "cursor_enabled": false,
-                "pi_enabled": false, "muse_enabled": false, "opencode_enabled": false,
+                "opencode_enabled": false,
                 "harnesses": {"grok": {"enabled": false}}}"#,
         )
         .unwrap();

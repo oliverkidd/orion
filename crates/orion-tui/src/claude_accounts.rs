@@ -20,13 +20,8 @@
 //! at the id, and the login lives in the dir.
 //!
 //! Removing an account leaves its dir, login and all, where it was —
-//! and a later add whose name comes to the same id adopts it, login and
-//! all. So the dir does not go quiet: SAVED ON THIS MACHINE lists every
-//! `~/.claude-*` dir that looks like Claude Code's and that no account
-//! runs in ([`on_disk`]), with who it is signed in as; Enter adds one
-//! back under a name ([`plan_adopt`]), `⌫` moves it to the Trash
-//! ([`trash_dir`]). The scan is the refresh's, off the loop, like the
-//! records.
+//! unless the remove sends it to the Trash — and a later add whose name
+//! comes to the same id adopts it, login and all.
 //!
 //! The record is `.claude.json` (`orion_core::claude_account`), and it
 //! can run to megabytes — Claude Code rewrites it as sessions run. So it
@@ -120,12 +115,6 @@ mod store {
     pub(super) fn tags<T>(f: impl FnOnce(&mut BTreeMap<String, AccountTag>) -> T) -> T {
         f(&mut TAGS.lock().unwrap_or_else(|e| e.into_inner()))
     }
-
-    static MACHINE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-
-    pub(super) fn machine<T>(f: impl FnOnce(&mut Vec<PathBuf>) -> T) -> T {
-        f(&mut MACHINE.lock().unwrap_or_else(|e| e.into_inner()))
-    }
 }
 
 #[cfg(test)]
@@ -137,7 +126,6 @@ mod store {
         static KNOWN: RefCell<BTreeMap<PathBuf, Known>> = const { RefCell::new(BTreeMap::new()) };
         static SHORT: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
         static TAGS: RefCell<BTreeMap<String, AccountTag>> = const { RefCell::new(BTreeMap::new()) };
-        static MACHINE: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     }
 
     pub(super) fn known<T>(f: impl FnOnce(&mut BTreeMap<PathBuf, Known>) -> T) -> T {
@@ -150,10 +138,6 @@ mod store {
 
     pub(super) fn tags<T>(f: impl FnOnce(&mut BTreeMap<String, AccountTag>) -> T) -> T {
         TAGS.with(|cell| f(&mut cell.borrow_mut()))
-    }
-
-    pub(super) fn machine<T>(f: impl FnOnce(&mut Vec<PathBuf>) -> T) -> T {
-        MACHINE.with(|cell| f(&mut cell.borrow_mut()))
     }
 }
 
@@ -219,12 +203,10 @@ fn read(record: &Record, previous: Option<&Known>) -> Option<Known> {
     }
 }
 
-/// Read every account the config names (off the loop in the app), what
-/// the cards call each one, and which config dirs on this machine no
-/// account runs in ([`scan`]) — with who each of those is signed in as.
-/// True when anything an account, or one of those dirs, shows changed.
-/// Under test, only against a pinned config — never the developer's own
-/// accounts — and a scan only of a pinned home.
+/// Read every account the config names (off the loop in the app), and
+/// what the cards call each one. True when anything an account shows
+/// changed. Under test, only against a pinned config — never the
+/// developer's own accounts.
 pub fn refresh_now() -> bool {
     #[cfg(test)]
     if !crate::config::config_pinned() {
@@ -236,15 +218,7 @@ pub fn refresh_now() -> bool {
         .iter()
         .filter_map(|entry| Some((entry.id.clone(), name_of(entry), record_of(entry)?)))
         .collect();
-    let machine = Places::of_this_machine()
-        .home
-        .map(|home| unregistered(&cfg, scan(&home)))
-        .unwrap_or_default();
-    let records: Vec<Record> = accounts
-        .iter()
-        .map(|(_, _, r)| r.clone())
-        .chain(machine.iter().filter_map(|dir| Record::of(Some(dir))))
-        .collect();
+    let records: Vec<Record> = accounts.iter().map(|(_, _, r)| r.clone()).collect();
     let mut changed = refresh(&records);
     // A name the user gave wins; else the email; else the id, as ever.
     let names: BTreeMap<String, String> = if accounts.len() > 1 {
@@ -285,12 +259,6 @@ pub fn refresh_now() -> bool {
     store::tags(|known| {
         if *known != tags {
             *known = tags;
-            changed = true;
-        }
-    });
-    store::machine(|known| {
-        if *known != machine {
-            *known = machine;
             changed = true;
         }
     });
@@ -1014,55 +982,6 @@ pub fn plan_new(cfg: &Config, name: &str) -> Result<NewAccount, String> {
     Ok(make(id))
 }
 
-/// The account a dir SAVED ON THIS MACHINE comes back as ([`on_disk`]):
-/// that dir, as it is, under the id its folder name makes —
-/// `~/.claude-work` → `claude-work`, or the first free `claude-work-2`,
-/// … when a harness holds that one now — going by `name` as typed
-/// (empty for none). `Err` when the dir is no longer one to add back: an
-/// account runs in it, or its folder name makes no id.
-pub fn plan_adopt(cfg: &Config, dir: &Path, name: &str) -> Result<NewAccount, String> {
-    let Some(home) = Places::of_this_machine().home else {
-        return Err("no home directory to find the account in".into());
-    };
-    if dir_in_use(cfg, dir) {
-        return Err(format!("an account already runs in {}", tilde(dir)));
-    }
-    let folder = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let base = slug(folder.trim_start_matches('.'));
-    if !base.starts_with("claude-") {
-        return Err(format!("{} makes no account id", tilde(dir)));
-    }
-    let id = std::iter::once(base.clone())
-        .chain((2..).map(|n| format!("{base}-{n}")))
-        .find(|id| !id_taken(cfg, id))
-        .expect("an unbounded range always finds a free id");
-    Ok(NewAccount {
-        id,
-        config_dir: stored_dir(&home, dir),
-        dir: dir.to_path_buf(),
-        name: name.trim().to_string(),
-    })
-}
-
-/// What the name prompt for a dir SAVED ON THIS MACHINE starts with: its
-/// folder's tail, `~/.claude-work` → `work` — nothing for a numbered one,
-/// `~/.claude-2`, whose number was never a name.
-pub fn suggested_name(dir: &Path) -> String {
-    let folder = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tail = folder.strip_prefix(".claude-").unwrap_or_default();
-    if tail.chars().all(|c| c.is_ascii_digit()) {
-        String::new()
-    } else {
-        tail.to_string()
-    }
-}
-
 /// Whether `id` is spoken for: a registry row, a `claude_accounts` entry
 /// (a broken one too) or a `harnesses` key.
 fn id_taken(cfg: &Config, id: &str) -> bool {
@@ -1161,8 +1080,8 @@ pub fn add(new: &NewAccount, share: bool) -> Result<String, String> {
             tilde(from)
         ));
     }
-    // The last read of a dir SAVED ON THIS MACHINE says who it is; never
-    // a read here.
+    // The last read of the dir, from when an account ran in it, says who
+    // it is; never a read here.
     let login = Record::of(Some(&new.dir)).and_then(|record| state_of(&record));
     note.push_str(&match (existed, login) {
         (true, Some(SignIn::As(email))) => format!(
@@ -1210,11 +1129,8 @@ pub fn rename(id: &str, name: &str) -> Result<String, String> {
         .iter()
         .any(|entry| entry.id == id && entry.is_claude_account())
     {
-        // A legacy `custom_harnesses` entry keeps a label of its own, which
-        // only an empty one in the map clears.
-        let legacy = cfg.custom_harnesses.iter().any(|c| c.id.trim() == id);
         let over = cfg.harnesses.entry(id.to_string()).or_default();
-        over.label = (!name.is_empty() || legacy).then(|| name.to_string());
+        over.label = (!name.is_empty()).then(|| name.to_string());
     } else {
         return Err(format!("`{id}` is no Claude account to rename"));
     }
@@ -1227,95 +1143,10 @@ pub fn rename(id: &str, name: &str) -> Result<String, String> {
     })
 }
 
-// ---- dirs saved on this machine ----
-
-/// What makes a `~/.claude-*` folder a Claude Code config dir rather than
-/// anything else so named: one of what Claude Code writes into one — its
-/// record, a login (Linux), its transcripts, its settings.
-const CONFIG_DIR_MARKS: &[&str] = &[
-    ".claude.json",
-    ".credentials.json",
-    "projects",
-    "settings.json",
-];
-
-/// The Claude Code config dirs in `home` ([`is_saved_dir`]), by name. A
-/// stat or two each; the refresh runs it, off the loop.
-pub fn scan(home: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(home) else {
-        return Vec::new();
-    };
-    let mut found: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|dir| is_saved_dir(home, dir))
-        .collect();
-    found.sort();
-    found
-}
-
-/// Whether `dir` is a Claude Code config dir [`scan`] lists: a
-/// `.claude-*` folder right in `home` — a real one, never a symlink —
-/// holding one of [`CONFIG_DIR_MARKS`]. `~/.claude` itself never is.
-fn is_saved_dir(home: &Path, dir: &Path) -> bool {
-    dir.parent() == Some(home)
-        && dir
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy().starts_with(".claude-"))
-        && std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir())
-        && CONFIG_DIR_MARKS
-            .iter()
-            .any(|mark| std::fs::symlink_metadata(dir.join(mark)).is_ok())
-}
-
-/// `dirs` without the ones an account runs in ([`account_dirs`]).
-fn unregistered(cfg: &Config, dirs: Vec<PathBuf>) -> Vec<PathBuf> {
-    if dirs.is_empty() {
-        return dirs;
-    }
-    let taken = account_dirs(cfg);
-    dirs.into_iter()
-        .filter(|dir| !taken.contains(dir))
-        .collect()
-}
-
-/// SAVED ON THIS MACHINE: the config dirs the last refresh found in the
-/// home dir ([`scan`]) that no account in `cfg` runs in — an account
-/// removed but kept, or one made by hand. Never touches the disk: an add
-/// takes its dir off at once, a removal's dir joins at the next read.
-pub fn on_disk(cfg: &Config) -> Vec<PathBuf> {
-    unregistered(cfg, store::machine(|dirs| dirs.clone()))
-}
-
-/// Who a dir SAVED ON THIS MACHINE is signed in as, at the last read.
+/// Who `dir` is signed in as, at the last read: a dir an account ran in
+/// before, about to be adopted by an add.
 pub fn dir_state(dir: &Path) -> Option<SignIn> {
     state_of(&Record::of(Some(dir))?)
-}
-
-/// Move `dir` — a dir SAVED ON THIS MACHINE — to the Trash. Refused for
-/// a dir an account runs in (the default one's included, whatever it is
-/// called), for anything but a `.claude-*` folder in the home dir, and
-/// for one that no longer looks like a config dir: what the confirm
-/// named is what goes. The answer is the line the footer shows.
-pub fn trash_dir(dir: &Path) -> Result<String, String> {
-    let cfg = Config::load();
-    let shown = tilde(dir);
-    if dir_in_use(&cfg, dir) {
-        return Err(format!("{shown} stays: an account runs in it"));
-    }
-    let saved = Places::of_this_machine()
-        .home
-        .is_some_and(|home| is_saved_dir(&home, dir));
-    if !saved {
-        return Err(format!("{shown} is no Claude config dir saved here"));
-    }
-    let Some(bin) = crate::paths_util::Places::of_this_machine().trash else {
-        return Err(format!("no Trash here — {shown} stays on disk"));
-    };
-    crate::paths_util::move_folder_to_trash(dir, &bin)
-        .map_err(|e| format!("couldn't move {shown} to the Trash: {e}"))?;
-    store::machine(|dirs| dirs.retain(|d| d != dir));
-    Ok(format!("moved {shown} to the Trash"))
 }
 
 /// The default account's config dir: the one built-in Claude's `env`
@@ -1369,14 +1200,7 @@ pub fn remove(id: &str, trash: bool) -> Result<String, String> {
     cfg.save()
         .map_err(|e| format!("couldn't save settings: {e}"))?;
     if !trash || !dir.exists() {
-        let listed = Places::of_this_machine()
-            .home
-            .is_some_and(|home| is_saved_dir(&home, &dir));
-        return Ok(if listed && !shared {
-            format!("removed {id} — {shown} stays on disk, under Saved on this machine")
-        } else {
-            format!("removed {id} — {shown} stays on disk")
-        });
+        return Ok(format!("removed {id} — {shown} stays on disk"));
     }
     if shared {
         return Ok(format!(
@@ -1903,7 +1727,6 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             model: None,
             effort: None,
             session_id: Some("sid".into()),
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
@@ -2082,12 +1905,6 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
             cfg.claude_accounts[0].enabled = false;
             assert_eq!(cfg.quick_prompt_harness(), (AgentKind::Claude, None));
-            // REMEMBER HARNESS writes an account's id like a built-in's.
-            cfg.claude_accounts[0].enabled = true;
-            cfg.quick_prompt_kind = "codex".into();
-            cfg.remember_harness = true;
-            assert!(cfg.remember_launch(AgentKind::Custom, Some("claude-2"), None, None));
-            assert_eq!(cfg.quick_prompt_kind, "claude-2");
         });
     }
 
@@ -2373,166 +2190,12 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
         });
     }
 
-    /// SAVED ON THIS MACHINE: every `~/.claude-*` dir that looks like
-    /// Claude Code's and that no account runs in — with who it is — and
-    /// nothing else: not an account's dir, not a symlink, not a folder
-    /// Claude Code never wrote into, never `~/.claude`.
-    #[test]
-    fn saved_on_this_machine_lists_the_config_dirs_no_account_runs_in() {
-        let m = Machine::new("{}");
-        let home = m.home.path();
-        let two = home.join(".claude-2");
-        config(
-            &m,
-            serde_json::json!({"claude_accounts": [
-                {"id": "claude-2", "config_dir": two.display().to_string()}
-            ]}),
-        );
-        m.sign(".claude-2/.claude.json", Some("two@b.co"));
-        m.sign(".claude-old/.claude.json", Some("old@b.co"));
-        std::fs::create_dir_all(home.join(".claude-chats/projects")).unwrap();
-        std::fs::create_dir_all(home.join(".claude-empty")).unwrap();
-        std::fs::write(home.join(".claude-file"), "not a dir").unwrap();
-        std::os::unix::fs::symlink(home.join(".claude-old"), home.join(".claude-link")).unwrap();
-        std::fs::write(home.join(".claude/settings.json"), "{}").unwrap();
-        m.run(|| {
-            assert!(on_disk(&Config::load()).is_empty(), "nothing read yet");
-            assert!(refresh_now());
-            let cfg = Config::load();
-            let found = on_disk(&cfg);
-            assert_eq!(
-                found,
-                [home.join(".claude-chats"), home.join(".claude-old")]
-            );
-            assert_eq!(
-                dir_state(&home.join(".claude-old")),
-                Some(SignIn::As("old@b.co".into()))
-            );
-            assert_eq!(dir_state(&home.join(".claude-chats")), Some(SignIn::Out));
-            use crate::config::AccountRow;
-            let rows = cfg.account_rows();
-            assert_eq!(
-                rows[2..],
-                [
-                    AccountRow::Add,
-                    AccountRow::OnDisk(home.join(".claude-chats")),
-                    AccountRow::OnDisk(home.join(".claude-old")),
-                ]
-            );
-            assert_eq!(cfg.registered_account_rows().len(), 3, "the wizard's");
-            assert_eq!(
-                cfg.account_value(&AccountRow::OnDisk(home.join(".claude-old"))),
-                "not in orion · signed in as old@b.co"
-            );
-            // Under its own header, after the accounts.
-            let shown = crate::config::settings_rows(crate::config::agents_tab(), 0);
-            assert!(
-                shown.contains(&crate::config::SettingsRow::Header(
-                    crate::config::MACHINE_GROUP.into()
-                )),
-                "{shown:?}"
-            );
-        });
-        // A pinned home is the only one ever scanned under test.
-        crate::config::with_config_path(m.config.clone(), || {
-            refresh_now();
-            assert!(on_disk(&Config::load()).is_empty());
-        });
-    }
-
-    /// Enter on a dir SAVED ON THIS MACHINE adds it back as it is — the
-    /// id its folder makes, or the next free one — under the name typed,
-    /// and its row goes.
-    #[test]
-    fn a_saved_dir_comes_back_under_a_name() {
-        let m = Machine::new("{}");
-        let home = m.home.path();
-        let old = home.join(".claude-old");
-        m.sign(".claude-old/.claude.json", Some("old@b.co"));
-        m.run(|| {
-            refresh_now();
-            assert_eq!(suggested_name(&old), "old");
-            assert_eq!(
-                suggested_name(&home.join(".claude-2")),
-                "",
-                "a number is no name"
-            );
-            let new = plan_adopt(&Config::load(), &old, "Old Job").unwrap();
-            assert_eq!(
-                (new.id.as_str(), new.dir.as_path(), new.name.as_str()),
-                ("claude-old", old.as_path(), "Old Job")
-            );
-            let note = add(&new, false).unwrap();
-            assert!(
-                note.contains("already on this machine, signed in as old@b.co"),
-                "{note}"
-            );
-            let cfg = Config::load();
-            assert!(on_disk(&cfg).is_empty(), "an account again, at once");
-            assert_eq!(label_of(&cfg, "claude-old"), "Old Job (old@b.co)");
-            assert!(
-                plan_adopt(&cfg, &old, "").is_err(),
-                "an account runs in it now"
-            );
-        });
-        // An id a harness holds now steps aside to the next.
-        config(
-            &m,
-            serde_json::json!({"harnesses": {"claude-old": {"model_default": "opus"}}}),
-        );
-        m.run(|| {
-            let new = plan_adopt(&Config::load(), &old, "").unwrap();
-            assert_eq!(new.id, "claude-old-2");
-        });
-    }
-
-    /// `⌫` on a dir SAVED ON THIS MACHINE moves it to the Trash — and
-    /// nothing an account runs in, nor `~/.claude`, ever goes.
-    #[test]
-    fn a_saved_dir_goes_to_the_trash() {
-        let m = Machine::new("{}");
-        let home = m.home.path().to_path_buf();
-        let two = home.join(".claude-2");
-        config(
-            &m,
-            serde_json::json!({"claude_accounts": [
-                {"id": "claude-2", "config_dir": two.display().to_string()}
-            ]}),
-        );
-        m.sign(".claude-2/.claude.json", Some("two@b.co"));
-        m.sign(".claude-old/.claude.json", Some("old@b.co"));
-        std::fs::write(home.join(".claude/settings.json"), "{}").unwrap();
-        let bin = home.join(".Trash");
-        let places = crate::paths_util::Places {
-            home: Some(home.clone()),
-            trash: Some(crate::paths_util::Trash::Mac(bin.clone())),
-            ..Default::default()
-        };
-        crate::paths_util::with_places(places, || {
-            m.run(|| {
-                refresh_now();
-                assert!(trash_dir(&two)
-                    .unwrap_err()
-                    .contains("an account runs in it"));
-                assert!(trash_dir(&home.join(".claude")).is_err());
-                assert!(trash_dir(&home.join(".claude-nothing")).is_err());
-                let note = trash_dir(&home.join(".claude-old")).unwrap();
-                assert_eq!(note, "moved ~/.claude-old to the Trash");
-                assert!(!home.join(".claude-old").exists());
-                assert!(bin.join(".claude-old/.claude.json").is_file());
-                assert!(on_disk(&Config::load()).is_empty(), "its row gone at once");
-                assert!(two.is_dir() && home.join(".claude").is_dir());
-            });
-        });
-    }
-
     /// The user's report: add `work`, sign it in, remove it, add another
     /// under a different name — and the old identity shows up again.
     /// orion's own caches hold nothing stale (a different name is a fresh
     /// dir, signed out); what carries the old login is the kept dir,
     /// which any name that comes to the same id (`Work`, `work!`) adopts
-    /// whole — so it is listed until then, and the add says so when it
-    /// happens.
+    /// whole — and the add says so when it happens.
     #[test]
     fn removing_and_adding_again_never_hides_the_old_login() {
         let m = Machine::new("{}");
@@ -2551,11 +2214,10 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
 
             let note = remove("claude-work", false).unwrap();
-            assert!(note.contains("under Saved on this machine"), "{note}");
+            assert!(note.contains("stays on disk"), "{note}");
             refresh_now();
             let cfg = Config::load();
             assert_eq!(short_name(AgentKind::Custom, Some("claude-work")), None);
-            assert_eq!(on_disk(&cfg), [home.join(".claude-work")], "not invisible");
             assert_eq!(
                 dir_state(&home.join(".claude-work")),
                 Some(SignIn::As("me@work.co".into()))
@@ -2571,7 +2233,6 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
                 label_of(&cfg, "claude-personal"),
                 "Personal (not signed in)"
             );
-            assert_eq!(on_disk(&cfg), [home.join(".claude-work")], "still listed");
 
             // A name that comes to the old id takes the old dir, login and
             // all — and says so, before and after.
@@ -2587,7 +2248,6 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
             let cfg = Config::load();
             assert_eq!(label_of(&cfg, "claude-work"), "Work (me@work.co)");
-            assert!(on_disk(&cfg).is_empty());
         });
     }
 

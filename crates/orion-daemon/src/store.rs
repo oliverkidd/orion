@@ -214,9 +214,9 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE agents ADD COLUMN unseen INTEGER NOT NULL DEFAULT 0;
     ",
-    // 20: the Claude Cloud session a row launched (`Agent::cloud_session_id`),
-    // read off the `claude --cloud` spawn's output. Drives the attach /
-    // teleport restart path; NULL for every local row.
+    // 20: the Claude Cloud session a row launched, read off the
+    // `claude --cloud` spawn's output; NULL for every local row. Cloud
+    // sessions are gone (30 archived their rows); the column stays unread.
     "
     ALTER TABLE agents ADD COLUMN cloud_session_id TEXT;
     ",
@@ -334,6 +334,30 @@ const MIGRATIONS: &[&str] = &[
     // and an older build reads the row as the red one it is.
     "
     ALTER TABLE agents ADD COLUMN usage_limit TEXT;
+    ",
+    // 30: cloud sessions are gone (20 added their column). A cloud row has
+    // no local session behind it, so one left live would read as a plain
+    // Claude row and boot a bare `claude` in its checkout: each is
+    // archived once, stamped now, and the column is never read again.
+    "
+    UPDATE agents SET archived = 1,
+        archived_at = CAST(strftime('%s', 'now') AS INTEGER) * 1000,
+        unseen = 0
+      WHERE cloud_session_id IS NOT NULL AND archived = 0;
+    ",
+    // 31: the Pi and Muse harnesses are gone. Their rows would otherwise
+    // read back as the default kind — a bare `claude` booted in a Pi
+    // session's name — so each is archived once, stamped now unless it
+    // already was, and moved onto `custom` under its old name as the
+    // registry id: a `harnesses` map entry of that name brings the CLI
+    // back, and without one the row refuses to boot with the reason.
+    "
+    UPDATE agents SET custom_harness = kind, kind = 'custom',
+        archived_at = CASE WHEN archived = 1 THEN archived_at
+          ELSE CAST(strftime('%s', 'now') AS INTEGER) * 1000 END,
+        archived = 1,
+        unseen = 0
+      WHERE kind IN ('pi', 'muse');
     ",
 ];
 
@@ -525,8 +549,8 @@ impl Store {
         issue_url: Option<&str>,
     ) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, cloud_session_id, pr_url, issue_url, custom_harness)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, pr_url, issue_url, custom_harness)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 a.id.as_str(),
                 a.worktree_id.as_str(),
@@ -543,7 +567,6 @@ impl Store {
                 a.effort,
                 auto_title as i64,
                 a.unseen as i64,
-                a.cloud_session_id,
                 pr_url,
                 issue_url,
                 a.custom_harness,
@@ -754,18 +777,6 @@ impl Store {
             params![id.as_str()],
         )?;
         Ok(changed > 0)
-    }
-
-    pub fn set_agent_cloud_session_id(
-        &self,
-        id: &AgentId,
-        cloud_session_id: Option<&str>,
-    ) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "UPDATE agents SET cloud_session_id = ?2 WHERE id = ?1",
-            params![id.as_str(), cloud_session_id],
-        )?;
-        Ok(())
     }
 
     pub fn set_agent_session_id(&self, id: &AgentId, session_id: Option<&str>) -> Result<()> {
@@ -1097,8 +1108,8 @@ const PROJECT_COLUMNS: &str = "id, name, repo_path, sort_order";
 const WORKTREE_COLUMNS: &str = "id, project_id, path, branch, is_main, sort_order";
 const AGENT_COLUMNS: &str = "id, worktree_id, name, status, archived, kind, \
                              claude_session_id, sort_order, status_changed_at, model, effort, \
-                             archived_at, unseen, cloud_session_id, recent_prompts, custom_harness, \
-                             issue_url, usage_limit";
+                             archived_at, unseen, recent_prompts, custom_harness, issue_url, \
+                             usage_limit";
 const TERMINAL_COLUMNS: &str = "id, worktree_id, name, sort_order, run_command";
 const LINK_COLUMNS: &str = "id, worktree_id, url, sort_order";
 
@@ -1139,12 +1150,11 @@ fn row_to_agent(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
         effort: r.get(10)?,
         archived_at: r.get(11)?,
         unseen: r.get::<_, i64>(12)? != 0,
-        cloud_session_id: r.get(13)?,
         alive: false,
-        issue_url: r.get(16)?,
-        recent_prompts: parse_prompts(r.get::<_, Option<String>>(14)?.as_deref()),
-        custom_harness: r.get(15)?,
-        usage_limit: parse_usage_limit(r.get::<_, Option<String>>(17)?.as_deref()),
+        issue_url: r.get(15)?,
+        recent_prompts: parse_prompts(r.get::<_, Option<String>>(13)?.as_deref()),
+        custom_harness: r.get(14)?,
+        usage_limit: parse_usage_limit(r.get::<_, Option<String>>(16)?.as_deref()),
     })
 }
 
@@ -1243,7 +1253,6 @@ mod tests {
             model: Some("opus".into()),
             effort: Some("high".into()),
             session_id: Some("sess-123".into()),
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
@@ -1268,7 +1277,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 1,
             status_changed_at: 0,
             alive: false,
@@ -1290,7 +1298,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 2,
             status_changed_at: 0,
             alive: false,
@@ -1313,7 +1320,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 3,
             status_changed_at: 0,
             alive: false,
@@ -1356,7 +1362,6 @@ mod tests {
             model: Some("big-1".into()),
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
@@ -1856,6 +1861,96 @@ mod tests {
         }
     }
 
+    /// Cloud sessions are gone: a stored cloud row comes back archived, so
+    /// nothing boots a bare local `claude` in its name, while a local row
+    /// beside it is untouched.
+    #[test]
+    fn migration_30_archives_cloud_rows() {
+        let path = std::env::temp_dir().join(format!("orion-mig30-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            for (i, migration) in MIGRATIONS.iter().take(29).enumerate() {
+                conn.execute_batch(&format!(
+                    "BEGIN; {migration}; PRAGMA user_version = {}; COMMIT;",
+                    i + 1
+                ))
+                .unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, name, repo_path, sort_order, created_at)
+                   VALUES ('p1', 'p', '/tmp/p', 0, 0);
+                 INSERT INTO worktrees (id, project_id, path, branch, is_main, sort_order, created_at)
+                   VALUES ('w1', 'p1', '/tmp/p', 'main', 1, 0, 0);
+                 INSERT INTO agents (id, worktree_id, name, created_at, unseen, cloud_session_id)
+                   VALUES ('cloud', 'w1', 'in the cloud', 0, 1, 'session_016SiQW5Lem2LbnUf1A3undt'),
+                          ('local', 'w1', 'on this machine', 0, 1, NULL);",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let cloud = store.get_agent(&AgentId("cloud".into())).unwrap().unwrap();
+        assert!(cloud.archived && cloud.archived_at > 0 && !cloud.unseen);
+        let local = store.get_agent(&AgentId("local".into())).unwrap().unwrap();
+        assert!(!local.archived && local.unseen);
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
+    /// Pi and Muse are gone: their stored rows come back archived, as
+    /// custom rows naming the old harness — never re-read as Claude — and
+    /// a row archived before keeps its stamp.
+    #[test]
+    fn migration_31_archives_pi_and_muse_rows_as_customs() {
+        let path = std::env::temp_dir().join(format!("orion-mig31-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            for (i, migration) in MIGRATIONS.iter().take(30).enumerate() {
+                conn.execute_batch(&format!(
+                    "BEGIN; {migration}; PRAGMA user_version = {}; COMMIT;",
+                    i + 1
+                ))
+                .unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO projects (id, name, repo_path, sort_order, created_at)
+                   VALUES ('p1', 'p', '/tmp/p', 0, 0);
+                 INSERT INTO worktrees (id, project_id, path, branch, is_main, sort_order, created_at)
+                   VALUES ('w1', 'p1', '/tmp/p', 'main', 1, 0, 0);
+                 INSERT INTO agents (id, worktree_id, name, created_at, kind, archived, archived_at)
+                   VALUES ('pi', 'w1', 'on pi', 0, 'pi', 0, 0),
+                          ('muse', 'w1', 'on muse', 0, 'muse', 1, 42),
+                          ('codex', 'w1', 'on codex', 0, 'codex', 0, 0);",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let agent = |id: &str| store.get_agent(&AgentId(id.into())).unwrap().unwrap();
+        let pi = agent("pi");
+        assert_eq!(pi.kind, AgentKind::Custom);
+        assert_eq!(pi.custom_harness.as_deref(), Some("pi"));
+        assert!(pi.archived && pi.archived_at > 42);
+        let muse = agent("muse");
+        assert_eq!(
+            (muse.kind, muse.custom_harness.as_deref()),
+            (AgentKind::Custom, Some("muse"))
+        );
+        assert_eq!(muse.archived_at, 42, "archived before: the stamp stands");
+        let codex = agent("codex");
+        assert_eq!((codex.kind, codex.archived), (AgentKind::Codex, false));
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+    }
+
     #[test]
     fn auto_title_pending_lifecycle() {
         let store = Store::open_in_memory().unwrap();
@@ -1888,7 +1983,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
@@ -1977,7 +2071,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: false,
@@ -2107,7 +2200,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: false,
@@ -2193,7 +2285,6 @@ mod tests {
                 model: Some("opus".into()),
                 effort: Some("high".into()),
                 session_id: Some("sid".into()),
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: false,
@@ -2278,7 +2369,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: false,
@@ -2379,7 +2469,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: false,

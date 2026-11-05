@@ -59,7 +59,7 @@ orion worktree [name] [--base <ref>]  # move the current session into a worktree
                           # worktree; no name invents one; --base picks a new branch's start point,
                           # a branch name meaning origin's fetched copy — main is origin/main;
                           # without it the worktree_base_branch setting, else origin's default)
-orion spawn <task> [--kind <claude|codex|cursor|pi|muse|grok|opencode>]  # start a new agent session beside the current
+orion spawn <task> [--kind <claude|codex|cursor|grok|opencode>]  # start a new agent session beside the current
                           # one, in the same worktree, opening on <task> (agents run this when you
                           # ask for a new orion session; --kind defaults to this session's harness;
                           # custom harnesses launch from the TUI picker and presets, not --kind)
@@ -171,4 +171,4 @@ orion upgrade            # install the latest release (--force on a dev build). 
 
 From source: `cargo install --path crates/orion --locked`, then `orion kill && orion` to restart the daemon.
 
-The agent CLIs orion runs, one of which it needs: [Claude](https://code.claude.com/docs/en/setup), [Codex](https://github.com/openai/codex), [Cursor](https://cursor.com/install), [Pi](https://pi.dev), [Muse](https://developer.meta.com/ai/lp/muse-code), [OpenCode](https://opencode.ai/docs/) and [Grok](https://github.com/xai-org/grok-build). Setup's Agents step installs the ones you turn on.
+The agent CLIs orion runs, one of which it needs: [Claude](https://code.claude.com/docs/en/setup), [Codex](https://github.com/openai/codex), [Cursor](https://cursor.com/install), [OpenCode](https://opencode.ai/docs/) and [Grok](https://github.com/xai-org/grok-build). Setup's Agents step installs the ones you turn on.

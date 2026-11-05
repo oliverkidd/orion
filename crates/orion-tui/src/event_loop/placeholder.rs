@@ -209,7 +209,6 @@ pub(super) fn stage_agent(
         model,
         effort,
         session_id: None,
-        cloud_session_id: None,
         sort_order: 0,
         // The DAEMON stamps a created row with its clock, which puts the
         // checkout at the top of RECENCY ORDER; the same stamp here means
@@ -572,8 +571,9 @@ fn forget_worktree(app: &mut App, id: &WorktreeId) {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{
-        buffer_text, hse, pick_fresh_worktree, press, seed_feat_worktree, seed_open_prs, seed_tree,
-        with_config_json, with_default_config, with_seeded_presets, worktree_branches,
+        buffer_text, hse, pick_fresh_worktree, preset_box, press, seed_feat_worktree,
+        seed_open_prs, seed_tree, with_config_json, with_default_config, with_seeded_presets,
+        worktree_branches,
     };
     use super::super::{
         connection_lost, fire_pending_prewarm, handle_server_event, handle_terminal_event,
@@ -675,7 +675,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: crate::app::now_ms(),
             alive: true,
@@ -1349,7 +1348,7 @@ mod tests {
     // ---- an AGENT PRESET run off the modal's stand-in ----
 
     /// `n`, "feat", Enter, then **Agent presets** on the new row and Enter
-    /// on the "reviewer" preset: the task box is open with "Fix auth" typed, and
+    /// on the "reviewer" preset: the box is open with "Fix auth" typed, and
     /// the DAEMON has not answered the `CreateWorktree` yet. Returns the
     /// stand-in id and that request's id.
     fn type_preset_task(app: &mut App, out: &mut Vec<ClientRequest>) -> (WorktreeId, u64) {
@@ -1364,13 +1363,10 @@ mod tests {
             app.overlay
         );
         press(app, KeyCode::Enter, KeyModifiers::NONE, out);
-        assert!(
-            matches!(
-                &app.overlay,
-                Some(Overlay::Prompt(prompt))
-                    if matches!(&prompt.kind, PromptKind::AgentPresetTask { worktree, preset } if *worktree == placeholder && preset.name == "reviewer")
-            ),
-            "Enter asks for the task: {:?}",
+        assert_eq!(
+            preset_box(app),
+            Some(("reviewer", &QuickTarget::Worktree(placeholder.clone()))),
+            "Enter opens the box on the preset: {:?}",
             app.overlay
         );
         assert!(paste_into_overlay(app, "Fix auth"));
@@ -1405,14 +1401,15 @@ mod tests {
 
             modal_worktree_created(&mut app, req_id, &mut out);
             assert!(!app.tree.worktrees.iter().any(|w| w.id == placeholder));
+            assert_eq!(
+                preset_box(&app).map(|(_, target)| target),
+                Some(&QuickTarget::Worktree(WorktreeId("w2".into()))),
+                "the box is addressed to the real checkout: {:?}",
+                app.overlay
+            );
             assert!(
-                matches!(
-                    &app.overlay,
-                    Some(Overlay::Prompt(prompt))
-                        if matches!(&prompt.kind, PromptKind::AgentPresetTask { worktree, .. } if worktree.0 == "w2")
-                            && prompt.input.as_str() == "Fix auth"
-                ),
-                "the box is addressed to the real checkout, text kept: {:?}",
+                matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str().contains("Fix auth")),
+                "text kept: {:?}",
                 app.overlay
             );
             assert!(out.is_empty(), "the Ack sends nothing: {out:?}");
@@ -1458,12 +1455,9 @@ mod tests {
                 app.overlay
             );
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    &app.overlay,
-                    Some(Overlay::Prompt(prompt))
-                        if matches!(&prompt.kind, PromptKind::AgentPresetTask { worktree, .. } if worktree.0 == "w2")
-                ),
+            assert_eq!(
+                preset_box(&app).map(|(_, target)| target),
+                Some(&QuickTarget::Worktree(WorktreeId("w2".into()))),
                 "{:?}",
                 app.overlay
             );
@@ -1574,11 +1568,12 @@ mod tests {
             assert!(
                 matches!(
                     app.pending.get(&create_id),
-                    Some(PendingIntent::AttachCreatedWithCloudRetry {
-                        kind: PromptKind::AgentPresetTask { worktree, .. },
+                    Some(PendingIntent::AttachCreatedWithRetry {
+                        kind: PromptKind::QuickPrompt(launch),
                         placeholder: Some(stand_in),
                         ..
-                    }) if worktree.0 == "w2" && *stand_in == agent
+                    }) if launch.target == QuickTarget::Worktree(WorktreeId("w2".into()))
+                        && *stand_in == agent
                 ),
                 "{:?}",
                 app.pending
@@ -1613,8 +1608,7 @@ mod tests {
                 out.iter().any(|r| matches!(r, ClientRequest::Attach { session, .. } if session == &SessionRef::Agent(AgentId("a9".into())))),
                 "the real session is attached: {out:?}"
             );
-            assert_eq!(app.focus, Focus::Terminal, "a preset launch takes the pane");
-            assert!(app.term_locked);
+            assert!(!app.term_locked, "a box launch leaves the keys on the grid");
         });
     }
 
@@ -1685,29 +1679,32 @@ mod tests {
 
     // ---- a PR SESSION into a checkout that does not exist yet ----
 
-    /// `n` on the OPEN PRS row for #7 opens the PR SESSION picker, and
-    /// Enter on its first row (Claude) launches — no box in between. The
-    /// checkout row for the head branch and the session row are up, and
-    /// nothing but the `CreatePrAgent` went to the DAEMON. Returns the
-    /// stand-in ids the intent carries and the request id.
+    /// `p` on the OPEN PRS row under the cursor opens the box as a PR
+    /// SESSION's, "Fix auth" is typed and Enter launches it.
+    fn launch_pr_box(app: &mut App, out: &mut Vec<ClientRequest>) {
+        crate::quick_prompt::open_quick_prompt(app);
+        assert!(
+            matches!(&app.overlay, Some(Overlay::Prompt(prompt))
+                if matches!(&prompt.kind, PromptKind::QuickPrompt(l) if l.pr.is_some())),
+            "the PR SESSION box is up: {:?}",
+            app.overlay
+        );
+        assert!(paste_into_overlay(app, "Fix auth"));
+        press(app, KeyCode::Enter, KeyModifiers::NONE, out);
+        assert!(app.overlay.is_none(), "launching closes the box");
+    }
+
+    /// The box launched on the OPEN PRS row for #7. The checkout row for
+    /// the head branch and the session row are up, and nothing but the
+    /// `CreatePrAgent` went to the DAEMON. Returns the stand-in ids the
+    /// intent carries and the request id.
     fn stage_pr_session(app: &mut App, out: &mut Vec<ClientRequest>) -> (PlaceholderRows, u64) {
         seed_tree(app);
         seed_open_prs(app, &[(7, "Attach links")]);
         app.focus = Focus::Worktrees;
         // The checkouts come first; the pull request is the row after.
         app.set_sel_worktree(1);
-        super::super::open_pr_agent_picker(app);
-        assert!(
-            matches!(app.overlay, Some(Overlay::Menu(_))),
-            "the PR harness picker is up: {:?}",
-            app.overlay
-        );
-        press(app, KeyCode::Enter, KeyModifiers::NONE, out);
-        assert!(
-            app.overlay.is_none(),
-            "the picker's row launches, with no box after it: {:?}",
-            app.overlay
-        );
+        launch_pr_box(app, out);
         let creates: Vec<&ClientRequest> = out
             .iter()
             .filter(|r| matches!(r, ClientRequest::CreatePrAgent { .. }))
@@ -1746,9 +1743,7 @@ mod tests {
             seed_open_prs(&mut app, &[(7, "Attach links")]);
             app.focus = Focus::Worktrees;
             app.set_sel_worktree(1);
-            super::super::open_pr_agent_picker(&mut app);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(app.overlay.is_none(), "{:?}", app.overlay);
+            launch_pr_box(&mut app, &mut out);
 
             let sessions = app.visible_session_rows();
             assert_eq!(sessions.len(), 1, "{sessions:?}");
@@ -1767,8 +1762,8 @@ mod tests {
     /// the stand-in worktree (one row on the branch, not two, the cursor
     /// still on it, the session stand-in now under the real checkout);
     /// then the session's upsert and the Ack naming it turn the session
-    /// stand-in into the created row, attached and entered as every
-    /// picker-walked launch is.
+    /// stand-in into the created row, attached in the pane with the keys
+    /// left on the grid, as every box launch is.
     #[test]
     fn the_upserts_and_the_ack_turn_the_pr_stand_ins_into_the_real_rows() {
         with_default_config(|| {
@@ -1820,8 +1815,7 @@ mod tests {
                 app.selected_session().map(|a| a.id.0).as_deref(),
                 Some("a9")
             );
-            assert_eq!(app.focus, Focus::Terminal);
-            assert!(app.term_locked);
+            assert!(!app.term_locked);
             let a9 = SessionRef::Agent(AgentId("a9".into()));
             assert!(
                 out.iter()
@@ -1930,8 +1924,8 @@ mod tests {
     }
 
     /// The head branch already has a checkout: the DAEMON spawns straight
-    /// into it, so nothing is staged — the launch is the plain
-    /// `AttachCreated` it always was.
+    /// into it, so nothing is staged — the launch is the box's plain one,
+    /// with no PR stand-ins to take down.
     #[test]
     fn a_pr_session_into_a_checkout_already_on_its_branch_stages_nothing() {
         with_default_config(|| {
@@ -1949,8 +1943,7 @@ mod tests {
                 Some(2),
                 "the checkout on the head branch lists under the pull request"
             );
-            super::super::open_pr_agent_picker(&mut app);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            launch_pr_box(&mut app, &mut out);
 
             assert!(
                 out.iter()
@@ -1958,10 +1951,10 @@ mod tests {
                 "{out:?}"
             );
             assert_eq!(worktree_branches(&app), ["main", "pr-7-head"]);
-            assert!(app
+            assert!(!app
                 .pending
                 .values()
-                .all(|i| matches!(i, PendingIntent::AttachCreated { .. })));
+                .any(|i| matches!(i, PendingIntent::AttachCreatedPrSession { .. })));
             assert!(!app
                 .tree
                 .agents
@@ -1972,7 +1965,8 @@ mod tests {
 
     /// A second PR SESSION on the same pull request while its checkout is
     /// still being cut waits, as every launch into a stand-in does:
-    /// nothing is sent and nothing else goes up.
+    /// nothing is sent, nothing else goes up, and the box comes back with
+    /// its task to send again once the checkout is real.
     #[test]
     fn a_second_pr_session_while_the_checkout_is_being_cut_waits() {
         with_default_config(|| {
@@ -1984,8 +1978,14 @@ mod tests {
             // under it, so the pull request is the row after the root.
             app.set_sel_worktree(1);
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
-            super::super::open_pr_agent_picker(&mut app);
+            crate::quick_prompt::open_quick_prompt(&mut app);
+            assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Fix auth"),
+                "{:?}",
+                app.overlay
+            );
             assert!(app.flash.is_none());
             assert!(
                 !out.iter()
@@ -2034,7 +2034,7 @@ mod tests {
 
     /// Input that moves nothing is not a manual move — the pointer
     /// crossing the screen, ↓ on the last row. The Ack follows as ever:
-    /// the created session selected, the pane entered and locked.
+    /// the created session selected and attached in the pane.
     #[test]
     fn input_that_moves_nothing_keeps_the_follow() {
         with_default_config(|| {
@@ -2062,8 +2062,6 @@ mod tests {
                 app.selected_session().map(|a| a.id.0).as_deref(),
                 Some("a9")
             );
-            assert_eq!(app.focus, Focus::Terminal);
-            assert!(app.term_locked);
             assert!(attached(&out, "a9"), "{out:?}");
         });
     }

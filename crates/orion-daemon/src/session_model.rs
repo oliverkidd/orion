@@ -237,7 +237,7 @@ impl Daemon {
         let Ok(Some(agent)) = self.store.get_agent(id) else {
             return false;
         };
-        if agent.kind != AgentKind::Claude || agent.cloud_session_id.is_some() {
+        if agent.kind != AgentKind::Claude {
             return false;
         }
         let Some(model) = adopt(agent.model.as_deref(), seen) else {
@@ -397,7 +397,6 @@ mod tests {
                     model: Some("sonnet".into()),
                     effort: Some("high".into()),
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: false,

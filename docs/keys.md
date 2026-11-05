@@ -94,19 +94,17 @@ Ghostty config.
 
 ## The grid
 
-orion's whole screen is a GRID of cards (see [Sessions](sessions.md#the-grid)): the sessions and
-terminals of the project whose PROJECT TAB is lit in the header, grouped into a BAND per checkout —
-a titled rule over one row of cards — with a pane beside them that reads the card under the
-cursor. `↑`/`↓` walk the bands, `Tab` opens one in place (its cards walked with `←`/`→`) and `Tab`
-or `Esc` folds it back.
+orion's whole screen is a GRID (see [Sessions](sessions.md#the-grid)): the sessions and
+terminals of the project whose PROJECT TAB is lit in the header, a line apiece, grouped into a
+BAND per checkout under a titled rule — with a pane beside them that reads the entry under the
+cursor. `↑`/`↓` walk the lines, every band listing all of its entries.
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | walk the BANDS — one checkout at a time, the pane swapping onto that checkout's remembered card as you pass; on the band opened with `Tab`, walk the rows of its cards and off its last row on to the next band. On the first band `↑` has nowhere to go: one press stays put, and a second within 400 ms walks up into the PROJECT TABS. Walking reads what the pane lands on — a `done` badge comes down as you arrive |
-| `←` / `→` | walk the cards of the band under the cursor, stopping at either end, the pane following onto each. A `❮` before the row or a `❯` after its last card says the rest went that way, and a click on either is the same step. With the pane beside the cards, `→` off the row's last card — or on a band with no cards — goes on into the pane, to read it ([below](#the-pane-focus-and-scroll)) |
-| `Tab` | **open the worktree in place**: every card of the band wrapped into rows under its rule, its terminals under a `terminals` rule. One band is open at a time; `Tab` on the open band folds it back. Remembered per project and across restarts. With Settings → Appearance → **Expand all worktrees** on, every band stays open and `Tab` does nothing |
+| `↑` / `↓` | walk the lines — down a band's sessions and terminals and off its last line onto the next band's first, the pane following onto each. On the first line `↑` has nowhere to go: one press stays put, and a second within 400 ms walks up into the PROJECT TABS. Walking reads what the pane lands on — a `done` badge comes down as you arrive |
+| `→` | with the pane beside the grid, into the pane, to read it ([below](#the-pane-focus-and-scroll)) |
 | `Enter`, a double-click | into the pane on the card under the cursor, its input locked. On a band with nothing on it but its pull request, into the pane to read it. On a terminal too short to draw the pane the session takes the whole screen instead |
-| `Esc` | close the open band first; in the ARCHIVED VIEW, back to the live sessions; with every band collapsed, let the band under the cursor go — the pane collapses. What was under the cursor is only let go of: the next arrow takes the aim back |
+| `Esc` | in the ARCHIVED VIEW, back to the live sessions; else let the band under the cursor go — the pane collapses. What was under the cursor is only let go of: the next arrow takes the aim back |
 | `Space` | the FOLLOW-UP MODAL: a small box over the grid for the selected session's next turn. `Enter` sends it down the PTY, `⇧Enter` / `⌥Enter` / `^J` break a line, `Esc` closes without sending. Nothing about the pane moves. Only a live local agent takes one; a session whose CLI is not up is booted first and the box kept |
 | `t` | a new shell terminal inside orion, in the cursor's checkout — a chip on the grid with the pane on it and the keys in it. `⌘O` → **Terminal in the checkout** opens one outside orion |
 | `` ` `` | the next TERMINAL chip of the cursor's checkout, round to the first |
@@ -219,7 +217,7 @@ the footer (or the modal's border) always names the way:
 
 | Key | Action |
 |---|---|
-| `↑`,`↑` on the top row of cards | **the PROJECT TABS take the keys.** A cursor of its own lands on the lit tab; the card you left stays selected with the pane still on it |
+| `↑`,`↑` on the first line | **the PROJECT TABS take the keys.** A cursor of its own lands on the lit tab; the card you left stays selected with the pane still on it |
 | `←` / `→`, `[` / `]` | walk the header's cursor along the tabs — **the grid switches with it**, each project on the card you last left it on |
 | `Enter`, `↓`,`↓` | hand the keys back to the cards of the project on screen |
 | `Backspace` | close the tab under the cursor, behind a confirm (or click its `×`; **Close project tab** has no key by default — bind one in Settings → Hotkeys) |
@@ -504,7 +502,7 @@ sends is the dim line along the bottom of the frame.
 |---|---|
 | `⇧Enter`, `⌥Enter`, `^J` | insert a line |
 | `^V` | paste the image on the clipboard (a ⌃⇧⌘4 screenshot, a copied image): it is kept in the DATA DIR's `attachments/` and its path goes in at the caret — [Dropping a screenshot on a prompt box](sessions.md#dropping-a-screenshot-on-a-prompt-box). `⌘V` is still Ghostty's text paste |
-| `Tab` | pick a different harness for this one launch (`→` drills into its model and effort); in Claude's list `Tab` toggles Claude Cloud |
+| `Tab` | pick a different harness for this one launch (`→` drills into its model and effort) |
 | `⇧Tab` | step the mode — edit, plan, ask — among the ones the harness has, as in Claude Code and Cursor; for this box only |
 | `⌘U` (`^X`) | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
 | `⌘P` (`^P`) | the PROJECT PICKER, over the box: aim it at any project on the machine, the text kept. A launch into another project runs in the background, and the footer names where it went |
@@ -538,8 +536,8 @@ branch only origin has into is that branch, too, never a fresh one cut over it.
 The COMMAND PALETTE, the OPEN MENU, a right-click menu, help, the ssh hosts list
 and the project pickers are all lists: type to filter where they filter, `↑`/`↓` move, `Enter` or
 a click picks, `→` / `←` step into and back out of a submenu, and `Esc` or a click outside closes
-the whole thing. Each list's keys are on its bottom border — on a session picker's Claude row
-`Tab cloud off`, on a harness `? settings` — and the COMMAND PALETTE says what the row under its
+the whole thing. Each list's keys are on its bottom border — on a harness `? settings` — and the
+COMMAND PALETTE says what the row under its
 cursor does on the line above them.
 
 In the SETTINGS OVERLAY, `Tab`/`⇧Tab`, `[`/`]` and the digits move between tabs, `↑`/`↓` move down
@@ -550,8 +548,7 @@ not taken silently: the row names who has it and a second `Enter` moves it. A �
 chord can't reach orion from this terminal; `R` resets every binding (with a confirmation). On the
 Agents tab's **Claude accounts** rows, `Enter` signs the account in (asking for the email first),
 `r` renames it, `o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter`
-on **Add account** names a new one; on a **Saved on this machine** row `Enter` adds the dir back
-under a name and `⌫` moves it to the Trash ([Configuration](configuration.md#claude-accounts)). On a row whose
+on **Add account** names a new one ([Configuration](configuration.md#claude-accounts)). On a row whose
 program isn't on PATH — General's **File editor**, a Claude account, a harness's **Enabled** row —
 `i` puts the command that installs it where the row's explanation was, `Enter` runs it in the editor
 modal and anything else leaves it unrun ([Installing editors and agent

@@ -4,9 +4,8 @@
 //!
 //! The `UserPromptSubmit` hook payload carries the prompt on every CLI
 //! orion manages (Claude and Codex as `prompt`, Cursor's
-//! `beforeSubmitPrompt` the same, pi and OpenCode through their managed
-//! extension and plugin). The
-//! hook receiver condenses it here — one line, whitespace collapsed,
+//! `beforeSubmitPrompt` the same, OpenCode through its managed plugin).
+//! The hook receiver condenses it here — one line, whitespace collapsed,
 //! clipped past [`MAX_PROMPT_CHARS`] — before it crosses the daemon's
 //! channel, so a pasted file never rides the wire whole. The store keeps
 //! the newest [`RECENT_PROMPTS_KEPT`] per session and the row's
@@ -219,7 +218,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: false,

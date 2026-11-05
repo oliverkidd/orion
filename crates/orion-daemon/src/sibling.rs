@@ -18,15 +18,15 @@ use crate::registry::{CreateAgentSpec, Daemon};
 /// a new worktree" becomes `orion spawn --worktree`, a real session on a
 /// real worktree row, instead of Claude's Agent tool with worktree
 /// isolation: that subagent lives inside this process, in a checkout under
-/// `.claude/worktrees/` no orion session ever runs in. Claude and pi, like the
-/// worktree guidance (both take `--append-system-prompt`): codex and cursor
+/// `.claude/worktrees/` no orion session ever runs in. Claude, like the
+/// worktree guidance (both ride `--append-system-prompt`): codex and cursor
 /// have no system-prompt flag.
 pub const CLAUDE_SPAWN_GUIDANCE: &str = "[orion] When the user asks you to start a new orion \
 session (\"start a new orion session that …\", \"spin up another session to …\", \"open a new \
 session for …\"), do not launch an agent process yourself. Run this shell command instead, exactly \
 once:\n\n  orion spawn \"<task>\"\n\nwhere <task> is the work the user wants that session to do, \
 in their own words — the new session opens on it as its first prompt, so make it self-contained. \
-Add `--kind claude|codex|cursor|pi|muse|opencode` only when the user names the harness; otherwise the new session \
+Add `--kind claude|codex|cursor|grok|opencode` only when the user names the harness; otherwise the new session \
 matches this one. orion starts it beside this session, in the same worktree, and it shows up in \
 the sessions list on its own. When the user wants that agent or session to work in a new \
 worktree, on its own branch or in its own checkout (\"kick off an agent in a new worktree to …\"), \
@@ -97,7 +97,6 @@ impl Daemon {
             model,
             effort,
             auto_title: true,
-            cloud_prompt: None,
             starting_prompt: Some(starting_prompt.to_string()),
             pr_url: None,
             issue_url: None,
@@ -191,7 +190,6 @@ mod tests {
             model: model.map(str::to_string),
             effort: model.map(|_| "high".to_string()),
             session_id: Some("s1".into()),
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
@@ -241,7 +239,7 @@ mod tests {
             spec.starting_prompt.as_deref(),
             Some("Fix the login redirect")
         );
-        assert!(spec.cloud_prompt.is_none() && spec.pr_url.is_none() && spec.issue_url.is_none());
+        assert!(spec.pr_url.is_none() && spec.issue_url.is_none());
     }
 
     #[test]

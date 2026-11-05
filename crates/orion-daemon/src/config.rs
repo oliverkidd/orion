@@ -50,11 +50,6 @@ pub struct Config {
     /// `remove+volumes`. Read through [`Config::worktree_containers`];
     /// anything unknown is `off` (see `containers`).
     pub worktree_containers: String,
-    /// User-defined harnesses from the `custom_harnesses` key, shared with
-    /// the TUI's picker. The daemon resolves programs, model flags and
-    /// respawns from this list; entries that fail validation are refused
-    /// at create time with the reason, never launched.
-    pub custom_harnesses: Vec<orion_core::harness::CustomHarness>,
     /// Per-harness deltas over the compiled-in registry (`harnesses` in
     /// config.json): repoint a program, rename a flag, switch a harness
     /// off, or define a whole new CLI. Merged by
@@ -95,7 +90,6 @@ impl Default for Config {
             worktree_base_branch: String::new(),
             link_env_files: true,
             worktree_containers: WorktreeContainers::Off.as_str().into(),
-            custom_harnesses: Vec::new(),
             harnesses: BTreeMap::new(),
             claude_accounts: Vec::new(),
             projects: BTreeMap::new(),
@@ -209,7 +203,6 @@ mod tests {
         assert!(!cfg.prewarm_agents && !cfg.prewarm_sessions);
         assert_eq!(cfg.session_idle_timeout, "30m");
         assert_eq!(cfg.worktree_base_branch, "develop");
-        assert_eq!(cfg.custom_harnesses.len(), 1, "the legacy list reads");
         assert!(cfg.harnesses.contains_key("grok"), "the registry map reads");
         assert_eq!(
             cfg.run_command(Path::new("/Users/me/src/app")),

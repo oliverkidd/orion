@@ -1,9 +1,9 @@
 //! Managed-hook installation into the agent CLI's config:
 //! `<worktree>/.claude/settings.local.json` (Claude Code),
 //! `~/.codex/hooks.json` (Codex CLI), or `<worktree>/.cursor/hooks.json`
-//! (Cursor CLI). Pi and OpenCode have no hook file — their managed
-//! TypeScript extension and plugin are `pi_extension.rs` and
-//! `opencode_plugin.rs`, which share this module's atomic writer.
+//! (Cursor CLI). OpenCode has no hook file — its managed TypeScript
+//! plugin is `opencode_plugin.rs`, which shares this module's atomic
+//! writer.
 //!
 //! Claude and Codex share one hooks dialect (PascalCase event names, groups
 //! of `{"hooks": [{"type": "command", ...}]}`). Cursor speaks its own
@@ -451,8 +451,7 @@ fn write_hooks_root(dir: &Path, file_name: &str, root: &Value) -> Result<()> {
 
 /// Write the managed file `name` holding `source` into `dir`, unless it
 /// already holds exactly that — an unchanged mtime keeps the CLI's own
-/// bookkeeping of the directory (pi's extension cache, OpenCode's plugin
-/// scan) quiet.
+/// bookkeeping of the directory (OpenCode's plugin scan) quiet.
 pub(super) fn install_unless_unchanged(dir: &Path, name: &str, source: &str) -> Result<()> {
     if let Ok(existing) = std::fs::read_to_string(dir.join(name)) {
         if existing == source {

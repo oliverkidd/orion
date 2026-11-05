@@ -244,12 +244,6 @@ fn find_ack(events: &[ServerEvent], want_req: u64) -> Option<&ServerEvent> {
     })
 }
 
-fn find_tail(events: &[ServerEvent], want_req: u64) -> Option<&ServerEvent> {
-    events
-        .iter()
-        .find(|e| matches!(e, ServerEvent::OutputTail { req_id, .. } if *req_id == want_req))
-}
-
 fn collected_output(events: &[ServerEvent]) -> Vec<u8> {
     let mut out = Vec::new();
     for e in events {
@@ -375,76 +369,6 @@ async fn full_crud_attach_and_restart_persistence() {
         "terminal cwd should be the worktree: {text}"
     );
 
-    // ---- TailOutput: the end of the ring, for the grid's terminal card ----
-    write_frame(
-        &mut c,
-        &ClientRequest::TailOutput {
-            req_id: 900,
-            session: sref.clone(),
-            max_bytes: 4096,
-            after_seq: None,
-        },
-    )
-    .await
-    .unwrap();
-    let events =
-        read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_tail(evs, 900).is_some()).await;
-    let Some(ServerEvent::OutputTail {
-        tail: Some(tail), ..
-    }) = find_tail(&events, 900)
-    else {
-        panic!("TailOutput answered with no tail: {events:#?}");
-    };
-    let text = String::from_utf8_lossy(&tail.data).into_owned();
-    assert!(text.contains(marker), "the tail holds the marker: {text}");
-    assert_eq!((tail.cols, tail.rows), (80, 24), "at the attached size");
-    assert!(tail.end_seq as usize >= tail.data.len());
-    // Asked again from where that left off, a ring that has not grown
-    // answers with no bytes.
-    write_frame(
-        &mut c,
-        &ClientRequest::TailOutput {
-            req_id: 901,
-            session: sref.clone(),
-            max_bytes: 4096,
-            after_seq: Some(tail.end_seq),
-        },
-    )
-    .await
-    .unwrap();
-    let events =
-        read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_tail(evs, 901).is_some()).await;
-    let Some(ServerEvent::OutputTail {
-        tail: Some(again), ..
-    }) = find_tail(&events, 901)
-    else {
-        panic!("TailOutput answered with no tail: {events:#?}");
-    };
-    if again.end_seq == tail.end_seq {
-        assert!(again.data.is_empty(), "nothing new, no bytes: {again:?}");
-    }
-    // A session with no PTY has no tail at all.
-    write_frame(
-        &mut c,
-        &ClientRequest::TailOutput {
-            req_id: 902,
-            session: SessionRef::Terminal(orion_core::TerminalId("no-such".into())),
-            max_bytes: 4096,
-            after_seq: None,
-        },
-    )
-    .await
-    .unwrap();
-    let events =
-        read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_tail(evs, 902).is_some()).await;
-    assert!(
-        matches!(
-            find_tail(&events, 902),
-            Some(ServerEvent::OutputTail { tail: None, .. })
-        ),
-        "{events:#?}"
-    );
-
     // ---- CreateAgent (ORION_AGENT_CMD=/bin/sh stands in for claude) ----
     write_frame(
         &mut c,
@@ -458,7 +382,6 @@ async fn full_crud_attach_and_restart_persistence() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -893,7 +816,6 @@ async fn hook_post_from_agent_pty_drives_status() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -1234,7 +1156,6 @@ async fn hook_cwd_rehomes_agent_to_other_worktree() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -1363,7 +1284,6 @@ async fn claude_session_title_and_row_name_stay_tied() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -1489,7 +1409,7 @@ async fn claude_session_title_and_row_name_stay_tied() {
 }
 
 /// A kill-and-respawn behind an attached client — Restart here, and the
-/// same path a `orion worktree` relocation or a cloud re-entry takes —
+/// same path a `orion worktree` relocation takes —
 /// rebinds that client to the new PTY: a fresh Scrollback and the new
 /// process's output arrive on the attachment it already holds, with no
 /// second Attach. Before this the forward task died with the old PTY and
@@ -1529,7 +1449,6 @@ async fn restart_rebinds_an_attached_client_to_the_new_pty() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -1666,7 +1585,6 @@ async fn codex_hooks_install_and_drive_status() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -2263,7 +2181,6 @@ async fn prewarmed_session_is_adopted_by_create_agent() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -2412,7 +2329,6 @@ async fn dead_prewarm_falls_back_to_cold_spawn() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -2457,7 +2373,7 @@ async fn create_agent_refuses_when_the_cli_is_not_installed() {
         // Cursor's binary is `cursor-agent`; the message must name that, not
         // the kind, or the user goes looking for the wrong thing to install.
         (12, AgentKind::Cursor, "cursor-agent"),
-        (13, AgentKind::Pi, "pi"),
+        (13, AgentKind::OpenCode, "opencode"),
     ] {
         write_frame(
             &mut c,
@@ -2471,7 +2387,6 @@ async fn create_agent_refuses_when_the_cli_is_not_installed() {
                 model: None,
                 effort: None,
                 auto_title: false,
-                cloud_prompt: None,
                 starting_prompt: None,
                 issue_url: None,
             },
@@ -2559,7 +2474,6 @@ async fn create_agent_succeeds_when_the_cli_is_on_the_login_shell_path() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -2668,7 +2582,6 @@ async fn create_agent_get_id(
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -2838,7 +2751,6 @@ async fn archive_sigkills_an_agent_that_ignores_sighup() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -2979,7 +2891,6 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -3028,7 +2939,6 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -3146,7 +3056,6 @@ async fn prewarm_worktree_sessions_boots_nothing_when_switched_off() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -3291,7 +3200,6 @@ async fn idle_sessions_reap_unwatched_but_spare_busy_and_attached() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -3618,7 +3526,6 @@ async fn auto_title_instruction_and_rename_flow() {
             model: None,
             effort: None,
             auto_title: true,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -3822,7 +3729,6 @@ async fn orion_worktree_cli_relocates_the_session_when_the_turn_ends() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -4093,7 +3999,6 @@ async fn orion_spawn_cli_starts_a_sibling_session_in_the_same_worktree() {
             model: None,
             effort: None,
             auto_title: false,
-            cloud_prompt: None,
             starting_prompt: None,
             issue_url: None,
         },
@@ -4282,238 +4187,6 @@ async fn cli_add_project() {
 
     write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
     wait_for_exit(&mut daemon);
-}
-
-/// A Claude Cloud row: `claude --cloud <task>` creates the session, prints
-/// its id and exits, and the daemon captures the id off the PTY — the only
-/// handle it ever gets. That is where the local side ends: the agent runs
-/// in the cloud sandbox, and the row's pane is a panel linking to it.
-/// Nothing is attached, teleported or re-homed on the user's behalf — the
-/// stub runs exactly once, the checkout never switches branch — and the
-/// paths that would boot a bare local CLI in the row's name (a restart, an
-/// attach finding no PTY) refuse instead.
-#[tokio::test]
-async fn cloud_row_captures_its_session_id_and_runs_nothing_locally() {
-    let env = TestEnv::new();
-    let repo = env.make_repo();
-    let state = env.tmp.path().join("cloud-stub");
-    std::fs::create_dir_all(&state).unwrap();
-    let stub = env.tmp.path().join("cloud-stub.sh");
-    std::fs::write(
-        &stub,
-        format!(
-            r#"#!/bin/sh
-n=$(cat "{state}/runs" 2>/dev/null || echo 0)
-n=$((n + 1))
-echo "$n" > "{state}/runs"
-pwd >> "{state}/cwds"
-printf 'Created cloud session: Greet the world\r\n'
-printf 'View: https://claude.ai/code/session_016SiQW5Lem2LbnUf1A3undt?from=cli&m=0\r\n'
-printf 'Resume with: claude --teleport session_016SiQW5Lem2LbnUf1A3undt\r\n'
-exit 0
-"#,
-            state = state.display()
-        ),
-    )
-    .unwrap();
-    make_executable(&stub);
-    let runs = || {
-        std::fs::read_to_string(state.join("runs"))
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default()
-    };
-    let mut daemon = env.spawn_daemon_with_agent_cmd(stub.to_str().unwrap());
-
-    let mut c = connect(&env.sock()).await;
-    handshake(&mut c).await;
-    let main_worktree = add_project_get_main_worktree(&mut c, &repo).await;
-
-    // The create: the stub prints the session lines and exits at once.
-    const CLOUD_ID: &str = "session_016SiQW5Lem2LbnUf1A3undt";
-    write_frame(
-        &mut c,
-        &ClientRequest::CreateAgent {
-            mode: Default::default(),
-            req_id: 10,
-            worktree: main_worktree.id.clone(),
-            // The stand-in name the TUI sends with AUTO-TITLE on: the
-            // sandbox fires no hook, so the title comes off the create's
-            // own output instead (issue #92).
-            name: "agent".into(),
-            kind: AgentKind::Claude,
-            custom_harness: None,
-            model: None,
-            effort: None,
-            auto_title: true,
-            cloud_prompt: Some("  Hello,\n  world  ".into()),
-            starting_prompt: None,
-            issue_url: None,
-        },
-    )
-    .await
-    .unwrap();
-    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
-        find_ack(evs, 10).is_some()
-            && evs.iter().any(|e| {
-                matches!(
-                    e,
-                    ServerEvent::EntityUpserted {
-                        entity: Entity::Agent(a)
-                    } if a.cloud_session_id.as_deref() == Some(CLOUD_ID)
-                )
-            })
-    })
-    .await;
-    // The task is the row's first prompt from the create's own upsert on,
-    // condensed like a typed one: the card says what the session was
-    // asked to do before the CLI has printed a thing.
-    let created = events
-        .iter()
-        .find_map(|e| match e {
-            ServerEvent::EntityUpserted {
-                entity: Entity::Agent(a),
-            } if a.cloud_session_id.is_none() => Some(a.clone()),
-            _ => None,
-        })
-        .expect("the create's own upsert");
-    assert_eq!(
-        created
-            .recent_prompts
-            .iter()
-            .map(|p| p.text.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Hello, world"],
-        "{created:#?}"
-    );
-    let ServerEvent::Ack {
-        created: Some(EntityId::Agent(agent_id)),
-        ..
-    } = find_ack(&events, 10).unwrap()
-    else {
-        panic!("CreateAgent failed: {events:#?}");
-    };
-    let agent_id = agent_id.clone();
-
-    // The create's exit is the end of the local story: the row goes dead
-    // and stays dead — nothing re-enters the session in its name.
-    let died = |evs: &[ServerEvent]| {
-        evs.iter().any(|e| {
-            matches!(
-                e,
-                ServerEvent::EntityUpserted {
-                    entity: Entity::Agent(a)
-                } if a.id == agent_id && !a.alive && a.cloud_session_id.as_deref() == Some(CLOUD_ID)
-            )
-        })
-    };
-    let mut events = read_events_until(&mut c, SLOW_TIMEOUT, died).await;
-    assert!(died(&events), "the create pane should exit: {events:#?}");
-    // Hold still past any cadence a follow could have had.
-    events.extend(read_events_for(&mut c, EVENT_TIMEOUT).await);
-    assert_eq!(
-        runs(),
-        "1",
-        "the create is the only CLI run — no attach, no teleport"
-    );
-    assert!(
-        !events.iter().any(|e| matches!(
-            e,
-            ServerEvent::EntityUpserted { entity: Entity::Worktree(w) } if w.branch.starts_with("cloud-")
-        )),
-        "no cloud-<id> worktree is cut: {events:#?}"
-    );
-    let row = events
-        .iter()
-        .rev()
-        .find_map(|e| match e {
-            ServerEvent::EntityUpserted {
-                entity: Entity::Agent(a),
-            } if a.id == agent_id => Some(a.clone()),
-            _ => None,
-        })
-        .unwrap();
-    assert_eq!(
-        row.worktree_id, main_worktree.id,
-        "the row stays where it was created"
-    );
-    assert_eq!(row.cloud_session_id.as_deref(), Some(CLOUD_ID));
-    assert!(!row.alive);
-    // Claude Cloud's title for the session is the row's name, read off
-    // the `Created cloud session:` line, and the task stays its prompt.
-    assert_eq!(row.name, "Greet the world");
-    assert_eq!(
-        row.recent_prompts
-            .iter()
-            .map(|p| p.text.as_str())
-            .collect::<Vec<_>>(),
-        vec!["Hello, world"]
-    );
-
-    // The create ran in the user's checkout, and left its branch alone.
-    let cwds = std::fs::read_to_string(state.join("cwds")).unwrap();
-    let cwds: Vec<PathBuf> = cwds
-        .lines()
-        .map(|l| std::fs::canonicalize(l).unwrap())
-        .collect();
-    assert_eq!(
-        cwds,
-        vec![std::fs::canonicalize(&main_worktree.path).unwrap()]
-    );
-    let main_branch = std::process::Command::new("git")
-        .args(["-C", repo.to_str().unwrap(), "branch", "--show-current"])
-        .output()
-        .unwrap();
-    assert_eq!(String::from_utf8_lossy(&main_branch.stdout).trim(), "main");
-
-    // A restart has nothing local to restart, and an attach finding no
-    // PTY must not boot a bare CLI wearing the row's name: both refuse,
-    // and the run count stays put.
-    write_frame(
-        &mut c,
-        &ClientRequest::RestartAgent {
-            req_id: 11,
-            id: agent_id.clone(),
-        },
-    )
-    .await
-    .unwrap();
-    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 11).is_some()).await;
-    match find_ack(&events, 11) {
-        Some(ServerEvent::Error { message, .. }) => {
-            assert!(message.contains("runs in Claude Cloud"), "{message}")
-        }
-        other => panic!("a cloud row's restart must be refused: {other:?}"),
-    }
-    write_frame(
-        &mut c,
-        &ClientRequest::Attach {
-            session: SessionRef::Agent(agent_id.clone()),
-            from_seq: None,
-            cols: 80,
-            rows: 24,
-        },
-    )
-    .await
-    .unwrap();
-    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
-        evs.iter().any(|e| {
-            matches!(e, ServerEvent::Error { req_id: None, message } if message.contains("runs in Claude Cloud"))
-        })
-    })
-    .await;
-    assert!(
-        events.iter().any(|e| matches!(
-            e,
-            ServerEvent::Error { req_id: None, message } if message.contains("runs in Claude Cloud")
-        )),
-        "a cloud row's attach must be refused: {events:#?}"
-    );
-    assert_eq!(runs(), "1", "neither verb spawned a CLI");
-
-    // Shutting down must not spawn anything further.
-    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
-    wait_for_exit(&mut daemon);
-    assert_eq!(runs(), "1");
 }
 
 /// `curl` one Claude hook from inside an agent's own PTY, with the env the

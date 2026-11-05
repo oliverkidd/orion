@@ -9,11 +9,10 @@
 //! Sessions) for a new preset and on every side a stored one holds text
 //! for; a side the row leaves out saves blank. The presets themselves (and
 //! their file) are
-//! `crate::agent_presets`; the task prompt a launch opens is an ordinary
-//! multi-line `PromptDialog` (`PromptKind::AgentPresetTask`) — sent on at
-//! once, empty, for a `skip_task` preset (`event_loop::submit_prompt_now`)
-//! — and the create it ends in goes through `event_loop::create_agent`
-//! like every other session.
+//! `crate::agent_presets`; a launch goes through the QUICK PROMPT with the
+//! preset on it — sent on at once, empty, for a `skip_task` preset
+//! (`event_loop::submit_prompt_now`) — and the create it ends in goes
+//! through `event_loop::create_agent` like every other session.
 
 use crate::agent_presets::{AgentPreset, PresetText};
 use crate::app::{
@@ -920,31 +919,20 @@ pub(crate) fn open_agent_preset_task(
         return;
     }
     let skip = preset.skip_task;
-    // Flipped onto a fresh worktree: only the QUICK PROMPT's launch cuts
-    // one first, so the preset goes on that box — sent at once for a
-    // `skip`-task preset, as the task box would be.
-    if let Some(target @ QuickTarget::NewWorktree { .. }) = view.aim.clone() {
-        let launch = crate::quick_prompt::QuickLaunch::of_preset(
-            target,
-            preset,
-            &crate::config::Config::load(),
-        );
-        if skip {
-            crate::event_loop::submit_prompt_now(app, PromptKind::QuickPrompt(launch), out);
-        } else {
-            let (launch, head, tail) = launch.inline_preset("", None);
-            crate::quick_prompt::reopen_around(app, launch, &head, &tail);
-        }
-        return;
-    }
-    let kind = PromptKind::AgentPresetTask {
-        worktree: view.worktree.clone(),
-        preset,
+    // The QUICK PROMPT with the preset on it, aimed where the list was
+    // opened for or where `Tab` flipped it — sent at once for a
+    // `skip`-task preset, as Enter on that box would.
+    let target = match view.aim.clone() {
+        Some(target @ QuickTarget::NewWorktree { .. }) => target,
+        _ => QuickTarget::Worktree(view.worktree.clone()),
     };
+    let launch =
+        crate::quick_prompt::QuickLaunch::of_preset(target, preset, &crate::config::Config::load());
     if skip {
-        crate::event_loop::submit_prompt_now(app, kind, out);
+        crate::event_loop::submit_prompt_now(app, PromptKind::QuickPrompt(launch), out);
     } else {
-        crate::event_loop::open_prompt(app, kind);
+        let (launch, head, tail) = launch.inline_preset("", None);
+        crate::quick_prompt::reopen_around(app, launch, &head, &tail);
     }
 }
 
@@ -1950,28 +1938,25 @@ mod tests {
     /// never a bare `custom` — and picking one stores the registry id.
     #[test]
     fn kind_choices_list_custom_entries_by_id() {
-        pinned(
-            r#"{"custom_harnesses": [{"id": "agy", "program": "agy"}]}"#,
-            || {
-                let mut editor = editor(PresetText::Prefix);
-                editor.field = PresetField::Kind;
-                let choices = editor.row_choices();
-                assert!(choices.contains(&"claude".to_string()), "{choices:?}");
-                assert!(choices.contains(&"agy".to_string()), "{choices:?}");
-                assert!(!choices.contains(&"custom".to_string()), "{choices:?}");
+        pinned(r#"{"harnesses": {"agy": {"program": "agy"}}}"#, || {
+            let mut editor = editor(PresetText::Prefix);
+            editor.field = PresetField::Kind;
+            let choices = editor.row_choices();
+            assert!(choices.contains(&"claude".to_string()), "{choices:?}");
+            assert!(choices.contains(&"agy".to_string()), "{choices:?}");
+            assert!(!choices.contains(&"custom".to_string()), "{choices:?}");
 
-                editor.set_row_value("agy");
-                assert_eq!(editor.kind, AgentKind::Custom);
-                assert_eq!(editor.custom.as_deref(), Some("agy"));
-                assert_eq!(editor.row_value(), "agy");
-                let preset = editor.to_preset();
-                assert_eq!(preset.custom_harness.as_deref(), Some("agy"));
+            editor.set_row_value("agy");
+            assert_eq!(editor.kind, AgentKind::Custom);
+            assert_eq!(editor.custom.as_deref(), Some("agy"));
+            assert_eq!(editor.row_value(), "agy");
+            let preset = editor.to_preset();
+            assert_eq!(preset.custom_harness.as_deref(), Some("agy"));
 
-                editor.set_row_value("codex");
-                assert_eq!(editor.kind, AgentKind::Codex);
-                assert_eq!(editor.custom, None);
-            },
-        );
+            editor.set_row_value("codex");
+            assert_eq!(editor.kind, AgentKind::Codex);
+            assert_eq!(editor.custom, None);
+        });
     }
 
     /// A refused save moves the caret onto the field the error names,

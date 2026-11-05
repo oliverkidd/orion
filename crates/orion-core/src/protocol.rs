@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 49;
+pub const PROTOCOL_VERSION: u32 = 50;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -122,16 +122,12 @@ pub enum ClientRequest {
         /// the session eligible for one agent-driven auto-title (the CLI
         /// runs `orion rename` on its first prompt).
         auto_title: bool,
-        /// One-shot task for a fresh `claude --cloud <task>` launch. This is
-        /// deliberately request-only: prompts are not persisted with Agent.
-        #[serde(default)]
-        cloud_prompt: Option<String>,
         /// The first turn handed to the CLI as its positional prompt
         /// (`claude "<text>"`, `codex "<text>"`, `cursor-agent "<text>"`) —
         /// what an AGENT PRESET launch composes from its prefix, the task
-        /// and its postfix. Request-only like `cloud_prompt`: never
-        /// persisted, so a RESUME can never replay it. Skips PREWARM POOL
-        /// adoption, since a spare booted bare cannot be handed one.
+        /// and its postfix. Request-only: never persisted, so a RESUME can
+        /// never replay it. Skips PREWARM POOL adoption, since a spare
+        /// booted bare cannot be handed one.
         #[serde(default)]
         starting_prompt: Option<String>,
         /// The GitHub issue this session was created for — an ISSUE
@@ -319,31 +315,21 @@ pub enum ClientRequest {
     /// place under `harness`'s — never over a different file, never
     /// deleting the source — switches the row to `harness` (name, worktree,
     /// and the model and effort `harness` offers, kept), and resumes the
-    /// stored session id there. Refused for a Cloud row, an archived one,
-    /// a session with no transcript to move, and a `harness` (registry id)
-    /// that cannot take one ([`crate::harness::HarnessDescriptor::takes_claude_sessions`]).
+    /// stored session id there. Refused for an archived row, a session
+    /// with no transcript to move, and a `harness` (registry id) that
+    /// cannot take one ([`crate::harness::HarnessDescriptor::takes_claude_sessions`]).
     /// Answered with `Ack`; the row reaches every client as an upsert.
     ContinueAgentOn {
         req_id: u64,
         id: AgentId,
         harness: String,
     },
-    /// Queue a message on the Claude Cloud session a row launched
-    /// (`claude -p <message> --cloud <id>`). Fire-and-forget by nature: the
-    /// CLI acknowledges the send and returns, and the reply only ever
-    /// appears in the session's page in the browser. Rejected for rows
-    /// without a `cloud_session_id`, and checked like the launch task.
-    SendCloudMessage {
-        req_id: u64,
-        id: AgentId,
-        message: String,
-    },
     /// `text` as a local agent's next turn: typed down its PTY and
     /// submitted when its CLI is up; otherwise the CLI is booted (resuming
     /// the stored session) with `text` as the first prompt it submits on
     /// its own, at `cols`×`rows`. Either way the turn is sent — a session
-    /// the IDLE REAPER put down never swallows it. Refused for archived and
-    /// Cloud rows. Answered with `Ack`.
+    /// the IDLE REAPER put down never swallows it. Refused for archived
+    /// rows. Answered with `Ack`.
     SendTurn {
         req_id: u64,
         id: AgentId,
@@ -431,20 +417,6 @@ pub enum ClientRequest {
         verb: StackVerb,
     },
 
-    /// The end of a live session's output ring — what a TERMINAL's card on
-    /// the grid shows as the last lines its shell printed. Answered by
-    /// `ServerEvent::OutputTail` with the same req_id (not an Ack).
-    /// `after_seq` is the ring end the client last heard: a ring that has
-    /// not grown past it answers with no bytes, so a grid asking after
-    /// every terminal on it once a second costs the idle ones nothing.
-    TailOutput {
-        req_id: u64,
-        session: SessionRef,
-        /// At most this many bytes, from the end of the ring.
-        max_bytes: u32,
-        after_seq: Option<u64>,
-    },
-
     Shutdown,
 }
 
@@ -485,22 +457,6 @@ pub struct PrewarmInfo {
     pub worktree: WorktreeId,
     pub kind: AgentKind,
     pub model: Option<String>,
-}
-
-/// The end of a session's ring, for `ClientRequest::TailOutput`: the bytes
-/// and the PTY size they were laid out against, so the client's throwaway
-/// screen wraps them where the pane would.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OutputTail {
-    pub cols: u16,
-    pub rows: u16,
-    /// Seq the ring's next byte gets — sent back as the next ask's
-    /// `after_seq`.
-    pub end_seq: u64,
-    /// The last `max_bytes` of the ring; empty when it has not grown past
-    /// `after_seq`.
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
 }
 
 /// Daemon-side half of the metrics modal's data; the client stacks its own
@@ -638,13 +594,6 @@ pub enum ServerEvent {
     Metrics {
         req_id: u64,
         snapshot: MetricsSnapshot,
-    },
-    /// Reply to `ClientRequest::TailOutput`: `None` when the session has no
-    /// live PTY — its ring went with its shell.
-    OutputTail {
-        req_id: u64,
-        session: SessionRef,
-        tail: Option<OutputTail>,
     },
 }
 

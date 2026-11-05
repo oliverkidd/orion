@@ -1,15 +1,14 @@
 //! The one AGENT KIND picker behind every launch surface — the NEW AGENT
 //! PICKER (`n` on the grid, which opens the QUICK PROMPT on the pick; from
-//! a menu's "New agent" row it launches outright), the PR SESSION picker
-//! (`Tab` in the PULL REQUESTS MODAL) and the QUICK PROMPT's `Tab`. Each is one
-//! `ContextMenu` with a row per harness still enabled on the AGENTS TAB (a
-//! disabled one is absent, not greyed), every row a
+//! a menu's "New agent" row it launches outright) and the QUICK PROMPT's
+//! `Tab`. Each is one `ContextMenu` with a row per harness still enabled
+//! on the AGENTS TAB (a disabled one is absent, not greyed), every row a
 //! `MenuAction::NewAgentOfKind` carrying the surface's launch context, so
 //! `→` drills into the same MODEL / EFFORT submenus everywhere.
 
 use crate::app::{App, ContextMenu, MenuAction, MenuItem, Overlay};
 use crate::config::Config;
-use crate::pull_request::{OpenPr, PrLaunch};
+use crate::pull_request::PrLaunch;
 use crate::quick_prompt::QuickReturn;
 use orion_core::{Agent, AgentKind, WorktreeId};
 
@@ -22,7 +21,6 @@ pub(crate) const NO_HARNESS_FLASH: &str =
 /// harness**, the action that opens it: the same new agent `⌘N` starts,
 /// with its harness asked first. It names an AGENT, never a session — a
 /// session is an agent or a terminal, and this only ever starts the first.
-/// `ContextMenu::hovered_claude_cloud` gates Cloud mode on it.
 pub(crate) const NEW_AGENT_PICKER_TITLE: &str = "New agent — choose harness";
 
 /// What one kind picker opens with: its title, where its rows launch, and
@@ -31,14 +29,11 @@ pub(crate) const NEW_AGENT_PICKER_TITLE: &str = "New agent — choose harness";
 pub(crate) struct KindPicker {
     pub title: String,
     pub worktree: WorktreeId,
-    /// OPEN PRS launch context (a PR SESSION picker).
-    pub pr: Option<PrLaunch>,
     /// The QUICK PROMPT box owed back (its `Tab` picker).
     pub quick: Option<Box<QuickReturn>>,
     /// The row to start on: the surface's own ask (a QUICK PROMPT picker
-    /// opens on its box's harness); None leaves it to REMEMBER HARNESS
-    /// (Settings → Experimental — the last launch's), else the first
-    /// row, which one not offered any more falls to as well.
+    /// opens on its box's harness); None is the first row, which one not
+    /// offered any more falls to as well.
     pub hover: Option<HarnessRow>,
 }
 
@@ -48,21 +43,6 @@ impl KindPicker {
         Self {
             title: NEW_AGENT_PICKER_TITLE.into(),
             worktree,
-            pr: None,
-            quick: None,
-            hover: None,
-        }
-    }
-
-    /// The PR SESSION picker: every row carries the PR's URL and head
-    /// branch. `worktree` is the PROJECT's ROOT WORKTREE — it names the
-    /// PROJECT the create is addressed to, not where the session ends up;
-    /// the DAEMON puts a PR SESSION in the head branch's own checkout.
-    pub fn pr_session(worktree: WorktreeId, pr: &OpenPr) -> Self {
-        Self {
-            title: format!("New PR agent · #{}", pr.number),
-            worktree,
-            pr: Some(PrLaunch::of(pr)),
             quick: None,
             hover: None,
         }
@@ -83,13 +63,12 @@ impl KindPicker {
     /// harness is asked first, and Enter on a row OPENS the QUICK PROMPT
     /// set to it (`back.from_box` is false: Esc closes the picker and
     /// opens nothing). The cursor starts on the harness the box would
-    /// have opened on — the Settings → Agents one, which REMEMBER
-    /// HARNESS writes the last launch into — so `Enter` at once is `p`.
+    /// have opened on — the Settings → Agents one — so `Enter` at once
+    /// is `p`.
     pub fn new_session_box(worktree: WorktreeId, back: QuickReturn) -> Self {
         Self {
             title: NEW_AGENT_PICKER_TITLE.into(),
             worktree,
-            pr: None,
             hover: Some(HarnessRow {
                 kind: back.launch.kind,
                 custom: back.launch.custom.clone(),
@@ -137,25 +116,14 @@ pub(crate) fn kind_rows(
 ) -> Vec<MenuItem> {
     rows.iter()
         .map(|row| {
-            // A QUICK PROMPT picker opens on the box as it stands: a box
-            // already set to CLAUDE CLOUD shows its Claude row toggled.
-            let cloud = row.kind == AgentKind::Claude
-                && row.custom.is_none()
-                && quick.is_some_and(|back| back.launch.cloud);
-            let label = label(row.kind, row.custom.as_deref());
             MenuItem::new(
-                if cloud {
-                    format!("{label}{}", crate::app::CLOUD_LABEL)
-                } else {
-                    label
-                },
+                label(row.kind, row.custom.as_deref()),
                 MenuAction::NewAgentOfKind {
                     worktree: worktree.clone(),
                     kind: row.kind,
                     custom: row.custom.clone(),
                     model: None,
                     effort: None,
-                    cloud,
                     pr: pr.cloned(),
                     quick: quick.map(|back| Box::new(back.clone())),
                 },
@@ -194,28 +162,17 @@ pub(crate) fn open_kind_picker(app: &mut App, picker: KindPicker) {
     let KindPicker {
         title,
         worktree,
-        pr,
         quick,
         hover,
     } = picker;
     let hover = hover
-        .or_else(|| {
-            cfg.remembered_harness()
-                .map(|(kind, custom)| HarnessRow { kind, custom })
-        })
         .and_then(|wanted| {
             rows.iter().position(|row| {
                 row.kind == wanted.kind && row.custom.as_deref() == wanted.custom.as_deref()
             })
         })
         .unwrap_or(0);
-    let items = kind_rows(
-        &rows,
-        &worktree,
-        pr.as_ref(),
-        quick.as_deref(),
-        harness_label,
-    );
+    let items = kind_rows(&rows, &worktree, None, quick.as_deref(), harness_label);
     app.overlay = Some(Overlay::Menu(ContextMenu {
         title: Some(title),
         items,
@@ -225,25 +182,6 @@ pub(crate) fn open_kind_picker(app: &mut App, picker: KindPicker) {
         parent: None,
         filter: None,
     }));
-}
-
-/// The PR SESSION rows a CONTEXT MENU on a PROJECT OPEN PRS GROUP row
-/// offers — `New Claude session`, `New Codex session`, … — one per enabled
-/// harness, and none (no FLASH: the menu's other verbs still apply) when
-/// every harness is off.
-pub(crate) fn pr_session_menu_rows(worktree: WorktreeId, pr: &OpenPr) -> Vec<MenuItem> {
-    let rows: Vec<HarnessRow> = Config::load()
-        .offered_harnesses()
-        .into_iter()
-        .map(|(kind, custom)| HarnessRow { kind, custom })
-        .collect();
-    kind_rows(
-        &rows,
-        &worktree,
-        Some(&PrLaunch::of(pr)),
-        None,
-        |kind, custom| format!("New {} session", harness_label(kind, custom)),
-    )
 }
 
 /// The same badge against a config already in hand. A CLAUDE ACCOUNT
@@ -273,8 +211,6 @@ pub(crate) fn kind_label(kind: AgentKind) -> &'static str {
         AgentKind::Claude => "Claude",
         AgentKind::Codex => "Codex",
         AgentKind::Cursor => "Cursor",
-        AgentKind::Pi => "Pi",
-        AgentKind::Muse => "Muse",
         AgentKind::Grok => "Grok Build",
         AgentKind::OpenCode => "OpenCode",
         // Custom rows label through `harness_label` (the entry's own
@@ -287,6 +223,7 @@ pub(crate) fn kind_label(kind: AgentKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::app::SubmenuKind;
+    use crate::pull_request::OpenPr;
     use crate::quick_prompt::QuickLaunch;
 
     const PR_URL: &str = "https://github.com/o/r/pull/7";
@@ -350,7 +287,6 @@ mod tests {
                         custom,
                         model: None,
                         effort: None,
-                        cloud: false,
                         pr: Some(pr),
                         quick: None,
                     } if worktree.as_str() == "w1"
@@ -365,16 +301,16 @@ mod tests {
         }
     }
 
-    /// Custom entries ride after the built-ins under their own labels;
+    /// `harnesses` map entries ride after the built-ins under their own labels;
     /// disabled, invalid and (under the hide switch) missing ones stay
     /// out, and their rows carry the registry id into the launch.
     #[test]
     fn picker_lists_usable_custom_entries_after_the_builtins() {
-        let json = r#"{"custom_harnesses": [
-            {"id": "agy", "label": "Agy", "program": "agy"},
-            {"id": "off", "label": "Off", "program": "off", "enabled": false},
-            {"id": "broken", "label": "Broken", "program": ""}
-        ]}"#;
+        let json = r#"{"harnesses": {
+            "agy": {"label": "Agy", "program": "agy"},
+            "off": {"label": "Off", "program": "off", "enabled": false},
+            "broken": {"label": "Broken", "program": ""}
+        }}"#;
         pinned(json, || {
             let worktree = WorktreeId("w1".into());
             let mut app = App::new();
@@ -404,9 +340,9 @@ mod tests {
     #[test]
     fn agents_tab_toggles_custom_entries_off_the_picker() {
         use crate::config::{locate_agent, HarnessField};
-        let json = r#"{"custom_harnesses": [
-            {"id": "agy", "label": "Agy", "program": "agy"}
-        ]}"#;
+        let json = r#"{"harnesses": {
+            "agy": {"label": "Agy", "program": "agy"}
+        }}"#;
         pinned(json, || {
             let worktree = WorktreeId("w1".into());
             let mut app = App::new();
@@ -440,7 +376,7 @@ mod tests {
         });
     }
 
-    /// The three surfaces differ only in title, context and starting row;
+    /// The surfaces differ only in title, context and starting row;
     /// a harness switched off on the AGENTS TAB is missing from all of them.
     #[test]
     fn every_surface_opens_the_same_rows_minus_disabled_harnesses() {
@@ -465,21 +401,6 @@ mod tests {
             assert_eq!(labels(menu), offered);
             assert_eq!(menu.hover, 0);
 
-            open_kind_picker(
-                &mut app,
-                KindPicker::pr_session(worktree.clone(), &open_pr()),
-            );
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(menu.title.as_deref(), Some("New PR agent · #7"));
-            assert_eq!(labels(menu), offered);
-            assert!(menu.items.iter().all(|item| matches!(
-                &item.action,
-                MenuAction::NewAgentOfKind { pr: Some(pr), quick: None, .. }
-                    if pr.url == PR_URL && pr.head == PR_HEAD
-            )));
-
             let back = QuickReturn {
                 launch: QuickLaunch {
                     target: crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
@@ -493,7 +414,6 @@ mod tests {
                     linear: None,
                     todo: None,
                     under: None,
-                    cloud: false,
                     mode: orion_core::AgentMode::Edit,
                 },
                 text: "typed so far".into(),
@@ -540,74 +460,15 @@ mod tests {
                 MenuAction::NewAgentOfKind { pr: None, quick: Some(back), .. }
                     if !back.from_box && back.text.is_empty()
             )));
-
-            let rows = pr_session_menu_rows(worktree, &open_pr());
-            let names: Vec<String> = rows.iter().map(|row| row.label.clone()).collect();
-            let expected: Vec<String> = offered
-                .iter()
-                .map(|label| format!("New {label} session"))
-                .collect();
-            assert_eq!(names, expected);
         });
     }
 
-    /// The QUICK PROMPT's picker offers the NEW AGENT PICKER's cloud
-    /// toggle on its Claude row, and opens with it on for a box already set
-    /// to cloud — but not for a box the DAEMON would refuse a cloud task
-    /// for, one carrying a pull request or an issue.
+    /// The NEW AGENT picker opens on its first row whatever
+    /// `quick_prompt_kind` says — a pick is one session's — and the QUICK
+    /// PROMPT's picker on its own box's harness.
     #[test]
-    fn the_quick_prompt_picker_toggles_cloud_where_the_box_can_go() {
-        pinned("{}", || {
-            let worktree = WorktreeId("w1".into());
-            let claude = QuickLaunch::of_kind(
-                crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
-                AgentKind::Claude,
-                None,
-                None,
-                None,
-                &Config::load(),
-            );
-            let open = |app: &mut App, launch: QuickLaunch| -> ContextMenu {
-                let back = QuickReturn {
-                    launch,
-                    text: "typed so far".into(),
-                    from_box: true,
-                    into_pane: None,
-                };
-                open_kind_picker(app, KindPicker::quick_prompt(worktree.clone(), back));
-                match &app.overlay {
-                    Some(Overlay::Menu(menu)) => menu.clone(),
-                    other => panic!("{other:?}"),
-                }
-            };
-            let mut app = App::new();
-
-            let mut menu = open(&mut app, claude.clone());
-            assert_eq!(menu.items[menu.hover].label, "Claude");
-            assert_eq!(menu.hovered_claude_cloud(), Some(false));
-            assert!(menu.toggle_hovered_claude_cloud());
-            assert_eq!(menu.items[menu.hover].label, "Claude · cloud");
-
-            let menu = open(&mut app, claude.clone().with_cloud(true));
-            assert_eq!(menu.items[menu.hover].label, "Claude · cloud");
-            assert_eq!(menu.hovered_claude_cloud(), Some(true));
-
-            let mut menu = open(&mut app, claude.with_pr(Some(PrLaunch::of(&open_pr()))));
-            assert_eq!(menu.hovered_claude_cloud(), None, "no cloud for a PR");
-            assert!(!menu.toggle_hovered_claude_cloud());
-            assert_eq!(menu.items[menu.hover].label, "Claude");
-        });
-    }
-
-    /// REMEMBER HARNESS on: the NEW AGENT and PR SESSION pickers open on
-    /// the last launch's harness — the `quick_prompt_kind` it wrote; off,
-    /// on the first row whatever that setting says. A remembered harness
-    /// switched off since steps to the first enabled one, and the QUICK
-    /// PROMPT's picker still opens on its own box's harness.
-    #[test]
-    fn pickers_open_on_the_remembered_harness_only_while_the_switch_is_on() {
+    fn pickers_open_on_the_first_row_or_the_boxs_own_harness() {
         let worktree = WorktreeId("w1".into());
-        let pr = open_pr();
         fn hover_of(app: &App) -> usize {
             match &app.overlay {
                 Some(Overlay::Menu(menu)) => menu.hover,
@@ -618,84 +479,44 @@ mod tests {
         pinned(r#"{"quick_prompt_kind": "cursor"}"#, || {
             let mut app = App::new();
             open_kind_picker(&mut app, KindPicker::new_session(worktree.clone()));
-            assert_eq!(
-                hover_of(&app),
-                0,
-                "off: the quick prompt's harness is its own"
-            );
+            assert_eq!(hover_of(&app), 0, "the quick prompt's harness is its own");
+
+            let back = QuickReturn {
+                launch: QuickLaunch {
+                    target: crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
+                    kind: AgentKind::Codex,
+                    custom: None,
+                    model: None,
+                    effort: None,
+                    preset: None,
+                    issue: None,
+                    pr: None,
+                    linear: None,
+                    todo: None,
+                    under: None,
+                    mode: orion_core::AgentMode::Edit,
+                },
+                text: String::new(),
+                from_box: true,
+                into_pane: None,
+            };
+            open_kind_picker(&mut app, KindPicker::quick_prompt(worktree.clone(), back));
+            assert_eq!(hover_of(&app), 1, "the box's own harness");
         });
-
-        pinned(
-            r#"{"remember_harness": true, "quick_prompt_kind": "cursor"}"#,
-            || {
-                let mut app = App::new();
-                open_kind_picker(&mut app, KindPicker::new_session(worktree.clone()));
-                assert_eq!(hover_of(&app), 2, "on: Cursor, the last launch's");
-                open_kind_picker(&mut app, KindPicker::pr_session(worktree.clone(), &pr));
-                assert_eq!(hover_of(&app), 2, "the PR SESSION picker too");
-
-                let back = QuickReturn {
-                    launch: QuickLaunch {
-                        target: crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
-                        kind: AgentKind::Codex,
-                        custom: None,
-                        model: None,
-                        effort: None,
-                        preset: None,
-                        issue: None,
-                        pr: None,
-                        linear: None,
-                        todo: None,
-                        under: None,
-                        cloud: false,
-                        mode: orion_core::AgentMode::Edit,
-                    },
-                    text: String::new(),
-                    from_box: true,
-                    into_pane: None,
-                };
-                open_kind_picker(&mut app, KindPicker::quick_prompt(worktree.clone(), back));
-                assert_eq!(
-                    hover_of(&app),
-                    1,
-                    "the box's own harness outranks the remembered one"
-                );
-            },
-        );
-
-        pinned(
-            r#"{"remember_harness": true, "quick_prompt_kind": "cursor", "cursor_enabled": false}"#,
-            || {
-                let mut app = App::new();
-                open_kind_picker(&mut app, KindPicker::new_session(worktree.clone()));
-                let Some(Overlay::Menu(menu)) = &app.overlay else {
-                    panic!("{:?}", app.overlay);
-                };
-                assert_eq!(
-                    labels(menu),
-                    ["Claude", "Codex", "Pi", "Muse", "Grok Build", "OpenCode"]
-                );
-                assert_eq!(
-                    menu.hover, 0,
-                    "a remembered harness switched off steps to the first enabled"
-                );
-            },
-        );
     }
 
     /// Only a hand-edited config reaches an empty list: the picker flashes
-    /// instead of opening, and a CONTEXT MENU just has no PR SESSION rows.
+    /// instead of opening.
     #[test]
-    fn no_harness_flashes_the_picker_and_empties_the_menu_rows() {
+    fn no_harness_flashes_the_picker() {
         pinned(
-            r#"{"claude_enabled": false, "codex_enabled": false, "cursor_enabled": false, "pi_enabled": false, "muse_enabled": false, "opencode_enabled": false, "harnesses":{"grok":{"enabled":false}}}"#,
+            r#"{"claude_enabled": false, "codex_enabled": false, "cursor_enabled": false, "opencode_enabled": false, "harnesses":{"grok":{"enabled":false}}}"#,
             || {
                 let worktree = WorktreeId("w1".into());
                 let mut app = App::new();
-                open_kind_picker(&mut app, KindPicker::new_session(worktree.clone()));
+                open_kind_picker(&mut app, KindPicker::new_session(worktree));
                 assert!(app.overlay.is_none(), "{:?}", app.overlay);
                 assert_eq!(app.flash.as_deref(), Some(NO_HARNESS_FLASH));
-                assert!(pr_session_menu_rows(worktree, &open_pr()).is_empty());
             },
         );
     }

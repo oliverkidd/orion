@@ -110,13 +110,6 @@ pub struct QuickLaunch {
     /// (`todos::agent_started`). Kept across the box's pickers, as the
     /// issue is.
     pub todo: Option<crate::todos::TodoRef>,
-    /// A CLAUDE CLOUD launch: `Tab` on the Claude row of the box's own
-    /// `Tab` picker toggles it, as it does in the NEW AGENT PICKER, and
-    /// Enter sends the typed text as the cloud task (`claude --cloud
-    /// <task>`) rather than as a STARTING PROMPT. Only ever on a plain
-    /// Claude launch ([`QuickLaunch::with_cloud`]): the DAEMON refuses a
-    /// cloud task beside a preset, an issue or a pull request.
-    pub cloud: bool,
     /// The mode the CLI starts in — edit, plan or ask — stepped by Cycle
     /// `⇧Tab` — as in Claude Code and Cursor — or a click on the header's
     /// `mode` field, among
@@ -436,7 +429,6 @@ impl QuickLaunch {
             linear: None,
             todo: None,
             under: None,
-            cloud: false,
             mode: AgentMode::Edit,
         }
     }
@@ -481,27 +473,11 @@ impl QuickLaunch {
         self
     }
 
-    /// The same launch, sent to Claude Cloud when `cloud` — and when the
-    /// launch can go there at all: plain Claude, no preset, no issue, no
-    /// pull request. What the `Tab` picker's pick does last, after the
-    /// issue and the PR are back on the launch it rebuilt.
-    pub fn with_cloud(mut self, cloud: bool) -> Self {
-        self.cloud = cloud
-            && self.kind == AgentKind::Claude
-            && self.custom.is_none()
-            && self.preset.is_none()
-            && self.takes_cloud();
-        self
-    }
-
     /// The modes this launch can start in, in the order Cycle mode steps
     /// them: edit, then whichever of plan and ask the harness has. Edit
     /// alone — and no `mode` field in the header — for a harness with
-    /// neither, and for a CLAUDE CLOUD launch, which runs in the sandbox.
+    /// neither.
     pub fn modes(&self, cfg: &Config) -> Vec<AgentMode> {
-        if self.cloud {
-            return vec![AgentMode::Edit];
-        }
         cfg.effective_harness(self.kind, self.custom.as_deref())
             .mode
             .offered()
@@ -520,33 +496,13 @@ impl QuickLaunch {
         self
     }
 
-    /// Could this box launch in Claude Cloud once its harness is Claude?
-    /// Not one for an issue or a pull request — the DAEMON refuses either
-    /// context beside a cloud task — so their `Tab` picker offers no
-    /// toggle. (A preset does not count: the `Tab` pick clears it.)
-    pub fn takes_cloud(&self) -> bool {
-        self.issue.is_none() && self.pr.is_none() && self.linear.is_none()
-    }
-
     /// The task Enter sends when the box is empty: an ISSUE SESSION's box
     /// may be sent as it is, the issue being the task. `None` for every
     /// other launch, whose empty box sends no task at all — the CLI starts
-    /// bare (`launches_empty`). A LINEAR box's empty task is its batch's,
+    /// bare. A LINEAR box's empty task is its batch's,
     /// which [`compose`](Self::compose) supplies instead.
     pub fn default_task(&self) -> Option<String> {
         self.issue.as_ref().map(|issue| issue.default_task())
-    }
-
-    /// Does Enter on an empty box launch? Every box but a CLAUDE CLOUD
-    /// one does: the session starts on the harness, MODEL and EFFORT the
-    /// title names with no first prompt — the CLI's own input is it, as
-    /// after the NEW AGENT PICKER (`n`) — and a box an AGENT PRESET is
-    /// on sends the prefix and postfix alone (nothing at all for a bare
-    /// preset). A cloud box cannot: `claude --cloud` takes its task on the
-    /// command line, so its empty box is a change of mind. (An ISSUE
-    /// SESSION's empty box is `default_task`'s: the issue is the task.)
-    pub fn launches_empty(&self) -> bool {
-        !self.cloud
     }
 
     /// The launch an AGENT PRESET describes: its harness, its pinned
@@ -647,12 +603,10 @@ impl QuickLaunch {
     /// `Quick prompt · reviewer (claude · opus · high)`,
     /// `Quick prompt · new worktree yellow-fox-jumps (claude)`,
     /// `Quick prompt · issue #15 · reviewer (claude · opus)`,
-    /// `Quick prompt · PR #42 · reviewer (claude · opus)`,
-    /// `Quick prompt (claude · cloud · opus)`.
+    /// `Quick prompt · PR #42 · reviewer (claude · opus)`.
     pub fn title(&self) -> String {
         let harness = harness_name(self.kind, self.custom.as_deref());
         let opts: Vec<&str> = std::iter::once(harness.as_str())
-            .chain(self.cloud.then_some("cloud"))
             .chain((self.mode != AgentMode::Edit).then(|| self.mode.as_str()))
             .chain(self.model.as_deref())
             .chain(self.effort.as_deref())
@@ -711,7 +665,6 @@ impl QuickLaunch {
                     "what should the agent do about PR #{}? (empty = start with no prompt)",
                     pr.number
                 ),
-                None if self.cloud => "what should Claude do in the cloud?".into(),
                 None => "what should the agent do? (empty = start with no prompt)".into(),
             },
         }
@@ -1343,10 +1296,6 @@ mod tests {
             "what should the agent do about PR #42? (empty = start with no prompt)"
         );
         assert_eq!(plain.default_task(), None);
-        assert!(
-            plain.launches_empty(),
-            "an empty box starts the CLI bare in the PR's checkout"
-        );
         assert!(!plain.is_new_worktree());
 
         let wrapped = QuickLaunch::of_preset(
@@ -1364,7 +1313,6 @@ mod tests {
             wrapped.label(),
             "reviewer — prefix + your task + postfix (empty = prefix + postfix only)"
         );
-        assert!(wrapped.launches_empty(), "a preset's task is optional");
         assert_eq!(wrapped.compose("fix it"), "Be strict.\n\nfix it");
     }
 
@@ -1438,13 +1386,11 @@ mod tests {
         assert_eq!(head, "Plan first.\n\n", "a blank line to type the task on");
     }
 
-    /// An empty box launches: with no preset the CLI starts with no first
-    /// prompt — the session `n` would start, on the harness and model the
-    /// title names — and with an AGENT PRESET on it, whose task is
-    /// optional, on the prefix and postfix alone; into a fresh worktree as
-    /// much as into the selected one. The label says so.
+    /// An empty box with no preset starts the CLI with no first prompt —
+    /// the session `n` would start, on the harness and model the title
+    /// names. The label says so.
     #[test]
-    fn an_empty_box_launches_with_or_without_a_preset() {
+    fn an_empty_box_starts_the_cli_with_no_first_prompt() {
         let cfg = Config::default();
         let plain = QuickLaunch::of_kind(worktree(), AgentKind::Claude, None, None, None, &cfg);
         assert_eq!(plain.title(), "Quick prompt (claude)");
@@ -1452,58 +1398,6 @@ mod tests {
             plain.label(),
             "what should the agent do? (empty = start with no prompt)"
         );
-        assert!(plain.launches_empty(), "an empty box starts the CLI bare");
         assert_eq!(plain.compose(""), "", "and sends it no first prompt");
-
-        let wrapped = QuickLaunch {
-            preset: Some(Box::new(preset("reviewer", AgentKind::Claude))),
-            ..plain.clone()
-        };
-        assert!(wrapped.launches_empty());
-
-        // The WORKTREE PICKER rebuilds the launch around a new target;
-        // neither answer changes with it.
-        let flipped = QuickLaunch {
-            target: new_worktree("fix-login"),
-            ..plain
-        };
-        assert!(flipped.launches_empty());
-        let flipped_wrapped = QuickLaunch {
-            target: new_worktree("fix-login"),
-            ..wrapped
-        };
-        assert!(flipped_wrapped.launches_empty());
-    }
-
-    /// Cloud is a plain Claude launch's alone: another harness, a preset,
-    /// an issue or a pull request keeps it off whatever the picker said,
-    /// and a cloud box names it in the title and asks for the task.
-    #[test]
-    fn only_a_plain_claude_launch_goes_to_the_cloud() {
-        let cfg = Config::default();
-        let claude = QuickLaunch::of_kind(worktree(), AgentKind::Claude, None, None, None, &cfg);
-        let cloud = claude.clone().with_cloud(true);
-        assert!(cloud.cloud);
-        assert_eq!(cloud.title(), "Quick prompt (claude · cloud)");
-        assert_eq!(cloud.label(), "what should Claude do in the cloud?");
-        assert!(!cloud.launches_empty(), "a cloud launch needs its task");
-        assert!(
-            claude.launches_empty(),
-            "off the cloud the same box starts the CLI bare"
-        );
-        assert!(!cloud.clone().with_cloud(false).cloud);
-
-        let codex = QuickLaunch::of_kind(worktree(), AgentKind::Codex, None, None, None, &cfg);
-        assert!(!codex.with_cloud(true).cloud);
-        let wrapped =
-            QuickLaunch::of_preset(worktree(), preset("reviewer", AgentKind::Claude), &cfg);
-        assert!(!wrapped.with_cloud(true).cloud);
-        let issue = claude.clone().with_issue(Some(crate::issues::IssueRef {
-            number: 15,
-            title: "Login fails".into(),
-            url: "https://github.com/o/r/issues/15".into(),
-        }));
-        assert!(!issue.takes_cloud());
-        assert!(!issue.with_cloud(true).cloud);
     }
 }

@@ -374,16 +374,6 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
             list.push(act(km, Action::PushWorktree, "push"));
         }
     }
-    // Tab opens the band in place, or folds it back — the verb the rule
-    // under the cursor used to spell at its right end.
-    if !app.launcher_all_open && !bands[band_at].cards.is_empty() {
-        let open = app.open_band(&bands) == Some(band_at);
-        list.push(act(
-            km,
-            Action::FocusNext,
-            if open { "collapse" } else { "expand" },
-        ));
-    }
     list.extend(tail);
     list
 }
@@ -401,12 +391,12 @@ fn into_pane(app: &App, bands: &[crate::launcher::Band]) -> Option<Hint> {
         "focus PR"
     } else if app.previewed_issue().is_some() {
         "focus issue"
-    } else if app.term.is_some() || app.previewed_cloud().is_some() {
+    } else if app.term.is_some() {
         "focus pane"
     } else {
         return None;
     };
-    let band = crate::launcher::band_cursor(app, bands)?;
+    let (band, layout) = app.walked_band(bands)?;
     let at = crate::launcher::card_cursor(app, &bands[band]);
     // A pane along the bottom is reached by Enter on a band with nothing
     // on it but what the pane reads (and by a click); `↓` stays the
@@ -416,14 +406,9 @@ fn into_pane(app: &App, bands: &[crate::launcher::Band]) -> Option<Hint> {
             .then(|| act(&app.keymap, Action::Activate, what))
             .flatten();
     }
-    let stuck = match app.walked_band(bands) {
-        Some((_, layout)) => layout.stepped(at, 1, 0).is_none_or(|n| Some(n) == at),
-        None => {
-            let len = bands[band].cards.len();
-            crate::launcher::grid_stepped(at, 1, 0, len, len).is_none_or(|n| Some(n) == at)
-        }
-    };
-    stuck
+    layout
+        .stepped(at, 1, 0)
+        .is_none_or(|n| Some(n) == at)
         .then(|| act(&app.keymap, Action::FocusRight, what))
         .flatten()
 }
@@ -497,10 +482,6 @@ fn pane_hints(app: &App) -> Vec<Option<Hint>> {
     }
     // Unlocked in the pane: reading it.
     let mut list = vec![Some(pane_keys::BACK.hint().kept())];
-    if app.previewed_cloud().is_some() && app.reading_url().is_none() {
-        list.push(act(km, Action::Activate, "open in browser"));
-        return list;
-    }
     if app.previewed_pr().is_some() {
         // The PULL REQUEST PAGE: its tabs, then what Enter and ↑/↓ do on
         // the one showing — open and walk its rows, or open the pull

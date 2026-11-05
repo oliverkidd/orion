@@ -17,15 +17,15 @@
 //! whose checkout of the PR's head branch the DAEMON finds or cuts.
 
 use super::{
-    create_agent, placeholder, remember_launch, schedule_prewarm, select_worktree_by_id,
-    send_with_follow, AgentLaunchDraft,
+    create_agent, placeholder, schedule_prewarm, select_worktree_by_id, send_with_follow,
+    AgentLaunchDraft,
 };
 use crate::app::{App, PendingIntent, PlaceholderRows, PromptKind};
 use crate::quick_prompt::{QuickLaunch, QuickTarget};
 use orion_core::{AgentId, ClientRequest, WorktreeId};
 
 /// Enter in the box, with `text` already sized — and empty as often as
-/// not (`QuickLaunch::launches_empty`): sent as it is, a box an AGENT
+/// not: sent as it is, a box an AGENT
 /// PRESET is on launches on the prefix and postfix alone, any other
 /// starts the CLI with no first prompt.
 pub(super) fn submit(
@@ -34,19 +34,6 @@ pub(super) fn submit(
     text: String,
     out: &mut Vec<ClientRequest>,
 ) {
-    // REMEMBER HARNESS (Settings → Experimental): a box fired on a harness
-    // — or a MODEL / EFFORT — picked through `Tab` makes that the next
-    // launch's default. A preset's harness is the preset's own, not a
-    // change of default, so a preset launch leaves the rows alone.
-    if launch.preset.is_none() {
-        remember_launch(
-            app,
-            launch.kind,
-            launch.custom.as_deref(),
-            launch.model.as_deref(),
-            launch.effort.as_deref(),
-        );
-    }
     crate::linear::remember_submit(app, &launch);
     // A box re-aimed with `^P` fires into a project the screen is not
     // showing: the session starts there and the user keeps working here,
@@ -258,17 +245,11 @@ pub(super) fn draft(
     );
     AgentLaunchDraft {
         custom: launch.custom.clone(),
-        // A CLAUDE CLOUD box sends the text as the cloud task instead —
-        // `claude --cloud <task>` — and no STARTING PROMPT beside it, which
-        // the DAEMON refuses (`QuickLaunch::with_cloud` keeps a preset, an
-        // issue and a PR off a cloud box).
-        cloud_prompt: launch.cloud.then(|| text.clone()),
         // Sized in `submit_prompt`, with the task — composing cannot fail.
         // An empty box (`launches_empty`) sends a preset's prefix + postfix
         // alone; with nothing to wrap it either, there is no first prompt,
         // the CLI's own input is it.
-        starting_prompt: Some(launch.compose(&text))
-            .filter(|prompt| !launch.cloud && !prompt.is_empty()),
+        starting_prompt: Some(launch.compose(&text)).filter(|prompt| !prompt.is_empty()),
         // An ISSUE SESSION's context, persisted by the DAEMON with the row.
         issue_url: launch.issue.as_ref().map(|issue| issue.url.clone()),
         todo: launch.todo.clone(),
@@ -366,7 +347,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: crate::app::now_ms(),
                     alive: true,
