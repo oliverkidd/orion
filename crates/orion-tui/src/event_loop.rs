@@ -13070,6 +13070,9 @@ struct SelectionSnapshot {
     /// takes its cursor's neighbour — but it makes two snapshots on
     /// different rows differ.
     pr: Option<String>,
+    /// Whether `worktree` stood among the DORMANT checkouts: a live one
+    /// that leaves hands its cursor to a live neighbour when it can.
+    worktree_dormant: bool,
     session: Option<SessionRef>,
     /// The Sessions panel row the cursor was on, and the group that row
     /// sat in. Following onto an archived row is only right when the
@@ -13106,10 +13109,43 @@ fn selection_snapshot(app: &App) -> SelectionSnapshot {
     SelectionSnapshot {
         project: app.selected_project().map(|p| p.id.clone()),
         worktree: app.selected_worktree().map(|w| w.id.clone()),
+        worktree_dormant: app
+            .selected_worktree()
+            .is_some_and(|w| in_dormant_group(app, w)),
         pr: app.selected_worktree_pr().map(|pr| pr.url.clone()),
         session_index,
         session_group: row.map(session_group),
         session: row.and_then(SessionRow::sref),
+    }
+}
+
+/// Whether checkout `w` sorts among the DORMANT ones
+/// ([`App::worktree_order`]): the root never does.
+fn in_dormant_group(app: &App, w: &orion_core::Worktree) -> bool {
+    !w.is_main && app.worktree_dormant(&w.id)
+}
+
+/// A live checkout that left its list put the cursor on the row that slid
+/// into its slot. When it was the last live one that row is the first
+/// DORMANT checkout, under the divider — and showing it attaches its
+/// session, which boots the reaped CLI, wakes the checkout and sends it
+/// back up the list with the cursor on a chat nobody picked. So the cursor
+/// steps up onto the live checkout above instead, as a session cursor
+/// steps out of the last row of its group.
+fn step_up_out_of_dormant(app: &mut App) {
+    let up = {
+        let rows = app.worktree_rows();
+        let at = app.worktree_index_in(&rows);
+        let dormant = |i: usize| {
+            rows.get(i)
+                .and_then(|row| row.checkout())
+                .map(|w| in_dormant_group(app, w))
+        };
+        at.checked_sub(1)
+            .filter(|&above| dormant(at) == Some(true) && dormant(above) == Some(false))
+    };
+    if let Some(at) = up {
+        app.set_sel_worktree(at);
     }
 }
 
@@ -13152,6 +13188,9 @@ fn reconcile_selection_inner(
     // on the row that took its place.
     if let Some(wid) = &before.worktree {
         if app.selected_worktree().map(|w| &w.id) != Some(wid) {
+            if !before.worktree_dormant {
+                step_up_out_of_dormant(app);
+            }
             restore_session(app, out);
             return;
         }

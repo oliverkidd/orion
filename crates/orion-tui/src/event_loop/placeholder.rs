@@ -1014,11 +1014,12 @@ mod tests {
                 },
                 &mut out,
             );
-            // Without its session the checkout has no stamp and sorts
-            // under `feat` again; the cursor follows the row.
+            // Without its session the checkout is dormant, but the cursor
+            // is on it: it is the HELD CHECKOUT, and keeps its place among
+            // the live ones until the cursor leaves.
             assert_eq!(
                 worktree_branches(&app),
-                ["main".to_string(), "feat".to_string(), branch.clone()]
+                ["main".to_string(), branch.clone(), "feat".to_string()]
             );
             assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w3"));
             assert!(app.visible_session_rows().is_empty());

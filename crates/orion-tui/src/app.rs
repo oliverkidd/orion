@@ -3902,6 +3902,14 @@ pub struct App {
     /// rest, moved with [`App::set_sel_project`] and the rest.
     project_cursor: PanelCursor<ProjectId>,
     worktree_cursor: PanelCursor<WorktreeRowKey>,
+    /// The HELD CHECKOUT: the one the Worktrees cursor is on, and whether
+    /// it was DORMANT when the cursor arrived. It keeps that group, and so
+    /// its place, for as long as the cursor stays on it — clicking a
+    /// dormant card wakes its checkout, and reading a live one's last
+    /// unread finish puts it to sleep, and either used to move the row out
+    /// from under the click. It goes to its group as the cursor leaves.
+    /// Set by [`App::hold_cursor_worktree`] on every move of that cursor.
+    worktree_hold: Option<(WorktreeId, bool)>,
     session_cursor: PanelCursor<SessionRowKey>,
     /// Bumped on every cursor move: what the ROWS MEMO keys on
     /// ([`RowsKey`]), so rows kept for one selection are never read for
@@ -4662,6 +4670,7 @@ impl App {
             focus: Focus::Sessions,
             project_cursor: PanelCursor::default(),
             worktree_cursor: PanelCursor::default(),
+            worktree_hold: None,
             session_cursor: PanelCursor::default(),
             cursor_moves: 0,
             follow_up: None,
@@ -5604,6 +5613,27 @@ impl App {
         let key = self.worktree_rows().get(index).map(|row| row.key());
         self.worktree_cursor.set(key, index);
         self.cursor_moves += 1;
+        self.hold_cursor_worktree();
+    }
+
+    /// Hold the checkout the Worktrees cursor is on, in the group it is in
+    /// now ([`App::worktree_hold`]) — unless it is already the one held,
+    /// whose group stands from when the cursor arrived. Off a checkout (a
+    /// pull request or issue row, nothing), nothing is held.
+    fn hold_cursor_worktree(&mut self) {
+        let Some(WorktreeRowKey::Checkout(id)) = &self.worktree_cursor.key else {
+            self.worktree_hold = None;
+            return;
+        };
+        if self
+            .worktree_hold
+            .as_ref()
+            .is_some_and(|(held, _)| held == id)
+        {
+            return;
+        }
+        let dormant = !self.live_worktrees().contains(id);
+        self.worktree_hold = Some((id.clone(), dormant));
     }
 
     /// Where the Sessions cursor stands in [`App::visible_session_rows`].
@@ -5651,6 +5681,7 @@ impl App {
         if let Some((key, at)) = worktree {
             self.worktree_cursor.set(key, at);
             self.cursor_moves += 1;
+            self.hold_cursor_worktree();
         }
         let session = self.with_session_rows(|rows| {
             let find = |key: &SessionRowKey| rows.iter().position(|row| row.has_key(key));
@@ -5670,6 +5701,11 @@ impl App {
         if self.worktree_cursor.key.as_ref() == Some(&WorktreeRowKey::Checkout(from.clone())) {
             self.worktree_cursor.key = Some(WorktreeRowKey::Checkout(to.clone()));
             self.cursor_moves += 1;
+            if let Some((held, _)) = &mut self.worktree_hold {
+                if held == from {
+                    *held = to.clone();
+                }
+            }
         }
     }
 
@@ -6015,7 +6051,9 @@ impl App {
     /// Never by recency. Ordering on the last turn moved a checkout every
     /// time one of its sessions started or finished one, and the list
     /// reshuffled under the reader all day. The one move left is a whole
-    /// checkout going cold, or waking up again.
+    /// checkout going cold, or waking up again — and the HELD CHECKOUT
+    /// under the cursor does not make even that move until the cursor
+    /// leaves it ([`App::worktree_hold`]).
     pub fn worktree_order(&self, project: &ProjectId) -> Vec<usize> {
         let worktrees = &self.tree.worktrees;
         let mut rows: Vec<usize> = (0..worktrees.len())
@@ -6025,17 +6063,27 @@ impl App {
         // A stable sort: inside each group, tree order stands.
         rows.sort_by_key(|&i| {
             let w = &worktrees[i];
-            (std::cmp::Reverse(w.is_main), !live.contains(&w.id))
+            (std::cmp::Reverse(w.is_main), self.dormant_in(&live, &w.id))
         });
         rows
+    }
+
+    /// Whether checkout `id` sorts as DORMANT, given the `live` ones: the
+    /// group the HELD CHECKOUT arrived in, for that one.
+    fn dormant_in(&self, live: &HashSet<&WorktreeId>, id: &WorktreeId) -> bool {
+        match &self.worktree_hold {
+            Some((held, dormant)) if held == id => *dormant,
+            _ => !live.contains(id),
+        }
     }
 
     /// Whether checkout `id` is DORMANT: no session in it is doing anything
     /// or has anything to say. Every unarchived session is drawn cold
     /// ([`drawn_cold`]), or it has none. A checkout still being cut, or
-    /// with a session still starting up, is live.
+    /// with a session still starting up, is live. The HELD CHECKOUT is in
+    /// the group it was in when the cursor arrived ([`App::worktree_hold`]).
     pub fn worktree_dormant(&self, id: &WorktreeId) -> bool {
-        !self.live_worktrees().contains(id)
+        self.dormant_in(&self.live_worktrees(), id)
     }
 
     /// Every checkout with a live session in it, in one pass over the

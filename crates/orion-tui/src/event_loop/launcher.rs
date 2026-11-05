@@ -1951,6 +1951,8 @@ pub(super) struct CursorCard {
     /// The band's checkout, and where the band sat on the grid.
     worktree: WorktreeId,
     band_index: usize,
+    /// Whether the band stood in the DORMANT group, under the divider.
+    dormant: bool,
     /// The card, when the cursor was on one: its session or terminal,
     /// where it sat in the band, and its neighbours by identity — the
     /// card before it and the one after — so [`keep_cursor`] lands on
@@ -1977,6 +1979,7 @@ pub(super) fn cursor_entry(app: &App) -> Option<CursorCard> {
     Some(CursorCard {
         worktree: band.worktree.clone(),
         band_index,
+        dormant: band.dormant,
         sref: card.and_then(sref_at),
         index: card.unwrap_or(0),
         before: card.and_then(|c| c.checked_sub(1)).and_then(sref_at),
@@ -1994,7 +1997,9 @@ pub(super) fn cursor_entry(app: &App) -> Option<CursorCard> {
 /// card BEFORE it when the one that left was the last, since there is
 /// nothing after that. The band's LAST card leaving takes the band with
 /// it: the grid is the bands again, the cursor on the one that slid up
-/// into its slot — and with no band left at all, the pane folds away
+/// into its slot (on the live band above, when that one is the first
+/// DORMANT band and the band that left was live) — and with no band left
+/// at all, the pane folds away
 /// ([`fold_empty_grid`]), as it does on a project opened with none.
 ///
 /// The grid settles this itself rather than leaving it to the PANELS'
@@ -2020,7 +2025,16 @@ pub(super) fn keep_cursor(app: &mut App, before: CursorCard, out: &mut Vec<Clien
         return;
     }
     let Some(band_index) = bands.iter().position(|b| b.worktree == before.worktree) else {
-        let next = before.band_index.min(bands.len() - 1);
+        let mut next = before.band_index.min(bands.len() - 1);
+        // A LIVE band leaving hands the cursor to a live neighbour. The
+        // last live one's slot is the first DORMANT band's, under the
+        // divider — and showing that band attaches its session, which
+        // boots the reaped CLI, wakes the checkout and sends it back up
+        // the grid with the cursor on a chat nobody picked. So the cursor
+        // steps up onto the live band above instead.
+        if !before.dormant && next > 0 && bands[next].dormant && !bands[next - 1].dormant {
+            next -= 1;
+        }
         tracing::debug!(
             left = %before.worktree.0,
             was_at = before.band_index,
@@ -11688,19 +11702,24 @@ mod tests {
     }
 
     /// Clicking the unread card reads it, and with its CLI reaped that
-    /// sends its checkout down among the dormant ones — under `old`, cut
-    /// first. The cursor was an index: it stayed on the slot, which `old`
-    /// slid up into, and the grid lit `old-chat` while the pane showed
-    /// `new-chat`. It is the card clicked.
+    /// leaves its checkout dormant. It is the HELD CHECKOUT now, so its
+    /// band stays where it was clicked rather than sinking under `old`
+    /// out from under the click, and the cursor and the pane are on the
+    /// card clicked. Moving off it lets it go down to its group.
     #[test]
     fn a_click_that_sends_its_checkout_dormant_keeps_the_cursor_on_the_card() {
         let mut app = back_from_away();
         let mut out = Vec::new();
         super::select_card(&mut app, agent_ref("new-chat"), &mut out);
+        assert!(!app
+            .tree
+            .agents
+            .iter()
+            .any(|a| a.id.0 == "new-chat" && a.unseen));
         assert_eq!(
             band_order(&app),
-            ["w1", "wOld", "wNew"],
-            "read, `new` is dormant"
+            ["w1", "wNew", "wOld"],
+            "read, `new` is dormant, but held where it was clicked"
         );
         assert_eq!(selected_sref(&app), Some(agent_ref("new-chat")));
         assert_eq!(
@@ -11711,6 +11730,54 @@ mod tests {
             app.term.as_ref().map(|t| t.sref.clone()),
             Some(agent_ref("new-chat")),
             "the pane and the cursor are on the same card"
+        );
+        super::select_card(&mut app, agent_ref("old-chat"), &mut out);
+        assert_eq!(
+            band_order(&app),
+            ["w1", "wOld", "wNew"],
+            "off it, `new` goes down among the dormant ones, under `old`"
+        );
+        assert_eq!(selected_sref(&app), Some(agent_ref("old-chat")));
+    }
+
+    /// Clicking a DORMANT card attaches it, which boots its reaped CLI and
+    /// wakes its checkout. Held, the band stays where it was clicked —
+    /// under the divider — until the cursor leaves it; then it goes up to
+    /// its place among the live checkouts.
+    #[test]
+    fn a_dormant_checkout_woken_by_a_click_stays_put_until_the_cursor_leaves() {
+        let mut app = back_from_away();
+        let mut booted = app
+            .tree
+            .agents
+            .iter()
+            .find(|a| a.id.0 == "old-chat")
+            .cloned()
+            .expect("old-chat");
+        booted.alive = true;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(booted),
+            },
+        );
+        assert_eq!(
+            band_order(&app),
+            ["w1", "wNew", "wOld"],
+            "awake, `old` holds its place under the cursor"
+        );
+        assert_eq!(selected_sref(&app), Some(agent_ref("old-chat")));
+        assert!(!app.worktree_dormant(&WorktreeId("wNew".into())));
+        assert!(
+            app.worktree_dormant(&WorktreeId("wOld".into())),
+            "it still reads as dormant, so the divider stays over its band"
+        );
+        let mut out = Vec::new();
+        super::select_card(&mut app, agent_ref("new-chat"), &mut out);
+        assert_eq!(
+            band_order(&app),
+            ["w1", "wOld", "wNew"],
+            "off it, `old` takes its place among the live ones, cut first"
         );
     }
 
@@ -11745,6 +11812,69 @@ mod tests {
         assert_eq!(
             app.term.as_ref().map(|t| t.sref.clone()),
             Some(agent_ref("new-chat"))
+        );
+    }
+
+    /// `⌘⌫` on the last LIVE checkout's card: the slot it leaves is the
+    /// first DORMANT band's, under the divider. The cursor does not drop
+    /// into the dormant group — landing there attached its session, which
+    /// booted the reaped CLI and brought that checkout back up the list
+    /// with the cursor on it, on a chat the user never picked. It steps up
+    /// to the live band above, as a session cursor steps up out of the
+    /// last row of its group.
+    #[test]
+    fn deleting_the_last_live_checkout_stays_out_of_the_dormant_group() {
+        with_default_config(|| {
+            let mut app = back_from_away();
+            if let Some(a) = app.tree.agents.iter_mut().find(|a| a.id.0 == "new-chat") {
+                a.unseen = false;
+                a.alive = true;
+            }
+            let mut out = Vec::new();
+            super::select_card(&mut app, agent_ref("new-chat"), &mut out);
+            assert_eq!(band_order(&app), ["w1", "wNew", "wOld"]);
+            draw_tall(&mut app);
+            key(&mut app, KeyCode::Backspace, KeyModifiers::SUPER);
+            let sent = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(band_order(&app), ["w1", "wOld"]);
+            assert_eq!(
+                app.selected_worktree().map(|w| w.id.0.as_str()),
+                Some("w1"),
+                "up to the live root, not down into the dormant `old`"
+            );
+            assert!(
+                !sent
+                    .iter()
+                    .any(|r| matches!(r, ClientRequest::Attach { session, .. }
+                    if *session == agent_ref("old-chat"))),
+                "the dormant session is not woken: {sent:?}"
+            );
+        });
+    }
+
+    /// The PANELS' own re-seat makes the same step, for a delete with no
+    /// grid behind it to settle the cursor.
+    #[test]
+    fn the_panels_reseat_also_stays_out_of_the_dormant_group() {
+        let mut app = back_from_away();
+        if let Some(a) = app.tree.agents.iter_mut().find(|a| a.id.0 == "new-chat") {
+            a.unseen = false;
+            a.alive = true;
+        }
+        let mut out = Vec::new();
+        super::select_card(&mut app, agent_ref("new-chat"), &mut out);
+        out.clear();
+        super::super::run_pending_action(
+            &mut app,
+            PendingAction::DeleteWorktree(WorktreeId("wNew".into())),
+            &mut out,
+        );
+        assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w1"));
+        assert!(
+            !out.iter()
+                .any(|r| matches!(r, ClientRequest::Attach { session, .. }
+                if *session == agent_ref("old-chat"))),
+            "{out:?}"
         );
     }
 
