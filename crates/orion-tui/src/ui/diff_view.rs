@@ -111,6 +111,8 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
         DiffFocus::Files => {
             if view.selected_dir().is_some() {
                 hints.push(OPEN.hint_as("fold"));
+            } else if crate::diff_actions::conflicted_file(view).is_some() {
+                hints.push(OPEN.hint_as("resolve").kept());
             } else {
                 hints.push(OPEN.hint_as("read").kept());
             }
@@ -542,14 +544,18 @@ fn draw_files(
         empty_list_row(f, list_inner, NO_MATCHES, th);
     }
     let start = view.window_start(list_inner.height as usize);
-    // Both lists open a row the same way: the status code, then the ✓ —
-    // so the two columns read straight down whichever is up.
+    // Both lists open a row the same way: the status code — git's red `U`
+    // on a file the base conflicts with — then the ✓, so the two columns
+    // read straight down whichever is up.
+    let conflicted = crate::diff_actions::conflicted(view);
     let gutter = |file: Option<&crate::git_diff::DiffFile>, reviewed: bool| {
         let status = match file {
-            Some(file) => Span::styled(
-                format!("{} ", file.status_str()),
-                Style::default().fg(super::change_color(file.xy, th)),
-            ),
+            Some(file) => {
+                let at_odds = conflicted.contains(&file.path);
+                let (xy, color) = crate::pr_preview::status_mark(file.xy, at_odds, th);
+                let code: String = xy.iter().collect();
+                Span::styled(format!("{code} "), Style::default().fg(color))
+            }
             None => Span::raw("   "),
         };
         let mark = if reviewed {

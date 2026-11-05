@@ -5423,6 +5423,7 @@ fn open_diff_view(app: &mut App) {
             crate::git_diff::load_selected_diff(&mut view);
         }
         app.overlay = Some(Overlay::Diff(view));
+        crate::diff_actions::ask(app);
     }
     jobs.run(move || {
         Some(crate::view_jobs::Answer::DiffListing {
@@ -5450,6 +5451,7 @@ fn show_diff_listing(
     // unreviewed file as the flat list is (`fill_view`).
     crate::git_diff::fill_view(&mut view, listing);
     app.overlay = Some(Overlay::Diff(view));
+    crate::diff_actions::ask(app);
 }
 
 /// Fuzzy file finder over every tracked + untracked file of the selected
@@ -5666,6 +5668,10 @@ fn land_diff_listing(
             if let Some(Overlay::Diff(view)) = &mut app.overlay {
                 crate::git_diff::fill_view(view, listing);
                 land_pr_review_at(view);
+            }
+            // A pull request's head is in the repo now, fetched if it had to be.
+            if matches!(&app.overlay, Some(Overlay::Diff(view)) if view.pr_review.is_some()) {
+                crate::diff_actions::ask(app);
             }
         }
         Ok(_) => app.overlay = None,
@@ -7293,6 +7299,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
     {
         app.overlay = None;
         app.dirty = true;
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Diff(_)))
+        && crate::diff_actions::handle_key(app, &key, out)
+    {
         return;
     }
     let Some(overlay) = &mut app.overlay else {

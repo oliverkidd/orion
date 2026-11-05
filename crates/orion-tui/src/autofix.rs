@@ -661,18 +661,25 @@ pub fn agent_name(number: u64) -> String {
     format!("autofix-{number}")
 }
 
-/// Whether `agent` works in one of `project`'s checkouts of `pr`'s branch.
-fn on_branch(app: &App, agent: &orion_core::Agent, project: &ProjectId, pr: &OpenPr) -> bool {
+/// Whether `agent` works in one of `project`'s checkouts of `branch`.
+fn on_branch(app: &App, agent: &orion_core::Agent, project: &ProjectId, branch: &str) -> bool {
     app.tree
         .worktrees
         .iter()
-        .any(|w| w.id == agent.worktree_id && &w.project_id == project && w.branch == pr.head)
+        .any(|w| w.id == agent.worktree_id && &w.project_id == project && w.branch == branch)
 }
 
 /// An `autofix-<n>` for `pr` is already starting, at work or waiting on
 /// the user: there is never a second one on a pull request.
 fn fixer_on_it(app: &App, project: &ProjectId, pr: &OpenPr) -> bool {
-    let fixer = agent_name(pr.number);
+    fixing(app, project, &pr.head, pr.number)
+}
+
+/// Whether an `autofix-<number>` is starting, at work or waiting on the
+/// user in one of `project`'s checkouts of `branch` — what the DIFF
+/// VIEWER's Enter on a conflicted file leaves the conflict to.
+pub(crate) fn fixing(app: &App, project: &ProjectId, branch: &str, number: u64) -> bool {
+    let fixer = agent_name(number);
     app.tree.agents.iter().any(|agent| {
         !agent.archived
             && agent.name == fixer
@@ -680,7 +687,7 @@ fn fixer_on_it(app: &App, project: &ProjectId, pr: &OpenPr) -> bool {
                 agent.status,
                 AgentStatus::Fresh | AgentStatus::Running | AgentStatus::NeedsFeedback
             )
-            && on_branch(app, agent, project, pr)
+            && on_branch(app, agent, project, branch)
     })
 }
 
@@ -701,7 +708,7 @@ fn live_on_branch<'a>(
                     agent.status,
                     AgentStatus::Running | AgentStatus::NeedsFeedback
                 )
-                && on_branch(app, agent, project, pr)
+                && on_branch(app, agent, project, &pr.head)
         })
         .collect()
 }
@@ -738,7 +745,7 @@ fn source_agent<'a>(
         .agents
         .iter()
         .filter(|a| {
-            !a.archived && !a.name.starts_with("autofix-") && on_branch(app, a, project, pr)
+            !a.archived && !a.name.starts_with("autofix-") && on_branch(app, a, project, &pr.head)
         })
         .max_by_key(|a| crate::app::last_interaction_ms(a))
 }

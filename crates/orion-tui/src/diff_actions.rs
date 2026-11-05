@@ -6,16 +6,58 @@
 //! a pull request's viewer reads that one. Where it stands comes from the PR
 //! STORE (`App::prs`) — the page's tally of its checks once the page has been
 //! read (`App::pr_detail`), else the store's one word for them, and `merged`
-//! or `closed` once it is past taking work. A branch with no pull request
-//! has no line.
+//! or `closed` once it is past taking work. Last, the files that conflict
+//! with its base: `3 files conflict with origin/dev`. A branch with no pull
+//! request and no conflict has no line.
+//!
+//! **Conflicts are worked out locally** (`conflicts::local`): `git
+//! merge-tree` of the base and HEAD — a pull request's viewer, its tip —
+//! off the loop as the viewer opens, so it never waits on it, and kept by
+//! the two commits' SHAs. No network: base sync keeps origin's copy of the
+//! base fresh, so it works before a pull request exists. The base is the
+//! pull request's once its page is read, else the one the COMMIT LIST
+//! measures against. The files it names wear git's red `U` in the file
+//! list, and `Enter` on one opens the CONFLICT RESOLVER on the checkout
+//! (`conflicts::resolve_in`; a pull request's viewer goes through
+//! `conflicts::open`) — or, with an `autofix-<n>` already on the pull
+//! request, says so and leaves it to that agent. Esc in the resolver comes
+//! back to the viewer, its conflicts asked again.
 
-use ratatui::style::{Modifier, Style};
+use crossterm::event::KeyEvent;
+use orion_core::ClientRequest;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, DiffView};
+use crate::app::{App, DiffFocus, DiffView, Overlay};
+use crate::flash::Flash;
 use crate::pull_request::{CheckCounts, Checks, Standing};
 use crate::theme::Theme;
+
+/// What a DIFF VIEWER knows of its branch's conflicts with its base.
+#[derive(Debug, Clone, Default)]
+pub struct Conflicts {
+    /// The ask in flight, by ticket: an answer to any other is dropped.
+    pub asking: Option<u64>,
+    /// The last answer — kept while the next is asked, so the marks don't
+    /// blink.
+    pub known: Option<crate::conflicts::Local>,
+}
+
+/// The files `view`'s branch conflicts in, as last asked; none while
+/// nothing is known.
+pub(crate) fn conflicted(view: &DiffView) -> &[String] {
+    view.conflicts
+        .known
+        .as_ref()
+        .map_or(&[], |local| local.files.as_slice())
+}
+
+/// The conflicted file under the cursor, by path: what `Enter` resolves.
+pub(crate) fn conflicted_file(view: &DiffView) -> Option<String> {
+    let path = &view.selected_file()?.path;
+    conflicted(view).contains(path).then(|| path.clone())
+}
 
 /// The pull request a DIFF VIEWER is about.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +65,13 @@ pub(crate) struct ViewedPr {
     pub number: u64,
     pub url: String,
     pub title: String,
+}
+
+impl ViewedPr {
+    /// `#42 title`.
+    fn label(&self) -> String {
+        crate::pull_request::numbered_label(self.number, &self.title)
+    }
 }
 
 /// The checkout `view` reads, when it reads one: None for a pull request's
@@ -56,32 +105,56 @@ pub(crate) fn pull_request(app: &App, view: &DiffView) -> Option<ViewedPr> {
 }
 
 /// The viewer's top line, `width` cells wide: the pull request's number and
-/// title, the title cut to leave room for where it stands. None without a
-/// pull request.
+/// title, the title cut to leave room for where it stands and what
+/// conflicts. None with neither a pull request nor a conflict.
 pub(crate) fn top_line(
     app: &App,
     view: &DiffView,
     width: usize,
     th: Theme,
 ) -> Option<Line<'static>> {
-    let pr = pull_request(app, view)?;
+    let pr = pull_request(app, view);
+    let facts: Vec<(String, Color)> = pr
+        .iter()
+        .filter_map(|pr| standing(app, &pr.url, th))
+        .chain(conflict_count(view, th))
+        .collect();
+    if pr.is_none() && facts.is_empty() {
+        return None;
+    }
     let mut tail = Vec::new();
-    if let Some((text, color)) = standing(app, &pr.url, th) {
-        tail.push(Span::styled(" · ", Style::default().fg(th.faint)));
+    for (text, color) in facts {
+        if pr.is_some() || !tail.is_empty() {
+            tail.push(Span::styled(" · ", Style::default().fg(th.faint)));
+        }
         tail.push(Span::styled(text, Style::default().fg(color)));
     }
-    let number = format!(" #{} ", pr.number);
-    let tail_w: usize = tail.iter().map(|s| s.content.width()).sum();
-    let room = width.saturating_sub(number.width() + tail_w + 1);
-    let mut spans = vec![
-        Span::styled(number, Style::default().fg(th.muted)),
-        Span::styled(
+    let mut spans = vec![Span::raw(" ")];
+    if let Some(pr) = pr {
+        let number = format!("#{} ", pr.number);
+        let tail_w: usize = tail.iter().map(|s| s.content.width()).sum();
+        let room = width.saturating_sub(number.width() + tail_w + 2);
+        spans.push(Span::styled(number, Style::default().fg(th.muted)));
+        spans.push(Span::styled(
             crate::ui::truncate_cells(&pr.title, room),
             Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        ),
-    ];
+        ));
+    }
     spans.extend(tail);
     Some(Line::from(spans))
+}
+
+/// `3 files conflict with origin/dev`, while any does.
+fn conflict_count(view: &DiffView, th: Theme) -> Option<(String, Color)> {
+    let local = view.conflicts.known.as_ref()?;
+    let n = local.files.len();
+    let verb = match n {
+        0 => return None,
+        1 => "conflicts",
+        _ => "conflict",
+    };
+    let files = crate::flash::plural(n, "file");
+    Some((format!("{files} {verb} with {}", local.base), th.err))
 }
 
 /// Where the pull request at `url` stands, after its title: `merged` or
@@ -89,7 +162,7 @@ pub(crate) fn top_line(
 /// gives them; while it is open, its checks — the page's tally
 /// (`✗ 44/45 checks`), else the store's one word for them. None while
 /// nothing is known of them, or there are none.
-fn standing(app: &App, url: &str, th: Theme) -> Option<(String, ratatui::style::Color)> {
+fn standing(app: &App, url: &str, th: Theme) -> Option<(String, Color)> {
     let status = app.prs.status_or_open(url);
     match status.standing {
         Standing::Merged => return Some((status.word().to_string(), th.merged)),
@@ -108,5 +181,374 @@ fn standing(app: &App, url: &str, th: Theme) -> Option<(String, ratatui::style::
         Checks::Pending => Some(("◐ checks running".into(), th.warn)),
         Checks::Passing => Some(("✓ checks passed".into(), th.ok)),
         Checks::Absent => None,
+    }
+}
+
+// ---- the conflicts ----
+
+/// Ask which files the DIFF VIEWER up conflicts in
+/// (`conflicts::local`): a checkout's HEAD against its pull request's
+/// base — the base the COMMIT LIST measures against while there is no pull
+/// request, or its page is not read — and a pull request's tip against the
+/// base it merges into. Off the loop in a viewer with BACKGROUND READS,
+/// inline in one without.
+pub(crate) fn ask(app: &mut App) {
+    let Some(Overlay::Diff(view)) = &app.overlay else {
+        return;
+    };
+    let page = pull_request(app, view).and_then(|pr| app.pr_detail.get(&pr.url));
+    let (base, head) = match (view.pr_review.is_some(), page) {
+        (true, Some(page)) if !page.head_sha.is_empty() => {
+            (page.base.clone(), page.head_sha.clone())
+        }
+        (true, _) => return,
+        (false, Some(page)) if !page.base.is_empty() => (page.base.clone(), "HEAD".to_string()),
+        (false, _) => (
+            crate::config::Config::load().worktree_base_branch,
+            "HEAD".to_string(),
+        ),
+    };
+    let (root, jobs) = (view.root.clone(), view.jobs.clone());
+    let ticket = crate::view_jobs::ticket();
+    if let Some(Overlay::Diff(view)) = &mut app.overlay {
+        view.conflicts.asking = Some(ticket);
+    }
+    let work = move || crate::conflicts::local(&root, &base, &head);
+    match jobs {
+        Some(jobs) => jobs.run(move || {
+            let answer = crate::conflicts::Answer::Local {
+                ticket,
+                result: work(),
+            };
+            Some(crate::view_jobs::Answer::Conflicts(answer))
+        }),
+        None => land(app, ticket, work()),
+    }
+}
+
+/// [`ask`]'s answer, for the viewer still waiting on it. One that failed —
+/// no base to compare with, a commit the repo lacks — keeps what was known.
+pub(crate) fn land(app: &mut App, ticket: u64, result: Result<crate::conflicts::Local, String>) {
+    let Some(Overlay::Diff(view)) = &mut app.overlay else {
+        return;
+    };
+    if view.conflicts.asking != Some(ticket) {
+        return;
+    }
+    view.conflicts.asking = None;
+    match result {
+        Ok(local) => view.conflicts.known = Some(local),
+        Err(why) => tracing::debug!(root = %view.root.display(), "conflicts: {why}"),
+    }
+}
+
+/// The viewer back up after the CONFLICT RESOLVER that stood over it, its
+/// conflicts asked again: the merge may have settled them.
+pub(crate) fn reopen(app: &mut App, view: DiffView) {
+    app.overlay = Some(Overlay::Diff(view));
+    ask(app);
+    app.dirty = true;
+}
+
+// ---- the keys ----
+
+/// The DIFF VIEWER's keys that reach past the diff: `Enter` on a
+/// conflicted file. True when `key` was one of them, and is spent.
+pub(crate) fn handle_key(app: &mut App, key: &KeyEvent, out: &mut Vec<ClientRequest>) -> bool {
+    use crate::ui::diff_keys::OPEN;
+    let Some(Overlay::Diff(view)) = &app.overlay else {
+        return false;
+    };
+    if !OPEN.matches(key) || view.focus != DiffFocus::Files {
+        return false;
+    }
+    let Some(path) = conflicted_file(view) else {
+        return false;
+    };
+    resolve(app, &path, out);
+    true
+}
+
+/// `Enter` on conflicted `path`: the CONFLICT RESOLVER over the viewer, on
+/// the checkout it reads — a pull request's viewer on the project's
+/// checkout of it, cut first if there is none — unless an `autofix-<n>` is
+/// already on the pull request, when the footer says so.
+fn resolve(app: &mut App, path: &str, out: &mut Vec<ClientRequest>) {
+    let Some(Overlay::Diff(view)) = &app.overlay else {
+        return;
+    };
+    let worktree = checkout(app, view).cloned();
+    let pr = pull_request(app, view);
+    let base = view.conflicts.known.as_ref().map(|l| l.base.clone());
+    if let Some(pr) = &pr {
+        if autofix_on_it(app, worktree.as_ref(), pr) {
+            let fixer = crate::autofix::agent_name(pr.number);
+            app.flash = Some(Flash::note(format!("{fixer} is on it")));
+            return;
+        }
+    }
+    match (worktree, pr) {
+        (Some(worktree), pr) => {
+            let base = crate::commit_list::base_name(base.as_deref().unwrap_or_default());
+            let base = base.to_string();
+            let (url, label, head_sha) = match &pr {
+                Some(pr) => (
+                    pr.url.as_str(),
+                    pr.label(),
+                    app.prs.status_or_open(&pr.url).head_sha,
+                ),
+                None => ("", worktree.branch.clone(), String::new()),
+            };
+            let pr = crate::conflicts::Pr {
+                url,
+                label: &label,
+                head_sha: &head_sha,
+            };
+            crate::conflicts::resolve_in(app, worktree, base, pr, Some(path));
+        }
+        (None, Some(pr)) => crate::conflicts::open(app, &pr.url, &pr.label(), Some(path), out),
+        (None, None) => {}
+    }
+}
+
+/// Whether an `autofix-<n>` is on `pr`, in one of its project's checkouts
+/// of its branch: the viewer's own checkout's, or the branch a pull
+/// request's page names.
+fn autofix_on_it(app: &App, worktree: Option<&orion_core::Worktree>, pr: &ViewedPr) -> bool {
+    let on = match worktree {
+        Some(w) => Some((w.project_id.clone(), w.branch.clone())),
+        None => app
+            .selected_project()
+            .map(|p| p.id.clone())
+            .zip(app.pr_detail.get(&pr.url).map(|d| d.head.clone())),
+    };
+    on.is_some_and(|(project, branch)| crate::autofix::fixing(app, &project, &branch, pr.number))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::conflicts::tests::{conflicted_clone, git};
+    use crossterm::event::KeyCode;
+    use orion_core::{Entity, ProjectId, ServerEvent, WorktreeId};
+    use std::path::Path;
+
+    const URL: &str = "https://github.com/o/r/pull/7";
+
+    /// A project whose one checkout, worktree `w` on `feature`, is `clone`.
+    fn app_on(clone: &Path) -> App {
+        let mut app = App::new();
+        let mut out = Vec::new();
+        let entities = [
+            Entity::Project(orion_core::Project {
+                id: ProjectId("p".into()),
+                name: "demo".into(),
+                repo_path: clone.to_path_buf(),
+                sort_order: 0,
+            }),
+            Entity::Worktree(orion_core::Worktree {
+                id: WorktreeId("w".into()),
+                project_id: ProjectId("p".into()),
+                path: clone.to_path_buf(),
+                branch: "feature".into(),
+                is_main: false,
+                sort_order: 0,
+            }),
+        ];
+        for entity in entities {
+            let event = ServerEvent::EntityUpserted { entity };
+            crate::event_loop::handle_server_event(&mut app, event, &mut out);
+        }
+        app
+    }
+
+    /// `w`'s branch has pull request #7.
+    fn with_pull_request(app: &mut App) {
+        let pr = crate::pull_request::PullRequest {
+            number: 7,
+            url: URL.into(),
+            title: "Fix login".into(),
+            answered_state: crate::pull_request::STATE_OPEN.into(),
+            answered_draft: false,
+            answered: Default::default(),
+            activity: Vec::new(),
+        };
+        app.pull_requests.insert(WorktreeId("w".into()), Some(pr));
+    }
+
+    fn the_view(app: &App) -> &DiffView {
+        match &app.overlay {
+            Some(Overlay::Diff(view)) => view,
+            other => panic!("no viewer: {other:?} {:?}", app.flash),
+        }
+    }
+
+    fn screen(app: &mut App) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(150, 40)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..40)
+            .map(|y| {
+                (0..150)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn press(app: &mut App, code: KeyCode) -> Vec<ClientRequest> {
+        let mut out = Vec::new();
+        crate::event_loop::handle_overlay_key(app, KeyEvent::from(code), &mut out);
+        out
+    }
+
+    /// `main` and `feature` edit the same line of a.txt, and feature deletes
+    /// gone.txt that main edits: `⌘E` on feature asks git, with no pull
+    /// request and no network, and both files wear `U`, the top line
+    /// counting them. With a pull request the count follows its checks.
+    #[test]
+    fn a_real_conflict_marks_its_files_and_heads_the_viewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clone) = conflicted_clone(&dir);
+        let mut app = app_on(&clone);
+        crate::event_loop::run_action(&mut app, crate::keymap::Action::GitDiff);
+        assert_eq!(conflicted(the_view(&app)), ["a.txt", "gone.txt"]);
+        let shot = screen(&mut app);
+        assert!(
+            shot.contains(" 2 files conflict with origin/main"),
+            "{shot}"
+        );
+        assert!(shot.contains("U    a.txt"), "{shot}");
+        assert!(shot.contains("U    gone.txt"), "{shot}");
+        assert!(!git(&clone, &["status", "--porcelain"]).contains("UU"));
+
+        with_pull_request(&mut app);
+        let shot = screen(&mut app);
+        assert!(
+            shot.contains(" #7 Fix login · 2 files conflict with origin/main"),
+            "{shot}"
+        );
+
+        // A branch that merges cleanly: nothing marked, and no line.
+        let clean = tempfile::tempdir().unwrap();
+        let (_, clone) = conflicted_clone(&clean);
+        git(&clone, &["reset", "-q", "--hard", "origin/main"]);
+        std::fs::write(clone.join("new.txt"), "new\n").unwrap();
+        git(&clone, &["add", "new.txt"]);
+        git(&clone, &["commit", "-q", "-m", "new"]);
+        let mut app = app_on(&clone);
+        crate::event_loop::run_action(&mut app, crate::keymap::Action::GitDiff);
+        assert!(conflicted(the_view(&app)).is_empty());
+        assert!(!screen(&mut app).contains("conflict with"));
+    }
+
+    /// The merge-tree runs on the blocking pool: the viewer is up, asking,
+    /// before it answers, and the marks land with the answer.
+    #[test]
+    fn the_conflicts_are_asked_off_the_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clone) = conflicted_clone(&dir);
+        let mut app = app_on(&clone);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.view_jobs = Some(crate::view_jobs::Jobs::new(tx));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            crate::event_loop::run_action(&mut app, crate::keymap::Action::GitDiff);
+            let view = the_view(&app);
+            assert!(view.conflicts.asking.is_some() && view.conflicts.known.is_none());
+            loop {
+                let wait = std::time::Duration::from_secs(20);
+                let answer = tokio::time::timeout(wait, rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if let crate::view_jobs::Answer::Conflicts(answer) = answer {
+                    crate::conflicts::land(&mut app, answer);
+                    break;
+                }
+            }
+        });
+        assert_eq!(conflicted(the_view(&app)), ["a.txt", "gone.txt"]);
+        assert_eq!(the_view(&app).conflicts.asking, None);
+    }
+
+    /// `Enter` on a `U` file opens the CONFLICT RESOLVER over the viewer on
+    /// its checkout, mid-merge at that file, and Esc comes back to the
+    /// viewer; with an `autofix-7` on the pull request it only says so.
+    #[test]
+    fn enter_on_a_conflicted_file_resolves_it_unless_autofix_is_on_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, clone) = conflicted_clone(&dir);
+        let mut app = app_on(&clone);
+        with_pull_request(&mut app);
+        crate::event_loop::run_action(&mut app, crate::keymap::Action::GitDiff);
+        let Some(Overlay::Diff(view)) = &mut app.overlay else {
+            panic!("no viewer");
+        };
+        view.focus = DiffFocus::Files;
+        assert!(view.select_path("gone.txt"));
+        let shot = screen(&mut app);
+        assert!(shot.contains("╰ Enter resolve · "), "{shot}");
+
+        app.tree.agents.push(orion_core::Agent {
+            id: orion_core::AgentId("fixer".into()),
+            worktree_id: WorktreeId("w".into()),
+            name: crate::autofix::agent_name(7),
+            status: orion_core::AgentStatus::Running,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind: orion_core::AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            session_id: None,
+            sort_order: 0,
+            status_changed_at: 1,
+            alive: true,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+        });
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.flash.as_deref(), Some("autofix-7 is on it"));
+        the_view(&app);
+        assert!(
+            git(&clone, &["status", "--porcelain"]).is_empty(),
+            "nothing merged"
+        );
+
+        app.tree.agents.clear();
+        press(&mut app, KeyCode::Enter);
+        let Some(Overlay::Conflicts(resolver)) = &app.overlay else {
+            panic!("no resolver: {:?}", app.flash);
+        };
+        assert!(matches!(
+            resolver.back,
+            Some(crate::conflicts::Under::Diff(_))
+        ));
+        assert_eq!(resolver.url, URL);
+        assert_eq!(resolver.label, "#7 Fix login");
+        let open = resolver
+            .files
+            .get(resolver.selected)
+            .map(|f| f.path.as_str());
+        assert_eq!(open, Some("gone.txt"), "at the file Enter was on");
+        assert!(git(&clone, &["status", "--porcelain"]).contains("a.txt"));
+
+        crate::conflicts::handle_key(&mut app, KeyEvent::from(KeyCode::Esc));
+        assert!(the_view(&app).conflicts.known.is_some());
+        assert!(
+            app.flash
+                .as_deref()
+                .is_some_and(|f| f.contains("mid-merge")),
+            "{:?}",
+            app.flash
+        );
+        git(&clone, &["merge", "--abort"]);
     }
 }

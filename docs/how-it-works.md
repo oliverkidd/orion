@@ -109,6 +109,16 @@
   commit it lists to count its lines, so three hundred commits are never diffed to show six. A pull
   request is read the same way (`event_loop::open_pr_review`), its head fetched by its pull ref
   (`refs/pull/N/head`) when the project's repo lacks it.
+- **A branch's conflicts are worked out locally — `conflicts::local`.** As the DIFF VIEWER opens,
+  a background job runs `git merge-tree --write-tree` on the branch's HEAD (a pull request's tip,
+  for its viewer) and its base — the pull request's base once its page is read, else the one the
+  COMMIT LIST measures against — and the files it names wear `U` in the list and are counted on the
+  viewer's top line, beside the branch's pull request and its checks. Nothing is checked out or
+  fetched: base sync keeps origin's copy of the base fresh, so this works before a pull request
+  exists and needs no network. Answers are kept by the two commits' SHAs, so opening the viewer
+  again on the same commits costs two `rev-parse`s. `Enter` on a `U` file opens the CONFLICT
+  RESOLVER on the checkout (`conflicts::resolve_in`), unless an `autofix-<n>` is already on the
+  pull request.
 - **The diff pane is read, not paged — `diff_doc`.** A file's `git diff` is read once, as it lands,
   into lines that say what they are: its headers into the facts on the pane's edge (added, renamed
   from, `+20 −3`), each `@@` into the line it starts on, each line of code into its old and new

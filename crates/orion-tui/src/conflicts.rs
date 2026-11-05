@@ -10,6 +10,13 @@
 //! and base ([`Known`]): a push moves the head, and the next page that says
 //! it still conflicts is asked about again.
 //!
+//! The DIFF VIEWER needs no word from GitHub: it asks the same merge of its
+//! branch and the base this repo already has, with no fetch ([`local`]),
+//! the answer kept by the two commits — before a pull request exists, and
+//! between the pages' asks. Its Enter on a conflicted file opens the
+//! RESOLVER on the checkout it reads ([`resolve_in`]), and Esc comes back
+//! to the viewer.
+//!
 //! **Settling them.** Enter on a conflicted file opens the RESOLVER at once,
 //! and merges the base into the pull request's branch in the project's
 //! checkout of it — what GitHub's own *Resolve conflicts* does. The modal is
@@ -469,6 +476,66 @@ fn merge_tree_files(stdout: &[u8]) -> Vec<String> {
         .collect()
 }
 
+// ---- a branch's conflicts, worked out locally ----
+
+/// What a branch conflicts in with its base, as [`local`] worked it out:
+/// the DIFF VIEWER's `U` marks and its top line (`diff_actions`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Local {
+    /// The base as named — `origin/dev`.
+    pub base: String,
+    /// The files that conflict; empty when the two merge cleanly.
+    pub files: Vec<String>,
+}
+
+/// How many head-and-base pairs [`local`] keeps the answer for before it
+/// starts over: a handful of checkouts, each read at a few commits.
+const LOCAL_KEPT: usize = 64;
+
+/// [`local`]'s answers: the conflicted files, by head commit and base
+/// commit.
+type Merged = std::sync::Mutex<HashMap<(String, String), Vec<String>>>;
+
+fn merged() -> &'static Merged {
+    static MERGED: std::sync::OnceLock<Merged> = std::sync::OnceLock::new();
+    MERGED.get_or_init(Default::default)
+}
+
+/// The files `head` — `HEAD`, or a pull request's tip — conflicts in with
+/// the base `base_setting` names, resolved as the COMMIT LIST resolves it
+/// (`commit_list::resolve_base_cached`): `git merge-tree` on the two
+/// commits, touching no checkout and fetching nothing — base sync keeps
+/// origin's copy fresh, so it works before a pull request exists. Kept by
+/// the two commits' SHAs: asked again with nothing moved, it costs two
+/// `rev-parse`s. Off the loop; it can take a second on a big repo.
+pub(crate) fn local(root: &Path, base_setting: &str, head: &str) -> Result<Local, String> {
+    let base = crate::commit_list::resolve_base_cached(root, base_setting)
+        .ok_or_else(|| "no base branch to compare with".to_string())?;
+    let commit = |rev: &str| {
+        read(
+            root,
+            &["rev-parse", "--verify", "-q", &format!("{rev}^{{commit}}")],
+        )
+        .map(|sha| sha.trim().to_string())
+    };
+    let key = (commit(head)?, commit(&base)?);
+    let kept = merged().lock().ok().and_then(|m| m.get(&key).cloned());
+    let files = match kept {
+        Some(files) => files,
+        None => {
+            let files = merge_tree(root, &key.1, &key.0)?;
+            if let Ok(mut m) = merged().lock() {
+                if m.len() >= LOCAL_KEPT {
+                    m.clear();
+                }
+                m.insert(key, files.clone());
+            }
+            files
+        }
+    };
+    Ok(Local { base, files })
+}
+
 // ---- the off-loop answers ----
 
 #[derive(Debug)]
@@ -489,6 +556,12 @@ pub enum Answer {
     Committed {
         ticket: u64,
         result: Result<(), String>,
+    },
+    /// What a DIFF VIEWER's branch conflicts in ([`local`],
+    /// `diff_actions::ask`).
+    Local {
+        ticket: u64,
+        result: Result<Local, String>,
     },
 }
 
@@ -523,6 +596,7 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
         }
         Answer::Prepared { ticket, result } => land_prepared(app, ticket, result),
         Answer::Committed { ticket, result } => land_committed(app, ticket, result),
+        Answer::Local { ticket, result } => crate::diff_actions::land(app, ticket, result),
     }
     app.dirty = true;
 }
@@ -693,29 +767,8 @@ pub(crate) fn open(
     path: Option<&str>,
     out: &mut Vec<orion_core::ClientRequest>,
 ) {
-    // One resolver at a time: a checkout landing under one on screen doesn't
-    // start another.
-    if let Some(Overlay::Conflicts(view)) = &app.overlay {
-        app.flash = Some(Flash::note(format!(
-            "⎇ {} is merging — finish that first",
-            view.branch
-        )));
+    if taken(app, |parked| parked.url == url) {
         return;
-    }
-    if let Some(parked) = &app.conflicts.parked {
-        if parked.url == url {
-            return unpark(app);
-        }
-        if parked.running() {
-            app.flash = Some(Flash::note(format!(
-                "⎇ {} has a merge at work — try again once it lands",
-                parked.branch
-            )));
-            return;
-        }
-        // Stopped, with nothing running: what git left is still there, for
-        // Enter on its file (mid-merge) or ⇧P (committed).
-        app.conflicts.parked = None;
     }
     let Some(detail) = app.pr_detail.get(url).cloned() else {
         return;
@@ -747,6 +800,75 @@ pub(crate) fn open(
         crate::pr_checkout::check_out(app, project, launch, then, out);
         return;
     };
+    let pr = Pr {
+        url,
+        label,
+        head_sha: &detail.head_sha,
+    };
+    start(app, worktree, detail.base, pr, path);
+}
+
+/// Enter on a conflicted file of a checkout's own DIFF VIEWER
+/// (`diff_actions`): the RESOLVER on that checkout, merging origin's
+/// `base` into it, as [`open`] does for a pull request's — `pr` naming the
+/// branch's pull request where it has one, an empty URL where it has none.
+/// A resolver PARKED on the same checkout comes back as it was.
+pub(crate) fn resolve_in(
+    app: &mut App,
+    worktree: orion_core::Worktree,
+    base: String,
+    pr: Pr,
+    path: Option<&str>,
+) {
+    if !taken(app, |parked| parked.worktree == worktree.id) {
+        start(app, worktree, base, pr, path);
+    }
+}
+
+/// The pull request a merge is for, as the RESOLVER names it: its URL
+/// (empty for a branch with none), its `#42 title` label, and the head
+/// commit a checkout behind it must pull first (empty: not checked).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Pr<'a> {
+    pub url: &'a str,
+    pub label: &'a str,
+    pub head_sha: &'a str,
+}
+
+/// One resolver at a time: true, with nothing new opened, while one is on
+/// screen or one PARKED has git at work — or when the PARKED one is the
+/// one asked for (`same`), which comes back as it was.
+fn taken(app: &mut App, same: impl Fn(&ConflictView) -> bool) -> bool {
+    // A checkout landing under one on screen doesn't start another.
+    if let Some(Overlay::Conflicts(view)) = &app.overlay {
+        app.flash = Some(Flash::note(format!(
+            "⎇ {} is merging — finish that first",
+            view.branch
+        )));
+        return true;
+    }
+    if let Some(parked) = &app.conflicts.parked {
+        if same(parked) {
+            unpark(app);
+            return true;
+        }
+        if parked.running() {
+            app.flash = Some(Flash::note(format!(
+                "⎇ {} has a merge at work — try again once it lands",
+                parked.branch
+            )));
+            return true;
+        }
+        // Stopped, with nothing running: what git left is still there, for
+        // Enter on its file (mid-merge) or ⇧P (committed).
+        app.conflicts.parked = None;
+    }
+    false
+}
+
+/// The RESOLVER up on `worktree`, merging `origin/<base>` into it off the
+/// loop — or saying why not, while an agent works there or a sync runs.
+fn start(app: &mut App, worktree: orion_core::Worktree, base: String, pr: Pr, path: Option<&str>) {
     let working = app
         .tree
         .agents
@@ -768,11 +890,11 @@ pub(crate) fn open(
     let mut view = ConflictView::new(
         worktree.path.clone(),
         worktree.branch.clone(),
-        detail.base.clone(),
+        base.clone(),
         Vec::new(),
     );
-    view.url = url.to_string();
-    view.label = label.to_string();
+    view.url = pr.url.to_string();
+    view.label = pr.label.to_string();
     view.worktree = worktree.id.clone();
     view.want_path = path.map(str::to_string);
     view.stage = Stage::Merging;
@@ -793,8 +915,7 @@ pub(crate) fn open(
         )));
         app.conflicts.parked = Some(view);
     }
-    let (root, branch, base, head_sha) =
-        (worktree.path, worktree.branch, detail.base, detail.head_sha);
+    let (root, branch, head_sha) = (worktree.path, worktree.branch, pr.head_sha.to_string());
     let quit = Arc::clone(&app.git_sync.quit);
     let work = move || Answer::Prepared {
         ticket,
@@ -803,12 +924,24 @@ pub(crate) fn open(
     off_loop(app, work);
 }
 
-/// `view` on screen — over the PULL REQUESTS MODAL it was asked from, as a
-/// level inside it, or over the panels. Something else opened meanwhile is
-/// left alone, and `view` handed back.
+/// What the RESOLVER was opened over, and Esc puts back.
+#[derive(Debug, Clone)]
+pub enum Under {
+    /// The PULL REQUESTS MODAL: the resolver is a level inside it.
+    PullRequests(Box<crate::pr_modal::PullRequestsView>),
+    /// A DIFF VIEWER, a checkout's or a pull request's (`diff_actions`).
+    Diff(Box<crate::app::DiffView>),
+}
+
+/// `view` on screen — over the PULL REQUESTS MODAL or the DIFF VIEWER it
+/// was asked from, as a level inside it, or over the panels. Something
+/// else opened meanwhile is left alone, and `view` handed back.
 fn raise(app: &mut App, mut view: Box<ConflictView>) -> Result<(), Box<ConflictView>> {
     match app.overlay.take() {
-        Some(Overlay::PullRequests(under)) => view.back = Some(Box::new(under)),
+        Some(Overlay::PullRequests(under)) => {
+            view.back = Some(Under::PullRequests(Box::new(under)));
+        }
+        Some(Overlay::Diff(under)) => view.back = Some(Under::Diff(Box::new(under))),
         None => {}
         other => {
             app.overlay = other;
@@ -965,8 +1098,9 @@ pub struct ConflictView {
     pub log_at: usize,
     /// The log said every conflict is settled, and none has opened since.
     pub said_settled: bool,
-    /// The PULL REQUESTS MODAL it was opened from: Esc puts it back.
-    pub back: Option<Box<crate::pr_modal::PullRequestsView>>,
+    /// The PULL REQUESTS MODAL or DIFF VIEWER it was opened from: Esc
+    /// puts it back.
+    pub back: Option<Under>,
     pub url: String,
     /// `#42 Fix login`, for the title.
     pub label: String,
@@ -1568,13 +1702,18 @@ pub(crate) fn push_landed(
 }
 
 /// The merge is on GitHub: the PULL REQUESTS MODAL, on the pull request's
-/// Checks tab, where the rest of its story is told.
+/// Checks tab, where the rest of its story is told — or, merged from a DIFF
+/// VIEWER, that viewer again, read afresh.
 fn land_on_pull_request(app: &mut App) {
     let Some(Overlay::Conflicts(view)) = app.overlay.take() else {
         return;
     };
     settled(app, &view.url);
-    let back = view.back.map(|back| *back);
+    let back = match view.back {
+        Some(Under::Diff(diff)) => return crate::diff_actions::reopen(app, *diff),
+        Some(Under::PullRequests(back)) => Some(*back),
+        None => None,
+    };
     crate::pr_modal::land_on(app, back, &view.url, crate::pr_preview::PrTab::Checks);
 }
 
@@ -1609,8 +1748,8 @@ fn abort(app: &mut App) {
     }
 }
 
-/// Leave the resolver for the PULL REQUESTS MODAL it was opened from, or
-/// the panels; a merge still underway is left as it is, and a view with git
+/// Leave the resolver for the PULL REQUESTS MODAL or DIFF VIEWER it was
+/// opened from, or the panels; a merge still underway is left as it is, and a view with git
 /// at work or a result to read is PARKED.
 pub(crate) fn back(app: &mut App) {
     let Some(Overlay::Conflicts(mut view)) = app.overlay.take() else {
@@ -1623,10 +1762,12 @@ pub(crate) fn back(app: &mut App) {
     close(app, under);
 }
 
-/// What the resolver stood on back up: the modal, or the panels.
-fn close(app: &mut App, under: Option<Box<crate::pr_modal::PullRequestsView>>) {
+/// What the resolver stood on back up: the modal or the viewer, or the
+/// panels.
+fn close(app: &mut App, under: Option<Under>) {
     match under {
-        Some(under) => crate::pr_modal::reopen(app, *under),
+        Some(Under::PullRequests(under)) => crate::pr_modal::reopen(app, *under),
+        Some(Under::Diff(under)) => crate::diff_actions::reopen(app, *under),
         None => app.overlay = None,
     }
 }
@@ -2473,7 +2614,7 @@ fn file_row(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const FILE: &str = "\
@@ -2579,7 +2720,7 @@ fn main() {
         assert!(merge_tree_files(b"4b825dc\0").is_empty());
     }
 
-    fn git(repo: &Path, args: &[&str]) -> String {
+    pub(crate) fn git(repo: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -2608,7 +2749,7 @@ fn main() {
     /// `origin` with `main` and `feature` editing the same line of a.txt,
     /// feature deleting gone.txt that main edits, and a clone on
     /// `feature`: the checkout a pull request's conflicts are settled in.
-    fn conflicted_clone(dir: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+    pub(crate) fn conflicted_clone(dir: &tempfile::TempDir) -> (PathBuf, PathBuf) {
         let origin = dir.path().join("origin");
         std::fs::create_dir(&origin).unwrap();
         git(&origin, &["init", "-q", "-b", "main"]);

@@ -1176,6 +1176,9 @@ pub struct DiffView {
     /// open_pr_review`): where it was asked to open, and which pull request
     /// the title names (`#42 ›`).
     pub pr_review: Option<crate::event_loop::PrReview>,
+    /// The files its branch conflicts in with its base, worked out locally
+    /// (`diff_actions::ask`): the `U` marks and the top line's count.
+    pub conflicts: crate::diff_actions::Conflicts,
 }
 
 /// The most diff text a DIFF VIEWER keeps beyond the one on screen. Two
@@ -1298,6 +1301,7 @@ impl DiffView {
             back: None,
             want_path: None,
             pr_review: None,
+            conflicts: Default::default(),
         };
         view.apply_filter();
         view

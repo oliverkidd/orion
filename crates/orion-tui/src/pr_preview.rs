@@ -1162,6 +1162,17 @@ fn count_text(sign: char, n: u64) -> String {
     }
 }
 
+/// A file's two-letter status as a list draws it, and its colour — git's
+/// own red `U` for a file the base conflicts with: the Changes tab's rows
+/// and the DIFF VIEWER's.
+pub(crate) fn status_mark(xy: [char; 2], conflicted: bool, th: Theme) -> ([char; 2], Color) {
+    if conflicted {
+        (['U', ' '], th.err)
+    } else {
+        (xy, crate::ui::change_color(xy, th))
+    }
+}
+
 /// A Changes row as the DIFF VIEWER lists a committed file: its
 /// two-letter status code (`M `) in the diff's colour, the path — its
 /// folders dim, its file name bright, cut from the left so the name
@@ -1173,17 +1184,7 @@ fn file_row(
     width: usize,
     th: Theme,
 ) -> Vec<Span<'static>> {
-    // A file the base conflicts with wears git's own `U`, in red.
-    let xy = if conflicted {
-        ['U', ' ']
-    } else {
-        [file.status(), ' ']
-    };
-    let color = if conflicted {
-        th.err
-    } else {
-        crate::ui::change_color(xy, th)
-    };
+    let (xy, color) = status_mark([file.status(), ' '], conflicted, th);
     let lead = BODY.len() + 3;
     // The counts go before the path shortens past [`MIN_TEXT_W`]; the path
     // keeps clear of them and of the cell of air `columns` leaves.
