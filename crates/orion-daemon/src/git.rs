@@ -654,7 +654,7 @@ async fn remote_only_branch(repo: &Path, branch: &str) -> Option<String> {
 /// the repo's own `.git/config`, then the user's global file, then the
 /// system's — or None when the key is unset (git exits 1 with nothing on
 /// stderr), empty, or git itself is missing.
-pub async fn config_get(repo: &Path, key: &str) -> Option<String> {
+async fn config_get(repo: &Path, key: &str) -> Option<String> {
     git(repo, &["config", "--get", key])
         .await
         .ok()

@@ -18,6 +18,8 @@ nix = { version = "0.31", features = ["feature", "process", "fs", "signal", "ter
 tokio-util = "0.7"
 rand = "0.10"
 subtle = "2"
-tempfile = { workspace = true }
 vt100 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 

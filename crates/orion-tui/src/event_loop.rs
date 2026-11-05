@@ -10465,8 +10465,8 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             };
             // The checkout it runs in: the project's worktree already on
             // the head branch, or one the DAEMON cuts behind this create
-            // — a fetch, `git worktree add` and the WORKTREE HOOK, seconds
-            // during which the panels used to show nothing. So the rows
+            // — a fetch and a `git worktree add`, seconds during which
+            // the panels used to show nothing. So the rows
             // go up now, as a QUICK PROMPT's do, and the upsert and the
             // Ack turn them into the real ones. A launch while that
             // checkout is still being cut waits, as every launch into a

@@ -30,9 +30,6 @@ pub const WORKTREE_SYNC_MS: &str = "ORION_WORKTREE_SYNC_MS";
 /// STACK STATUS poll period in ms (default 5s): how often the daemon asks
 /// docker which compose stacks exist and run.
 pub const STACK_POLL_MS: &str = "ORION_STACK_POLL_MS";
-/// How long a WORKTREE HOOK may run before the daemon kills it, in ms
-/// (default 30s); tests shorten it.
-pub const HOOK_TIMEOUT_MS: &str = "ORION_HOOK_TIMEOUT_MS";
 /// `RUST_LOG`-style tracing filter for both the daemon and the TUI.
 pub const LOG: &str = "ORION_LOG";
 /// Overrides the install script URL `orion upgrade` / `orion ssh` fetch.
@@ -56,13 +53,6 @@ pub const PERF_LOG: &str = "ORION_PERF_LOG";
 /// leaves the "daemon still running" note to the upgrade. `install.sh`
 /// reads it by this name.
 pub const UPGRADE_HANDOFF: &str = "ORION_UPGRADE_HANDOFF";
-/// Set on a WORKTREE HOOK script: which hook it is running as
-/// (`worktree-create` / `worktree-delete`), so one script can serve both.
-pub const HOOK: &str = "ORION_HOOK";
-/// Set on a WORKTREE HOOK script: the worktree's branch.
-pub const WORKTREE_BRANCH: &str = "ORION_WORKTREE_BRANCH";
-/// Set on a WORKTREE HOOK script: the worktree's id.
-pub const WORKTREE_ID: &str = "ORION_WORKTREE_ID";
 /// Claude Code's own override of its config dir (`~/.claude`), honoured
 /// wherever orion reads Claude's settings or transcripts.
 pub const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";

@@ -7,7 +7,6 @@ use crate::hooks::{self, HookEnv};
 use crate::pty::{PtyEvent, PtySession, SpawnSpec, DEFAULT_COLS, DEFAULT_ROWS};
 use crate::status::{AgentStatusMachine, Effect, HookEvent};
 use crate::store::Store;
-use crate::worktree_hooks::{self, HookContext, WorktreeHook};
 use anyhow::{bail, Context, Result};
 use orion_core::env;
 use orion_core::harness::HarnessDescriptor;
@@ -898,13 +897,8 @@ impl Daemon {
     }
 
     /// What a checkout orion just cut for the project at `repo` gets once
-    /// its row is out: its ENV LINKS, its WORKTREE HOOK, then its SETUP
-    /// COMMAND started. Callers hold `worktree_ops`, so the hook is ordered
-    /// with the operation it belongs to — a delete of this path waits for
-    /// it, two hooks never overlap — and the Ack waits for it, so whatever
-    /// it provisions is in place before anything is launched in the
-    /// checkout; the hook timeout bounds what that holds the lock for. The
-    /// setup only starts here, and runs on past the Ack.
+    /// its row is out: its ENV LINKS, then its SETUP COMMAND started — the
+    /// setup runs on past the Ack, for as long as it takes.
     async fn provision_worktree(
         self: &Arc<Self>,
         repo: &Path,
@@ -912,8 +906,6 @@ impl Daemon {
         config: &crate::config::Config,
     ) {
         self.link_env_files(repo, &worktree.path).await;
-        self.run_worktree_hook(WorktreeHook::Create, repo, worktree)
-            .await;
         self.setup_worktree(repo, worktree, config);
     }
 
@@ -988,8 +980,8 @@ impl Daemon {
         force: bool,
     ) -> Result<WorktreeDelete> {
         // Answer a changed checkout before queueing for `worktree_ops`: a
-        // run of deletes holds it through git, containers and hooks, and
-        // the question shouldn't wait for all of that to be asked.
+        // run of deletes holds it through git and containers, and the
+        // question shouldn't wait for all of that to be asked.
         if !force {
             if let Some(files) = self.uncommitted_in(id).await? {
                 return Ok(WorktreeDelete::HasChanges(files));
@@ -1025,17 +1017,13 @@ impl Daemon {
             id: EntityId::Worktree(id.clone()),
         });
         // The delete has happened as far as git and every client are
-        // concerned; the WORKTREE HOOK only releases what the checkout
-        // owned elsewhere, so it runs after, and its failure is a warning
+        // concerned; WORKTREE CONTAINERS only release what the checkout
+        // started elsewhere, so they go after, and a failure is a warning
         // — never an Error for this request, which would put the rows
         // back in the TUI. Still under the lock: a create of the same path
-        // waits until the hook has released what it is about to claim,
-        // and the hook's "still on disk" check sees the delete's result,
-        // not a recreate's. WORKTREE CONTAINERS go first, on the same
-        // terms, so a hook that releases ports finds them already free.
+        // waits until they are released, and their "still on disk" check
+        // sees the delete's result, not a recreate's.
         self.release_containers(&project.repo_path, &worktree.path)
-            .await;
-        self.run_worktree_hook(WorktreeHook::Delete, &project.repo_path, &worktree)
             .await;
         drop(ops);
         Ok(WorktreeDelete::Deleted)
@@ -1091,20 +1079,6 @@ impl Daemon {
         let policy = crate::config::Config::load().worktree_containers(repo);
         for warning in crate::containers::release(worktree, policy).await {
             self.warn_clients(warning);
-        }
-    }
-
-    /// Run the repository's WORKTREE HOOK for `hook`, if it configures
-    /// one, and turn anything it has to say into a client warning.
-    async fn run_worktree_hook(&self, hook: WorktreeHook, repo: &Path, worktree: &Worktree) {
-        let ctx = HookContext {
-            repo,
-            worktree: &worktree.path,
-            branch: &worktree.branch,
-            id: &worktree.id,
-        };
-        if let Err(e) = worktree_hooks::run(hook, ctx).await {
-            self.warn_clients(format!("{e:#}"));
         }
     }
 
@@ -7288,8 +7262,8 @@ mod tests {
         project
     }
 
-    /// Every `Error` a daemon broadcast with no `req_id` — the warnings a
-    /// WORKTREE HOOK raises after its request already succeeded.
+    /// Every `Error` a daemon broadcast with no `req_id` — the warnings it
+    /// raises after a request already succeeded.
     fn drain_warnings(events: &mut broadcast::Receiver<ServerEvent>) -> Vec<String> {
         let mut warnings = Vec::new();
         while let Ok(ev) = events.try_recv() {
@@ -7304,55 +7278,40 @@ mod tests {
         warnings
     }
 
-    /// The create hook runs once the checkout exists and its row is out,
-    /// with the main repo and the new checkout as its arguments and the
-    /// branch in its environment.
+    /// WORKTREE HOOKS are gone: a repository that still names them in git
+    /// config — `orion.worktreeCreateHook`, `orion.worktreeDeleteHook` —
+    /// runs neither on a create or a delete, and nobody is warned.
     #[tokio::test]
-    async fn create_worktree_runs_the_create_hook() {
+    async fn the_old_worktree_hooks_in_git_config_run_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let repo = init_repo(&root);
         let log = root.join("hook.log");
-        let hook = hook_script(
-            &root,
-            &format!(
-                "printf '%s %s %s %s\\n' \"$ORION_HOOK\" \"$1\" \"$2\" \"$ORION_WORKTREE_BRANCH\" > '{}'",
-                log.display()
-            ),
-        );
-        git_in(
-            &repo,
-            &[
-                "config",
-                "orion.worktreeCreateHook",
-                &hook.to_string_lossy(),
-            ],
-        );
+        let hook = hook_script(&root, &format!("echo ran >> '{}'", log.display()));
+        for key in ["orion.worktreeCreateHook", "orion.worktreeDeleteHook"] {
+            git_in(&repo, &["config", key, &hook.to_string_lossy()]);
+        }
         let daemon = test_daemon();
         let project = project_at(&daemon, &repo);
         let mut events = daemon.events.subscribe();
 
-        let created = daemon
-            .create_worktree(&project.id, "feat", None, false)
-            .await
-            .unwrap();
-        let EntityId::Worktree(id) = created else {
-            panic!("a worktree id: {created:?}");
-        };
-        let worktree = daemon.store.get_worktree(&id).unwrap().unwrap();
-        assert!(worktree.path.exists(), "the checkout is real");
-        assert_eq!(
-            std::fs::read_to_string(&log).unwrap(),
-            format!(
-                "worktree-create {} {} feat\n",
-                repo.display(),
-                worktree.path.display()
+        let EntityId::Worktree(id) = daemon
+            .create_worktree_with(
+                &project.id,
+                "feat",
+                None,
+                false,
+                &crate::config::Config::default(),
             )
-        );
-        assert!(
-            drain_warnings(&mut events).is_empty(),
-            "a clean run warns nobody"
-        );
+            .await
+            .unwrap()
+        else {
+            panic!("a worktree id");
+        };
+        daemon.delete_worktree(&id, false).await.unwrap();
+
+        assert!(!log.exists(), "{}", std::fs::read_to_string(&log).unwrap());
+        assert!(drain_warnings(&mut events).is_empty());
     }
 
     /// A new worktree runs its project's SETUP COMMAND in its own band,
@@ -7410,7 +7369,7 @@ mod tests {
     }
 
     /// ENV LINKS: a new worktree gets the main checkout's ignored `.env`
-    /// as a link back to it, before the create hook runs.
+    /// as a link back to it, before the setup command runs.
     #[tokio::test]
     async fn create_worktree_links_the_main_checkouts_env_files() {
         let tmp = tempfile::tempdir().unwrap();
@@ -7470,155 +7429,6 @@ mod tests {
         assert!(err.to_string().contains("no branch nowhere"), "{err}");
     }
 
-    /// The delete hook runs after the checkout is gone and the row is
-    /// dropped, sees the deleted path, and its failure is a broadcast
-    /// warning: the request still succeeds and the row stays gone.
-    #[tokio::test]
-    async fn delete_worktree_runs_the_delete_hook_and_survives_its_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let repo = init_repo(&root);
-        let wt = root.join("repo-worktrees").join("feat");
-        git_in(
-            &repo,
-            &["worktree", "add", &wt.to_string_lossy(), "-b", "feat"],
-        );
-        let log = root.join("hook.log");
-        let hook = hook_script(
-            &root,
-            &format!(
-                "printf '%s %s %s\\n' \"$ORION_HOOK\" \"$1\" \"$2\" > '{}'\n\
-                 [ -e \"$2\" ] && echo 'still there' >&2\n\
-                 echo 'slot 7 was not ours' >&2\n\
-                 exit 2",
-                log.display()
-            ),
-        );
-        git_in(
-            &repo,
-            &[
-                "config",
-                "orion.worktreeDeleteHook",
-                &hook.to_string_lossy(),
-            ],
-        );
-        let daemon = test_daemon();
-        project_at(&daemon, &repo);
-        seed_worktree(&daemon, "p", "feat", &wt.to_string_lossy(), false);
-        let mut events = daemon.events.subscribe();
-
-        daemon
-            .delete_worktree(&WorktreeId("feat".into()), false)
-            .await
-            .unwrap();
-
-        assert!(!wt.exists(), "the checkout is gone");
-        let (_, worktrees, _, _) = daemon.store.load_tree().unwrap();
-        assert!(
-            worktrees.iter().all(|w| w.id.as_str() != "feat"),
-            "the row stays deleted despite the hook: {worktrees:#?}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&log).unwrap(),
-            format!("worktree-delete {} {}\n", repo.display(), wt.display())
-        );
-        let warnings = drain_warnings(&mut events);
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(
-            warnings[0].contains("worktree-delete hook")
-                && warnings[0].contains("exited 2: slot 7 was not ours"),
-            "{}",
-            warnings[0]
-        );
-    }
-
-    /// A create of the path a delete hook is still releasing waits for
-    /// that hook: the delete hook sees the checkout gone (no "still on
-    /// disk" skip), then the create hook runs, in that order.
-    #[tokio::test]
-    async fn recreating_a_path_waits_for_its_delete_hook() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let repo = init_repo(&root);
-        let wt = root.join("repo-worktrees").join("feat");
-        git_in(
-            &repo,
-            &["worktree", "add", &wt.to_string_lossy(), "-b", "feat"],
-        );
-        let log = root.join("hook.log");
-        let hook = hook_script(
-            &root,
-            &format!(
-                "[ \"$ORION_HOOK\" = worktree-delete ] && sleep 0.5\n\
-                 echo \"$ORION_HOOK $2\" >> '{}'",
-                log.display()
-            ),
-        );
-        for key in ["orion.worktreeCreateHook", "orion.worktreeDeleteHook"] {
-            git_in(&repo, &["config", key, &hook.to_string_lossy()]);
-        }
-        let daemon = test_daemon();
-        let project = project_at(&daemon, &repo);
-        seed_worktree(&daemon, "p", "feat", &wt.to_string_lossy(), false);
-        let mut events = daemon.events.subscribe();
-
-        let deleting = {
-            let daemon = daemon.clone();
-            tokio::spawn(async move {
-                daemon
-                    .delete_worktree(&WorktreeId("feat".into()), false)
-                    .await
-            })
-        };
-        // Let the delete get into its hook, then ask for the same path back.
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        daemon
-            .create_worktree(&project.id, "feat", None, false)
-            .await
-            .unwrap();
-        deleting.await.unwrap().unwrap();
-
-        let got = std::fs::read_to_string(&log).unwrap();
-        assert_eq!(
-            got,
-            format!(
-                "worktree-delete {wt}\nworktree-create {wt}\n",
-                wt = wt.display()
-            ),
-            "delete hook first, create hook second"
-        );
-        assert!(wt.exists(), "the recreated checkout is there");
-        assert!(
-            drain_warnings(&mut events).is_empty(),
-            "neither hook was skipped or failed"
-        );
-    }
-
-    /// No hook configured: a delete is exactly what it was.
-    #[tokio::test]
-    async fn delete_worktree_without_a_hook_warns_nobody() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(tmp.path()).unwrap();
-        let repo = init_repo(&root);
-        let wt = root.join("repo-worktrees").join("feat");
-        git_in(
-            &repo,
-            &["worktree", "add", &wt.to_string_lossy(), "-b", "feat"],
-        );
-        let daemon = test_daemon();
-        project_at(&daemon, &repo);
-        seed_worktree(&daemon, "p", "feat", &wt.to_string_lossy(), false);
-        let mut events = daemon.events.subscribe();
-
-        daemon
-            .delete_worktree(&WorktreeId("feat".into()), false)
-            .await
-            .unwrap();
-
-        assert!(!wt.exists());
-        assert!(drain_warnings(&mut events).is_empty());
-    }
-
     /// Unforced, a checkout with an untracked file and an edited one is
     /// answered with its change count and left on disk with its row;
     /// forced, it goes. An ignored file is not a change.
@@ -7670,7 +7480,7 @@ mod tests {
 
     /// A changed checkout's answer doesn't queue behind other worktree
     /// work: with `worktree_ops` held — as a run of deletes holds it
-    /// through git, containers and hooks — an unforced delete still says
+    /// through git and containers — an unforced delete still says
     /// at once that there are changes, and leaves the checkout be.
     #[tokio::test]
     async fn a_changed_worktree_is_answered_without_waiting_for_other_deletes() {
