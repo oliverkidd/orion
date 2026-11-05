@@ -1300,6 +1300,8 @@ fn draw_list_row(
         text_style: Style,
         /// A run line's ports, drawn after its command (`text`).
         ports: &'a [u16],
+        /// The todo a session was sent at, `☐ text`, dim after its prompt.
+        todo: Option<String>,
         badge: String,
         badge_style: Style,
         /// The color the cursor's wash takes: the status's while it
@@ -1334,6 +1336,8 @@ fn draw_list_row(
                 text,
                 text_style: Style::default().fg(look.prompt),
                 ports: &[],
+                todo: crate::todos::of_agent(app, &a.id)
+                    .map(|todo| format!("{} {}", crate::todos::mark(todo), todo.text)),
                 badge: look.ago,
                 badge_style: look.ago_style,
                 status: card_edge(
@@ -1361,6 +1365,7 @@ fn draw_list_row(
                 text: t.run_command.clone().unwrap_or_default(),
                 text_style: Style::default().fg(th.muted),
                 ports: &t.run.ports,
+                todo: None,
                 badge,
                 badge_style,
                 status: None,
@@ -1420,11 +1425,27 @@ fn draw_list_row(
             let ports_w: usize = labels.iter().map(|l| l.chars().count() + 1).sum::<usize>() + 1;
             let ports_fit = !labels.is_empty() && room >= text_at + text_mark_w + 6 + ports_w;
             let text_room = room - text_at - text_mark_w - if ports_fit { ports_w } else { 0 };
-            let text = truncate(&e.text, text_room);
+            // The todo the session came from keeps up to half the prompt's
+            // room, where that half holds a few letters of it.
+            const TODO_MIN: usize = 6;
+            let todo_w = e.todo.as_ref().map_or(0, |t| t.chars().count() + LIST_GAP);
+            let keep = if text_room / 2 >= LIST_GAP + TODO_MIN {
+                todo_w.min(text_room / 2)
+            } else {
+                0
+            };
+            let text = truncate(&e.text, text_room - keep);
             spans.push(Span::raw(" ".repeat(text_at - used)));
             spans.push(Span::styled(e.text_mark, Style::default().fg(th.dim)));
             used = text_at + text_mark_w + text.chars().count();
+            let todo_room = text_room.saturating_sub(text.chars().count() + LIST_GAP);
             spans.push(Span::styled(text, e.text_style));
+            if let Some(todo) = e.todo.as_ref().filter(|_| todo_room >= TODO_MIN) {
+                let todo = truncate(todo, todo_room);
+                spans.push(Span::raw(" ".repeat(LIST_GAP)));
+                used += LIST_GAP + todo.chars().count();
+                spans.push(Span::styled(todo, Style::default().fg(th.dim)));
+            }
             // Underlined links, the one under the pointer lit.
             let hovered = match (&app.hover_crumb, card) {
                 (Some(HitTarget::RunPort(id, port)), crate::launcher::Card::Terminal(t))
@@ -3921,6 +3942,51 @@ mod tests {
             .find(|l| l.contains("s0"))
             .expect("the session's line");
         assert!(line.contains("› fix the login redirect"), "{line:?}");
+    }
+
+    /// A session sent at a todo names it after its prompt, a dim `☐` — a
+    /// `☑` once it is ticked — and a long prompt leaves the todo its
+    /// share of the line rather than crowding it out. A session sent at
+    /// none shows only its prompt.
+    #[test]
+    fn a_session_line_names_the_todo_it_came_from() {
+        let mut app = a_tree();
+        select(&mut app, "api");
+        let prompt = |text: &str| orion_core::PromptEntry {
+            text: text.into(),
+            submitted_at: 0,
+        };
+        app.tree.agents[0].recent_prompts = vec![prompt("fix the login redirect")];
+        let mut file = crate::todos::TodoFile::new(std::path::Path::new("/tmp/api"));
+        let inbox = file.inbox();
+        let item = file.add_item(inbox, "redirects lose the query", crate::todos::today());
+        file.item_mut(item).unwrap().agent = Some(app.tree.agents[0].id.0.clone());
+        app.todos.insert("/tmp/api".into(), file);
+        let body = Rect::new(0, 0, 120, 30);
+        let line = |app: &mut App| -> String {
+            drawn_lines(app, body)
+                .into_iter()
+                .find(|l| l.contains("s0"))
+                .expect("the session's line")
+        };
+
+        let row = line(&mut app);
+        let (prompt_at, todo_at) = (
+            row.find("› fix the login redirect").expect(&row),
+            row.find("☐ redirects lose the query").expect(&row),
+        );
+        assert!(prompt_at < todo_at, "after its prompt: {row:?}");
+
+        app.tree.agents[0].recent_prompts = vec![prompt(&"a very long prompt ".repeat(12))];
+        let row = line(&mut app);
+        assert!(row.contains("☐ redirects lose"), "its share kept: {row:?}");
+
+        let file = app.todos.get_mut(std::path::Path::new("/tmp/api")).unwrap();
+        file.toggle(item, crate::todos::now());
+        assert!(line(&mut app).contains("☑ redirects"));
+
+        app.tree.agents[0].id = orion_core::AgentId("someone-else".into());
+        assert!(!line(&mut app).contains("redirects"), "sent at nothing");
     }
 
     /// A session stopped on a usage limit says so on its line: `limit

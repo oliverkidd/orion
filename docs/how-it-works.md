@@ -402,7 +402,8 @@ delete stands out from across the room (a session still running or asking there 
 that is not a checkout to pull out from under it). The name sweeps once, for about five seconds after
 orion sees the merge land, then holds still in solid purple — nothing about a landed
 checkout is live, so it says so once; one found already merged (last run's cache, a first lookup) never
-sweeps, and a merged checkout left lying around costs an idle orion no repaints. Jump to it with
+sweeps, and a merged checkout left lying around costs an idle orion no repaints. The same merge seen
+to land ticks the todos the checkout's sessions were sent at (see [Todos](sessions.md#todos)). Jump to it with
 `⌘K` and the pane reads the pull request as its [page](keys.md#the-pull-request-page) — description and
 conversation, changes, commits, checks and reviews in tabs, one `gh pr view` for all of them — exactly
 as the PULL REQUESTS MODAL does (whose list moves a pull request to its **Merged** section on merge — the last 7 days'

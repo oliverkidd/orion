@@ -1413,6 +1413,7 @@ fn paste_clip_at(app: &mut App, text: &str, group: Option<u64>, after: Option<u6
                     item.done = None;
                     item.created = today;
                     item.agent = None;
+                    item.worktree = None;
                 }
                 item
             })
@@ -1767,7 +1768,7 @@ fn done(app: &mut App) {
 
 /// `ids`, just ticked or unticked, kept in sight where they stand until
 /// the modal goes.
-fn hold(app: &mut App, ids: &[u64]) {
+pub(super) fn hold(app: &mut App, ids: &[u64]) {
     if let Some(view) = view_mut(app) {
         for id in ids {
             if !view.held.contains(id) {

@@ -82,6 +82,10 @@ pub struct Item {
     /// The agent session sent at it (`AgentId`), while there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// The worktree that session works in (`WorktreeId`): whose pull
+    /// request merging ticks the item, the session deleted or not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
 }
 
 impl TodoFile {
@@ -334,6 +338,7 @@ mod tests {
             created: NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(),
             done: Some(Local.with_ymd_and_hms(2026, 10, 6, 23, 30, 0).unwrap()),
             agent: None,
+            worktree: None,
         });
         file
     }

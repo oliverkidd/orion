@@ -448,7 +448,8 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   meanwhile. A session is its status dot and name,
   what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
-  `›`, and how long ago at the right. The pull requests come from the same `gh` lookups
+  `›` — and, for a session sent at a todo, that todo after it, a dim `☐ text` (`☑` once ticked)
+  that a long prompt leaves its share of the line — and how long ago at the right. The pull requests come from the same `gh` lookups
   the PULL REQUESTS MODAL makes, swept over every checkout the grid lists. The header counts the project's open pull requests beside the session count
   (`4 sessions  3 prs`), so what is waiting on the repo is read without opening `v` to find it —
   and a click on the count opens that list, as the key does. When the room left
@@ -756,4 +757,9 @@ the item's text in the box with `Context: todo in <group › subgroup>` under it
 and `Enter` sends it; `Esc` comes back to the list. `⇧Tab` picks one of your AGENT PRESETS
 instead. The session it starts is written onto the item: its row shows `● agent`, in the session's
 STATUS MARK colour, and from then on `Enter` — or a click on the chip — closes the modal and lands
-on that session. When the session is deleted the chip goes, and `Enter` sends a new one.
+on that session. When the session is deleted the chip goes, and `Enter` sends a new one. The
+session's row on the grid names the todo after its prompt, a dim `☐ text`. And when orion sees the
+pull request on that session's worktree merge, the item is ticked — every item one launch was sent
+at, the session deleted since or not, since the item keeps its worktree too — and the footer says so (`done: <text> — its pull request merged`); with the modal up it
+strikes through where it stands, as a tick by hand does. A pull request found already merged (a
+first lookup) ticks nothing, so an item put back on its list stays there.
