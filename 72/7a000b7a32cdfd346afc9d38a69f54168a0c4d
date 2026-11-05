@@ -1,0 +1,20 @@
+docs/2026-11-05-feature-cull/feature-cull.md
+  s_61e50232cdb2f2::t_d9ba7e8fd6befc 409
+  s_61e50232cdb2f2::t_bc9d4970f04f98 1-408,410-516
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "727a000b7a32cdfd346afc9d38a69f54168a0c4d",
+  "prompts": {},
+  "sessions": {
+    "s_61e50232cdb2f2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df12aa21-1ffc-4111-873e-7e452dc4702c",
+        "model": "unknown"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
