@@ -5404,11 +5404,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::claude_accounts::current_name(&cfg, id),
             )
         }
-        PromptKind::AdoptClaudeDir { dir } => (
-            format!("Add back · {}", crate::claude_accounts::tilde(dir)).into(),
-            "name it goes by — its login and transcripts come with it (empty = no name)".into(),
-            crate::claude_accounts::suggested_name(dir),
-        ),
     };
     let highlight = matches!(kind, PromptKind::AddProject)
         .then(|| app.launch_repo_name())
@@ -8268,7 +8263,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::ClaudeSignIn { .. }
                         | PromptKind::AddClaudeAccount
                         | PromptKind::RenameClaudeAccount { .. }
-                        | PromptKind::AdoptClaudeDir { .. }
                 );
                 // The comment box stood in for the ISSUES MODAL: Esc puts
                 // the modal back on its row, the comment unposted.
@@ -8820,15 +8814,13 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     let hotkeys = view.is_hotkeys();
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     // A CLAUDE ACCOUNTS row's own verbs: `r` renames it, `o` signs it
-    // out, `⌫` removes it — and `⌫` on a dir SAVED ON THIS MACHINE moves
-    // it to the Trash.
+    // out, `⌫` removes it.
     let account_row = || {
         (!on_tabs && tab == crate::config::agents_tab())
             .then(|| crate::config::Config::load().account_row(selected))
             .flatten()
     };
     let account = || matches!(account_row(), Some(crate::config::AccountRow::Account(_)));
-    let on_disk = || matches!(account_row(), Some(crate::config::AccountRow::OnDisk(_)));
 
     use crate::ui::settings_keys as keys;
     let cmd = match key.code {
@@ -8863,9 +8855,7 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         _ if keys::INSTALL.matches(&key) && !hotkeys => SettingsCmd::Install(selected),
         _ if keys::RENAME.matches(&key) && account() => SettingsCmd::RenameAccount(selected),
         _ if keys::SIGN_OUT.matches(&key) && account() => SettingsCmd::SignOut(selected),
-        _ if keys::REMOVE.matches(&key) && (account() || on_disk()) => {
-            SettingsCmd::RemoveAccount(selected)
-        }
+        _ if keys::REMOVE.matches(&key) && account() => SettingsCmd::RemoveAccount(selected),
         _ if keys::ADD.matches(&key) && hotkeys => SettingsCmd::Capture { add: true },
         _ if keys::DEFAULT.matches(&key) && hotkeys => SettingsCmd::ResetHotkey,
         _ if keys::UNBIND.matches(&key) && hotkeys => SettingsCmd::ClearHotkey,
@@ -9028,7 +9018,7 @@ enum SettingsCmd {
     RenameAccount(usize),
     /// `o` on a CLAUDE ACCOUNTS row.
     SignOut(usize),
-    /// `⌫` on a CLAUDE ACCOUNTS row, or on a dir SAVED ON THIS MACHINE.
+    /// `⌫` on a CLAUDE ACCOUNTS row.
     RemoveAccount(usize),
     Capture {
         add: bool,
@@ -9168,8 +9158,7 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
     // A CLAUDE ACCOUNTS row: Enter signs the account in, asking first for
     // the email that fills Claude's login page; ←/→ are its switch, which
     // the cycle below flips like any harness's. **Add account** asks for
-    // the new one's name, and a dir SAVED ON THIS MACHINE for the name to
-    // add it back under.
+    // the new one's name.
     if tab == crate::config::agents_tab() {
         use crate::config::AccountRow;
         match (crate::config::Config::load().account_row(index), delta) {
@@ -9180,16 +9169,6 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
             (Some(AccountRow::Add), _) => {
                 if let Some(view) = settings_mut(app) {
                     view.info("Enter: name a new account");
-                }
-                return;
-            }
-            (Some(AccountRow::OnDisk(dir)), 0) => {
-                app.remember_settings_row(tab, index);
-                return open_prompt(app, PromptKind::AdoptClaudeDir { dir });
-            }
-            (Some(AccountRow::OnDisk(_)), _) => {
-                if let Some(view) = settings_mut(app) {
-                    view.info("Enter: add it back · ⌫: move it to the Trash");
                 }
                 return;
             }
@@ -9437,16 +9416,13 @@ fn confirm_sign_out(app: &mut App, index: usize) {
 
 /// `⌫` on a CLAUDE ACCOUNTS row: take an added account out of
 /// config.json, behind a confirm asking whether its config dir goes to
-/// the Trash too — kept unless `t` says so, and listed under SAVED ON
-/// THIS MACHINE once kept. The default account and a hand-written
-/// `harnesses` entry are not orion's to remove: the notice says what to
-/// do instead. On a dir SAVED ON THIS MACHINE, the Trash, behind its own
-/// confirm.
+/// the Trash too — kept unless `t` says so. The default account and a
+/// hand-written `harnesses` entry are not orion's to remove: the notice
+/// says what to do instead.
 fn confirm_remove_account(app: &mut App, index: usize) {
     let cfg = crate::config::Config::load();
     let id = match cfg.account_row(index) {
         Some(crate::config::AccountRow::Account(id)) => id,
-        Some(crate::config::AccountRow::OnDisk(dir)) => return confirm_trash_dir(app, index, dir),
         _ => return,
     };
     if !cfg.is_extra_account(&id) {
@@ -9499,8 +9475,8 @@ fn confirm_remove_account(app: &mut App, index: usize) {
         title: "Remove account".into(),
         message: format!(
             "Remove {} ({id}) from orion?\n{sessions}\n{dir} — its login, settings and \
-             transcripts — stays on disk, listed under Saved on this machine\nto add back or \
-             trash later, unless it goes to the Trash now.",
+             transcripts — stays on disk, for an account added by the same name\nto pick \
+             up, unless it goes to the Trash now.",
             entry.display_label()
         ),
         action: PendingAction::RemoveClaudeAccount { id },
@@ -9608,52 +9584,6 @@ fn settings_note(app: &mut App, result: Result<String, String>) {
 fn rename_claude_account(app: &mut App, id: &str, name: &str) {
     let result = crate::claude_accounts::rename(id, name);
     open_claude_accounts(app, Some(id));
-    crate::claude_accounts::request_refresh(app, true);
-    settings_note(app, result);
-}
-
-/// Enter's name typed on a dir SAVED ON THIS MACHINE: add it back as an
-/// account, dir and login as they are — no setup shared into it, which it
-/// has its own of — and land on its row.
-fn adopt_claude_dir(app: &mut App, dir: &std::path::Path, name: &str) {
-    let cfg = crate::config::Config::load();
-    let new = match crate::claude_accounts::plan_adopt(&cfg, dir, name) {
-        Ok(new) => new,
-        Err(why) => {
-            reopen_settings(app);
-            return settings_note(app, Err(why));
-        }
-    };
-    let result = crate::claude_accounts::add(&new, false);
-    open_claude_accounts(app, Some(&new.id));
-    crate::claude_accounts::request_refresh(app, true);
-    settings_note(app, result);
-}
-
-/// `⌫` on a dir SAVED ON THIS MACHINE: move it to the Trash, behind a
-/// confirm that says what goes with it.
-fn confirm_trash_dir(app: &mut App, index: usize, dir: std::path::PathBuf) {
-    let shown = crate::claude_accounts::tilde(&dir);
-    let who = match crate::claude_accounts::dir_state(&dir) {
-        Some(crate::claude_accounts::SignIn::As(email)) => format!("its login as {email}"),
-        _ => "its login".to_string(),
-    };
-    app.remember_settings_row(crate::config::agents_tab(), index);
-    app.overlay = Some(Overlay::Confirm(ConfirmDialog {
-        title: "Move to the Trash".into(),
-        message: format!(
-            "Move {shown} to the Trash?\nNo account runs in it; {who}, its settings and its \
-             transcripts\ngo with it. The Trash can still put it back."
-        ),
-        action: PendingAction::TrashClaudeDir { dir },
-        area: ratatui::layout::Rect::default(),
-    }));
-}
-
-/// Move `dir` to the Trash and land back on the section.
-fn trash_claude_dir(app: &mut App, dir: &std::path::Path) {
-    let result = crate::claude_accounts::trash_dir(dir);
-    open_claude_accounts(app, None);
     crate::claude_accounts::request_refresh(app, true);
     settings_note(app, result);
 }
@@ -9825,7 +9755,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         | PromptKind::ClaudeSignIn { .. }
         | PromptKind::AddClaudeAccount
         | PromptKind::RenameClaudeAccount { .. }
-        | PromptKind::AdoptClaudeDir { .. }
         | PromptKind::AgentPresetTask { .. } => true,
         PromptKind::QuickPrompt(launch) => launch.launches_empty(),
         _ => false,
@@ -10021,7 +9950,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         }
         PromptKind::AddClaudeAccount => ask_to_share(app, &value),
         PromptKind::RenameClaudeAccount { id } => rename_claude_account(app, &id, &value),
-        PromptKind::AdoptClaudeDir { dir } => adopt_claude_dir(app, &dir, &value),
     }
 }
 
@@ -10112,7 +10040,6 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             crate::claude_accounts::sign_out(app, &id);
         }
         PendingAction::RemoveClaudeAccount { id } => remove_claude_account(app, &id, false),
-        PendingAction::TrashClaudeDir { dir } => trash_claude_dir(app, &dir),
         PendingAction::Quit => app.should_quit = true,
         PendingAction::Restart => {
             app.restart = true;
@@ -30086,112 +30013,6 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// SAVED ON THIS MACHINE in the overlay: a removed account's dir is
-    /// listed under the accounts with who it is; Enter adds it back under
-    /// the name typed (prefilled from its folder), and `⌫` moves one to
-    /// the Trash behind a confirm.
-    #[test]
-    fn saved_dirs_come_back_or_go_to_the_trash() {
-        with_two_accounts(|root| {
-            std::fs::create_dir_all(root.join(".claude-old")).unwrap();
-            std::fs::write(
-                root.join(".claude-old/.claude.json"),
-                r#"{"oauthAccount": {"emailAddress": "old@b.co"}}"#,
-            )
-            .unwrap();
-            crate::claude_accounts::refresh_now();
-            let bin = root.join(".Trash");
-            let skills = crate::skills::Places {
-                home: Some(root.to_path_buf()),
-                trash: Some(crate::skills::Trash::Mac(bin.clone())),
-                ..Default::default()
-            };
-            crate::skills::with_places(skills, || {
-                let mut app = App::new();
-                let mut out = Vec::new();
-                // claude, claude-2, Add account, then the saved dir.
-                open_account_row(&mut app, 3, &mut out);
-                let mut terminal = Terminal::new(TestBackend::new(110, 50)).unwrap();
-                terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-                let text = buffer_text(&terminal);
-                for needle in [
-                    "Saved on this machine",
-                    "~/.claude-old",
-                    "[not in orion · signed in as old@b.co]",
-                    "Enter add it back",
-                ] {
-                    assert!(text.contains(needle), "{needle}:\n{text}");
-                }
-
-                // Enter: back as an account, under the name typed.
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                assert!(
-                    matches!(&app.overlay, Some(Overlay::Prompt(p))
-                        if p.kind == PromptKind::AdoptClaudeDir { dir: root.join(".claude-old") }
-                            && p.input.as_str() == "old"),
-                    "{:?}",
-                    app.overlay
-                );
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                type_text(&mut app, "Old Job", &mut out);
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                let cfg = crate::config::Config::load();
-                let back = cfg.claude_accounts.last().unwrap();
-                assert_eq!(
-                    (back.id.as_str(), back.name.as_str()),
-                    ("claude-old", "Old Job")
-                );
-                assert_eq!(back.dir(), root.join(".claude-old"));
-                assert_eq!(
-                    settings_view(&app).selected,
-                    crate::config::AGENTS_HEAD.len() + 2,
-                    "on its own row"
-                );
-                assert!(crate::claude_accounts::on_disk(&cfg).is_empty());
-
-                // Removed again, kept: listed again, and the confirm said so.
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
-                    if c.message.contains("listed under Saved on this machine")));
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                assert_eq!(
-                    crate::claude_accounts::on_disk(&crate::config::Config::load()),
-                    [root.join(".claude-old")]
-                );
-
-                // `⌫` on it: the Trash, behind a confirm; Esc first keeps it.
-                // The removal landed on the section's first row.
-                for _ in 0..3 {
-                    press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
-                }
-                assert_eq!(
-                    settings_view(&app).selected,
-                    crate::config::AGENTS_HEAD.len() + 3
-                );
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                assert!(matches!(&app.overlay, Some(Overlay::Confirm(c))
-                    if c.action == PendingAction::TrashClaudeDir { dir: root.join(".claude-old") }
-                        && c.message.contains("its login as old@b.co")));
-                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-                assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
-                assert!(root.join(".claude-old").is_dir());
-                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
-                assert!(!root.join(".claude-old").exists());
-                assert!(bin.join(".claude-old").is_dir());
-                assert!(crate::claude_accounts::on_disk(&crate::config::Config::load()).is_empty());
-                assert!(
-                    root.join(".claude-2").is_dir(),
-                    "an account's dir never goes"
-                );
-            });
-        });
-    }
-
-    /// **Claude accounts** in the COMMAND PALETTE opens the section.
     #[test]
     fn the_palette_opens_the_accounts_section() {
         with_two_accounts(|_| {

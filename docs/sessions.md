@@ -280,8 +280,8 @@ name you gave it and the email it is signed in as, `Work (you@example.com)` — 
 (you@example.com)` until it has a name — and `r` on its row renames it, the default account too,
 without moving its sessions or its dir. On a machine with more than one a card says which its
 session runs on by that name, else that email (`Work opus high`), where it would say `claude`. A
-removed account's dir stays, listed under **Saved on this machine** with who it is signed in as, to
-add back or move to the Trash. See [Configuration](configuration.md#claude-accounts) for the
+removed account's dir stays, unless you send it to the Trash, for an account added by the same name
+to take back. See [Configuration](configuration.md#claude-accounts) for the
 `claude_accounts` entry behind it, signing in and out, renaming and removing one.
 
 Two accounts signed in to the same claude.ai login are one subscription with one limit — the

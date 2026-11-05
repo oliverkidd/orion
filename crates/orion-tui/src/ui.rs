@@ -598,9 +598,6 @@ pub(crate) fn confirm_hints(action: &crate::app::PendingAction) -> Vec<crate::hi
             TRASH.hint(),
             CANCEL.show(2).hint(),
         ],
-        PendingAction::TrashClaudeDir { .. } => {
-            vec![YES.hint_as("move to the Trash"), CANCEL.show(2).hint()]
-        }
         _ => vec![YES.hint(), CANCEL.show(2).hint()],
     }
 }
@@ -1701,9 +1698,8 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                                     (spec.label.to_string(), cfg.value_label(spec.kind), "")
                                 }
                                 // A CLAUDE ACCOUNT goes by its name and
-                                // email, a dir SAVED ON THIS MACHINE by
-                                // its path; a long one is cut to the
-                                // label column.
+                                // email; a long one is cut to the label
+                                // column.
                                 (None, Some(row)) => {
                                     let label = match &row {
                                         crate::config::AccountRow::Account(id) => cfg
@@ -1711,9 +1707,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                                             .display_label()
                                             .to_string(),
                                         crate::config::AccountRow::Add => "Add account".into(),
-                                        crate::config::AccountRow::OnDisk(dir) => {
-                                            crate::claude_accounts::tilde(dir)
-                                        }
                                     };
                                     (truncate(&label, label_w - 1), cfg.account_value(&row), "")
                                 }
@@ -3178,8 +3171,7 @@ pub(crate) mod settings_keys {
     pub const ADD: Key = Key::new(&["a", "+"], "add");
     pub const DEFAULT: Key = Key::new(&["backspace", "delete"], "default");
     pub const UNBIND: Key = Key::new(&["x"], "unbind");
-    /// A CLAUDE ACCOUNTS row. `⌫` on a dir SAVED ON THIS MACHINE is its
-    /// trash.
+    /// A CLAUDE ACCOUNTS row.
     pub const RENAME: Key = Key::new(&["r"], "rename");
     pub const SIGN_OUT: Key = Key::new(&["o"], "sign out");
     pub const REMOVE: Key = Key::new(&["backspace", "delete"], "remove");
@@ -3265,13 +3257,6 @@ pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hint
         {
             Some((_, crate::config::AccountRow::Add)) => {
                 return vec![CHOOSE.hint_as("add an account").kept(), CLOSE.hint()];
-            }
-            Some((_, crate::config::AccountRow::OnDisk(_))) => {
-                return vec![
-                    CHOOSE.hint_as("add it back").kept(),
-                    REMOVE.hint_as("move to the Trash"),
-                    CLOSE.hint(),
-                ];
             }
             Some((cfg, crate::config::AccountRow::Account(id))) => {
                 let mut hints = vec![

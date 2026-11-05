@@ -411,7 +411,7 @@ every account under **Claude accounts**, the default first: its name, `on` or `o
 | `r` | rename it: a prompt prefilled with its name, `Enter` keeps what is typed and an empty one takes the name away (back to `Claude (you@example.com)`), `Esc` leaves it. Only the name moves — the id its sessions point back at and the dir its login lives in stay. The default account's name is written as `harnesses.claude.label`, a hand-written entry's as its `harnesses` label |
 | `o` | sign it out, behind a confirm: `claude auth logout` in the same modal. Its dir keeps its settings and transcripts |
 | `←` / `→` | switch it on or off — the same switch as its section's **Enabled** row further down |
-| `⌫` | remove an added account, behind a confirm: its entry (and any `harnesses.<id>` deltas, and the `⌘N` default when it named it) leaves config.json. `Enter` keeps its dir on disk — listed from then on under **Saved on this machine**, below — `t` moves it to the Trash; a dir another account also runs in is never moved. The default account, and a hand-written `harnesses` entry, are not orion's to remove: switch the one off, edit the file for the other |
+| `⌫` | remove an added account, behind a confirm: its entry (and any `harnesses.<id>` deltas, and the `⌘N` default when it named it) leaves config.json. `Enter` keeps its dir on disk, for a later **Add account** by the same name to take back whole — `t` moves it to the Trash; a dir another account also runs in is never moved. The default account, and a hand-written `harnesses` entry, are not orion's to remove: switch the one off, edit the file for the other |
 
 **Add account** asks for a name — `Work` makes `claude-work` in `~/.claude-work`, going by `Work`
 as typed; nothing makes the next `claude-2`, `claude-3` … whose dir is not there yet, with no name;
@@ -425,21 +425,6 @@ what make it another account. Being links, an edit in either account is an edit 
 `Enter` on its row signs it in. First-run onboarding has the same step right after Agents (while
 Claude is on there): the same rows, `Enter` on an account to sign it in, `Enter` on **Add account**
 for the same two questions, and the same warning.
-
-**Saved on this machine.** Removing an account keeps its dir — its login, settings and transcripts
-— and a later **Add account** whose name comes to the same id (`Work` after `work`) takes it back
-whole, so it never sits there unseen: under the accounts, **Saved on this machine** lists every
-`~/.claude-*` folder that looks like a Claude Code config dir (it holds `.claude.json`,
-`.credentials.json`, `projects` or `settings.json`; a real folder, not a symlink) and that no account
-runs in, with who it is signed in as — `~/.claude-work [not in orion · signed in as you@work.com]`.
-The home dir is scanned with the records, off the TUI's loop. On one of those rows:
-
-| Key | Action |
-|---|---|
-| `Enter` | add it back: asks for the name it goes by, prefilled from its folder (`~/.claude-work` → `work`; a number is no name), then adds it as it is — under the id its folder makes, or the next free `claude-work-2` — sharing nothing into it, since it has its own setup |
-| `⌫` | move it to the Trash, behind a confirm that names the login going with it. Never a dir an account runs in, never `~/.claude` |
-
-First-run onboarding lists only the accounts.
 
 **One login, twice.** claude.ai's browser sign-in approves whichever account the browser is
 signed in to, so a second dir signed in from the same browser silently becomes the first account

@@ -803,12 +803,6 @@ pub enum PendingAction {
     RemoveClaudeAccount {
         id: String,
     },
-    /// `⌫` on a dir SAVED ON THIS MACHINE: move it — its login and
-    /// transcripts with it — to the Trash. Every answer reopens the
-    /// settings overlay.
-    TrashClaudeDir {
-        dir: std::path::PathBuf,
-    },
     Quit,
     /// **Restart orion** (`⌘⇧R`): quit, stop the daemon and every session
     /// in it, and start the binary again (`App::restart`).
@@ -848,7 +842,6 @@ impl PendingAction {
                 | PendingAction::AddClaudeAccount(_)
                 | PendingAction::SignOutClaude { .. }
                 | PendingAction::RemoveClaudeAccount { .. }
-                | PendingAction::TrashClaudeDir { .. }
         )
     }
 }
@@ -997,12 +990,6 @@ pub enum PromptKind {
     /// overlay back on the row. The id and the dir never change.
     RenameClaudeAccount {
         id: String,
-    },
-    /// Enter on a dir SAVED ON THIS MACHINE: the name to add it back under,
-    /// prefilled from its folder (`~/.claude-work` → `work`). Enter adds
-    /// it, dir and login as they are; Esc puts the overlay back.
-    AdoptClaudeDir {
-        dir: std::path::PathBuf,
     },
 }
 
