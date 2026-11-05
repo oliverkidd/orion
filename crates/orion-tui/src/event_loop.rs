@@ -5548,6 +5548,8 @@ fn open_tree_browser(app: &mut App) {
 
 /// Find-in-files (`F`): live `git grep` over the selected worktree; Enter
 /// on a hit opens it in the editor modal. Same shell as `open_diff_view`.
+/// Text dragged over in the pane is the query it opens on, searched at
+/// once: its first line, trimmed.
 fn open_grep_view(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
@@ -5555,8 +5557,21 @@ fn open_grep_view(app: &mut App) {
     let editor = crate::config::Config::load().editor_command();
     let mut view = GrepView::new(path, branch, editor);
     view.jobs = app.view_jobs.clone();
+    let selected = selection_text(app);
+    if let Some(first) = selected
+        .as_deref()
+        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+    {
+        let phrase: String = first.chars().take(GREP_PREFILL_MAX).collect();
+        view.query.insert_str(&phrase);
+        view.run_search();
+    }
     app.overlay = Some(Overlay::Grep(view));
 }
+
+/// The most of a pane's selection find in files takes as its query: a
+/// phrase to look for, not a paragraph.
+const GREP_PREFILL_MAX: usize = 200;
 
 /// A BACKGROUND READ came back (`view_jobs`): hand it to the view that
 /// asked, if that view is still the one on screen. Every answer carries
@@ -5602,6 +5617,11 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
             Some(Overlay::FileTabs(view)) => view.land_preview(ticket, *preview),
             _ => {}
         },
+        Answer::GrepPreview { ticket, preview } => {
+            if let Some(Overlay::Grep(view)) = &mut app.overlay {
+                view.land_preview(ticket, preview);
+            }
+        }
         Answer::Usage(answer) => crate::usage::land(app, answer),
         Answer::ClipboardViaTerminal { payload, flash } => {
             app.pending_clipboard = Some(payload);
@@ -7889,6 +7909,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // Enter opens the hit in the editor modal, which closes this
                 // overlay unless `close_finder_on_open` is off.
                 _ if ui::finder_keys::OPEN.matches(&key) => open_selected_hit_in_editor(app),
+                // ⌘R (^R): the query as a regex, or back to the text itself.
+                _ if ui::finder_keys::REGEX.matches(&key) => view.toggle_regex(),
                 // ⌘C (^Y) copies the hit's path, as Go to file's does —
                 // unless the query holds a selection to copy.
                 _ if crate::hints::copies_path(&key, &view.query) => {
@@ -11530,11 +11552,16 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             MouseEventKind::Down(MouseButton::Left) => {
                 let list = view.list_area;
                 let first = view.window_start(list.height as usize);
-                if let Some(index) =
-                    crate::list_hit::row_at(list, first, view.hits.len(), mouse_pos)
-                {
-                    view.select(index as i64);
-                    open_selected_hit_in_editor(app);
+                let rows = view.rows();
+                // A file's header selects its first hit; a hit opens.
+                let hit = crate::list_hit::row_at(list, first, rows.len(), mouse_pos);
+                match hit.map(|row| rows[row]) {
+                    Some(ui::ListEntry::Row(index)) => {
+                        view.select(index as i64);
+                        open_selected_hit_in_editor(app);
+                    }
+                    Some(ui::ListEntry::Header { first: lead, .. }) => view.select(lead as i64),
+                    None => {}
                 }
                 app.dirty = true;
             }
@@ -29526,6 +29553,151 @@ mod tests {
         });
     }
 
+    /// Hits come under a header per file; the selected one's file is
+    /// previewed beside them, numbered, the hit's line lifted and each
+    /// match lit; moving to a hit in another file previews that one, and
+    /// a click on a header selects its first hit.
+    #[test]
+    fn find_in_files_groups_hits_by_file_and_previews_the_selected_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        std::fs::write(repo.join("b.txt"), "one\nfind me, find me\nthree\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "find me too\n").unwrap();
+        let mut app = App::new();
+        seed_repo_tree(&mut app, &repo);
+        let mut out = Vec::new();
+        press(
+            &mut app,
+            KeyCode::Char('F'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            &mut out,
+        );
+        for c in "find me".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+        }
+        use crate::ui::ListEntry::{Header, Row};
+        assert_eq!(
+            grep_view(&app).rows(),
+            [
+                Header { first: 0, count: 1 },
+                Row(0),
+                Header { first: 1, count: 1 },
+                Row(1)
+            ]
+        );
+        let preview = grep_view(&app).preview.clone().expect("b.txt read");
+        assert_eq!(preview.path, "b.txt");
+        assert_eq!(preview.matches, [(2, 0..7), (2, 9..16)]);
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(" b.txt  1"), "{text}");
+        assert!(text.contains("2 find me, find me"), "the preview:\n{text}");
+        let buf = terminal.backend().buffer().clone();
+        let (x, y) = (0..40)
+            .flat_map(|y| (0..160).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                (0..18).all(|i| {
+                    buf[(x + i, y)].symbol()
+                        == "2 find me, find me"
+                            .chars()
+                            .nth(i as usize)
+                            .unwrap()
+                            .to_string()
+                }) && x > 60
+            })
+            .expect("the preview's hit line");
+        assert_eq!(buf[(x + 2, y)].bg, app.theme.sel_bg, "a match, lit");
+        assert_eq!(buf[(x + 9, y)].bg, app.theme.sel_bg_dim, "the line, lifted");
+
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+        assert_eq!(grep_view(&app).preview.as_ref().unwrap().path, "c.txt");
+        let list = grep_view(&app).list_area;
+        handle_mouse(
+            &mut app,
+            mev(MouseEventKind::Down(MouseButton::Left), list.x + 2, list.y),
+            &mut out,
+        );
+        assert_eq!(grep_view(&app).selected, 0, "the header's first hit");
+        assert!(app.editor.is_none(), "a header opens nothing");
+    }
+
+    /// `⌘R` reads the query as a regex — the title says so — and back;
+    /// the search runs again each way.
+    #[test]
+    fn cmd_r_in_find_in_files_toggles_a_regex() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        std::fs::write(repo.join("b.txt"), "abc\naxxc\n").unwrap();
+        let mut app = App::new();
+        seed_repo_tree(&mut app, &repo);
+        let mut out = Vec::new();
+        press(
+            &mut app,
+            KeyCode::Char('F'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            &mut out,
+        );
+        for c in "ax+c".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+        }
+        assert!(grep_view(&app).hits.is_empty(), "the text itself: no hit");
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::SUPER, &mut out);
+        assert!(grep_view(&app).mode.regex);
+        assert_eq!(grep_view(&app).query, "ax+c", "the r is no part of it");
+        let lines: Vec<u64> = grep_view(&app).hits.iter().map(|h| h.line).collect();
+        assert_eq!(lines, [2]);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Find in files (regex) — main (1 hits)"),
+            "{text}"
+        );
+        assert!(text.contains("⌘R text"), "{text}");
+        press(
+            &mut app,
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
+        assert!(!grep_view(&app).mode.regex);
+        assert!(grep_view(&app).hits.is_empty());
+    }
+
+    /// Text dragged over in the pane is the query find in files opens on,
+    /// searched at once: its first line, trimmed.
+    #[test]
+    fn find_in_files_opens_on_the_panes_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        std::fs::write(repo.join("b.txt"), "the needle is here\n").unwrap();
+        let mut app = App::new();
+        seed_repo_tree(&mut app, &repo);
+        let mut term = AttachedTerm::new(SessionRef::Agent(AgentId("a1".into())), 80, 24);
+        term.apply_output(0, b"look:  needle  \r\nsecond line");
+        app.term = Some(term);
+        let base = history_base(&app);
+        app.term_selection = Some(TermSelection {
+            anchor: (5, base),
+            head: (4, base + 1),
+            dragging: false,
+            active: true,
+            pointer: (0, 0),
+        });
+        let mut out = Vec::new();
+        press(
+            &mut app,
+            KeyCode::Char('F'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            &mut out,
+        );
+        let view = grep_view(&app);
+        assert_eq!(view.query, "needle");
+        assert_eq!(view.hits.len(), 1, "searched at once: {:?}", view.hits);
+    }
+
     #[test]
     fn close_finder_on_open_also_closes_the_grep_overlay() {
         let dir = tempfile::tempdir().unwrap();
@@ -29685,7 +29857,14 @@ mod tests {
             text.contains("Find in files — main (2 hits)"),
             "title:\n{text}"
         );
-        assert!(text.contains("src/alpha.rs:3"), "hit location:\n{text}");
+        assert!(
+            text.contains(" src/alpha.rs  1"),
+            "the file's header:\n{text}"
+        );
+        assert!(
+            text.contains(" 3  let zz = 1;"),
+            "the hit under it:\n{text}"
+        );
         assert!(text.contains("let zz = 1;"), "hit text:\n{text}");
         let view = grep_view(&app);
         assert!(view.area.width > 0, "draw writes hit-test area");

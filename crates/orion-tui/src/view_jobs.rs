@@ -109,6 +109,11 @@ pub enum Answer {
         ticket: u64,
         preview: Box<crate::tree_browser::Preview>,
     },
+    /// Find in files' preview of the selected hit's file, its matches found.
+    GrepPreview {
+        ticket: u64,
+        preview: std::sync::Arc<crate::grep_search::GrepPreview>,
+    },
     /// One ACCOUNT USAGE ask, back from its provider.
     Usage(crate::usage::Answer),
     /// [`STALE_GRACE`] is up on `ticket`.

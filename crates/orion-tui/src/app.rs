@@ -1968,7 +1968,9 @@ impl FileFinder {
     }
 }
 
-/// Find-in-files overlay (`F`): live `git grep` over the selected worktree.
+/// Find-in-files overlay (`F`): live `git grep` over the selected worktree,
+/// the hits under a header per file, the selected one's file previewed
+/// beside them with its matches lit, and `⌘R` reading the query as a regex.
 #[derive(Debug, Clone)]
 pub struct GrepView {
     /// Checkout dir the search runs in.
@@ -2001,6 +2003,15 @@ pub struct GrepView {
     pub waiting: Option<u64>,
     /// Stops the search in flight when the query moves on.
     pub cancel: crate::view_jobs::Cancel,
+    /// How the query is read: the text itself, or a regex (`⌘R`).
+    pub mode: crate::grep_search::Mode,
+    /// The selected hit's file as the preview pane shows it, with its
+    /// matches; None until one is read.
+    pub preview: Option<std::sync::Arc<crate::grep_search::GrepPreview>>,
+    /// The preview read in flight, by ticket.
+    pub preview_waiting: Option<u64>,
+    /// Stops the preview read in flight when the cursor moves on.
+    pub preview_cancel: crate::view_jobs::Cancel,
 }
 
 impl GrepView {
@@ -2019,7 +2030,18 @@ impl GrepView {
             jobs: None,
             waiting: None,
             cancel: crate::view_jobs::Cancel::default(),
+            mode: crate::grep_search::Mode::default(),
+            preview: None,
+            preview_waiting: None,
+            preview_cancel: crate::view_jobs::Cancel::default(),
         }
+    }
+
+    /// `⌘R`: read the query the other way — as a regex, or as the text
+    /// itself — and search again.
+    pub fn toggle_regex(&mut self) {
+        self.mode.regex = !self.mode.regex;
+        self.run_search();
     }
 
     /// Re-run the grep for the current query and reset the selection to the
@@ -2030,23 +2052,25 @@ impl GrepView {
         // Whatever was being searched for is no longer the query.
         self.cancel.cancel();
         self.waiting = None;
-        if self.query.chars().count() < crate::grep_search::MIN_QUERY_LEN {
+        if self.too_short() {
             self.hits.clear();
             self.truncated = false;
+            self.load_preview();
             return;
         }
         let Some(jobs) = &self.jobs else {
-            let result = crate::grep_search::search(&self.root, &self.query);
+            let result = crate::grep_search::search(&self.root, &self.query, self.mode);
             self.show(result);
             return;
         };
         let ticket = crate::view_jobs::ticket();
         self.waiting = Some(ticket);
         self.cancel = crate::view_jobs::Cancel::default();
-        let (root, query, cancel) = (
+        let (root, query, cancel, mode) = (
             self.root.clone(),
             self.query.to_string(),
             self.cancel.clone(),
+            self.mode,
         );
         jobs.run(move || {
             // The next character, typed at speed, cancels this before git
@@ -2055,9 +2079,58 @@ impl GrepView {
             if cancel.is_cancelled() {
                 return None;
             }
-            let result = crate::grep_search::search_streaming(&root, &query, &cancel)?;
+            let result = crate::grep_search::search_streaming(&root, &query, mode, &cancel)?;
             Some(crate::view_jobs::Answer::Grep { ticket, result })
         });
+    }
+
+    /// Read the selected hit's file for the preview pane, with the query's
+    /// matches in it — off the loop when there are BACKGROUND READS, the
+    /// pane keeping what it showed until the read lands. The file already
+    /// on show is not read again, only searched. With no hit the pane
+    /// empties.
+    pub fn load_preview(&mut self) {
+        use crate::grep_search::read_preview;
+        self.preview_cancel.cancel();
+        self.preview_waiting = None;
+        let Some(path) = self.selected_hit().map(|hit| hit.path.clone()) else {
+            self.preview = None;
+            return;
+        };
+        let (root, query, mode) = (self.root.clone(), self.query.to_string(), self.mode);
+        let read = self
+            .preview
+            .as_ref()
+            .filter(|shown| shown.path == path)
+            .map(|shown| shown.file.clone());
+        let Some(jobs) = &self.jobs else {
+            self.preview = read_preview(&root, &path, &query, mode, read, None).map(Into::into);
+            return;
+        };
+        let ticket = crate::view_jobs::ticket();
+        self.preview_waiting = Some(ticket);
+        self.preview_cancel = crate::view_jobs::Cancel::default();
+        let cancel = self.preview_cancel.clone();
+        jobs.run(move || {
+            let preview = read_preview(&root, &path, &query, mode, read, Some(&cancel))?;
+            Some(crate::view_jobs::Answer::GrepPreview {
+                ticket,
+                preview: preview.into(),
+            })
+        });
+    }
+
+    /// A background preview read came back: shown when it is the one being
+    /// waited on, dropped when the cursor has moved on since.
+    pub fn land_preview(
+        &mut self,
+        ticket: u64,
+        preview: std::sync::Arc<crate::grep_search::GrepPreview>,
+    ) {
+        if self.preview_waiting == Some(ticket) {
+            self.preview_waiting = None;
+            self.preview = Some(preview);
+        }
     }
 
     /// A background search's answer: shown when it is the one being waited
@@ -2087,17 +2160,45 @@ impl GrepView {
                 self.error = Some(msg);
             }
         }
+        self.load_preview();
+    }
+
+    /// The list as drawn: a header over each file's run of hits — git
+    /// lists them a file at a time — then the hits.
+    pub(crate) fn rows(&self) -> Vec<crate::ui::ListEntry> {
+        let paths: Vec<&str> = self.hits.iter().map(|hit| hit.path.as_str()).collect();
+        crate::ui::sections(&paths, true)
+    }
+
+    /// The query is too short to search with ([`grep_search::MIN_QUERY_LEN`]).
+    ///
+    /// [`grep_search::MIN_QUERY_LEN`]: crate::grep_search::MIN_QUERY_LEN
+    pub fn too_short(&self) -> bool {
+        self.query.chars().count() < crate::grep_search::MIN_QUERY_LEN
+    }
+
+    /// The drawn row of `hits[index]`; the top for a hit there isn't.
+    pub fn display_row(&self, index: usize) -> usize {
+        self.rows()
+            .iter()
+            .position(|entry| *entry == crate::ui::ListEntry::Row(index))
+            .unwrap_or(0)
     }
 
     /// First visible row of the result list's stateless follow-window for a
     /// list of `height` rows.
     pub fn window_start(&self, height: usize) -> usize {
-        window_start(self.selected, height)
+        window_start(self.display_row(self.selected), height)
     }
 
-    /// Clamped absolute selection.
+    /// Clamped absolute selection; a hit in another file reads that file
+    /// for the preview.
     pub fn select(&mut self, index: i64) {
+        let before = self.selected_hit().map(|hit| hit.path.clone());
         self.selected = clamp_selection(index, self.hits.len());
+        if self.selected_hit().map(|hit| &hit.path) != before.as_ref() {
+            self.load_preview();
+        }
     }
 
     /// The hit behind the current selection, if any row is visible.

@@ -14,6 +14,7 @@ use ratatui::Frame;
 
 mod diff_view;
 pub(crate) mod footer;
+mod grep_view;
 mod launcher_view;
 pub(crate) use launcher_view::session_line;
 
@@ -2110,96 +2111,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 fin.list_area = list_inner;
             }
         }
-        Overlay::Grep(view) => {
-            let area = centered_rect_pct(f.area(), GREP_MODAL_PCT.0, GREP_MODAL_PCT.1);
-            let title = if view.query.chars().count() < crate::grep_search::MIN_QUERY_LEN {
-                format!(" Find in files — {} ", view.branch)
-            } else if view.waiting.is_some() {
-                format!(" Find in files — {} (searching…) ", view.branch)
-            } else if view.truncated {
-                format!(
-                    " Find in files — {} ({}+ hits) ",
-                    view.branch,
-                    view.hits.len()
-                )
-            } else {
-                format!(
-                    " Find in files — {} ({} hits) ",
-                    view.branch,
-                    view.hits.len()
-                )
-            };
-            f.render_widget(Clear, area);
-            let block = crate::hints::modal_block(
-                modal_block(title, th),
-                &[
-                    finder_keys::OPEN.hint_as(format!("edit in {}", editor_name(&view.editor))),
-                    crate::hints::COPY_PATH.hint(),
-                    crate::hints::in_app_hint(),
-                    crate::hints::ESC_CLOSE.hint(),
-                ],
-                area.width,
-                th,
-            );
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-
-            // First row: the always-live grep query.
-            if let Some(query_area) = row_rect(inner, 0) {
-                let line = search_line(&view.query, "type to search…", query_area, th);
-                f.render_widget(Paragraph::new(line), query_area);
-            }
-            let list_inner = below_first_row(inner);
-
-            // Placeholder row: error, too-short query, or an empty result.
-            let placeholder = if let Some(err) = &view.error {
-                Some(Span::styled(err.clone(), Style::default().fg(th.err)))
-            } else if view.query.chars().count() < crate::grep_search::MIN_QUERY_LEN {
-                Some(Span::styled(
-                    format!(
-                        "type at least {} characters to search",
-                        crate::grep_search::MIN_QUERY_LEN
-                    ),
-                    Style::default().fg(th.dim),
-                ))
-            } else if view.hits.is_empty() && view.waiting.is_none() {
-                Some(Span::styled(NO_MATCHES, Style::default().fg(th.dim)))
-            } else {
-                None
-            };
-            if let (Some(span), Some(row_area)) = (placeholder, row_rect(list_inner, 0)) {
-                f.render_widget(Paragraph::new(span), row_area);
-            }
-
-            let start = view.window_start(list_inner.height as usize);
-            for (row, (i, hit)) in view.hits.iter().enumerate().skip(start).enumerate() {
-                let Some(row_area) = row_rect(list_inner, row) else {
-                    break;
-                };
-                let budget = (list_inner.width as usize).saturating_sub(2);
-                let loc = format!("{}:{}", hit.path, hit.line);
-                let loc_len = loc.chars().count();
-                let mut spans = vec![Span::raw(" ")];
-                if loc_len + 2 >= budget {
-                    spans.push(Span::styled(
-                        truncate(&loc, budget),
-                        Style::default().fg(th.accent),
-                    ));
-                } else {
-                    spans.push(Span::styled(loc, Style::default().fg(th.accent)));
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::raw(truncate(&hit.text, budget - loc_len - 2)));
-                }
-                render_row(f, row_area, spans, i == view.selected, true, th);
-            }
-
-            // Write-back (draw works on a clone): rects for mouse
-            // hit-testing.
-            if let Some(Overlay::Grep(v)) = &mut app.overlay {
-                v.area = area;
-                v.list_area = list_inner;
-            }
-        }
+        Overlay::Grep(view) => grep_view::draw(f, app, &view, th),
         Overlay::Hosts(view) => {
             let total = view.hosts.len();
             let selected = view.selected.min(total.saturating_sub(1));
@@ -2801,11 +2713,13 @@ pub(crate) mod finder_keys {
     pub const SOURCE: Key = Key::new(&["cmd+r", "ctrl+r"], "source");
     /// Go to file: make the typed path and open it.
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new file");
+    /// Find in files: the query as a regex, or as the text itself.
+    pub const REGEX: Key = Key::new(&["cmd+r", "ctrl+r"], "regex");
 
     #[cfg(test)]
     #[test]
     fn every_finder_key_parses() {
-        for key in [OPEN, ATTACH, FOCUS_ROW, FOLD, SCROLL, SOURCE, NEW] {
+        for key in [OPEN, ATTACH, FOCUS_ROW, FOLD, SCROLL, SOURCE, NEW, REGEX] {
             assert!(key.parses(), "{:?}", key.chords);
         }
     }
