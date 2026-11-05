@@ -2,7 +2,8 @@
 //! assigned to you, and `Other issues`, the rest of your teams' — grouped
 //! by status, a line per issue with its priority's letter, the reading
 //! pane setting out its properties as Linear's sidebar does — who has it
-//! and who reported it among them — and filtered
+//! and who reported it among them — and its comments, read as the cursor
+//! rests on it ([`schedule_comments`]), and filtered
 //! by words (a status, priority or label as well as the title), `key:value`
 //! tokens and the FILTER PICK (`list_filter`).
 //! Issues are picked together so one agent fixes them in one worktree and
@@ -132,6 +133,23 @@ pub struct LinearIssue {
     /// them, open, merged or closed.
     #[serde(default)]
     pub prs: Vec<IssuePr>,
+    /// Its latest comments ([`COMMENTS_LIMIT`]), oldest first: read when
+    /// the cursor rests on it ([`schedule_comments`]) — the list never asks
+    /// for them — and kept across the lists that land after.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<IssueComment>,
+}
+
+/// A comment on a Linear issue, as the reading pane shows it and an
+/// agent is given it ([`issue_sections`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueComment {
+    /// Who wrote it, by display name — or, for one that came in through an
+    /// integration (Slack, email), who wrote it there.
+    pub author: String,
+    /// RFC 3339.
+    pub created_at: String,
+    pub body: String,
 }
 
 /// A pull request on a Linear issue, from the attachment's metadata:
@@ -425,6 +443,23 @@ pub fn ids_of(issues: &[LinearIssue]) -> String {
 }
 
 impl LinearBatch {
+    /// `issues` with the task a launch on them sends: the **Linear
+    /// Ticket** preset's text, the issues filled in ([`ticket_task`]).
+    pub fn of(issues: Vec<LinearIssue>) -> Self {
+        let ticket = crate::agent_presets::system(crate::agent_presets::SystemPreset::LinearTicket);
+        let task = ticket_task(&ticket, &issues);
+        Self { issues, task }
+    }
+
+    /// Issue `id`'s comments, read after the box opened on it: the task
+    /// says them too.
+    fn put_comments(&mut self, id: &str, comments: &[IssueComment]) {
+        if let Some(issue) = self.issues.iter_mut().find(|i| i.id == id) {
+            issue.comments = comments.to_vec();
+            *self = Self::of(std::mem::take(&mut self.issues));
+        }
+    }
+
     pub fn ids(&self) -> String {
         ids_of(&self.issues)
     }
@@ -451,9 +486,10 @@ impl LinearBatch {
 
 /// `issues` written out in full, a markdown section each — identifier
 /// and title, then state, priority and link, then the whole description
-/// — as `{issues}` expands and as a typed task gets them appended
-/// (`QuickLaunch::compose`). The agent works from this text alone: a
-/// session needs no Linear access of its own to read what it is fixing.
+/// and the comments read on it — as `{issues}` expands and as a typed
+/// task gets them appended (`QuickLaunch::compose`). The agent works from
+/// this text alone: a session needs no Linear access of its own to read
+/// what it is fixing.
 pub fn issue_sections(issues: &[LinearIssue]) -> String {
     issues
         .iter()
@@ -471,12 +507,20 @@ pub fn issue_sections(issues: &[LinearIssue]) -> String {
                 "" => "(no description)",
                 desc => desc,
             };
-            format!(
+            let mut section = format!(
                 "### {}: {}\n{}\n\n{desc}",
                 i.identifier,
                 i.title,
                 facts.join(" · ")
-            )
+            );
+            if !i.comments.is_empty() {
+                section.push_str("\n\n#### Comments");
+                for c in &i.comments {
+                    let day = c.created_at.get(..10).unwrap_or_default();
+                    section.push_str(&format!("\n\n**{}** ({day}):\n{}", c.author, c.body.trim()));
+                }
+            }
+            section
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -814,6 +858,11 @@ pub enum LinearAnswer {
         dir: PathBuf,
         result: Result<Viewer, String>,
     },
+    /// The comments of the issue the ticket names ([`request_comments`]).
+    Comments {
+        ticket: crate::fetch::Ticket<String>,
+        result: Result<Vec<IssueComment>, String>,
+    },
 }
 
 /// A state kind Linear counts as still to start: triage, the backlog or
@@ -958,6 +1007,34 @@ impl LocalEdits {
         });
     }
 }
+
+/// The issues' comments, read one issue at a time as the cursor rests on
+/// it ([`schedule_comments`]) — the comments themselves live on the
+/// issues ([`LinearIssue::comments`]).
+#[derive(Debug, Default)]
+pub struct CommentReads {
+    /// One read per issue at a time.
+    flights: crate::fetch::Flights<String>,
+    /// When each issue's last read landed, by issue id: one read within
+    /// [`COMMENTS_FRESH`] is not asked again.
+    pub(crate) read: HashMap<String, std::time::Instant>,
+    /// The issue the cursor rests on, the checkout whose key reads it, and
+    /// when the rest has been long enough to read its comments.
+    rest: Option<(String, PathBuf, std::time::Instant)>,
+    /// Issues a launch took whose comments were never read, with the
+    /// checkout whose key reads them: read on the loop's next turn, into
+    /// the launch's task ([`put_comments`]).
+    owed: Vec<(String, PathBuf)>,
+}
+
+/// How long the cursor rests on an issue before its comments are read —
+/// the pull request page's own rest.
+const COMMENTS_DEBOUNCE: std::time::Duration = crate::event_loop::PR_DETAIL_DEBOUNCE;
+/// How long a read of an issue's comments stands before a rest on it reads
+/// them again — shown meanwhile.
+const COMMENTS_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+/// How many of an issue's comments are read: the latest.
+const COMMENTS_LIMIT: usize = 20;
 
 /// The account a key belongs to, as Linear's `viewer` query names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1819,12 +1896,14 @@ fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf, mode: 
     view.selected = clamp_selection(0, list_len(app, &project));
     app.overlay = Some(Overlay::Linear(view));
     request_list(app, project, dir, false);
+    schedule_comments(app);
     app.dirty = true;
 }
 
 pub(crate) fn reopen(app: &mut App, mut view: LinearView) {
     view.selected = clamp_selection(view.selected as i64, list_len(app, &view.project));
     app.overlay = Some(Overlay::Linear(view));
+    schedule_comments(app);
     app.dirty = true;
 }
 
@@ -1919,8 +1998,124 @@ fn keep_cut_prs(fresh: &mut LinearList, old: &[LinearIssue]) {
     }
 }
 
+/// An issue keeps the comments the last list had read on it: a list
+/// never asks for them.
+fn keep_comments(fresh: &mut LinearList, old: &[LinearIssue]) {
+    for issue in fresh.list.iter_mut().filter(|i| i.comments.is_empty()) {
+        if let Some(was) = old.iter().find(|o| o.id == issue.id) {
+            issue.comments = was.comments.clone();
+        }
+    }
+}
+
+/// The cursor moved, or the view changed under it: arm the read of the
+/// comments of the issue it is on now — [`COMMENTS_DEBOUNCE`] from now, so
+/// rows walked past are never asked about — unless they were read within
+/// [`COMMENTS_FRESH`] or are being read. Disarmed with no issue under the
+/// cursor, or the view gone.
+pub(crate) fn schedule_comments(app: &mut App) {
+    let on = match &app.overlay {
+        Some(Overlay::Linear(view)) => {
+            selected_issue(app).map(|issue| (issue.id.clone(), view.dir.clone()))
+        }
+        _ => None,
+    };
+    let reads = &mut app.linear_comments;
+    let Some((id, dir)) = on else {
+        reads.rest = None;
+        return;
+    };
+    if reads.rest.as_ref().is_some_and(|(rest, ..)| *rest == id) {
+        return;
+    }
+    let fresh = reads
+        .read
+        .get(&id)
+        .is_some_and(|at| at.elapsed() < COMMENTS_FRESH);
+    reads.rest = (!fresh && !reads.flights.in_flight(&id))
+        .then(|| (id, dir, std::time::Instant::now() + COMMENTS_DEBOUNCE));
+}
+
+/// How long until a read of comments is due: none for a launch's, the
+/// rest of the rest for the cursor's; None with neither.
+pub(crate) fn comments_delay(app: &App) -> Option<std::time::Duration> {
+    let reads = &app.linear_comments;
+    if !reads.owed.is_empty() {
+        return Some(std::time::Duration::ZERO);
+    }
+    let (.., at) = reads.rest.as_ref()?;
+    Some(at.saturating_duration_since(std::time::Instant::now()))
+}
+
+/// Read the comments due: a launch's, and the cursor's once it has
+/// rested.
+pub(crate) fn fire_comments(app: &mut App) {
+    for (id, dir) in std::mem::take(&mut app.linear_comments.owed) {
+        request_comments(app, dir, id);
+    }
+    let rested = app
+        .linear_comments
+        .rest
+        .as_ref()
+        .is_some_and(|(.., at)| *at <= std::time::Instant::now());
+    if let Some((id, dir, _)) = app.linear_comments.rest.take_if(|_| rested) {
+        request_comments(app, dir, id);
+    }
+}
+
+/// Ask Linear, off the loop, for issue `id`'s latest comments, with the
+/// key in `dir` — one read per issue at a time.
+fn request_comments(app: &mut App, dir: PathBuf, id: String) {
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    let Some(ticket) = app.linear_comments.flights.begin(id, crate::fetch::now()) else {
+        return;
+    };
+    app.dirty = true;
+    tokio::spawn(async move {
+        let result = fetch_comments(&dir, &ticket.key).await;
+        let _ = tx.send(LinearAnswer::Comments { ticket, result });
+    });
+}
+
+/// Issue `id`'s comments, read: onto the issue in every list that has it
+/// — and into the task of a QUICK PROMPT already up on it.
+fn put_comments(app: &mut App, id: &str, comments: Vec<IssueComment>) {
+    for list in app.linear.values_mut() {
+        for issue in list.list.iter_mut().filter(|i| i.id == id) {
+            issue.comments = comments.clone();
+        }
+    }
+    if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
+        if let crate::app::PromptKind::QuickPrompt(launch) = &mut prompt.kind {
+            if let Some(batch) = &mut launch.linear {
+                batch.put_comments(id, &comments);
+            }
+        }
+    }
+}
+
 pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
     match answer {
+        LinearAnswer::Comments { ticket, result } => {
+            if app.linear_comments.flights.land(&ticket).is_none() {
+                return;
+            }
+            // A failed read is tried again on a rest after the next
+            // COMMENTS_FRESH, the comments known kept meanwhile.
+            app.linear_comments
+                .read
+                .insert(ticket.key.clone(), std::time::Instant::now());
+            // A rest armed on it meanwhile has nothing left to ask.
+            app.linear_comments
+                .rest
+                .take_if(|(id, ..)| *id == ticket.key);
+            if let Ok(comments) = result {
+                put_comments(app, &ticket.key, comments);
+            }
+            app.dirty = true;
+        }
         LinearAnswer::Viewer { dir, result } => {
             let source = key_source(&dir);
             let test = match result {
@@ -1959,6 +2154,7 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                 Ok(mut fetched) => {
                     let old = app.linear.remove(&project).unwrap_or_default();
                     keep_cut_prs(&mut fetched, &old.list);
+                    keep_comments(&mut fetched, &old.list);
                     let me = fetched.me_id().map(str::to_string);
                     app.linear_edits.lay_over(
                         &project,
@@ -1969,6 +2165,7 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                     app.linear_failed.remove(&project);
                     app.linear.insert(project.clone(), fetched);
                     follow_cursor(app, &project, &old.list);
+                    schedule_comments(app);
                     if let Some(wt) = waiting {
                         copy_linked(app, &wt);
                     }
@@ -3260,7 +3457,14 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     true
 }
 
+/// A key in the LINEAR VIEW — and the read of the comments of whatever
+/// issue the cursor is on after it armed.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    view_key(app, key, out);
+    schedule_comments(app);
+}
+
+fn view_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.prop_pick.is_some()) {
         handle_pick_key(app, key);
         return;
@@ -3349,6 +3553,11 @@ pub(crate) fn handle_mouse(
     pos: Position,
     out: &mut Vec<ClientRequest>,
 ) {
+    view_mouse(app, mouse, pos, out);
+    schedule_comments(app);
+}
+
+fn view_mouse(app: &mut App, mouse: MouseEvent, pos: Position, out: &mut Vec<ClientRequest>) {
     if app.hover_crumb == Some(HitTarget::ModalBrowser)
         && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
     {
@@ -3784,12 +3993,16 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
     let Some(Overlay::Linear(view)) = &app.overlay else {
         return None;
     };
-    let project = view.project.clone();
+    let (project, dir) = (view.project.clone(), view.dir.clone());
+    // Any comments not read yet land in the box's task when they come.
+    let reads = &mut app.linear_comments;
+    for issue in issues.iter().filter(|i| !reads.read.contains_key(&i.id)) {
+        reads.owed.push((issue.id.clone(), dir.clone()));
+    }
     let cfg = crate::config::Config::load();
     let mut ticket = crate::agent_presets::system(crate::agent_presets::SystemPreset::LinearTicket);
-    let task = ticket_task(&ticket, &issues);
     let taken = app.project_branches(&project);
-    let batch = LinearBatch { issues, task };
+    let batch = LinearBatch::of(issues);
     // A fresh worktree named after the batch (`LinearBatch::branch`),
     // never the project's root checkout: a batch of issues is a branch of
     // its own, and its pull request is what `remember_submit` links back.
@@ -4109,7 +4322,11 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     let body_inner = block.inner(body_a);
     let read_a = reading_area(body_inner);
     let lines: Vec<Line> = match current {
-        Some(issue) => body_lines(issue, read_a.width as usize, now, th),
+        Some(issue) => {
+            // A first read of its comments, still out, says so.
+            let reading = app.linear_comments.flights.in_flight(&issue.id);
+            body_lines(issue, read_a.width as usize, now, reading, th)
+        }
         None => Vec::new(),
     };
     let max_scroll = (lines.len() as u16).saturating_sub(read_a.height.max(1));
@@ -4901,8 +5118,16 @@ fn properties(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
 const PAIR_W: usize = 34;
 
 /// The reading pane's text, `width` wide: the title, wrapped and bold,
-/// the properties under it over a rule, then the description.
-fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Line<'static>> {
+/// the properties under it over a rule, then the description and the
+/// comments read on it — or, `reading` them for the first time, a line
+/// saying so.
+fn body_lines(
+    issue: &LinearIssue,
+    width: usize,
+    now: i64,
+    reading: bool,
+    th: Theme,
+) -> Vec<Line<'static>> {
     let title = Style::default().fg(th.text).add_modifier(Modifier::BOLD);
     let mut lines: Vec<Line> = crate::pr_preview::wrap(&issue.title, width)
         .into_iter()
@@ -4923,6 +5148,58 @@ fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
     } else {
         lines.extend(markdown::render(
             &issue.description,
+            width.max(20),
+            Breaks::Hard,
+            Style::default(),
+            th,
+        ));
+    }
+    lines.extend(comment_lines(issue, width, now, reading, th));
+    lines
+}
+
+/// The reading pane's comments, under the description: a `Comments · N`
+/// heading over a rule, then each one's author and day over its text.
+fn comment_lines(
+    issue: &LinearIssue,
+    width: usize,
+    now: i64,
+    reading: bool,
+    th: Theme,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(th.dim);
+    if issue.comments.is_empty() {
+        if !reading {
+            return Vec::new();
+        }
+        return vec![
+            Line::default(),
+            Line::from(Span::styled("reading comments…", dim)),
+        ];
+    }
+    let mut lines = vec![
+        Line::default(),
+        Line::from(Span::styled(
+            format!("Comments · {}", issue.comments.len()),
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "─".repeat(width),
+            Style::default().fg(th.faint),
+        )),
+    ];
+    for comment in &issue.comments {
+        lines.push(Line::default());
+        let mut head = vec![Span::styled(
+            comment.author.clone(),
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+        )];
+        if let Some(day) = short_date(&comment.created_at, now) {
+            head.push(Span::styled(format!("  {day}"), dim));
+        }
+        lines.push(Line::from(head));
+        lines.extend(markdown::render(
+            &comment.body,
             width.max(20),
             Breaks::Hard,
             Style::default(),
@@ -5560,6 +5837,7 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
             .flatten()
             .filter_map(IssuePr::from_json)
             .collect(),
+        comments: Vec::new(),
     })
 }
 
@@ -5715,6 +5993,47 @@ async fn fetch_viewer(key: &str) -> Result<Viewer, String> {
     parse_viewer(&json)
 }
 
+/// Issue `id`'s latest comments ([`COMMENTS_LIMIT`]), with the key in
+/// `dir`, oldest first.
+async fn fetch_comments(dir: &Path, id: &str) -> Result<Vec<IssueComment>, String> {
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
+    let query = format!(
+        "query($id: String!) {{ issue(id: $id) {{ comments(first: {COMMENTS_LIMIT}, orderBy: createdAt) {{ \
+         nodes {{ body createdAt user {{ displayName }} externalUser {{ name }} }} }} }} }}"
+    );
+    let json = graphql(&key, &query, serde_json::json!({ "id": id })).await?;
+    parse_comments(&json)
+}
+
+/// The comments in a [`fetch_comments`] answer, oldest first — Linear
+/// sends the latest first — with an empty one left out.
+fn parse_comments(json: &serde_json::Value) -> Result<Vec<IssueComment>, String> {
+    if let Some(err) = graphql_error(json) {
+        return Err(err);
+    }
+    let nodes = json
+        .pointer("/data/issue/comments/nodes")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "Linear returned no comments".to_string())?;
+    let mut comments: Vec<IssueComment> = nodes
+        .iter()
+        .map(|node| IssueComment {
+            author: [
+                json_text(node, "/user/displayName"),
+                json_text(node, "/externalUser/name"),
+            ]
+            .into_iter()
+            .find(|name| !name.is_empty())
+            .unwrap_or_else(|| "unknown".into()),
+            created_at: json_text(node, "/createdAt"),
+            body: json_text(node, "/body"),
+        })
+        .filter(|c| !c.body.trim().is_empty())
+        .collect();
+    comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(comments)
+}
+
 /// Linear's answer to the `viewer` query: the account's name and email,
 /// or the error it gave.
 fn parse_viewer(json: &serde_json::Value) -> Result<Viewer, String> {
@@ -5806,6 +6125,7 @@ pub(crate) mod tests {
             updated_at: String::new(),
             completed_at: String::new(),
             prs: Vec::new(),
+            comments: Vec::new(),
         }
     }
 
@@ -8020,6 +8340,118 @@ pub(crate) mod tests {
         assert_eq!(input["priority"], 2);
         assert_eq!(input["title"], "run plan");
         assert!(sent[1]["input"].get("stateId").is_none(), "{sent:?}");
+    }
+
+    // ---- comments ----
+
+    /// Linear's `comments` answer for an issue: the latest first, one of
+    /// them empty and one from an integration.
+    fn comments_answer(_: &str, query: &str) -> Result<serde_json::Value, String> {
+        assert!(query.contains("comments(first: 20"), "{query}");
+        Ok(
+            serde_json::json!({"data": {"issue": {"comments": {"nodes": [
+                {"body": "Still broken on Safari.", "createdAt": "2026-10-06T09:00:00.000Z",
+                 "user": {"displayName": "Sam"}},
+                {"body": " ", "createdAt": "2026-10-05T12:00:00.000Z", "user": {"displayName": "Bot"}},
+                {"body": "Repro: log in twice.", "createdAt": "2026-10-05T10:00:00.000Z",
+                 "user": null, "externalUser": {"name": "Ana via Slack"}}
+            ]}}}}),
+        )
+    }
+
+    /// The task the QUICK PROMPT up now sends with `typed` in it.
+    fn box_task(app: &App, typed: &str) -> String {
+        match &app.overlay {
+            Some(Overlay::Prompt(p)) => match &p.kind {
+                crate::app::PromptKind::QuickPrompt(launch) => launch.compose(typed),
+                other => panic!("the QUICK PROMPT, got {other:?}"),
+            },
+            other => panic!("the QUICK PROMPT, got {other:?}"),
+        }
+    }
+
+    /// A rest on an issue reads its comments — a walk past a row asks
+    /// nothing — and the reading pane shows them oldest first under the
+    /// description; read once, a rest within the minute asks nothing, a
+    /// list landing keeps them, and a launch's task carries them.
+    #[test]
+    fn a_rest_on_an_issue_reads_its_comments_into_the_pane_and_the_task() {
+        let (mut app, dir, mut rx) = paired();
+        let project = ProjectId("p1".into());
+        open(&mut app);
+        let resting = |app: &App| app.linear_comments.rest.as_ref().map(|(id, ..)| id.clone());
+        assert_eq!(resting(&app).as_deref(), Some("1"), "armed, not asked");
+        assert!(comments_delay(&app).is_some_and(|d| d > std::time::Duration::ZERO));
+        press(&mut app, plain(KeyCode::Down));
+        press(&mut app, plain(KeyCode::Down));
+        assert_eq!(
+            resting(&app).as_deref(),
+            Some("2"),
+            "on the row it rests on"
+        );
+
+        let sent = with_graphql_stub(comments_answer, || {
+            run_linear(&mut app, &mut rx, |app| {
+                if let Some((.., at)) = &mut app.linear_comments.rest {
+                    *at = std::time::Instant::now();
+                }
+                fire_comments(app);
+            });
+            graphql_sent()
+        });
+        assert_eq!(sent[0]["id"], "2");
+        let authors = |app: &App| -> Vec<String> {
+            rows(app, &project)[1]
+                .comments
+                .iter()
+                .map(|c| c.author.clone())
+                .collect()
+        };
+        assert_eq!(authors(&app), ["Ana via Slack", "Sam"], "oldest first");
+        let screen = shot(&mut app, 200, 50);
+        assert!(screen.contains("Comments · 2"), "{screen}");
+        assert!(screen.contains("Repro: log in twice."), "{screen}");
+        assert!(screen.contains("Ana via Slack"), "{screen}");
+
+        press(&mut app, plain(KeyCode::Up));
+        press(&mut app, plain(KeyCode::Down));
+        assert_eq!(resting(&app), None, "read a moment ago");
+
+        app.linear_flights.cancel(&project);
+        let ticket = ask_list(&mut app);
+        let fresh = vec![
+            issue("1", "ENG-1", "Login"),
+            issue("2", "ENG-2", "Logout"),
+            issue("3", "ENG-3", "Signup"),
+        ];
+        land_list(&mut app, ticket, &dir, fresh);
+        assert_eq!(authors(&app).len(), 2, "a list never asks for them");
+
+        press(&mut app, plain(KeyCode::Enter));
+        let task = box_task(&app, "");
+        assert!(
+            task.contains("#### Comments\n\n**Ana via Slack** (2026-10-05):\nRepro: log in twice."),
+            "{task}"
+        );
+        assert!(box_task(&app, "also this").contains("**Sam** (2026-10-06)"));
+        assert!(app.linear_comments.owed.is_empty(), "nothing left to read");
+    }
+
+    /// Comments read after the box opened on an issue go into its task.
+    #[test]
+    fn comments_read_after_the_box_opened_go_into_its_task() {
+        let (mut app, _dir, mut rx) = paired();
+        open(&mut app);
+        press(&mut app, plain(KeyCode::Down));
+        press(&mut app, plain(KeyCode::Enter));
+        assert!(!box_task(&app, "").contains("#### Comments"));
+        assert_eq!(app.linear_comments.owed.len(), 1);
+        assert_eq!(comments_delay(&app), Some(std::time::Duration::ZERO));
+        with_graphql_stub(comments_answer, || {
+            run_linear(&mut app, &mut rx, fire_comments);
+        });
+        assert!(box_task(&app, "").contains("Still broken on Safari."));
+        assert!(box_task(&app, "typed").contains("Still broken on Safari."));
     }
 
     // ---- newest asked wins: ⌘S, the cursor, attaches ----

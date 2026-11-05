@@ -4353,6 +4353,9 @@ pub struct App {
     /// copy once its project's list lands — asked for because orion had
     /// not read it yet.
     pub linear_copy: Option<WorktreeId>,
+    /// The reads of the issues' comments, as the LINEAR VIEW's cursor
+    /// rests on each.
+    pub linear_comments: crate::linear::CommentReads,
     /// Each project's TODOS list, by its checkout, read when the modal
     /// first opens on it and kept for the session — saved on every change
     /// (`todos::store`).
@@ -4613,6 +4616,7 @@ impl App {
             linear_edits: crate::linear::LocalEdits::default(),
             linear_links: crate::linear::LinkStore::default(),
             linear_copy: None,
+            linear_comments: Default::default(),
             todos: HashMap::new(),
             todo_pending: HashMap::new(),
             todo_clip: None,

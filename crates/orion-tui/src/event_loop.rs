@@ -736,6 +736,11 @@ async fn main_loop(
                 if app.pr_detail_delay().is_some() => {
                 lookup_pr_detail(&mut app, &detail_tx);
             }
+            // The LINEAR VIEW's cursor has rested on an issue: its comments.
+            _ = tokio::time::sleep(crate::linear::comments_delay(&app).unwrap_or(Duration::MAX)),
+                if crate::linear::comments_delay(&app).is_some() => {
+                crate::linear::fire_comments(&mut app);
+            }
             // The PULL REQUESTS MODAL's prefetch: your pull requests at
             // once, the rest one at a time behind them.
             _ = tokio::time::sleep(app.pr_prefetch_delay().unwrap_or(Duration::MAX)),
