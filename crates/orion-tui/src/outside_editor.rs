@@ -1,12 +1,12 @@
 //! OPEN IN APP: the GUI editor `⌘O` hands a file to — and the OPEN MENU a
 //! checkout — outside orion. Settings → Tools **Open in app**
-//! (`outside_editor`) picks Cursor, VS Code, Sublime Text, Zed or the
-//! system default; `auto`, the default, is the first of the four that is
-//! installed, else the system default.
+//! (`outside_editor`) picks Cursor, VS Code or Sublime Text; `auto`, the
+//! default, is the first of the three that is installed, else whatever
+//! macOS's `open` hands the file to.
 //!
 //! An app is reached by the command-line tool inside its own bundle first —
 //! `Cursor.app/…/bin/cursor`, `Visual Studio Code.app/…/bin/code`,
-//! `Sublime Text.app/…/bin/subl`, `Zed.app/…/cli`, in `/Applications` or
+//! `Sublime Text.app/…/bin/subl`, in `/Applications` or
 //! `~/Applications` — which ships with the app whether or not its "install
 //! shell command" was ever run, and which goes to a line. Then the tool on
 //! PATH, past Cursor's AGENT CLI shim: `~/.local/bin/cursor` from the
@@ -29,7 +29,6 @@ pub enum App {
     Cursor,
     VsCode,
     Sublime,
-    Zed,
 }
 
 /// How an app's tool is told the file's line.
@@ -38,7 +37,7 @@ enum Goto {
     /// `<root> --goto <file>:<line>`: the checkout's window — reused when
     /// it is already open — with the file at the line (Cursor, VS Code).
     Flag,
-    /// `<root> <file>:<line>` (Sublime Text, Zed).
+    /// `<root> <file>:<line>` (Sublime Text).
     Suffix,
 }
 
@@ -83,15 +82,6 @@ const APPS: &[Spec] = &[
         path_cli: "subl",
         goto: Goto::Suffix,
     },
-    Spec {
-        app: App::Zed,
-        word: "zed",
-        name: "Zed",
-        bundle: "Zed.app",
-        bundle_cli: "Contents/MacOS/cli",
-        path_cli: "zed",
-        goto: Goto::Suffix,
-    },
 ];
 
 fn spec(app: App) -> &'static Spec {
@@ -103,32 +93,24 @@ fn spec(app: App) -> &'static Spec {
 /// The **Open in app** setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Choice {
-    /// The first of Cursor, VS Code, Sublime Text and Zed installed, else
-    /// the system default.
+    /// The first of Cursor, VS Code and Sublime Text installed, else
+    /// whatever macOS's `open` hands the file to.
     #[default]
     Auto,
     App(App),
-    /// `open <file>` (`xdg-open` off macOS): whatever the system opens
-    /// that kind of file with.
-    System,
 }
 
 /// The setting's word for [`Choice::Auto`].
 pub const AUTO: &str = "auto";
 
-/// The setting's word for [`Choice::System`].
-pub const SYSTEM: &str = "default";
-
 /// The **Open in app** row's choices, in the order it cycles them.
-pub const CHOICES: &[&str] = &[AUTO, "cursor", "vscode", "sublime", "zed", SYSTEM];
+pub const CHOICES: &[&str] = &[AUTO, "cursor", "vscode", "sublime"];
 
 impl Choice {
-    /// A stored word back to its choice; anything unknown is `auto`.
+    /// A stored word back to its choice; anything unknown — the retired
+    /// `zed` and `default` among them — is `auto`.
     pub fn parse(word: &str) -> Self {
         let word = word.trim();
-        if word.eq_ignore_ascii_case(SYSTEM) {
-            return Choice::System;
-        }
         APPS.iter()
             .find(|spec| spec.word.eq_ignore_ascii_case(word))
             .map_or(Choice::Auto, |spec| Choice::App(spec.app))
@@ -138,12 +120,11 @@ impl Choice {
         match self {
             Choice::Auto => AUTO,
             Choice::App(app) => spec(app).word,
-            Choice::System => SYSTEM,
         }
     }
 }
 
-/// The name a hint or a flash calls the system default by.
+/// The name a hint or a flash calls what `open` hands a file to.
 pub const SYSTEM_NAME: &str = "default app";
 
 /// How a resolved app is started.
@@ -153,7 +134,7 @@ pub enum Launcher {
     Cli(PathBuf),
     /// `open -a <bundle>`: the file, at its top.
     Bundle(PathBuf),
-    /// `open` / `xdg-open`.
+    /// `open`.
     System,
 }
 
@@ -167,7 +148,7 @@ pub struct Target {
 }
 
 /// Where apps are looked for: the folders holding an `Applications` folder
-/// (`/` and the home directory, on macOS only) and the PATH.
+/// (`/` and the home directory) and the PATH.
 #[derive(Debug, Clone, Default)]
 pub struct Places {
     pub roots: Vec<PathBuf>,
@@ -177,11 +158,8 @@ pub struct Places {
 impl Places {
     /// This machine's.
     pub fn here() -> Self {
-        let mut roots = Vec::new();
-        if cfg!(target_os = "macos") {
-            roots.push(PathBuf::from("/"));
-            roots.extend(orion_core::env::home_dir());
-        }
+        let mut roots = vec![PathBuf::from("/")];
+        roots.extend(orion_core::env::home_dir());
         Self {
             roots,
             path: std::env::var_os("PATH"),
@@ -241,7 +219,7 @@ pub fn is_agent_shim(cli: &Path) -> bool {
 }
 
 /// The setting resolved to an installed app, or why there is none: `auto`
-/// with nothing installed is the system default, a named app that isn't
+/// with nothing installed is macOS's `open`, a named app that isn't
 /// installed is the reason.
 pub fn resolve(choice: Choice, places: &Places) -> Result<Target, String> {
     let target = |spec: &Spec, launcher| Target {
@@ -260,7 +238,6 @@ pub fn resolve(choice: Choice, places: &Places) -> Result<Target, String> {
                 .map(|launcher| target(spec, launcher))
                 .ok_or_else(|| format!("{} isn't installed (Settings → Open in app)", spec.name))
         }
-        Choice::System => Ok(system()),
     }
 }
 
@@ -298,12 +275,10 @@ pub fn hint_name() -> &'static str {
         }
     }
     let choice = Choice::parse(&crate::config::Config::load().outside_editor);
-    let name = match resolve(choice, &Places::here()) {
-        Ok(target) => target.name,
-        Err(_) => match choice {
-            Choice::App(app) => spec(app).name,
-            _ => SYSTEM_NAME,
-        },
+    let name = match (choice, resolve(choice, &Places::here())) {
+        (_, Ok(target)) => target.name,
+        (Choice::App(app), Err(_)) => spec(app).name,
+        (Choice::Auto, Err(_)) => SYSTEM_NAME,
     };
     *kept = Some((std::time::Instant::now(), name));
     name
@@ -321,7 +296,6 @@ pub fn value_label(stored: &str, places: &Places) -> String {
     let choice = Choice::parse(stored);
     match (choice, resolve(choice, places)) {
         (Choice::Auto, Ok(target)) => format!("auto · {}", target.name),
-        (Choice::System, _) => "system default".into(),
         (Choice::App(app), Ok(_)) => spec(app).name.into(),
         (Choice::App(app), Err(_)) => format!("{} — not installed", spec(app).name),
         (Choice::Auto, Err(why)) => why,
@@ -376,11 +350,7 @@ impl Target {
 }
 
 fn system_opener() -> PathBuf {
-    PathBuf::from(if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    })
+    PathBuf::from("open")
 }
 
 /// How long [`launch`] waits for a tool to fail before taking it as
@@ -581,8 +551,8 @@ mod tests {
         assert_eq!(args, ["-a", &bundle.to_string_lossy(), "/repo/src/a.rs"]);
     }
 
-    /// `auto` takes the first installed of Cursor → VS Code → Sublime →
-    /// Zed, else the system default; a named app that isn't installed is
+    /// `auto` takes the first installed of Cursor → VS Code → Sublime,
+    /// else what `open` hands it to; a named app that isn't installed is
     /// a reason, never a quiet swap.
     #[test]
     fn auto_takes_the_first_installed_and_a_missing_choice_says_so() {
@@ -591,8 +561,6 @@ mod tests {
             resolve(Choice::Auto, &m.places()).unwrap().name,
             SYSTEM_NAME
         );
-        m.bundle_cli(&m.system, App::Zed);
-        assert_eq!(resolve(Choice::Auto, &m.places()).unwrap().name, "Zed");
         m.bundle_cli(&m.system, App::Sublime);
         assert_eq!(
             resolve(Choice::Auto, &m.places()).unwrap().name,
@@ -611,23 +579,18 @@ mod tests {
             resolve(Choice::App(App::Cursor), &m.places()),
             Err("Cursor isn't installed (Settings → Open in app)".into())
         );
-        assert_eq!(
-            resolve(Choice::System, &m.places()).unwrap().name,
-            SYSTEM_NAME
-        );
-        assert_eq!(
-            installed_names(&m.places()),
-            ["VS Code", "Sublime Text", "Zed"]
-        );
+        assert_eq!(installed_names(&m.places()), ["VS Code", "Sublime Text"]);
         assert_eq!(value_label("auto", &m.places()), "auto · VS Code");
         assert_eq!(value_label("cursor", &m.places()), "Cursor — not installed");
-        assert_eq!(value_label("zed", &m.places()), "Zed");
-        assert_eq!(value_label("default", &m.places()), "system default");
+        for retired in ["zed", "default"] {
+            assert_eq!(Choice::parse(retired), Choice::Auto, "{retired}");
+            assert_eq!(value_label(retired, &m.places()), "auto · VS Code");
+        }
     }
 
     /// Each app is told the line its own way: `--goto` for Cursor and VS
-    /// Code, a `:line` suffix for Sublime Text and Zed — all with the
-    /// checkout as the window.
+    /// Code, a `:line` suffix for Sublime Text — all with the checkout as
+    /// the window — and `open` the file alone.
     #[test]
     fn each_app_goes_to_the_line_its_own_way() {
         let m = Machine::new();
@@ -653,9 +616,8 @@ mod tests {
             sublime.file_command(root, "src/a.rs", 7),
             (subl, vec!["/repo".into(), "/repo/src/a.rs:7".into()])
         );
-        let system = resolve(Choice::System, &m.places()).unwrap();
-        let (program, args) = system.file_command(root, "src/a.rs", 7);
-        assert!(program == Path::new("open") || program == Path::new("xdg-open"));
+        let (program, args) = system().file_command(root, "src/a.rs", 7);
+        assert_eq!(program, Path::new("open"));
         assert_eq!(args, ["/repo/src/a.rs"], "no line to go to");
     }
 }

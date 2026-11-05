@@ -391,11 +391,9 @@ pub(crate) mod keys {
     ];
 }
 
-/// `⌘1-9 project` — none where the terminal sends no ⌘, as then the
-/// keys cannot be pressed.
-fn project_hint() -> Option<crate::hints::Hint> {
-    crate::keymap::cmd_shown()
-        .then(|| crate::hints::Hint::new(format!("{}-9", keys::PROJECT.label()), "project"))
+/// `⌘1-9 project`.
+fn project_hint() -> crate::hints::Hint {
+    crate::hints::Hint::new(format!("{}-9", keys::PROJECT.label()), "project")
 }
 
 /// The keys along the modal's bottom edge. Esc lets a selection go
@@ -468,7 +466,7 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
         keys::COPY.hint(),
         keys::JUMP.hint(),
     ];
-    hints.extend(project_hint());
+    hints.push(project_hint());
     hints.extend([
         keys::NEW_GROUP.hint(),
         keys::PRESET.hint(),
@@ -973,7 +971,7 @@ fn add_lines(app: &mut App, lines: &[String]) {
     }
     app.flash = Some(crate::flash::Flash::done(format!(
         "added {}",
-        crate::bundle::plural(lines.len(), "item")
+        crate::flash::plural(lines.len(), "item")
     )));
 }
 
@@ -1326,7 +1324,7 @@ fn clip(app: &mut App, cut: bool) {
             .join("\n"),
     };
     let dir = view.dir.clone();
-    let what = crate::bundle::plural(items.len(), "todo");
+    let what = crate::flash::plural(items.len(), "todo");
     app.todo_clip = Some(TodoClip {
         dir,
         items,
@@ -1413,7 +1411,7 @@ fn paste_clip_at(app: &mut App, text: &str, group: Option<u64>, after: Option<u6
     }
     app.flash = Some(crate::flash::Flash::done(format!(
         "pasted {}",
-        crate::bundle::plural(count, "todo")
+        crate::flash::plural(count, "todo")
     )));
     true
 }
@@ -2514,7 +2512,7 @@ fn header_spans(
                 format!(
                     "delete {} and its {}?",
                     g.name,
-                    crate::bundle::plural(file.size(group), "item")
+                    crate::flash::plural(file.size(group), "item")
                 ),
                 Style::default().fg(th.err).add_modifier(Modifier::BOLD),
             ),

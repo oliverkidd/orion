@@ -31,14 +31,16 @@ const SHIFT_RIGHT: &[u8] = b"\x1b[1;2C";
 const CTRL_Q: &[u8] = &[0x11];
 const CTRL_R: &[u8] = &[0x12];
 const CTRL_E: &[u8] = &[0x05];
-const CTRL_N: &[u8] = &[0x0e];
 const CTRL_U: &[u8] = &[0x15];
 const CTRL_S: &[u8] = &[0x13];
 const CTRL_A: &[u8] = &[0x01];
 const CTRL_G: &[u8] = &[0x07];
-const CTRL_F: &[u8] = &[0x06];
-/// `⌘U` as Ghostty's kitty protocol spells it.
+/// `⌘U`, `⌘N`, `⌘E`, `⌘S` and `⌘F` as Ghostty's kitty protocol spells
+/// them.
 const CMD_U: &[u8] = b"\x1b[117;9u";
+const CMD_N: &[u8] = b"\x1b[110;9u";
+const CMD_E: &[u8] = b"\x1b[101;9u";
+const CMD_F: &[u8] = b"\x1b[102;9u";
 const SHIFT_TAB: &[u8] = b"\x1b[Z";
 const SPACE: &[u8] = b" ";
 /// The COMMAND PALETTE's chord every terminal sends (⌘⇧P needs Ghostty).
@@ -133,7 +135,6 @@ impl TuiHarness {
         cmd.env(orion_core::env::WORKTREE_SYNC_MS, "100"); // fast external-change pickup
         cmd.env(orion_core::env::UPDATE_CHECK_SECS, "0"); // the footer must not depend on GitHub
         cmd.env(orion_core::env::SPOTIFY_POLL_SECS, "0"); // …nor on what's playing
-        cmd.env(orion_core::env::GHOSTTY_CONFIG, "off"); // never touch the machine's Ghostty config
         cmd.env(orion_core::env::USAGE, "off"); // never read the machine's logins
         cmd.env(orion_core::env::LOG, "debug");
         cmd.env("SHELL", "/bin/sh");
@@ -441,7 +442,7 @@ fn choose_menu_row(tui: &mut TuiHarness, label: &str) {
 /// grid starts one, then stepped into so the pane has the keys. `task` is
 /// typed into the box — the grid's box will not launch on an empty one.
 fn start_session(tui: &mut TuiHarness, task: &str) {
-    tui.send(CTRL_N);
+    tui.send(CMD_N);
     tui.wait_for_text("what should the agent do?");
     tui.type_str(task);
     tui.send(ENTER);
@@ -779,7 +780,7 @@ fn tui_git_diff_modal() {
     // this project has none. ^e reads the checkout for itself.
 
     // ---- open the modal; the selected file's diff renders ----
-    tui.send(CTRL_E);
+    tui.send(CMD_E);
     tui.wait_for_text("Files (2)");
     // Status is path-ordered, so .keep (modified) is selected first.
     tui.wait_for_selected(".keep");
@@ -829,7 +830,7 @@ fn tui_git_diff_modal() {
     // ---- a clean tree opens nothing ----
     repo_git(&repo, &["add", "."]);
     repo_git(&repo, &["commit", "-m", "wip"]);
-    tui.send(CTRL_E);
+    tui.send(CMD_E);
     // Opened ahead of `git status` off a badge that has not caught up yet,
     // the modal closes again once git says there is nothing to show.
     if tui.try_wait_for_text("Files (", Duration::from_secs(2)) {
@@ -878,7 +879,7 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
     add_project(&mut tui, &repo, "commits-proj");
 
     // ---- nothing uncommitted: the whole branch, every commit ticked ----
-    tui.send(CTRL_E);
+    tui.send(CMD_E);
     tui.wait_for_text("Commits · 2 since origin/main");
     tui.wait_for_text("all ticked · together");
     tui.wait_for_text("Files (2)");
@@ -917,7 +918,7 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
 
     // ---- something uncommitted: the view it always was, on top ----
     std::fs::write(repo.join("wip.txt"), "wip line\n").unwrap();
-    tui.send(CTRL_E);
+    tui.send(CMD_E);
     tui.wait_for_selected("Uncommitted changes");
     tui.wait_for_text("+ wip line");
     tui.send(ESC);
@@ -1032,18 +1033,15 @@ fn scrolled(screen: &vt100::Screen) -> usize {
 /// A drag-select past the pane's top edge scrolls the history under the
 /// pointer on the event loop's own beat — with no further mouse report —
 /// and the release copies rows that were never on screen together. A stub
-/// clipboard tool on PATH catches the copy.
+/// `pbcopy` on PATH catches the copy.
 #[test]
 fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
     use std::os::unix::fs::PermissionsExt;
     let stub_bin = tempfile::tempdir().unwrap();
     let copied = stub_bin.path().join("copied");
-    // Whichever tool this platform's copy reaches for.
-    for tool in ["pbcopy", "xclip", "xsel", "wl-copy"] {
-        let stub = stub_bin.path().join(tool);
-        std::fs::write(&stub, format!("#!/bin/sh\ncat > {}\n", copied.display())).unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let stub = stub_bin.path().join("pbcopy");
+    std::fs::write(&stub, format!("#!/bin/sh\ncat > {}\n", copied.display())).unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!(
         "{}:{}",
         stub_bin.path().display(),
@@ -1274,7 +1272,7 @@ fn tui_conflict_resolver_runs_through_to_the_pull_request() {
     tui.send(ENTER);
     tui.wait_for_gone("Open project");
 
-    tui.send(&[0x16]);
+    tui.send(CMD_U);
     tui.wait_for_text("Add things");
     tui.send(SHIFT_RIGHT);
     tui.wait_for_text("a.txt");
@@ -1353,7 +1351,7 @@ fn tui_cmd_u_pastes_a_preset_into_the_running_agent() {
     tui.wait_for_text("the task");
 
     // Over a full-screen session too, and Esc lands back in it.
-    tui.send(CTRL_F);
+    tui.send(CMD_F);
     tui.wait_for_text("normal size");
     tui.send(CMD_U);
     tui.wait_for_text("Insert preset");

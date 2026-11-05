@@ -1,12 +1,12 @@
-//! INSTALLS from inside orion: an editor the BUILT-IN EDITOR runs, an
-//! agent's CLI, or Ghostty, put on this machine by its own installer —
-//! Homebrew for an editor (`brew install micro`) or Ghostty (`brew install
-//! --cask ghostty`), the vendor's documented command for an agent (`curl
-//! -fsSL https://claude.ai/install.sh | bash`).
+//! INSTALLS from inside orion: fresh, the BUILT-IN EDITOR, an agent's CLI,
+//! or Ghostty, put on this machine by its own installer — Homebrew for
+//! fresh (`brew install fresh-editor`) or Ghostty (`brew install --cask
+//! ghostty`), the vendor's documented command for an agent (`curl -fsSL
+//! https://claude.ai/install.sh | bash`).
 //!
-//! The onboarding wizard's Agents and Editor pages and its App step,
-//! and the SETTINGS OVERLAY's **File editor**, CLAUDE ACCOUNTS and harness
-//! rows share it: `i` on a program that isn't on PATH shows its [`Plan`] — the line it
+//! The onboarding wizard's Agents page and its App step, the SETTINGS
+//! OVERLAY's CLAUDE ACCOUNTS and harness rows, and the footer's word that
+//! fresh is missing share it: `i` on a program that isn't on PATH shows its [`Plan`] — the line it
 //! would run — and Enter runs that line in the editor modal's PTY, the
 //! machinery a Claude sign-in uses (`claude_accounts::run`), so the
 //! installer's own output, and any question it asks, are on screen. The
@@ -28,10 +28,11 @@ use crate::app::App;
 /// its maker documents it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
-    /// The program on PATH once it is in: `micro`, `claude`.
+    /// The program on PATH once it is in: `fresh`, `claude`.
     pub program: String,
     /// What runs, as the user reads it before it does: `brew install
-    /// micro`. Empty when there is nothing orion can run — see `link`.
+    /// fresh-editor`. Empty when there is nothing orion can run — see
+    /// `link`.
     pub line: String,
     /// How the modal runs [`Plan::line`]; None when orion has nothing to
     /// run, and the plan is only its [`Plan::link`].
@@ -75,60 +76,24 @@ impl Plan {
     }
 }
 
-/// The editors orion can install, by the program the **File editor** row
-/// names: its Homebrew formula and the editor's own install page.
-const EDITORS: &[(&str, &str, &str)] = &[
-    // The `fresh-editor` formula installs `fresh`.
-    (
-        "fresh",
-        "fresh-editor",
-        "https://github.com/sinelaw/fresh#installation",
-    ),
-    (
-        "micro",
-        "micro",
-        "https://github.com/zyedidia/micro#installation",
-    ),
-    // Microsoft Edit: the `msedit` formula installs `edit`.
-    ("edit", "msedit", "https://github.com/microsoft/edit"),
-    (
-        "nvim",
-        "neovim",
-        "https://github.com/neovim/neovim/blob/master/INSTALL.md",
-    ),
-    ("hx", "helix", "https://docs.helix-editor.com/install.html"),
-    (
-        "emacs",
-        "emacs",
-        "https://www.gnu.org/software/emacs/download.html",
-    ),
-];
+/// fresh's Homebrew formula — `fresh-editor` installs `fresh` — and its
+/// own install page.
+const FRESH_FORMULA: &str = "fresh-editor";
+const FRESH_LINK: &str = "https://github.com/sinelaw/fresh#installation";
 
-/// The Homebrew formula that installs `editor` (any spelling the **File
-/// editor** row takes: `/opt/homebrew/bin/micro`, `msedit`, `helix`).
-#[cfg(test)]
-pub fn editor_formula(editor: &str) -> Option<&'static str> {
-    editor_spec(editor).map(|(_, formula, _)| formula)
-}
-
-fn editor_spec(editor: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    let program = match crate::editor::program_name(editor) {
-        "msedit" => "edit",
-        "helix" => "hx",
-        other => other,
-    };
-    EDITORS
-        .iter()
-        .copied()
-        .find(|(name, _, _)| *name == program)
-}
-
-/// How `editor` gets onto this machine: `brew install <formula>` with
-/// Homebrew at `brew`, else its install page. None for an editor orion has
-/// no formula for (vim, which macOS ships, or a hand-typed command).
+/// How `editor` gets onto this machine: `brew install fresh-editor` with
+/// Homebrew at `brew`, else fresh's install page. None for any other
+/// command `ORION_EDITOR` names.
 pub fn editor_plan(editor: &str, brew: Option<&Path>) -> Option<Plan> {
-    let (program, formula, link) = editor_spec(editor)?;
-    Some(brew_plan(program, formula, false, link, brew))
+    (crate::editor::Kind::of(editor) == crate::editor::Kind::Fresh).then(|| {
+        brew_plan(
+            crate::editor::DEFAULT_EDITOR,
+            FRESH_FORMULA,
+            false,
+            FRESH_LINK,
+            brew,
+        )
+    })
 }
 
 /// Ghostty's download page, which documents the Homebrew cask too.
@@ -211,7 +176,6 @@ const APPS: &[(&str, &str, &str)] = &[
         "sublime-text",
         "https://www.sublimetext.com/download",
     ),
-    ("zed", "zed", "https://zed.dev/download"),
 ];
 
 /// The **Open in app** app `program` names, when it names one of [`APPS`].
@@ -224,16 +188,14 @@ fn outside_app(program: &str) -> Option<crate::outside_editor::App> {
 }
 
 /// How the **Open in app** choice `word` gets onto a Mac: its cask. None
-/// for `auto`, `system`, or off macOS.
+/// for `auto`.
 pub fn app_plan(word: &str, brew: Option<&Path>) -> Option<Plan> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
     let (word, cask, link) = APPS.iter().find(|(name, _, _)| *name == word)?;
     Some(brew_plan(word, cask, true, link, brew))
 }
 
-/// How Ghostty, the outside terminal ⇧T opens, gets onto a Mac: `brew
+/// How Ghostty — Orion.app's base, and the terminal ⌘O opens in the
+/// checkout — gets onto a Mac: `brew
 /// install --cask ghostty` with Homebrew at `brew`, else its download page.
 /// The cask puts `ghostty` on PATH as well as the app in /Applications.
 pub fn ghostty_plan(brew: Option<&Path>) -> Plan {
@@ -327,13 +289,9 @@ pub fn agent_plan(program: &str, brew: Option<&Path>, npm: Option<&Path>) -> Opt
     })
 }
 
-/// Where Homebrew installs itself, by platform, for a `brew` a PATH
-/// without its shellenv doesn't name.
-const BREW_PREFIXES: &[&str] = &[
-    "/opt/homebrew/bin/brew",
-    "/usr/local/bin/brew",
-    "/home/linuxbrew/.linuxbrew/bin/brew",
-];
+/// Where Homebrew installs itself — Apple silicon, then Intel — for a
+/// `brew` a PATH without its shellenv doesn't name.
+const BREW_PREFIXES: &[&str] = &["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
 
 /// The first `program` in the directories `path` lists — a PATH lookup.
 pub fn which(path: &OsStr, program: &str) -> Option<PathBuf> {
@@ -403,9 +361,8 @@ impl Tools {
 }
 
 /// The plan behind a SETTINGS OVERLAY row whose program isn't on PATH —
-/// the **File editor** row's editor, a CLAUDE ACCOUNT's or a harness's
-/// CLI on its Enabled row. None on any other row, or when the program is
-/// there.
+/// a CLAUDE ACCOUNT's or a harness's CLI on its Enabled row. None on any
+/// other row, or when the program is there.
 pub fn settings_row_plan(
     cfg: &crate::config::Config,
     tab: usize,
@@ -426,10 +383,6 @@ pub fn settings_row_plan(
     }
     let spec = crate::config::setting_at(tab, index)?;
     match spec.kind {
-        SettingKind::Editor => tools.editor_plan(&cfg.editor_resolved().missing?),
-        SettingKind::OutsideTerminal => {
-            (cfg!(target_os = "macos") && !installed(GHOSTTY)).then(|| tools.ghostty_plan())
-        }
         SettingKind::OutsideEditor => {
             let word = cfg.outside_editor.trim();
             (!installed(word)).then(|| tools.app_plan(word)).flatten()
@@ -459,13 +412,13 @@ pub fn run(app: &mut App, plan: &Plan) -> bool {
     }
     #[cfg(not(test))]
     {
-        let Some(tx) = app.vim_tx.clone() else {
+        let Some(tx) = app.editor_tx.clone() else {
             return false;
         };
-        let (cols, rows) = crate::event_loop::vim_size_guess(app);
-        app.vim_generation += 1;
+        let (cols, rows) = crate::event_loop::editor_size_guess(app);
+        app.editor_generation += 1;
         let home = orion_core::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-        match crate::vim_term::VimTerm::spawn_cmd_env(
+        match crate::editor_term::EditorTerm::spawn_cmd_env(
             &command.program,
             &command.args,
             &[],
@@ -473,12 +426,12 @@ pub fn run(app: &mut App, plan: &Plan) -> bool {
             plan.title(),
             cols,
             rows,
-            app.vim_generation,
+            app.editor_generation,
             tx,
         ) {
             Ok(mut term) => {
                 term.install = Some(plan.program.clone());
-                app.vim = Some(term);
+                app.editor = Some(term);
                 app.dirty = true;
                 true
             }
@@ -521,7 +474,7 @@ pub fn outcome(program: &str, installed: bool) -> String {
 /// The installer in the modal exited: the modal stays, its title saying
 /// how it went, until Enter closes it ([`closed`]).
 pub fn exited(app: &mut App) {
-    let Some(vim) = &mut app.vim else {
+    let Some(vim) = &mut app.editor else {
         return;
     };
     let Some(program) = vim.install.clone() else {
@@ -556,21 +509,15 @@ fn outcome_flash(program: &str, installed: bool, then: &str) -> crate::flash::Fl
 
 /// The install modal closed: say how it went in the footer, in place of
 /// the `installing…` [`run`] put there, and where the user is looking —
-/// the onboarding page, the settings overlay — and let the editor
-/// fallback be noted afresh.
+/// the onboarding page, the settings overlay.
 pub fn closed(app: &mut App, program: &str) {
     let installed = installed(program);
     let note = outcome(program, installed);
-    app.editor_fallback_noted = None;
     app.flash = Some(outcome_flash(program, installed, ""));
     match &mut app.overlay {
         Some(crate::app::Overlay::Onboard(view)) => view.note = Some(note),
         Some(crate::app::Overlay::Settings(view)) => view.info(note),
         _ => {}
-    }
-    // Ghostty in: it is the outside terminal again, as by default.
-    if program == GHOSTTY && installed {
-        crate::onboard::use_ghostty();
     }
     app.dirty = true;
 }
@@ -626,59 +573,41 @@ mod tests {
             "https://git-scm.com/downloads"
         );
         assert!(cli_plan("hg", Some(brew)).is_none());
-        if cfg!(target_os = "macos") {
-            let plan = app_plan("vscode", Some(brew)).unwrap();
-            assert_eq!(plan.line, "brew install --cask visual-studio-code");
-            assert!(app_plan("auto", Some(brew)).is_none());
-        }
+        let plan = app_plan("vscode", Some(brew)).unwrap();
+        assert_eq!(plan.line, "brew install --cask visual-studio-code");
+        assert!(app_plan("auto", Some(brew)).is_none());
     }
 
-    /// Every editor the **File editor** row cycles through but vim has a
-    /// formula, under each spelling the row takes; the formula is what
-    /// `brew install` runs, with the brew this machine has.
+    /// fresh installs by its formula — `fresh-editor` puts `fresh` on
+    /// PATH — with the brew this machine has; any other command has no
+    /// plan.
     #[test]
-    fn each_editor_installs_by_its_formula() {
-        for (editor, formula) in [
-            ("micro", "micro"),
-            ("/opt/homebrew/bin/micro -autosu true", "micro"),
-            ("edit", "msedit"),
-            ("msedit", "msedit"),
-            ("fresh", "fresh-editor"),
-            ("nvim", "neovim"),
-            ("hx", "helix"),
-            ("helix", "helix"),
-            ("emacs", "emacs"),
-        ] {
-            assert_eq!(editor_formula(editor), Some(formula), "{editor}");
-        }
-        assert_eq!(editor_formula("vim"), None, "macOS ships it");
-        assert_eq!(editor_formula("code --wait"), None);
-        for editor in crate::editor::EDITORS.iter().filter(|e| **e != "vim") {
-            assert!(editor_formula(editor).is_some(), "{editor} has a formula");
-        }
-
+    fn fresh_installs_by_its_formula() {
         let brew = Path::new("/opt/homebrew/bin/brew");
-        let plan = editor_plan("edit", Some(brew)).unwrap();
-        assert_eq!(plan.program, "edit", "the formula installs `edit`");
-        assert_eq!(plan.line, "brew install msedit");
+        let plan = editor_plan("fresh", Some(brew)).unwrap();
+        assert_eq!(plan.program, "fresh", "the formula installs `fresh`");
+        assert_eq!(plan.line, "brew install fresh-editor");
         assert_eq!(
             plan.command,
             Some(Command {
                 program: "/opt/homebrew/bin/brew".into(),
-                args: vec!["install".into(), "msedit".into()],
+                args: vec!["install".into(), "fresh-editor".into()],
             })
         );
-        assert!(plan.question().contains("`brew install msedit`"));
-        assert_eq!(plan.title(), "Install edit · brew install msedit");
+        assert!(plan.question().contains("`brew install fresh-editor`"));
+        assert_eq!(plan.title(), "Install fresh · brew install fresh-editor");
+        assert!(editor_plan("/opt/homebrew/bin/fresh", Some(brew)).is_some());
+        assert_eq!(editor_plan("vim", Some(brew)), None);
+        assert_eq!(editor_plan("code --wait", Some(brew)), None);
     }
 
-    /// No Homebrew: the editor's own page, and nothing to run.
+    /// No Homebrew: fresh's own page, and nothing to run.
     #[test]
-    fn without_homebrew_an_editor_is_its_install_page() {
-        let plan = editor_plan("micro", None).unwrap();
+    fn without_homebrew_fresh_is_its_install_page() {
+        let plan = editor_plan("fresh", None).unwrap();
         assert!(!plan.runnable());
         assert_eq!(plan.line, "");
-        assert_eq!(plan.link, "https://github.com/zyedidia/micro#installation");
+        assert_eq!(plan.link, "https://github.com/sinelaw/fresh#installation");
         assert!(plan.question().contains(plan.link), "{}", plan.question());
     }
 
@@ -766,16 +695,16 @@ mod tests {
     #[test]
     fn a_run_is_recorded_and_never_spawned() {
         let mut app = App::new();
-        let plan = editor_plan("micro", Some(Path::new("/b/brew"))).unwrap();
+        let plan = editor_plan("fresh", Some(Path::new("/b/brew"))).unwrap();
         assert!(run(&mut app, &plan));
         assert_eq!(
             take_ran(),
             [Command {
                 program: "/b/brew".into(),
-                args: vec!["install".into(), "micro".into()],
+                args: vec!["install".into(), "fresh-editor".into()],
             }]
         );
-        assert!(!run(&mut app, &editor_plan("micro", None).unwrap()));
+        assert!(!run(&mut app, &editor_plan("fresh", None).unwrap()));
         assert!(take_ran().is_empty());
     }
 }

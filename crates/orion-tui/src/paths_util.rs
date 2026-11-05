@@ -3,23 +3,10 @@
 //! and the two things done with them: a path shown with `~` for the home
 //! directory, and a folder moved into the Trash.
 //!
-//! A move into the Trash is a rename, never a removal: `~/.Trash` on
-//! macOS (Finder has no Put Back for it — drag it out), the freedesktop.org
-//! Trash (`~/.local/share/Trash`) elsewhere, recorded so a file manager
-//! can restore it.
+//! A move into the Trash is a rename into `~/.Trash`, never a removal
+//! (Finder has no Put Back for it — drag it out).
 
 use std::path::{Path, PathBuf};
-
-/// The Trash a folder is moved into.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Trash {
-    /// macOS: `~/.Trash`, the folder Finder empties.
-    Mac(PathBuf),
-    /// Elsewhere: the freedesktop.org Trash (`$XDG_DATA_HOME/Trash`), each
-    /// entry in its `files/` with an `info/<name>.trashinfo` saying where it
-    /// came from, so a file manager can put it back.
-    Freedesktop(PathBuf),
-}
 
 /// This machine's folders, as orion finds them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -27,7 +14,8 @@ pub struct Places {
     pub home: Option<PathBuf>,
     /// Claude Code's config dir (`orion_core::paths::claude_config_dir`).
     pub claude: Option<PathBuf>,
-    pub trash: Option<Trash>,
+    /// `~/.Trash`, the folder Finder empties.
+    pub trash: Option<PathBuf>,
 }
 
 impl Places {
@@ -39,14 +27,7 @@ impl Places {
             return pinned().unwrap_or_default();
         }
         let home = orion_core::env::home_dir();
-        let trash = if cfg!(target_os = "macos") {
-            home.as_ref().map(|h| Trash::Mac(h.join(".Trash")))
-        } else {
-            orion_core::env::non_empty("XDG_DATA_HOME")
-                .map(PathBuf::from)
-                .or_else(|| home.as_ref().map(|h| h.join(".local/share")))
-                .map(|data| Trash::Freedesktop(data.join("Trash")))
-        };
+        let trash = home.as_ref().map(|h| h.join(".Trash"));
         Self {
             claude: orion_core::paths::claude_config_dir(),
             home,
@@ -93,68 +74,19 @@ pub fn with_places<T>(places: Places, f: impl FnOnce() -> T) -> T {
 /// Trash does not hold yet, and return where it landed. A rename, never a
 /// copy and a delete: across volumes it fails, and the folder stays where
 /// it was.
-pub fn move_folder_to_trash(dir: &Path, trash: &Trash) -> std::io::Result<PathBuf> {
+pub fn move_folder_to_trash(dir: &Path, trash: &Path) -> std::io::Result<PathBuf> {
     let name = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no folder name"))?;
-    // macOS keeps the folder itself; freedesktop.org keeps it in `files/`
-    // with its record in `info/`, and a name is free only in both.
-    let (files, info) = match trash {
-        Trash::Mac(files) => (files.clone(), None),
-        Trash::Freedesktop(root) => (root.join("files"), Some(root.join("info"))),
-    };
-    let record = |candidate: &str| {
-        info.as_ref()
-            .map(|info| info.join(format!("{candidate}.trashinfo")))
-    };
-    let taken = |path: &Path| std::fs::symlink_metadata(path).is_ok();
     let candidate = std::iter::once(name.clone())
         .chain((2..).map(|n| format!("{name} {n}")))
-        .find(|candidate| {
-            !taken(&files.join(candidate)) && !record(candidate).is_some_and(|r| taken(&r))
-        })
+        .find(|candidate| std::fs::symlink_metadata(trash.join(candidate)).is_err())
         .expect("an unbounded range always finds a free name");
-    std::fs::create_dir_all(&files)?;
-    let landed = files.join(&candidate);
-    let Some(record) = record(&candidate) else {
-        std::fs::rename(dir, &landed)?;
-        return Ok(landed);
-    };
-    // The spec's order: claim the name with the record, then move — and
-    // take the record back out when the move fails.
-    std::fs::create_dir_all(record.parent().unwrap_or(&files))?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&record)?;
-    let moved = std::io::Write::write_all(&mut file, trash_info(dir).as_bytes())
-        .and_then(|()| std::fs::rename(dir, &landed));
-    if let Err(e) = moved {
-        let _ = std::fs::remove_file(&record);
-        return Err(e);
-    }
+    std::fs::create_dir_all(trash)?;
+    let landed = trash.join(&candidate);
+    std::fs::rename(dir, &landed)?;
     Ok(landed)
-}
-
-/// A freedesktop.org `.trashinfo` for `path`: where it came from, percent-
-/// encoded, and when it went — in UTC, where the spec asks for local
-/// time, so a file manager's "deleted" column is off by the zone at most.
-fn trash_info(path: &Path) -> String {
-    use std::os::unix::ffi::OsStrExt;
-    let mut encoded = String::new();
-    for &byte in path.as_os_str().as_bytes() {
-        if byte.is_ascii_alphanumeric() || b"/-_.~".contains(&byte) {
-            encoded.push(byte as char);
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    let when = orion_core::crashlog::format_timestamp(orion_core::clock::now_secs());
-    format!(
-        "[Trash Info]\nPath={encoded}\nDeletionDate={}\n",
-        when.trim_end_matches('Z')
-    )
 }
 
 /// `path` with the home directory spelled `~`.
@@ -180,7 +112,7 @@ mod tests {
     #[test]
     fn the_trash_takes_the_folder_under_a_free_name() {
         let home = tempfile::tempdir().unwrap();
-        let trash = Trash::Mac(home.path().join(".Trash"));
+        let trash = home.path().join(".Trash");
         let first = folder(home.path(), "notes", "kept");
         let landed = move_folder_to_trash(&first, &trash).unwrap();
         assert_eq!(landed, home.path().join(".Trash/notes"));
@@ -200,26 +132,6 @@ mod tests {
             home.path().join(".Trash/notes/notes.md").exists(),
             "the first one is untouched"
         );
-    }
-
-    #[test]
-    fn the_freedesktop_trash_records_where_each_folder_came_from() {
-        let home = tempfile::tempdir().unwrap();
-        let trash = Trash::Freedesktop(home.path().join("Trash"));
-        let dir = folder(&home.path().join("my things"), "notes", "x");
-        let landed = move_folder_to_trash(&dir, &trash).unwrap();
-        assert_eq!(landed, home.path().join("Trash/files/notes"));
-        let info = std::fs::read_to_string(home.path().join("Trash/info/notes.trashinfo")).unwrap();
-        assert!(info.starts_with("[Trash Info]\nPath="), "{info}");
-        assert!(info.contains("/my%20things/notes\n"), "{info}");
-        assert!(info.contains("DeletionDate="), "{info}");
-
-        let again = folder(&home.path().join("my things"), "notes", "y");
-        assert_eq!(
-            move_folder_to_trash(&again, &trash).unwrap(),
-            home.path().join("Trash/files/notes 2")
-        );
-        assert!(home.path().join("Trash/info/notes 2.trashinfo").exists());
     }
 
     #[test]

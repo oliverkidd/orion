@@ -1,8 +1,6 @@
 //! `install.sh`'s dependency step, run for real against a PATH of stubs: a
 //! `brew` that writes down what it was asked and "installs" a formula by
-//! dropping a stub of its program beside itself, a `curl` that serves a
-//! stand-in for fresh's or micro's quick-install script, a `git` that is
-//! just there.
+//! dropping a stub of its program beside itself, a `git` that is just there.
 //! The PATH holds nothing else, so no real installer is ever reached and
 //! nothing is downloaded. The script's functions run without its `main` —
 //! the last line, which would fetch orion itself.
@@ -21,7 +19,7 @@ fn functions() -> String {
 }
 
 /// The shells the script is held to: POSIX sh, and dash where there is one
-/// — the strictest sh a Linux box is likely to run it with.
+/// — the strictest sh there is.
 fn shells() -> Vec<&'static str> {
     ["/bin/sh", "/bin/dash"]
         .into_iter()
@@ -94,20 +92,6 @@ fi"#,
         )
     }
 
-    /// curl: written down, and serving a script that does what the real
-    /// one does — fresh's links `fresh` into `$FRESH_BIN_DIR`, micro's
-    /// leaves `micro` in the folder it runs in.
-    fn curl(&self) -> &Self {
-        self.stub(
-            "curl",
-            r##"echo "curl $*" >> "$LOG"
-case "$*" in
-*sinelaw/fresh*) echo 'printf "#!/bin/sh\n" > "$FRESH_BIN_DIR/fresh"; chmod +x "$FRESH_BIN_DIR/fresh"' ;;
-*) echo 'printf "#!/bin/sh\n" > micro; chmod +x micro' ;;
-esac"##,
-        )
-    }
-
     /// `uname` saying this is `system`, in place of the machine's.
     fn system(&self, system: &str) -> &Self {
         std::fs::remove_file(self.path("bin").join("uname")).unwrap();
@@ -162,24 +146,23 @@ fn the_script_is_posix_sh() {
 #[test]
 fn nothing_is_said_or_run_when_everything_is_here() {
     for shell in shells() {
-        for editor in ["fresh", "micro", "edit"] {
-            let sandbox = Sandbox::new();
-            sandbox.programs(&["git", "gh", editor]).brew().curl();
-            let out = sandbox.run(shell, "ensure_deps", &[]);
-            assert!(out.status.success(), "{shell}: {}", said(&out));
-            assert_eq!(said(&out), "", "{shell} with {editor}");
-            assert_eq!(sandbox.log(), "", "{shell} with {editor}");
-        }
+        let sandbox = Sandbox::new();
+        sandbox.programs(&["git", "gh", "fresh"]).brew();
+        let out = sandbox.run(shell, "ensure_deps", &[]);
+        assert!(out.status.success(), "{shell}: {}", said(&out));
+        assert_eq!(said(&out), "", "{shell}");
+        assert_eq!(sandbox.log(), "", "{shell}");
     }
 }
 
-/// No editor of the three: fresh from Homebrew, and gh with it.
+/// No fresh — whatever other editor is here: fresh from Homebrew, and gh
+/// with it.
 #[test]
 fn fresh_and_gh_come_from_homebrew() {
     const LOG: &str = "brew install fresh-editor\nbrew install gh\n";
     for shell in shells() {
         let sandbox = Sandbox::new();
-        sandbox.programs(&["git", "vim"]).brew().curl();
+        sandbox.programs(&["git", "vim", "micro"]).brew();
         let out = sandbox.run(shell, "ensure_deps", &[]);
         assert!(out.status.success(), "{shell}: {}", said(&out));
         assert_eq!(sandbox.log(), LOG);
@@ -198,39 +181,44 @@ fn fresh_and_gh_come_from_homebrew() {
     }
 }
 
-/// No Homebrew on Linux: fresh by its own quick-install script, linked
-/// into the install dir; gh pointed at, not installed.
+/// orion runs on macOS only: anywhere else the install stops at once.
 #[test]
-fn without_homebrew_on_linux_fresh_lands_in_the_install_dir() {
+fn only_a_mac_is_installed_on() {
+    let sandbox = Sandbox::new();
+    sandbox.system("Linux");
+    let out = sandbox.run("/bin/sh", "need_macos; echo carried-on", &[]);
+    assert!(!out.status.success());
+    assert!(
+        said(&out).contains("orion runs on macOS only"),
+        "{}",
+        said(&out)
+    );
+    let sandbox = Sandbox::new();
+    sandbox.system("Darwin");
+    let out = sandbox.run("/bin/sh", "need_macos; echo carried-on", &[]);
+    assert_eq!(said(&out), "carried-on\n");
+}
+
+/// No Homebrew: fresh's install page and gh's pointed at, nothing
+/// installed.
+#[test]
+fn without_homebrew_fresh_and_gh_are_pointed_at() {
     for shell in shells() {
         let sandbox = Sandbox::new();
-        sandbox.programs(&["git"]).curl().system("Linux");
+        sandbox.programs(&["git"]).system("Darwin");
         let out = sandbox.run(shell, "ensure_deps", &[]);
         assert!(out.status.success(), "{shell}: {}", said(&out));
-        assert_eq!(
-            sandbox.log(),
-            "curl -fsSL https://raw.githubusercontent.com/sinelaw/fresh/refs/heads/master/scripts/install.sh\n"
+        assert_eq!(sandbox.log(), "");
+        assert!(
+            said(&out).contains("https://github.com/sinelaw/fresh#installation"),
+            "{}",
+            said(&out)
         );
-        assert!(sandbox.path("install/fresh").exists(), "{}", said(&out));
         assert!(
             said(&out).contains("https://github.com/cli/cli#installation"),
             "{}",
             said(&out)
         );
-    }
-}
-
-/// No Homebrew on a Mac, where fresh's script would want it: micro by its
-/// quick-install script, into the install dir.
-#[test]
-fn without_homebrew_on_a_mac_micro_lands_in_the_install_dir() {
-    for shell in shells() {
-        let sandbox = Sandbox::new();
-        sandbox.programs(&["git"]).curl().system("Darwin");
-        let out = sandbox.run(shell, "ensure_deps", &[]);
-        assert!(out.status.success(), "{shell}: {}", said(&out));
-        assert_eq!(sandbox.log(), "curl -fsSL https://getmic.ro\n");
-        assert!(sandbox.path("install/micro").exists(), "{}", said(&out));
     }
 }
 
@@ -256,7 +244,7 @@ fn a_failed_editor_install_warns_and_carries_on() {
 fn git_is_required() {
     for shell in shells() {
         let sandbox = Sandbox::new();
-        sandbox.programs(&["micro", "gh"]).brew();
+        sandbox.programs(&["fresh", "gh"]).brew();
         let out = sandbox.run(shell, "ensure_deps", &[]);
         assert!(!out.status.success(), "{shell}");
         assert!(said(&out).contains("orion needs git"), "{}", said(&out));
@@ -289,8 +277,8 @@ fn the_step_can_be_skipped() {
 }
 
 /// A first install at a Mac with Ghostty opens orion as its app, whatever
-/// terminal the installer ran in; an update, ssh, tmux, `--no-launch` and
-/// Linux leave it to `orion` typed by hand.
+/// terminal the installer ran in; an update, ssh, tmux and `--no-launch`
+/// leave it to `orion` typed by hand.
 #[test]
 fn a_first_install_at_a_mac_opens_orion_as_its_app() {
     // Ghostty is looked for in /Applications, which no sandbox reaches.
@@ -319,7 +307,6 @@ fn a_first_install_at_a_mac_opens_orion_as_its_app() {
         );
     }
     assert_eq!(opened("Darwin", &open("1"), &[]), "", "an update");
-    assert_eq!(opened("Linux", &open(""), &[]), "", "not a Mac");
     for skip in [
         ("SSH_TTY", "/dev/ttys001"),
         ("TMUX", "/tmp/tmux-501/default,1,0"),
@@ -333,7 +320,7 @@ fn a_first_install_at_a_mac_opens_orion_as_its_app() {
 /// A Mac without Ghostty gets it for Orion.app: Homebrew's cask where
 /// there is a Homebrew, else the newest disk image Ghostty's own feed
 /// lists, copied in only when the app inside is signed by Ghostty's team.
-/// Over ssh, in tmux and on Linux nothing is fetched.
+/// Over ssh and in tmux nothing is fetched.
 #[test]
 fn a_mac_without_ghostty_gets_it_from_homebrew_or_its_own_download() {
     const MISSING: &str = "have_ghostty() { return 1; }; ensure_ghostty";
@@ -405,14 +392,10 @@ if [ "$1" = attach ]; then mkdir -p "$6/Ghostty.app"; fi"#,
         "{said_bad}"
     );
 
-    for (system, env) in [
-        ("Darwin", ("SSH_TTY", "/dev/ttys001")),
-        ("Darwin", ("TMUX", "x")),
-        ("Linux", ("X", "")),
-    ] {
+    for env in [("SSH_TTY", "/dev/ttys001"), ("TMUX", "x")] {
         let sandbox = Sandbox::new();
-        sandbox.system(system).brew();
+        sandbox.system("Darwin").brew();
         sandbox.run("/bin/sh", MISSING, &[env]);
-        assert_eq!(sandbox.log(), "", "{system} {env:?}");
+        assert_eq!(sandbox.log(), "", "{env:?}");
     }
 }

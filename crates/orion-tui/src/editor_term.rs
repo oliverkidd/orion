@@ -1,5 +1,5 @@
-//! Embedded editor modal: a local PTY child (micro, Edit, fresh, vim, …)
-//! rendered inside the TUI.
+//! Embedded editor modal: a local PTY child (fresh, or the command
+//! `ORION_EDITOR` names) rendered inside the TUI.
 //!
 //! Unlike agent/terminal sessions (daemon-owned PTYs reached over IPC), the
 //! editor is spawned in-process: it's a short-lived affordance of the
@@ -7,9 +7,9 @@
 //! client. Output flows reader thread → mpsc → the main loop, which feeds
 //! the vt100 parser here (the daemon's `PtySession` shape, minus the ring
 //! buffer and broadcast) and answers the terminal queries in it the way
-//! the daemon does for a session (`orion_core::kitty`): Microsoft Edit
-//! waits on a DA1 reply and a cursor report before it draws anything, and
-//! fresh pushes kitty keyboard flags its keys are then encoded for.
+//! the daemon does for a session (`orion_core::kitty`): an editor may wait
+//! on a DA1 reply and a cursor report before it draws anything, and fresh
+//! pushes kitty keyboard flags its keys are then encoded for.
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use ratatui::layout::Rect;
@@ -20,12 +20,12 @@ use tokio::sync::mpsc::UnboundedSender;
 /// Reader-thread → main-loop messages. `generation` stamps which spawn they
 /// belong to, so bytes from a closed editor can't bleed into a new one.
 #[derive(Debug)]
-pub enum VimEvent {
+pub enum EditorEvent {
     Output { generation: u64, data: Vec<u8> },
     Exited { generation: u64 },
 }
 
-pub struct VimTerm {
+pub struct EditorTerm {
     pub generation: u64,
     pub parser: vt100::Parser,
     /// Size the parser (and PTY) currently uses.
@@ -42,14 +42,13 @@ pub struct VimTerm {
     /// or the FILE TABS' body — instead of the centered modal (set by that
     /// overlay's Enter).
     pub embedded: bool,
-    /// Inner rect from the last draw; `sync_vim_size` resizes to it.
+    /// Inner rect from the last draw; `sync_editor_size` resizes to it.
     pub area: Rect,
     /// Which editor runs here, for its keys hint (`Kind::Other` for a bare
     /// command).
     pub kind: crate::editor::Kind,
-    /// The editor quits on Ctrl+Q itself, asking to save first (micro,
-    /// Edit, fresh), so Ctrl+Q goes to it rather than force-closing the
-    /// modal.
+    /// The editor quits on Ctrl+Q itself, asking to save first (fresh), so
+    /// Ctrl+Q goes to it rather than force-closing the modal.
     pub quits_itself: bool,
     /// The modal runs `claude auth …` for a CLAUDE ACCOUNT rather than an
     /// editor: there is no file to hand to an app, and its exit re-reads
@@ -65,10 +64,6 @@ pub struct VimTerm {
     /// Terminal queries in the output, answered here, and the kitty
     /// keyboard flags the child has pushed.
     queries: orion_core::kitty::KittyScanner,
-    /// Keys to type once the editor has drawn ([`Kind::startup_keys`]).
-    ///
-    /// [`Kind::startup_keys`]: crate::editor::Kind::startup_keys
-    startup_keys: Option<&'static [u8]>,
     /// A mouse press inside the editor is held: its drag and release are
     /// the editor's wherever the pointer goes.
     pub mouse_held: bool,
@@ -76,18 +71,14 @@ pub struct VimTerm {
     /// a match since: the next Enter steps too, where the editor's own
     /// would be a new line (`Kind::find_step`).
     pub find_stepping: bool,
-    /// Output chunks seen, and whether one asked something that was
-    /// answered: the first quiet chunk after that is its first screen.
-    chunks: u64,
-    answered: bool,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
 }
 
-impl VimTerm {
+impl EditorTerm {
     /// Spawn `editor` on `file` at `line` in the checkout, told the line
-    /// its own way — micro and fresh off orion's own config (`editor`).
+    /// its own way — fresh off orion's own config (`editor`).
     /// `Err` is a user-facing flash message.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_editor(
@@ -98,7 +89,7 @@ impl VimTerm {
         cols: u16,
         rows: u16,
         generation: u64,
-        tx: UnboundedSender<VimEvent>,
+        tx: UnboundedSender<EditorEvent>,
     ) -> Result<Self, String> {
         let title = format!("{file}:{line}");
         let kind = crate::editor::Kind::of(editor);
@@ -122,7 +113,6 @@ impl VimTerm {
         )?;
         term.kind = kind;
         term.quits_itself = kind.quits_on_ctrl_q();
-        term.startup_keys = kind.startup_keys();
         term.file = file.to_string();
         term.line = line;
         Ok(term)
@@ -138,7 +128,7 @@ impl VimTerm {
         cols: u16,
         rows: u16,
         generation: u64,
-        tx: UnboundedSender<VimEvent>,
+        tx: UnboundedSender<EditorEvent>,
     ) -> Result<Self, String> {
         Self::spawn_cmd_env(program, args, &[], cwd, title, cols, rows, generation, tx)
     }
@@ -156,7 +146,7 @@ impl VimTerm {
         cols: u16,
         rows: u16,
         generation: u64,
-        tx: UnboundedSender<VimEvent>,
+        tx: UnboundedSender<EditorEvent>,
     ) -> Result<Self, String> {
         let cols = cols.max(2);
         let rows = rows.max(2);
@@ -203,14 +193,14 @@ impl VimTerm {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let data = buf[..n].to_vec();
-                        if tx.send(VimEvent::Output { generation, data }).is_err() {
+                        if tx.send(EditorEvent::Output { generation, data }).is_err() {
                             break; // main loop gone
                         }
                     }
                 }
             }
             let _ = child.wait(); // reap
-            let _ = tx.send(VimEvent::Exited { generation });
+            let _ = tx.send(EditorEvent::Exited { generation });
         });
 
         Ok(Self {
@@ -230,11 +220,8 @@ impl VimTerm {
             install: None,
             finished: None,
             queries: orion_core::kitty::KittyScanner::new(),
-            startup_keys: None,
             mouse_held: false,
             find_stepping: false,
-            chunks: 0,
-            answered: false,
             master: pair.master,
             writer,
             killer,
@@ -243,12 +230,10 @@ impl VimTerm {
 
     /// Feed reader-thread output into the emulator, answering the terminal
     /// queries in it — a cursor report off the screen as it stood just
-    /// past its query — and typing the startup keys once the editor has
-    /// drawn.
+    /// past its query.
     pub fn process(&mut self, data: &[u8]) {
         use orion_core::kitty::Reply;
         let actions = self.queries.feed(data);
-        let asked = !actions.replies.is_empty();
         let mut reply = Vec::new();
         let mut fed = 0;
         for answer in actions.replies {
@@ -265,14 +250,6 @@ impl VimTerm {
         self.parser.process(&data[fed..]);
         if !reply.is_empty() {
             self.input(&reply);
-        }
-        self.chunks += 1;
-        if asked {
-            self.answered = true;
-        } else if self.answered || self.chunks > 1 {
-            if let Some(keys) = self.startup_keys.take() {
-                self.input(keys);
-            }
         }
     }
 
@@ -342,13 +319,13 @@ mod tests {
     use std::time::Duration;
 
     async fn recv_until(
-        rx: &mut tokio::sync::mpsc::UnboundedReceiver<VimEvent>,
-        term: &mut VimTerm,
-        mut done: impl FnMut(&VimTerm, &VimEvent) -> bool,
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<EditorEvent>,
+        term: &mut EditorTerm,
+        mut done: impl FnMut(&EditorTerm, &EditorEvent) -> bool,
     ) {
         let ok = tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(ev) = rx.recv().await {
-                if let VimEvent::Output { data, .. } = &ev {
+                if let EditorEvent::Output { data, .. } = &ev {
                     term.process(data);
                 }
                 if done(term, &ev) {
@@ -369,7 +346,7 @@ mod tests {
     async fn output_reaches_parser_and_kill_exits() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut term = VimTerm::spawn_cmd(
+        let mut term = EditorTerm::spawn_cmd(
             "/bin/sh",
             &["-c".into(), "printf 'VIM_MODAL_TEST'; sleep 30".into()],
             dir.path(),
@@ -388,7 +365,7 @@ mod tests {
 
         term.kill();
         recv_until(&mut rx, &mut term, |_, ev| {
-            matches!(ev, VimEvent::Exited { generation: 1 })
+            matches!(ev, EditorEvent::Exited { generation: 1 })
         })
         .await;
     }
@@ -397,7 +374,7 @@ mod tests {
     async fn env_reaches_the_child() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut term = VimTerm::spawn_cmd_env(
+        let mut term = EditorTerm::spawn_cmd_env(
             "/bin/sh",
             &[
                 "-c".into(),
@@ -423,7 +400,7 @@ mod tests {
     async fn input_reaches_the_child() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut term = VimTerm::spawn_cmd(
+        let mut term = EditorTerm::spawn_cmd(
             "/bin/sh",
             &["-c".into(), "read line; printf \"GOT:$line\"".into()],
             dir.path(),
@@ -443,14 +420,14 @@ mod tests {
         // The script ends after one line: the exit must be reported with the
         // spawn's generation stamp.
         recv_until(&mut rx, &mut term, |_, ev| {
-            matches!(ev, VimEvent::Exited { generation: 7 })
+            matches!(ev, EditorEvent::Exited { generation: 7 })
         })
         .await;
     }
 
     /// Terminal queries are answered from the modal's own screen: DA1, a
     /// kitty flags query, and a cursor report of where the child's output
-    /// had put the cursor when it asked — what Microsoft Edit waits on
+    /// had put the cursor when it asked — what an editor may wait on
     /// before it draws. Pushed kitty flags are tracked for the keys.
     #[tokio::test]
     async fn terminal_queries_are_answered_from_the_modals_screen() {
@@ -458,7 +435,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let script = "stty raw -echo; printf 'abc\\033[6n\\033[c\\033[>5u'; \
                       dd bs=1 count=11 2>/dev/null | od -An -c | tr -d ' \\n'; sleep 30";
-        let mut term = VimTerm::spawn_cmd(
+        let mut term = EditorTerm::spawn_cmd(
             "/bin/sh",
             &["-c".into(), script.into()],
             dir.path(),
@@ -479,73 +456,11 @@ mod tests {
         term.kill();
     }
 
-    /// Microsoft Edit's word wrap goes on with the keys it is typed once
-    /// its first screen is up: after the queries it waited on, never
-    /// mixed into their answers.
-    #[tokio::test]
-    async fn startup_keys_follow_the_first_screen() {
-        let dir = tempfile::tempdir().unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let script = "stty raw -echo; printf '\\033[c'; dd bs=1 count=5 2>/dev/null >/dev/null; \
-                      printf 'SCREEN'; dd bs=1 count=2 2>/dev/null | od -An -c | tr -d ' \\n'; \
-                      sleep 30";
-        let mut term = VimTerm::spawn_cmd(
-            "/bin/sh",
-            &["-c".into(), script.into()],
-            dir.path(),
-            "test".into(),
-            80,
-            24,
-            4,
-            tx,
-        )
-        .unwrap();
-        term.startup_keys = crate::editor::Kind::Edit.startup_keys();
-        recv_until(&mut rx, &mut term, |t, _| {
-            t.parser.screen().contents().contains("SCREEN033z")
-        })
-        .await;
-        term.kill();
-    }
-
-    /// The real micro, where installed: it opens on the asked line off
-    /// orion's config dir, and quits on its own Ctrl+Q.
-    #[tokio::test]
-    async fn micro_opens_on_the_line_and_quits_on_ctrl_q() {
-        if !crate::config::program_installed("micro") {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
-        crate::editor::ensure_config("micro", dir.path()).unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut term = VimTerm::spawn_cmd(
-            "micro",
-            &crate::editor::editor_args("micro", dir.path(), "a.txt", 3),
-            dir.path(),
-            "test".into(),
-            80,
-            24,
-            3,
-            tx,
-        )
-        .unwrap();
-        recv_until(&mut rx, &mut term, |t, _| {
-            t.parser.screen().contents().contains("(3,1)")
-        })
-        .await;
-        term.input(&[0x11]);
-        recv_until(&mut rx, &mut term, |_, ev| {
-            matches!(ev, VimEvent::Exited { generation: 3 })
-        })
-        .await;
-    }
-
     #[tokio::test]
     async fn spawn_failure_is_a_message_not_a_panic() {
         let dir = tempfile::tempdir().unwrap();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let err = VimTerm::spawn_cmd(
+        let err = EditorTerm::spawn_cmd(
             "/nonexistent-editor-binary",
             &[],
             dir.path(),

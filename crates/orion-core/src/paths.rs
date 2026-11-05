@@ -1,8 +1,8 @@
 use crate::env;
 use std::path::{Path, PathBuf};
 
-/// The settings files' names in the data dir. Their loaders, the SETTINGS
-/// BUNDLE and `orion config path` all spell them from here.
+/// The settings files' names in the data dir. Their loaders and
+/// `orion config path` spell them from here.
 pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const CONFIG_LOCAL_FILE_NAME: &str = "config.local.json";
 pub const PRESETS_FILE_NAME: &str = "agent_presets.json";
@@ -49,8 +49,8 @@ pub fn buildstamp_path() -> PathBuf {
     runtime_dir().join("daemon.build")
 }
 
-/// The platform's per-user dirs for this app (`~/Library/Application
-/// Support/dev.orion.orion` on macOS, `~/.local/share/orion` on Linux).
+/// The per-user dirs for this app (`~/Library/Application
+/// Support/dev.orion.orion`).
 fn project_dirs() -> Option<directories::ProjectDirs> {
     directories::ProjectDirs::from("dev", "orion", "orion")
 }
@@ -68,8 +68,8 @@ pub fn db_path() -> PathBuf {
     data_dir().join("orion.db")
 }
 
-/// User settings file (JSON) — the portable layer, which backups and
-/// `orion ssh` carry. Lives beside the DB so `ORION_DATA_DIR` isolates it
+/// User settings file (JSON) — the portable layer, which a backup copies.
+/// Lives beside the DB so `ORION_DATA_DIR` isolates it
 /// for tests and parallel instances too; `ORION_CONFIG_FILE` moves this one
 /// file alone (a leading `~/` is expanded, since a quoted value never is).
 pub fn config_path() -> PathBuf {
@@ -82,9 +82,8 @@ pub fn config_path() -> PathBuf {
     }
 }
 
-/// This machine's settings, layered over [`config_path`] key by key: never
-/// exported, forwarded or overwritten by an import. Stays in the data dir
-/// when `ORION_CONFIG_FILE` moves the portable file.
+/// This machine's settings, layered over [`config_path`] key by key. Stays
+/// in the data dir when `ORION_CONFIG_FILE` moves the portable file.
 pub fn config_local_path() -> PathBuf {
     data_dir().join(CONFIG_LOCAL_FILE_NAME)
 }

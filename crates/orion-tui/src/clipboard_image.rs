@@ -111,15 +111,7 @@ fn read_png(_scratch: &Path) -> Result<Option<Vec<u8>>, String> {
 
 #[cfg(not(test))]
 fn read_png(scratch: &Path) -> Result<Option<Vec<u8>>, String> {
-    #[cfg(target_os = "macos")]
-    {
-        mac::read_png(scratch)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = scratch;
-        linux::read_png()
-    }
+    mac::read_png(scratch)
 }
 
 /// `bytes` when they are a PNG, else the reason they are not used.
@@ -151,7 +143,7 @@ fn applescript_data(out: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(not(test))]
 mod mac {
     use super::{applescript_data, png_or_err};
     use std::path::Path;
@@ -227,34 +219,6 @@ mod mac {
         let _ = std::fs::remove_file(&from);
         let _ = std::fs::remove_file(&to);
         png_or_err(converted?, "sips").map(|png| png.unwrap_or_default())
-    }
-}
-
-#[cfg(all(not(target_os = "macos"), not(test)))]
-mod linux {
-    use super::png_or_err;
-    use std::process::{Command, Stdio};
-
-    /// `wl-paste` on Wayland, `xclip` on X11, each asked for `image/png`.
-    pub(super) fn read_png() -> Result<Option<Vec<u8>>, String> {
-        let (program, args): (&str, &[&str]) = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            ("wl-paste", &["--no-newline", "--type", "image/png"])
-        } else {
-            (
-                "xclip",
-                &["-selection", "clipboard", "-t", "image/png", "-o"],
-            )
-        };
-        let out = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|err| format!("{program}: {err}"))?;
-        if !out.status.success() || out.stdout.is_empty() {
-            return Ok(None);
-        }
-        png_or_err(out.stdout, program)
     }
 }
 

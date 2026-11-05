@@ -24,49 +24,6 @@ use std::path::{Path, PathBuf};
 /// is reaped).
 pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1h"];
 
-/// Editor commands the **File editor** row cycles through, the VS
-/// Code-style ones first (`editor::EDITORS`); each is told the file and
-/// line its own way (`editor::editor_args`). As with models, hand-edited
-/// configs can name any command the list doesn't.
-pub const EDITORS: &[&str] = crate::editor::EDITORS;
-
-/// The **Outside terminal** choices (Settings → Tools), in the order the
-/// row cycles them: the [`OutsideTerminal`] apps by name, the default first.
-pub const OUTSIDE_TERMINALS: &[&str] = &[
-    OutsideTerminal::Ghostty.as_str(),
-    OutsideTerminal::Terminal.as_str(),
-];
-
-/// The app ⇧T opens a terminal in, outside orion: a Ghostty tab, or a
-/// window of macOS's own Terminal.app.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OutsideTerminal {
-    #[default]
-    Ghostty,
-    Terminal,
-}
-
-impl OutsideTerminal {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            OutsideTerminal::Ghostty => "ghostty",
-            OutsideTerminal::Terminal => "terminal",
-        }
-    }
-
-    /// A stored word back to its app; anything unknown is the default.
-    pub fn parse(word: &str) -> Self {
-        if word
-            .trim()
-            .eq_ignore_ascii_case(OutsideTerminal::Terminal.as_str())
-        {
-            OutsideTerminal::Terminal
-        } else {
-            OutsideTerminal::Ghostty
-        }
-    }
-}
-
 /// The **Start on** choices (Settings → Review): the DIFF VIEWER panel
 /// that has the keys when it opens, the default first.
 pub const DIFF_STARTS: &[&str] = &["commits", START_ON_FILES, START_ON_DIFF];
@@ -477,11 +434,8 @@ pub enum SettingKind {
     WorktreeBaseBranch,
     LinkEnvFiles,
     WorktreeContainers,
-    OutsideTerminal,
-    Editor,
     OutsideEditor,
     CloseFinderOnOpen,
-    SshSyncConfig,
     /// The Tools tab's action row: Enter opens ORION SETUP, every step.
     RunSetup,
     /// The Tools tab's read-only git row: installed or not, `i` installs.
@@ -646,12 +600,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 hint: "Opening a file closes the file finder behind the editor, so quitting the editor lands on the grid",
                 group: "",
             },
-            SettingSpec {
-                kind: SettingKind::SshSyncConfig,
-                label: "Sync settings over ssh",
-                hint: "orion ssh / tunnel carry config.json and presets to the remote (config.local.json stays)",
-                group: "",
-            },
         ]),
     },
     SettingsTab {
@@ -660,25 +608,13 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::RunSetup,
                 label: "Setup",
-                hint: "Enter opens Orion setup again, every step: agents and their CLIs, Claude accounts, editors, worktrees, Linear and the outside terminal",
+                hint: "Enter opens Orion setup again, every step: agents and their CLIs, Claude accounts, the Open in app editor, worktrees, Linear and autofix",
                 group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::OutsideTerminal,
-                label: "Outside terminal",
-                hint: "What {open_outside} → Terminal in the checkout opens in the selected worktree: a Ghostty tab, or a Terminal.app window (Terminal.app when Ghostty isn't installed)",
-                group: "Terminal",
-            },
-            SettingSpec {
-                kind: SettingKind::Editor,
-                label: "File editor",
-                hint: "Editor every file opens in — {find_file}, {grep}, {tree_browser} and ⌥click (ORION_EDITOR overrides)",
-                group: "Editors",
             },
             SettingSpec {
                 kind: SettingKind::OutsideEditor,
                 label: "Open in app",
-                hint: "What {open_outside} opens a file or checkout in; auto is the first installed of Cursor, VS Code, Sublime Text, Zed",
+                hint: "What {open_outside} opens a file or checkout in; auto is the first installed of Cursor, VS Code, Sublime Text",
                 group: "Editors",
             },
             SettingSpec {
@@ -1075,15 +1011,10 @@ pub fn hint_at(tab: usize, index: usize) -> String {
     }
 }
 
-/// A value row's hint — led, on the two rows that pick a program, by what
-/// is installed on this machine.
+/// A value row's hint — led, on the row that picks an app, by what is
+/// installed on this machine.
 fn setting_hint(spec: &SettingSpec) -> String {
     let installed = match spec.kind {
-        SettingKind::Editor => EDITORS
-            .iter()
-            .copied()
-            .filter(|editor| program_installed(editor))
-            .collect::<Vec<_>>(),
         SettingKind::OutsideEditor => {
             crate::outside_editor::installed_names(&crate::outside_editor::Places::here())
         }
@@ -1254,32 +1185,10 @@ pub struct Config {
     /// `remove`, or `remove+volumes`. Owned by the daemon (`containers`);
     /// the TUI writes it so the settings overlay can cycle it.
     pub worktree_containers: String,
-    /// The app ⇧T opens a terminal in, outside orion: `ghostty` (the
-    /// default) or `terminal` (macOS's Terminal.app), which is also the
-    /// fallback when Ghostty.app isn't installed. See
-    /// [`Config::outside_terminal`].
-    pub outside_terminal: String,
-    /// RETIRED with Orion.app carrying its own key table. Through 1.6 the
-    /// **Ghostty keybinds** SETTING (Settings → Tools, on by default) had
-    /// orion keep a marked block in the user's Ghostty config unbinding
-    /// the ⌘ chords its keymap used. Nothing writes that block now — the
-    /// first launch takes it out (`ghostty_config`) — so no tab shows the
-    /// row and nothing reads it. Still loaded and written back as stored,
-    /// so an older build sharing the file keeps the choice its user made.
-    pub ghostty_keybinds: bool,
-    /// Editor command the file finder (`f`), tree browser (`b`),
-    /// find-in-files (`F`), ⌥click file links and a MARKDOWN PAGE's Enter
-    /// launch, each told the file and line its own way
-    /// (`editor::editor_args`). Any command passes through verbatim, so
-    /// hand-edited configs can name editors the picker doesn't list. The
-    /// `ORION_EDITOR` env var overrides it for the process, and one that
-    /// isn't installed falls back (`editor::resolve`); see
-    /// [`Config::editor_command`].
-    pub editor: String,
     /// OPEN IN APP: the GUI editor ⌘O hands a file or a checkout to —
     /// `auto` (the default: the first installed of Cursor, VS Code,
-    /// Sublime Text and Zed, else the system default), `cursor`,
-    /// `vscode`, `sublime`, `zed` or `default`. See `outside_editor`.
+    /// Sublime Text, else what macOS's `open` picks), `cursor`, `vscode`
+    /// or `sublime`. See `outside_editor`.
     pub outside_editor: String,
     /// Opening a file from the file finder (`f`) or find-in-files (`F`)
     /// closes that overlay as the editor modal opens, so quitting the
@@ -1289,11 +1198,6 @@ pub struct Config {
     /// touch the tree browser (`b`), whose editor is embedded in its own
     /// preview pane, or ⌥click, which has no overlay to close.
     pub close_finder_on_open: bool,
-    /// `orion ssh` and `orion tunnel` carry this machine's `config.json`
-    /// and AGENT PRESETS to the remote orion, which merges them into its
-    /// own on every connect — its `config.local.json` still wins there. On
-    /// by default; `--no-sync-config` leaves them behind for one connection.
-    pub ssh_sync_config: bool,
     /// LINEAR ACCOUNT: whose issues ⌘L lists. Empty — the default — is
     /// the owner of the project's `LINEAR_API_KEY`, which for a personal
     /// key is the user; an email names another member of the workspace,
@@ -1779,12 +1683,8 @@ impl Default for Config {
             worktree_base_branch: String::new(),
             link_env_files: true,
             worktree_containers: WorktreeContainers::Off.as_str().into(),
-            outside_terminal: OutsideTerminal::default().as_str().into(),
-            ghostty_keybinds: true,
-            editor: crate::editor::DEFAULT_EDITOR.into(),
             outside_editor: crate::outside_editor::AUTO.into(),
             close_finder_on_open: true,
-            ssh_sync_config: true,
             linear_assignee_email: String::new(),
             linear_auto_attach: true,
             onboarded: false,
@@ -2054,27 +1954,10 @@ impl Config {
         self.diff_ticked_word() == ONE_AT_A_TIME
     }
 
-    /// `outside_terminal` resolved to the app ⇧T opens.
-    pub fn outside_terminal(&self) -> OutsideTerminal {
-        OutsideTerminal::parse(&self.outside_terminal)
-    }
-
     /// The editor the file overlays launch: `ORION_EDITOR` when set,
-    /// otherwise the `editor` setting, otherwise fresh — and one that isn't
-    /// installed swapped for the first installed of fresh, micro, edit and
-    /// vim ([`Config::editor_resolved`] says when).
+    /// otherwise fresh ([`crate::editor::command`]).
     pub fn editor_command(&self) -> String {
-        self.editor_resolved().command
-    }
-
-    /// [`Config::editor_command`], with the editor it stands in for when
-    /// the one asked for isn't installed.
-    pub fn editor_resolved(&self) -> crate::editor::Resolved {
-        crate::editor::resolve(
-            orion_core::env::non_empty(orion_core::env::EDITOR).as_deref(),
-            &self.editor,
-            program_installed,
-        )
+        crate::editor::command()
     }
 
     /// The effective registry this config reads, every Claude account
@@ -3002,25 +2885,14 @@ impl Config {
             SettingKind::WorktreeContainers => WorktreeContainers::parse(&self.worktree_containers)
                 .as_str()
                 .into(),
-            SettingKind::OutsideTerminal => {
-                let chosen = self.outside_terminal().as_str();
-                if cfg!(target_os = "macos") && !crate::install::installed(crate::install::GHOSTTY)
-                {
-                    format!("{chosen} · Ghostty install…")
-                } else {
-                    chosen.into()
-                }
-            }
             SettingKind::RunSetup => "Enter opens it".into(),
             SettingKind::Git => installed_label("git"),
             SettingKind::Gh => installed_label("gh"),
-            SettingKind::Editor => editor_label(&self.editor, &self.editor_resolved()),
             SettingKind::OutsideEditor => crate::outside_editor::value_label(
                 &self.outside_editor,
                 &crate::outside_editor::Places::here(),
             ),
             SettingKind::CloseFinderOnOpen => on_off(self.close_finder_on_open).into(),
-            SettingKind::SshSyncConfig => on_off(self.ssh_sync_config).into(),
             SettingKind::LinearAccount => match self.linear_assignee_email.trim() {
                 "" => LINEAR_KEY_OWNER.into(),
                 email => email.to_string(),
@@ -3158,13 +3030,6 @@ impl Config {
                 self.worktree_containers =
                     cycle_choice(current.as_str(), WORKTREE_CONTAINERS, step).into();
             }
-            SettingKind::OutsideTerminal => {
-                self.outside_terminal =
-                    cycle_choice(self.outside_terminal().as_str(), OUTSIDE_TERMINALS, step).into();
-            }
-            SettingKind::Editor => {
-                self.editor = cycle_choice(&self.editor, EDITORS, step).into();
-            }
             SettingKind::OutsideEditor => {
                 let current = crate::outside_editor::Choice::parse(&self.outside_editor);
                 self.outside_editor =
@@ -3173,9 +3038,6 @@ impl Config {
             }
             SettingKind::CloseFinderOnOpen => {
                 self.close_finder_on_open = !self.close_finder_on_open;
-            }
-            SettingKind::SshSyncConfig => {
-                self.ssh_sync_config = !self.ssh_sync_config;
             }
             SettingKind::SessionIdleTimeout => {
                 self.session_idle_timeout =
@@ -3341,17 +3203,12 @@ pub enum Sound {
 impl Config {
     /// The sound to play for an unseen finish, or `None` for silence —
     /// which also stands down the `<session> finished` desktop
-    /// notification. A named system sound only resolves to its file on
-    /// macOS, on a local
-    /// terminal, and when the file exists — over ssh `afplay` would ring
-    /// the *remote* box, so the bell stands in there, as it does off
-    /// macOS and for a name the sound folder doesn't hold.
+    /// notification. A named system sound only resolves to its file on a
+    /// local terminal, and when the file exists — over ssh `afplay` would
+    /// ring the *remote* box, so the bell stands in there, as it does for a
+    /// name the sound folder doesn't hold.
     pub fn done_sound(&self) -> Option<Sound> {
-        resolve_sound(
-            &self.done_sound,
-            orion_core::host::is_remote_session(),
-            cfg!(target_os = "macos"),
-        )
+        resolve_sound(&self.done_sound, orion_core::host::is_remote_session())
     }
 
     /// The sound to play when a turn stops to ask the user or dies
@@ -3360,20 +3217,16 @@ impl Config {
     /// `feedback_sound` is the one switch for both. Same fallbacks as
     /// [`Config::done_sound`].
     pub fn feedback_sound(&self) -> Option<Sound> {
-        resolve_sound(
-            &self.feedback_sound,
-            orion_core::host::is_remote_session(),
-            cfg!(target_os = "macos"),
-        )
+        resolve_sound(&self.feedback_sound, orion_core::host::is_remote_session())
     }
 }
 
-fn resolve_sound(configured: &str, remote: bool, macos: bool) -> Option<Sound> {
+fn resolve_sound(configured: &str, remote: bool) -> Option<Sound> {
     let name = configured.trim();
     if name.is_empty() || name.eq_ignore_ascii_case("off") {
         return None;
     }
-    if name.eq_ignore_ascii_case("bell") || remote || !macos {
+    if name.eq_ignore_ascii_case("bell") || remote {
         return Some(Sound::Bell);
     }
     // A sound name is a bare file stem; anything else (a path, a dot) is
@@ -3386,20 +3239,6 @@ fn resolve_sound(configured: &str, remote: bool, macos: bool) -> Option<Sound> {
         Some(Sound::File(path))
     } else {
         Some(Sound::Bell)
-    }
-}
-
-/// The **File editor** row's value: the setting as stored — the default
-/// when blank — and, when that editor isn't installed, the one that opens
-/// instead.
-fn editor_label(stored: &str, resolved: &crate::editor::Resolved) -> String {
-    let shown = match stored.trim() {
-        "" => crate::editor::DEFAULT_EDITOR,
-        typed => typed,
-    };
-    match &resolved.missing {
-        Some(_) => format!("{shown} — not installed, opens {}", resolved.command),
-        None => shown.to_string(),
     }
 }
 
@@ -4030,26 +3869,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let local = dir.path().join("config.local.json");
-        std::fs::write(&path, r#"{"editor": "nvim", "theme": "ocean"}"#).unwrap();
-        std::fs::write(&local, r#"{"editor": "vim"}"#).unwrap();
+        std::fs::write(&path, r#"{"done_sound": "Ping", "theme": "ocean"}"#).unwrap();
+        std::fs::write(&local, r#"{"done_sound": "Pop"}"#).unwrap();
         let mut cfg = load_from(&path);
-        assert_eq!(cfg.editor, "vim");
+        assert_eq!(cfg.done_sound, "Pop");
         assert_eq!(cfg.theme, "ocean");
 
         cfg.theme = "forest".into();
         cfg.save_to(&path).unwrap();
         assert_eq!(read_json_file(&path)["theme"], "forest");
         assert_eq!(
-            read_json_file(&path)["editor"],
-            "nvim",
+            read_json_file(&path)["done_sound"],
+            "Ping",
             "the local value stays local"
         );
-        assert_eq!(read_json_file(&local), serde_json::json!({"editor": "vim"}));
+        assert_eq!(
+            read_json_file(&local),
+            serde_json::json!({"done_sound": "Pop"})
+        );
 
-        cfg.editor = "hx".into();
+        cfg.done_sound = "Hero".into();
         cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&local)["editor"], "hx");
-        assert_eq!(read_json_file(&path)["editor"], "nvim");
+        assert_eq!(read_json_file(&local)["done_sound"], "Hero");
+        assert_eq!(read_json_file(&path)["done_sound"], "Ping");
     }
 
     #[test]
@@ -4127,23 +3969,6 @@ mod tests {
             cfg.cycle(t, r, 1);
         }
         assert_eq!(serde_json::to_value(&cfg).unwrap(), before);
-    }
-
-    #[test]
-    fn ssh_sync_defaults_on_and_toggles_from_the_general_tab() {
-        assert!(Config::default().ssh_sync_config);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.ssh_sync_config);
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let mut cfg = Config::default();
-        let (t, r) = locate(SettingKind::SshSyncConfig).unwrap();
-        assert_eq!(SETTINGS_TABS[t].title, "General");
-        cfg.cycle(t, r, 0);
-        assert_eq!(cfg.value_label(SettingKind::SshSyncConfig), "off");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["ssh_sync_config"], false);
-        assert!(!load_from(&path).ssh_sync_config);
     }
 
     #[test]
@@ -4301,10 +4126,9 @@ mod tests {
             Some("Worktree base branch")
         );
         assert!(
-            !cfg.set_text(SettingKind::Editor, "nvim"),
+            !cfg.set_text(SettingKind::Theme, "ocean"),
             "a cycled row is not a typed one"
         );
-        assert_eq!(cfg.editor, "fresh");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -4354,28 +4178,19 @@ mod tests {
         assert_eq!(load_from(&path).done_sound, "Glass");
 
         // Silence, the bell, and every reason a name falls back to it.
-        assert_eq!(resolve_sound("off", false, true), None);
-        assert_eq!(resolve_sound("OFF", false, true), None);
-        assert_eq!(resolve_sound("", false, true), None);
-        assert_eq!(resolve_sound("bell", false, true), Some(Sound::Bell));
+        assert_eq!(resolve_sound("off", false), None);
+        assert_eq!(resolve_sound("OFF", false), None);
+        assert_eq!(resolve_sound("", false), None);
+        assert_eq!(resolve_sound("bell", false), Some(Sound::Bell));
         assert_eq!(
-            resolve_sound("Glass", true, true),
+            resolve_sound("Glass", true),
             Some(Sound::Bell),
             "over ssh afplay would ring the remote box"
         );
+        assert_eq!(resolve_sound("NoSuchSound", false), Some(Sound::Bell));
+        assert_eq!(resolve_sound("../etc/passwd", false), Some(Sound::Bell));
         assert_eq!(
-            resolve_sound("Glass", false, false),
-            Some(Sound::Bell),
-            "no system sounds off macOS"
-        );
-        assert_eq!(resolve_sound("NoSuchSound", false, true), Some(Sound::Bell));
-        assert_eq!(
-            resolve_sound("../etc/passwd", false, true),
-            Some(Sound::Bell)
-        );
-        #[cfg(target_os = "macos")]
-        assert_eq!(
-            resolve_sound("Glass", false, true),
+            resolve_sound("Glass", false),
             Some(Sound::File(Path::new(MACOS_SOUNDS_DIR).join("Glass.aiff")))
         );
     }
@@ -4419,13 +4234,11 @@ mod tests {
         assert_eq!(loaded.feedback_sound(), None, "off is silence for both");
         assert_eq!(loaded.done_sound, "Glass");
 
-        // The same resolution as the done sound: the bell over ssh and off
-        // macOS, silence for off.
-        assert_eq!(resolve_sound("Sosumi", true, true), Some(Sound::Bell));
-        assert_eq!(resolve_sound("Sosumi", false, false), Some(Sound::Bell));
-        #[cfg(target_os = "macos")]
+        // The same resolution as the done sound: the bell over ssh,
+        // silence for off.
+        assert_eq!(resolve_sound("Sosumi", true), Some(Sound::Bell));
         assert_eq!(
-            resolve_sound("Sosumi", false, true),
+            resolve_sound("Sosumi", false),
             Some(Sound::File(Path::new(MACOS_SOUNDS_DIR).join("Sosumi.aiff")))
         );
     }
@@ -4494,54 +4307,6 @@ mod tests {
         assert!(!cfg.show_all_worktrees);
     }
 
-    #[test]
-    fn editor_defaults_cycles_and_persists() {
-        let mut cfg = Config::default();
-        assert_eq!(cfg.editor, "fresh");
-        let (tab, row) = locate(SettingKind::Editor).unwrap();
-        // The VS Code-style editors come first.
-        for next in ["micro", "edit", "vim"] {
-            cfg.cycle(tab, row, 1);
-            assert_eq!(cfg.editor, next);
-        }
-        cfg.editor = "micro".into();
-        cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.editor, "fresh");
-        // Hand-edited commands the picker doesn't list cycle from the start.
-        cfg.editor = "kak".into();
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.editor, "micro");
-
-        cfg.editor = "nvim".into();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(load_from(&path).editor, "nvim");
-        // A config predating the key gets the default.
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.editor, "fresh");
-    }
-
-    /// The row says when the editor it names isn't installed, and which
-    /// one opens instead.
-    #[test]
-    fn the_editor_row_names_a_missing_editor_and_its_stand_in() {
-        let fine = crate::editor::Resolved {
-            command: "nvim".into(),
-            missing: None,
-        };
-        assert_eq!(editor_label("nvim", &fine), "nvim");
-        let fell = crate::editor::Resolved {
-            command: "edit".into(),
-            missing: Some("fresh".into()),
-        };
-        assert_eq!(editor_label("", &fell), "fresh — not installed, opens edit");
-        assert_eq!(
-            editor_label("fresh", &fell),
-            "fresh — not installed, opens edit"
-        );
-    }
-
     /// A `config.json` without a `harnesses` key — `{}`, or a file from
     /// before orion first rewrote it — starts Grok Build off, as a fresh
     /// config does. A map that is there is read as written: grok on when
@@ -4561,7 +4326,7 @@ mod tests {
             assert!(!grok(&missing), "no key reads as a fresh config");
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.json");
-            std::fs::write(&path, r#"{"claude_enabled": true, "editor": "vim"}"#).unwrap();
+            std::fs::write(&path, r#"{"claude_enabled": true, "theme": "ocean"}"#).unwrap();
             assert!(!grok(&load_from(&path)), "nor through the layered load");
 
             let on: Config =
@@ -4580,8 +4345,7 @@ mod tests {
         let mut cfg = Config::default();
         assert_eq!(cfg.outside_editor, "auto");
         let (tab, row) = locate(SettingKind::OutsideEditor).unwrap();
-        assert_eq!(locate(SettingKind::Editor).map(|(t, _)| t), Some(tab));
-        for next in ["cursor", "vscode", "sublime", "zed", "default", "auto"] {
+        for next in ["cursor", "vscode", "sublime", "auto"] {
             cfg.cycle(tab, row, 1);
             assert_eq!(cfg.outside_editor, next);
         }
@@ -6132,10 +5896,7 @@ mod tests {
     fn keybindings_round_trip_through_the_config_file() {
         let mut cfg = Config::default();
         assert!(cfg.keybindings.is_empty(), "no overrides out of the box");
-        let mut keymap = cfg.keymap();
-        let quit = crate::keymap::index_of(crate::keymap::Action::Quit).unwrap();
-        keymap.bind(quit, crate::keymap::KeyChord::parse("f9").unwrap(), false);
-        cfg.keybindings = keymap.overrides();
+        cfg.keybindings = BTreeMap::from([("quit".into(), "f9".into())]);
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");

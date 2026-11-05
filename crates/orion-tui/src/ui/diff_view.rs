@@ -31,8 +31,8 @@ use super::{
     CountColumns, NO_MATCHES, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
 };
 use crate::app::{App, DiffFocus, DiffView, Overlay};
-use crate::bundle::plural;
 use crate::commit_list::{CommitList, Row, Showing};
+use crate::flash::plural;
 use crate::theme::Theme;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -884,16 +884,16 @@ mod tests {
         v.focus = DiffFocus::Commits;
         let text = crate::hints::text(&diff_hints(&v), 200);
         assert!(
-            text.starts_with("Space tick · ^A all · ⇧←/⇧→ commit · Tab files"),
+            text.starts_with("Space tick · ⌘A all · ⇧←/⇧→ commit · Tab files"),
             "{text}"
         );
         let list = v.commits.as_mut().unwrap();
         list.ticked.extend([Row::Commit(0), Row::Commit(2)]);
         let text = crate::hints::text(&diff_hints(&v), 200);
-        assert!(text.contains("^G one at a time · ⇧←/⇧→ step"), "{text}");
+        assert!(text.contains("⌘G one at a time · ⇧←/⇧→ step"), "{text}");
         v.commits.as_mut().unwrap().toggle_mode();
         let text = crate::hints::text(&diff_hints(&v), 200);
-        assert!(text.contains("^G together"), "{text}");
+        assert!(text.contains("⌘G together"), "{text}");
         v.focus = DiffFocus::Diff;
         let text = crate::hints::text(&diff_hints(&v), 200);
         assert!(text.starts_with("↑↓ scroll · PgUp/PgDn page"), "{text}");
@@ -903,7 +903,7 @@ mod tests {
         pr.commits = None;
         let text = crate::hints::text(&diff_hints(&pr), 200);
         assert!(!text.contains('⇧') || text.contains("⇧↑"), "{text}");
-        assert!(!text.contains("^G") && !text.contains("Space"), "{text}");
+        assert!(!text.contains("⌘G") && !text.contains("Space"), "{text}");
     }
 
     /// The explanation says what is on screen in each state, and the keys
@@ -922,7 +922,7 @@ mod tests {
             text.starts_with("Every commit made on the branch since origin/main"),
             "{text}"
         );
-        assert!(text.contains("^A unticks"), "{text}");
+        assert!(text.contains("⌘A unticks"), "{text}");
         let list = v.commits.as_mut().unwrap();
         list.toggle_mode();
         assert!(

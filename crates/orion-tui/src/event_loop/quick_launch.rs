@@ -324,7 +324,7 @@ mod tests {
 
     /// `p`, a task, and the send.
     fn launch(app: &mut App, mods: KeyModifiers) -> (u64, WorktreeId) {
-        key(app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+        key(app, KeyCode::Char('n'), KeyModifiers::SUPER);
         type_text(app, "tidy the nav");
         send(app, mods)
     }
@@ -485,7 +485,7 @@ mod tests {
             let card = on_card(&mut app);
             let focus = app.focus;
 
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER);
             type_text(&mut app, "tidy the nav");
             pick_fresh_worktree(&mut app, &mut Vec::new());
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -580,12 +580,12 @@ mod tests {
             let mut app = App::new();
             seed_tree(&mut app);
             draw(&mut app);
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER);
             let mut terminal = Terminal::new(TestBackend::new(130, 34)).unwrap();
             terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
             let screen = buffer_text(&terminal);
             assert!(screen.contains("Enter launch"), "{screen}");
-            assert!(!screen.contains('⌘'), "{screen}");
+            assert!(!screen.contains("⌘Enter"), "{screen}");
         });
     }
 
@@ -682,7 +682,7 @@ mod tests {
                 Some("demo")
             );
 
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
+            key(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER);
             type_text(&mut app, "tidy the nav");
             key(&mut app, KeyCode::Char('p'), KeyModifiers::CONTROL);
             type_text(&mut app, "we");

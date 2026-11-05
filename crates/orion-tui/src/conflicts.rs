@@ -858,7 +858,7 @@ fn land_prepared(app: &mut App, ticket: u64, result: Result<Prepared, String>) {
         Ok(Prepared::Conflicts(files)) => {
             let stopped = match files.len() {
                 0 => "The merge stopped.".to_string(),
-                n => format!("The merge stopped on {}.", crate::bundle::plural(n, "file")),
+                n => format!("The merge stopped on {}.", crate::flash::plural(n, "file")),
             };
             view.log.say(
                 LogKind::Note,
@@ -1330,7 +1330,7 @@ fn undo(view: &mut ConflictView) {
 }
 
 /// Enter: the file in the BUILT-IN EDITOR at the cursor's conflict; the
-/// resolver reads it again when the editor closes (`event_loop::close_vim`).
+/// resolver reads it again when the editor closes (`event_loop::close_editor`).
 fn edit(app: &mut App) {
     let Some(Overlay::Conflicts(view)) = &app.overlay else {
         return;
@@ -1343,7 +1343,7 @@ fn edit(app: &mut App) {
     };
     let (root, path, line) = (view.root.clone(), file.path.clone(), view.file_line());
     let editor = crate::config::Config::load().editor_command();
-    let size = crate::event_loop::vim_size_guess(app);
+    let size = crate::event_loop::editor_size_guess(app);
     crate::event_loop::spawn_editor_modal(app, &editor, &root, &path, line, size);
 }
 
@@ -1380,8 +1380,8 @@ fn commit(app: &mut App) {
         let files = view.files.iter().filter(|f| f.left > 0).count();
         view.note = Some(Flash::failed(format!(
             "{} left in {} — settle {} before committing",
-            crate::bundle::plural(left, "conflict"),
-            crate::bundle::plural(files, "file"),
+            crate::flash::plural(left, "conflict"),
+            crate::flash::plural(files, "file"),
             if left == 1 { "it" } else { "them" }
         )));
         return;
@@ -2027,7 +2027,7 @@ fn log_footer(view: &ConflictView, th: Theme) -> Option<(String, ratatui::style:
         Stage::Resolving => Some((
             format!(
                 "{} still open. {} goes back to the file.",
-                crate::bundle::plural(view.left(), "conflict"),
+                crate::flash::plural(view.left(), "conflict"),
                 keys::LOG.label()
             ),
             th.warn,

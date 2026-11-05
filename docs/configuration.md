@@ -5,8 +5,7 @@
 CONFIG.JSON is the settings file, in the DATA DIR beside the SQLITE STORE — hand-editable, and
 what the `s` SETTINGS OVERLAY writes:
 
-- **macOS**: `~/Library/Application Support/dev.orion.orion/config.json`
-- **Linux**: `~/.local/share/orion/config.json`
+- `~/Library/Application Support/dev.orion.orion/config.json`
 - `ORION_CONFIG_FILE` moves that one file — into a dotfiles checkout, say — and leaves everything
   else where it is. A save writes through a symlink instead of replacing it, so linking `config.json`
   into a repo works as well.
@@ -61,24 +60,20 @@ Linear option in one place ([Linear](#linear)).
 | `palette_enter_attaches` | bool | `true` | General | `Enter` on a session in the jump list (`⌘K`) attaches and focuses the TERMINAL PANE. Off, `Enter` only lands on the card and previews it — except on a session that NEEDS FEEDBACK (the red row), which attaches either way, since the only thing to do with a jump to a question is answer it. `Ctrl+o` / `⌘F` still pick open / focus explicitly either way. The `.` / `,` attention jump lands the same way this setting says, red rows included. |
 | `git_init_on_create` | bool | `true` | — (retired) | Through 0.37, **git init new projects** (Settings → General): DAEMON-owned, off left a directory the ADD PROJECT BROWSER (`o`) created without a repository, and the add then failed. Every project is a git repository now: a folder the browser creates is always `git init`ed, and opening an existing folder in no repository asks in a CONFIRM DIALOG whether to `git init` it — `y` inits it and opens it, `n` leaves it alone. So nothing reads the key and no tab edits it; the TUI still loads and writes it back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `worktree_base_branch` | string | `""` | General | DAEMON-owned WORKTREE BASE BRANCH: where every new WORKTREE nobody named a base for starts — a bare `orion worktree`, the QUICK PROMPT's auto-created one (`orion worktree --base` always wins). Empty, shown as `auto` in the overlay, is origin's own default branch: `origin/HEAD` freshly fetched, normally `origin/main`. A name — `master`, `develop` — is resolved the way `--base` resolves one: origin is fetched and origin's copy of that branch (`origin/master`) is the start point, untracked, never the checkout's local branch of that name, which is only as new as its last pull; a branch origin lacks that the checkout has locally is used as named. The setting is one name for every project, so a repo with no branch of that name at all does not fail the launch: it falls back to `origin/HEAD` as if the key were empty, and `daemon.log` says which repo ignored it. A leading `origin/` is dropped (`origin/master` means `master`); a tag or SHA is not a branch and falls back too — name those with `--base`. Typed, not cycled: `Enter` on the row opens a prompt, an empty answer puts `auto` back. |
-| `editor` | string | `"fresh"` | Tools | **File editor**: the BUILT-IN EDITOR every file opens in — Go to file (`⌘P`), the TREE BROWSER (`⌘B`), find in files (`⌘⇧F`), ⌥click, a MARKDOWN PAGE's `Enter`. The overlay cycles the VS Code-style editors first — `fresh`, `micro`, `edit` (Microsoft Edit) — then `vim`, `nvim`, `hx`, `emacs`, its hint naming the ones installed; any command passes through verbatim, so a hand edit can name one the picker doesn't. Each is told the line its own way: micro `<file> +<line>`, Edit, fresh and Helix `<file>:<line>`, the rest `+<line> <file>`. micro, Edit and fresh quit on their own `Ctrl+Q` after asking to save; `Ctrl+\` force-closes any of them ([Keys](keys.md#the-built-in-editor)). Text wraps: `micro` runs off orion's own config dir (`<data dir>/micro`, never your `~/.config/micro`), made on first use with `Ctrl+D` bound to add the next match as another cursor, the keys the Mac editing chords become ([Keys](keys.md#the-built-in-editor)) and `softwrap`/`wordwrap` on — a binding or setting already in its `bindings.json`/`settings.json` is left as it is — and orion presses Edit's `Alt+Z` (its word wrap, which no setting turns on) once Edit has drawn; fresh, vim and emacs wrap by default. `fresh` runs off orion's own config file too (`fresh --config <data dir>/fresh/config.json --no-upgrade-check --no-restore`, never your `~/.config/fresh/config.json`): just the one file — no menu bar, tab bar, scrollbar, file explorer, workspace dock (its `orchestrator` plugin off) or restored session, no whitespace dots, `~` lines, edge fade or animation, no update checks — a status bar of the cursor, the cursor count and fresh's messages on the left and the language on the right, the `default` keymap, and fresh's `dark` theme (VS Code's Dark+ colours) on orion's own background (`use_terminal_bg`). fresh loads a theme file only from `~/.config/fresh/themes`, which orion never writes to, so a theme of orion's own palette isn't possible; set `theme` in that file to pick another built-in. As with micro, a key you set there — at any depth — is left as it is. A chosen editor that isn't installed is never swapped in silence: the first installed of `fresh`, `micro`, `edit` and `vim` opens instead, the footer says so the first time, and the row reads `nvim — not installed, opens fresh`; `i` on the row installs it ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)), and `install.sh` puts fresh on a machine that has none of fresh, micro and Edit. A `.md` file opens as its rendered MARKDOWN PAGE, `Enter` there editing it ([Keys](keys.md#the-markdown-page)). `ORION_EDITOR` overrides it for the process. |
-| `outside_editor` | string | `"auto"` | Tools | **Open in app**: the GUI editor `⌘O` hands a file to — from Go to file, find in files, the TREE BROWSER, a MARKDOWN PAGE and the BUILT-IN EDITOR — and the OPEN MENU's **Checkout in …** row opens the checkout in: `cursor`, `vscode`, `sublime`, `zed`, or `default` (macOS `open`, whatever the system opens that kind of file with). `auto` is the first of Cursor, VS Code, Sublime Text and Zed installed, else the system default; the row shows which (`auto · Cursor`) and its hint lists the ones installed. An app is launched through the command-line tool inside its own bundle in `/Applications` or `~/Applications` (`Cursor.app/Contents/Resources/app/bin/cursor`, `Visual Studio Code.app/…/bin/code`, `Sublime Text.app/Contents/SharedSupport/bin/subl`, `Zed.app/Contents/MacOS/cli`), then the one on `PATH` — never Cursor's agent CLI shim, the `~/.local/bin/cursor` the `cursor-agent` installer writes, which only forwards to another `cursor` and otherwise fails — then `open -a`. A tool goes to the file's line (`cursor`/`code` with `--goto <file>:<line>` in the checkout's window, `subl` and `zed` with `<file>:<line>`); `open -a` and the system default open the file at its top. The hints name the app (`⌘O: VS Code`). A named app that isn't installed, or a tool that fails, says why in the footer instead; over ssh the file opens in the BUILT-IN EDITOR. |
+| `outside_editor` | string | `"auto"` | Tools | **Open in app**: the GUI editor `⌘O` hands a file to — from Go to file, find in files, the TREE BROWSER, a MARKDOWN PAGE and the BUILT-IN EDITOR — and the OPEN MENU's **Checkout in …** row opens the checkout in: `cursor`, `vscode` or `sublime`. `auto` is the first of Cursor, VS Code and Sublime Text installed, else whatever macOS's `open` hands the file to; the row shows which (`auto · Cursor`) and its hint lists the ones installed. A stored `zed` or `default` reads as `auto`. With a named app missing, `i` on the row installs it — `brew install --cask cursor`, `visual-studio-code` or `sublime-text` — in the install modal. An app is launched through the command-line tool inside its own bundle in `/Applications` or `~/Applications` (`Cursor.app/Contents/Resources/app/bin/cursor`, `Visual Studio Code.app/…/bin/code`, `Sublime Text.app/Contents/SharedSupport/bin/subl`), then the one on `PATH` — never Cursor's agent CLI shim, the `~/.local/bin/cursor` the `cursor-agent` installer writes, which only forwards to another `cursor` and otherwise fails — then `open -a`. A tool goes to the file's line (`cursor`/`code` with `--goto <file>:<line>` in the checkout's window, `subl` with `<file>:<line>`); `open -a` and `open` open the file at its top. The hints name the app (`⌘O: VS Code`). A named app that isn't installed, or a tool that fails, says why in the footer instead; over ssh the file opens in the BUILT-IN EDITOR. |
 | `link_env_files` | bool | `true` | General | DAEMON-owned ENV LINKS (**Link .env files**): every new WORKTREE, one an agent moves into, and one made outside orion that the sync adopts gets the main checkout's git-ignored `.env*` files (`.env`, `.env.local`, `apps/web/.env.development`, …) as symlinks at the same paths, so each checkout runs against the clone's secrets and local settings. A tracked file (a committed `.env.example`) and anything under `node_modules` are left alone, and a path that already exists in the worktree is never replaced. Off links nothing new; links already made stay. |
 | `worktree_containers` | string | `"off"` | General | DAEMON-owned WORKTREE CONTAINERS (**Worktree containers**): what deleting a worktree does to the docker compose projects started in it — `off` leaves them, `stop` stops them, `remove` runs `docker compose down` (volumes kept), `remove+volumes` removes their volumes too. Matched by the directory compose recorded on each container, never by name; a value this build doesn't know is `off`. See [Worktree containers](#worktree-containers). |
-| `outside_terminal` | string | `"ghostty"` | Tools | **Outside terminal**: the app `⌘O` → **Terminal in the checkout** opens, in the selected worktree's directory — `ghostty` (a new Ghostty tab) or `terminal` (a Terminal.app window). Ghostty not installed in `/Applications` or `~/Applications` opens Terminal.app instead. Off macOS or over ssh nothing opens. |
-| `ghostty_keybinds` | bool | `true` | — (retired) | Through 1.6, **Ghostty keybinds** (Settings → Tools): on, orion kept a marked block in your Ghostty config unbinding the ⌘ chords its keymap used. Nothing writes that block now, and the first launch takes it out: [Orion.app](#orionapp) carries its own key table. Still loaded and written back as stored, so an older build sharing the file keeps the choice its user made. |
-| `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard — **Orion setup** — has been seen. While it is false, orion opens it over the grid at startup, a step at a time under a STEP STRIP. On a Mac — outside tmux and ssh, and anywhere but in Orion.app already — it starts on the APP STEP, on a Mac that has the Ghostty the app is made from: `Enter` makes [Orion.app](#orionapp) and reopens orion in it in the same folder, and setup carries on there; `→` stays in this terminal with the `^` twins. Then: which agents to turn on, each with its default model and its CLI `installed` or `install…`; the Claude accounts (while Claude is on); the editors — the **File editor** choices, each installed or `install…`, and the **Open in app** choices with the app each opens here; the worktree defaults (**Worktree base branch**, **Link .env files**); Linear (the Linear tab's rows, the same values in the same order); autofix; then what was chosen, and the keys to press next. The outside terminal is on Settings → Tools. `i` installs a missing CLI or editor ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)). `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
+| `onboarded` | bool | `false` | — (config.local.json) | Whether the ONBOARDING wizard — **Orion setup** — has been seen. While it is false, orion opens it over the grid at startup, a step at a time under a STEP STRIP. On a Mac — outside tmux and ssh, and anywhere but in Orion.app already — it starts on the APP STEP, on a Mac that has the Ghostty the app is made from: `Enter` makes [Orion.app](#orionapp) and reopens orion in it in the same folder, and setup carries on there; `→` stays in this terminal, without the ⌘ shortcuts. Then: which agents to turn on, each with its default model and its CLI `installed` or `install…`; the Claude accounts (while Claude is on); the **Open in app** choices with the app each opens here; the worktree defaults (**Worktree base branch**, **Link .env files**); Linear (the Linear tab's rows, the same values in the same order); autofix; then what was chosen, and the keys to press next. `i` installs a missing CLI ([Installing editors and agent CLIs](#installing-editors-and-agent-clis)). `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key to see the wizard again. |
 | `setup_version` | number | `0` | — (config.local.json) | The SETUP VERSION this machine last went through. A release that adds a step to **Orion setup** bumps it; on the next launch an onboarded machine on an older version sees only the new steps that have something to offer it (version 5's is the App step: every Mac set up before Orion.app existed is offered the move once, ahead of the release notes — it was version 4's in 2.0.0, where it stood behind them and `Esc` on the notes dismissed it unseen, so a machine that went through 4 is asked once more), then Ready — and with nothing to offer, the version is stamped quietly. 0 on a config from before the key, read as 1. Setup opens again in full from the palette's **Run setup**, Settings → Tools → **Setup**, or `orion setup`. |
 | `seen_version` | string | `""` | — (config.local.json) | The orion version this machine last saw **What's new** for. On the first launch of a newer build — after `orion upgrade` or the footer's update — setup opens as **What's new in Orion**: every release since this one, stacked newest first however many the upgrade jumped, each with its date and what its commits said; then the setup steps added since (`setup_version`) and Ready, or with none missed, the notes alone. Closing it stamps this build's version; it is never lowered, so an older or dev build in between shows nothing twice. A first run stamps it without showing notes. Empty on a config from before the key: read as the release that brought its `setup_version` (2 → 1.0.17, 3 → 1.0.21), or as nothing seen. The notes are baked in at build time from git — each release is the commits between its `v*` tag and the one before (`crates/orion-tui/build.rs`) — so a build without git or tags has none, and setup carries on. |
 | `close_finder_on_open` | bool | `true` | General | Opening a file closes the FILE FINDER behind the editor modal (or the MARKDOWN PAGE), so quitting the editor is one Esc instead of two. Off leaves the results underneath. Never touches the TREE BROWSER (its editor is its own preview pane) or ⌥click. |
-| `ssh_sync_config` | bool | `true` | General | SETTINGS SYNC: `orion ssh` and `orion tunnel` send this machine's `config.json` and AGENT PRESETS along, and the remote orion merges them into its own settings before it starts — so a remote is set up the way this machine is on every connect, without reconfiguring it. Its `config.local.json` still wins there, and its projects, sessions and SSH HOSTS FILE stay its own. `--no-sync-config` leaves the settings behind for one connection. See [Backup, restore and other machines](#backup-restore-and-other-machines). |
 | `linear_auto_attach` | bool | `true` | Linear | **Link PRs to Linear**: a branch a `⌘L` launch cut is remembered, and when the project's open list first shows a pull request on it, orion attaches the pull request to each of its Linear issues through Linear's API (`attachmentLinkGitHubPR`). A pull request from another branch whose title names an issue still waiting — `ENG-12: fix login`, as a launch asks the agent to title it — is attached to that issue too. The link is orion's, so it holds when the branch name carries no issue ID — the case Linear's own GitHub integration misses — and it is a closing link (`linkKind: closes`), the kind Linear's pull request automations act on: the issue moves when the pull request opens and when it merges, as it would had the branch named it. Linear keeps one attachment per pull request, so an issue that is linked twice still shows it once. An issue has one branch at a time: sent to another worktree (a `⌘L` launch, `⌘.`, or attached by hand to another pull request), it leaves the branch it was on, and orion deletes the attachment it made for that branch's pull request, so the old pull request's merge no longer moves the issue. A link Linear made itself is left alone, and a pull request can still close several issues. Off, nothing is remembered or attached. |
 | `linear_assignee_email` | string | `""` | Linear (config.local.json) | **Linear account**: whose open issues `⌘L` lists. Empty, shown as `the key's owner`, is the owner of the project's `LINEAR_API_KEY`; an email names another member of the workspace, for a key a team shares. A typed row. Always written to `config.local.json`, so `orion ssh` never carries it to a remote. |
 | `skip_session_naming` | bool | `false` | — (retired) | Through 0.30, **Skip starting prompt**: on, new AGENTS launched straight from the NEW AGENT PICKER instead of stopping at a task box first. Every launch now goes through the QUICK PROMPT (`⌘N`, or **New agent — choose harness** after its harness pick), whose `Enter` on an empty box starts the CLI bare, so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `confirm_on_archive` | bool | `false` | — (retired) | Through 0.34, **Confirm on archive**: on, `a` and the row menu's **Archive** asked in a CONFIRM DIALOG before archiving a session; off, the default, archived at once. Every archive asks now, whatever the key says — the dialog names the session and says `u` brings it back — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `session_idle_timeout` | string | `"5m"` | Sessions | DAEMON-owned IDLE TIMEOUT: how long a session in a WORKTREE no client is viewing goes unwatched before the IDLE REAPER kills its PTY. See the values below. |
 | `done_sound` | string | `"Glass"` | Sessions | The DONE SOUND rung when a turn you haven't seen reaches FINISHED: `off`, `bell` (the terminal BEL — silent in Ghostty unless its `bell-features` include `audio`), or a macOS system sound from `/System/Library/Sounds` played with `afplay` (`Glass`, `Ping`, `Pop`, `Hero`, …). Over `orion ssh` and off macOS it is always the bell. Stepping the row in the settings overlay plays each sound. It rings only for news: a turn that finishes in the pane on screen was watched and rings nothing. It waits 3 s for the finish to settle, and stays quiet if by then the session is working again, has been looked at, or was archived or deleted. It rings once per unseen stretch — the follow-up turns a session starts on its own (a task notification, a queued message) ring nothing more until you have looked at it, and then its next finish rings again. And it never rings within 10 s of the last sound of either kind, so a burst of finishes is one ding. The one switch for that finish's DESKTOP NOTIFICATION too: while the terminal window is in the background, each finish that settles is named in one (`Fix Login finished`, under its project and branch) — even when the 10 s rule kept the sound quiet — on the same terms as `feedback_sound`'s. `off` silences the sound and the notification together. |
-| `feedback_sound` | string | `"Sosumi"` | Sessions | The FEEDBACK SOUND rung when a turn stops at NEEDS FEEDBACK — a permission prompt or a question — or when a session's CLI dies with an error in the middle of a turn, with the same values and fallbacks as `done_sound`, and a different default so red and green sound different from the next room. It never rings for the session whose pane you are locked into typing at while the terminal window has focus: that prompt, or that error, is already under your hands. The one switch for their DESKTOP NOTIFICATIONS too: while the terminal window is in the background (from the focus reports orion asks the terminal for — tmux needs `focus-events on`), each session that goes red is also named in a desktop notification (`Fix Login needs feedback`), and so is each that crashes (`Fix Login stopped with an error`). On macOS they come from orion's own NOTIFIER APP — a copy of Homebrew's `terminal-notifier` re-badged with orion's name and logo, built on first use under the data dir, whose click brings the terminal back; `osascript` when `terminal-notifier` is not installed — and from `notify-send` on Linux; never over `orion ssh`, where the desktop is the wrong machine's; a notifier that is missing or fails is a debug line, not an error. `off` silences the sound and the notifications together. |
+| `feedback_sound` | string | `"Sosumi"` | Sessions | The FEEDBACK SOUND rung when a turn stops at NEEDS FEEDBACK — a permission prompt or a question — or when a session's CLI dies with an error in the middle of a turn, with the same values and fallbacks as `done_sound`, and a different default so red and green sound different from the next room. It never rings for the session whose pane you are locked into typing at while the terminal window has focus: that prompt, or that error, is already under your hands. The one switch for their DESKTOP NOTIFICATIONS too: while the terminal window is in the background (from the focus reports orion asks the terminal for — tmux needs `focus-events on`), each session that goes red is also named in a desktop notification (`Fix Login needs feedback`), and so is each that crashes (`Fix Login stopped with an error`). On macOS they come from orion's own NOTIFIER APP — a copy of Homebrew's `terminal-notifier` re-badged with orion's name and logo, built on first use under the data dir, whose click brings the terminal back; `osascript` when `terminal-notifier` is not installed; never over `orion ssh`, where the desktop is the wrong machine's; a notifier that is missing or fails is a debug line, not an error. `off` silences the sound and the notifications together. |
 | `preset_text` | string | `"prefix"` | Sessions | PRESET TEXT: which side of the task a new AGENT PRESET's text goes — `prefix` (one box, sent before the task), `postfix` (one box, sent after it) or `prefix & postfix` (both, the form every preset had through 0.32). The PRESET EDITOR opens a new preset with the box(es) named here, and its **Text** row changes one preset — a side the row leaves out saves blank; editing a stored preset also shows any side that already holds text, so nothing saved is ever hidden. Prefix alone by default: the framing most people reach for, and one box to fill. A hand-edited `both` reads as `prefix & postfix`; anything else as the default. See [Sessions](sessions.md#agent-presets). |
 | `delete_empty_worktree` | bool | `false` | Sessions | DELETE EMPTIED WORKTREE: what the delete of a linked WORKTREE's last live card asks — the last session's `Backspace`, the last terminal's close, or a **Delete all sessions** that takes them all. Off, the default, that card's own CONFIRM DIALOG carries the question too, before anything is deleted (`Delete agent 'x'? Its session and history go away.` then `Nothing else is left in worktree 'feature': delete it from disk too?`), with three answers: `Enter` or `y` deletes the card and then the worktree, the same forced delete the band's own `Backspace` runs; `n` deletes the card and keeps the empty checkout; `Esc` cancels and keeps the card alive. On, the question is not asked: the dialog is the card's ordinary two-way confirm, its message saying the worktree goes with it, and `Enter` deletes both — unless archived sessions are still filed under the checkout, whose history the delete would take: those always get the three-way question, which says how many go with it. The ROOT WORKTREE is never offered either way, and archiving a session (`a`) never counts as emptying: an archived card is still filed under its checkout. With `show_all_worktrees` on, off asks nothing — the emptied worktree keeps its band — and on still deletes the worktree with its last card. See [Sessions](sessions.md#the-grid). |
 | `show_all_worktrees` | bool | `true` | Sessions | SHOW ALL WORKTREES: every checkout of the project gets a BAND on the grid, one with nothing running in it too. It is on by default. Off, the grid is only what is running: a checkout with no session or terminal has no band. On, such a checkout is an EMPTY BAND — its rule over one line, `nothing running · ⌘N: new agent · t: terminal · ⌫: delete worktree` — which `↑`/`↓` walk onto, where `⌘N`/`t` start work, and where `Backspace` (or **Delete worktree** in its right-click menu) deletes the worktree behind its own confirm (`Delete worktree 'feature' from disk?`); the ROOT WORKTREE's band offers no delete. On also means deleting a worktree's last card never asks about the worktree, so the emptied band stays until its own `Backspace` — unless `delete_empty_worktree` is on, which still deletes the worktree with its last card. The ARCHIVED VIEW never shows an empty band. See [Sessions](sessions.md#the-grid). |
@@ -133,9 +128,9 @@ Linear option in one place ([Linear](#linear)).
 | `harnesses` | object | `{"grok": {"enabled": false}}` | Agents | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Grok Build, OpenCode), and whole new third-party CLIs. The Agents tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the NEW AGENT PICKER, AGENT PRESETS, spawn, resume and hooks all read the merged rows. An entry keyed by a `claude_accounts` id is deltas over that account's row (its own model default, say). A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `orion config harnesses` to print the effective rows to copy from. Written even when empty, so removing its last entry sticks. |
 | `claude_accounts` | array | `[]` | Agents | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as, after its `name` when it has one (`"name": "Work"`, written only while set — `Work (you@example.com)`). `enabled: false` switches one off (written only while off). The Agents tab's **Claude accounts** section and first-run onboarding add, rename, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
 | `account_tags` | object | `{}` | — | The ACCOUNT TAG each Claude account's sessions wear on the grid, set by hand: by account id (`claude` for the default one), `{"claude-2": {"tag": "wk", "tint": 2}}`, either half alone. With more than one Claude account, every list row and card shows two letters right after its status dot, tinted per account, so you can see which account each session runs on at a glance; Settings → Agents and the usage modal show each account's tag. An account with no entry gets two letters from its name, else its email, never the same as another's, and the next of six tints, none of them a status color. Written only while set. |
-| `keybindings` | object | `{}` | Hotkeys | KEYMAP overrides, keyed by action id, valued with a comma-separated chord list: `{"git_diff": "ctrl+g, g"}`. An empty string deliberately unbinds; unknown ids are ignored. Only rows that differ from the defaults are written. |
+| `keybindings` | object | `{}` | — (hand-edited) | KEYMAP overrides, keyed by action id, valued with a comma-separated chord list: `{"git_diff": "cmd+g, g"}`. An empty string deliberately unbinds; unknown ids are ignored. The Hotkeys tab lists the result and edits nothing. |
 | `prewarm_agents` | bool | `true` | Sessions | DAEMON-owned PREWARM POOL: keep one booted agent CLI standing by in the selected WORKTREE, so creating a session there adopts it and feels instant. **Costs one idle CLI process per warm slot** (150–300 MB each, up to 15 minutes), and that spare is a real session as far as the CLI is concerned — Claude's own `/list-agents` lists it beside the sessions you made, named after the directory (`my-repo-3f`). Off drains the pool on the DAEMON's next sweep (within 30 s). |
-| `usage_claude` | bool | `true` | Sessions | ACCOUNT USAGE (`⇧U`) reads each Claude account's limits every 15 minutes, from the endpoint Claude Code's own `/usage` reads, with that account's Claude Code login (on a Mac the Keychain item Claude Code keeps it in, elsewhere `.credentials.json` in its config dir). The token is only read, never refreshed. Off: no Claude accounts listed, and nothing is asked. |
+| `usage_claude` | bool | `true` | Sessions | ACCOUNT USAGE (`⇧U`) reads each Claude account's limits every 15 minutes, from the endpoint Claude Code's own `/usage` reads, with that account's Claude Code login (the Keychain item Claude Code keeps it in, else `.credentials.json` in its config dir). The token is only read, never refreshed. Off: no Claude accounts listed, and nothing is asked. |
 | `usage_cursor` | bool | `true` | Sessions | ACCOUNT USAGE reads the `cursor-agent` login's monthly allowance every 15 minutes, from Cursor's dashboard endpoint. Shown while `cursor-agent` is installed and the Cursor harness is on. On a Mac the first read may ask to let `security` read the `cursor-access-token` Keychain item. |
 | `prewarm_sessions` | bool | `true` | Sessions | DAEMON-owned SESSION PREWARM: boot a WORKTREE's dead sessions when your selection rests on it, so attaching shows an already-booted screen instead of a booting shell. **Costs idle shell/CLI processes for sessions you may never open.** Off — for a machine with less memory to spare — landing on a worktree boots nothing: a session forks only when your cursor lands on its row or you attach to it, one at a time; sessions already up stay until the IDLE REAPER takes them. |
 
@@ -158,28 +153,21 @@ itself:
 | `⌘←`, `⌘→`, `⌥←`, `⌥→` | typed as the keys a shell reads, as Ghostty types them anywhere: the line's start and end (`^A`, `^E`), a word back and on (`⎋b`, `⎋f`) — what orion's fields, its editor and every agent's prompt expect |
 
 Every other chord reaches orion as the key it is, whatever your keymap or a rebind says — `⌘T`,
-`⌘N`, `⌘D`, `⌘W`, `⌘1`–`⌘9` and the rest of Ghostty's tab, split and window keys included — and
-Settings → Hotkeys marks a rebind onto one of the kept keys. `⌘.` is the one chord macOS takes
+`⌘N`, `⌘D`, `⌘W`, `⌘1`–`⌘9` and the rest of Ghostty's tab, split and window keys included. `⌘.` is
+the one chord macOS takes
 before a terminal can send it (it is Cancel, Escape's twin, in every Mac app), so the app's config
 binds it to the bytes the kitty protocol spells it with (`csi:46;9u`); orion also reads an Escape
 still carrying ⌘ as `⌘.`, for a terminal without that line.
 
-Nothing is written into your own Ghostty config. Releases through 1.6 kept a marked block of
-`unbind` lines there (`# >>> orion keybinds … >>>` to `# <<< orion keybinds <<<`), rewritten on
-every rebind; the first launch of a newer orion takes that block out and leaves the rest of the file
-as it was, and Ghostty's own ⌘ keys are its own again from its next start. `ORION_GHOSTTY_CONFIG`
-names another file to clean, or `off` to leave every file alone. So an orion started in a Ghostty
-window of your own — or in Terminal.app, which never sends ⌘ — answers to the `^` twins (`^K`,
-`^N`, `^P`), and Help and the footers print those there.
+Nothing is written into your own Ghostty config. So in a Ghostty window of your own — or in
+Terminal.app, which never sends ⌘ — orion's ⌘ shortcuts don't reach it.
 
 ### Installing editors and agent CLIs
 
 orion runs programs it does not ship: the editor behind the BUILT-IN EDITOR, and a CLI per harness.
-`install.sh` makes sure of three after orion itself: git, which it stops without; an editor with VS
-Code's keys — fresh, unless fresh, micro or Microsoft Edit is already there (`brew install
-fresh-editor`; without Homebrew, on Linux, the quick-install script fresh's README links, its
-universal build linked into the install dir, and on a Mac — or should that fail — the one micro's
-README links, run in the install dir); and gh, which pull
+`install.sh` makes sure of three after orion itself: git, which it stops without; fresh, the editor
+with VS Code's keys every file opens in (`brew install fresh-editor`; without Homebrew, a pointer to
+its install page); and gh, which pull
 requests and issues are read with (`brew install gh`, else a pointer to its install page); and on a
 Mac, Ghostty, which Orion.app is made from (`brew install --cask ghostty`; without Homebrew, the
 newest disk image Ghostty's own update feed lists, copied into `/Applications` — or `~/Applications`
@@ -216,8 +204,8 @@ through the move, and projects, settings, accounts and history are where they we
 opens Orion.app and leaves the terminal, saying so. An upgrade moves an orion kept in a terminal
 over the same way: it reopens orion, and the reopening opens the app, before anything of the new
 release is drawn — the release notes are read there. With the app already open it is brought to
-the front instead. orion stays where it was started under tmux, over ssh, on `orion browser`'s
-page, on a Mac without Ghostty, when `ORION_RUNTIME_DIR` or `ORION_DATA_DIR` points it at a daemon
+the front instead. orion stays where it was started under tmux, over ssh,
+on a Mac without Ghostty, when `ORION_RUNTIME_DIR` or `ORION_DATA_DIR` points it at a daemon
 or data of its own, when it is a build from a checkout, and when `ORION_APP=off` says to — the way
 back into a terminal should the app ever not come up. If the app can't be made, orion carries on in
 the terminal and says why in its footer. The other commands (`orion add`, `orion doctor`, …) run
@@ -230,7 +218,7 @@ Quitting orion closes the app.
 
 Desktop notifications come from the app itself — its name, its icon, and a click that brings its
 window back — so macOS asks once whether Orion may send them. Outside the app they are posted with
-`osascript` on a Mac and `notify-send` elsewhere.
+`osascript`.
 
 The copy is rebuilt when the Ghostty it came from is updated, when `orion` is installed somewhere
 else, or when a newer orion gives it a different config or layout: by `orion app` when the app isn't running, or
@@ -239,14 +227,14 @@ so whatever it once asked you to allow Ghostty — a folder such as Documents, n
 ask again for "Orion", and once more after a rebuild.
 
 Inside orion, `i` on a row whose program isn't on PATH — first-run setup's Agents and Editor steps,
-every program row on Settings → Tools (**Outside terminal** for Ghostty, **File editor**, **Open in app**, git and gh), a
-Claude account's row or a harness's **Enabled** row on the Agents tab — shows the command that
+every program row on Settings → Tools (**Open in app**, git and gh), a
+Claude account's row or a harness's **Enabled** row on the Agents tab, and the footer's word that
+fresh is missing when a file was to open — shows the command that
 installs it, and `Enter` runs it in the editor modal, the installer's own output on screen (`Ctrl+Q`
 stops it), the footer reading `installing …` meanwhile. When it exits the modal stays, its title and
 the footer saying whether the program is here now, until `Enter`; the footer and the page or tab
 under the modal then keep the result. Ghostty counts as here once its app is in `/Applications` or
-`~/Applications`, and installing it from setup — `Enter` on the App step — makes it the outside
-terminal again. The rows read
+`~/Applications`. The rows read
 PATH as they draw. An
 installer that puts its program somewhere new and adds that to your shell profile leaves orion's
 own PATH as it was: start orion again from a new shell. Nothing is installed unasked, and `orion
@@ -256,11 +244,6 @@ them.
 | Program | Command | Documented at |
 |---|---|---|
 | fresh | `brew install fresh-editor` | [github.com/sinelaw/fresh](https://github.com/sinelaw/fresh#installation) |
-| micro | `brew install micro` | [github.com/zyedidia/micro](https://github.com/zyedidia/micro#installation) |
-| Microsoft Edit (`edit`) | `brew install msedit` | [github.com/microsoft/edit](https://github.com/microsoft/edit) |
-| nvim | `brew install neovim` | [neovim INSTALL.md](https://github.com/neovim/neovim/blob/master/INSTALL.md) |
-| hx | `brew install helix` | [docs.helix-editor.com](https://docs.helix-editor.com/install.html) |
-| emacs | `brew install emacs` | [gnu.org/software/emacs](https://www.gnu.org/software/emacs/download.html) |
 | Claude (`claude`) | `curl -fsSL https://claude.ai/install.sh \| bash` | [code.claude.com](https://code.claude.com/docs/en/setup) |
 | Codex (`codex`) | `brew install --cask codex`, or without Homebrew `npm install -g @openai/codex` | [github.com/openai/codex](https://github.com/openai/codex) |
 | Cursor (`cursor-agent`) | `curl https://cursor.com/install -fsS \| bash` | [cursor.com/docs/cli](https://cursor.com/docs/cli/installation) |
@@ -269,7 +252,7 @@ them.
 | Ghostty (macOS) | `brew install --cask ghostty` | [ghostty.org/download](https://ghostty.org/download) |
 | git | `brew install git` | [git-scm.com](https://git-scm.com/downloads) |
 | gh | `brew install gh` | [cli.github.com](https://cli.github.com) |
-| Open in app (macOS) | `brew install --cask cursor` / `visual-studio-code` / `sublime-text` / `zed` | each app's download page |
+| Open in app (macOS) | `brew install --cask cursor` / `visual-studio-code` / `sublime-text` | each app's download page |
 
 Without Homebrew an editor's or Ghostty's row names its install page instead and runs nothing;
 in first-run setup `Enter` opens that page in the browser. vim has no
@@ -366,8 +349,7 @@ effort defaults until its own Model / Effort rows on the Agents tab are changed,
 `harnesses.<id>`. The `id` is what its sessions point back at, so it stays put; lowercase letters,
 digits and hyphens, never a built-in's. `name` is the one it goes by, as typed — `Work Laptop` —
 and the only thing a rename changes: never the `id`, never the dir. `enabled: false` switches one off like any harness. The
-list is this machine's logins: an export carries it, but `orion ssh` and `orion tunnel` leave it
-behind, as they leave `harnesses`, so a remote keeps its own accounts. An entry an older orion reads
+list is this machine's logins: a remote reached over `orion ssh` keeps its own. An entry an older orion reads
 is an unknown key it leaves alone: its sessions refuse to start there ("custom harness `claude-2` is
 no longer defined") and nothing is lost.
 
@@ -498,55 +480,23 @@ next ATTACH or prewarm, and an agent RESUMES its conversation there.
   plays the sound it lands on, so you can pick by ear. And which side of the task a new AGENT PRESET's text goes (`preset_text`: `prefix`, the
   default, `postfix` or `prefix & postfix`). `R` inside the overlay puts every setting —
   hotkeys included — back to its default, after a confirmation, and removes `config.local.json`.
-- **Every grid key is rebindable.** The overlay's Hotkeys tab lists every action and what it answers to,
-  and writes overrides into the same file (`"keybindings": {"git_diff": "ctrl+g, g"}`); an empty value
-  unbinds. Because orion is always a guest inside Terminal.app / Ghostty / tmux, the tab says at bind
-  time when a chord probably won't survive the trip — `⌘` anything, `^⇧` without the kitty protocol,
-  `^←` on stock macOS. `Ctrl+q` is the one exception to all of it: it unlocks a terminal no matter what
-  you bind, since unbinding your way out would trap you in the session.
+- **Every grid key is rebindable by hand.** The overlay's Hotkeys tab lists every action and what it
+  answers to, and nothing on it edits: overrides go into the same file by hand
+  (`"keybindings": {"git_diff": "cmd+g, g"}`), and an empty value unbinds. `Ctrl+q` is the one
+  exception: it unlocks a terminal no matter what you bind, since unbinding your way out would trap
+  you in the session.
 
 ## Backup, restore and other machines
 
 ```sh
 orion config path                  # where each settings file is
-orion config export ~/backups      # write ~/backups/orion-settings.json
-orion config import ~/backups      # merge it back in, here or on a new machine
 ```
 
-A SETTINGS BUNDLE is one JSON file holding `config.json`, `agent_presets.json` and `ssh_hosts.json`,
-each exactly as the file has it, under a marker key:
-
-```json
-{
-  "orion_bundle": 1,
-  "exported_by": "0.27.0",
-  "config": { "theme": "ocean", "keybindings": { "git_diff": "ctrl+g" } },
-  "agent_presets": [{ "name": "reviewer", "kind": "claude", "prefix": "Be strict." }],
-  "ssh_hosts": [{ "host": "me@box", "last_used_ms": 1789400000000 }]
-}
-```
-
-- **Export** writes to stdout, to a file, or to `orion-settings.json` inside a folder you name. It
-  never carries `config.local.json`, the database, the logs or the PR and model caches.
-- **Import** takes an export, a bare `config.json`, `agent_presets.json` or `ssh_hosts.json`, a folder
-  holding any of them (a dotfiles folder, a copy of an old data dir), or `-` for stdin. It merges
-  rather than replaces: keys the file sets replace this machine's and keys it lacks are left alone,
-  presets merge by name, and hosts merge by destination, keeping the most recent. `config.local.json`
-  is never written, and the summary names any imported key it still overrides. A settings file that
-  exists but can't be read fails the import before anything is written. Changes apply without a
-  restart.
-- **Copying the file works too.** Both halves re-read `config.json` on every use, so a backup copied
-  over it — or to wherever `ORION_CONFIG_FILE` points — applies at once, with no import and no
-  restart.
-- **Over ssh** (`ssh_sync_config`, on by default), `orion ssh` and `orion tunnel` export
-  `config.json` and the presets into the one ssh command they already run, and the remote orion
-  imports them before it starts, saying what changed on stderr. Sync is one way: the machine you
-  connect from wins key by key on each connect, so a setting the remote should keep goes in the
-  remote's `config.local.json`. A remote orion too old to know about the bundle ignores it and starts
-  as before. The bundle travels base64-encoded in the remote command, so that machine's process list
-  shows it while ssh starts. Settings hold no credentials, but a preset's prefix text travels too.
-  A bundle over 64 KiB is not sent (a real one is a few KiB), and the connection goes ahead without
-  it.
+- **Copy the file.** Both halves re-read `config.json` on every use, so a backup copied over it — or
+  to wherever `ORION_CONFIG_FILE` points — applies at once, with no restart. `agent_presets.json`
+  and `ssh_hosts.json` sit beside it and copy the same way; `config.local.json` is this machine's.
+- **Over ssh**, `orion ssh` runs the remote's own orion on the remote's own settings: nothing of
+  this machine's travels with it.
 
 ### Compatibility rules
 
@@ -570,9 +520,7 @@ version breaks the other:
    one still loads as written and survives a save. Each release adds its own fixture.
 
 `config.json` carries no version number. An older build could only refuse a newer file or ignore the
-number, and the keys a file holds already tell a newer build everything it needs. The bundle's
-`orion_bundle` marks the file and never gates it: sections are only ever added, and a reader leaves
-one it doesn't know alone.
+number, and the keys a file holds already tell a newer build everything it needs.
 
 ## The project file (`.orion.json`)
 
@@ -740,11 +688,10 @@ caddy reload --config /etc/caddy/Caddyfile
 
 ## Logs
 
-`daemon.log` and `tui.log` live in the state dir, which is not the DATA DIR on Linux and *is* on
-macOS — the `directories` crate has no state dir there, so orion falls back to `<DATA DIR>/state`:
+`daemon.log` and `tui.log` live in the state dir, under the DATA DIR — the `directories` crate has
+no state dir on macOS, so orion uses `<DATA DIR>/state`:
 
-- **macOS**: `~/Library/Application Support/dev.orion.orion/state/`
-- **Linux**: `~/.local/state/orion/`
+- `~/Library/Application Support/dev.orion.orion/state/`
 - With `ORION_DATA_DIR` set, always `$ORION_DATA_DIR/state/`, so a test or a parallel instance keeps
   its logs beside its own data.
 
@@ -781,7 +728,6 @@ Knobs worth reaching for by hand:
 |---|---|---|
 | `ORION_LOG` | — | `RUST_LOG`-style tracing filter for both the DAEMON and the TUI. |
 | `ORION_EDITOR` | — | Editor command the file modals open, ahead of the `editor` setting. |
-| `ORION_GHOSTTY_CONFIG` | Ghostty's own config file | The Ghostty config file a newer orion takes an older one's keybind block out of, or `off` to leave every file alone. |
 | `ORION_APP` | unset | `off` keeps a bare `orion` in the terminal it was typed in, on a Mac where it would otherwise open [Orion.app](#orionapp). The app's launcher sets it to `1` for the orion it starts; orion takes it out of its environment again, so nothing it starts inherits it. |
 | `ORION_CONFIG_FILE` | `<DATA DIR>/config.json` | Moves `config.json` alone — into a dotfiles checkout, say — leaving the database, logs and `config.local.json` in the DATA DIR. Give an absolute or `~/` path. The DAEMON reads it from its own environment, so after changing it run `orion kill` and relaunch. |
 
@@ -802,6 +748,4 @@ Overrides for tests and parallel instances — real, but not things a normal ins
 
 `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` are set *by* the DAEMON on every agent
 PTY (and scrubbed from plain terminals) so hooks can reach the HOOK RECEIVER — never something you
-set yourself. `ORION_IMPORT_BUNDLE` is likewise set *by* `orion ssh` and `orion tunnel` in the
-remote command: the SETTINGS BUNDLE the remote orion merges at startup and removes from its
-environment before it starts anything. For all of these, empty and unset mean the same thing: use the default.
+set yourself. For all of these, empty and unset mean the same thing: use the default.

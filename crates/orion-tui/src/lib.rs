@@ -6,7 +6,6 @@ pub mod autofix;
 pub mod base_sync;
 pub mod branch_name;
 pub mod branch_switch;
-pub mod bundle;
 pub mod claude_accounts;
 pub mod claude_catalogue;
 pub mod clean_worktrees;
@@ -23,6 +22,7 @@ pub mod doc_select;
 pub mod doctor;
 pub mod dropped_files;
 pub mod editor;
+pub mod editor_term;
 pub mod event_loop;
 pub mod fetch;
 pub mod field_mouse;
@@ -82,7 +82,6 @@ pub mod ui;
 pub mod update_check;
 pub mod usage;
 pub mod view_jobs;
-pub mod vim_term;
 pub mod week_review;
 pub mod whats_new;
 
@@ -95,12 +94,51 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .build()?)
 }
 
-pub use bundle::ConfigOp;
+/// `orion config <command>`, as the CLI parsed it.
+#[derive(Debug, Clone)]
+pub enum ConfigOp {
+    Path,
+    Harnesses,
+}
 
-/// `orion config path | export | import`: locate, back up and restore this
-/// machine's settings. See [`bundle`].
+/// `orion config path | harnesses`: where each settings file lives, and
+/// the harness registry launches read.
 pub fn run_config(op: ConfigOp) -> Result<()> {
-    bundle::run(op)
+    use anyhow::Context as _;
+    use orion_core::paths::{
+        CONFIG_FILE_NAME, CONFIG_LOCAL_FILE_NAME, PRESETS_FILE_NAME, SSH_HOSTS_FILE_NAME,
+    };
+    use std::io::Write as _;
+    match op {
+        ConfigOp::Path => {
+            for (label, path) in [
+                (CONFIG_FILE_NAME, orion_core::paths::config_path()),
+                (
+                    CONFIG_LOCAL_FILE_NAME,
+                    orion_core::paths::config_local_path(),
+                ),
+                (PRESETS_FILE_NAME, agent_presets::store_path()),
+                (SSH_HOSTS_FILE_NAME, hosts::store_path()),
+            ] {
+                println!("{label:<20}{}", path.display());
+            }
+            Ok(())
+        }
+        ConfigOp::Harnesses => {
+            // The registry as launches read it: the compiled-in rows with
+            // the `harnesses` map, the legacy list, the Claude accounts
+            // and the legacy keys folded in — labels as written, never an
+            // account's email. Copy a row into config.json `harnesses` to
+            // override it field by field (`null` clears a nullable row).
+            let registry = config::Config::load().raw_harness_registry();
+            let mut text = serde_json::to_string_pretty(&registry)?;
+            text.push('\n');
+            std::io::stdout()
+                .lock()
+                .write_all(text.as_bytes())
+                .context("writing to stdout")
+        }
+    }
 }
 
 /// `orion doctor [--json]`: what this machine has of what orion leans on,
@@ -170,7 +208,7 @@ pub fn relaunch() -> Result<()> {
     use std::os::unix::process::CommandExt as _;
     let mut args = std::env::args_os();
     // argv[0] over `current_exe`: a binary replaced since launch is the
-    // one wanted, and Linux spells the old one `… (deleted)`.
+    // one wanted.
     let program = match args.next() {
         Some(arg0) => std::path::PathBuf::from(arg0),
         None => std::env::current_exe().context("resolve current_exe")?,

@@ -15,7 +15,7 @@
 //!
 //! Every key label comes from one formatter, [`KeyChord::display`]: a
 //! registry action's from the live keymap ([`act`] — a rebind shows, an
-//! unbound action drops out, a terminal without ⌘ sees the `^` twin), a
+//! unbound action drops out, a ⌘ chord is printed over its fallbacks), a
 //! modal's own keys from the small [`Key`] table its key handler matches
 //! against, so a hint can never name a key the modal does not answer to.
 //! And every key label is drawn in one style, [`key_style`] — the theme's
@@ -71,23 +71,11 @@ impl Hint {
     }
 }
 
-/// The label of a list of chords: the first `show` of the side this
-/// terminal can press ([`Keymap::shown_chords`]'s rule), arrows run
-/// together (`↑↓`), the rest joined by `/` — `Enter/y`, `PgUp/PgDn`.
+/// The label of a list of chords: the first `show` of the ones the hints
+/// print ([`Keymap::shown_chords`]'s rule), arrows run together (`↑↓`),
+/// the rest joined by `/` — `Enter/y`, `PgUp/PgDn`.
 fn label_of(chords: &[KeyChord], show: usize) -> String {
-    let mut shown = crate::keymap::shown_side_of(chords);
-    // A terminal that sends no ⌘ speaks no kitty protocol either: a chord
-    // only that protocol carries (`⇧Enter`) gives way to its twin (`^J`).
-    if !crate::keymap::cmd_shown() && shown.len() > 1 {
-        let plain: Vec<KeyChord> = shown
-            .iter()
-            .copied()
-            .filter(|c| crate::keymap::host_warning(c).0.is_fine())
-            .collect();
-        if !plain.is_empty() {
-            shown = plain;
-        }
-    }
+    let mut shown = crate::keymap::shown(chords);
     shown.truncate(show.max(1));
     let mut out = String::new();
     let mut prev_arrow = false;
@@ -239,8 +227,7 @@ impl Key {
         self.chords().contains(&pressed)
     }
 
-    /// Its label: the chords this terminal can press, `⌘C` where ⌘
-    /// arrives and `^Y` where it does not.
+    /// Its label: its ⌘ chords, or every chord when it has none.
     pub fn label(&self) -> String {
         label_of(&self.chords(), self.show)
     }
@@ -257,8 +244,7 @@ impl Key {
     }
 }
 
-/// Copy the path of the file or skill under the cursor: `⌘C` where the
-/// terminal sends ⌘, `^Y` everywhere.
+/// Copy the path of the file or skill under the cursor: `⌘C`, and `^Y`.
 pub const COPY_PATH: Key = Key::new(&["cmd+c", "ctrl+y"], "copy path");
 
 /// Whether `key` is a finder's [`COPY_PATH`]: not while its `query` holds
@@ -508,16 +494,17 @@ mod tests {
         let keymap = Keymap::default();
         assert_eq!(
             act(&keymap, Action::FindFile, "go to file"),
-            Some(Hint::new("^P", "go to file"))
+            Some(Hint::new("⌘P", "go to file"))
         );
         assert_eq!(act(&keymap, Action::Help, "help"), None);
     }
 
     #[test]
     fn a_rebind_is_what_the_hint_says() {
-        let mut keymap = Keymap::default();
-        let index = crate::keymap::index_of(Action::NewTerminal).unwrap();
-        keymap.bind(index, KeyChord::parse("ctrl+x").unwrap(), false);
+        let keymap = Keymap::from_overrides(&std::collections::BTreeMap::from([(
+            "new_terminal".into(),
+            "ctrl+x".into(),
+        )]));
         assert_eq!(key(&keymap, Action::NewTerminal).as_deref(), Some("^X"));
     }
 
@@ -560,15 +547,15 @@ mod tests {
     }
 
     #[test]
-    fn a_modal_key_matches_every_spelling_and_shows_the_side_sent() {
+    fn a_modal_key_matches_every_spelling_and_shows_its_cmd_chord() {
         let copy = COPY_PATH;
         assert!(copy.parses());
         let ev = |code, mods| KeyEvent::new(code, mods);
         assert!(copy.matches(&ev(KeyCode::Char('c'), KeyModifiers::SUPER)));
         assert!(copy.matches(&ev(KeyCode::Char('y'), KeyModifiers::CONTROL)));
         assert!(!copy.matches(&ev(KeyCode::Char('c'), KeyModifiers::CONTROL)));
-        // No ⌘ from this terminal (the test default): the ^ twin.
-        assert_eq!(copy.label(), "^Y");
+        // The ⌘ chord is the one printed.
+        assert_eq!(copy.label(), "⌘C");
         let confirm = Key::new(&["enter", "y"], "confirm");
         assert_eq!(confirm.label(), "Enter", "the first chord unless told");
         assert_eq!(confirm.show(2).label(), "Enter/y");
@@ -675,13 +662,15 @@ mod tests {
     /// stays a brace.
     #[test]
     fn explanations_spell_their_keys_from_the_keymap() {
-        let mut keymap = Keymap::default();
+        let keymap = Keymap::default();
         assert_eq!(
             expand("Nothing is deleted — {palette} opens it again", &keymap),
-            "Nothing is deleted — ^K opens it again"
+            "Nothing is deleted — ⌘K opens it again"
         );
-        let index = crate::keymap::index_of(Action::Palette).unwrap();
-        keymap.bind(index, KeyChord::parse("f2").unwrap(), false);
+        let keymap = Keymap::from_overrides(&std::collections::BTreeMap::from([(
+            "palette".into(),
+            "f2".into(),
+        )]));
         assert_eq!(expand("{palette} jumps", &keymap), "F2 jumps");
         assert_eq!(
             expand("{help} lists them", &keymap),

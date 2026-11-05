@@ -609,10 +609,7 @@ pub fn claude_service(dir: Option<&Path>) -> String {
 }
 
 fn claude_credentials(account: &Account) -> Result<ClaudeCreds, Problem> {
-    let mut blob = None;
-    if cfg!(target_os = "macos") {
-        blob = keychain(&claude_service(account.keychain_dir.as_deref()), None);
-    }
+    let mut blob = keychain(&claude_service(account.keychain_dir.as_deref()), None);
     if blob.is_none() {
         blob = account
             .dir
@@ -692,10 +689,7 @@ struct CursorCreds {
 
 fn cursor_credentials() -> Result<CursorCreds, Problem> {
     let home = orion_core::env::home_dir().ok_or(Problem::SignedOut)?;
-    let mut token = None;
-    if cfg!(target_os = "macos") {
-        token = keychain(CURSOR_SERVICE, Some(CURSOR_KEY_ACCOUNT));
-    }
+    let mut token = keychain(CURSOR_SERVICE, Some(CURSOR_KEY_ACCOUNT));
     if token.is_none() {
         token = [".config/cursor/auth.json", ".cursor/auth.json"]
             .iter()

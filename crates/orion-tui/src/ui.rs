@@ -22,7 +22,7 @@ use footer::draw_footer;
 
 /// Outer size of the editor modal, as (width, height) percent of the frame.
 /// Shared with the event loop's pre-draw PTY size guess.
-pub const VIM_MODAL_PCT: (u16, u16) = (94, 92);
+pub const EDITOR_MODAL_PCT: (u16, u16) = (94, 92);
 /// Outer size of the two split modals (diff, tree), percent of the frame.
 pub(crate) const SPLIT_MODAL_PCT: (u16, u16) = (92, 90);
 /// The rows along the bottom the FOOTER takes.
@@ -259,7 +259,7 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
 /// already drew).
 fn draw_vim(f: &mut Frame, app: &mut App) {
     let th = app.theme;
-    let Some(vim) = &app.vim else {
+    let Some(vim) = &app.editor else {
         return;
     };
     if vim.embedded {
@@ -280,7 +280,7 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
             // cursor follows it rather than the pane underneath.
             app.host_cursor = pty_cursor_cell(vim.parser.screen(), inner);
             // Write-back: the post-draw sync resizes the PTY to the pane.
-            if let Some(vim) = &mut app.vim {
+            if let Some(vim) = &mut app.editor {
                 vim.area = inner;
             }
             return;
@@ -289,7 +289,7 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
         // to the modal so the session is never invisible.
     }
     dim_backdrop(f);
-    let area = centered_rect_pct(f.area(), VIM_MODAL_PCT.0, VIM_MODAL_PCT.1);
+    let area = centered_rect_pct(f.area(), EDITOR_MODAL_PCT.0, EDITOR_MODAL_PCT.1);
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -311,26 +311,27 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
     );
     app.host_cursor = pty_cursor_cell(vim.parser.screen(), inner);
     // Write-back: the post-draw sync resizes the PTY to the drawn rect.
-    if let Some(vim) = &mut app.vim {
+    if let Some(vim) = &mut app.editor {
         vim.area = inner;
     }
 }
 
 /// The editor modal's keys: the editor's own save and quit, which it
 /// reads itself, and the ones orion takes before the editor sees them
-/// (`event_loop::handle_vim_key`) — the force close and ⌘O.
+/// (`event_loop::handle_editor_key`) — the force close and ⌘O.
 pub(crate) mod editor_keys {
     use crate::hints::Key;
 
     pub const SAVE: Key = Key::new(&["ctrl+s"], "save");
     pub const QUIT: Key = Key::new(&["ctrl+q"], "quit");
-    pub const NEXT_MATCH: Key = Key::new(&["ctrl+d"], "next match");
-    pub const MENU: Key = Key::new(&["f10"], "menu");
     pub const PALETTE: Key = Key::new(&["ctrl+p"], "palette");
     /// `is_editor_hatch`: always the modal's, whatever the editor.
     pub const FORCE_CLOSE: Key = Key::new(&["ctrl+\\"], "force close");
     /// `^Q` force-closes too, for an editor that has no `^Q` of its own.
     pub const QUIT_FORCE: Key = Key::new(&["ctrl+q"], "force close");
+    /// fresh missing: the footer's offer of its install
+    /// (`event_loop::offer_editor_install`).
+    pub const INSTALL: Key = Key::new(&["i"], "install");
 }
 
 /// The editor modal's keys while it runs an installer (`install`): the
@@ -345,7 +346,7 @@ pub(crate) mod install_keys {
 
 /// The editor modal's bottom-border keys, for the editor it runs: its
 /// own save and quit, the force close, and ⌘O.
-pub(crate) fn editor_hints(vim: &crate::vim_term::VimTerm) -> Vec<crate::hints::Hint> {
+pub(crate) fn editor_hints(vim: &crate::editor_term::EditorTerm) -> Vec<crate::hints::Hint> {
     use crate::editor::Kind;
     use crate::hints::Hint;
     use editor_keys::*;
@@ -364,14 +365,7 @@ pub(crate) fn editor_hints(vim: &crate::vim_term::VimTerm) -> Vec<crate::hints::
         ];
     }
     let mut hints = match vim.kind {
-        Kind::Micro => vec![SAVE.hint(), QUIT.hint().kept(), NEXT_MATCH.hint()],
-        Kind::Edit => vec![SAVE.hint(), QUIT.hint().kept(), MENU.hint()],
         Kind::Fresh => vec![SAVE.hint(), QUIT.hint().kept(), PALETTE.hint()],
-        Kind::Vim | Kind::Helix => vec![Hint::new(":w", "save"), Hint::new(":q", "quit").kept()],
-        Kind::Emacs => vec![
-            Hint::new("^X ^S", "save"),
-            Hint::new("^X ^C", "quit").kept(),
-        ],
         Kind::Other => Vec::new(),
     };
     hints.push(if vim.quits_itself {
@@ -388,14 +382,14 @@ pub(crate) fn editor_hints(vim: &crate::vim_term::VimTerm) -> Vec<crate::hints::
 /// margin each side, scrolled where its keys left it.
 fn draw_page(f: &mut Frame, app: &mut App) {
     let th = app.theme;
-    if app.vim.as_ref().is_some_and(|v| !v.embedded) {
+    if app.editor.as_ref().is_some_and(|v| !v.embedded) {
         return; // the editor modal covers it exactly
     }
     let Some(page) = &mut app.page else {
         return;
     };
     dim_backdrop(f);
-    let area = centered_rect_pct(f.area(), VIM_MODAL_PCT.0, VIM_MODAL_PCT.1);
+    let area = centered_rect_pct(f.area(), EDITOR_MODAL_PCT.0, EDITOR_MODAL_PCT.1);
     f.render_widget(Clear, area);
     let mut block = Block::default()
         .borders(Borders::ALL)
@@ -1301,10 +1295,10 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             // giant list, and at ~24 rows it fits a stock terminal window
             // (the old single list clipped its tail on short screens).
             // Key columns come from the live keymap, not hardcoded text:
-            // every one of these is rebindable in Settings → Hotkeys, and
-            // help that lies about that is worse than no help. Literals
-            // are for keys that belong to an overlay rather than the
-            // grid, which is why they aren't rebindable.
+            // every one of these can be rebound in config.json's
+            // `keybindings`, and help that lies about that is worse than
+            // no help. Literals are for keys that belong to an overlay
+            // rather than the grid, which is why they can't be.
             use crate::keymap::Action::*;
             enum HelpKeys {
                 Lit(&'static str),
@@ -1442,7 +1436,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         (Act(&[Home]), "home: orion's animation"),
                         (Act(&[ToggleLauncherPane]), "fold / unfold the pane"),
                         (Act(&[ToggleFullScreen]), "full-screen / normal size"),
-                        (Act(&[Settings]), "settings; Hotkeys tab rebinds"),
+                        (Act(&[Settings]), "settings; Hotkeys tab lists keys"),
                         (Act(&[Quit]), "quit"),
                     ],
                 ),
@@ -1605,7 +1599,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             f.render_widget(block, area);
 
             let dim = Style::default().fg(th.dim);
-            let capturing = view.capturing();
 
             // ---- tab strip ----
             let (strip, hits) = tab_strip(
@@ -1738,36 +1731,18 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         let spec = crate::keymap::spec_at(*i)
                             .expect("settings_rows indexes the action table");
                         let selected = *i == view.selected && !view.on_tabs;
-                        let value = if selected && capturing {
-                            "press a key…".to_string()
-                        } else {
-                            app.keymap.display_at(*i)
-                        };
-                        let reach = app.keymap.reach_at(*i);
-                        let ambiguous = app.keymap.is_ambiguous(*i);
+                        let value = app.keymap.display_at(*i);
                         let mut label_style = Style::default();
-                        let mut value_style = if reach.is_fine() && !ambiguous {
-                            crate::hints::key_style(th)
-                        } else {
-                            Style::default().fg(th.warn)
-                        };
+                        let mut value_style = crate::hints::key_style(th);
                         if selected {
                             label_style = label_style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
                             value_style = value_style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
                         }
-                        // A row the host terminal probably can't deliver
-                        // says so on the row, not only when you bind it.
-                        let flag = match (ambiguous, reach) {
-                            (true, _) | (_, crate::keymap::Reach::Blocked) => "✗",
-                            (_, crate::keymap::Reach::Risky) => "⚠",
-                            _ => " ",
-                        };
                         // No brackets here, unlike the value tabs: `^]` is
-                        // a bindable chord and `[^q ^]]` is unreadable.
+                        // a chord and `[^q ^]]` is unreadable.
                         lines.push(Line::from(vec![
                             Span::styled(format!("   {:<28}", spec.label), label_style),
                             Span::styled(format!("{value:<18}"), value_style),
-                            Span::styled(flag.to_string(), Style::default().fg(th.warn)),
                         ]));
                     }
                 }
@@ -1777,14 +1752,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             }
 
             // ---- the EXPLANATION: a notice, or what the row does ----
-            // A row the config file has double-booked explains itself in
-            // place of its usual hint — that's the more urgent thing to
-            // say about it.
-            let shadowed = view
-                .is_hotkeys()
-                .then(|| app.keymap.shadowed_by(view.selected))
-                .filter(|names| !names.is_empty());
-            let (explanation, explain_style) = match (&view.notice, shadowed) {
+            let (explanation, explain_style) = match &view.notice {
                 // `i` asked whether to run an installer: the question
                 // stands in the explanation's place until it is answered.
                 _ if view.install.is_some() => (
@@ -1794,21 +1762,14 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         .unwrap_or_default(),
                     Style::default().fg(th.accent),
                 ),
-                (Some((text, level)), _) => (
+                Some((text, level)) => (
                     text.clone(),
                     match level {
                         crate::app::NoticeLevel::Warn => Style::default().fg(th.warn),
                         crate::app::NoticeLevel::Info => Style::default().fg(th.muted),
                     },
                 ),
-                (None, Some(names)) => (
-                    format!(
-                        "✗ this key also belongs to {} — whichever is listed first wins",
-                        names.join(", ")
-                    ),
-                    Style::default().fg(th.warn),
-                ),
-                (None, None) => (
+                None => (
                     crate::hints::expand(&crate::config::hint_at(tab, view.selected), &app.keymap),
                     dim,
                 ),
@@ -2324,7 +2285,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             // room, and the preview is a whole file.
             let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
             let title = format!(" Open files ({}) ", view.tabs.len());
-            let editing = app.vim.as_ref().is_some_and(|v| v.embedded);
+            let editing = app.editor.as_ref().is_some_and(|v| v.embedded);
             f.render_widget(Clear, area);
             let block = crate::hints::modal_block(
                 modal_block(title, th),
@@ -2508,7 +2469,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             // Right: the selected node's preview, syntax-highlighted and
             // scrolled — or the embedded editor, which draw_vim paints into
             // this pane after us.
-            let editing = app.vim.as_ref().is_some_and(|v| v.embedded);
+            let editing = app.editor.as_ref().is_some_and(|v| v.embedded);
             let sel_path = view.selected_node().map(|n| n.path.as_str()).unwrap_or("");
             let title = if editing {
                 format!(
@@ -2840,22 +2801,17 @@ pub(crate) mod settings_keys {
     pub const CLOSE: Key = Key::new(&["esc", "q", "s"], "close");
     pub const NEXT_TAB: Key = Key::new(&["tab", "]"], "next tab");
     pub const PREV_TAB: Key = Key::new(&["shift+tab", "["], "previous tab");
-    /// Enter on a row: toggle it, cycle it, type it, rebind it.
+    /// Enter on a row: toggle it, cycle it, type it.
     pub const CHOOSE: Key = Key::new(&["enter", "space"], "toggle");
     /// A value row's value, either way.
     pub const CYCLE: Key = Key::new(&["left", "right", "h", "l"], "cycle").show(2);
     pub const RESET_ALL: Key = Key::new(&["shift+r"], "reset all");
-    /// A HOTKEYS row: a second chord beside the first, the default back,
-    /// none at all.
-    pub const ADD: Key = Key::new(&["a", "+"], "add");
-    pub const DEFAULT: Key = Key::new(&["backspace", "delete"], "default");
-    pub const UNBIND: Key = Key::new(&["x"], "unbind");
     /// A CLAUDE ACCOUNTS row.
     pub const RENAME: Key = Key::new(&["r"], "rename");
     pub const SIGN_OUT: Key = Key::new(&["o"], "sign out");
     pub const REMOVE: Key = Key::new(&["backspace", "delete"], "remove");
-    /// A row whose program isn't on PATH — the **File editor**'s editor,
-    /// an agent's CLI — and the Enter that runs its installer once asked.
+    /// A row whose program isn't on PATH — an agent's CLI, git, gh — and
+    /// the Enter that runs its installer once asked.
     pub const INSTALL: Key = Key::new(&["i"], "install");
     pub const RUN: Key = Key::new(&["enter"], "run it here");
 
@@ -2863,8 +2819,8 @@ pub(crate) mod settings_keys {
     #[test]
     fn every_settings_key_parses() {
         for key in [
-            CLOSE, NEXT_TAB, PREV_TAB, CHOOSE, CYCLE, RESET_ALL, ADD, DEFAULT, UNBIND, RENAME,
-            SIGN_OUT, REMOVE, INSTALL, RUN,
+            CLOSE, NEXT_TAB, PREV_TAB, CHOOSE, CYCLE, RESET_ALL, RENAME, SIGN_OUT, REMOVE, INSTALL,
+            RUN,
         ] {
             assert!(key.parses(), "{:?}", key.chords);
         }
@@ -2876,18 +2832,6 @@ pub(crate) mod settings_keys {
 pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     use settings_keys::*;
-    if view.capturing() {
-        return vec![
-            Hint::new("any key", "binds it").kept(),
-            Hint::new("Esc", "cancel"),
-        ];
-    }
-    if view.capture.is_some() {
-        return vec![
-            Hint::new("Enter", "reassign it here").kept(),
-            Hint::new("Esc", "leave it where it is"),
-        ];
-    }
     if let Some(plan) = &view.install {
         let mut hints = Vec::new();
         if plan.runnable() {
@@ -2904,12 +2848,7 @@ pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hint
             .unwrap_or_default();
         vec![CYCLE.hint_as("tab"), Hint::new(digits, "jump")]
     } else if view.is_hotkeys() {
-        vec![
-            CHOOSE.hint_as("rebind").kept(),
-            ADD.hint(),
-            DEFAULT.hint(),
-            UNBIND.hint(),
-        ]
+        Vec::new()
     } else if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_text()) {
         vec![CHOOSE.hint_as("type a value (empty = default)").kept()]
     } else if let Some(
@@ -5491,10 +5430,10 @@ mod tests {
         }
         let full = text(&quick, launcher_view::BOX_SIZE.0 as usize);
         assert_eq!(
-            full, "Enter launch · ^J newline · ^X preset · ^V paste image · Esc cancel",
-            "no ⌘ from this terminal, so no kitty ⇧Enter either: ^J"
+            full,
+            "Enter launch · ⇧Enter newline · ⌘U preset · ^V paste image · Esc cancel"
         );
-        for chord in ["^P", "^T", "^/", "^Y", "^N", "Tab agent"] {
+        for chord in ["⌘P", "⌘.", "⌘/", "⌘Y", "⌘N", "Tab agent"] {
             assert!(!full.contains(chord), "{full} repeats {chord}");
         }
         assert!(!text(&follow_up, 80).contains("Tab"));

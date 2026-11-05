@@ -46,7 +46,6 @@ const AVAILABLE_MODELS_KEY: &str = "availableModels";
 const REMOTE_SETTINGS_FILE: &str = "remote-settings.json";
 
 /// The macOS managed-preferences domain an MDM profile writes.
-#[cfg(target_os = "macos")]
 const MDM_DOMAIN: &str = "com.anthropic.claudecode";
 
 // --- resolution ------------------------------------------------------------
@@ -165,13 +164,7 @@ pub fn install_available(available: Vec<String>) {
 
 /// The system directory managed settings files live in.
 fn managed_dir() -> PathBuf {
-    if cfg!(target_os = "macos") {
-        PathBuf::from("/Library/Application Support/ClaudeCode")
-    } else if cfg!(windows) {
-        PathBuf::from(r"C:\Program Files\ClaudeCode")
-    } else {
-        PathBuf::from("/etc/claude-code")
-    }
+    PathBuf::from("/Library/Application Support/ClaudeCode")
 }
 
 /// `availableModels` out of one settings document: an array of strings at
@@ -232,7 +225,6 @@ fn available_models_in_managed_files(dir: &Path) -> Option<Vec<String>> {
 
 /// The MDM profile, per-user then machine-wide, converted with `plutil`.
 /// Only shells out when the profile file exists.
-#[cfg(target_os = "macos")]
 fn available_models_in_mdm() -> Option<Vec<String>> {
     let file = format!("{MDM_DOMAIN}.plist");
     let mut paths = Vec::new();
@@ -257,11 +249,6 @@ fn available_models_in_mdm() -> Option<Vec<String>> {
         }
         available_models_in(&serde_json::from_slice(&output.stdout).ok()?)
     })
-}
-
-#[cfg(not(target_os = "macos"))]
-fn available_models_in_mdm() -> Option<Vec<String>> {
-    None
 }
 
 /// The first `availableModels` Claude Code would apply from on-disk

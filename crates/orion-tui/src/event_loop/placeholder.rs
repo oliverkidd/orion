@@ -604,7 +604,7 @@ mod tests {
             app.selected_worktree().map(|w| w.branch.as_str()),
             Some("feat")
         );
-        press(app, KeyCode::Char('n'), KeyModifiers::CONTROL, out);
+        press(app, KeyCode::Char('n'), KeyModifiers::SUPER, out);
         pick_fresh_worktree(app, out);
         let branch = match &app.overlay {
             Some(Overlay::Prompt(prompt)) => match &prompt.kind {
@@ -2207,12 +2207,7 @@ mod tests {
             seed_project_that_ran_first(&mut app);
             app.focus = Focus::Projects;
             assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w1"));
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let req_id = match out.as_slice() {

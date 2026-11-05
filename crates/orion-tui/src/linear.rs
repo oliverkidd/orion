@@ -3545,7 +3545,7 @@ fn copy_issues(app: &mut App, issues: &[LinearIssue], whence: &str) {
     }
     let label = format!(
         "copied {}{whence}",
-        crate::bundle::plural(issues.len(), "issue")
+        crate::flash::plural(issues.len(), "issue")
     );
     crate::event_loop::copy_and_flash(app, &issue_sections(issues), &label);
 }

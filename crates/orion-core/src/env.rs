@@ -20,10 +20,6 @@ pub const DATA_DIR: &str = "ORION_DATA_DIR";
 /// Moves `config.json` alone — into a dotfiles checkout, say — leaving the
 /// database, the logs and `config.local.json` in the data dir.
 pub const CONFIG_FILE: &str = "ORION_CONFIG_FILE";
-/// A SETTINGS BUNDLE (base64 JSON) that `orion ssh` / `orion tunnel` hand
-/// the remote orion. Read once at startup, merged into that machine's
-/// settings, and removed from the environment before anything is spawned.
-pub const IMPORT_BUNDLE: &str = "ORION_IMPORT_BUNDLE";
 /// Replaces every agent CLI with one command line, taken verbatim (tests
 /// stand in `/bin/sh` or a stub script for `claude`).
 pub const AGENT_CMD: &str = "ORION_AGENT_CMD";
@@ -53,13 +49,6 @@ pub const SPOTIFY_POLL_SECS: &str = "ORION_SPOTIFY_POLL_SECS";
 /// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
 /// run never reads the machine's logins or calls out with them.
 pub const USAGE: &str = "ORION_USAGE";
-/// A Ghostty config file the TUI keeps its GHOSTTY KEYBINDS block in
-/// instead of the one Ghostty reads, or `off` for none — as the e2e tests
-/// set it, so a run never touches the real one.
-pub const GHOSTTY_CONFIG: &str = "ORION_GHOSTTY_CONFIG";
-/// Set on the orion `orion browser` serves through ttyd: a page in a
-/// browser has no terminal for setup to move into Ghostty.
-pub const BROWSER: &str = "ORION_BROWSER";
 /// A file the TUI writes its INPUT LATENCY PROBE's timeline to
 /// (`make perf`); unset, there is no probe.
 pub const PERF_LOG: &str = "ORION_PERF_LOG";

@@ -41,7 +41,7 @@ pub(crate) struct Cli {
     /// Directory to add as a project — shorthand for `orion add <dir>`.
     ///
     /// A directory whose name collides with a subcommand needs the long form
-    /// (`orion add browser`) or a `./` prefix.
+    /// (`orion add setup`) or a `./` prefix.
     pub(crate) dir: Option<String>,
 }
 
@@ -49,7 +49,7 @@ const ROOT_EXAMPLES: &str = "\
 Examples:
   orion                            open the TUI (auto-starts the daemon)
   orion add ~/code/my-app          register a project
-  orion browser --port 8080        serve this TUI in a browser tab
+  orion ssh user@server            open orion on a remote machine
 
 Run `orion <command> --help` for a command's flags and examples.";
 
@@ -190,118 +190,33 @@ pub(crate) enum Command {
     /// leaves it out.
     #[command(subcommand, hide = true)]
     Autofix(AutofixCommand),
-    /// Back up, restore or locate this machine's settings.
+    /// Locate this machine's settings.
     ///
-    /// Settings live in `config.json` — the portable file an export, an
-    /// import and `orion ssh` carry — with `config.local.json` over it for
+    /// Settings live in `config.json`, with `config.local.json` over it for
     /// what only makes sense on this machine, beside `agent_presets.json` and
-    /// `ssh_hosts.json`. An export is one JSON file holding all but the local
-    /// layer; an import merges one in. Changes apply without a restart.
+    /// `ssh_hosts.json`. Changes apply without a restart.
     #[command(after_help = CONFIG_EXAMPLES)]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Serve this TUI in a web browser via ttyd.
-    ///
-    /// Runs ttyd in front of a orion TUI and opens a tab on it, so a phone or
-    /// another machine can drive this orion. Needs ttyd on PATH
-    /// (`brew install ttyd`); Ctrl+C takes the server down. It listens on
-    /// loopback unless --bind or --public widens it.
-    #[command(after_help = BROWSER_EXAMPLES)]
-    Browser {
-        /// Port for ttyd to listen on.
-        ///
-        /// Omit to take 7681 when it's free and a free one otherwise — so a
-        /// checkout per worktree can each serve at once. `--port 0` always
-        /// picks a free one; a port named explicitly is used or the command
-        /// fails, which is what you want behind an ssh tunnel.
-        #[arg(long)]
-        port: Option<u16>,
-        /// Address to listen on (default 127.0.0.1).
-        ///
-        /// Name a specific interface address to reach this orion from another
-        /// host — e.g. `--bind 10.0.1.7`. See --public for every interface.
-        #[arg(long, value_name = "ADDR", conflicts_with = "public")]
-        bind: Option<std::net::IpAddr>,
-        /// Listen on every interface (0.0.0.0).
-        ///
-        /// For a orion on a remote box. This serves a live, writable terminal
-        /// to anything that can reach the port — put a firewall, security
-        /// group, or VPN in front of it, and consider --credential.
-        #[arg(long)]
-        public: bool,
-        /// HTTP basic auth for the served terminal, as USER:PASSWORD.
-        ///
-        /// ttyd asks for it in the browser tab. Worth adding to any bind wider
-        /// than loopback, on top of whatever guards the port itself.
-        #[arg(long, value_name = "USER:PASSWORD")]
-        credential: Option<String>,
-        /// Serve the URL but do not open a desktop browser.
-        ///
-        /// For a machine with no desktop to open it on — `orion tunnel` runs
-        /// the remote half this way.
-        #[arg(long)]
-        no_open: bool,
-    },
     /// Open orion on a remote host over ssh.
     ///
     /// Connects with ssh and runs orion there, installing it on the remote
-    /// first when it is missing, so what you drive is the remote's own daemon
-    /// and sessions. This machine's `config.json` and agent presets ride
-    /// along and are merged into the remote's settings, where its own
-    /// `config.local.json` still wins. Destinations are remembered for the
-    /// TUI's host picker (**SSH hosts** in its command palette, `⌘⇧P`).
+    /// first when it is missing, so what you drive is the remote's own daemon,
+    /// sessions and settings. Destinations are remembered for the TUI's host
+    /// picker (**SSH hosts** in its command palette, `⌘⇧P`).
     #[command(after_help = SSH_EXAMPLES)]
     Ssh {
         /// ssh destination, passed verbatim (e.g. user@server).
         host: String,
         /// Remote directory to start in (default: remote $HOME).
         path: Option<String>,
-        /// Leave this machine's settings behind for this connection.
-        ///
-        /// The `ssh_sync_config` setting turns the forward off for good.
-        #[arg(long)]
-        no_sync_config: bool,
-    },
-    /// Open a remote host's orion in a browser tab here.
-    ///
-    /// One ssh tunnel does the whole thing: it installs orion on the remote
-    /// if missing, runs `orion browser` on the remote's own loopback,
-    /// forwards the port, and opens the local URL. Nothing is exposed on the
-    /// remote's network — the tunnel is the only way in — so it needs no
-    /// --credential. A `orion browser` already serving that port is reused
-    /// rather than treated as a clash. Needs ttyd on the remote; Ctrl+C takes
-    /// both ends down.
-    #[command(after_help = TUNNEL_EXAMPLES)]
-    Tunnel {
-        /// ssh destination, passed verbatim (e.g. user@server).
-        host: String,
-        /// Remote directory to start in (default: remote $HOME).
-        path: Option<String>,
-        /// Local end of the tunnel, and the port the browser opens.
-        ///
-        /// Omit to take 7681 when it is free and a free port otherwise;
-        /// `--port 0` always picks a free one.
-        #[arg(long)]
-        port: Option<u16>,
-        /// Port the remote serves on (default: the same number as --port).
-        ///
-        /// Name one when something on the remote already holds that port.
-        #[arg(long, value_name = "PORT")]
-        remote_port: Option<u16>,
-        /// Leave this machine's settings behind for this connection.
-        ///
-        /// By default `config.json` and the agent presets ride along, as they
-        /// do for `orion ssh`; the `ssh_sync_config` setting turns that off
-        /// for good.
-        #[arg(long)]
-        no_sync_config: bool,
     },
     /// Open orion on its setup, every step.
     ///
-    /// Agents, Claude accounts, editors, worktrees, Linear and the outside
-    /// terminal, with `i` to install what's missing. The palette's Run
+    /// Agents, Claude accounts, the Open in app editor, worktrees, Linear
+    /// and autofix, with `i` to install what's missing. The palette's Run
     /// setup and Settings → Tools → Setup open the same thing.
     Setup,
     /// Open orion as a Mac app of its own.
@@ -316,13 +231,13 @@ pub(crate) enum Command {
     App,
     /// Check what orion needs on this machine.
     ///
-    /// One line each for git, gh and its sign-in, the File editor and what
-    /// really opens, the Open in app editor, Ghostty and orion's keybind
-    /// block in its config, the CLI of every agent turned on, and this
+    /// One line each for git, gh and its sign-in, fresh (or the editor
+    /// `ORION_EDITOR` names), the Open in app editor, Orion.app and the
+    /// Ghostty it is made from, the CLI of every agent turned on, and this
     /// project's LINEAR_API_KEY (where it was found, never the key) — with
     /// the command that fixes whatever is missing. It never installs
     /// anything. Exits non-zero only when something orion can't do without
-    /// is missing: git, or an editor to open files in.
+    /// is missing: git, or the editor files open in.
     #[command(after_help = DOCTOR_EXAMPLES)]
     Doctor {
         /// Print the report as JSON.
@@ -401,33 +316,15 @@ Examples:
   orion open README.md                one tab
   orion open src/main.rs docs/keys.md a tab each, in this order";
 
-const BROWSER_EXAMPLES: &str = "\
-Examples:
-  orion browser                   serve on 127.0.0.1:7681, open a tab
-  orion browser --port 8080       take a specific port
-  orion browser --no-open         serve only; print the URL
-  orion browser --public --credential me:secret
-                                   reachable off-box, behind basic auth";
-
 const SSH_EXAMPLES: &str = "\
 Examples:
   orion ssh user@server           open the remote's orion
-  orion ssh user@server /srv/app  start in a directory there
-  orion ssh user@server --no-sync-config
-                                   keep this machine's settings here";
+  orion ssh user@server /srv/app  start in a directory there";
 
 const CONFIG_EXAMPLES: &str = "\
 Examples:
   orion config path               where each settings file lives
-  orion config export ~/backups   write ~/backups/orion-settings.json
-  orion config import ~/backups   merge it back in, here or elsewhere";
-
-const TUNNEL_EXAMPLES: &str = "\
-Examples:
-  orion tunnel user@server           the remote's TUI in a tab here
-  orion tunnel user@server /srv/app  start in a directory there
-  orion tunnel user@server --port 9000
-                                      pick the local end of the tunnel";
+  orion config harnesses          the harness registry launches read";
 
 const DOCTOR_EXAMPLES: &str = "\
 Examples:
@@ -463,36 +360,6 @@ pub(crate) enum ConfigCommand {
     /// checkout, say; `ORION_DATA_DIR` moves them all.
     #[command(after_help = "Example:\n  orion config path")]
     Path,
-    /// Write this machine's settings to one JSON file.
-    ///
-    /// Carries `config.json`, the agent presets and the ssh host list, never
-    /// `config.local.json`. Keys and presets this build doesn't know are
-    /// carried as they are, so a newer orion's settings survive the trip.
-    #[command(
-        after_help = "Examples:\n  orion config export > orion-settings.json\n  \
-                            orion config export ~/backups   writes ~/backups/orion-settings.json"
-    )]
-    Export {
-        /// File, or existing folder, to write (default: stdout; `-` too).
-        #[arg(value_name = "PATH")]
-        path: Option<String>,
-    },
-    /// Merge a settings backup into this machine's settings.
-    ///
-    /// Takes an export, a bare `config.json`, `agent_presets.json` or
-    /// `ssh_hosts.json`, a folder holding any of them, or `-` for stdin. Keys
-    /// the file sets replace this machine's and keys it lacks are left alone;
-    /// presets merge by name and hosts by destination. `config.local.json` is
-    /// never written, and still wins.
-    #[command(
-        after_help = "Examples:\n  orion config import orion-settings.json\n  \
-                            orion config import ~/dotfiles/orion   a folder holding config.json"
-    )]
-    Import {
-        /// The file, the folder, or `-` for stdin.
-        #[arg(value_name = "SOURCE")]
-        source: String,
-    },
     /// Print the effective harness registry: every harness orion knows —
     /// the built-ins, Claude accounts and `harnesses` map ids —
     /// with the program, flags, resume shape, hook dialect and defaults a

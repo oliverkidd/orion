@@ -1,6 +1,6 @@
 //! `orion doctor`: what this machine has of what orion leans on, a line
-//! each — git, gh and its sign-in, the **File editor** and what really
-//! opens, the **Open in app** editor, Orion.app and the Ghostty it is made
+//! each — git, gh and its sign-in, fresh (or the editor `ORION_EDITOR`
+//! names), the **Open in app** editor, Orion.app and the Ghostty it is made
 //! from, the CLI of every agent turned on, and the project's
 //! `LINEAR_API_KEY` (where it was found, never the key), and the docker
 //! compose projects whose checkout is gone — with the command that fixes
@@ -8,7 +8,7 @@
 //! `install.sh` and the onboarding wizard do, with the same commands
 //! (`install`).
 //!
-//! Only git, and an editor files can open in, are required; the exit code
+//! Only git, and the editor files open in, are required; the exit code
 //! is non-zero only when one of those is missing. Everything is probed
 //! against a [`Machine`] — a PATH, a home, the Applications folders — so
 //! the tests name their own.
@@ -93,7 +93,6 @@ pub struct Machine {
     pub home: Option<PathBuf>,
     pub app_roots: Vec<PathBuf>,
     pub cwd: PathBuf,
-    pub macos: bool,
     /// `ORION_EDITOR`.
     pub editor_env: Option<String>,
 }
@@ -102,18 +101,13 @@ impl Machine {
     /// This machine, as orion would see it from this shell.
     pub fn here() -> Self {
         let home = orion_core::env::home_dir();
-        let macos = cfg!(target_os = "macos");
-        let mut app_roots = Vec::new();
-        if macos {
-            app_roots.push(PathBuf::from("/"));
-            app_roots.extend(home.clone());
-        }
+        let mut app_roots = vec![PathBuf::from("/")];
+        app_roots.extend(home.clone());
         Self {
             path: std::env::var_os("PATH").unwrap_or_default(),
             home,
             app_roots,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            macos,
             editor_env: orion_core::env::non_empty(orion_core::env::EDITOR),
         }
     }
@@ -176,7 +170,7 @@ fn probe_output(m: &Machine, program: &Path, args: &[&str], cwd: &Path) -> Optio
 
 /// Every check, in the report's order.
 pub fn checks(cfg: &Config, m: &Machine) -> Vec<Check> {
-    let mut out = vec![git(m), gh(m), editor(cfg, m), open_in_app(cfg, m)];
+    let mut out = vec![git(m), gh(m), editor(m), open_in_app(cfg, m)];
     out.push(orion_app(m));
     out.extend(agents(cfg, m));
     out.push(linear(m));
@@ -195,11 +189,7 @@ fn plan_fix(plan: crate::install::Plan) -> String {
 }
 
 fn git(m: &Machine) -> Check {
-    let fix = if m.macos {
-        "xcode-select --install"
-    } else {
-        "https://git-scm.com/downloads"
-    };
+    let fix = "xcode-select --install";
     match m.find("git") {
         None => Check::new(
             "git",
@@ -239,67 +229,31 @@ fn gh(m: &Machine) -> Check {
     }
 }
 
-/// The **File editor**: the one chosen, and what opens when it is missing.
-fn editor(cfg: &Config, m: &Machine) -> Check {
-    let installed = |program: &str| m.find(program).is_some();
-    let resolved = crate::editor::resolve(m.editor_env.as_deref(), &cfg.editor, installed);
-    let program = resolved
-        .command
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_string();
+/// The editor files open in: fresh, or the command `ORION_EDITOR` names —
+/// installed, or the line that installs it.
+fn editor(m: &Machine) -> Check {
+    let command = m
+        .editor_env
+        .clone()
+        .unwrap_or_else(|| crate::editor::DEFAULT_EDITOR.to_string());
+    let program = crate::editor::program_name(&command);
     let source = if m.editor_env.is_some() {
         " (ORION_EDITOR)"
     } else {
         ""
     };
-    let fix_for = |editor: &str| {
-        m.tools().editor_plan(editor).map(|plan| {
-            if plan.runnable() {
-                plan.line
-            } else {
-                plan.link.to_string()
-            }
-        })
-    };
-    match (&resolved.missing, installed(&program)) {
-        (None, true) => Check::new(
-            "File editor",
-            Status::Ok,
-            format!("{}{source}", resolved.command),
-        )
-        .required(),
-        (Some(missing), _) => {
-            let mut check = Check::new(
-                "File editor",
-                Status::Missing,
-                format!(
-                    "{missing}{source} isn't installed — files open in {} instead",
-                    resolved.command
-                ),
-            );
-            if let Some(fix) = fix_for(missing) {
-                check = check.fix(fix);
-            }
-            check
-        }
-        (None, false) => {
-            let mut check = Check::new(
-                "File editor",
-                Status::Missing,
-                format!(
-                    "{program}{source} isn't installed, and none of fresh, micro, edit or vim \
-                     is either — no file can open"
-                ),
-            )
-            .required();
-            if let Some(fix) = fix_for(&program).or_else(|| fix_for(crate::editor::DEFAULT_EDITOR))
-            {
-                check = check.fix(fix);
-            }
-            check
-        }
+    if m.find(program).is_some() {
+        return Check::new("File editor", Status::Ok, format!("{command}{source}")).required();
+    }
+    let check = Check::new(
+        "File editor",
+        Status::Missing,
+        format!("{program}{source} isn't installed — no file can open"),
+    )
+    .required();
+    match m.tools().editor_plan(&command) {
+        Some(plan) => check.fix(plan_fix(plan)),
+        None => check,
     }
 }
 
@@ -334,15 +288,12 @@ fn open_in_app(cfg: &Config, m: &Machine) -> Check {
 /// made — the one place orion's ⌘ chords reach it.
 fn orion_app(m: &Machine) -> Check {
     const NAME: &str = "Orion.app";
-    if !m.macos {
-        return Check::new(NAME, Status::Skipped, "macOS only");
-    }
     if crate::event_loop::ghostty_app_in(&m.app_roots).is_none() {
         return Check::new(
             NAME,
             Status::Missing,
-            "Ghostty isn't installed, and the app is made from it — ⌘ shortcuts answer to \
-             their ^ twins, and the outside terminal opens in Terminal.app",
+            "Ghostty isn't installed, and the app is made from it — orion's ⌘ shortcuts \
+             reach it only there, and a terminal in the checkout opens in it",
         )
         .fix(plan_fix(m.tools().ghostty_plan()));
     }
@@ -363,8 +314,7 @@ fn orion_app(m: &Machine) -> Check {
         None => Check::new(
             NAME,
             Status::Missing,
-            "not made yet — orion's ⌘ shortcuts work in it, and answer to their ^ twins in a \
-             terminal",
+            "not made yet — orion's ⌘ shortcuts work in it",
         )
         .fix("orion app"),
     }
@@ -585,7 +535,6 @@ mod tests {
                 home: Some(root.join("home")),
                 app_roots: vec![root.join("root")],
                 cwd: root.join("project"),
-                macos: true,
                 editor_env: None,
             }
         }
@@ -717,35 +666,38 @@ mod tests {
         );
     }
 
-    /// The chosen editor missing: what opens instead, and the formula
-    /// that installs it. Nothing at all to open files in: required.
+    /// fresh missing: required, and the formula that installs it — or,
+    /// with no Homebrew, its page. `ORION_EDITOR` names another.
     #[test]
-    fn the_editor_says_what_really_opens() {
+    fn the_editor_is_fresh_or_what_orion_editor_names() {
         let stubs = Stubs::new();
         stubs.program("vim", "exit 0").program("brew", "exit 0");
-        let check = editor(&claude_only(r#", "editor": "micro""#), &stubs.machine());
+        let check = editor(&stubs.machine());
         assert_eq!(check.status, Status::Missing);
-        assert_eq!(
-            check.detail,
-            "micro isn't installed — files open in vim instead"
-        );
-        assert_eq!(check.fix.as_deref(), Some("brew install micro"));
-        assert!(!check.fails(), "vim opens them");
+        assert_eq!(check.detail, "fresh isn't installed — no file can open");
+        assert_eq!(check.fix.as_deref(), Some("brew install fresh-editor"));
+        assert!(check.fails(), "vim is no stand-in");
 
         let stubs = Stubs::new();
-        let check = editor(&claude_only(r#", "editor": "hx""#), &stubs.machine());
-        assert!(check.fails(), "{check:?}");
+        let check = editor(&stubs.machine());
         assert_eq!(
             check.fix.as_deref(),
-            Some("https://docs.helix-editor.com/install.html"),
-            "no Homebrew: the editor's page"
+            Some("https://github.com/sinelaw/fresh#installation"),
+            "no Homebrew: fresh's page"
         );
 
         let stubs = Stubs::new();
         stubs.program("nvim", "exit 0");
         let mut m = stubs.machine();
         m.editor_env = Some("nvim".into());
-        assert_eq!(editor(&claude_only(""), &m).detail, "nvim (ORION_EDITOR)");
+        assert_eq!(editor(&m).detail, "nvim (ORION_EDITOR)");
+        m.editor_env = Some("hx".into());
+        let check = editor(&m);
+        assert_eq!(
+            check.detail,
+            "hx (ORION_EDITOR) isn't installed — no file can open"
+        );
+        assert_eq!(check.fix, None);
     }
 
     /// Every agent turned on, by its CLI — a missing one with its maker's
@@ -778,7 +730,7 @@ mod tests {
     #[test]
     fn orion_app_and_the_ghostty_it_is_made_from() {
         let stubs = Stubs::new();
-        let mut m = stubs.machine();
+        let m = stubs.machine();
         let check = orion_app(&m);
         assert_eq!(check.status, Status::Missing);
         assert!(
@@ -800,9 +752,6 @@ mod tests {
             check.detail.ends_with("Applications/Orion.app"),
             "{check:?}"
         );
-
-        m.macos = false;
-        assert_eq!(orion_app(&m).status, Status::Skipped);
     }
 
     /// The project's key: where it was found, never what it is.

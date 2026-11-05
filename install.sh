@@ -3,12 +3,12 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/oliverkidd/orion/main/install.sh | sh
 #
-# Grabs the prebuilt binary for this platform from the latest GitHub release,
-# falling back to `cargo install --git` when no release (or no matching asset)
-# exists. Then makes sure of what orion leans on: git (required), an editor it
-# opens files in (fresh, unless fresh, micro or Microsoft Edit is already
-# here), gh for pull requests and issues and, on a Mac, Ghostty, which orion's
-# own app is made from. A first install on a Mac then opens orion as that app
+# orion runs on macOS. Grabs the prebuilt binary for this Mac from the latest
+# GitHub release, falling back to `cargo install --git` when no release (or no
+# matching asset) exists. Then makes sure of what orion leans on: git
+# (required), fresh, the editor it opens files in, gh for pull requests and
+# issues, and Ghostty, which orion's own app is made from. A first install
+# then opens orion as that app
 # — Orion.app in ~/Applications — so setup starts where its ⌘ shortcuts work
 # and orion is in the Dock from then on.
 # Running it again updates in place, and says nothing about dependencies that
@@ -45,23 +45,15 @@ parse_args() {
     done
 }
 
+need_macos() {
+    [ "$(uname -s)" = Darwin ] || err "orion runs on macOS only"
+}
+
 detect_target() {
-    case "$(uname -s)" in
-    Darwin)
-        case "$(uname -m)" in
-        arm64) echo aarch64-apple-darwin ;;
-        x86_64) echo x86_64-apple-darwin ;;
-        *) return 1 ;;
-        esac
-        ;;
-    Linux)
-        case "$(uname -m)" in
-        x86_64) echo x86_64-unknown-linux-musl ;;
-        aarch64 | arm64) echo aarch64-unknown-linux-musl ;;
-        *) return 1 ;;
-        esac
-        ;;
-    *) err "orion runs on macOS and Linux only (the daemon needs unix sockets)" ;;
+    case "$(uname -m)" in
+    arm64) echo aarch64-apple-darwin ;;
+    x86_64) echo x86_64-apple-darwin ;;
+    *) return 1 ;;
     esac
 }
 
@@ -91,41 +83,18 @@ install_from_source() {
 # git: every project is a git repository. Nothing orion does works without it.
 need_git() {
     have git && return 0
-    case "$(uname -s)" in
-    Darwin) err "orion needs git — run 'xcode-select --install' (or 'brew install git'), then re-run this" ;;
-    *) err "orion needs git — install it with your package manager (https://git-scm.com/downloads), then re-run this" ;;
-    esac
+    err "orion needs git — run 'xcode-select --install' (or 'brew install git'), then re-run this"
 }
 
-# An editor orion opens files in, with VS Code's keys: fresh, micro or
-# Microsoft Edit (`edit`). With none of them here, fresh — from Homebrew;
-# without it, on Linux, with the quick-install script fresh's README links
-# (https://github.com/sinelaw/fresh#installation), its universal build with
-# `fresh` linked into the install dir. That script wants Homebrew on macOS,
-# so there — or when it fails — micro instead, with the quick-install script
-# micro's README links (https://getmic.ro), which drops the binary into the
-# folder it runs in: the install dir.
+# fresh, the editor orion opens files in, with VS Code's keys: from
+# Homebrew; without it, a pointer to its install page.
 ensure_editor() {
-    for editor in fresh micro edit; do
-        have "$editor" && return 0
-    done
+    have fresh && return 0
     if have brew; then
         say "installing fresh, the editor orion opens files in (brew install fresh-editor)…"
         brew install fresh-editor && return 0
-    else
-        mkdir -p "$INSTALL_DIR"
-        if [ "$(uname -s)" = Linux ]; then
-            say "installing fresh, the editor orion opens files in, into $INSTALL_DIR…"
-            curl -fsSL https://raw.githubusercontent.com/sinelaw/fresh/refs/heads/master/scripts/install.sh |
-                FRESH_BIN_DIR="$INSTALL_DIR" sh -s -- --method=tarball || true
-            [ -x "$INSTALL_DIR/fresh" ] && return 0
-        fi
-        say "installing micro, the editor orion opens files in, into $INSTALL_DIR…"
-        # A pipe's status is its last command's: ask the folder, not sh.
-        (cd "$INSTALL_DIR" && curl -fsSL https://getmic.ro | sh) || true
-        [ -x "$INSTALL_DIR/micro" ] && return 0
     fi
-    say "warning: couldn't install fresh — files open in vim until it is (https://github.com/sinelaw/fresh#installation)"
+    say "warning: couldn't install fresh — no file opens in orion until it is (https://github.com/sinelaw/fresh#installation)"
 }
 
 # gh, the GitHub CLI orion reads pull requests and issues with. Recommended,
@@ -146,10 +115,9 @@ have_ghostty() {
     [ -d /Applications/Ghostty.app ] || [ -d "$HOME/Applications/Ghostty.app" ]
 }
 
-# Whether this is a Mac at its own keyboard, outside tmux. Over ssh the Mac is
+# Whether this Mac is at its own keyboard, outside tmux. Over ssh the Mac is
 # not the one being typed at, and tmux is a choice a new window would undo.
 at_this_mac() {
-    [ "$(uname -s)" = Darwin ] || return 1
     [ -z "${SSH_CONNECTION:-}${SSH_TTY:-}" ] || return 1
     [ -z "${TMUX:-}" ]
 }
@@ -225,6 +193,7 @@ open_app() {
 
 main() {
     parse_args "$@"
+    need_macos
     command -v curl >/dev/null 2>&1 || err "curl is required"
 
     had_orion=""
@@ -240,7 +209,7 @@ main() {
             reason="couldn't download orion-$target from the latest release"
         fi
     else
-        reason="no prebuilt binary for $(uname -s) $(uname -m)"
+        reason="no prebuilt binary for $(uname -m)"
     fi
 
     if [ -z "$installed" ]; then

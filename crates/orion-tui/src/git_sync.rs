@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use orion_core::{Worktree, WorktreeId};
 
 use crate::app::{App, ConfirmDialog, Focus, Overlay, PendingAction};
-use crate::bundle::plural;
+use crate::flash::plural;
 use crate::flash::Flash;
 use crate::git_proc::{
     head_branch, logged_git, read, remote_git, run, GitLog, FETCH_TIMEOUT, PUSH_TIMEOUT,

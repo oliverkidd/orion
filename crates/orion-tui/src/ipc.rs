@@ -748,14 +748,6 @@ fn process_running(pid: i32) -> bool {
     if send_signal(pid, 0) != 0 {
         return false;
     }
-    // Linux: the state letter follows the parenthesised command name, which
-    // can itself hold spaces and parens — hence the last `)`. No `ps` needed.
-    if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        let state = stat
-            .rsplit_once(')')
-            .and_then(|(_, rest)| rest.trim_start().chars().next());
-        return state != Some('Z');
-    }
     match std::process::Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .output()

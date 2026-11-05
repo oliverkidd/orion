@@ -230,7 +230,7 @@ pub(super) fn diff_focus_next(view: &mut DiffView, forward: bool) {
 /// applies the setting (toggles it, opens its box, cycles it in place).
 pub(super) fn settings_row_cmd(hotkeys: bool, selected: usize) -> SettingsCmd {
     if hotkeys {
-        SettingsCmd::Capture { add: false }
+        SettingsCmd::Nudge
     } else {
         SettingsCmd::Apply(selected, 0)
     }

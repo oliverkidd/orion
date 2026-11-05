@@ -3189,11 +3189,11 @@ mod tests {
         assert!(rows[0].starts_with("project "), "{rows:?}");
         assert!(rows[1].starts_with("agent "), "{rows:?}");
         for (field, want) in [
-            (BoxField::Project, "project (project gone) ^P"),
-            (BoxField::Worktree, "worktree (worktree gone) ^T"),
+            (BoxField::Project, "project (project gone) ⌘P"),
+            (BoxField::Worktree, "worktree (worktree gone) ⌘."),
             (BoxField::Agent, "Claude Tab"),
-            (BoxField::Model, "model default ^/"),
-            (BoxField::Effort, "effort default ^Y"),
+            (BoxField::Model, "model default ⌘/"),
+            (BoxField::Effort, "effort default ⌘Y"),
         ] {
             let cells = cells_of(&head, field).unwrap_or_else(|| panic!("{field:?}: {rows:?}"));
             assert!(cells.ends_with(want), "{field:?} is {cells:?}");
@@ -3211,12 +3211,12 @@ mod tests {
         launch.effort = Some("high".into());
         let head = header(&app, &launch, inner);
         assert!(
-            cells_of(&head, BoxField::Model).is_some_and(|c| c.ends_with("opus · latest ^/")),
+            cells_of(&head, BoxField::Model).is_some_and(|c| c.ends_with("opus · latest ⌘/")),
             "{:?}",
             rows_of(&head)
         );
         assert!(
-            cells_of(&head, BoxField::Effort).is_some_and(|c| c.ends_with("effort high ^Y")),
+            cells_of(&head, BoxField::Effort).is_some_and(|c| c.ends_with("effort high ⌘Y")),
             "{:?}",
             rows_of(&head)
         );
@@ -3229,7 +3229,6 @@ mod tests {
     /// its key arm matches.
     #[test]
     fn the_header_keys_come_from_the_keymap_and_the_box_table() {
-        use crate::keymap::{index_of, KeyChord};
         let mut app = App::new();
         let mut launch = a_launch();
         launch.preset = Some(Box::new(a_preset("reviewer")));
@@ -3255,10 +3254,10 @@ mod tests {
         }
 
         // Rebound: the header follows. Unbound: no key, still a field.
-        let effort = index_of(Action::CycleEffort).unwrap();
-        app.keymap
-            .bind(effort, KeyChord::parse("f7").unwrap(), false);
-        app.keymap.clear(index_of(Action::SelectModel).unwrap());
+        app.keymap = crate::keymap::Keymap::from_overrides(&std::collections::BTreeMap::from([
+            ("cycle_effort".into(), "f7".into()),
+            ("select_model".into(), String::new()),
+        ]));
         let head = header(&app, &launch, 200);
         assert!(
             key(&head, BoxField::Effort).ends_with(" F7"),
@@ -3390,13 +3389,13 @@ mod tests {
             for (field, ..) in &head.fields {
                 let cells = cells_of(&head, *field).unwrap();
                 let key = match field {
-                    BoxField::Project => "^P",
-                    BoxField::Worktree => "^T",
+                    BoxField::Project => "⌘P",
+                    BoxField::Worktree => "⌘.",
                     BoxField::Agent => "Tab",
-                    BoxField::Model => "^/",
-                    BoxField::Effort => "^Y",
+                    BoxField::Model => "⌘/",
+                    BoxField::Effort => "⌘Y",
                     BoxField::Mode => "⇧Tab",
-                    BoxField::Preset => "^X",
+                    BoxField::Preset => "⌘U",
                 };
                 assert!(
                     cells.ends_with(&format!(" {key}")),
@@ -4476,7 +4475,7 @@ mod tests {
                 .skip(usize::from(x))
                 .take(usize::from(w))
                 .collect();
-            assert!(under.ends_with(" ^T"), "{width}: {under:?}");
+            assert!(under.ends_with(" ⌘."), "{width}: {under:?}");
             assert!(under.starts_with("(w"), "{width}: {under:?}");
             let (_, frow, fx, fw) = head
                 .fields
@@ -4520,7 +4519,7 @@ mod tests {
         let head = header(&app, &launch, 200);
         let rows = rows_of(&head);
         assert!(
-            rows[0].contains("new worktree yellow-fox-jumps ^T"),
+            rows[0].contains("new worktree yellow-fox-jumps ⌘."),
             "{rows:?}"
         );
         assert!(
@@ -4553,12 +4552,12 @@ mod tests {
                 200,
             )
         };
-        assert!(border(&launch).contains("^X preset"), "{}", border(&launch));
+        assert!(border(&launch).contains("⌘U preset"), "{}", border(&launch));
         launch.preset = Some(Box::new(a_preset("reviewer")));
         let head = header(&app, &launch, BOX_SIZE.0 - 4);
         assert_eq!(
             cells_of(&head, BoxField::Preset).as_deref(),
-            Some("preset reviewer ^X"),
+            Some("preset reviewer ⌘U"),
             "{:?}",
             rows_of(&head)
         );

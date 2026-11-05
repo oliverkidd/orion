@@ -347,7 +347,7 @@
   byte in its first 8 KiB, git's own test — a terminal has nothing to show for a PNG); the daemon only
   checks the caller is a known session and passes the agent's checkout along as the editor's working
   directory. Same appended prompt, plus a `Bash(orion open:*)` permission.
-- **Everything persists in SQLite** (`~/.local/share/orion/orion.db` or the platform equivalent):
+- **Everything persists in SQLite** (`~/Library/Application Support/dev.orion.orion/orion.db`):
   projects, worktrees, agents (with kind + CLI session ids), links, and your last selection.
 - **Sessions warm up, then get reaped.** The daemon can pre-spawn an agent CLI in the selected worktree
   before you ask for one, and pre-boot a worktree's dead sessions while your selection rests on it, so attaching

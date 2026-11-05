@@ -141,7 +141,7 @@ mod tests {
         }));
         assert!(menu_hints(&app)
             .iter()
-            .any(|(label, hint)| label == "Go to file" && hint.as_deref() == Some("^P")));
+            .any(|(label, hint)| label == "Go to file" && hint.as_deref() == Some("⌘P")));
         assert!(rows.iter().all(|(_, action)| match action {
             MenuAction::RunAction(action) => listed(*action),
             _ => false,

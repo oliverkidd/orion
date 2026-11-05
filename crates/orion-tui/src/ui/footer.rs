@@ -206,7 +206,7 @@ fn place(app: &App) -> Option<&'static str> {
 /// The footer's KEY HINTS for the screen as it stands — none at all while
 /// a modal (or the editor) is up: those keys are on the modal's border.
 pub(crate) fn hints(app: &App) -> Vec<Hint> {
-    if app.overlay.is_some() || app.vim.is_some() || app.page.is_some() {
+    if app.overlay.is_some() || app.editor.is_some() || app.page.is_some() {
         return Vec::new();
     }
     let km = &app.keymap;
@@ -414,13 +414,13 @@ fn into_pane(app: &App, bands: &[crate::launcher::Band]) -> Option<Hint> {
 }
 
 /// [`act`] for a key pressed from inside a LOCKED PANE, where only a ⌘
-/// chord reaches orion — the `^` twins are the agent's there. None in a
-/// terminal that never sends ⌘ ([`crate::keymap::cmd_shown`]), or for an
-/// action with no ⌘ chord, so the footer never names a key the agent
-/// would get instead.
+/// chord reaches orion. None for an action with no ⌘ chord, so the
+/// footer never names a key the agent would get instead.
 fn from_lock(km: &crate::keymap::Keymap, action: Action, does: &str) -> Option<Hint> {
     let shown = km.shown_first(action)?;
-    (crate::keymap::cmd_shown() && shown.mods.contains(crossterm::event::KeyModifiers::SUPER))
+    shown
+        .mods
+        .contains(crossterm::event::KeyModifiers::SUPER)
         .then(|| act(km, action, does))
         .flatten()
 }
@@ -471,7 +471,7 @@ fn pane_hints(app: &App) -> Vec<Option<Hint>> {
             // ⌘ is read off the Mac's own keyboard, which a TUI on
             // another machine has none of.
             Some(Hint::new(
-                if cfg!(target_os = "macos") && !app.is_remote {
+                if !app.is_remote {
                     "⌘click"
                 } else {
                     "⌥click"

@@ -103,7 +103,7 @@ pub(crate) fn stop_all(app: &mut App, out: &mut Vec<ClientRequest>) {
     // One line for the lot, not the last run's own.
     app.flash = Some(crate::flash::Flash::note(format!(
         "stopping {}",
-        crate::bundle::plural(runs.len() + running.len(), "stack")
+        crate::flash::plural(runs.len() + running.len(), "stack")
     )));
 }
 

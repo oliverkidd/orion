@@ -104,12 +104,8 @@ pub struct Answer {
 
 /// The poll's cadence while a track is up: `ORION_SPOTIFY_POLL_SECS` when
 /// set, `None` when it is `0` (off — the e2e tests, whose footers must not
-/// depend on what is playing) and anywhere but macOS, where there is no
-/// AppleScript to ask; else [`DEFAULT_INTERVAL`].
+/// depend on what is playing); else [`DEFAULT_INTERVAL`].
 pub fn interval() -> Option<Duration> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
     orion_core::env::secs_override(orion_core::env::SPOTIFY_POLL_SECS, DEFAULT_INTERVAL)
 }
 

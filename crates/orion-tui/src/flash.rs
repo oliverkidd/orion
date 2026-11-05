@@ -81,3 +81,8 @@ impl fmt::Display for Flash {
         f.write_str(&self.text)
     }
 }
+
+/// `n` and `noun`, the noun plural unless `n` is one: `1 file`, `3 files`.
+pub(crate) fn plural(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}

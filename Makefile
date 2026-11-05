@@ -4,10 +4,9 @@
 #   make dev      isolated instance — own daemon, own data; your real sessions untouched
 #                 (first run copies your real projects, worktrees and settings in,
 #                 so it looks like yours — `make dev-reset` re-copies)
-#   make browser  the same isolated instance, served into a browser tab via ttyd
 #
 # Each checkout gets its own instance, keyed to its path, so the main clone and
-# every worktree can run at once without sharing a daemon, a DB, or a port.
+# every worktree can run at once without sharing a daemon or a DB.
 # `make dev-ls` shows them all.
 #   make install  put it in ~/.cargo/bin for real use (then `make kill` to cut over)
 #   make cycle    install + kill + prune + dev in one go — the re-runnable full cutover
@@ -40,11 +39,6 @@ KEEP ?= 3
 # including the warm-slot prewarm, which launches one before you create any
 # agent at all. Unset (the default) means real agents, exactly like production.
 AGENT ?=
-# Left empty on purpose: `orion browser` then takes 7681 when it is free and
-# a free port otherwise, printing which — so a `make browser` per checkout all
-# serve at once. `make browser PORT=8080` pins it (and fails if 8080 is taken,
-# which is what you want when you have an ssh tunnel pointed at it).
-PORT ?=
 
 # Every dev-instance run goes through this: its own socket dir and its own DB,
 # so nothing here can touch the real daemon's state.
@@ -52,7 +46,7 @@ DEV_ENV = ORION_RUNTIME_DIR=$(DEV_RUNTIME) ORION_DATA_DIR=$(DEV_DATA) \
 	$(if $(AGENT),ORION_AGENT_CMD=$(AGENT))
 
 .DEFAULT_GOAL := help
-.PHONY: help dev browser dev-prep dev-seed dev-reset dev-ls dev-stop build install kill prune cycle check fmt lint test ci clean shot perf
+.PHONY: help dev dev-prep dev-seed dev-reset dev-ls dev-stop build install kill prune cycle check fmt lint test ci clean shot perf
 
 help: ## Show this help
 	@grep -hE '^[a-z][a-z-]*:.*?## ' $(MAKEFILE_LIST) \
@@ -65,19 +59,8 @@ dev: dev-prep ## Run the latest code in an isolated instance (own daemon + data)
 	-@$(DEV_ENV) $(DEBUG_BIN)
 	@$(MAKE) --no-print-directory dev-stop
 
-# `orion browser` shells out to ttyd and serves *this* binary
-# (`current_exe`, not whatever `orion` is on PATH), so the tab gets the build
-# below rather than the installed release. ttyd hands its environment to the
-# command it runs, so $(DEV_ENV) reaches the TUI in the tab and the browser
-# instance stays as isolated as `make dev`. Needs ttyd on PATH — the binary
-# says how to install it if it is missing. Ctrl+C here stops ttyd.
-browser: dev-prep ## Serve the latest code into a browser tab via ttyd (PORT= to pin)
-	@echo "dev instance → runtime $(DEV_RUNTIME), data $(DEV_DATA)"
-	-@$(DEV_ENV) $(DEBUG_BIN) browser $(if $(PORT),--port $(PORT))
-	@$(MAKE) --no-print-directory dev-stop
-
-# Build, clear the way, and seed — everything `dev` and `browser` both need
-# before they can hand the terminal over.
+# Build, clear the way, and seed — everything `dev` needs before it can hand
+# the terminal over.
 dev-prep:
 	cargo build
 	@# Load-bearing: a dev daemon from a previous run detached and outlived
@@ -101,10 +84,7 @@ dev-prep:
 # puts it (orion-core/src/paths.rs); keep the two in step.
 dev-seed: ## Copy real projects/settings into the dev instance (only if it has no DB yet)
 	@[ ! -e $(DEV_DATA)/orion.db ] || exit 0; \
-	case "$$(uname -s)" in \
-		Darwin) real="$$HOME/Library/Application Support/dev.orion.orion";; \
-		*)      real="$${XDG_DATA_HOME:-$$HOME/.local/share}/orion";; \
-	esac; \
+	real="$$HOME/Library/Application Support/dev.orion.orion"; \
 	if [ ! -f "$$real/orion.db" ]; then \
 		echo "no real orion data at $$real — dev instance starts empty"; exit 0; fi; \
 	if ! command -v sqlite3 >/dev/null 2>&1; then \
