@@ -836,18 +836,17 @@ The order is yours: `⌥↑`/`⌥↓` move an item a place up or down the list a
 its priority — past the next item, into a nested group it meets and through it, out of the bottom
 of the nested group to just under it, and past the end of a top-level group onto the start of the
 next (or the end of the one before). On a header they move the group: a nested one the same way
-(past what is beside it, never into another), and off the end of the last top-level group (or the
-start of the first) out on its own as a top-level group; a top-level one past the top-level group
-beside it. `⌘P` puts an item set out of order at the end of the run of
+(past what is beside it, never into another), and no further than the end of the last top-level
+group (or the start of the first); a top-level one past the top-level group beside it. `⌘P` puts an item set out of order at the end of the run of
 items at its new priority, so a list kept in priority order stays so. `⌥→` on one item makes it a
 nested group of that name, where it stood and at its priority, with the field for its first item
 open in it (an item an agent is on is kept as that first item, agent and all) — and
 typed into a new item's field, `⌥→` at the end of the text does the same, so `⌘N`, a name, `⌥→`
 starts a group. On a selection in one top-level group it puts them in a new group where they stood,
-its name typed at once (`Esc` keeps **New group**). Groups go one deep. `⌥←` takes items in a
-nested group out to just under it, and on all of them flattens the group into its place; on a
-nested group's header it makes it a top-level group of its own, right under the one it was in, and
-`⌥→` on a top-level group's header puts it back at the end of the one above.
+its name typed at once (`Esc` keeps **New group**). Groups go two levels deep: a top-level group
+and the groups in it, and a group stays at its level (a list from before that nested deeper has its
+deeper groups lifted into the top-level group they were under). `⌥←` takes items in a nested group
+out to just under it, and on all of them flattens the group into its place.
 (Ghostty sends `⌥←`/`⌥→` as `⌥B`/`⌥F`; both work.) `⇧↑`/`⇧↓` select a run of items, across groups
 too, and ticking, `⌘P`, moving, grouping, deleting, `Enter` and cut/copy then act on them all.
 `⌘X` cuts and `⌘C` copies: the clipboard gets their text, a line each, and that text pasted back

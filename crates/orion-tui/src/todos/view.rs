@@ -15,11 +15,8 @@
 //! group's header acts as an item does: `space` ticks everything in it
 //! (or opens again what was ticked while the modal was up), `⌘P` sets
 //! its priority and every item's in it — one then set on its own keeps
-//! its own until the group's is set again — and `⌥↑`/`⌥↓` move it, off
-//! the last section's end out on its own; on a section's header they
-//! move the section past the one beside it. `⌥←` on a nested group's
-//! header makes it a section, right under the one it was in, and `⌥→` on
-//! a section's nests it at the end of the one above. The
+//! its own until the group's is set again — and `⌥↑`/`⌥↓` move it; on a
+//! section's header they move the section past the one beside it. The
 //! project row says what was ticked today and this week, across every
 //! project, day by day — and a click on either opens the DONE page on it
 //! (`history`).
@@ -330,13 +327,10 @@ pub(crate) mod keys {
     /// The item — or the selection, or a group from its header — a place
     /// up or down the list as drawn: past the next item, into a nested
     /// group and out of it (a group goes past one), then into the next
-    /// group; a nested group off the last one's end is a section of its
-    /// own, and a section goes past the one beside it.
+    /// group; a section goes past the one beside it.
     pub const MOVE: Key = Key::new(&["alt+up", "alt+down"], "move").show(2);
     /// `⌥→` the items into a new group of their own — one item made that
-    /// group, named for it — `⌥←` them out of theirs. On a header, `⌥←`
-    /// lifts a nested group out to a section, `⌥→` nests a section in
-    /// the one above.
+    /// group, named for it — `⌥←` them out of theirs.
     /// Ghostty sends ⌥←/⌥→ as `⌥B`/`⌥F` (its word-jump default), so those
     /// are the same keys.
     pub const GROUP: Key = Key::new(&["alt+right", "alt+left", "alt+f", "alt+b"], "group").show(2);
@@ -693,7 +687,7 @@ impl Walk<'_> {
     /// filter matched a group it is in), else only what the filter finds,
     /// a folded group left folded while nothing is typed.
     fn group(&self, group: u64, depth: u16, all: bool, out: &mut Vec<Entry>) {
-        if depth as usize > super::MAX_DEPTH {
+        if depth as usize >= super::MAX_DEPTH {
             return;
         }
         let Some(g) = self.file.group(group) else {
@@ -1234,11 +1228,9 @@ fn nested_header(app: &App) -> Option<u64> {
 
 /// `⌥→`: the chosen items — open, in one top-level group — into a new
 /// group there, its name's field open on it; one item alone made that
-/// group, named for it, its first item's field open in it. On a section's
-/// header, the section nested in the one above. `⌥←`: on a nested
-/// group's header, the group out on its own, a section right under the
-/// one it was in; on items in one, them out of it, right under it — the
-/// group flattened when that is all of it.
+/// group, named for it, its first item's field open in it. `⌥←`: items in
+/// a nested group out of it, right under it — the group flattened when
+/// that is all of it. A group's header stays at its level.
 fn group_chosen(app: &mut App, into: bool) {
     let note = |app: &mut App, text: &str| {
         app.flash = Some(crate::flash::Flash::note(text.to_string()));
@@ -1259,31 +1251,8 @@ fn group_chosen(app: &mut App, into: bool) {
     };
     let shared = file.shared_group(&ids);
     let nested = |group: u64| file.parent_of(group).is_some();
-    let has_groups = header.is_some_and(|g| file.subgroups(Some(g)).next().is_some());
     match (into, header) {
-        (false, Some(group)) if !nested(group) => note(app, "already a top-level group"),
-        (false, Some(group)) => {
-            edit(app, |file| file.promote(group, true));
-            land_on_group(app, Some(group));
-        }
-        (true, Some(group)) if nested(group) => {
-            note(app, "groups go one deep — this one is already in one")
-        }
-        (true, Some(_)) if has_groups => {
-            note(app, "groups go one deep — this one has groups in it")
-        }
-        (true, Some(group)) => {
-            let into = edit(app, |file| {
-                let into = file.demote(group)?;
-                file.reveal(into);
-                Some(into)
-            })
-            .flatten();
-            match into {
-                Some(_) => land_on_group(app, Some(group)),
-                None => note(app, "no group above to go into"),
-            }
-        }
+        (_, Some(_)) => note(app, "a group stays at its level — ⌥↑/⌥↓ move it"),
         (_, None) if ids.is_empty() => {}
         (_, None) if shared.is_none() => note(app, "pick open items in one group"),
         (false, None) if !shared.is_some_and(nested) => {

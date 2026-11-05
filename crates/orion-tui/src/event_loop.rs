@@ -41682,8 +41682,8 @@ diff --git a/src/c.rs b/src/c.rs
 
     /// `⌥→` puts the selected items in a new group where they stood, its
     /// name typed at once; `⌥←` on one of them takes it out, right under
-    /// the group, and on the group's header makes it a top-level group
-    /// right under the one it was in. A top-level group goes no higher.
+    /// the group. On a group's header neither moves it: groups go two
+    /// levels deep, and the footer says so.
     #[test]
     fn alt_right_groups_todos_and_alt_left_ungroups_them() {
         crate::todos::with_now(todo_clock(6), || {
@@ -41712,25 +41712,20 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(shape(&app), ["a", "[later]"]);
             assert_eq!(todo_texts_in(&app, "later"), ["b", "c"]);
 
-            // b out, right under the group; then the group out on its own.
+            // b out, right under the group.
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Left, KeyModifiers::ALT, &mut out);
             assert_eq!(shape(&app), ["a", "[later]", "b"]);
-            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Left, KeyModifiers::ALT, &mut out);
-            assert_eq!(shape(&app), ["a", "b"]);
-            assert_eq!(todo_texts(&app, 1), ["c"], "a section under Emails");
 
-            // Already at the top: nothing moves, and the footer says so —
-            // ⌥← as Ghostty sends it, `⌥B`.
+            // On the group's header, ⌥← — as Ghostty sends it, `⌥B` — and
+            // ⌥→ leave it where it is, and the footer says so.
+            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Char('b'), KeyModifiers::ALT, &mut out);
-            assert_eq!(todo_texts(&app, 1), ["c"]);
+            assert_eq!(shape(&app), ["a", "[later]", "b"]);
             assert!(app.flash.is_some());
-
-            // And ⌥→ puts it back, at the end of the section above.
             press(&mut app, KeyCode::Right, KeyModifiers::ALT, &mut out);
-            assert_eq!(shape(&app), ["a", "b", "[later]"]);
+            assert_eq!(shape(&app), ["a", "[later]", "b"]);
         });
     }
 
@@ -41814,8 +41809,8 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// `⌥↑`/`⌥↓` on a section's header move it past the section beside
-    /// it; a nested group moved off the last section's end is a section
-    /// of its own.
+    /// it; a nested group moved down stops at the last section's end,
+    /// still nested.
     #[test]
     fn alt_arrows_move_todo_sections() {
         crate::todos::with_now(todo_clock(6), || {
@@ -41834,14 +41829,18 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Up, KeyModifiers::ALT, &mut out);
             assert_eq!(names(&app), ["Emails", "UI"]);
 
-            // run plan a group in Emails, walked down through UI and out.
+            // run plan a group in Emails, walked down through UI to its end.
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::ALT, &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             for _ in 0..4 {
                 press(&mut app, KeyCode::Down, KeyModifiers::ALT, &mut out);
             }
-            assert_eq!(names(&app), ["Emails", "UI", "run plan"]);
+            assert_eq!(names(&app), ["Emails", "UI"]);
+            assert_eq!(todo_texts_in(&app, "run plan"), Vec::<String>::new());
+            let file = todo_file(&app);
+            let run_plan = file.groups.iter().find(|g| g.name == "run plan").unwrap();
+            assert_eq!(file.group(run_plan.parent.unwrap()).unwrap().name, "UI");
         });
     }
 

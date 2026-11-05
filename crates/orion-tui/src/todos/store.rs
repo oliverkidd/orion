@@ -183,6 +183,7 @@ pub fn load_from(path: &Path, repo: &Path, now: u64) -> Loaded {
     match serde_json::from_str::<TodoFile>(&raw) {
         Ok(mut file) => {
             file.upgrade();
+            file.lift_deep_groups();
             Loaded {
                 file,
                 problem: None,
