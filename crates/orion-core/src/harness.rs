@@ -681,20 +681,24 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
             },
             ..base
         },
+        // Codex's models and efforts as its docs list them on 2026-11-05
+        // (learn.chatgpt.com/docs/models: the recommended four, GPT-5.5
+        // retired from ChatGPT sign-in on 2026-10-14; config-reference:
+        // `model_reasoning_effort` up to `max` and `ultra`).
         "codex" => HarnessDescriptor {
             label: "Codex".into(),
             program: "codex".into(),
             model: ModelSpec {
                 flag: Some("--model".into()),
                 default: default_model_choice(),
-                models: models(&["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]),
+                models: models(&["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]),
                 catalog: None,
             },
             effort: EffortSpec {
                 config_flag: Some("-c".into()),
                 config_key: Some("model_reasoning_effort".into()),
                 default: default_model_choice(),
-                efforts: ["minimal", "low", "medium", "high", "xhigh"]
+                efforts: ["low", "medium", "high", "xhigh", "max", "ultra"]
                     .iter()
                     .map(ToString::to_string)
                     .collect(),
@@ -769,9 +773,11 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
             ..base
         },
         // OpenCode's model is a `provider/model` id (`opencode models`
-        // lists what this machine has credentials for; a hand-edited id
-        // passes verbatim). No effort flag: reasoning is a per-model
-        // variant chosen inside its own TUI. No permission flag either —
+        // lists what this machine has credentials for, out of models.dev's
+        // catalogue; a hand-edited id passes verbatim). The list is its own
+        // free model, then the newest Claude and GPT ids models.dev had on
+        // 2026-11-05. No effort flag: reasoning is a per-model variant
+        // chosen inside its own TUI. No permission flag either —
         // its prompts drive NEEDS FEEDBACK through the managed plugin
         // (`--auto` is one `permissions_flag` override away). The
         // positional is the project path, so the first prompt rides
@@ -786,9 +792,9 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
                 models: models(&[
                     "opencode/big-pickle",
                     "anthropic/claude-fable-5-1",
-                    "anthropic/claude-opus-5",
-                    "anthropic/claude-sonnet-5",
-                    "openai/gpt-5.5",
+                    "anthropic/claude-opus-5-5",
+                    "anthropic/claude-sonnet-5-5",
+                    "openai/gpt-6.1-sol",
                 ]),
                 catalog: None,
             },
@@ -1180,6 +1186,43 @@ mod tests {
         assert_eq!(grok.hook_dialect(), Some(AgentKind::Grok));
         assert_eq!(grok.permissions_flag, None, "it keeps its own prompts");
         assert!(!grok.claude_like());
+    }
+
+    /// The static lists are what the CLIs offer today: Codex's four
+    /// recommended models and its efforts up to `ultra` (`minimal` and
+    /// the GPT-5.5 / 5.6 ids gone), OpenCode's `provider/model` ids
+    /// on the newest Claude and GPT generations.
+    #[test]
+    fn builtin_model_lists_are_the_clis_current_ones() {
+        let ids = |d: &HarnessDescriptor| -> Vec<String> {
+            d.model.models.iter().map(|m| m.id.clone()).collect()
+        };
+        let codex = builtin("codex").unwrap();
+        assert_eq!(
+            ids(&codex),
+            ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]
+        );
+        assert_eq!(
+            codex.effort.efforts,
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert!(codex.offers_model("gpt-6.1-sol"));
+        assert!(!codex.offers_model("gpt-5.5"), "retired");
+        assert!(codex.offers_effort("ultra"));
+        assert!(!codex.offers_effort("minimal"));
+
+        let opencode = builtin("opencode").unwrap();
+        assert_eq!(
+            ids(&opencode),
+            [
+                "opencode/big-pickle",
+                "anthropic/claude-fable-5-1",
+                "anthropic/claude-opus-5-5",
+                "anthropic/claude-sonnet-5-5",
+                "openai/gpt-6.1-sol",
+            ]
+        );
+        assert!(ids(&opencode).iter().all(|id| id.contains('/')));
     }
 
     /// The picker's note: none where every status can show; a hookless
