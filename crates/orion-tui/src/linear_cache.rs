@@ -157,14 +157,18 @@ pub fn hydrate(app: &mut App) {
     app.dirty = true;
 }
 
-/// The document as the app would write it now.
+/// The document as the app would write it now: the lists of the projects
+/// orion still has — one removed is forgotten with it. Only ever taken
+/// once a list has landed, which needs the tree a project is picked from.
 pub fn snapshot(app: &App) -> Store {
+    let kept = |project: &ProjectId| app.tree.projects.iter().any(|p| &p.id == project);
     Store {
         version: VERSION,
         saved_at: orion_core::clock::now_secs(),
         projects: app
             .linear
             .iter()
+            .filter(|(project, _)| kept(project))
             .map(|(project, list)| (project.clone(), CachedList::of(list)))
             .collect(),
     }
@@ -219,16 +223,24 @@ mod tests {
         }
     }
 
-    /// A landed list goes to disk once, comments and all, and the next
-    /// launch paints it before any list has landed — never over one that
-    /// has.
+    /// A landed list goes to disk once, comments and all — a project
+    /// orion no longer has is forgotten — and the next launch paints it
+    /// before any list has landed, never over one that has.
     #[test]
     fn a_landed_list_comes_back_on_the_next_launch() {
         let (_dir, cache) = cache();
         let project = ProjectId("p1".into());
         let mut app = App::new();
+        app.tree.projects.push(orion_core::Project {
+            id: project.clone(),
+            name: "demo".into(),
+            repo_path: "/tmp/demo".into(),
+            sort_order: 0,
+        });
         app.linear_cache = Some(cache.clone());
         app.linear.insert(project.clone(), listed());
+        app.linear
+            .insert(ProjectId("gone".into()), LinearList::default());
         assert!(take_flush(&mut app).is_none(), "nothing landed yet");
         app.linear_cache_dirty = true;
         let (to, store) = take_flush(&mut app).expect("a flush");
@@ -238,6 +250,7 @@ mod tests {
         let mut next = App::new();
         next.linear_cache = Some(cache.clone());
         hydrate(&mut next);
+        assert_eq!(next.linear.len(), 1, "the removed project's list forgotten");
         let back = &next.linear[&project];
         assert_eq!(back.list, listed().list);
         assert_eq!(back.list[1].comments.len(), 1, "the comments read on it");
