@@ -778,15 +778,15 @@ fn push_hit(app: &mut App, within: Rect, x: u16, width: u16, target: HitTarget) 
 
 /// The footer's right-edge readout: the agents running and orion's total
 /// memory footprint (TUI + daemon + every session's process subtree), `8
-/// agents · 44 MB`. Terminals and the prewarm pool's spares count toward
-/// the memory but not the agents. None until the first metrics reply
-/// arrives.
+/// agents · 44 MB`. Terminals and the SPARE WORKTREES' setups and CLIs
+/// count toward the memory but not the agents. None until the first
+/// metrics reply arrives.
 fn footer_usage(app: &App) -> Option<String> {
     let m = app.last_metrics.as_ref()?;
     let agents = m
         .sessions
         .iter()
-        .filter(|s| matches!(s.session, orion_core::SessionRef::Agent(_)) && s.prewarm.is_none())
+        .filter(|s| matches!(s.session, orion_core::SessionRef::Agent(_)) && !s.spare)
         .count();
     let total = m.daemon_rss_bytes
         + app.client_rss_bytes

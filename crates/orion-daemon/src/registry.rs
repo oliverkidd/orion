@@ -11,8 +11,8 @@ use anyhow::{bail, Context, Result};
 use orion_core::env;
 use orion_core::harness::HarnessDescriptor;
 use orion_core::{
-    Agent, AgentId, AgentKind, AgentStatus, EnterOutcome, Entity, EntityId, LinkId, PrewarmInfo,
-    Project, ProjectId, ServerEvent, SessionRef, TerminalId, TerminalTab, Worktree, WorktreeId,
+    Agent, AgentId, AgentKind, AgentStatus, EnterOutcome, Entity, EntityId, LinkId, Project,
+    ProjectId, ServerEvent, SessionRef, TerminalId, TerminalTab, Worktree, WorktreeId,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,24 +20,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
-/// A warm agent CLI older than this is reaped — it holds memory and its
-/// conversation context grows stale.
-const PREWARM_MAX_AGE: Duration = Duration::from_secs(15 * 60);
-/// A live same-spec warm CLI older than this is recycled (killed and
-/// re-booted fresh) when its slot is re-requested, instead of being kept.
-/// Clients keep-warm the selected worktree on a cadence shorter than
-/// `PREWARM_MAX_AGE - PREWARM_RECYCLE_AGE`, so a slot they still care about
-/// is always refreshed before the reaper can empty it.
-const PREWARM_RECYCLE_AGE: Duration = Duration::from_secs(10 * 60);
 /// Gap between the boots of a worktree prewarm sweep. A worktree with five
 /// agents must not fork five agent CLIs at once: they would all contend for
 /// the CPU with the one session the user is actually waiting to see, which
 /// is the whole reason the sweep exists. Nothing is watching these, so
 /// warming them slowly costs the user nothing.
 const PREWARM_STAGGER: Duration = Duration::from_millis(1500);
-/// Hook events buffered on a warm session before its row exists (oldest
-/// dropped beyond this).
-const PREWARM_HOOK_BUFFER_CAP: usize = 64;
 /// A resumed agent CLI that exits with an error this soon after its spawn
 /// is taken to have not found the session it was told to resume. Generous
 /// on purpose: the login shell alone takes most of a second, and a worktree
@@ -111,23 +99,6 @@ pub(crate) struct CreateAgentSpec {
     pub mode: orion_core::harness::AgentMode,
 }
 
-/// A pre-spawned agent CLI waiting to be adopted by the next CreateAgent for
-/// the same (worktree, kind). The PTY lives in the normal sessions map under
-/// a pre-generated agent id, so its ORION_AGENT_ID env is already the id
-/// the adopted row will use. Hook events that arrive before the row exists
-/// (SessionStart carries the resume session id) are buffered here and
-/// replayed at adoption.
-struct PrewarmEntry {
-    agent_id: AgentId,
-    spawned_at: Instant,
-    /// Model/effort the warm CLI booted with; a CreateAgent asking for a
-    /// different spec can't adopt it (the CLI is already running the wrong
-    /// model), so the entry is discarded instead.
-    model: Option<String>,
-    effort: Option<String>,
-    buffered_hooks: Vec<(HookEvent, Option<String>)>,
-}
-
 /// What [`Daemon::delete_worktree`] came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorktreeDelete {
@@ -154,11 +125,9 @@ pub struct Daemon {
     pub shutdown: tokio_util::sync::CancellationToken,
     /// Serializes worktree create/delete with the background auto-sync so
     /// a checkout is never adopted twice while its row is mid-insert.
-    worktree_ops: tokio::sync::Mutex<()>,
-    /// Warm agent CLIs awaiting adoption, at most one per (worktree, kind).
-    prewarmed: Mutex<HashMap<(WorktreeId, AgentKind), PrewarmEntry>>,
+    pub(crate) worktree_ops: tokio::sync::Mutex<()>,
     /// Cached `command -v` results per CLI so a missing binary doesn't get
-    /// re-probed (login shell spawn) on every prewarm request.
+    /// re-probed (login shell spawn) on every create.
     cli_probes: Mutex<HashMap<String, (bool, Instant)>>,
     /// How many client connections are attached per session — a session
     /// with attachments (and its whole worktree) is "in view" and exempt
@@ -215,6 +184,9 @@ pub struct Daemon {
     /// STACK STATUS: the last docker compose listing, and the poke that
     /// asks for a fresh one now.
     pub stacks: crate::stacks::StackWatch,
+    /// SPARE WORKTREES: the warm next worktree of each project in use
+    /// (`spare`).
+    pub(crate) spares: crate::spare::SpareBook,
 }
 
 impl Daemon {
@@ -230,7 +202,6 @@ impl Daemon {
             session_installs,
             shutdown: tokio_util::sync::CancellationToken::new(),
             worktree_ops: tokio::sync::Mutex::new(()),
-            prewarmed: Mutex::new(HashMap::new()),
             cli_probes: Mutex::new(HashMap::new()),
             attach_counts: Mutex::new(HashMap::new()),
             session_interest: Mutex::new(HashMap::new()),
@@ -244,6 +215,7 @@ impl Daemon {
             stopping_runs: Mutex::new(HashMap::new()),
             queued_runs: Mutex::new(HashMap::new()),
             stacks: crate::stacks::StackWatch::default(),
+            spares: Default::default(),
         })
     }
 
@@ -257,23 +229,23 @@ impl Daemon {
         event: HookEvent,
         session_id: Option<String>,
     ) {
-        enum Outcome {
-            Effects(Vec<Effect>),
-            UnknownAgent(HookEvent, Option<String>),
-        }
         // A `orion worktree` relocation waiting on this agent's turn end
         // holds that end at `running` (`AgentStatusMachine::set_relocating`;
         // `complete_pending_move` drains it). Read off the daemon's own
         // record before every event, so the machine's copy cannot go stale
         // — and before the machines lock, so the two are never nested.
         let relocating = self.pending_moves.lock().unwrap().contains_key(agent_id);
-        let outcome = {
+        // A SPARE WORKTREE's CLI is up once it says so, row or none.
+        if matches!(event, HookEvent::SessionStart { .. }) {
+            self.spares.note_boot(agent_id);
+        }
+        let effects = {
             let mut machines = self.status_machines.lock().unwrap();
             match machines.entry(agent_id.clone()) {
                 std::collections::hash_map::Entry::Occupied(e) => {
                     let machine = e.into_mut();
                     machine.set_relocating(relocating);
-                    Outcome::Effects(machine.handle(event, session_id.as_deref(), Instant::now()))
+                    Some(machine.handle(event, session_id.as_deref(), Instant::now()))
                 }
                 std::collections::hash_map::Entry::Vacant(slot) => {
                     // Lazily seed from the persisted row.
@@ -285,39 +257,17 @@ impl Daemon {
                                     .at_limit(limited),
                             );
                             machine.set_relocating(relocating);
-                            Outcome::Effects(machine.handle(
-                                event,
-                                session_id.as_deref(),
-                                Instant::now(),
-                            ))
+                            Some(machine.handle(event, session_id.as_deref(), Instant::now()))
                         }
-                        _ => Outcome::UnknownAgent(event, session_id),
+                        // No row: a stale env's id, or an agent deleted
+                        // since — nothing to drive.
+                        _ => None,
                     }
                 }
             }
         };
-        match outcome {
-            Outcome::Effects(effects) => self.apply_status_effects(agent_id, effects),
-            // Ids with no row are prewarmed sessions (buffer for replay at
-            // adoption) or stale env / deleted agents (dropped, as before).
-            Outcome::UnknownAgent(event, session_id) => {
-                self.buffer_prewarm_hook(agent_id, event, session_id)
-            }
-        }
-    }
-
-    fn buffer_prewarm_hook(
-        &self,
-        agent_id: &AgentId,
-        event: HookEvent,
-        session_id: Option<String>,
-    ) {
-        let mut pool = self.prewarmed.lock().unwrap();
-        if let Some(entry) = pool.values_mut().find(|e| &e.agent_id == agent_id) {
-            if entry.buffered_hooks.len() >= PREWARM_HOOK_BUFFER_CAP {
-                entry.buffered_hooks.remove(0);
-            }
-            entry.buffered_hooks.push((event, session_id));
+        if let Some(effects) = effects {
+            self.apply_status_effects(agent_id, effects);
         }
     }
 
@@ -400,40 +350,23 @@ impl Daemon {
             .is_some_and(|current| Arc::ptr_eq(current, session))
     }
 
-    /// (session, child pid, prewarm-pool home) for every live PTY — the
-    /// metrics reading's input. A pool spare has no agent row, so the only
-    /// way a client can name or place it is the home reported here.
-    pub fn session_pids(&self) -> Vec<(SessionRef, u32, Option<PrewarmInfo>)> {
-        // Snapshot the pool first and drop its lock: `prewarm_agent` holds
-        // the pool lock while it asks the sessions map, so the two are
-        // never held together here in the other order.
-        let prewarmed: HashMap<AgentId, PrewarmInfo> = self
-            .prewarmed
+    /// (session, child pid, a SPARE WORKTREE's?) for every live PTY — the
+    /// metrics reading's input.
+    pub fn session_pids(&self) -> Vec<(SessionRef, u32, bool)> {
+        let live: Vec<(SessionRef, u32)> = self
+            .sessions
             .lock()
             .unwrap()
             .iter()
-            .map(|((worktree, kind), e)| {
-                (
-                    e.agent_id.clone(),
-                    PrewarmInfo {
-                        worktree: worktree.clone(),
-                        kind: *kind,
-                        model: e.model.clone(),
-                    },
-                )
-            })
+            .filter_map(|(sref, s)| Some((sref.clone(), s.child_pid?)))
             .collect();
-        self.sessions
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|(sref, s)| {
-                let pid = s.child_pid?;
-                let prewarm = match sref {
-                    SessionRef::Agent(id) => prewarmed.get(id).cloned(),
-                    SessionRef::Terminal(_) => None,
-                };
-                Some((sref.clone(), pid, prewarm))
+        // Asked after the sessions lock is let go: the spare book is never
+        // taken inside it.
+        let spares = self.spares.sessions();
+        live.into_iter()
+            .map(|(sref, pid)| {
+                let spare = spares.contains(&sref);
+                (sref, pid, spare)
             })
             .collect()
     }
@@ -461,6 +394,9 @@ impl Daemon {
     /// connection). While any attachment exists, the session — and its
     /// whole worktree — counts as "in view".
     pub fn note_attached(&self, sref: &SessionRef) {
+        if let Some(worktree) = self.session_worktree(sref) {
+            self.note_used_in(&worktree);
+        }
         *self
             .attach_counts
             .lock()
@@ -485,6 +421,14 @@ impl Daemon {
         self.touch_session(sref);
     }
 
+    /// Worktree `id`'s project was just used, which keeps it a SPARE
+    /// WORKTREE.
+    fn note_used_in(&self, id: &WorktreeId) {
+        if let Ok(Some(worktree)) = self.store.get_worktree(id) {
+            self.spares.note_used(&worktree.project_id);
+        }
+    }
+
     /// Stamp `sref` as just-looked-at for the idle reaper.
     fn touch_session(&self, sref: &SessionRef) {
         self.session_interest
@@ -501,9 +445,9 @@ impl Daemon {
     /// Spared regardless of age: agents that are running or waiting on
     /// feedback, agents with a backgrounded tool call still running (a job
     /// detached from their terminal — see `pty::detached_job_under`),
-    /// terminals with a command running, and prewarm-pool sessions
-    /// (`reap_prewarmed` owns those). A reaped session revives on the next
-    /// attach or prewarm; agents resume their conversation.
+    /// terminals with a command running, and sessions with no row. A reaped
+    /// session revives on the next attach or prewarm; agents resume their
+    /// conversation.
     pub fn reap_idle_sessions(self: &Arc<Self>) {
         let Some(timeout) = crate::config::Config::load().session_idle_timeout() else {
             return;
@@ -523,7 +467,7 @@ impl Daemon {
             .collect();
         let now = Instant::now();
         for (sref, session) in sessions {
-            // No store row = prewarm-pool session (or deleted mid-sweep).
+            // No store row: deleted mid-sweep, its delete kills the PTY.
             let Some(worktree_id) = self.session_worktree(&sref) else {
                 continue;
             };
@@ -588,8 +532,7 @@ impl Daemon {
         }
     }
 
-    /// The worktree a session's row lives under; None when the row is gone
-    /// or never existed (prewarm pool).
+    /// The worktree a session's row lives under; None when the row is gone.
     fn session_worktree(&self, sref: &SessionRef) -> Option<WorktreeId> {
         match sref {
             SessionRef::Agent(id) => self
@@ -759,6 +702,7 @@ impl Daemon {
             sort_order: self.store.next_project_sort_order()?,
         };
         self.store.insert_project(&project)?;
+        self.spares.note_used(&project.id);
         self.broadcast(ServerEvent::EntityUpserted {
             entity: Entity::Project(project.clone()),
         });
@@ -812,10 +756,17 @@ impl Daemon {
             .map(|w| w.id)
             .collect();
         self.kill_sessions_in(&wt_ids, &agents, &terminals);
-        // Removing a project only forgets it in orion — never touches disk.
+        // Removing a project only forgets it in orion — never touches disk,
+        // but for its SPARE WORKTREE, which was orion's own.
         self.store.delete_project(id)?;
         self.broadcast(ServerEvent::EntityRemoved {
             id: EntityId::Project(id.clone()),
+        });
+        let daemon = self.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            daemon.remove_spare(&id, false).await;
+            daemon.spares.forget_project(&id);
         });
         Ok(())
     }
@@ -847,6 +798,7 @@ impl Daemon {
         if branch.trim().is_empty() {
             bail!("branch name is empty");
         }
+        self.spares.note_used(project_id);
         let ops = self.worktree_ops.lock().await;
         let project = self
             .store
@@ -1047,7 +999,7 @@ impl Daemon {
     /// itself unless the project was added from a linked one — lends its
     /// ignored `.env*` files to `worktree`, always; a failure is a client
     /// warning, never a failed create.
-    async fn link_env_files(&self, repo: &Path, worktree: &Path) {
+    pub(crate) async fn link_env_files(&self, repo: &Path, worktree: &Path) {
         let main = git::list_worktrees(repo)
             .await
             .ok()
@@ -1075,7 +1027,7 @@ impl Daemon {
     /// Stop or tear down the compose projects started in a just-deleted
     /// checkout of the project at `repo`, as its **On worktree delete**
     /// says; whatever goes wrong is a client warning.
-    async fn release_containers(&self, repo: &Path, worktree: &Path) {
+    pub(crate) async fn release_containers(&self, repo: &Path, worktree: &Path) {
         let policy = crate::config::Config::load().worktree_containers(repo);
         for warning in crate::containers::release(worktree, policy).await {
             self.warn_clients(warning);
@@ -1085,7 +1037,7 @@ impl Daemon {
     /// Tell every client about something that went wrong after a request
     /// had already succeeded. Rides `ServerEvent::Error` with no `req_id`,
     /// which the TUI shows as a flash and ties to no pending intent.
-    fn warn_clients(&self, message: String) {
+    pub(crate) fn warn_clients(&self, message: String) {
         tracing::warn!("{message}");
         self.broadcast(ServerEvent::Error {
             req_id: None,
@@ -1237,31 +1189,35 @@ impl Daemon {
             .store
             .get_worktree(&worktree_id)?
             .context("worktree not found")?;
-        // A warm session for this (worktree, kind) hands over its PTY and
-        // its pre-generated id — the CLI booted while the user typed the
-        // name, so the create feels instant. A starting prompt rides the
-        // CLI's argv, and a spare already booted bare cannot be handed one;
-        // neither can it be handed a PR rule.
-        // Nor can one booted in edit mode be handed plan or ask, nor one
-        // booted on the default account a launch on another account.
-        let adopted = (pr_url.is_none()
-            && starting_prompt.is_none()
-            && custom_harness.is_none()
-            && mode == orion_core::harness::AgentMode::Edit)
-            .then(|| self.take_prewarmed(&worktree_id, kind, model.as_deref(), effort.as_deref()))
+        self.spares.note_used(&worktree.project_id);
+        // A SPARE WORKTREE a launch just took holds the CLI it booted for
+        // this very launch: the row takes that CLI's id, and the task goes
+        // in as its first turn. A PR rule rides a CLI's argv, so a launch
+        // with one never adopts.
+        let adopted = pr_url
+            .is_none()
+            .then(|| {
+                let launch = orion_core::LaunchSpec {
+                    kind,
+                    custom_harness: custom_harness.clone(),
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    mode,
+                };
+                self.take_held_cli(&worktree_id, &launch)
+            })
             .flatten();
-        // Only the cold path needs asking: an adopted warm session is proof
-        // the CLI runs. Without this, a missing CLI still "succeeds" — the
-        // login shell prints `command not found` into a PTY that dies at
-        // once, leaving a dead row that looks identical to a fresh one.
+        // Only the cold path needs asking: an adopted CLI is proof it runs.
+        // Without this, a missing CLI still "succeeds" — the login shell
+        // prints `command not found` into a PTY that dies at once, leaving
+        // a dead row that looks identical to a fresh one.
         if adopted.is_none() && !self.cli_available_for_create(&program).await {
             bail!("{}", cli_missing_message(&program));
         }
         let agent = Agent {
             id: adopted
                 .as_ref()
-                .map(|e| e.agent_id.clone())
-                .unwrap_or_else(AgentId::generate),
+                .map_or_else(AgentId::generate, |cli| cli.agent.clone()),
             worktree_id,
             name: if name.trim().is_empty() {
                 "agent".into()
@@ -1287,8 +1243,17 @@ impl Daemon {
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
-        self.store
-            .insert_agent_with_launch_context(&agent, auto_title, pr_url.as_deref())?;
+        if let Err(e) =
+            self.store
+                .insert_agent_with_launch_context(&agent, auto_title, pr_url.as_deref())
+        {
+            // An adopted CLI with no row would run on, unseen, to the end.
+            if adopted.is_some() {
+                self.spares.forget_boot(&agent.id);
+                self.kill_session(&SessionRef::Agent(agent.id.clone()));
+            }
+            return Err(e);
+        }
         if optimistic_run {
             // Seeded by hand, ahead of the spawn, so the CLI's own startup
             // progress-clear cannot green the row out before its turn has
@@ -1300,7 +1265,6 @@ impl Daemon {
                 .insert(agent.id.clone(), AgentStatusMachine::launching());
         }
         if adopted.is_none() {
-            // Cold path: boot the CLI right away.
             let spawned = self.spawn_agent_session_with(
                 &agent,
                 &worktree,
@@ -1316,12 +1280,8 @@ impl Daemon {
         self.broadcast(ServerEvent::EntityUpserted {
             entity: Entity::Agent(broadcast_agent),
         });
-        if let Some(entry) = adopted {
-            // Now that the row exists, replay the hooks the warm CLI fired
-            // before adoption (SessionStart stores the resume session id).
-            for (event, sid) in entry.buffered_hooks {
-                self.apply_hook_event(&agent.id, event, sid);
-            }
+        if let Some(cli) = adopted {
+            self.send_first_turn(agent.id.clone(), cli.boot, starting_prompt);
         }
         Ok(EntityId::Agent(agent.id))
     }
@@ -1368,157 +1328,9 @@ impl Daemon {
         }
     }
 
-    // ---- prewarm pool ----
-
-    /// Pre-spawn an agent CLI for (worktree, kind) so the next create adopts
-    /// an already-booted session. Fail-soft by design: a disabled config,
-    /// missing CLI, or spawn error just means the create stays cold.
-    pub async fn prewarm_agent(
-        self: &Arc<Self>,
-        worktree_id: &WorktreeId,
-        kind: AgentKind,
-        model: Option<String>,
-        effort: Option<String>,
-    ) -> Result<()> {
-        if !crate::config::Config::load().prewarm_agents {
-            return Ok(());
-        }
-        if kind == AgentKind::Custom {
-            // No warm spares for custom harnesses: the pool is keyed by
-            // kind alone and a spare booted for one entry must never be
-            // adopted by another. Custom creates stay cold.
-            return Ok(());
-        }
-        let Some(worktree) = self.store.get_worktree(worktree_id)? else {
-            return Ok(());
-        };
-        let stale = {
-            // One warm slot per key; keep a live, young one with the same
-            // spec, replace a dead, wrong-spec, or aging one (recycling
-            // before the reaper hits keeps a re-requested slot gap-free).
-            let mut pool = self.prewarmed.lock().unwrap();
-            if let Some(entry) = pool.get(&(worktree_id.clone(), kind)) {
-                if self.is_alive(&SessionRef::Agent(entry.agent_id.clone()))
-                    && entry.model == model
-                    && entry.effort == effort
-                    && entry.spawned_at.elapsed() < PREWARM_RECYCLE_AGE
-                {
-                    return Ok(());
-                }
-                pool.remove(&(worktree_id.clone(), kind))
-            } else {
-                None
-            }
-        };
-        if let Some(old) = stale {
-            self.kill_session(&SessionRef::Agent(old.agent_id));
-        }
-        if !self.cli_available(kind.cli_program()).await {
-            tracing::debug!(kind = kind.as_str(), "prewarm skipped: CLI not installed");
-            return Ok(());
-        }
-        let agent = Agent {
-            id: AgentId::generate(),
-            worktree_id: worktree_id.clone(),
-            name: "prewarm".into(),
-            status: AgentStatus::Fresh,
-            archived: false,
-            archived_at: 0,
-            unseen: false,
-            kind,
-            custom_harness: None,
-            model: model.clone(),
-            effort: effort.clone(),
-            session_id: None,
-            sort_order: 0,
-            status_changed_at: 0,
-            alive: false,
-            recent_prompts: Vec::new(),
-            usage_limit: None,
-        };
-        self.spawn_agent_session(&agent, &worktree, DEFAULT_COLS, DEFAULT_ROWS)?;
-        tracing::info!(agent = %agent.id, kind = kind.as_str(), worktree = %worktree.branch, "prewarmed agent session");
-        let replaced = self.prewarmed.lock().unwrap().insert(
-            (worktree_id.clone(), kind),
-            PrewarmEntry {
-                agent_id: agent.id,
-                spawned_at: Instant::now(),
-                model,
-                effort,
-                buffered_hooks: Vec::new(),
-            },
-        );
-        // Two racing prewarms for the same key: the loser's session would
-        // otherwise leak as an orphan CLI process.
-        if let Some(old) = replaced {
-            self.kill_session(&SessionRef::Agent(old.agent_id));
-        }
-        Ok(())
-    }
-
-    /// Pop the warm entry for (worktree, kind) if its PTY is still running
-    /// and it booted with the requested model/effort. A dead entry (CLI
-    /// missing/crashed while warm) is dropped, a wrong-spec one is killed;
-    /// either way the caller falls back to a cold spawn.
-    fn take_prewarmed(
-        &self,
-        worktree_id: &WorktreeId,
-        kind: AgentKind,
-        model: Option<&str>,
-        effort: Option<&str>,
-    ) -> Option<PrewarmEntry> {
-        let entry = self
-            .prewarmed
-            .lock()
-            .unwrap()
-            .remove(&(worktree_id.clone(), kind))?;
-        if !self.is_alive(&SessionRef::Agent(entry.agent_id.clone())) {
-            return None;
-        }
-        if entry.model.as_deref() != model || entry.effort.as_deref() != effort {
-            self.kill_session(&SessionRef::Agent(entry.agent_id));
-            return None;
-        }
-        Some(entry)
-    }
-
-    /// Drop warm sessions that died or sat unclaimed past the max age —
-    /// and, once `prewarm_agents` is switched off, every one of them: a
-    /// spare is a real CLI process the user can see (Claude's `/list-agents`
-    /// names it beside their own sessions), so the toggle takes it away on
-    /// the next sweep rather than leaving it to age out over 15 minutes.
-    /// Runs on the daemon's periodic tick.
-    pub fn reap_prewarmed(&self) {
-        self.reap_prewarmed_with(&crate::config::Config::load());
-    }
-
-    fn reap_prewarmed_with(&self, config: &crate::config::Config) {
-        let doomed: Vec<AgentId> = {
-            let mut pool = self.prewarmed.lock().unwrap();
-            let expired: Vec<_> = pool
-                .iter()
-                .filter(|(_, e)| {
-                    !config.prewarm_agents
-                        || e.spawned_at.elapsed() > PREWARM_MAX_AGE
-                        || !self.is_alive(&SessionRef::Agent(e.agent_id.clone()))
-                })
-                .map(|(k, _)| k.clone())
-                .collect();
-            expired
-                .into_iter()
-                .filter_map(|k| pool.remove(&k))
-                .map(|e| e.agent_id)
-                .collect()
-        };
-        for id in doomed {
-            tracing::debug!(agent = %id, "reaping prewarmed session");
-            self.kill_session(&SessionRef::Agent(id));
-        }
-    }
-
-    /// Kill every live agent and terminal PTY homed in these worktrees, and
-    /// the warm spares with them — the prelude to dropping their rows
-    /// (worktree delete, project remove).
+    /// Kill every live agent and terminal PTY homed in these worktrees —
+    /// the prelude to dropping their rows (worktree delete, project
+    /// remove).
     fn kill_sessions_in(
         &self,
         worktree_ids: &[WorktreeId],
@@ -1538,35 +1350,15 @@ impl Daemon {
             self.kill_session(&SessionRef::Terminal(t.id.clone()));
             self.forget_command(&t.id);
         }
-        self.kill_prewarmed_in(worktree_ids);
-    }
-
-    /// Kill warm sessions homed in any of these worktrees (worktree delete,
-    /// project remove — their store rows are gone or going).
-    fn kill_prewarmed_in(&self, worktree_ids: &[WorktreeId]) {
-        let doomed: Vec<AgentId> = {
-            let mut pool = self.prewarmed.lock().unwrap();
-            let keys: Vec<_> = pool
-                .keys()
-                .filter(|(w, _)| worktree_ids.contains(w))
-                .cloned()
-                .collect();
-            keys.into_iter()
-                .filter_map(|k| pool.remove(&k))
-                .map(|e| e.agent_id)
-                .collect()
-        };
-        for id in doomed {
-            self.kill_session(&SessionRef::Agent(id));
-        }
+        self.drop_held_in(worktree_ids);
     }
 
     /// Is the harness's CLI on the user's PATH (as their login shell sees
     /// it)? Cached by program: hits for an hour, misses for a minute so a
     /// just-installed CLI gets picked up quickly. Probe trouble (timeout,
-    /// spawn error) fails open — a doomed warm spawn is still graceful.
+    /// spawn error) fails open — the spawn itself then gets to report.
     /// Custom harnesses pass their entry's program; built-ins their CLI.
-    async fn cli_available(&self, program: &str) -> bool {
+    pub(crate) async fn cli_available(&self, program: &str) -> bool {
         if std::env::var(env::AGENT_CMD).is_ok() {
             return true; // test override is spawned verbatim
         }
@@ -2163,16 +1955,7 @@ impl Daemon {
         let Some(command) = config.setup_command(repo) else {
             return Ok(None);
         };
-        let term = TerminalTab {
-            id: TerminalId::generate(),
-            worktree_id: worktree.id.clone(),
-            name: SETUP_TERMINAL_NAME.into(),
-            sort_order: 0,
-            alive: false,
-            run_command: Some(command.to_string()),
-            setup: true,
-            run: Default::default(),
-        };
+        let term = setup_terminal_row(worktree, command);
         let id = term.id.clone();
         // Held across the insert and the spawn, as a run's start holds it:
         // an attach in between must find the PTY, not a row without one.
@@ -3369,7 +3152,7 @@ impl Daemon {
         dirs
     }
 
-    fn spawn_terminal_session(
+    pub(crate) fn spawn_terminal_session(
         self: &Arc<Self>,
         terminal: &TerminalTab,
         worktree: &Worktree,
@@ -3456,11 +3239,18 @@ impl Daemon {
                             break;
                         }
                         tracing::info!(session = ?sref, exit_code, "session exited");
+                        // A SPARE WORKTREE's setup has no row: its spare
+                        // hears how it went. Asked first, so a take that
+                        // puts its row in after this exit finds it ended.
                         if let SessionRef::Terminal(id) = &sref {
-                            match daemon.command_terminal(id) {
-                                Some(t) if t.setup => daemon.setup_ended(&t, &session, exit_code),
-                                Some(_) => daemon.run_ended(id, &session, exit_code),
-                                None => {}
+                            if !daemon.spares.setup_ended(id, exit_code) {
+                                match daemon.command_terminal(id) {
+                                    Some(t) if t.setup => {
+                                        daemon.setup_ended(&t, &session, exit_code)
+                                    }
+                                    Some(_) => daemon.run_ended(id, &session, exit_code),
+                                    None => {}
+                                }
                             }
                         }
                         if let SessionRef::Agent(id) = &sref {
@@ -3869,6 +3659,22 @@ fn push_system_prompt(
     }
 }
 
+/// The row of a SETUP TERMINAL running `command` in `worktree`: a new
+/// worktree's, or a SPARE WORKTREE's, which becomes its worktree's when a
+/// launch takes it.
+pub(crate) fn setup_terminal_row(worktree: &Worktree, command: &str) -> TerminalTab {
+    TerminalTab {
+        id: TerminalId::generate(),
+        worktree_id: worktree.id.clone(),
+        name: SETUP_TERMINAL_NAME.into(),
+        sort_order: 0,
+        alive: false,
+        run_command: Some(command.to_string()),
+        setup: true,
+        run: Default::default(),
+    }
+}
+
 /// Validate an AGENT PRESET's composed starting prompt before it becomes the
 /// CLI's positional argument. It rides the login shell's `-c` string as
 /// well as the CLI's argv: quoting stops injection, but a NUL would
@@ -3906,7 +3712,7 @@ pub(crate) fn sanitize_title(raw: &str) -> String {
 /// Canonicalize for path containment tests, falling back to the raw path
 /// when it doesn't resolve (deleted checkout, not-yet-created dir). macOS
 /// symlinks (`/tmp` → `/private/tmp`) otherwise break `starts_with`.
-fn canonical_or_raw(path: &Path) -> std::path::PathBuf {
+pub(crate) fn canonical_or_raw(path: &Path) -> std::path::PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -4148,7 +3954,7 @@ fn cli_probe_line(program: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Claude argv: `args`, then orion's appended guidance (worktree and
@@ -5050,7 +4856,7 @@ mod tests {
         );
     }
 
-    fn test_daemon() -> Arc<Daemon> {
+    pub(crate) fn test_daemon() -> Arc<Daemon> {
         let store = Arc::new(Store::open_in_memory().unwrap());
         Daemon::new(
             store,
@@ -6148,7 +5954,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn starting_prompt_is_validated_and_never_adopts_a_warm_cli() {
+    async fn starting_prompt_is_validated() {
         let daemon = test_daemon();
         let spec = |kind: AgentKind, starting: Option<&str>| CreateAgentSpec {
             mode: Default::default(),
@@ -6174,31 +5980,6 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains(needle), "{kind:?}: {err}");
         }
-
-        // A starting prompt rides the CLI's argv, so a warm spare (booted
-        // bare) is never adopted: the pool entry survives the create.
-        seed_projects(&daemon, &["p"]);
-        seed_worktree(&daemon, "p", "w1", "/tmp", true);
-        let key = (WorktreeId("w1".into()), AgentKind::Claude);
-        daemon.prewarmed.lock().unwrap().insert(
-            key.clone(),
-            PrewarmEntry {
-                agent_id: AgentId("warm-1".into()),
-                spawned_at: Instant::now(),
-                model: None,
-                effort: None,
-                buffered_hooks: Vec::new(),
-            },
-        );
-        let mut preset = spec(AgentKind::Claude, Some("Fix auth"));
-        preset.worktree = WorktreeId("w1".into());
-        // Without a CLI on this box the cold path fails at the probe; the
-        // result is beside the point — adoption would have emptied the pool.
-        let _ = daemon.create_agent(preset).await;
-        assert!(
-            daemon.prewarmed.lock().unwrap().contains_key(&key),
-            "a starting-prompt create must not adopt the warm spare"
-        );
     }
 
     /// Which launches boot straight into a turn — the question the
@@ -6304,14 +6085,14 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Save/restore around a process-wide env var a test has to set.
-    struct EnvGuard {
+    pub(crate) struct EnvGuard {
         key: &'static str,
         was: Option<String>,
         _held: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
+        pub(crate) fn set(key: &'static str, value: &str) -> Self {
             let held = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let was = std::env::var(key).ok();
             std::env::set_var(key, value);
@@ -6362,7 +6143,13 @@ mod tests {
         }
     }
 
-    fn seed_worktree(daemon: &Daemon, project: &str, id: &str, path: &str, is_main: bool) {
+    pub(crate) fn seed_worktree(
+        daemon: &Daemon,
+        project: &str,
+        id: &str,
+        path: &str,
+        is_main: bool,
+    ) {
         daemon
             .store
             .insert_worktree(&Worktree {
@@ -7123,7 +6910,7 @@ mod tests {
 
     /// A fresh repo with one commit, at a canonical path (the macOS
     /// tempdir is a symlink, and git reports worktrees canonically).
-    fn init_repo(root: &Path) -> PathBuf {
+    pub(crate) fn init_repo(root: &Path) -> PathBuf {
         let repo = root.join("repo");
         std::fs::create_dir(&repo).unwrap();
         git_in(&repo, &["init", "-b", "main"]);
@@ -7139,7 +6926,7 @@ mod tests {
         path
     }
 
-    fn project_at(daemon: &Daemon, repo: &Path) -> Project {
+    pub(crate) fn project_at(daemon: &Daemon, repo: &Path) -> Project {
         let project = Project {
             id: ProjectId("p".into()),
             name: "p".into(),
@@ -7399,7 +7186,7 @@ mod tests {
         assert!(wt.join("notes.txt").exists(), "nothing removed");
     }
 
-    fn git_in(repo: &Path, args: &[&str]) {
+    pub(crate) fn git_in(repo: &Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -7495,161 +7282,6 @@ mod tests {
             assert!(msg.contains("try again"), "{msg}");
             assert!(!msg.contains("restart"), "{msg}");
         }
-    }
-
-    #[test]
-    fn prewarm_pool_buffers_hooks_and_drops_dead_entries() {
-        let daemon = test_daemon();
-        let key = (WorktreeId("w1".into()), AgentKind::Claude);
-        daemon.prewarmed.lock().unwrap().insert(
-            key.clone(),
-            PrewarmEntry {
-                agent_id: AgentId("warm-1".into()),
-                spawned_at: Instant::now(),
-                model: None,
-                effort: None,
-                buffered_hooks: Vec::new(),
-            },
-        );
-
-        // Hooks for the warm (row-less) id are buffered on the entry, not
-        // dropped; hooks for unrelated unknown ids still vanish quietly.
-        daemon.apply_hook_event(
-            &AgentId("warm-1".into()),
-            HookEvent::SessionStart { source: None },
-            Some("sid-9".into()),
-        );
-        daemon.apply_hook_event(&AgentId("stranger".into()), HookEvent::Stop, None);
-        {
-            let pool = daemon.prewarmed.lock().unwrap();
-            let entry = pool.get(&key).unwrap();
-            assert_eq!(entry.buffered_hooks.len(), 1);
-            assert_eq!(
-                entry.buffered_hooks[0],
-                (
-                    HookEvent::SessionStart { source: None },
-                    Some("sid-9".to_string())
-                )
-            );
-        }
-
-        // The buffer is bounded: overflow drops the oldest.
-        for i in 0..(PREWARM_HOOK_BUFFER_CAP + 5) {
-            daemon.apply_hook_event(
-                &AgentId("warm-1".into()),
-                HookEvent::Notification {
-                    notification_type: Some(format!("n{i}")),
-                },
-                None,
-            );
-        }
-        assert_eq!(
-            daemon
-                .prewarmed
-                .lock()
-                .unwrap()
-                .get(&key)
-                .unwrap()
-                .buffered_hooks
-                .len(),
-            PREWARM_HOOK_BUFFER_CAP
-        );
-
-        // No live PTY backs the entry, so take() refuses it (create falls
-        // back to a cold spawn) and reap clears it out.
-        assert!(daemon
-            .take_prewarmed(&WorktreeId("w1".into()), AgentKind::Claude, None, None)
-            .is_none());
-        assert!(daemon.prewarmed.lock().unwrap().is_empty());
-
-        daemon.prewarmed.lock().unwrap().insert(
-            key.clone(),
-            PrewarmEntry {
-                agent_id: AgentId("warm-2".into()),
-                spawned_at: Instant::now(),
-                model: None,
-                effort: None,
-                buffered_hooks: Vec::new(),
-            },
-        );
-        daemon.reap_prewarmed();
-        assert!(daemon.prewarmed.lock().unwrap().is_empty());
-    }
-
-    /// Switching `prewarm_agents` off drains the pool on the next sweep. A
-    /// spare is a real CLI process the user can see — Claude's own
-    /// `/list-agents` lists it beside their sessions, named after the
-    /// directory (issue #15) — so the toggle has to take it away now, not
-    /// when it ages out.
-    #[tokio::test]
-    async fn reap_prewarmed_drains_the_pool_once_prewarming_is_off() {
-        let daemon = test_daemon();
-        let key = (WorktreeId("w1".into()), AgentKind::Claude);
-        let id = AgentId("warm-1".into());
-        let sref = SessionRef::Agent(id.clone());
-        let session = PtySession::spawn(
-            sref.clone(),
-            SpawnSpec {
-                program: "sleep".into(),
-                args: vec!["30".into()],
-                cwd: std::env::temp_dir(),
-                env: vec![],
-                scrub_env: &[],
-                cols: 80,
-                rows: 24,
-                scan_ports: false,
-            },
-        )
-        .unwrap();
-        daemon.install_session(session);
-        daemon.prewarmed.lock().unwrap().insert(
-            key.clone(),
-            PrewarmEntry {
-                agent_id: id.clone(),
-                spawned_at: Instant::now(),
-                model: None,
-                effort: None,
-                buffered_hooks: Vec::new(),
-            },
-        );
-        let with_pool = |on: bool| crate::config::Config {
-            prewarm_agents: on,
-            ..crate::config::Config::default()
-        };
-
-        // Live, young and wanted: the ordinary sweep keeps it.
-        daemon.reap_prewarmed_with(&with_pool(true));
-        assert!(daemon.prewarmed.lock().unwrap().contains_key(&key));
-        assert!(daemon.is_alive(&sref), "a kept spare keeps its PTY");
-
-        // Off: the same sweep takes it, PTY and all.
-        daemon.reap_prewarmed_with(&with_pool(false));
-        assert!(daemon.prewarmed.lock().unwrap().is_empty());
-        assert!(
-            !daemon.is_alive(&sref),
-            "a drained spare's PTY goes with it"
-        );
-    }
-
-    #[test]
-    fn kill_prewarmed_in_scopes_to_worktrees() {
-        let daemon = test_daemon();
-        for (wt, id) in [("w1", "a"), ("w2", "b")] {
-            daemon.prewarmed.lock().unwrap().insert(
-                (WorktreeId(wt.into()), AgentKind::Codex),
-                PrewarmEntry {
-                    agent_id: AgentId(id.into()),
-                    spawned_at: Instant::now(),
-                    model: None,
-                    effort: None,
-                    buffered_hooks: Vec::new(),
-                },
-            );
-        }
-        daemon.kill_prewarmed_in(&[WorktreeId("w1".into())]);
-        let pool = daemon.prewarmed.lock().unwrap();
-        assert_eq!(pool.len(), 1);
-        assert!(pool.contains_key(&(WorktreeId("w2".into()), AgentKind::Codex)));
     }
 
     #[test]

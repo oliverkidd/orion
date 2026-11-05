@@ -6,6 +6,7 @@
 //! value this build can't read costs only its own key.
 
 use orion_core::compose::WorktreeContainers;
+use orion_core::{AgentKind, LaunchSpec};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,13 +14,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Pre-spawn agent CLIs while the user is still naming the session so
-    /// creation feels instant. Costs one idle CLI process per warm slot.
-    pub prewarm_agents: bool,
     /// Kill idle session PTYs in worktrees no client is looking at once
     /// they've gone unwatched this long: "1m" | "5m" | "15m" | "30m" | "1h"
     /// ("off" disables reaping entirely; any `<n>s`/`<n>m`/`<n>h` works).
-    /// Bounds what prewarming and walked-away-from sessions cost. Running
+    /// Bounds what prewarmed and walked-away-from sessions cost. Running
     /// or feedback-waiting agents, agents with a backgrounded tool call
     /// still running, and terminals with a command running are spared; a
     /// reaped session revives on the next attach or prewarm (agents resume
@@ -44,6 +42,13 @@ pub struct Config {
     /// [`Config::setup_command`], [`Config::run_command`],
     /// [`Config::worktree_containers`]).
     pub projects: BTreeMap<PathBuf, ProjectConfig>,
+    /// The harness `⌘N` launches on (the TUI's **New agents on**): a
+    /// built-in's name or a Claude account's id. Read for what a SPARE
+    /// WORKTREE boots ([`Config::spare_launch`]).
+    pub quick_prompt_kind: String,
+    /// The default Claude account's switch, where `harnesses.claude` says
+    /// nothing (the TUI's Accounts tab). Off, no SPARE WORKTREE boots it.
+    pub claude_enabled: bool,
 }
 
 /// One project's entry under `projects` — the rows of the TUI's Projects
@@ -79,11 +84,12 @@ pub struct ProjectConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            prewarm_agents: true,
             session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             harnesses: BTreeMap::new(),
             claude_accounts: Vec::new(),
             projects: BTreeMap::new(),
+            quick_prompt_kind: AgentKind::Claude.as_str().into(),
+            claude_enabled: false,
         }
     }
 }
@@ -121,6 +127,47 @@ impl Config {
         let name = self.projects.get(repo_path)?.base_branch.trim();
         let name = name.strip_prefix("origin/").unwrap_or(name).trim();
         (!name.is_empty()).then_some(name)
+    }
+
+    /// The launch `⌘N` makes on its own defaults — the harness
+    /// `quick_prompt_kind` names, at that harness's default model and
+    /// effort, in edit mode — when it is a Claude account that is on: what
+    /// a SPARE WORKTREE's CLI boots as. Read the way the TUI's
+    /// `Config::quick_prompt_harness` reads it: an account switched off or
+    /// gone falls back to the default one. None when `⌘N` starts another
+    /// harness, or the account it would start is off.
+    pub fn spare_launch(&self) -> Option<LaunchSpec> {
+        let registry = orion_core::harness::registry(&self.harnesses, &self.claude_accounts);
+        let claude = || registry.iter().find(|e| e.id == AgentKind::Claude.as_str());
+        let name = self.quick_prompt_kind.trim();
+        let entry = match AgentKind::parse(name) {
+            Some(AgentKind::Claude) => claude(),
+            Some(_) => None,
+            None => registry
+                .iter()
+                .find(|e| {
+                    e.id == name && e.enabled && e.problem().is_none() && e.is_claude_account()
+                })
+                .or_else(claude),
+        }?;
+        // The default account's own switch is the legacy key wherever the
+        // `harnesses` map says nothing, as the TUI folds it.
+        let on = match self.harnesses.get(&entry.id).and_then(|o| o.enabled) {
+            _ if entry.id != AgentKind::Claude.as_str() => entry.enabled,
+            Some(enabled) => enabled,
+            None => self.claude_enabled,
+        };
+        if !on || !entry.is_claude_account() || entry.problem().is_some() {
+            return None;
+        }
+        let (kind, custom_harness) = entry.session_kind();
+        Some(LaunchSpec {
+            kind,
+            custom_harness,
+            model: entry.default_model().map(str::to_string),
+            effort: entry.default_effort().map(str::to_string),
+            mode: Default::default(),
+        })
     }
 
     /// The ON WORKTREE DELETE policy of the project checked out at
@@ -187,12 +234,15 @@ mod tests {
     #[test]
     fn an_unreadable_key_costs_only_that_key() {
         let obj = serde_json::json!({
-            "prewarm_agents": "nope",
+            "projects": "nope",
             "session_idle_timeout": "1h",
         });
         let (cfg, skipped) =
             orion_core::settings::parse_lenient::<Config>(obj.as_object().unwrap());
-        assert!(cfg.prewarm_agents, "the unreadable key takes its default");
+        assert!(
+            cfg.projects.is_empty(),
+            "the unreadable key takes its default"
+        );
         assert_eq!(cfg.session_idle_timeout, "1h");
         assert_eq!(skipped.len(), 1);
     }
@@ -205,7 +255,6 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw).unwrap();
         let (cfg, skipped) = orion_core::settings::parse_lenient::<Config>(&obj);
         assert!(skipped.is_empty(), "{skipped:?}");
-        assert!(!cfg.prewarm_agents);
         assert_eq!(cfg.session_idle_timeout, "30m");
         assert_eq!(
             cfg.harnesses.get("claude").and_then(|h| h.enabled),
@@ -239,13 +288,62 @@ mod tests {
         assert!(Config::default().claude_accounts.is_empty());
     }
 
+    /// A SPARE WORKTREE boots what `⌘N` launches, on its own defaults —
+    /// the default account or another, never another harness, never one
+    /// that is off.
     #[test]
-    fn defaults_enable_prewarm_and_allow_opt_out() {
-        assert!(Config::default().prewarm_agents);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.prewarm_agents);
-        let cfg: Config = serde_json::from_str(r#"{"prewarm_agents": false}"#).unwrap();
-        assert!(!cfg.prewarm_agents);
+    fn the_spare_boots_what_cmd_n_launches() {
+        let cfg = |json: serde_json::Value| -> Config { serde_json::from_value(json).unwrap() };
+        assert_eq!(Config::default().spare_launch(), None, "Claude starts off");
+        let on = cfg(serde_json::json!({ "claude_enabled": true }));
+        assert_eq!(
+            on.spare_launch(),
+            Some(LaunchSpec {
+                kind: AgentKind::Claude,
+                custom_harness: None,
+                model: None,
+                effort: None,
+                mode: Default::default(),
+            })
+        );
+        let tuned = cfg(serde_json::json!({
+            "claude_enabled": true,
+            "harnesses": { "claude": { "model_default": "opus", "effort_default": "high" } },
+        }));
+        let launch = tuned.spare_launch().unwrap();
+        assert_eq!(
+            (launch.model.as_deref(), launch.effort.as_deref()),
+            (Some("opus"), Some("high"))
+        );
+        let work = serde_json::json!({
+            "claude_enabled": true,
+            "quick_prompt_kind": "claude-work",
+            "claude_accounts": [{ "id": "claude-work", "config_dir": "/srv/claude" }],
+            "harnesses": { "claude-work": { "model_default": "sonnet" } },
+        });
+        let launch = cfg(work.clone()).spare_launch().unwrap();
+        assert_eq!(launch.kind, AgentKind::Claude);
+        assert_eq!(launch.custom_harness.as_deref(), Some("claude-work"));
+        assert_eq!(launch.model.as_deref(), Some("sonnet"));
+        let mut gone = work.clone();
+        gone["claude_accounts"][0]["enabled"] = false.into();
+        assert_eq!(
+            cfg(gone).spare_launch().unwrap().custom_harness,
+            None,
+            "an account switched off falls back to the default one"
+        );
+        let codex =
+            cfg(serde_json::json!({ "claude_enabled": true, "quick_prompt_kind": "codex" }));
+        assert_eq!(
+            codex.spare_launch(),
+            None,
+            "⌘N on Codex keeps no Claude warm"
+        );
+        let off = cfg(serde_json::json!({
+            "claude_enabled": true,
+            "harnesses": { "claude": { "enabled": false } },
+        }));
+        assert_eq!(off.spare_launch(), None, "the map's switch wins");
     }
 
     #[test]

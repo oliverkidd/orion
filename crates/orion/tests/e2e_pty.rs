@@ -388,6 +388,7 @@ async fn full_crud_attach_and_restart_persistence() {
             branch: "feature-x".into(),
             base: None,
             existing: false,
+            launch: None,
         },
     )
     .await
@@ -1098,6 +1099,7 @@ async fn hook_cwd_rehomes_agent_to_other_worktree() {
             branch: "feat".into(),
             base: None,
             existing: false,
+            launch: None,
         },
     )
     .await
@@ -2247,89 +2249,158 @@ async fn add_project_get_main_worktree(c: &mut UnixStream, repo: &Path) -> orion
         .expect("main worktree upsert")
 }
 
-/// PrewarmAgent boots the CLI while the user is "typing the name"; the
-/// following CreateAgent must adopt that already-running PTY (its slow boot
-/// output is already in scrollback) and replay the hooks it fired before the
-/// row existed (SessionStart → the session id the row's first turn saves).
+/// The SPARE WORKTREES under `repo`'s WORKTREE DIR, by directory name.
+fn spare_dirs(repo: &Path) -> Vec<String> {
+    let dir = repo.parent().unwrap().join("repo-worktrees");
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| orion_core::is_spare_branch(name))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+async fn until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} never happened"
+        );
+        tokio::time::sleep(POLL_STEP).await;
+    }
+}
+
+/// A new-worktree launch on the `⌘N` account takes the project's SPARE
+/// WORKTREE end to end: the daemon cuts it for the project in use and
+/// boots the CLI in it; the launch's `CreateWorktree` comes back as that
+/// checkout under the launch's branch; its `CreateAgent` adopts the CLI
+/// that was already booted and types the task into it; and a new spare is
+/// cut behind it.
 #[tokio::test]
-async fn prewarmed_session_is_adopted_by_create_agent() {
+async fn a_new_worktree_launch_takes_the_spare_and_types_its_task() {
     let env = TestEnv::new();
     let repo = env.make_repo();
-    // Stand-in agent CLI with a deliberately slow boot: posts SessionStart
-    // (like claude does), sleeps, prints a marker, then becomes a shell. If
-    // adoption works, the marker is in scrollback the moment we attach; a
-    // cold spawn at CreateAgent time couldn't print it for another 3s.
-    let script = env.tmp.path().join("slow-agent.sh");
+    env.write_config(r#"{"claude_enabled": true}"#);
+    // Stand-in claude: says it booted (SessionStart, as claude's hook
+    // does), leaves a mark, then sits at a shell prompt.
+    let script = env.tmp.path().join("spare-agent.sh");
     std::fs::write(
         &script,
         concat!(
             "#!/bin/sh\n",
             "curl -sS -m 3 -X POST -H \"Authorization: Bearer $ORION_API_TOKEN\" \\\n",
-            "  -H 'Content-Type: application/json' -d '{\"session_id\":\"warm-sid-99\"}' \\\n",
+            "  -H 'Content-Type: application/json' -d '{\"session_id\":\"spare-sid\"}' \\\n",
             "  \"$ORION_API_URL/api/hooks/claude?agentId=$ORION_AGENT_ID&hookEvent=SessionStart\" \\\n",
             "  >/dev/null 2>&1\n",
-            "sleep 3\n",
-            "echo PREWARM_READY\n",
+            "touch .spare-booted\n",
+            "echo SPARE_BOOTED\n",
             "exec /bin/sh\n",
         ),
     )
     .unwrap();
     make_executable(&script);
-    let mut daemon = env.spawn_daemon_with_agent_cmd(script.to_str().unwrap());
-
+    let mut daemon =
+        env.spawn_daemon_with(script.to_str().unwrap(), &[(env::SPARE_TICK_MS, "200")]);
     let mut c = connect(&env.sock()).await;
     handshake(&mut c).await;
-    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    let main = add_project_get_main_worktree(&mut c, &repo).await;
 
-    // Kind picked — warm the CLI. No reply expected.
+    // Adding the project is using it: its spare is cut and its CLI boots.
+    let worktrees = repo.parent().unwrap().join("repo-worktrees");
+    until("the spare's CLI booting", SPAWN_CHAIN_TIMEOUT, || {
+        spare_dirs(&repo)
+            .first()
+            .is_some_and(|name| worktrees.join(name).join(".spare-booted").exists())
+    })
+    .await;
+    // Its CLI is up a beat before the daemon files the spare away.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let spare = spare_dirs(&repo).remove(0);
+
+    let claude = orion_core::harness::builtin("claude").unwrap();
     write_frame(
         &mut c,
-        &ClientRequest::PrewarmAgent {
-            worktree: worktree.id.clone(),
-            kind: AgentKind::Claude,
-            model: None,
-            effort: None,
+        &ClientRequest::CreateWorktree {
+            req_id: 3,
+            project: main.project_id.clone(),
+            branch: "feat-spare".into(),
+            base: None,
+            existing: false,
+            launch: Some(orion_core::LaunchSpec {
+                kind: AgentKind::Claude,
+                custom_harness: None,
+                model: claude.default_model().map(String::from),
+                effort: claude.default_effort().map(String::from),
+                mode: Default::default(),
+            }),
         },
     )
     .await
     .unwrap();
-    // "User types the name": long enough for the warm boot to finish.
-    tokio::time::sleep(Duration::from_millis(4500)).await;
+    let row_of = |evs: &[ServerEvent]| {
+        evs.iter().find_map(|e| match e {
+            ServerEvent::EntityUpserted {
+                entity: Entity::Worktree(w),
+            } if !w.is_main => Some(w.clone()),
+            _ => None,
+        })
+    };
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        matches!(find_ack(evs, 3), Some(ServerEvent::Error { .. }))
+            || (find_ack(evs, 3).is_some() && row_of(evs).is_some())
+    })
+    .await;
+    let Some(ServerEvent::Ack {
+        created: Some(EntityId::Worktree(worktree)),
+        ..
+    }) = find_ack(&events, 3)
+    else {
+        panic!("CreateWorktree failed: {events:#?}");
+    };
+    let row = row_of(&events).unwrap();
+    assert_eq!(&row.id, worktree);
+    assert_eq!(row.branch, "feat-spare");
+    assert_eq!(
+        row.path.file_name().unwrap().to_string_lossy(),
+        spare,
+        "the spare's own checkout, its directory keeping its name"
+    );
 
     write_frame(
         &mut c,
         &ClientRequest::CreateAgent {
             mode: Default::default(),
-            req_id: 2,
-            worktree: worktree.id.clone(),
-            name: "warm-agent".into(),
+            req_id: 4,
+            worktree: worktree.clone(),
+            name: String::new(),
             kind: AgentKind::Claude,
             custom_harness: None,
-            model: None,
-            effort: None,
-            auto_title: false,
-            starting_prompt: None,
+            model: claude.default_model().map(String::from),
+            effort: claude.default_effort().map(String::from),
+            auto_title: true,
+            starting_prompt: Some("echo SPARE_TOOK_THE_TASK".into()),
         },
     )
     .await
     .unwrap();
-    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 2).is_some()).await;
-    let ServerEvent::Ack {
-        created: Some(EntityId::Agent(agent_id)),
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 4).is_some()).await;
+    let Some(ServerEvent::Ack {
+        created: Some(EntityId::Agent(agent)),
         ..
-    } = find_ack(&events, 2).unwrap()
+    }) = find_ack(&events, 4)
     else {
         panic!("CreateAgent failed: {events:#?}");
     };
-    let agent_id = agent_id.clone();
-
-    // Attach: the boot marker must already be there (window far shorter
-    // than the script's 3s boot, so a cold spawn cannot pass).
-    let sref = SessionRef::Agent(agent_id.clone());
     write_frame(
         &mut c,
         &ClientRequest::Attach {
-            session: sref.clone(),
+            session: SessionRef::Agent(agent.clone()),
             from_seq: None,
             cols: 100,
             rows: 30,
@@ -2337,140 +2408,18 @@ async fn prewarmed_session_is_adopted_by_create_agent() {
     )
     .await
     .unwrap();
-    let events = read_events_until(&mut c, Duration::from_secs(2), |evs| {
-        String::from_utf8_lossy(&collected_output(evs)).contains("PREWARM_READY")
-    })
-    .await;
-    drop(events);
-
-    // The adopted PTY is interactive.
-    let marker = "adopted_marker_7731";
-    write_frame(
-        &mut c,
-        &ClientRequest::Input {
-            session: sref.clone(),
-            data: format!("echo {marker}\n").into_bytes(),
-        },
-    )
-    .await
-    .unwrap();
-    read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
-        String::from_utf8_lossy(&collected_output(evs))
-            .matches(marker)
-            .count()
-            >= 2
-    })
-    .await;
-
-    // The SessionStart the warm CLI posted before the row existed was
-    // buffered and replayed. A session id is saved only once a turn has
-    // run, and a Stop saves only the id already adopted — so the first
-    // turn's Stop persisting warm-sid-99 proves the replay happened.
-    write_frame(
-        &mut c,
-        &ClientRequest::Input {
-            session: sref.clone(),
-            data: concat!(
-                r#"curl -sS -m 3 -X POST -H "Authorization: Bearer $ORION_API_TOKEN" -H 'Content-Type: application/json' -d '{"session_id":"warm-sid-99"}' "$ORION_API_URL/api/hooks/claude?agentId=$ORION_AGENT_ID&hookEvent=Stop""#,
-                "\n"
-            )
-            .as_bytes()
-            .to_vec(),
-        },
-    )
-    .await
-    .unwrap();
+    // Booted before the launch (its mark is in the replay), and handed the
+    // task: the typed line, then what it printed.
     read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
-        evs.iter().any(|e| {
-            matches!(e, ServerEvent::StatusChanged { agent, status: orion_core::AgentStatus::Finished, .. }
-                if *agent == agent_id)
-        })
+        let out = String::from_utf8_lossy(&collected_output(evs)).into_owned();
+        out.contains("SPARE_BOOTED") && out.matches("SPARE_TOOK_THE_TASK").count() >= 2
     })
     .await;
-    let mut c2 = connect(&env.sock()).await;
-    handshake(&mut c2).await;
-    write_frame(&mut c2, &ClientRequest::Subscribe)
-        .await
-        .unwrap();
-    let events = read_events_until(&mut c2, EVENT_TIMEOUT, |evs| {
-        evs.iter()
-            .any(|e| matches!(e, ServerEvent::Snapshot { .. }))
+
+    until("a new spare behind it", SPAWN_CHAIN_TIMEOUT, || {
+        spare_dirs(&repo).iter().any(|name| *name != spare)
     })
     .await;
-    let ServerEvent::Snapshot { agents, .. } = &events[0] else {
-        panic!("expected snapshot");
-    };
-    let agent = agents.iter().find(|a| a.id == agent_id).expect("agent row");
-    assert_eq!(agent.name, "warm-agent");
-    assert!(agent.alive, "adopted session is live");
-    assert_eq!(
-        agent.session_id.as_deref(),
-        Some("warm-sid-99"),
-        "buffered SessionStart replayed at adoption, saved at the first Stop"
-    );
-
-    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
-    wait_for_exit(&mut daemon);
-}
-
-/// A prewarmed CLI that dies immediately (the "claude/codex not installed"
-/// shape) must not poison creation: CreateAgent quietly falls back to a
-/// fresh spawn and still succeeds.
-#[tokio::test]
-async fn dead_prewarm_falls_back_to_cold_spawn() {
-    let env = TestEnv::new();
-    let repo = env.make_repo();
-    let script = env.tmp.path().join("dying-agent.sh");
-    std::fs::write(&script, "#!/bin/sh\nexit 127\n").unwrap();
-    make_executable(&script);
-    let mut daemon = env.spawn_daemon_with_agent_cmd(script.to_str().unwrap());
-
-    let mut c = connect(&env.sock()).await;
-    handshake(&mut c).await;
-    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
-
-    write_frame(
-        &mut c,
-        &ClientRequest::PrewarmAgent {
-            worktree: worktree.id.clone(),
-            kind: AgentKind::Claude,
-            model: None,
-            effort: None,
-        },
-    )
-    .await
-    .unwrap();
-    // Give the warm spawn time to die.
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    write_frame(
-        &mut c,
-        &ClientRequest::CreateAgent {
-            mode: Default::default(),
-            req_id: 2,
-            worktree: worktree.id.clone(),
-            name: "fallback-agent".into(),
-            kind: AgentKind::Claude,
-            custom_harness: None,
-            model: None,
-            effort: None,
-            auto_title: false,
-            starting_prompt: None,
-        },
-    )
-    .await
-    .unwrap();
-    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 2).is_some()).await;
-    assert!(
-        matches!(
-            find_ack(&events, 2),
-            Some(ServerEvent::Ack {
-                created: Some(EntityId::Agent(_)),
-                ..
-            })
-        ),
-        "CreateAgent must survive a dead prewarm: {events:#?}"
-    );
 
     write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
     wait_for_exit(&mut daemon);

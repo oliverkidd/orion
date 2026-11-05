@@ -212,7 +212,7 @@ flowchart TB
     PTY_REQ["Attach · Detach · Input · Resize"]
     CRUD["Entity CRUD<br/>AddProject, CreateAgent, CreateWorktree, …"]
     CTRL["MarkAgentSeen · GetMetrics · SaveUiState · Shutdown"]
-    PRE["PrewarmAgent · PrewarmWorktreeSessions (fire-and-forget)"]
+    PRE["PrewarmWorktreeSessions (fire-and-forget)"]
   end
 
   subgraph inbound["Daemon → Client (ServerEvent)"]

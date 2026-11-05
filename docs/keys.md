@@ -679,7 +679,7 @@ The FOOTER carries the rest, left to right:
 | `demo ⎇ feat ◐ fix-login  · archived` after it | where you are, in the marks the grid draws it with: the project, the checkout behind its SCOPE MARK (`⌂` the root, `⎇` a worktree), and the card under the cursor behind its STATUS MARK, then `· archived`, `· full screen` or `· home` when the view is not the grid of live sessions. Each part is a link: a click goes back down onto the grid there — the project's whole grid, the checkout's band, the session's card |
 | a message in place of the hints | a FLASH, until the next key, led by what kind it is: `✕` a failure in crimson, `⚠` a setting to change in gold, `✓` a result nothing else shows in green, the gold spinner over muted words for a wait, `·` a heads-up in muted |
 | `♪ Midnight City · M83  ⏮ ⏸ ⏭` before it | what Spotify is playing (macOS, the `spotify` setting), dimmed while paused. Each glyph is a button: back, play/pause, next. Gone while Spotify is closed or stopped |
-| `2 agents · 412 MB` at the right edge | the agents running and orion's whole memory footprint (this UI, the DAEMON and every session's processes), re-read every 5 seconds |
+| `2 agents · 412 MB` at the right edge | the agents running and orion's whole memory footprint (this UI, the DAEMON and every session's processes, the SPARE WORKTREES' setups and CLIs among them), re-read every 5 seconds |
 | `↓ - Move down` on the row above the bar | the KEY COMBO DISPLAY: the key you just pressed and what it did, for anyone watching a screen share. Keys typed into a LOCKED PANE never show |
 
 ## Mouse

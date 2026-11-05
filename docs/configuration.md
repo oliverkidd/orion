@@ -14,19 +14,20 @@ what the `s` SETTINGS OVERLAY writes:
 
 CONFIG.LOCAL.JSON, beside it in the DATA DIR, has the same keys and wins over `config.json` one key at
 a time. It is for what only makes sense on this machine — an editor a remote box lacks,
-`prewarm_agents: false` on a small one — and it is never exported, never sent over `orion ssh`, and
+a short `session_idle_timeout` on a small one — and it is never exported, never sent over `orion ssh`, and
 never written by an import. Create it by hand with just the keys to pin; after that the overlay
 writes a key it holds back into it, so changing that setting here keeps it local, and every other key
 into `config.json`:
 
 ```json
-{ "editor": "vim", "prewarm_agents": false }
+{ "editor": "vim", "session_idle_timeout": "1m" }
 ```
 
 Both halves of orion read the two files. The TUI owns most keys; the DAEMON owns
-`session_idle_timeout` and `prewarm_agents`, reads
+`session_idle_timeout`, reads
 `harnesses` and `claude_accounts` beside the TUI (spawn and resume go through
-them), and reads three keys out of each `projects` entry: `base_branch`, `run_command` and
+them), reads `quick_prompt_kind` and `claude_enabled` for the account a SPARE WORKTREE boots, and
+reads four keys out of each `projects` entry: `base_branch`, `setup_command`, `run_command` and
 `worktree_containers`. Each side
 deserializes only its own fields and ignores the rest, and both load
 them fresh on every use — so a hand edit applies without restarting either. No key is required: a
@@ -86,9 +87,9 @@ read as nothing.
 | `diff_tree_view` | bool | `true` | — (⌘B) | Whether the DIFF VIEWER (`⌘E`, and a pull request's diff) lists its files as a directory tree rather than flat paths. `⌘B` flips the open viewer and writes the answer here, so the next one — after a restart too — opens the way the last was left. Replaces the tree state the UI-state blob carried through 0.42, which no longer decides it. |
 | `pr_autofix` | string | `"auto"` | General | **Auto-fix my PRs**: on (`auto`) or `off`. When one of *your* open pull requests (`gh`'s signed-in user opened it) hits merge conflicts or failing checks, a fresh `autofix-<n>` session starts on it, nothing to confirm, and the footer says so. It runs on the harness, Claude account, model and effort of the session that did the work on the PR's branch (the most recently active one there), and with none on your default agent at the **PR autofix** system preset's model and effort (as the PR's own agent is what it runs on, the preset's harness is not used). Its prompt is the PR and what broke, wrapped in that preset's text (see [Sessions](sessions.md#agent-presets)): orion's own rules unless you changed them — fix only what is listed; resolve conflicts; reproduce each failing unit test locally and fix it; re-run only the e2e specs that failed, never the full suite, unless earlier attempts failed the same way; push; watch the PR until it is green and go round again. Failing checks are acted on once every check has finished (or after 20 minutes); conflicts alone at once. Each breakage — head commit, conflicts, failing checks — is sent once, across restarts; there is never a second `autofix-<n>` on a pull request while one is starting, working or waiting on you. Another session live on the branch, working or waiting on you, does not hold it back: the agent is told where that session's conversation is and reads it first, and when that session is already on this fix it runs `orion autofix stand-down "<why>"`, which archives it, and the footer shows why. A live session whose conversation can't be read (not a Claude session, or no transcript yet) holds it back instead, and the footer says so once. After 3 sends in a row that didn't turn the PR green it stops, with a footer message and a desktop notification. Unit vs e2e is read off each check's name. Seen while the TUI runs: within about 15s for the selected project, 5 minutes for the others; a breakage from while it was closed is picked up on the next launch. `⌘G` in the PULL REQUESTS MODAL still opens the AUTOFIX MODAL for any PR, whatever this says. An older orion's `ask` reads as on. |
 | `projects` | object | `{}` | Projects | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Projects** tab — `{"projects": {"/Users/me/src/app": {"base_branch": "dev", "setup_command": "npm ci", "run_command": "npm run dev", "open_command": "open http://localhost:3000", "worktree_containers": "remove"}}}`. **Base branch** (`base_branch`, string, default `""`) is where the project's new WORKTREES start when nobody named a base — a bare `orion worktree`, the QUICK PROMPT's **+ new worktree** (`orion worktree --base` always wins). Empty, shown as `auto`, is origin's own default branch: `origin/HEAD` freshly fetched. A name — `dev`, `master` — is resolved the way `--base` resolves one: origin is fetched and origin's copy of that branch is the start point, untracked, never the checkout's local branch of that name; a branch origin lacks that the checkout has locally is used as named, and a name the repo has no branch of at all falls back to `origin/HEAD` with a line in `daemon.log`. A leading `origin/` is dropped. Typed, like the commands. The same branch is what the grid's ahead/behind counts, the COMMIT LIST and the background base fetch measure against, and what a merge never deletes. **Setup command** (`setup_command`, string, default `""`) is the SETUP COMMAND the DAEMON runs once in each worktree it creates for the project, on a setup line in its band — see [Setup command](#setup-command); empty (shown as `not set`) is none. Typed, and read fresh at each create. **Run command** (`run_command`, string, default `""`) is the RUN COMMAND `⌘⇧S` (**Start stack** in a card's or the project tab's right-click menu) starts in *that project's* worktrees; empty (shown as `not set`) is none, and **Start stack** says where to set one. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer unsets it. The DAEMON reads it fresh at each start. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. **On worktree delete** (`worktree_containers`, string, default `""` shown as `off`) is what deleting one of the project's worktrees does to the docker compose projects started in it — see [Worktree containers](#worktree-containers). **Linear key** is no setting: it says where the project's `LINEAR_API_KEY` was found, and `Enter` tests it ([Linear](#linear)). `merge_method` (string, default `""`, squash) has no row: it is the method the project's last merge took (`squash`, `merge` or `rebase`), which its next merge form opens on. Releases before these keys kept **Base branch**, **On worktree delete** and **Merge method** once for every project (`worktree_base_branch`, `worktree_containers`, `pr_merge_method`): the first time the grid lists the projects, each project with no value of its own takes the old one, and the old key leaves the file on the next save. The tab lists every project under its name and path; with no project in the tree it says so. A project with no entry reads as the defaults, and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty row is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
-| `quick_prompt_kind` | string | `"claude"` | Accounts | Which AGENT KIND the QUICK PROMPT (`⌘N`) launches: `claude`, `codex`, `cursor`, `grok` or `opencode` — or another CLAUDE ACCOUNT's id (`claude-2`), which the **New agents on** row steps through right after `claude` and shows by name, `Claude (you@example.com)`. Its model and effort come from that harness's own defaults below, so this is one name, not a third pair. A kind or an account switched off here is stepped around, and an older orion reading an account's id falls back to Claude. A Claude account at its limit — a session on it stopped there, or nothing left at the last usage reading — is stepped around for the box's opening too: it opens on your next Claude account that isn't, and says so. The NEW AGENT PICKER opens on it too. |
+| `quick_prompt_kind` | string | `"claude"` | Accounts | Which AGENT KIND the QUICK PROMPT (`⌘N`) launches: `claude`, `codex`, `cursor`, `grok` or `opencode` — or another CLAUDE ACCOUNT's id (`claude-2`), which the **New agents on** row steps through right after `claude` and shows by name, `Claude (you@example.com)`. Its model and effort come from that harness's own defaults below, so this is one name, not a third pair. A kind or an account switched off here is stepped around, and an older orion reading an account's id falls back to Claude. A Claude account at its limit — a session on it stopped there, or nothing left at the last usage reading — is stepped around for the box's opening too: it opens on your next Claude account that isn't, and says so. The NEW AGENT PICKER opens on it too, and a SPARE WORKTREE's `claude` boots on it (see [Spare worktrees](#spare-worktrees)): only while it names a Claude account. |
 | `follow_new_session` | bool | `true` | General | FOLLOW NEW SESSION (**Follow new session**): a QUICK PROMPT launch lands the cursor on the new session's card — the grid scrolls to keep it on screen and the pane shows it, the keys still on the grid — so a run of launches can be watched going up. It selects the card and no more: a QUICK PROMPT never enters its session's terminal. It covers every QUICK PROMPT: `⌘N`, **New agent — choose harness**'s box, **Duplicate session** on a card, and the box the PULL REQUESTS MODAL opens. Off, the cursor, the pane and the keys stay on the card you were on while the new session's card goes up in its band — first in it, stand-in rows first for a launch that cuts a fresh worktree — and the footer names the branch it went to (`started a session in feat`): the BACKGROUND LAUNCH's stillness, in the project on screen. A launch with no card under the cursor — the aim let go with `Esc`, an empty band, an empty grid — has nothing to keep and lands on its new card either way. Terminals (`t`) always come up in the pane. |
-| `claude_enabled` | bool | `false` | Accounts | HARNESS TOGGLE. Off leaves Claude — the default CLAUDE ACCOUNT — out of the NEW AGENT PICKER, and skips the standing PREWARM POOL slot; existing sessions keep attaching and resuming. Every harness starts off — a file that never names the key reads as off too — until setup or the Accounts tab turns it on, so the picker only offers what you use. Its other accounts keep switches of their own (see [Claude accounts](#claude-accounts)). |
+| `claude_enabled` | bool | `false` | Accounts | HARNESS TOGGLE. Off leaves Claude — the default CLAUDE ACCOUNT — out of the NEW AGENT PICKER, and boots no SPARE WORKTREE on it; existing sessions keep attaching and resuming. Every harness starts off — a file that never names the key reads as off too — until setup or the Accounts tab turns it on, so the picker only offers what you use. Its other accounts keep switches of their own (see [Claude accounts](#claude-accounts)). |
 | `codex_enabled` | bool | `false` | Accounts | HARNESS TOGGLE for Codex, same rules. |
 | `cursor_enabled` | bool | `false` | Accounts | HARNESS TOGGLE for Cursor, same rules. |
 | `opencode_enabled` | bool | `false` | Accounts | HARNESS TOGGLE for OpenCode, same rules. |
@@ -99,7 +100,6 @@ read as nothing.
 | `claude_accounts` | array | `[]` | Accounts | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as, after its name when it has one (`harnesses.<id>.label`, `Work (you@example.com)`; an older release's `"name"` on the entry moves there on load). Its model and effort are `harnesses.<id>` rows too. `enabled: false` switches one off (written only while off). The Accounts tab's **Claude accounts** section and first-run onboarding add, rename, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
 | `account_tags` | object | `{}` | Accounts | The ACCOUNT CHIP each Claude account's sessions wear, by account id (`claude` for the default one): `{"claude-2": {"icon": "★", "tint": 2}}`, either half alone. With more than one Claude account, every grid row shows a filled chip right after its status dot — the account's letter, black on its tint (`mono` draws it inverse, in its grays; an archived row's is dim) — so you can see which account each session runs on at a glance; the pane's header, the PR page's SESSIONS line, the usage modal and Settings → Accounts show it too. `icon` is one character that replaces the letter, a letter or a glyph (Settings → Accounts `g`); `tint` is which of six tints fills it, none of them a status color (`c` steps it). An account with no entry gets the first letter of its name, else its email, that no other account's chip has, and the next tint in line. An older `tag` (two letters) still gives its first letter while no `icon` is set. Written only while set. |
 | `keybindings` | object | `{}` | — (hand-edited) | KEYMAP overrides, keyed by action id, valued with a comma-separated chord list: `{"git_diff": "cmd+g, g"}`. An empty string deliberately unbinds; unknown ids are ignored. The Keys tab lists the result and edits nothing. |
-| `prewarm_agents` | bool | `true` | — (hand-edited) | DAEMON-owned PREWARM POOL: keep one booted agent CLI standing by in the selected WORKTREE, so creating a session there adopts it and feels instant. **Costs one idle CLI process per warm slot** (150–300 MB each, up to 15 minutes), and that spare is a real session as far as the CLI is concerned — Claude's own `/list-agents` lists it beside the sessions you made, named after the directory (`my-repo-3f`). Off drains the pool on the DAEMON's next sweep (within 30 s). |
 
 ### Ghostty's keys in Orion.app
 
@@ -226,22 +226,46 @@ installer here: macOS ships it, and it is the last fallback.
 
 ### Prewarming
 
-Orion boots processes you never asked for in two ways, worth knowing about on a laptop or a small
-remote box — and worth knowing about if your sessions talk to each other. A worktree's dead sessions
-boot when your selection rests on it, so attaching is instant; that is how orion works, with no
-switch. And `prewarm_agents` keeps a warm spare: a bare `claude` sitting at its prompt in the
-selected worktree. Claude's `/list-agents` shows it as a peer named after the directory, the same
-way it names any session you have not titled yet, so a spare beside a fresh untitled session reads
-as two copies of one session (`my-repo-3f`, `my-repo-a1`), one of them forever idle. That is the
-spare, not a duplicate. The pool has no row; turn it off by hand, in `config.local.json` on a small
-machine:
+Orion boots processes you never asked for, worth knowing about on a laptop or a small remote box. A
+worktree's dead sessions boot when your selection rests on it, so attaching is instant; that is how
+orion works, with no switch. `session_idle_timeout` is what bounds the cost.
 
-```json
-{ "prewarm_agents": false }
-```
+### Spare worktrees
 
-Turning the pool off takes the standing spares away on the DAEMON's next sweep. `session_idle_timeout`
-is what bounds the cost of both.
+For every project you have used in the last 24 hours — a session created, attached or working in
+it — the DAEMON keeps a SPARE WORKTREE: your next new worktree, cut ahead of time from the project's
+**Base branch**, its `.env` links made and its **Setup command** run, with a `claude` booted in it on
+the `⌘N` account (`quick_prompt_kind`) at that account's default model and effort, sitting at its
+prompt. Its branch and its directory are both `orion-spare-<id>`
+(`../<repo>-worktrees/orion-spare-3kq9xa`), so whoever meets it in `git worktree list` knows whose
+it is; the grid, the worktree sync and the WORKTREE PICKER's branch rows leave it out, and Claude's
+`/list-agents` shows its CLI as a peer named after that directory.
+
+A launch into a new worktree — `⌘⇧N`, the box's **+ new worktree**, a Linear launch — on the account,
+model and effort the spare's CLI booted with, in edit mode, takes it: the branch is renamed to the
+launch's (`git branch -m`; the directory keeps its `orion-spare-` name), the worktree appears, and
+the task is typed into the booted CLI as its first turn once it is at its prompt. A new spare is cut
+behind it. Any other launch, or one onto a branch name that exists, cuts its worktree as before.
+
+A spare follows its base. The DAEMON fetches `origin` for it every five minutes; when the base has
+moved, or the **Base branch** setting now names another, a spare nobody has taken is reset to the
+new base (`git reset --hard` — nothing in it is anyone's; untracked files such as installed
+dependencies stay, and the setup is not run again) and its CLI is booted again on the new files. A
+spare is never reset once a launch has taken it, nor while its setup is still running.
+
+A spare outlives a DAEMON restart only when it is worth keeping: one that finished setting up under
+the setup command its project still has, for a project still in use, is kept and its CLI booted
+again; anything else the last DAEMON left — a spare still setting up, a spare branch nothing has
+checked out, a spare directory git no longer knows — is removed at boot. Removing a project removes
+its spare, and a spare's removal releases its containers as **On worktree delete** says, as any
+deleted worktree's does. The footer's memory readout counts each spare's setup and CLI in orion's
+total, not among the agents.
+
+There is no switch, only what it follows: no spare is kept while `⌘N` starts another harness or the
+account it names is off, and a project's spare goes once nobody has used the project for a day. One
+whose setup fails is taken away, and the next is cut ten minutes later; a CLI that dies, or never
+gets to its prompt, is booted again two minutes later. Spares are cut one at a time, never while
+another is still setting up. Each costs one idle worktree and one 150–300 MB CLI.
 
 ### The harness registry
 

@@ -17,6 +17,7 @@ pub mod server;
 pub mod session_model;
 pub mod session_title;
 pub mod sibling;
+pub mod spare;
 pub mod stacks;
 pub mod status;
 pub mod store;
@@ -179,10 +180,7 @@ async fn serve() -> Result<()> {
             loop {
                 tokio::select! {
                     _ = daemon.shutdown.cancelled() => break,
-                    _ = interval.tick() => {
-                        daemon.tick_status_machines();
-                        daemon.reap_prewarmed();
-                    }
+                    _ = interval.tick() => daemon.tick_status_machines(),
                 }
             }
         });
@@ -250,6 +248,27 @@ async fn serve() -> Result<()> {
                         ),
                     }
                 }
+            }
+        });
+    }
+
+    // SPARE WORKTREES: the warm next worktree of each project in use, cut,
+    // kept and taken away on their own tick (see `spare`) — the ones the
+    // last daemon left kept or cleared first.
+    {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            daemon.sweep_spares_at_boot().await;
+            let mut interval = env_interval(env::SPARE_TICK_MS, 30_000);
+            // A tick that ran long (a fetch, an install's removal) is not
+            // made up for with a burst of them.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = daemon.shutdown.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                daemon.tend_spares().await;
             }
         });
     }

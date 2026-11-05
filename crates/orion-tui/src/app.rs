@@ -4216,10 +4216,6 @@ pub struct App {
     /// while an attach waits out its debounce, so the Detach that precedes
     /// the next Attach names the session the daemon actually holds.
     pub attached_sref: Option<SessionRef>,
-    /// Standing keep-warm: when to next re-assert the selected worktree's
-    /// warm default-spec Claude session, so one is always ready to adopt.
-    /// Re-armed after every send; disarmed when nothing is selected.
-    pub next_keepwarm: Option<std::time::Instant>,
     /// Mouse drag-selection over the terminal pane, if any.
     pub term_selection: Option<TermSelection>,
     /// The next EDGE AUTO-SCROLL tick: set while a drag-selection's pointer
@@ -4733,7 +4729,6 @@ impl App {
             saved_draft: None,
             pending_attach: None,
             attached_sref: None,
-            next_keepwarm: None,
             term_selection: None,
             next_drag_autoscroll: None,
             term_mouse_grab: None,
@@ -6467,12 +6462,6 @@ impl App {
                     .map(|pr| pr.url.clone()),
             )
             .collect()
-    }
-
-    /// Delay until the standing keep-warm re-send is due. None when disarmed.
-    pub fn keepwarm_delay(&self) -> Option<std::time::Duration> {
-        let at = self.next_keepwarm.as_ref()?;
-        Some(at.saturating_duration_since(std::time::Instant::now()))
     }
 
     /// Aggregate status for a worktree row ([`worktree_rollup`]), archived

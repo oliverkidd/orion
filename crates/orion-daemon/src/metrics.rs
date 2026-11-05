@@ -3,11 +3,11 @@
 //! fans out into node workers, shells, MCP servers — the user cares about the
 //! whole tree, not just the root).
 
-use orion_core::{MetricsSnapshot, PrewarmInfo, SessionMetrics, SessionRef};
+use orion_core::{MetricsSnapshot, SessionMetrics, SessionRef};
 use std::collections::{HashMap, HashSet};
 
 /// Take one reading. Blocking (shells out to `ps`); call via spawn_blocking.
-pub fn collect(sessions: Vec<(SessionRef, u32, Option<PrewarmInfo>)>) -> MetricsSnapshot {
+pub fn collect(sessions: Vec<(SessionRef, u32, bool)>) -> MetricsSnapshot {
     let table = std::process::Command::new("ps")
         .args(["-axo", "pid=,ppid=,rss="])
         .output()
@@ -27,7 +27,7 @@ pub fn collect(sessions: Vec<(SessionRef, u32, Option<PrewarmInfo>)>) -> Metrics
 fn snapshot_from_table(
     table: &str,
     daemon_pid: u32,
-    sessions: &[(SessionRef, u32, Option<PrewarmInfo>)],
+    sessions: &[(SessionRef, u32, bool)],
     system_total_bytes: u64,
 ) -> MetricsSnapshot {
     let mut rss: HashMap<u32, u64> = HashMap::new();
@@ -47,14 +47,14 @@ fn snapshot_from_table(
 
     let sessions = sessions
         .iter()
-        .map(|(sref, pid, prewarm)| {
+        .map(|(sref, pid, spare)| {
             let (rss_bytes, procs) = subtree_rss(*pid, &rss, &children);
             SessionMetrics {
                 session: sref.clone(),
                 pid: *pid,
                 rss_bytes,
                 procs,
-                prewarm: prewarm.clone(),
+                spare: *spare,
             }
         })
         .collect();
@@ -119,8 +119,8 @@ mod tests {
             table,
             10,
             &[
-                (sref("a"), 20, None),
-                (SessionRef::Terminal(TerminalId("t".into())), 30, None),
+                (sref("a"), 20, false),
+                (SessionRef::Terminal(TerminalId("t".into())), 30, true),
             ],
             0,
         );
@@ -129,11 +129,15 @@ mod tests {
         assert_eq!(snap.sessions[0].procs, 4);
         assert_eq!(snap.sessions[1].rss_bytes, 50 * 1024);
         assert_eq!(snap.sessions[1].procs, 1);
+        assert!(
+            !snap.sessions[0].spare && snap.sessions[1].spare,
+            "the flag rides along"
+        );
     }
 
     #[test]
     fn exited_session_reads_zero() {
-        let snap = snapshot_from_table(" 10 1 100\n", 10, &[(sref("a"), 555, None)], 0);
+        let snap = snapshot_from_table(" 10 1 100\n", 10, &[(sref("a"), 555, false)], 0);
         assert_eq!(snap.sessions[0].rss_bytes, 0);
         assert_eq!(snap.sessions[0].procs, 0);
     }
@@ -141,31 +145,8 @@ mod tests {
     #[test]
     fn garbage_lines_are_skipped() {
         let table = "not numbers at all\n 20 10 100\n";
-        let snap = snapshot_from_table(table, 10, &[(sref("a"), 20, None)], 0);
+        let snap = snapshot_from_table(table, 10, &[(sref("a"), 20, false)], 0);
         assert_eq!(snap.sessions[0].rss_bytes, 100 * 1024);
         assert_eq!(snap.daemon_rss_bytes, 0);
-    }
-
-    /// A pool spare's home rides along untouched: the client has no agent
-    /// row to look it up by, so this is what it labels the row from.
-    #[test]
-    fn prewarm_home_passes_through() {
-        use orion_core::{AgentKind, WorktreeId};
-        let home = PrewarmInfo {
-            worktree: WorktreeId("w1".into()),
-            kind: AgentKind::Claude,
-            model: Some("opus".into()),
-        };
-        let snap = snapshot_from_table(
-            " 20 10 100\n 21 10 50\n",
-            10,
-            &[
-                (sref("warm"), 20, Some(home.clone())),
-                (sref("live"), 21, None),
-            ],
-            0,
-        );
-        assert_eq!(snap.sessions[0].prewarm.as_ref(), Some(&home));
-        assert_eq!(snap.sessions[1].prewarm, None);
     }
 }

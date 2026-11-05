@@ -96,6 +96,14 @@ pub enum ClientRequest {
         /// branch of that name; `base` is ignored. A row already on the
         /// branch is the answer.
         existing: bool,
+        /// The launch this checkout is cut for — the `CreateAgent` its Ack
+        /// sends next — when there is one. A new branch off the project's
+        /// own base (no `base`, not `existing`) for a launch that is the
+        /// one its SPARE WORKTREE's CLI booted as takes the spare: its
+        /// branch renamed to `branch`, its row sent, and its CLI handed to
+        /// that `CreateAgent`. Anything else is cut as before.
+        #[serde(default)]
+        launch: Option<LaunchSpec>,
     },
     DeleteWorktree {
         req_id: u64,
@@ -127,15 +135,13 @@ pub enum ClientRequest {
         /// (`claude "<text>"`, `codex "<text>"`, `cursor-agent "<text>"`) —
         /// what an AGENT PRESET launch composes from its prefix, the task
         /// and its postfix. Request-only: never persisted, so a RESUME can
-        /// never replay it. Skips PREWARM POOL adoption, since a spare
-        /// booted bare cannot be handed one.
+        /// never replay it.
         #[serde(default)]
         starting_prompt: Option<String>,
         /// The mode the CLI starts in — plan, ask, or the edit it always
         /// starts in ([`crate::harness::AgentMode`]). Request-only like
         /// `starting_prompt`: a RESUME starts where the session left off,
-        /// and a mode the harness does not have is dropped. Skips PREWARM
-        /// POOL adoption unless it is edit, a spare having booted in edit.
+        /// and a mode the harness does not have is dropped.
         #[serde(default)]
         mode: crate::harness::AgentMode,
     },
@@ -197,18 +203,6 @@ pub enum ClientRequest {
         project: ProjectId,
         pr_url: String,
         head: String,
-    },
-    /// Fire-and-forget: pre-spawn an agent CLI for this (worktree, kind) so
-    /// the next CreateAgent adopts an already-booted session. Sent the
-    /// moment the user picks the kind, before they type the name. No reply;
-    /// a missing CLI or failed spawn silently degrades to a cold spawn.
-    PrewarmAgent {
-        worktree: WorktreeId,
-        kind: AgentKind,
-        /// Must match the CreateAgent that follows or the warm session is
-        /// discarded (a CLI booted with the wrong model can't be adopted).
-        model: Option<String>,
-        effort: Option<String>,
     },
     /// Fire-and-forget: pre-spawn every dead (non-archived) session under a
     /// worktree so attaching later replays an already-booted screen instead
@@ -415,6 +409,19 @@ pub enum ClientRequest {
     Shutdown,
 }
 
+/// What a new session launches as — its harness (a Claude account is
+/// `Claude` with the account's id beside it), model, effort and mode, as
+/// `CreateAgent` carries them. A SPARE WORKTREE's CLI was booted as one,
+/// and only a launch that is the same one can take it over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchSpec {
+    pub kind: AgentKind,
+    pub custom_harness: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub mode: crate::harness::AgentMode,
+}
+
 /// How much of a pull request's conversation the user had already seen the
 /// last time they opened it. `marker` is the newest thing anyone else had
 /// posted at that moment, as GitHub's RFC 3339 stamp — those sort
@@ -438,20 +445,11 @@ pub struct SessionMetrics {
     pub rss_bytes: u64,
     /// Live processes in the subtree, the root included.
     pub procs: u32,
-    /// Set when the session is a prewarm-pool spare: an agent CLI the
-    /// daemon booted ahead of time for this worktree, waiting for the next
-    /// new-agent request there to adopt it. It has no agent row yet, so
-    /// this is the only handle a client has for naming and placing it.
+    /// The session is a SPARE WORKTREE's — its setup or its booted CLI,
+    /// with no row a client knows: memory orion spends, not a session the
+    /// user has.
     #[serde(default)]
-    pub prewarm: Option<PrewarmInfo>,
-}
-
-/// Where a prewarm-pool spare is homed and what it booted as.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PrewarmInfo {
-    pub worktree: WorktreeId,
-    pub kind: AgentKind,
-    pub model: Option<String>,
+    pub spare: bool,
 }
 
 /// Daemon-side half of the metrics modal's data; the client stacks its own

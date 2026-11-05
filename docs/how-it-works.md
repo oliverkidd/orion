@@ -167,6 +167,26 @@
   footer says) and starts the run once the setup exits cleanly; a `StopRun` meanwhile calls it off. It
   replaces the WORKTREE HOOKS of git config (`orion.worktreeCreateHook` / `orion.worktreeDeleteHook`),
   which nothing reads any more. See [Configuration](configuration.md#setup-command).
+- **The next worktree is already there — the SPARE WORKTREE.** For each project used in the last
+  day the DAEMON keeps one checkout ahead of you: cut from the **Base branch**, set up, with `claude`
+  booted in it on the `⌘N` account at that account's default model and effort, sitting at its
+  prompt, under the name `orion-spare-<id>` (branch and directory both). It has no rows, the
+  worktree sync leaves it out, and so does every branch list. A launch into a new worktree — `⌘⇧N`,
+  the box's **+ new worktree**, a Linear launch — sends its harness, model, effort and mode with its
+  `CreateWorktree`; when they are the ones the spare's CLI booted with and the branch name is free,
+  the DAEMON takes the spare instead of cutting: `git branch -m` to the launch's branch (the
+  directory keeps its name), the row goes out, a setup still running becomes the worktree's setup
+  row, and the `CreateAgent` that follows adopts the booted CLI and types the task in as its first
+  turn — once the CLI has fired its `SessionStart` and its screen has sat still for half a second, so
+  nothing goes into a CLI still starting. A CLI that never says it booted within a minute is put
+  down and the task boots a fresh one, as a cold launch would. A new spare is cut behind it. A
+  launch on another account, model or effort, in plan mode, onto a branch that exists, or for a pull
+  request is cut cold, as before, and leaves the spare for the next. When the base moves (`origin`
+  is fetched for it every five minutes) or the **Base branch** setting changes, an untaken spare is
+  `git reset --hard` to the new base and its CLI restarted; a taken one is never touched. At boot a
+  spare the last DAEMON left fully set up is kept and anything else of one is removed; removing a
+  project removes its spare. The footer's memory readout counts the spares. See
+  [Configuration](configuration.md#spare-worktrees).
 - **A worktree runs its own project — the RUN COMMAND.** The Projects tab of the SETTINGS OVERLAY
   holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a card's or the
   project tab's right-click menu, has the DAEMON start `run` — once the worktree's setup, if any, has
@@ -374,21 +394,16 @@
   directory. Same appended prompt, plus a `Bash(orion open:*)` permission.
 - **Everything persists in SQLite** (`~/Library/Application Support/dev.orion.orion/orion.db`):
   projects, worktrees, agents (with kind + CLI session ids), links, and your last selection.
-- **Sessions warm up, then get reaped.** The daemon can pre-spawn an agent CLI in the selected worktree
-  before you ask for one, and pre-boot a worktree's dead sessions while your selection rests on it, so attaching
+- **Sessions warm up, then get reaped.** The daemon pre-boots a worktree's dead sessions while your
+  selection rests on it, so attaching
   lands on a booted screen instead of a booting shell. To bound what that costs, idle PTYs in worktrees
   no client is watching are killed after `session_idle_timeout` (5m by default) — working agents, ones
   waiting on you, ones whose backgrounded tool call is still running (Claude's `run_in_background`
   Bash or Monitor, a Codex shell command; the clock restarts when it ends), and terminals with a
   command running are all spared, and a reaped agent revives on the next attach with its
   conversation resumed. Until then its row's STATUS DOT is gray,
-  whatever its last status was — a cold session shows what it last did, not what it is doing. A
-  worktree's dead sessions always boot when the selection rests on it; the warm spare is
-  `prewarm_agents`, `true` by default and switched off by hand in CONFIG.JSON (see
-  [Configuration](configuration.md)), which drains its spares on the next sweep — and a warm spare nobody claims inside 15 min is reaped on
-  its own, because it holds real memory and its context goes stale. A spare is a bare CLI at its
-  prompt, so the CLI's own session list (Claude's `/list-agents`) shows it beside your sessions,
-  named after the directory. The IDLE REAPER's check is a 15 s sweep (`ORION_IDLE_REAP_MS`), so the real
+  whatever its last status was — a cold session shows what it last did, not what it is doing. The
+  IDLE REAPER's check is a 15 s sweep (`ORION_IDLE_REAP_MS`), so the real
   latency is the timeout plus up to 15 s more; `session_idle_timeout` also takes `"off"`, which
   switches reaping off entirely.
 

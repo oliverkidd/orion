@@ -116,13 +116,6 @@ pub(crate) const PREWARM_DEBOUNCE: Duration = Duration::from_millis(250);
 /// attaches it on the keypress.
 const ATTACH_DEBOUNCE: Duration = Duration::from_millis(180);
 
-/// How often the standing keep-warm request for the selected worktree's
-/// default-spec Claude session is re-sent. Must stay comfortably under the
-/// daemon's reap window minus its recycle threshold, so the warm slot is
-/// refreshed (a young session is a no-op, an aging one is recycled) before
-/// the reaper can empty it.
-const KEEPWARM_REFRESH: Duration = Duration::from_secs(4 * 60);
-
 /// How soon a worktree that came back without a pull request is asked
 /// again, and how far that gap may grow. Switching into a worktree resets
 /// it to the floor, so a PR an agent opens while the user watches lands on
@@ -625,14 +618,6 @@ async fn main_loop(
                 if app.pending_prewarm.is_some() =>
             {
                 fire_pending_prewarm(&mut app, &mut out);
-            }
-            // Standing keep-warm: periodically re-assert the selected
-            // worktree's warm default-spec Claude session so the daemon's
-            // reaper never leaves the next create cold.
-            _ = tokio::time::sleep(app.keepwarm_delay().unwrap_or_default()),
-                if app.next_keepwarm.is_some() =>
-            {
-                fire_keepwarm(&mut app, &mut out);
             }
             ev = input.next() => match ev {
                 Some(Ok(event)) => {
@@ -9088,6 +9073,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                     branch,
                     base: None,
                     existing: false,
+                    launch: None,
                 },
             );
         }
@@ -9400,8 +9386,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         } => {
             // Opened from the QUICK PROMPT: the pick rewrites that box's
             // launch and hands it straight back — no session is created
-            // here, nothing is warmed (a STARTING PROMPT launch can never
-            // adopt a WARM SPARE), and the SETTING is untouched. The
+            // here, and the SETTING is untouched. The
             // resolve/fit below is `QuickLaunch::of_kind`'s job instead.
             if let Some(back) = quick {
                 // A model or an effort picked for the harness the box is
@@ -9474,11 +9459,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             // under the generated name and AUTO-TITLE, its first prompt
             // typed in the CLI. No box stands between the picker and the
             // pane — a launch that starts from a typed task is the QUICK
-            // PROMPT's (`p`; `e` on an OPEN PRS row for a PR SESSION). The
-            // standing default-spec warm slot gets adopted where it
-            // matches (never for a PR SESSION: an unscoped warm CLI cannot
-            // be adopted for one), and the refill behind the create
-            // re-warms it either way.
+            // PROMPT's (`p`; `e` on an OPEN PRS row for a PR SESSION).
             create_agent(
                 app,
                 AgentLaunchDraft {
@@ -10451,14 +10432,10 @@ fn fire_pending_prewarm(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
     let (cols, rows) = pane_size(app);
     out.push(ClientRequest::PrewarmWorktreeSessions {
-        worktree: worktree.clone(),
+        worktree,
         cols,
         rows,
     });
-    // The selected worktree also keeps one Claude session standing by, so
-    // creating a session there adopts an already-booted CLI.
-    out.extend(default_claude_prewarm(worktree));
-    app.next_keepwarm = Some(std::time::Instant::now() + KEEPWARM_REFRESH);
 }
 
 /// The PROJECT a checkout belongs to — what `CreatePrAgent` is addressed
@@ -10588,7 +10565,6 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         (true, Some(name)) => name,
         (true, None) => app.default_session_name("agent"),
     };
-    let with_first_prompt = starting_prompt.is_some();
     let req_id = app.alloc_req_id(intent);
     if let Some(todo) = todo {
         app.todo_pending.insert(req_id, todo);
@@ -10626,54 +10602,6 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             mode,
         },
     });
-    // The create consumes (or, off-spec, discards) the worktree's warm
-    // Claude slot; refill it so the next create is instant too. A launch
-    // carrying a STARTING PROMPT (a preset, the QUICK PROMPT) never
-    // touches the slot, so there is nothing to refill.
-    // Nor does a PR SESSION: the DAEMON adopts no unscoped spare for one,
-    // and `worktree` there is the ROOT WORKTREE, which only names the
-    // project — a refill would boot a Claude in the main checkout for a
-    // launch that never runs there. A launch on another Claude account
-    // never takes the default account's spare either.
-    if kind == AgentKind::Claude && custom.is_none() && !with_first_prompt && pr_url.is_none() {
-        out.extend(default_claude_prewarm(worktree));
-    }
-}
-
-/// The one spec kept permanently warm: a Claude CLI at the configured
-/// default model/effort. Creates matching it adopt the warm session
-/// instantly; any other spec launches cold on purpose — off-default CLIs
-/// would sit idle holding memory for a spec the user rarely repeats.
-/// None while Claude is disabled in Settings: a harness the user turned
-/// off should not keep a 150–300 MB WARM SPARE booted behind their back.
-fn default_claude_prewarm(worktree: WorktreeId) -> Option<ClientRequest> {
-    let cfg = crate::config::Config::load();
-    if !cfg.kind_enabled(AgentKind::Claude) {
-        return None;
-    }
-    Some(ClientRequest::PrewarmAgent {
-        worktree,
-        kind: AgentKind::Claude,
-        model: cfg.default_model(AgentKind::Claude),
-        effort: cfg.default_effort(AgentKind::Claude),
-    })
-}
-
-/// Periodic re-assert of the standing warm Claude session for the selected
-/// worktree. A young same-spec session makes this a daemon-side no-op and an
-/// aging one is recycled in place, so without this tick the daemon's reaper
-/// would empty the slot at its max age and the next create would boot cold.
-fn fire_keepwarm(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let Some(worktree) = app.selected_worktree().map(|w| w.id.clone()) else {
-        app.next_keepwarm = None;
-        return;
-    };
-    // The beat keeps going past a QUICK PROMPT stand-in — it is the real
-    // checkout a moment later — but nothing is asked for it.
-    if !app.is_placeholder_worktree(&worktree) {
-        out.extend(default_claude_prewarm(worktree));
-    }
-    app.next_keepwarm = Some(std::time::Instant::now() + KEEPWARM_REFRESH);
 }
 
 /// Mouse position → pane-relative cell, clamped into the terminal area (so a
@@ -17769,8 +17697,7 @@ mod tests {
     }
 
     /// Resting the worktree selection arms the debounced prewarm; firing it
-    /// sends one PrewarmWorktreeSessions plus the standing default-spec
-    /// Claude keep-warm for that worktree, then disarms.
+    /// sends one PrewarmWorktreeSessions for that worktree, then disarms.
     #[test]
     fn worktree_move_arms_prewarm_and_fire_sends_request() {
         use orion_core::{Entity, ProjectId, Worktree, WorktreeId};
@@ -17801,17 +17728,9 @@ mod tests {
         assert!(app.pending_prewarm.is_none(), "fires once, then disarms");
         assert!(matches!(
             out.as_slice(),
-            [
-                ClientRequest::PrewarmWorktreeSessions { worktree, .. },
-                ClientRequest::PrewarmAgent {
-                    worktree: agent_wt,
-                    kind: AgentKind::Claude,
-                    model: None,
-                    effort: None,
-                },
-            ] if worktree == &WorktreeId("w2".into()) && agent_wt == &WorktreeId("w2".into())
+            [ClientRequest::PrewarmWorktreeSessions { worktree, .. }]
+                if worktree == &WorktreeId("w2".into())
         ));
-        assert!(app.next_keepwarm.is_some(), "keep-warm re-send is armed");
     }
 
     /// An empty `gh` answer doesn't retire the worktree: the next attempt
@@ -18177,37 +18096,6 @@ mod tests {
         assert!(!app.pr_lookup_due(&wid), "already wearing the merge");
     }
 
-    /// The keep-warm tick re-sends the default-spec Claude prewarm for the
-    /// selected worktree and re-arms itself; with nothing selected it
-    /// disarms until the next worktree rest re-arms it.
-    #[test]
-    fn keepwarm_refires_for_selected_worktree_and_rearms() {
-        with_default_config(|| {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.next_keepwarm = Some(std::time::Instant::now());
-            let mut out = Vec::new();
-            fire_keepwarm(&mut app, &mut out);
-            assert!(matches!(
-                out.as_slice(),
-                [ClientRequest::PrewarmAgent {
-                    worktree,
-                    kind: AgentKind::Claude,
-                    model: None,
-                    effort: None,
-                }] if worktree == &orion_core::WorktreeId("w1".into())
-            ));
-            assert!(app.next_keepwarm.is_some(), "re-arms after sending");
-
-            let mut empty = App::new();
-            empty.next_keepwarm = Some(std::time::Instant::now());
-            out.clear();
-            fire_keepwarm(&mut empty, &mut out);
-            assert!(out.is_empty(), "nothing selected, nothing to keep warm");
-            assert!(empty.next_keepwarm.is_none(), "disarms without a worktree");
-        })
-    }
-
     /// Esc on the NEW AGENT PICKER sends nothing: opening it warmed
     /// nothing, and only Enter on a row creates.
     #[test]
@@ -18464,7 +18352,8 @@ mod tests {
     }
 
     /// The footer's right edge shows live session counts and orion's
-    /// total memory once a metrics reading arrives.
+    /// total memory once a metrics reading arrives — a SPARE WORKTREE's
+    /// CLI in the memory, not in the agents.
     #[test]
     fn footer_shows_session_counts_and_memory() {
         use orion_core::{MetricsSnapshot, SessionMetrics, TerminalId};
@@ -18486,16 +18375,23 @@ mod tests {
                 SessionMetrics {
                     session: SessionRef::Agent(AgentId("a1".into())),
                     pid: 10,
-                    rss_bytes: 700 * 1024 * 1024,
+                    rss_bytes: 400 * 1024 * 1024,
                     procs: 3,
-                    prewarm: None,
+                    spare: false,
                 },
                 SessionMetrics {
                     session: SessionRef::Terminal(TerminalId("t1".into())),
                     pid: 11,
                     rss_bytes: 24 * 1024 * 1024,
                     procs: 2,
-                    prewarm: None,
+                    spare: false,
+                },
+                SessionMetrics {
+                    session: SessionRef::Agent(AgentId("spare-cli".into())),
+                    pid: 12,
+                    rss_bytes: 300 * 1024 * 1024,
+                    procs: 4,
+                    spare: true,
                 },
             ],
         });
@@ -18611,7 +18507,7 @@ mod tests {
                 pid: 10,
                 rss_bytes: 724 * 1024 * 1024,
                 procs: 3,
-                prewarm: None,
+                spare: false,
             }],
         });
         app.spotify_enabled = true;
@@ -19467,9 +19363,7 @@ mod tests {
             // follows, so there is no STARTING PROMPT — the CLI's own input
             // is the first prompt — and the row takes the next free default
             // name and AUTO-TITLE. Nothing configured → no model/effort
-            // flags. The default-spec warm slot the create adopts is
-            // refilled right behind it, and that is the only prewarm: with
-            // no box there is no typing to warm under.
+            // flags.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "no box: {:?}", app.overlay);
             assert!(
@@ -19485,15 +19379,9 @@ mod tests {
                             starting_prompt: None,
                             ..
                         },
-                        ClientRequest::PrewarmAgent {
-                            kind: AgentKind::Claude,
-                            model: None,
-                            effort: None,
-                            ..
-                        }
                     ] if name == "agent-2"
                 ),
-                "one create, then the refill: {out:?}"
+                "one create: {out:?}"
             );
         })
     }
@@ -20099,37 +19987,6 @@ mod tests {
                 assert!(app.flash.is_some());
             },
         );
-    }
-
-    #[test]
-    fn disabled_claude_skips_the_standing_prewarm() {
-        with_config_json(r#"{"claude_enabled": false}"#, || {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            let worktree = app.selected_worktree().unwrap().id.clone();
-            app.pending_prewarm = Some((worktree.clone(), std::time::Instant::now()));
-            let mut out = Vec::new();
-
-            fire_pending_prewarm(&mut app, &mut out);
-            assert!(
-                matches!(
-                    out.as_slice(),
-                    [ClientRequest::PrewarmWorktreeSessions { .. }]
-                ),
-                "dead sessions still prewarm; no Claude WARM SPARE: {out:?}"
-            );
-
-            out.clear();
-            fire_keepwarm(&mut app, &mut out);
-            assert!(
-                out.is_empty(),
-                "keep-warm sends nothing for a disabled harness: {out:?}"
-            );
-            assert!(
-                app.next_keepwarm.is_some(),
-                "still re-armed, so re-enabling warms again"
-            );
-        });
     }
 
     #[test]
@@ -32283,11 +32140,6 @@ mod tests {
                 ),
                 "one PR create with the sandwiched prompt: {out:?}"
             );
-            assert!(
-                out.iter()
-                    .all(|r| !matches!(r, ClientRequest::PrewarmAgent { .. })),
-                "an unscoped warm CLI must not start for a PR SESSION: {out:?}"
-            );
             // No checkout on the head branch yet: the stand-in rows are up
             // for the one the DAEMON is cutting.
             assert!(
@@ -32938,7 +32790,7 @@ mod tests {
                 "Be strict.\n\n\n\nRun the tests.",
                 "the preset's text written round the caret"
             );
-            assert!(out.is_empty(), "no prewarm for a preset launch: {out:?}");
+            assert!(out.is_empty(), "nothing sent before Enter: {out:?}");
 
             assert!(paste_into_overlay(&mut app, "Fix auth"));
             press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
@@ -33513,7 +33365,14 @@ mod tests {
                     branch: b,
                     base: None,
                     existing: false,
-                }] if project == &ProjectId("p1".into()) && b == &branch => *req_id,
+                    launch: Some(launch),
+                }] if project == &ProjectId("p1".into())
+                    && b == &branch
+                    && launch.kind == AgentKind::Codex
+                    && launch.mode == orion_core::harness::AgentMode::Edit =>
+                {
+                    *req_id
+                }
                 other => panic!("one base-less CreateWorktree first: {other:?}"),
             };
             out.clear();
@@ -33724,7 +33583,7 @@ mod tests {
             };
             assert_eq!(menu.title.as_deref(), Some("Quick prompt agent"));
             assert_eq!(menu.hover, 0, "starts on the harness the box has");
-            assert!(out.is_empty(), "no session, no prewarm yet: {out:?}");
+            assert!(out.is_empty(), "nothing sent before Enter: {out:?}");
 
             // Down to Codex, → into its model list, and take a model.
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
@@ -34726,7 +34585,14 @@ mod tests {
                     branch: b,
                     base: None,
                     existing: false,
-                }] if project == &ProjectId("p1".into()) && b == &branch => *req_id,
+                    launch: Some(launch),
+                }] if project == &ProjectId("p1".into())
+                    && b == &branch
+                    && launch.kind == AgentKind::Claude
+                    && launch.mode == orion_core::harness::AgentMode::Edit =>
+                {
+                    *req_id
+                }
                 other => panic!("one base-less CreateWorktree first: {other:?}"),
             };
             out.clear();
@@ -34785,22 +34651,17 @@ mod tests {
                 app.overlay
             );
             assert_ne!(app.flash.as_deref(), Some("cancelled: empty input"));
-            // A bare create is one a warm CLI can stand in for, so the
-            // slot is refilled behind it — the same trail `n` leaves.
             assert!(
                 matches!(
                     out.as_slice(),
-                    [
-                        ClientRequest::CreateAgent {
-                            worktree: w,
-                            kind: AgentKind::Claude,
-                            starting_prompt: None,
-                            ..
-                        },
-                        ClientRequest::PrewarmAgent { .. }
-                    ] if *w == worktree
+                    [ClientRequest::CreateAgent {
+                        worktree: w,
+                        kind: AgentKind::Claude,
+                        starting_prompt: None,
+                        ..
+                    }] if *w == worktree
                 ),
-                "one bare create in the selected checkout, then the refill: {out:?}"
+                "one bare create in the selected checkout: {out:?}"
             );
             assert_eq!(
                 app.visible_sessions().first().map(|a| a.status),

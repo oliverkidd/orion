@@ -300,6 +300,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     branch,
                     base,
                     existing,
+                    launch,
                 } => {
                     // A create fetches `origin` and then runs the WORKTREE
                     // HOOK, each bounded by a 30 s timeout; off the request
@@ -308,15 +309,19 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     let daemon = daemon.clone();
                     let out_tx = out_tx.clone();
                     tokio::spawn(async move {
-                        reply(
-                            &out_tx,
-                            req_id,
-                            daemon
-                                .create_worktree(&project, &branch, base.as_deref(), existing)
-                                .await
-                                .map(Some),
-                        )
-                        .await;
+                        let created = match launch.filter(|_| base.is_none() && !existing) {
+                            Some(launch) => {
+                                daemon
+                                    .create_launch_worktree(&project, &branch, &launch)
+                                    .await
+                            }
+                            None => {
+                                daemon
+                                    .create_worktree(&project, &branch, base.as_deref(), existing)
+                                    .await
+                            }
+                        };
+                        reply(&out_tx, req_id, created.map(Some)).await;
                     });
                 }
                 ClientRequest::DeleteWorktree { req_id, id, force } => {
@@ -467,22 +472,6 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     tokio::spawn(async move {
                         let result = daemon.create_pr_worktree(&project, &pr_url, &head).await;
                         reply(&out_tx, req_id, result.map(Some)).await;
-                    });
-                }
-                ClientRequest::PrewarmAgent {
-                    worktree,
-                    kind,
-                    model,
-                    effort,
-                } => {
-                    // Fire-and-forget: boot the CLI while the user is still
-                    // typing the session name; CreateAgent adopts it. Runs
-                    // off the request loop (the CLI probe can take a bit).
-                    let daemon = daemon.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = daemon.prewarm_agent(&worktree, kind, model, effort).await {
-                            tracing::debug!(error = %e, "prewarm failed");
-                        }
                     });
                 }
                 ClientRequest::PrewarmWorktreeSessions {

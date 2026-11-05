@@ -345,7 +345,10 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   no checkout yet, local and on origin (`⎇`, a teammate's branch among them: picking one runs the
   launch in a new worktree that checks that branch out) — and picks where this
   one launch runs, never switching a checkout's branch; a fresh worktree is that first row, the
-  box's own toggle for it gone. `⌘/` opens the harness's model list straight away (`→` on a model
+  box's own toggle for it gone. A fresh worktree on the account, model and effort `⌘N` starts on
+  is there at once: it is the project's SPARE WORKTREE, already set up with `claude` at its prompt,
+  and the task is typed into it (see [How it works](how-it-works.md)). Its directory keeps its
+  `orion-spare-<id>` name; the branch is the one the box named. `⌘/` opens the harness's model list straight away (`→` on a model
   reaches its efforts), `⌘Y` steps the effort in place — `default`, then the harness's list, round
   again — and `Tab` opens the harness picker — the lists over the box, as the project picker is,
   so the task stays in front of you while you pick what will run it; with nothing switched on but

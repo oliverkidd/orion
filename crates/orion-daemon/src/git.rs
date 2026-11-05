@@ -67,12 +67,16 @@ pub struct WorktreeEntry {
 /// checkout. Linked checkouts that are not the user's are left out, so the
 /// grid never adopts them (or links `.env` files into them): ones git marks
 /// prunable (directory gone), a tool's scratch checkouts in the system
-/// temp dir — fallow's audit caches, say — and the checkouts Claude's
-/// isolated subagents run in (see [`without_subagent_checkouts`]).
+/// temp dir — fallow's audit caches, say — the checkouts Claude's
+/// isolated subagents run in (see [`without_subagent_checkouts`]), and the
+/// DAEMON's SPARE WORKTREES ([`list_spare_worktrees`] lists those).
 pub async fn list_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
     let entries = without_scratch(parse_worktree_list(&out), &temp_roots());
     let mut entries = without_subagent_checkouts(entries);
+    // A SPARE WORKTREE is the DAEMON's own until a launch takes it, and
+    // the take renames its branch before the row goes in.
+    entries.retain(|e| !orion_core::is_spare_branch(&e.branch));
     for entry in &mut entries {
         if entry.branch != "(detached)" && !entry.branch.starts_with("detached @ ") {
             continue;
@@ -184,6 +188,140 @@ fn without_subagent_checkouts(mut entries: Vec<WorktreeEntry>) -> Vec<WorktreeEn
             .is_some_and(|name| name.starts_with("agent-") && !name.contains('/'))
     });
     entries
+}
+
+/// The repo's SPARE WORKTREES: its linked checkouts on a branch named
+/// [`orion_core::SPARE_PREFIX`]…, in `git worktree list` order.
+pub async fn list_spare_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
+    let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
+    let mut entries = parse_worktree_list(&out);
+    entries.retain(|e| orion_core::is_spare_branch(&e.branch));
+    Ok(entries)
+}
+
+/// The commit `rev` names, in full; None when it names none.
+pub async fn rev_parse(repo: &Path, rev: &str) -> Option<String> {
+    let commit = format!("{rev}^{{commit}}");
+    let out = git(repo, &["rev-parse", "--verify", "--quiet", &commit])
+        .await
+        .ok()?;
+    Some(out.trim().to_string())
+}
+
+/// Where a new worktree nobody named a base for starts: the ref
+/// [`add_worktree_off_configured`] or [`add_worktree_off_default`] cut it
+/// from — origin's copy of the project's **Base branch** `configured`,
+/// else the local branch of that name, else `origin/HEAD`. None is the
+/// checkout's own HEAD: a repo with no origin. `fetch` fetches `origin`
+/// first, and may ask it for its HEAD; either way the answer is read off
+/// origin's refs as last fetched, so a fetch that fails — offline — names
+/// the same ref as a look that never fetches, and a SPARE WORKTREE's base
+/// never flips between the two.
+pub async fn new_worktree_base(
+    repo: &Path,
+    configured: Option<&str>,
+    fetch: bool,
+) -> Option<String> {
+    let origin = git(repo, &["remote", "get-url", "origin"]).await.is_ok();
+    if origin && fetch {
+        fetch_origin_if_any(repo).await;
+    }
+    if let Some(configured) = configured {
+        if let Some(remote) = origin_branch(repo, configured).await {
+            return Some(remote);
+        }
+        if local_branch(repo, configured).await {
+            return Some(configured.to_string());
+        }
+    }
+    match (origin, fetch) {
+        (false, _) => None,
+        (true, true) => origin_head(repo).await,
+        // A look between fetches asks the remote nothing.
+        (true, false) => recorded_origin_head(repo).await,
+    }
+}
+
+/// Cut a SPARE WORKTREE: a new branch `branch` at commit `start`, checked
+/// out in the WORKTREE DIR under the branch's own name, tracking nothing —
+/// once a launch takes it, it is that launch's new work, like any branch
+/// cut off the base ([`add_worktree_off_default`]).
+pub async fn add_spare_worktree(repo: &Path, branch: &str, start: &str) -> Result<PathBuf> {
+    add_worktree_inner(repo, branch, Some(start), false).await
+}
+
+/// Whether `name` is already a branch here or on `origin` (as last
+/// fetched): a new worktree of that name would check it out rather than
+/// cut it ([`add_worktree_off_default`]).
+pub async fn branch_taken(repo: &Path, name: &str) -> bool {
+    local_branch(repo, name).await || origin_branch(repo, name).await.is_some()
+}
+
+/// `git branch -m <from> <to>`: what a SPARE WORKTREE's branch becomes
+/// when a launch takes it. git moves the checkout's HEAD with it.
+pub async fn rename_branch(repo: &Path, from: &str, to: &str) -> Result<()> {
+    git(repo, &["branch", "-m", from, to]).await?;
+    Ok(())
+}
+
+/// The branch `checkout` has checked out; None for a detached HEAD.
+pub async fn current_branch(checkout: &Path) -> Option<String> {
+    let out = git(checkout, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .await
+        .ok()?;
+    Some(out.trim().to_string())
+}
+
+/// `git reset --hard <commit>` in `checkout`: its branch, index and files
+/// moved to `commit`, untracked and ignored files left where they are —
+/// what a SPARE WORKTREE's refresh does when its base moves.
+pub async fn reset_hard(checkout: &Path, commit: &str) -> Result<()> {
+    git(checkout, &["reset", "--hard", "--quiet", commit]).await?;
+    Ok(())
+}
+
+/// The repo's SPARE WORKTREE branches, each with whether some checkout
+/// has it checked out.
+pub async fn spare_branches(repo: &Path) -> Result<Vec<(String, bool)>> {
+    let pattern = format!("refs/heads/{}*", orion_core::SPARE_PREFIX);
+    let out = git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%00%(worktreepath)",
+            &pattern,
+        ],
+    )
+    .await?;
+    Ok(out
+        .lines()
+        .filter_map(|line| line.split_once('\0'))
+        .map(|(branch, checkout)| (branch.to_string(), !checkout.is_empty()))
+        .collect())
+}
+
+/// Take a SPARE WORKTREE off the disk: its checkout, whatever is in it,
+/// then its branch. A checkout already gone is pruned from git's list
+/// instead. Each step is tried whatever the one before it did; the first
+/// failure is the answer.
+pub async fn remove_spare_worktree(repo: &Path, path: &Path, branch: &str) -> Result<()> {
+    let mut result = remove_worktree(repo, path, true).await;
+    if path.exists() {
+        // What git would not take — a checkout it no longer lists.
+        if let Err(e) = tokio::fs::remove_dir_all(path).await {
+            result = result.and(Err(e.into()));
+        }
+    }
+    if local_branch(repo, branch).await {
+        result = result.and(delete_branch(repo, branch).await);
+    }
+    result
+}
+
+/// `git branch -D <branch>`.
+pub async fn delete_branch(repo: &Path, branch: &str) -> Result<()> {
+    git(repo, &["branch", "-D", branch]).await?;
+    Ok(())
 }
 
 /// The branch a paused rebase in `checkout` is replaying, if there is one —
@@ -457,16 +595,8 @@ async fn git_remote(repo: &Path, args: &[&str]) -> Result<String> {
 /// answer in time.
 async fn origin_head(repo: &Path) -> Option<String> {
     for attempt in 0..2 {
-        if let Ok(out) = git(
-            repo,
-            &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
-        )
-        .await
-        {
-            let short = out.trim();
-            if !short.is_empty() {
-                return Some(short.to_string());
-            }
+        if let Some(head) = recorded_origin_head(repo).await {
+            return Some(head);
         }
         if attempt == 0
             && git_remote(repo, &["remote", "set-head", "origin", "--auto"])
@@ -477,6 +607,19 @@ async fn origin_head(repo: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// `origin/HEAD` as this checkout has it recorded (`origin/main`), asking
+/// the remote nothing.
+async fn recorded_origin_head(repo: &Path) -> Option<String> {
+    let out = git(
+        repo,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    .ok()?;
+    let short = out.trim();
+    (!short.is_empty()).then(|| short.to_string())
 }
 
 /// Check pull request `number`'s head branch `head` out into a new worktree

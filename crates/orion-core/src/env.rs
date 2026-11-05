@@ -27,6 +27,9 @@ pub const AGENT_CMD: &str = "ORION_AGENT_CMD";
 pub const IDLE_REAP_MS: &str = "ORION_IDLE_REAP_MS";
 /// External-worktree sync probe period in ms; tests shorten it.
 pub const WORKTREE_SYNC_MS: &str = "ORION_WORKTREE_SYNC_MS";
+/// How often (ms, default 30 s) the DAEMON tends its SPARE WORKTREES:
+/// cuts one for a project in use, refreshes or removes one; tests shorten it.
+pub const SPARE_TICK_MS: &str = "ORION_SPARE_TICK_MS";
 /// STACK STATUS poll period in ms (default 5s): how often the daemon asks
 /// docker which compose stacks exist and run.
 pub const STACK_POLL_MS: &str = "ORION_STACK_POLL_MS";
