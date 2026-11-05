@@ -156,7 +156,6 @@ const KEPT_VARS: &[&str] = &[
     orion_core::env::DATA_DIR,
     orion_core::env::CONFIG_FILE,
     orion_core::env::EDITOR,
-    orion_core::env::GHOSTTY_CONFIG,
     orion_core::env::LOG,
 ];
 

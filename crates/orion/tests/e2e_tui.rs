@@ -137,7 +137,6 @@ impl TuiHarness {
         cmd.env(orion_core::env::WORKTREE_SYNC_MS, "100"); // fast external-change pickup
         cmd.env(orion_core::env::UPDATE_CHECK_SECS, "0"); // the footer must not depend on GitHub
         cmd.env(orion_core::env::SPOTIFY_POLL_SECS, "0"); // …nor on what's playing
-        cmd.env(orion_core::env::GHOSTTY_CONFIG, "off"); // never touch the machine's Ghostty config
         cmd.env(orion_core::env::USAGE, "off"); // never read the machine's logins
         cmd.env(orion_core::env::LOG, "debug");
         cmd.env("SHELL", "/bin/sh");

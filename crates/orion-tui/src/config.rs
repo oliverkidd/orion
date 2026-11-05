@@ -1388,14 +1388,6 @@ pub struct Config {
     /// `remove`, or `remove+volumes`. Owned by the daemon (`containers`);
     /// the TUI writes it so the settings overlay can cycle it.
     pub worktree_containers: String,
-    /// RETIRED with Orion.app carrying its own key table. Through 1.6 the
-    /// **Ghostty keybinds** SETTING (Settings → Tools, on by default) had
-    /// orion keep a marked block in the user's Ghostty config unbinding
-    /// the ⌘ chords its keymap used. Nothing writes that block now — the
-    /// first launch takes it out (`ghostty_config`) — so no tab shows the
-    /// row and nothing reads it. Still loaded and written back as stored,
-    /// so an older build sharing the file keeps the choice its user made.
-    pub ghostty_keybinds: bool,
     /// OPEN IN APP: the GUI editor ⌘O hands a file or a checkout to —
     /// `auto` (the default: the first installed of Cursor, VS Code,
     /// Sublime Text and Zed, else the system default), `cursor`,
@@ -1963,7 +1955,6 @@ impl Default for Config {
             worktree_base_branch: String::new(),
             link_env_files: true,
             worktree_containers: WorktreeContainers::Off.as_str().into(),
-            ghostty_keybinds: true,
             outside_editor: crate::outside_editor::AUTO.into(),
             close_finder_on_open: true,
             linear_assignee_email: String::new(),
@@ -4130,7 +4121,12 @@ mod tests {
 
     /// Keys a release wrote whose setting has since been removed: no field
     /// reads them any more.
-    const DROPPED_KEYS: &[&str] = &["ssh_sync_config", "editor", "outside_terminal"];
+    const DROPPED_KEYS: &[&str] = &[
+        "ssh_sync_config",
+        "editor",
+        "outside_terminal",
+        "ghostty_keybinds",
+    ];
 
     fn read_json_file(path: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()

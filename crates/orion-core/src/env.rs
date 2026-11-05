@@ -49,10 +49,6 @@ pub const SPOTIFY_POLL_SECS: &str = "ORION_SPOTIFY_POLL_SECS";
 /// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
 /// run never reads the machine's logins or calls out with them.
 pub const USAGE: &str = "ORION_USAGE";
-/// A Ghostty config file the TUI keeps its GHOSTTY KEYBINDS block in
-/// instead of the one Ghostty reads, or `off` for none — as the e2e tests
-/// set it, so a run never touches the real one.
-pub const GHOSTTY_CONFIG: &str = "ORION_GHOSTTY_CONFIG";
 /// A file the TUI writes its INPUT LATENCY PROBE's timeline to
 /// (`make perf`); unset, there is no probe.
 pub const PERF_LOG: &str = "ORION_PERF_LOG";

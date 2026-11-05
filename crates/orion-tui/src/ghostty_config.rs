@@ -13,15 +13,11 @@
 //! can send it is bound to the bytes orion expects for it
 //! ([`SENT_AS_KITTY`]) — ⌘. is Cancel, Escape's twin, everywhere on a Mac.
 //!
-//! Nothing is written into the user's own Ghostty config. Older orions
-//! kept a marked block of `unbind`s there, rewritten on every rebind; the
-//! first launch of this one takes it out again ([`retire_block`]), and an
-//! orion run in the user's own Ghostty answers to the `^` twins, as it
-//! does in any terminal that keeps ⌘ for itself.
+//! Nothing is written into the user's own Ghostty config: in a Ghostty
+//! window of the user's own, Ghostty keeps its ⌘ chords for itself.
 
 use crate::keymap::KeyChord;
 use crossterm::event::{KeyCode, KeyModifiers};
-use std::path::{Path, PathBuf};
 
 /// The keys Orion.app's Ghostty keeps, each as Ghostty binds it by
 /// default: `(trigger, action)`. Copy only while Ghostty has a selection
@@ -75,12 +71,6 @@ pub const PERFORMABLE: &[&str] = &["super+c"];
 ///   keymap binds. orion folds an Escape carrying ⌘ into the same chord
 ///   ([`crate::keymap::untangle_cmd_period`]) for a terminal without it.
 pub const SENT_AS_KITTY: &[(&str, &str)] = &[("super+.", "csi:46;9u")];
-
-/// First and last line of the block older orions kept in the user's
-/// Ghostty config.
-const BEGIN: &str =
-    "# >>> orion keybinds (managed by orion; edits inside this block are replaced) >>>";
-const END: &str = "# <<< orion keybinds <<<";
 
 /// `chord` in Ghostty's trigger spelling — `super+shift+p`, `super+/`,
 /// `super+arrow_up` — or None for a chord without ⌘, which Ghostty passes
@@ -160,81 +150,6 @@ pub fn app_keybinds() -> Vec<String> {
         .chain(kept)
         .chain(sent)
         .collect()
-}
-
-/// `existing` without the block an older orion kept in it, and without
-/// the blank line that set it off; None when it holds no block.
-pub fn without_block(existing: &str) -> Option<String> {
-    let start = existing.find(BEGIN)?;
-    let end_at = start + existing[start..].find(END)?;
-    let mut end = end_at + END.len();
-    if existing[end..].starts_with('\n') {
-        end += 1;
-    }
-    let mut head = &existing[..start];
-    if head.ends_with("\n\n") {
-        head = &head[..head.len() - 1];
-    }
-    Some(format!("{head}{}", &existing[end..]))
-}
-
-/// The config file Ghostty reads on macOS, by its own rule: the first of
-/// Application Support's `config.ghostty` / `config` and the XDG dir's
-/// `config.ghostty` / `config` that exists with something in it, else
-/// Application Support's `config.ghostty` (what Ghostty creates first).
-pub fn config_path(home: &Path, xdg_config_home: Option<&Path>) -> PathBuf {
-    let app_support = home.join("Library/Application Support/com.mitchellh.ghostty");
-    let xdg = xdg_config_home
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| home.join(".config"))
-        .join("ghostty");
-    let candidates = [
-        app_support.join("config.ghostty"),
-        app_support.join("config"),
-        xdg.join("config.ghostty"),
-        xdg.join("config"),
-    ];
-    candidates
-        .iter()
-        .find(|path| std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0))
-        .cloned()
-        .unwrap_or_else(|| app_support.join("config.ghostty"))
-}
-
-/// The startup pass on a local Mac: take the block an older orion kept in
-/// Ghostty's config out of it, leaving everything else in the file as it
-/// was (`ORION_GHOSTTY_CONFIG` names another file, or `off` none). The
-/// flash to show when the file changed, or could not be written; None
-/// when there was no block, which is every launch after the first. Unit
-/// tests never get past the first check: they must not write the
-/// machine's real config.
-pub fn retire_block() -> Option<crate::flash::Flash> {
-    if cfg!(test) || !cfg!(target_os = "macos") || orion_core::host::is_remote_session() {
-        return None;
-    }
-    let path = match std::env::var(orion_core::env::GHOSTTY_CONFIG) {
-        Ok(v) if v.eq_ignore_ascii_case("off") => return None,
-        Ok(v) if !v.trim().is_empty() => PathBuf::from(v),
-        _ => {
-            let home = PathBuf::from(std::env::var_os("HOME")?);
-            let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
-            config_path(&home, xdg.as_deref())
-        }
-    };
-    let cleaned = without_block(&std::fs::read_to_string(&path).ok()?)?;
-    Some(
-        match orion_core::settings::write_atomic(&path, cleaned.as_bytes()) {
-            Ok(()) => crate::flash::Flash::done(format!(
-            "took orion's keybinds out of {} — Orion.app carries its own, and Ghostty's ⌘ keys \
-             are its own again from its next start",
-            path.display()
-        )),
-            Err(e) => crate::flash::Flash::failed(format!(
-                "couldn't take orion's keybinds out of {}: {e}",
-                path.display()
-            )),
-        },
-    )
 }
 
 #[cfg(test)]
@@ -319,46 +234,6 @@ mod tests {
             let c = key.chars().next().unwrap();
             assert_eq!(*sent, format!("csi:{};{}u", c as u32, 1 + 8));
         }
-    }
-
-    /// An older orion's block comes out whole, the blank line that set it
-    /// off with it, and the user's own lines on either side stay as typed.
-    #[test]
-    fn an_older_orions_block_comes_out_and_nothing_else() {
-        let before = "theme = x\nkeybind = super+d=close_surface\n";
-        let block =
-            format!("{BEGIN}\nkeybind = super+k=unbind\nkeybind = super+.=csi:46;9u\n{END}\n");
-        assert_eq!(
-            without_block(&format!("{before}\n{block}")).as_deref(),
-            Some(before)
-        );
-        assert_eq!(
-            without_block(&format!("{before}\n{block}font-size = 14\n")).as_deref(),
-            Some("theme = x\nkeybind = super+d=close_surface\nfont-size = 14\n")
-        );
-        assert_eq!(without_block(&block).as_deref(), Some(""));
-        assert_eq!(without_block(before), None, "no block, nothing to write");
-        assert_eq!(
-            without_block(&format!("{before}{BEGIN}\nkeybind = x")),
-            None,
-            "unfinished"
-        );
-    }
-
-    /// Ghostty reads the first of its four config files that holds
-    /// anything; an empty one is passed over.
-    #[test]
-    fn the_config_path_is_the_first_file_with_something_in_it() {
-        let home = tempfile::tempdir().unwrap();
-        let home = home.path();
-        let app_support = home.join("Library/Application Support/com.mitchellh.ghostty");
-        assert_eq!(config_path(home, None), app_support.join("config.ghostty"));
-        std::fs::create_dir_all(&app_support).unwrap();
-        std::fs::write(app_support.join("config.ghostty"), "").unwrap();
-        let xdg = home.join(".config/ghostty");
-        std::fs::create_dir_all(&xdg).unwrap();
-        std::fs::write(xdg.join("config"), "theme = x\n").unwrap();
-        assert_eq!(config_path(home, None), xdg.join("config"));
     }
 
     #[test]
