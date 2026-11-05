@@ -80,11 +80,8 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, body: Rect) {
         }
         return;
     }
-    // Every band its entries stacked a line apiece, the ACCORDION's open
-    // one (`App::launcher_expanded`) listing all of them — pushing the
-    // bands after it down, so the whole panel, not just that band, may
-    // run taller than the screen and scrolls as one list. With **Expand
-    // all worktrees** on every band is open at once.
+    // Every band its entries stacked a line apiece, so the whole panel
+    // may run taller than the screen and scrolls as one list.
     let panel = app.panel_layout(&bands);
     let scroll = settle_panel_scroll(app, &panel, &bands, cursor);
     draw_head(f, app, body, count, panel.hidden(scroll));
@@ -148,13 +145,10 @@ fn draw_marks(f: &mut Frame, app: &mut App, bands: &[crate::launcher::Band]) {
 
 /// The scroll this frame draws the GRID at, settled from what the last
 /// frame left and what has happened since — the rule
-/// [`App::launcher_scroll`] spells out. Opening or closing a band as the
-/// ACCORDION starts from the top again rather than wherever the last
-/// layout's scroll was left; a scroll the wheel set is kept unless a key
+/// [`App::launcher_scroll`] spells out. A scroll the wheel set is kept unless a key
 /// asked for the cursor's card ([`App::launcher_reveal`]) or the cursor
-/// is on another card than the one it was set under; any other scroll
-/// keeps in step with the cursor — its band whole on screen, or on the
-/// open band its card with the row over it
+/// is on another entry than the one it was set under; any other scroll
+/// keeps in step with the cursor — its entry with the line over it
 /// ([`crate::launcher::PanelLayout::reveal`]). Whatever it lands on is
 /// held within the panel, so a window that grew or a list that shrank
 /// never scrolls past the last row.
@@ -164,11 +158,6 @@ fn settle_panel_scroll(
     bands: &[crate::launcher::Band],
     cursor: Option<usize>,
 ) -> u16 {
-    if app.launcher_scroll_in != app.launcher_expanded {
-        app.launcher_scroll = 0;
-        app.launcher_scroll_held = false;
-        app.launcher_scroll_in = app.launcher_expanded.clone();
-    }
     let mut scroll = panel.clamp(app.launcher_scroll);
     if let Some(index) = cursor {
         let band = &bands[index];
@@ -837,9 +826,8 @@ fn pad_x(r: Rect) -> Rect {
 }
 
 /// The GRID: one band per checkout, top to bottom — its rule and its
-/// entries a line apiece under it, the ACCORDION's open one listing all of
-/// them — the whole panel scrolled by rows so the cursor's entry is always
-/// drawn.
+/// entries a line apiece under it — the whole panel scrolled by rows so
+/// the cursor's entry is always drawn.
 fn draw_bands(
     f: &mut Frame,
     app: &mut App,
@@ -912,7 +900,6 @@ fn draw_bands(
                     index,
                     on,
                     lit: on && keys,
-                    more: pb.content.more,
                     cols,
                 },
             );
@@ -949,7 +936,6 @@ fn draw_bands(
         draw_list_band(
             f,
             app,
-            area,
             pb,
             ListBand {
                 index,
@@ -958,7 +944,6 @@ fn draw_bands(
                 scroll,
                 on,
                 at,
-                lit: on && keys,
             },
             &mut cfg,
         );
@@ -1026,14 +1011,10 @@ fn draw_empty_band(
 }
 
 /// The EDGE MARKERS on a grid taller than its window: `↑ 2 more above`
-/// on the header's row of air over the cards, `↓ 3 more below` on the
+/// on the header's row of air over the entries, `↓ 3 more below` on the
 /// row kept under them ([`crate::launcher::PanelLayout::window`]) —
 /// each where the eye looks for the rest, so the grid says it scrolls,
-/// and which way, without a word painted over an entry. With every band
-/// collapsed what is past the edge is whole checkouts, and the marker
-/// says so (`↓ 3 more worktrees below`), so a screenful that happens to
-/// end on a band does not read as the whole project; with one open its
-/// entries are in the count too, and the marker just counts. The header's
+/// and which way, without a word painted over an entry. The header's
 /// `↑↓ 5 hidden` says the same once more. A grid that fits has neither
 /// row marked, and a panel scrolled to an end leaves that end's row as
 /// plain air.
@@ -1047,13 +1028,6 @@ fn draw_panel_edge_marks(
         return;
     }
     let hidden = panel.hidden(scroll);
-    let what = |n: usize| {
-        if panel.open().is_some() {
-            String::new()
-        } else {
-            format!(" worktree{}", plural(n))
-        }
-    };
     let mark = |f: &mut Frame, r: Rect, words: String| {
         f.render_widget(
             Paragraph::new(Span::styled(words, Style::default().fg(th.muted)))
@@ -1068,7 +1042,7 @@ fn draw_panel_edge_marks(
             ..panel.area
         };
         let n = hidden.above;
-        mark(f, r, format!("↑ {n} more{} above", what(n)));
+        mark(f, r, format!("↑ {n} more above"));
     }
     if hidden.below > 0 {
         let window = panel.window();
@@ -1078,58 +1052,8 @@ fn draw_panel_edge_marks(
             ..panel.area
         };
         let n = hidden.below;
-        mark(f, r, format!("↓ {n} more{} below", what(n)));
+        mark(f, r, format!("↓ {n} more below"));
     }
-}
-
-/// The MORE BUTTON under a collapsed band's last entry: `▾ 6 more · see
-/// all 8`, on the band's own row under its lines
-/// ([`crate::launcher::MORE_H`]) in the column its entries' names start
-/// in, so a band hiding sessions says so where the eye leaves the list
-/// rather than only at the far end of its rule. Muted, its verb in the
-/// accent while the band holds the keys or the pointer is on it. A
-/// button: a click opens the band as the ACCORDION, the very toggle Tab
-/// runs (`HitTarget::LauncherBandMore`) — the key itself is the FOOTER's
-/// to name.
-fn draw_strip_more(
-    f: &mut Frame,
-    app: &mut App,
-    r: Rect,
-    band: &crate::launcher::Band,
-    more: StripMore,
-) {
-    let StripMore { index, hidden, lit } = more;
-    let th = app.theme;
-    let hit = HitTarget::LauncherBandMore(index);
-    let hovered = app.hover_crumb.as_ref() == Some(&hit);
-    let (words, does) = (
-        format!("▾ {hidden} more · "),
-        format!("see all {}", band.cards.len()),
-    );
-    let key_style = if lit || hovered {
-        Style::default().fg(th.accent).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(th.dim)
-    };
-    let text = Style::default().fg(if hovered { th.accent } else { th.muted });
-    let line = Line::from(vec![
-        Span::styled(words, text),
-        Span::styled(does, key_style),
-    ]);
-    let w = (line.width() as u16).min(r.width);
-    let x = r.x + LIST_LEAD.min(r.width - w);
-    let at = Rect { x, width: w, ..r };
-    f.render_widget(Paragraph::new(line), at);
-    app.hits.push((at, hit));
-}
-
-/// What [`draw_strip_more`] says: the band it is under, how many it
-/// counts, and whether the band holds the keys.
-#[derive(Debug, Clone, Copy)]
-struct StripMore {
-    index: usize,
-    hidden: usize,
-    lit: bool,
 }
 
 /// One band's ARCHIVED DRAWER as [`draw_drawer`] draws it.
@@ -1263,20 +1187,15 @@ struct ListBand<'a> {
     /// The cursor is on the band, and `at` is its card.
     on: bool,
     at: Option<usize>,
-    /// The keys are on the band too.
-    lit: bool,
 }
 
-/// A band in the LIST: under its rule, one line per entry the
-/// layout shows — its most recent sessions, or every card once it is
-/// open (`launcher::list_layout`) — the names and what each runs on in
-/// columns shared down the band, then the MORE HINT on the line under
-/// them when it leaves any off. A click on a line lands the cursor on its
-/// entry (`HitTarget::LauncherCard`).
+/// A band in the LIST: under its rule, one line per entry
+/// (`launcher::list_layout`), the names and what each runs on in columns
+/// shared down the band. A click on a line lands the cursor on its entry
+/// (`HitTarget::LauncherCard`).
 fn draw_list_band(
     f: &mut Frame,
     app: &mut App,
-    area: Rect,
     pb: &crate::launcher::PanelBand,
     list: ListBand<'_>,
     cfg: &mut Option<crate::config::Config>,
@@ -1288,7 +1207,6 @@ fn draw_list_band(
         scroll,
         on,
         at,
-        lit,
     } = list;
     let content = &pb.content;
     let shown: Vec<usize> = content
@@ -1334,21 +1252,6 @@ fn draw_list_band(
                 card: i,
             }),
         ));
-    }
-    if let Some(y) = content.more_y() {
-        let row = Rect {
-            y: pb.rule_y + y,
-            height: crate::launcher::MORE_H,
-            ..area
-        };
-        if let Some(placed) = crate::launcher::place(window, scroll, row) {
-            let more = StripMore {
-                index,
-                hidden: content.more,
-                lit,
-            };
-            draw_strip_more(f, app, placed.rect, band, more);
-        }
     }
 }
 
@@ -1569,8 +1472,6 @@ struct BandRule {
     /// The keys are on the band too — not up on the PROJECT TABS nor
     /// down in the pane: the rule takes the accent and the cursor mark.
     lit: bool,
-    /// Entries a collapsed band leaves off — always 0 once it is open.
-    more: usize,
     /// The widths the right-hand columns take on every rule of the grid.
     cols: RuleColumns,
 }
@@ -1583,8 +1484,8 @@ const GIT_COLUMNS: usize = 5;
 /// gives way.
 const MIN_BRANCH_CELLS: usize = 8;
 
-/// The gap between the parts of a rule's right end: `▸ N more`, the pull
-/// request, the counts.
+/// The gap between the parts of a rule's right end: the pull request and
+/// the counts.
 const COLUMN_GAP: usize = 2;
 
 /// What a band's rule says at its right end ([`rule_facts`]): its pull
@@ -1720,8 +1621,7 @@ fn folder_if_differs(app: &App, band: &crate::launcher::Band) -> Option<String> 
 /// (`feat/ui-redesign in pawy`) — then the rule, and at the right end the
 /// pull request and the git counts in columns as wide on every band
 /// ([`RuleColumns`]), so the eye reads them down the grid and nothing
-/// shifts when one band's count changes. Entries a collapsed band leaves
-/// off are counted just ahead of them (`▸ 2 more`).
+/// shifts when one band's count changes.
 ///
 /// On the band the cursor is on the branch is bold — this is what says
 /// which checkout the pane reads, since no entry under it may wear the
@@ -1736,7 +1636,7 @@ fn folder_if_differs(app: &App, band: &crate::launcher::Band) -> Option<String> 
 /// after orion sees the merge land, then holds still.
 ///
 /// A rule too narrow for all of it lets the folder go first, then the
-/// pull request's column, then the counts', then `▸ N more`, before the
+/// pull request's column, then the counts', before the
 /// branch shortens past eight letters.
 /// Returns the rule's hits: the pull request ahead of the rule itself,
 /// so a click on `#42` opens it and one anywhere else lands on the band.
@@ -1751,11 +1651,7 @@ fn draw_band_rule(
     let th = app.theme;
     let width = usize::from(r.width);
     let BandRule {
-        on,
-        lit,
-        more,
-        mut cols,
-        ..
+        on, lit, mut cols, ..
     } = rule;
     let edge = if lit { th.accent } else { th.edge };
     let dash = |n: usize| Span::styled("─".repeat(n), Style::default().fg(edge));
@@ -1788,29 +1684,18 @@ fn draw_band_rule(
         dash(2)
     };
     let lead_w = 2 + 1 + 2;
-    let mut more_label = (more > 0).then(|| format!("▸ {more} more"));
-    // What the right end takes: the `▸ N more` and the columns, with the
-    // tail around them; and the words need ` ` and two dashes after them.
-    let right_w = |cols: &RuleColumns, more: Option<&String>| {
-        let gap = if cols.width() > 0 { COLUMN_GAP } else { 0 };
-        let more_w = more.map_or(0, |m| m.chars().count() + gap);
-        1 + 2 + rule_tail_width(more_w + cols.width())
-    };
+    // What the right end takes: the columns, with the tail around them;
+    // and the words need ` ` and two dashes after them.
+    let right_w = |cols: &RuleColumns| 1 + 2 + rule_tail_width(cols.width());
     let keep = band.branch.chars().count().min(MIN_BRANCH_CELLS);
-    let crowded =
-        |cols: &RuleColumns, more: Option<&String>| lead_w + keep + right_w(cols, more) > width;
-    if crowded(&cols, more_label.as_ref()) {
+    let crowded = |cols: &RuleColumns| lead_w + keep + right_w(cols) > width;
+    if crowded(&cols) {
         cols.pr = 0;
     }
-    if crowded(&cols, more_label.as_ref()) {
+    if crowded(&cols) {
         cols.git = [0; GIT_COLUMNS];
     }
-    if crowded(&cols, more_label.as_ref()) {
-        more_label = None;
-    }
-    let room = width
-        .saturating_sub(lead_w + right_w(&cols, more_label.as_ref()))
-        .max(1);
+    let room = width.saturating_sub(lead_w + right_w(&cols)).max(1);
     let branch = truncate(&band.branch, room);
     let folder = folder_if_differs(app, band)
         .map(|dir| format!(" in {dir}"))
@@ -1831,15 +1716,9 @@ fn draw_band_rule(
         left.push(Span::styled(folder, Style::default().fg(th.dim)));
     }
 
-    // The right end: what the band leaves off, then the columns.
+    // The right end: the columns.
     let mut right = Vec::new();
     let gap = || Span::raw(" ".repeat(COLUMN_GAP));
-    if let Some(more) = more_label {
-        right.push(Span::styled(more, Style::default().fg(th.muted)));
-        if cols.width() > 0 {
-            right.push(gap());
-        }
-    }
     let mut hits = Vec::new();
     let mut pr_at = None;
     if cols.pr > 0 {
@@ -3669,8 +3548,8 @@ mod tests {
         );
     }
 
-    /// The whole view, drawn with its one band open on the ACCORDION: a
-    /// body too short for every entry says so in the header, and says it
+    /// The whole view: a body too short for every entry says so in the
+    /// header, and says it
     /// about exactly the entries the grid left off. This is what a PANE
     /// dragged up over the grid looks like — the entries that lost their
     /// room are counted rather than simply gone — and the grid's own edge
@@ -3680,7 +3559,6 @@ mod tests {
         use crate::launcher::{BAND_RULE_H, BELOW_MARK_H, HEAD_H, LIST_ROW_H};
         let mut app = a_crowded_tree(9);
         select(&mut app, "api");
-        app.launcher_expanded = Some(orion_core::WorktreeId("w0".into()));
         // The cursor on the grid's first card, the way a project opens:
         // everything missing is under the fold.
         let first = crate::launcher::rows(&app)[0].agent.id.0.clone();
@@ -3726,7 +3604,6 @@ mod tests {
         use orion_core::{TerminalId, TerminalTab, WorktreeId};
         let mut app = a_crowded_tree(9);
         select(&mut app, "api");
-        app.launcher_expanded = Some(WorktreeId("w0".into()));
         for i in 1..=3 {
             app.tree.terminals.push(TerminalTab {
                 id: TerminalId(format!("t{i}")),
@@ -4084,7 +3961,6 @@ mod tests {
                 ..one.clone()
             })
             .collect();
-        app.launcher_expanded = None;
         app
     }
 
@@ -4094,7 +3970,6 @@ mod tests {
             app.worktree_row_of(&orion_core::WorktreeId(id.into()))
                 .expect("a row for the checkout"),
         );
-        app.launcher_expanded = None;
     }
 
     /// The air under the last whole band says how many more are down
@@ -4114,12 +3989,12 @@ mod tests {
         let body = Rect::new(0, 0, 60, bands_end + 2);
         let lines = drawn_lines(&mut app, body);
         let cue: Vec<usize> = (0..lines.len())
-            .filter(|&y| lines[y].contains("more worktree"))
+            .filter(|&y| lines[y].contains("more below"))
             .collect();
         assert_eq!(cue.len(), 1, "{lines:#?}");
-        // Seven bands are past the two whole ones.
+        // Seven bands, an entry each, are past the two on screen.
         assert!(
-            lines[cue[0]].contains("↓ 7 more worktrees below"),
+            lines[cue[0]].contains("↓ 7 more below"),
             "{:?}",
             lines[cue[0]]
         );
@@ -4131,13 +4006,11 @@ mod tests {
         aim_at_band(&mut app, "wt8");
         let lines = drawn_lines(&mut app, body);
         assert!(
-            lines
-                .iter()
-                .all(|line| !line.contains("more worktrees below")),
+            lines.iter().all(|line| !line.contains("more below")),
             "{lines:#?}"
         );
         assert!(
-            lines[usize::from(HEAD_H) - 1].contains("↑ 7 more worktrees above"),
+            lines[usize::from(HEAD_H) - 1].contains("↑ 7 more above"),
             "{lines:#?}"
         );
     }
@@ -4158,7 +4031,7 @@ mod tests {
         );
         let lines = drawn_lines(&mut app, body);
         assert!(
-            lines.iter().all(|line| !line.contains("more worktree")),
+            lines.iter().all(|line| !line.contains("more below")),
             "{lines:#?}"
         );
     }
@@ -4804,7 +4677,6 @@ mod tests {
                 index: 0,
                 on: false,
                 lit: false,
-                more: 0,
                 cols: RuleColumns::default(),
             },
         )
@@ -5060,7 +4932,6 @@ mod tests {
                 index: 0,
                 on: false,
                 lit: false,
-                more: 0,
                 cols: RuleColumns::of([&facts]),
             },
         );
@@ -5121,7 +4992,6 @@ mod tests {
                 index: 0,
                 on: false,
                 lit: false,
-                more: 0,
                 cols,
             };
             draw_band_rule(&mut buf, &app, area, band, facts, rule);
@@ -5156,12 +5026,10 @@ mod tests {
     }
 
     /// The band the keys are on says so: its rule opens on the CURSOR
-    /// MARK `❯` in the accent where every other band's opens on `──`, and
-    /// counts what hangs past its edge. It spells no key: what Tab does
-    /// to the band under the cursor is the FOOTER's to say
-    /// (`ui::footer`), not a word on one rule of many. With the cursor on
-    /// the band but the keys elsewhere (up on the PROJECT TABS, down in
-    /// the pane) the rule is the plain gray one again.
+    /// MARK `❯` in the accent where every other band's opens on `──`. It
+    /// spells no key. With the cursor on the band but the keys elsewhere
+    /// (up on the PROJECT TABS, down in the pane) the rule is the plain
+    /// gray one again.
     #[test]
     fn the_band_the_keys_are_on_marks_itself_and_spells_no_key() {
         let app = App::new();
@@ -5170,18 +5038,16 @@ mod tests {
         let mut band = a_band(true, "main");
         let card = band.cards[0].clone();
         band.cards.extend(std::iter::repeat_n(card, 7));
-        let lit = |more| BandRule {
+        let lit = BandRule {
             index: 0,
             on: true,
             lit: true,
-            more,
             cols: RuleColumns::default(),
         };
 
-        let buf = rule_row_as(&app, &band, 96, lit(6));
+        let buf = rule_row_as(&app, &band, 96, lit);
         let text = row_string(&buf, 0);
         assert!(text.starts_with("❯  ⌂ main"), "{text:?}");
-        assert!(text.ends_with(" ▸ 6 more ──"), "{text:?}");
         assert!(!text.contains(&key) && !text.contains("expand"), "{text:?}");
         // The mark in the accent, the checkout as on any band.
         let accent = painted(&buf, 0, th.accent);
@@ -5189,7 +5055,7 @@ mod tests {
         assert_eq!(painted(&buf, 0, th.text), "main");
 
         // The cursor's band with the keys elsewhere: bold branch, and
-        // that is all — no mark, the count as on any band.
+        // that is all — no mark.
         let buf = rule_row_as(
             &app,
             &band,
@@ -5198,20 +5064,17 @@ mod tests {
                 index: 0,
                 on: true,
                 lit: false,
-                more: 6,
                 cols: RuleColumns::default(),
             },
         );
         let text = row_string(&buf, 0);
         assert!(text.starts_with("── ⌂ main"), "keys elsewhere: {text:?}");
-        assert!(text.ends_with(" ▸ 6 more ──"), "{text:?}");
         assert_eq!(painted(&buf, 0, th.accent), "", "{text:?}");
     }
 
-    /// A narrow rule keeps the cursor mark and the count of what hangs
-    /// past the edge before the branch gives way.
+    /// A narrow rule keeps the cursor mark before the branch gives way.
     #[test]
-    fn a_narrow_rule_keeps_the_cursor_mark_and_the_count() {
+    fn a_narrow_rule_keeps_the_cursor_mark() {
         let app = App::new();
         let mut band = a_band(false, "feat-x");
         let card = band.cards[0].clone();
@@ -5220,14 +5083,12 @@ mod tests {
             index: 0,
             on: true,
             lit: true,
-            more: 2,
             cols: RuleColumns::default(),
         };
 
         let buf = rule_row_as(&app, &band, 40, rule);
         let text = row_string(&buf, 0);
         assert!(text.starts_with("❯  ⎇ feat-x"), "{text:?}");
-        assert!(text.ends_with(" ▸ 2 more ──"), "{text:?}");
     }
 
     /// The cursor's wash takes its status's color while it wants you —

@@ -125,12 +125,6 @@ pub enum HitTarget {
     /// The STACK MARK `⬡` at a band's right end, registered ahead of the
     /// rule so it wins: a click opens the Stacks modal on that stack.
     LauncherBandStack(WorktreeId),
-    /// The `▾ 6 more · see all 8` under a collapsed BAND's last entry,
-    /// by the band's place in
-    /// `launcher::bands`: a click puts the cursor on the band and opens
-    /// it as the ACCORDION, the very toggle Tab runs
-    /// (`event_loop::launcher::click_band_more`).
-    LauncherBandMore(usize),
     /// The `▸ 3 archived` line under a BAND, by the band's place in
     /// `launcher::bands`: a click puts the cursor on the band and folds
     /// or unfolds its ARCHIVED DRAWER, as `z` does
@@ -3534,18 +3528,6 @@ pub struct UiState {
     /// blobs, which open with it showing.
     #[serde(default)]
     pub launcher_pane_hidden: bool,
-    /// The band left open as the ACCORDION
-    /// ([`App::launcher_expanded`]), by its worktree id; absent, or None,
-    /// in blobs saved before there was one, which open with every band
-    /// collapsed.
-    #[serde(default)]
-    pub launcher_expanded: Option<String>,
-    /// The band every project was left with open
-    /// ([`App::launcher_open_bands`]), project id to worktree id, the one
-    /// on screen included; absent in older blobs, which remember only
-    /// the one in `launcher_expanded`.
-    #[serde(default)]
-    pub launcher_open_bands: HashMap<String, String>,
     /// The LAUNCHER VIEW's PROJECT TABS, by project id, far left first;
     /// absent in older blobs, which open with the one project restored.
     #[serde(default)]
@@ -4146,13 +4128,6 @@ pub struct App {
     /// is [`App::launcher_pane_side`], which falls back to the bottom on a
     /// window too narrow to stand the pane beside the cards.
     pub launcher_pane_at: crate::launcher::PaneSide,
-    /// Every BAND is laid out open at once — every entry listed — and
-    /// there is no ACCORDION:
-    /// Settings → Appearance → **Expand all worktrees**
-    /// (`event_loop::apply_config`). [`App::launcher_expanded`] is kept
-    /// as it was but read by nothing while this is on, so switching it
-    /// off brings back the band that was open.
-    pub launcher_all_open: bool,
     /// The LAUNCHER VIEW's PANE is folded away (`^~`): the GRID takes the
     /// whole body and no session is read under it. Hiding it also lets
     /// the card under the cursor go (`event_loop::launcher::toggle_pane`
@@ -4160,27 +4135,10 @@ pub struct App {
     /// on their own — nothing selected, nothing being read. It is
     /// remembered across restarts with the pane's height.
     pub launcher_pane_hidden: bool,
-    /// The one BAND open as an ACCORDION, its cards wrapped into rows
-    /// under its rule instead of the one-row STRIP a collapsed band
-    /// shows (`Tab`, `event_loop::launcher::toggle_band_expand`). At
-    /// most one at a time: opening another closes this one first. None
-    /// at the top, where every band is the collapsed row. Remembered
-    /// across restarts, so a project reopens with the checkout it was
-    /// left looking into still open.
-    pub launcher_expanded: Option<WorktreeId>,
-    /// The band each OTHER project was left with open, by project: a
-    /// switch files [`App::launcher_expanded`] away under the project
-    /// being left and brings back the one the new project had
-    /// (`event_loop::carry_open_band`), so switching away and back finds
-    /// the band still open, whatever was opened elsewhere in between.
-    /// Remembered across restarts with the one on screen.
-    pub launcher_open_bands: HashMap<ProjectId, WorktreeId>,
     /// How far the whole GRID is scrolled: rows of its panel layout
     /// (`launcher::panel_layout`) above the window's top edge, the way a
-    /// terminal's screen scrolls through its history. Collapsed bands
-    /// never push the panel past one screen on their own, but the one
-    /// OPEN band can, so the whole list — not just that band — scrolls
-    /// as one. The wheel moves it a few rows a notch
+    /// terminal's screen scrolls through its history, the whole list as
+    /// one. The wheel moves it a few rows a notch
     /// (`event_loop::launcher::wheel_grid`) and the cursor stays where
     /// it is — a trackpad never swaps the pane out from under the card
     /// being read; a cursor move pulls it just far enough to bring the
@@ -4199,10 +4157,6 @@ pub struct App {
     /// The card the scroll last kept on screen: a frame that finds the
     /// cursor on another one scrolls to that, wheel or no wheel.
     pub launcher_scroll_on: Option<SessionRef>,
-    /// Which band's cards the scroll last settled a reveal against:
-    /// opening a different one as the ACCORDION starts its reveal fresh
-    /// rather than wherever the last one's scroll was left.
-    pub launcher_scroll_in: Option<WorktreeId>,
     /// A key asked for the cursor's card whether or not the cursor moved
     /// (`j` against the grid's edge after a wheel away, a landing on the
     /// card already selected): the next frame scrolls to it.
@@ -4933,14 +4887,10 @@ impl App {
             launcher_pane_h: None,
             launcher_pane_w: None,
             launcher_pane_at: crate::launcher::PaneSide::default(),
-            launcher_all_open: false,
             launcher_pane_hidden: false,
-            launcher_expanded: None,
-            launcher_open_bands: HashMap::new(),
             launcher_scroll: 0,
             launcher_scroll_held: false,
             launcher_scroll_on: None,
-            launcher_scroll_in: None,
             launcher_reveal: false,
             launcher_pane_drag: None,
             launcher_tab_drag: None,
@@ -5537,47 +5487,12 @@ impl App {
         !self.launcher_unaimed
     }
 
-    /// The band OPEN as the ACCORDION ([`App::launcher_expanded`]), while
-    /// the checkout it names still has a band on this grid. None with
-    /// every band collapsed, and none while the open checkout is another
-    /// project's, or has nothing running in it any more. None too with
-    /// every band open ([`App::launcher_all_open`]): there is no
-    /// accordion then, so nothing for Esc to close.
-    pub fn open_band(&self, bands: &[crate::launcher::Band]) -> Option<usize> {
-        if self.launcher_all_open {
-            return None;
-        }
-        let open = self.launcher_expanded.as_ref()?;
-        bands.iter().position(|b| &b.worktree == open)
-    }
-
-    /// The band the cursor is on, when it is also the one OPEN as the
-    /// ACCORDION — so its cards walk as rows rather than as the collapsed
-    /// STRIP's single row. None with the cursor on a collapsed band: the
-    /// open one's cards stay open on screen, but the keys are walking
-    /// somewhere else.
-    pub fn cursor_in_open_band(&self, bands: &[crate::launcher::Band]) -> Option<usize> {
-        let index = crate::launcher::band_cursor(self, bands)?;
-        (self.open_band(bands) == Some(index)).then_some(index)
-    }
-
     /// The whole GRID laid out the way this frame draws it: every band's
-    /// entries stacked under its rule, all of them on the ACCORDION's open
-    /// one — or on every band, with every band open
-    /// ([`App::launcher_all_open`]) — and the cursor's entry among them
-    /// wherever it sits (`launcher::panel_layout`). The draw, the wheel and
-    /// the keys all read this one, so what `j`/`k` walk is what is on
-    /// screen.
+    /// entries stacked under its rule (`launcher::panel_layout`). The
+    /// draw, the wheel and the keys all read this one, so what `j`/`k`
+    /// walk is what is on screen.
     pub fn panel_layout(&self, bands: &[crate::launcher::Band]) -> crate::launcher::PanelLayout {
-        crate::launcher::panel_layout(
-            self.body_area,
-            bands,
-            self.launcher_expanded
-                .as_ref()
-                .filter(|_| !self.launcher_all_open),
-            self.launcher_all_open,
-            crate::launcher::cursor(self, bands),
-        )
+        crate::launcher::panel_layout(self.body_area, bands)
     }
 
     /// The band the keys walk, and its lines: whichever band the cursor is

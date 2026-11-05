@@ -374,16 +374,6 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
             list.push(act(km, Action::PushWorktree, "push"));
         }
     }
-    // Tab opens the band in place, or folds it back — the verb the rule
-    // under the cursor used to spell at its right end.
-    if !app.launcher_all_open && !bands[band_at].cards.is_empty() {
-        let open = app.open_band(&bands) == Some(band_at);
-        list.push(act(
-            km,
-            Action::FocusNext,
-            if open { "collapse" } else { "expand" },
-        ));
-    }
     list.extend(tail);
     list
 }

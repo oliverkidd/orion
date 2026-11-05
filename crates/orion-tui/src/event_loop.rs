@@ -3292,8 +3292,6 @@ fn ui_state_json(app: &App) -> String {
         launcher_pane_h: app.launcher_pane_h,
         launcher_pane_w: app.launcher_pane_w,
         launcher_pane_hidden: app.launcher_pane_hidden,
-        launcher_expanded: app.launcher_expanded.as_ref().map(|w| w.to_string()),
-        launcher_open_bands: saved_open_bands(app),
         launcher_tabs: app.launcher_tabs.iter().map(|id| id.to_string()).collect(),
         projects_closed: app.projects_closed,
         archived_open: app
@@ -3304,30 +3302,6 @@ fn ui_state_json(app: &App) -> String {
             .collect(),
     };
     serde_json::to_string(&state).unwrap_or_else(|_| "{}".into())
-}
-
-/// The band every project was left with open, for the blob: the other
-/// projects' ([`App::launcher_open_bands`]) with the one on screen filed
-/// under its own project, less any project or checkout the tree no
-/// longer has.
-fn saved_open_bands(app: &App) -> std::collections::HashMap<String, String> {
-    let mut bands = app.launcher_open_bands.clone();
-    if let Some(pid) = app.selected_project().map(|p| p.id.clone()) {
-        match &app.launcher_expanded {
-            Some(open) => bands.insert(pid, open.clone()),
-            None => bands.remove(&pid),
-        };
-    }
-    bands
-        .into_iter()
-        .filter(|(pid, wid)| {
-            app.tree
-                .worktrees
-                .iter()
-                .any(|w| &w.id == wid && &w.project_id == pid)
-        })
-        .map(|(pid, wid)| (pid.to_string(), wid.to_string()))
-        .collect()
 }
 
 /// Re-seat the cursor from the persisted blob. Returns whether the
@@ -3365,15 +3339,6 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
     // height does. Nothing is unselected on the way back in: the restore
     // lands on the cards either way.
     app.launcher_pane_hidden = state.launcher_pane_hidden;
-    app.launcher_expanded = state.launcher_expanded.map(orion_core::WorktreeId::from);
-    // Every other project's open band too; the restored project's own is
-    // `launcher_expanded` above, which the next switch away files here.
-    app.launcher_open_bands = state
-        .launcher_open_bands
-        .into_iter()
-        .filter(|(pid, _)| state.project.as_ref() != Some(pid))
-        .map(|(pid, wid)| (ProjectId(pid), WorktreeId(wid)))
-        .collect();
     // The PROJECT TABS come back in the order they were left, less any
     // project the tree no longer has; the draw's settle gives the
     // restored project its tab if it had none.
@@ -4513,7 +4478,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     if action.is_none() && app.launcher_grid() && key.code == KeyCode::Esc {
         if app.launcher_tab_cursor.is_some() {
             crate::key_combo::note(app, &[chord], Some("Back to the cards"));
-        } else if app.show_archived && app.open_band(&crate::launcher::bands(app)).is_none() {
+        } else if app.show_archived {
             crate::key_combo::note(app, &[chord], Some("Back to the live sessions"));
         } else if !app.launcher_unaimed {
             crate::key_combo::note(app, &[chord], Some("Unselect the card"));
@@ -7937,9 +7902,9 @@ fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
 fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientRequest>) -> bool {
     match *target {
         HitTarget::LauncherCard(at) => launcher::select_card_row(app, at, out),
-        HitTarget::LauncherBand(i)
-        | HitTarget::LauncherBandMore(i)
-        | HitTarget::LauncherDrawer(i) => launcher::select_band_row(app, i, out),
+        HitTarget::LauncherBand(i) | HitTarget::LauncherDrawer(i) => {
+            launcher::select_band_row(app, i, out)
+        }
         HitTarget::LauncherDrawerEntry(band, entry) => {
             launcher::select_drawer_entry(app, band, entry, out)
         }
@@ -9164,7 +9129,6 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.card_issue_number = cfg.card_issue_number;
     app.show_all_worktrees = cfg.show_all_worktrees;
     app.launcher_pane_at = cfg.pane_side();
-    app.launcher_all_open = cfg.expand_all_worktrees;
     app.diff_tree = cfg.diff_tree_view;
     app.diff_start = cfg.diff_start();
     app.diff_one_at_a_time = cfg.diff_one_at_a_time();
@@ -10535,32 +10499,9 @@ fn select_project_row_by_id(app: &mut App, id: &orion_core::ProjectId) -> bool {
     };
     app.select_worktree_when_seen = None;
     remember_context(app);
-    let left = app.selected_project().map(|p| p.id.clone());
     app.set_sel_project(row);
     app.reopen_projects();
-    carry_open_band(app, left);
     true
-}
-
-/// After the cursor moved from project `left` to whichever is selected
-/// now: the ACCORDION's open band is one per project, so the band open on
-/// the grid being left is filed away under `left`
-/// ([`App::launcher_open_bands`]) and the one the new project was left
-/// with comes back open — switching away and back finds it as it was,
-/// whatever was opened in between. Nothing moves when the project did
-/// not change.
-fn carry_open_band(app: &mut App, left: Option<ProjectId>) {
-    let now = app.selected_project().map(|p| p.id.clone());
-    if now == left {
-        return;
-    }
-    if let Some(pid) = left {
-        match app.launcher_expanded.take() {
-            Some(open) => app.launcher_open_bands.insert(pid, open),
-            None => app.launcher_open_bands.remove(&pid),
-        };
-    }
-    app.launcher_expanded = now.and_then(|pid| app.launcher_open_bands.get(&pid).cloned());
 }
 
 /// Close the overlay and land on session `id` as the palette does a
@@ -10933,7 +10874,6 @@ fn select_project_row(app: &mut App, i: usize, out: &mut Vec<ClientRequest>) {
     let owner_before = app.selected_project().map(|p| p.id.clone());
     app.set_sel_project(i);
     app.reopen_projects();
-    carry_open_band(app, owner_before.clone());
     if app.selected_project().map(|p| p.id.clone()) != owner_before {
         restore_context(app, out);
     }
@@ -12176,7 +12116,6 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
                 | HitTarget::LauncherBandStack(_)
-                | HitTarget::LauncherBandMore(_)
                 | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
@@ -12942,9 +12881,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // A BAND's rule: the cursor lands on the band, as `j`/`k`
                 // walking onto it do.
                 Some(HitTarget::LauncherBand(i)) => launcher::click_band(app, i, out),
-                // `▾ 6 more · Tab: see all 8` under a band's row: the band
-                // opens, the very toggle Tab runs.
-                Some(HitTarget::LauncherBandMore(i)) => launcher::click_band_more(app, i, out),
                 // `▸ 3 archived` under a band: its ARCHIVED DRAWER folds
                 // or unfolds, as `z` does.
                 Some(HitTarget::LauncherDrawer(i)) => launcher::click_drawer(app, i, out),
@@ -13189,7 +13125,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
                             | HitTarget::LauncherBandStack(_)
-                            | HitTarget::LauncherBandMore(_)
                             | HitTarget::LauncherDrawer(_)
                             | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)
@@ -14233,11 +14168,7 @@ fn reconcile_selection_inner(
     if let Some(pid) = &before.project {
         if !app.tree.projects.iter().any(|p| &p.id == pid) {
             // The selected row's project is gone; the cursor landed on a
-            // neighbor — bring up its remembered worktree + session, and
-            // the band it was left with open.
-            app.launcher_open_bands.remove(pid);
-            app.launcher_expanded = None;
-            carry_open_band(app, None);
+            // neighbor — bring up its remembered worktree + session.
             restore_context(app, out);
             return;
         }
@@ -15027,9 +14958,6 @@ mod tests {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_second_agent(&mut app, AgentStatus::Finished);
-        // The band open, so both cards are on screen whichever the
-        // cursor's row keeps on its strip.
-        app.launcher_expanded = Some(orion_core::WorktreeId("w1".into()));
         let a2 = AgentId("a2".into());
         // The agent-2 row's dot color, and the row's text.
         let dot = |app: &mut App| {

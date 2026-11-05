@@ -324,15 +324,9 @@ pub(super) fn center_pane(app: &mut App) {
 
 // ---- the BANDS ----
 
-/// The band the cursor wears — None once the aim has been let go of
-/// (`App::launcher_unaimed`), as `ui::launcher_view::wearing` draws it.
-fn wearing_band(app: &App, bands: &[view::Band]) -> Option<usize> {
-    (!app.launcher_unaimed)
-        .then(|| view::band_cursor(app, bands))
-        .flatten()
-}
-
-/// The card the cursor wears inside `band`, by the same rule.
+/// The card the cursor wears inside `band` — None once the aim has been
+/// let go of (`App::launcher_unaimed`), as `ui::launcher_view::wearing`
+/// draws it.
 fn wearing_card(app: &App, band: &view::Band) -> Option<usize> {
     (!app.launcher_unaimed)
         .then(|| view::card_cursor(app, band))
@@ -461,53 +455,6 @@ fn select_terminal(app: &mut App, id: orion_core::TerminalId, out: &mut Vec<Clie
     super::preview_selected(app, out);
 }
 
-/// Tab on the GRID: the ACCORDION opens the band under the cursor — every
-/// entry listed under its rule in place of the collapsed band's most
-/// recent — closing whichever other one was open, so at most one band is
-/// open at a time. On the one already open it closes
-/// instead. With no band aimed at — Esc let it go — the first band,
-/// opened.
-///
-/// Never what Enter does: Enter always opens the card itself
-/// ([`enter_pane`]), expanded or not. With every band open at once
-/// (Settings → Appearance → **Expand all worktrees**) there is nothing to
-/// open or fold.
-///
-/// INPUT PARITY: the one function behind the key and a second click on
-/// a band's rule ([`click_band`]).
-pub(super) fn toggle_band_expand(app: &mut App, out: &mut Vec<ClientRequest>) {
-    if app.launcher_all_open {
-        return;
-    }
-    let bands = view::bands(app);
-    if bands.is_empty() {
-        return;
-    }
-    let index = match wearing_band(app, &bands) {
-        Some(index) => index,
-        None => {
-            select_band(app, bands[0].worktree.clone(), out);
-            0
-        }
-    };
-    if bands[index].cards.is_empty() {
-        // An EMPTY BAND has nothing to open.
-        take_aim(app);
-        return;
-    }
-    let worktree = bands[index].worktree.clone();
-    let open = app.launcher_expanded.as_ref() == Some(&worktree);
-    if !open && bands[index].cards.len() <= view::LIST_RECENT {
-        // The LIST already shows every entry of a band this short:
-        // opening it would change nothing on screen but the rule's word.
-        take_aim(app);
-        return;
-    }
-    app.launcher_expanded = if open { None } else { Some(worktree) };
-    take_aim(app);
-    app.dirty = true;
-}
-
 /// A terminal just opened — `t`, an EMPTY BAND's **New terminal** —
 /// comes up as its card on the grid with the PANE on it: unfolded and
 /// aimed, so the shell that was asked for is on screen rather than
@@ -566,10 +513,9 @@ pub(super) fn walk_terminals(app: &mut App, out: &mut Vec<ClientRequest>) {
     select_card(app, cards[next].sref(), out);
 }
 
-/// Esc in the GRID: first close the ACCORDION's open band, if one is
-/// open; then let the card under the cursor go ([`clear_aim`]). With
-/// nothing selected already, and nothing open, there is nothing left to
-/// let go of, and Esc does nothing: the grid is the top of the view.
+/// Esc in the GRID: let the entry under the cursor go ([`clear_aim`]).
+/// With nothing selected already there is nothing left to let go of, and
+/// Esc does nothing: the grid is the top of the view.
 ///
 /// With the PROJECT TABS holding the keys ([`focus_tabs`]) Esc is only
 /// the way back down: the cards get the keys again, on the project the
@@ -580,9 +526,6 @@ pub(super) fn escape(app: &mut App, out: &mut Vec<ClientRequest>) {
     } else if !app.marked.is_empty() {
         // The MULTI-SELECT is the nearest thing to let go of.
         clear_marks(app);
-    } else if app.open_band(&view::bands(app)).is_some() {
-        app.launcher_expanded = None;
-        app.dirty = true;
     } else if app.show_archived {
         // The ARCHIVED VIEW is a level over the live grid: Esc climbs
         // back down to it, as `⇧A` does.
@@ -642,10 +585,9 @@ pub(super) fn handle_action(
         // band aimed at rather than any one card, its remembered card
         // (`enter_pane`'s own `cursor_or_first`).
         Action::Activate => enter_pane(app, out),
-        // Tab — the panels' "next panel" — is the grid's own here: the
-        // ACCORDION, opening the band under the cursor's cards in place
-        // or folding them back up. Never what Enter does.
-        Action::FocusNext => toggle_band_expand(app, out),
+        // Tab — the panels' "next panel" — has nothing to do on the grid:
+        // every band lists all of its entries already.
+        Action::FocusNext => {}
         // `` ` ``: the checkout's TERMINAL chips, one after another.
         Action::PaneTabs => walk_terminals(app, out),
         // `t`: a terminal in the cursor's checkout, as its chip.
@@ -1227,7 +1169,7 @@ fn onto_band(
     // line lands on the next band's first, `k` off its first on the band
     // above's last — not on whichever entry that band last had, which may
     // be lines away from where the eye is.
-    let entries = view::list_layout(app.body_area, &bands[next], app.launcher_all_open, None).rows;
+    let entries = view::list_layout(app.body_area, &bands[next]).rows;
     let edge = if dy > 0 {
         entries.first()
     } else {
@@ -1717,11 +1659,10 @@ pub(super) fn close_tab(app: &mut App, id: &ProjectId, out: &mut Vec<ClientReque
 
 /// The last PROJECT TAB closed: the grid goes and the SPLASH comes back.
 /// The pane lets go of its session — nothing on the splash shows it — and
-/// the header's cursor, the aim and the accordion go with the grid.
+/// the header's cursor and the aim go with the grid.
 fn close_every_project(app: &mut App, out: &mut Vec<ClientRequest>) {
     app.launcher_tabs.clear();
     app.launcher_tab_cursor = None;
-    app.launcher_expanded = None;
     app.follow_up = None;
     clear_aim(app);
     if app.term.is_some() {
@@ -1906,8 +1847,6 @@ pub(super) fn open_project(app: &mut App, id: &ProjectId, out: &mut Vec<ClientRe
 /// archived or deleted out of it ([`keep_cursor`]).
 fn fold_empty_grid(app: &mut App, out: &mut Vec<ClientRequest>) {
     clear_aim(app);
-    // Nothing left to keep open either: the grid is the (empty) bands.
-    app.launcher_expanded = None;
     // And nothing left attached behind the fold: what the pane read
     // belongs to cards this grid no longer holds — another project's, or
     // the one just archived — so bringing the pane back (`^``) opens it
@@ -1977,22 +1916,10 @@ pub(super) fn click_card(app: &mut App, at: CardRef, out: &mut Vec<ClientRequest
 }
 
 /// A click on a BAND's rule: the cursor onto that band, the pane on its
-/// remembered card — what `j`/`k` walking onto it do — unfolding the pane
-/// as a click on a card does. A second click on the same rule opens the
-/// ACCORDION on it, or closes it — what Tab does. INPUT PARITY:
-/// [`select_band`] and [`toggle_band_expand`].
+/// remembered entry — what `j`/`k` walking onto it do — unfolding the
+/// pane as a click on an entry does. INPUT PARITY: [`select_band`].
 pub(super) fn click_band(app: &mut App, index: usize, out: &mut Vec<ClientRequest>) {
-    let bands = view::bands(app);
-    let Some(worktree) = bands.get(index).map(|b| b.worktree.clone()) else {
-        return;
-    };
     select_band_row(app, index, out);
-    if is_double_click(
-        &mut app.last_session_click,
-        crate::app::RowKey::Worktree(worktree),
-    ) {
-        toggle_band_expand(app, out);
-    }
 }
 
 /// A click on the FOOTER's breadcrumb (`HitTarget::FooterCrumb`): back
@@ -2021,20 +1948,6 @@ pub(super) fn click_crumb(
         crate::app::CrumbPart::Session => take_aim(app),
     }
     app.dirty = true;
-}
-
-/// A click on the MORE HINT under a band's row (`HitTarget::LauncherBandMore`):
-/// the cursor onto the band, then the band opens as the ACCORDION.
-///
-/// INPUT PARITY: the open is [`toggle_band_expand`], the one Tab runs.
-pub(super) fn click_band_more(app: &mut App, index: usize, out: &mut Vec<ClientRequest>) {
-    if !select_band_row(app, index, out) {
-        return;
-    }
-    let bands = view::bands(app);
-    if app.launcher_expanded.as_ref() != bands.get(index).map(|b| &b.worktree) {
-        toggle_band_expand(app, out);
-    }
 }
 
 /// A right-click's first half on a card, `select_clicked_row`'s arm: the
@@ -2076,10 +1989,8 @@ pub(super) fn select_band_of(
 /// goes there and the PANE beside the cards opens on it — ALWAYS, folded
 /// away (`^~`) or not. A card clicked is a card to read, so the fold only
 /// lasts while the grid is walked with the keys; a click unfolds it the
-/// way Enter does ([`enter_pane`]). The ACCORDION is left as it is: a
-/// card clicked on a collapsed band aims it without opening it, and the
-/// pointer's second click finds the card where the first left it. None
-/// off the grid.
+/// way Enter does ([`enter_pane`]). The pointer's second click finds the
+/// entry where the first left it. None off the grid.
 fn point_at(app: &mut App, at: CardRef, out: &mut Vec<ClientRequest>) -> Option<SessionRef> {
     let bands = view::bands(app);
     let sref = view::card_at(&bands, at)?.sref();
@@ -2173,11 +2084,6 @@ pub(super) fn keep_cursor(app: &mut App, before: CursorCard, out: &mut Vec<Clien
             lands_on = %bands[next].worktree.0,
             "launcher grid: the cursor's band left the grid"
         );
-        // A band that leaves the grid takes its ACCORDION with it: the
-        // one that slides up is collapsed, as every other band is.
-        if app.launcher_expanded.as_ref() == Some(&before.worktree) {
-            app.launcher_expanded = None;
-        }
         select_band(app, bands[next].worktree.clone(), out);
         return;
     };
@@ -2210,7 +2116,7 @@ pub(super) fn keep_cursor(app: &mut App, before: CursorCard, out: &mut Vec<Clien
 /// Enter anywhere on the GRID (or a double-click on a card): the
 /// card under the cursor in the PANE beside the cards, with the input
 /// lock on — focus crosses into the pane where it stands, the grid still
-/// up over it (expanded or not — this never touches the ACCORDION), and
+/// up over it, and
 /// `^`` ([`fold_key`]) hands the keys back to the cards, exactly as it
 /// does after a click into the pane. Only a body too short to draw the
 /// pane gives the session the whole screen instead ([`open_session`]). A
@@ -4023,9 +3929,8 @@ mod tests {
 
     /// Walk the cursor onto the entry at `index` — its place in the flat
     /// `launcher::rows` list — with the keys: `j`/`k` along the bands to
-    /// its checkout, Tab to open the band when the entry is one it leaves
-    /// off, then `j`/`k` down its lines ([`step_grid`]), as many presses
-    /// as it takes — for a test that is about the KEYS walking the grid,
+    /// its checkout, then `j`/`k` down its lines ([`step_grid`]), as many
+    /// presses as it takes — for a test that is about the KEYS walking the grid,
     /// where a pointer landing on the entry would be a different ask.
     fn walk_to(app: &mut App, index: usize) {
         let mut out = Vec::new();
@@ -4045,10 +3950,6 @@ mod tests {
             let band = &bands[target];
             let to = band.position(&want).expect("the card is in the band");
             let (_, layout) = app.walked_band(&bands).expect("the cursor is on a band");
-            if layout.cell(to).is_none() {
-                super::toggle_band_expand(app, &mut out);
-                continue;
-            }
             let at = crate::launcher::card_cursor(app, band).expect("the cursor is on a card");
             if at == to {
                 return;
@@ -4435,7 +4336,6 @@ mod tests {
             // Tab has no cards to open, and says so.
             key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            assert_eq!(app.launcher_expanded, None);
             assert!(app.flash.is_none());
         });
     }
@@ -5693,22 +5593,17 @@ mod tests {
         });
     }
 
-    /// The grid is the BANDS: `j`/`k` walk the checkouts — the pane
-    /// swapping onto each band's remembered card as the cursor passes,
-    /// as ↑/↓ down the SESSIONS PANEL previews a row — and `h`/`l` walk
-    /// the cards along a band. Tab opens the band under the cursor as
-    /// the ACCORDION, its cards wrapped into rows in place with the
-    /// cursor where it was, and Tab or Esc closes it again, the band
-    /// still aimed at; opening another closes it, one open at a time.
-    /// The grid's cursor is the panels' selection, so the verbs that read
-    /// it name the same session.
+    /// The grid is the BANDS' lines: `j`/`k` walk them — the pane
+    /// swapping onto each entry as the cursor passes, as ↑/↓ down the
+    /// SESSIONS PANEL previews a row — and `h` has nothing beside a line
+    /// to walk to. The grid's cursor is the panels' selection, so the
+    /// verbs that read it name the same session.
     #[test]
     fn hjkl_walk_the_grid_and_the_pane_follows() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
             assert_eq!(app.focus, Focus::Sessions, "the grid has the keys");
-            assert_eq!(app.launcher_expanded, None, "every band collapsed");
             assert_eq!(
                 selected(&app).as_deref(),
                 Some("a1"),
@@ -5751,7 +5646,6 @@ mod tests {
                 Some("a2"),
                 "h has nothing beside a line to walk to"
             );
-            assert_eq!(app.launcher_expanded, None, "without opening it");
             assert_eq!(app.flash, None, "and says nothing of it");
 
             key(&mut app, KeyCode::Up, KeyModifiers::NONE);
@@ -5767,7 +5661,6 @@ mod tests {
                 Some("a1"),
                 "the first band stays"
             );
-            assert_eq!(app.launcher_expanded, None);
         });
     }
 
@@ -8137,10 +8030,6 @@ mod tests {
                 Some("a1"),
                 "its band went with it: the root band's card, at the band level"
             );
-            assert!(
-                app.launcher_expanded.is_none(),
-                "the bands, not an empty worktree"
-            );
             assert_eq!(app.focus, Focus::Sessions);
         });
     }
@@ -8195,10 +8084,6 @@ mod tests {
             key(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
             key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
             assert_eq!(cards(&app), ["a9", "a1"], "the delete went through");
-            assert!(
-                app.launcher_expanded.is_none(),
-                "its band went with it: the bands"
-            );
             assert_eq!(
                 app.selected_worktree().map(|w| w.id.0.clone()).as_deref(),
                 Some("w1"),
@@ -8502,10 +8387,6 @@ mod tests {
             assert!(!by_click.collapsed, "not full-screen");
             assert_eq!(by_click.focus, by_key.focus, "and the keys are in it");
             assert_eq!(pane(&by_click), pane(&by_key));
-            assert_eq!(
-                by_click.launcher_expanded.is_some(),
-                by_key.launcher_expanded.is_some()
-            );
             let text = buffer_text(&draw(&mut by_click));
             assert_eq!(
                 tabs_drawn(&by_click),
@@ -8573,8 +8454,8 @@ mod tests {
     /// used to walk it a row, which swaps the pane onto another session —
     /// a trackpad did that by accident while you were reading the one you
     /// were on. Only the keys walk the grid now: the wheel scrolls the
-    /// panel under the cursor — here the band opened with Tab, whose
-    /// entries outrun the narrow body — three rows a notch, held at the
+    /// panel under the cursor — here a band whose entries outrun the
+    /// narrow body — three rows a notch, held at the
     /// panel's ends, and the draw keeps it where the wheel left it — until
     /// a key walks the cursor, or asks for its entry at the edge, which
     /// brings that entry back on screen.
@@ -8582,8 +8463,8 @@ mod tests {
     fn the_wheel_over_the_grid_scrolls_the_entries_and_leaves_the_cursor_alone() {
         with_default_config(|| {
             let mut app = two_sessions();
-            // More entries than the narrow body holds once the band is
-            // open, so there is something to scroll.
+            // More entries than the narrow body holds, so there is
+            // something to scroll.
             let home = app
                 .tree
                 .agents
@@ -8595,12 +8476,8 @@ mod tests {
                 seed_running(&mut app, &format!("x{i}"), &home, &format!("extra-{i}"));
             }
             draw_narrow(&mut app);
-            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            draw_narrow(&mut app);
             let bands = crate::launcher::bands(&app);
-            let band = app
-                .cursor_in_open_band(&bands)
-                .expect("Tab opened the cursor's band");
+            let band = crate::launcher::band_cursor(&app, &bands).expect("the cursor's band");
             let panel = app.panel_layout(&bands);
             let pb = &panel.bands[band];
             assert!(panel.overflows(), "the entries outrun the body");
@@ -9186,8 +9063,7 @@ mod tests {
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert!(
                 app.focus != Focus::Terminal && !app.term_locked && app.flash.is_none(),
-                "inside={} unaimed={} focus={:?} hidden={} collapsed={} overlay={}",
-                app.launcher_expanded.is_some(),
+                "unaimed={} focus={:?} hidden={} collapsed={} overlay={}",
                 app.launcher_unaimed,
                 app.focus,
                 app.launcher_pane_hidden,
@@ -9297,7 +9173,6 @@ mod tests {
             let mut app = two_sessions();
             seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Fix the nav")]);
             seed_issues(&mut app, &[(15, "Crash on boot")]);
-            app.launcher_expanded = None;
 
             let text = buffer_text(&draw(&mut app));
             assert!(text.contains("2 sessions"), "{text}");
@@ -10402,7 +10277,6 @@ mod tests {
     fn the_header_never_overprints_its_count() {
         with_default_config(|| {
             let mut app = two_sessions();
-            app.launcher_expanded = None;
             let mut counted = 0;
             // Below this the lit tab and its `×` are wider than the row.
             for width in 20..=130u16 {
@@ -10453,7 +10327,6 @@ mod tests {
                     ];
                 }
             }
-            app.launcher_expanded = None;
             let text = buffer_text(&draw_at(&mut app, 130, 50));
             assert!(text.contains("› now make it sticky"), "the newest: {text}");
             assert!(!text.contains("first pass at the nav"), "{text}");
@@ -11136,27 +11009,22 @@ mod tests {
         crate::launcher::cursor(app, &crate::launcher::bands(app))
     }
 
-    /// In the LIST a worktree stacks its sessions a line apiece, and
-    /// collapsed — as every band starts — shows only its three most
-    /// recent, the line under them counting the rest: `▾ 2 more · Tab:
-    /// see all 5`. Tab opens the band to every session, and again folds
-    /// it back to three. A band with nothing left off has no such line.
+    /// A worktree lists every session a line apiece, newest first,
+    /// stacked one under the other — there is nothing to open and no line
+    /// counting what is left off.
     #[test]
-    fn the_list_shows_three_recent_sessions_until_tab_opens_the_rest() {
+    fn every_band_lists_all_of_its_sessions_a_line_apiece() {
         with_default_config(|| {
             let mut app = list_of_five();
             let bands = crate::launcher::bands(&app);
             assert_eq!(bands[0].cards.len(), 5);
-            // The cursor on the newest: on the oldest, the band would list
-            // it too (`the_cursors_session_stays_listed_on_a_collapsed_band`).
             super::select_card(&mut app, bands[0].cards[0].sref(), &mut Vec::new());
             let term = draw(&mut app);
-            assert_eq!(app.launcher_expanded, None, "collapsed by default");
             let entries = drawn_entries(&app, 0);
             assert_eq!(
                 entries.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
-                vec![0, 1, 2],
-                "the three most recent, newest first"
+                vec![0, 1, 2, 3, 4],
+                "every session, newest first"
             );
             for (_, r) in &entries {
                 assert_eq!(r.height, 1, "one line an entry");
@@ -11165,48 +11033,22 @@ mod tests {
                 entries.windows(2).all(|w| w[1].1.y == w[0].1.y + 1),
                 "stacked one under the other: {entries:?}"
             );
-            let hint = app
-                .hit_rect(&HitTarget::LauncherBandMore(0))
-                .expect("a line counting the rest");
-            assert_eq!(hint.y, entries[2].1.y + 1, "right under the last entry");
-            let buf = term.backend().buffer();
-            let text: String = (hint.x..hint.x + hint.width)
-                .map(|x| buf[(x, hint.y)].symbol().to_string())
-                .collect();
-            assert!(text.contains("▾ 2 more"), "{text:?}");
-            assert!(text.contains("see all 5"), "{text:?}");
             assert_eq!(drawn_entries(&app, 1).len(), 1, "feat's one session");
-            assert!(app.hit_rect(&HitTarget::LauncherBandMore(1)).is_none());
             let screen = buffer_text(&term);
-            for name in [
-                bands[0].cards[0].name(),
-                bands[0].cards[2].name(),
-                "polish-nav",
-            ] {
-                assert!(screen.contains(name), "{name} is listed:\n{screen}");
+            for card in &bands[0].cards {
+                assert!(
+                    screen.contains(card.name()),
+                    "{} is listed:\n{screen}",
+                    card.name()
+                );
             }
-            assert!(
-                !screen.contains(bands[0].cards[4].name()),
-                "the oldest waits behind Tab:\n{screen}"
-            );
-
-            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            assert_eq!(app.launcher_expanded.as_ref(), Some(&bands[0].worktree));
-            let screen = buffer_text(&draw(&mut app));
-            assert_eq!(drawn_entries(&app, 0).len(), 5, "every session");
-            assert!(screen.contains(bands[0].cards[4].name()), "{screen}");
-            assert!(app.hit_rect(&HitTarget::LauncherBandMore(0)).is_none());
-
-            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            assert_eq!(app.launcher_expanded, None, "Tab folds it back");
-            draw(&mut app);
-            assert_eq!(drawn_entries(&app, 0).len(), 3);
+            assert!(!screen.contains("more · see all"), "{screen}");
         });
     }
 
     /// `j` / `k` walk the LIST's lines as one column: down the band's
-    /// three, past the ones it leaves off, onto the next band's first
-    /// line — and `k` from there back onto the last line above it.
+    /// five, onto the next band's first line — and `k` from there back
+    /// onto the last line above it.
     #[test]
     fn j_and_k_walk_the_list_lines_across_worktrees() {
         with_default_config(|| {
@@ -11215,179 +11057,20 @@ mod tests {
             draw(&mut app);
             super::select_card(&mut app, bands[0].cards[0].sref(), &mut Vec::new());
             let at = |band, card| Some(crate::launcher::CardRef { band, card });
-            for want in [at(0, 1), at(0, 2), at(1, 0), at(1, 0)] {
+            for want in [at(0, 1), at(0, 2), at(0, 3), at(0, 4), at(1, 0), at(1, 0)] {
                 key(&mut app, KeyCode::Down, KeyModifiers::NONE);
                 draw(&mut app);
                 assert_eq!(cursor_card(&app), want);
             }
             key(&mut app, KeyCode::Up, KeyModifiers::NONE);
-            assert_eq!(cursor_card(&app), at(0, 2), "onto the last line above");
+            assert_eq!(cursor_card(&app), at(0, 4), "onto the last line above");
         });
     }
 
-    // ---- EXPAND ALL WORKTREES ----
-
-    /// [`list_of_five`] with **Expand all worktrees** on: `demo`'s root
-    /// band holds five sessions, the `feat` band one.
-    fn all_open_of_five() -> App {
-        let mut app = list_of_five();
-        app.launcher_all_open = true;
-        app
-    }
-
-    /// Settings → Appearance → **Expand all worktrees** reaches the app
-    /// the way every setting does (`apply_config`), off out of the box.
+    /// INPUT PARITY: a click on a LIST line lands the cursor on its entry,
+    /// as `j` walking onto it does.
     #[test]
-    fn the_expand_all_worktrees_setting_reaches_the_app() {
-        with_config_json(r#"{"expand_all_worktrees": true}"#, || {
-            let mut app = two_sessions();
-            super::super::apply_config(&mut app, &crate::config::Config::load());
-            assert!(app.launcher_all_open);
-        });
-        with_default_config(|| {
-            let mut app = two_sessions();
-            app.launcher_all_open = true;
-            super::super::apply_config(&mut app, &crate::config::Config::load());
-            assert!(!app.launcher_all_open, "off out of the box");
-        });
-    }
-
-    /// With **Expand all worktrees** on every band shows every entry at
-    /// once under its rule — no `▸ N more`, no `Tab:` verb on the rule —
-    /// and Tab, or a second click on a rule,
-    /// opens and folds nothing: the footer says why, the one function
-    /// behind both (INPUT PARITY). Esc has no band to close, so the first
-    /// press lets the card go.
-    #[test]
-    fn expand_all_worktrees_shows_every_card_and_tab_opens_nothing() {
-        with_default_config(|| {
-            let mut app = all_open_of_five();
-            let bands = crate::launcher::bands(&app);
-            assert_eq!(bands[0].cards.len(), 5);
-            super::select_card(&mut app, bands[0].cards[0].sref(), &mut Vec::new());
-            let term = draw_tall(&mut app);
-            let root = drawn_entries(&app, 0);
-            assert_eq!(root.len(), 5, "every entry of the root band");
-            assert_eq!(drawn_entries(&app, 1).len(), 1, "and feat's one");
-            for index in 0..bands.len() {
-                assert!(app.hit_rect(&HitTarget::LauncherBandMore(index)).is_none());
-            }
-            let screen = buffer_text(&term);
-            for verb in [": collapse", ": expand", ": see all"] {
-                assert!(!screen.contains(verb), "no {verb:?} on a rule:\n{screen}");
-            }
-
-            // A band the accordion remembered stays remembered, unread.
-            app.launcher_expanded = Some(bands[1].worktree.clone());
-            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            assert!(app.flash.is_none());
-            assert_eq!(app.launcher_expanded.as_ref(), Some(&bands[1].worktree));
-            draw_tall(&mut app);
-            assert_eq!(drawn_entries(&app, 0).len(), 5, "still every card");
-
-            let rule = app
-                .hit_rect(&HitTarget::LauncherBand(1))
-                .expect("feat's rule");
-            let (x, y) = (rule.x + rule.width - 2, rule.y);
-            app.flash = None;
-            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
-            draw_tall(&mut app);
-            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
-            assert!(app.flash.is_none(), "as Tab says");
-            assert_eq!(app.launcher_expanded.as_ref(), Some(&bands[1].worktree));
-
-            app.flash = None;
-            key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
-            assert!(app.launcher_unaimed, "the first Esc lets the card go");
-            assert!(app.flash.is_none());
-        });
-    }
-
-    /// With every band open `j`/`k` walk every line of each band, and `j`
-    /// off a band's last line lands on the next band's first, `k` back
-    /// onto the last line above; a line has nothing beside it for `l`.
-    #[test]
-    fn expand_all_worktrees_walks_the_lines_across_worktrees() {
-        with_default_config(|| {
-            let mut app = all_open_of_five();
-            let bands = crate::launcher::bands(&app);
-            draw_tall(&mut app);
-            assert_eq!(
-                crate::launcher::list_layout(app.body_area, &bands[0], true, None).rows,
-                vec![vec![0], vec![1], vec![2], vec![3], vec![4]],
-                "a line apiece"
-            );
-            super::select_card(&mut app, bands[0].cards[0].sref(), &mut Vec::new());
-            let at = |band, card| Some(crate::launcher::CardRef { band, card });
-            for (code, want) in [
-                (KeyCode::Right, at(0, 0)),
-                (KeyCode::Down, at(0, 1)),
-                (KeyCode::Down, at(0, 2)),
-                (KeyCode::Down, at(0, 3)),
-                (KeyCode::Down, at(0, 4)),
-                (KeyCode::Down, at(1, 0)),
-                (KeyCode::Down, at(1, 0)),
-                (KeyCode::Up, at(0, 4)),
-            ] {
-                key(&mut app, code, KeyModifiers::NONE);
-                draw_tall(&mut app);
-                assert_eq!(cursor_card(&app), want, "after {code:?}");
-            }
-        });
-    }
-
-    /// The card the pane reads is always a line on screen: with the
-    /// cursor on one the collapsed band leaves off — the palette jumped
-    /// there, or the list reordered under it — the band lists it after
-    /// its three, and counts one fewer left off.
-    #[test]
-    fn the_cursors_session_stays_listed_on_a_collapsed_band() {
-        with_default_config(|| {
-            let mut app = list_of_five();
-            let bands = crate::launcher::bands(&app);
-            super::select_card(&mut app, bands[0].cards[4].sref(), &mut Vec::new());
-            let term = draw(&mut app);
-            let entries = drawn_entries(&app, 0);
-            assert_eq!(
-                entries.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
-                vec![0, 1, 2, 4]
-            );
-            let hint = app.hit_rect(&HitTarget::LauncherBandMore(0)).unwrap();
-            let buf = term.backend().buffer();
-            let text: String = (hint.x..hint.x + hint.width)
-                .map(|x| buf[(x, hint.y)].symbol().to_string())
-                .collect();
-            assert!(text.contains("▾ 1 more"), "{text:?}");
-            let row: String = (0..130)
-                .map(|x| buf[(x, entries[3].1.y)].symbol().to_string())
-                .collect();
-            assert!(
-                row.contains("▌ "),
-                "the cursor's line wears the mark: {row:?}"
-            );
-        });
-    }
-
-    /// Tab on a LIST band that already lists every session opens nothing
-    /// — there is nothing more to see — and says so.
-    #[test]
-    fn tab_on_a_list_band_with_nothing_left_off_says_so() {
-        with_default_config(|| {
-            let mut app = list_of_five();
-            let bands = crate::launcher::bands(&app);
-            draw(&mut app);
-            super::select_card(&mut app, bands[1].cards[0].sref(), &mut Vec::new());
-            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            assert_eq!(app.launcher_expanded, None);
-            assert!(app.flash.is_none());
-        });
-    }
-
-    /// INPUT PARITY: a click on a LIST line lands the cursor on its card,
-    /// as `j` walking onto it does, and a click on the `▾ 2 more` line
-    /// opens the band as Tab does.
-    #[test]
-    fn a_click_on_a_list_line_is_the_walk_and_on_the_more_line_is_tab() {
+    fn a_click_on_a_list_line_is_the_walk() {
         with_default_config(|| {
             let mut app = list_of_five();
             let bands = crate::launcher::bands(&app);
@@ -11403,11 +11086,6 @@ mod tests {
             super::select_card(&mut by_key, bands[0].cards[0].sref(), &mut Vec::new());
             key(&mut by_key, KeyCode::Down, KeyModifiers::NONE);
             assert_eq!(cursor_card(&by_key), cursor_card(&app));
-
-            draw(&mut app);
-            let hint = app.hit_rect(&HitTarget::LauncherBandMore(0)).unwrap();
-            click_at(&mut app, hint.x + 1, hint.y);
-            assert_eq!(app.launcher_expanded.as_ref(), Some(&bands[0].worktree));
         });
     }
 

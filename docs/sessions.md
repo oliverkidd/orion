@@ -443,13 +443,7 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   `p` fetches and pulls the band's checkout, and `⇧P` pushes it ([Keys](keys.md#the-grid)). A band
   with nothing to say in a column leaves it blank; a narrow rule drops the folder, then the pull
   request's column, then the counts', before the branch shortens.
-  How many entries a collapsed band leaves off sits just ahead of them (`▸ 2 more`).
-  The band the keys are on opens on `❯` where the rest open on `──`, and the FOOTER says what
-  Tab does there — `Tab expand`, or `Tab collapse` on the one band open as an accordion, every
-  entry of it listed under the rule.
-  A collapsed band lists its 3 most recent sessions (the one the cursor is on stays listed too,
-  wherever it sits) and says what it left off on the line under them — `▾ 2 more · see all 5` —
-  where the eye leaves the list; a click on it opens the band as Tab does.
+  The band the keys are on opens on `❯` where the rest open on `──`.
   The entries under it are the checkout's sessions, then its terminals, the names and what each
   runs on in columns down the band. A terminal is `❯ shell-1` with what runs in it — `▶` on a RUN
   TERMINAL, `exited` at the right once its shell is gone. A session is its status dot and name,
@@ -476,24 +470,16 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   done color while a finish is unread, breathing while the animations are on; the accent's, still,
   on one at rest), and the pane reads it; the accent goes with the keys, so with them up on the
   PROJECT TABS or down in the pane the rule is gray like the others and only the bold branch and the
-  entry's mark still say what the pane reads. `Tab` opens the band in place, like an accordion:
-  every one of its entries listed, pushing the bands under it down, one band open at a time — and
-  `Tab` or `Esc` folds it back up with the cursor where it was. The whole grid scrolls by rows to
-  keep the cursor's entry on screen. `Enter` opens the entry under the cursor in the pane. Which band is open is remembered per project — a trip to another
-  project's tab and back finds it still open — and across restarts, and a jump that
-  names a session — `⌘K`, the attention walk, a terminal just opened — lands inside its checkout.
+  entry's mark still say what the pane reads. Every band lists all of its entries, so there is
+  nothing to open or fold. The whole grid scrolls by rows to keep the cursor's entry on screen.
+  `Enter` opens the entry under the cursor in the pane, and a jump that names a session — `⌘K`,
+  the attention walk, a terminal just opened — lands on its line.
   The wheel never walks the cursor, so a trackpad cannot swap the pane out from under the entry you
   are reading: the grid scrolls the way a terminal's screen does — the wheel moves the bands three
   rows a notch under a cursor that stays put, held at the grid's ends. The next key that walks the
   cursor, or `↑`/`↓` against the grid's edge, scrolls just far enough to bring the cursor's entry
   back on screen — with the checkout's rule when it is the first — and a click on one does the
-  same. A band that already lists everything has nothing to open, and `Tab` there does nothing.
-- **Every worktree open.** Settings → Appearance → **Expand all worktrees** (`expand_all_worktrees`,
-  off by default) lays every band out open at once — each worktree's sessions and terminals wrapped
-  listed under its rule — so there is no accordion: `Tab`, and
-  a second click on a rule, open and fold nothing, the footer offers no `Tab` verb,
-  and `Esc` has no band to close. Which band `Tab` last opened is kept, and comes back open when
-  the setting is switched off.
+  same.
 - **The pane** runs down the right side of the cards, full height and half the width — or along
   the bottom, under them, with the `⬓` button just before the `×` on its header (`◨` there moves
   it back) or Settings → Appearance → **Session pane** (`session_pane`, which the button writes; a

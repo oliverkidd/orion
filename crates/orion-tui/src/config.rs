@@ -534,7 +534,6 @@ pub enum SettingKind {
     Spotify,
     BlackBackground,
     SessionPane,
-    ExpandAllWorktrees,
     CardIssueNumber,
     HideDraftPrs,
     QuickPromptKind,
@@ -824,12 +823,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::SessionPane,
                 label: "Session pane",
                 hint: "Where the session under the cursor is read: beside the cards on the right, or under them",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::ExpandAllWorktrees,
-                label: "Expand all worktrees",
-                hint: "Show every worktree's sessions and terminals at once, with no Tab to open one (off = one worktree opens at a time, with Tab)",
                 group: "",
             },
             SettingSpec {
@@ -1480,13 +1473,6 @@ pub struct Config {
     /// pane beside the cards lays it out along the bottom until there is
     /// room (`launcher::fitted_side`).
     pub session_pane: String,
-    /// EXPAND ALL WORKTREES: every BAND on the GRID laid out open at once
-    /// — each worktree's sessions and terminals wrapped into rows under
-    /// its rule, every entry of the compact LIST listed — so there is no
-    /// ACCORDION for Tab to open, and `j`/`k` walk down every card of
-    /// every worktree as one column of rows. Off by default, a config
-    /// predating the key too: one band opens at a time, with Tab.
-    pub expand_all_worktrees: bool,
     /// RETIRED with every card carrying its last prompt. Through 0.40 the
     /// **Card prompt** SETTING (Settings → Appearance, `shown` by default)
     /// could leave the last prompt off every session card on the GRID.
@@ -1895,7 +1881,6 @@ impl Default for Config {
             spotify: true,
             black_background: true,
             session_pane: crate::launcher::PaneSide::default().as_str().into(),
-            expand_all_worktrees: false,
             hide_card_prompt: false,
             card_issue_number: true,
             hide_draft_prs: false,
@@ -3217,7 +3202,6 @@ impl Config {
             SettingKind::Spotify => on_off(self.spotify).into(),
             SettingKind::BlackBackground => on_off(self.black_background).into(),
             SettingKind::SessionPane => self.pane_side().as_str().into(),
-            SettingKind::ExpandAllWorktrees => on_off(self.expand_all_worktrees).into(),
             SettingKind::CardIssueNumber => on_off(self.card_issue_number).into(),
             SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
             SettingKind::DiffTreeView => on_off(self.diff_tree_view).into(),
@@ -3402,9 +3386,6 @@ impl Config {
                 // list steps on from the right it reads as.
                 self.session_pane =
                     cycle_choice(self.pane_side().as_str(), PANE_SIDES, step).into();
-            }
-            SettingKind::ExpandAllWorktrees => {
-                self.expand_all_worktrees = !self.expand_all_worktrees;
             }
             SettingKind::CardIssueNumber => {
                 self.card_issue_number = !self.card_issue_number;
@@ -5052,35 +5033,6 @@ mod tests {
         assert!(legacy.card_issue_number);
         let loaded: Config = serde_json::from_str(r#"{"card_issue_number": false}"#).unwrap();
         assert!(!loaded.card_issue_number);
-    }
-
-    /// EXPAND ALL WORKTREES: an Appearance row that reads `on` / `off`,
-    /// off by default (a config that predates the key too), and persisted
-    /// under `expand_all_worktrees`.
-    #[test]
-    fn expand_all_worktrees_is_off_by_default_toggles_and_persists() {
-        let mut cfg = Config::default();
-        assert!(!cfg.expand_all_worktrees, "off by default");
-        assert_eq!(cfg.value_label(SettingKind::ExpandAllWorktrees), "off");
-
-        let (tab, row) = locate(SettingKind::ExpandAllWorktrees).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.expand_all_worktrees);
-        assert_eq!(cfg.value_label(SettingKind::ExpandAllWorktrees), "on");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains(r#""expand_all_worktrees": true"#), "{raw}");
-        assert!(load_from(&path).expand_all_worktrees);
-
-        cfg.cycle(tab, row, 0);
-        assert!(!cfg.expand_all_worktrees);
-
-        let legacy: Config = serde_json::from_str("{}").unwrap();
-        assert!(!legacy.expand_all_worktrees, "a missing key reads as off");
     }
 
     /// CARD LINE COUNTS: retired with every card counting its lines. The

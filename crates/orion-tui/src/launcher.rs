@@ -489,14 +489,6 @@ const ROW_MIN_W: u16 = 34;
 pub const GRID_KEEP_H: u16 = 8;
 /// The row over a BAND's entries: the checkout's rule.
 pub const BAND_RULE_H: u16 = 1;
-/// The line under a collapsed band's last entry that says how many it
-/// left off (`▾ 2 more · see all 8`). Part of the band, so the gap to the
-/// next band's rule stands under it rather than being painted over.
-pub const MORE_H: u16 = 1;
-/// How many of a collapsed band's entries the LIST shows — its most
-/// recent, since the sessions come newest first ([`rows`]) — before the
-/// `▾ N more` row; Tab (the ACCORDION) opens the rest.
-pub const LIST_RECENT: usize = 3;
 /// One entry of the LIST: a session or a terminal on a single line.
 pub const LIST_ROW_H: u16 = 1;
 /// The line under an EMPTY BAND's rule — a checkout with nothing running
@@ -797,10 +789,8 @@ impl Hidden {
 pub struct PanelBand {
     pub rule_y: u16,
     /// The band's entries stacked a line apiece under its rule
-    /// ([`list_layout`]); `open` says whether it is showing them all.
+    /// ([`list_layout`]).
     pub content: ExpandedLayout,
-    /// The band is the one open as the ACCORDION.
-    pub open: bool,
     /// Rows the band takes, rule included: its content's height, and its
     /// ARCHIVED DRAWER under that.
     pub height: u16,
@@ -830,8 +820,7 @@ impl PanelBand {
         }
     }
 
-    /// `card`'s line, in panel rows. None for one a collapsed band
-    /// leaves off.
+    /// `card`'s line, in panel rows.
     pub fn cell(&self, card: usize) -> Option<Rect> {
         let local = self.content.cell(card)?;
         Some(Rect {
@@ -841,12 +830,10 @@ impl PanelBand {
     }
 }
 
-/// The whole GRID laid out: every band's rule top to bottom and its
-/// entries under it, the one band open as the ACCORDION
-/// (`App::launcher_expanded`) listing all of them — which pushes every
-/// band after it down, so the panel can run taller than the screen. It
-/// scrolls as one list, by rows, the way a terminal's screen scrolls
-/// through its history. Where it is scrolled to is the app's
+/// The whole GRID laid out: every band's rule top to bottom and every
+/// one of its entries under it, so the panel can run taller than the
+/// screen. It scrolls as one list, by rows, the way a terminal's screen
+/// scrolls through its history. Where it is scrolled to is the app's
 /// ([`crate::app::App::launcher_scroll`]): the wheel moves it, a cursor
 /// move pulls it just far enough to bring the cursor's entry on screen
 /// ([`PanelLayout::reveal`]), and the draw holds it within the panel
@@ -865,18 +852,8 @@ pub struct PanelLayout {
 }
 
 /// `bands` laid out in `body`: every band its rule over its entries
-/// stacked a line apiece ([`list_layout`]) — all of them on the band
-/// `expanded` names, or on every band with `all_open` (**Expand all
-/// worktrees**), the [`LIST_RECENT`] most recent on the rest, and on the
-/// band the cursor is on (`pin`) its entry too wherever it sits, so the
-/// entry the pane reads is always one of the lines on screen.
-pub fn panel_layout(
-    body: Rect,
-    bands: &[Band],
-    expanded: Option<&WorktreeId>,
-    all_open: bool,
-    pin: Option<CardRef>,
-) -> PanelLayout {
+/// stacked a line apiece ([`list_layout`]).
+pub fn panel_layout(body: Rect, bands: &[Band]) -> PanelLayout {
     let mut y = 0u16;
     let mut out = Vec::with_capacity(bands.len());
     let divider_at = dormant_divider_at(bands);
@@ -886,15 +863,12 @@ pub fn panel_layout(
             divider_y = Some(y);
             y += DORMANT_DIVIDER_H;
         }
-        let open = all_open || expanded == Some(&band.worktree);
-        let pin = pin.filter(|p| p.band == index).map(|p| p.card);
-        let content = list_layout(body, band, open, pin);
+        let content = list_layout(body, band);
         let above = content.height();
         let height = above + band.drawer_h();
         out.push(PanelBand {
             rule_y: y,
             content,
-            open,
             height,
             drawer_y: above,
         });
@@ -909,11 +883,6 @@ pub fn panel_layout(
 }
 
 impl PanelLayout {
-    /// The band open as the ACCORDION, if one of these is.
-    pub fn open(&self) -> Option<usize> {
-        self.bands.iter().position(|b| b.open)
-    }
-
     /// The panel is taller than its area: it scrolls, and a marker row
     /// stands under the window ([`BELOW_MARK_H`]).
     pub fn overflows(&self) -> bool {
@@ -995,9 +964,9 @@ impl PanelLayout {
     }
 
     /// What the window's edges cut, either way — what the header's `↑↓ N
-    /// hidden` and the edge markers count: a collapsed band not whole on
-    /// screen is one, the open band's entries one each. `above` has rows
-    /// over the window's top edge, `below` rows past its bottom.
+    /// hidden` and the edge markers count: the entries one each, an EMPTY
+    /// BAND as one. `above` has rows over the window's top edge, `below`
+    /// rows past its bottom.
     pub fn hidden(&self, scroll: u16) -> Hidden {
         let bottom = scroll + self.window().height;
         let mut hidden = Hidden::default();
@@ -1009,7 +978,7 @@ impl PanelLayout {
             }
         };
         for band in &self.bands {
-            if !band.open {
+            if band.content.rows.is_empty() {
                 count(band.rule_y, band.rule_y + band.height);
                 continue;
             }
@@ -1030,55 +999,38 @@ impl PanelLayout {
 /// grid, and how far the grid is scrolled, is [`PanelLayout`]'s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpandedLayout {
-    /// Every entry's line, by its index in the band — None for one a
-    /// collapsed band leaves off ([`list_layout`]).
-    cells: Vec<Option<Rect>>,
-    /// Entries a collapsed band leaves off, counted on the `▾ N more` row
-    /// under its last line ([`ExpandedLayout::more_y`]). Always 0 on the
-    /// open band.
-    pub more: usize,
+    /// Every entry's line, by its index in the band.
+    cells: Vec<Rect>,
     /// The entries on each line, top to bottom: what the cursor keys walk.
     pub rows: Vec<Vec<usize>>,
     /// Rows the whole layout takes, the band's rule included.
     height: u16,
 }
 
-/// `band` as the LIST lays it out under its rule: one line per
-/// card, the band's full width, in the band's own order — its sessions
-/// newest first, then its terminals — one column `j`/`k` walk. `open`
-/// lists every card; collapsed it lists the first [`LIST_RECENT`], then
-/// `pin` (the cursor's card) when that is further down, and says how
-/// many it left off on a row of its own under them (`more`).
-pub fn list_layout(body: Rect, band: &Band, open: bool, pin: Option<usize>) -> ExpandedLayout {
+/// `band` as the LIST lays it out under its rule: one line per entry,
+/// the band's full width, in the band's own order — its sessions newest
+/// first, then its terminals — one column `j`/`k` walk; an EMPTY BAND its
+/// one line saying so.
+pub fn list_layout(body: Rect, band: &Band) -> ExpandedLayout {
     let area = grid_area(body);
-    let total = band.cards.len();
-    let mut shown: Vec<usize> = (0..if open { total } else { total.min(LIST_RECENT) }).collect();
-    if let Some(p) = pin.filter(|&p| p < total && !shown.contains(&p)) {
-        shown.push(p);
-    }
-    let mut cells = vec![None; total];
-    let mut y = BAND_RULE_H;
-    for &i in &shown {
-        cells[i] = Some(Rect {
+    let lines = band.cards.len() as u16;
+    let cells = (0..lines)
+        .map(|i| Rect {
             x: area.x,
-            y,
+            y: BAND_RULE_H + i * LIST_ROW_H,
             width: area.width,
             height: LIST_ROW_H,
-        });
-        y += LIST_ROW_H;
-    }
-    let more = total - shown.len();
-    if more > 0 {
-        y += MORE_H;
-    }
-    if total == 0 {
-        y += EMPTY_BAND_ROW_H;
-    }
+        })
+        .collect();
+    let under = if lines == 0 {
+        EMPTY_BAND_ROW_H
+    } else {
+        lines * LIST_ROW_H
+    };
     ExpandedLayout {
         cells,
-        more,
-        rows: shown.into_iter().map(|i| vec![i]).collect(),
-        height: y,
+        rows: (0..band.cards.len()).map(|i| vec![i]).collect(),
+        height: BAND_RULE_H + under,
     }
 }
 
@@ -1140,21 +1092,14 @@ impl ExpandedLayout {
         self.height
     }
 
-    /// `card`'s cell, `y` counted from the band's rule. None for one a
-    /// collapsed LIST leaves off.
+    /// `card`'s cell, `y` counted from the band's rule.
     pub fn cell(&self, card: usize) -> Option<Rect> {
-        self.cells.get(card).copied().flatten()
+        self.cells.get(card).copied()
     }
 
-    /// Every card's cell there is, in the band's own card order.
+    /// Every card's cell, in the band's own card order.
     pub fn cells(&self) -> impl Iterator<Item = Rect> + '_ {
-        self.cells.iter().flatten().copied()
-    }
-
-    /// The row of the collapsed LIST's `▾ N more` line, counted from the
-    /// band's rule: under its last entry. None with nothing left off.
-    pub fn more_y(&self) -> Option<u16> {
-        (self.more > 0).then(|| self.height - MORE_H)
+        self.cells.iter().copied()
     }
 
     /// The entry `dx` along its row and `dy` rows down from `at`, clamped:
@@ -1860,7 +1805,7 @@ mod tests {
         assert_eq!(branches(&app).len(), 3, "main, feat and idle");
         let body = Rect::new(0, 0, 120, 60);
         assert_eq!(
-            super::panel_layout(body, &bands, None, false, None).bands[idle].height,
+            super::panel_layout(body, &bands).bands[idle].height,
             BAND_RULE_H + EMPTY_BAND_ROW_H
         );
 
@@ -1888,7 +1833,7 @@ mod tests {
         assert_eq!(idle, bands.len() - 1, "dormant last");
         assert_eq!(super::dormant_divider_at(&bands), Some(idle));
         let body = Rect::new(0, 0, 120, 60);
-        let panel = super::panel_layout(body, &bands, None, false, None);
+        let panel = super::panel_layout(body, &bands);
         let above = &panel.bands[idle - 1];
         let gap_end = above.rule_y + above.height + GAP_Y;
         assert_eq!(panel.divider_y, Some(gap_end));
@@ -2149,10 +2094,6 @@ mod tests {
             feat,
             "the checkout under the cursor"
         );
-        // Collapsed or open, the band the cursor is on reads the same.
-        app.launcher_expanded = None;
-        assert_eq!(target_for(&app, &api, false), feat, "on the band");
-        app.launcher_expanded = Some(WorktreeId("w2".into()));
         // Another project's box reads its own root, not this cursor.
         assert_eq!(
             target_for(&app, &ProjectId("p2".into()), false),
@@ -2482,20 +2423,17 @@ mod tests {
         (app, Rect::new(0, 0, 100, HEAD_H + 10))
     }
 
-    /// The band `crowded` opens, laid out: its index and the panel.
+    /// `crowded` laid out: its band's index and the panel.
     fn crowded_panel() -> (usize, PanelLayout) {
         let (app, body) = crowded();
         let all = super::bands(&app);
         let at = all.iter().position(|b| b.worktree.0 == "w1").unwrap();
-        (
-            at,
-            panel_layout(body, &all, Some(&all[at].worktree), false, None),
-        )
+        (at, panel_layout(body, &all))
     }
 
     /// A grid taller than the body scrolls by rows through a window that
     /// keeps its last row for the `↓` marker, and counts what each edge
-    /// has past it: the open band's entries one each.
+    /// has past it: the entries one each.
     #[test]
     fn a_tall_grid_scrolls_by_rows_and_counts_what_is_past_its_edges() {
         let (at, panel) = crowded_panel();
@@ -2565,13 +2503,7 @@ mod tests {
     fn a_panel_that_fits_never_scrolls() {
         let app = app();
         let all = super::bands(&app);
-        let panel = panel_layout(
-            Rect::new(0, 0, 80, 60),
-            &all,
-            Some(&all[0].worktree),
-            false,
-            None,
-        );
+        let panel = panel_layout(Rect::new(0, 0, 80, 60), &all);
         assert!(!panel.overflows());
         assert_eq!(panel.window(), panel.area);
         assert_eq!(panel.max_scroll(), 0);

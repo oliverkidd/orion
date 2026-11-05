@@ -98,16 +98,14 @@ Ghostty config.
 orion's whole screen is a GRID (see [Sessions](sessions.md#the-grid)): the sessions and
 terminals of the project whose PROJECT TAB is lit in the header, a line apiece, grouped into a
 BAND per checkout under a titled rule — with a pane beside them that reads the entry under the
-cursor. `↑`/`↓` walk the lines, `Tab` opens a band that lists only its most recent, and `Tab` or
-`Esc` folds it back.
+cursor. `↑`/`↓` walk the lines, every band listing all of its entries.
 
 | Key | Action |
 |---|---|
 | `↑` / `↓` | walk the lines — down a band's sessions and terminals and off its last line onto the next band's first, the pane following onto each. On the first line `↑` has nowhere to go: one press stays put, and a second within 400 ms walks up into the PROJECT TABS. Walking reads what the pane lands on — a `done` badge comes down as you arrive |
 | `→` | with the pane beside the grid, into the pane, to read it ([below](#the-pane-focus-and-scroll)) |
-| `Tab` | **open the worktree in place**: every line of the band, where a collapsed one lists its 3 most recent. One band is open at a time; `Tab` on the open band folds it back. Remembered per project and across restarts. With Settings → Appearance → **Expand all worktrees** on, every band stays open and `Tab` does nothing |
 | `Enter`, a double-click | into the pane on the card under the cursor, its input locked. On a band with nothing on it but its pull request, into the pane to read it. On a terminal too short to draw the pane the session takes the whole screen instead |
-| `Esc` | close the open band first; in the ARCHIVED VIEW, back to the live sessions; with every band collapsed, let the band under the cursor go — the pane collapses. What was under the cursor is only let go of: the next arrow takes the aim back |
+| `Esc` | in the ARCHIVED VIEW, back to the live sessions; else let the band under the cursor go — the pane collapses. What was under the cursor is only let go of: the next arrow takes the aim back |
 | `Space` | the FOLLOW-UP MODAL: a small box over the grid for the selected session's next turn. `Enter` sends it down the PTY, `⇧Enter` / `⌥Enter` / `^J` break a line, `Esc` closes without sending. Nothing about the pane moves. Only a live local agent takes one; a session whose CLI is not up is booted first and the box kept |
 | `t` | a new shell terminal inside orion, in the cursor's checkout — a chip on the grid with the pane on it and the keys in it. `⌘O` → **Terminal in the checkout** opens one outside orion |
 | `` ` `` | the next TERMINAL chip of the cursor's checkout, round to the first |
