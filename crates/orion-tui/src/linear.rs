@@ -1347,6 +1347,38 @@ impl LinkStore {
         Some(waiting)
     }
 
+    /// [`begin_attach`](Self::begin_attach) for a pull request from
+    /// another branch than theirs — `head`, whose own link `begin_attach`
+    /// takes: of the issues waiting on `project`'s other links, the ones
+    /// `title` names ([`names_issue`]), each link marked out as its own,
+    /// by branch. A link out already, or given up on, is left be.
+    pub(crate) fn begin_named_attach(
+        &mut self,
+        project: &ProjectId,
+        title: &str,
+        head: &str,
+    ) -> Vec<(String, Vec<(String, String)>)> {
+        let own = self.key_of(project, head);
+        let mut out = Vec::new();
+        for (key, link) in self.links.iter_mut() {
+            let theirs = link.project.as_ref().is_none_or(|p| p == project);
+            if !theirs || Some(key) == own.as_ref() || link.sending || link.gave_up() {
+                continue;
+            }
+            let named: Vec<(String, String)> = link
+                .waiting()
+                .into_iter()
+                .filter(|(_, identifier)| names_issue(title, identifier))
+                .collect();
+            if named.is_empty() {
+                continue;
+            }
+            link.sending = true;
+            out.push((link.branch.clone().unwrap_or_else(|| key.clone()), named));
+        }
+        out
+    }
+
     /// Linear answered the attach [`begin_attach`](Self::begin_attach)
     /// sent out: the issues it took (`attached`, by id) are attached —
     /// `made` the attachments the ask made for them, as `(issue id,
@@ -1468,9 +1500,10 @@ impl WorkPr {
     }
 }
 
-/// Whether `branch` names the issue `identifier` (`ENG-12`): the
-/// identifier, any case, with no letter or digit before it and no digit
-/// after — `eng-12-fix` and `feat/ENG-12` do, `eng-123` doesn't.
+/// Whether `branch` — or a pull request's title — names the issue
+/// `identifier` (`ENG-12`): the identifier, any case, with no letter or
+/// digit before it and no digit after — `eng-12-fix`, `feat/ENG-12` and
+/// `ENG-12: fix login` do, `eng-123` doesn't.
 fn names_issue(branch: &str, identifier: &str) -> bool {
     let (branch, id) = (branch.to_ascii_lowercase(), identifier.to_ascii_lowercase());
     if id.is_empty() {
@@ -2257,7 +2290,9 @@ fn project_at(app: &App, dir: &Path) -> Option<ProjectId> {
 
 /// When a pull request is listed on a remembered branch, attach it —
 /// never one from the root checkout's branch ([`root_branch`]), whatever
-/// is remembered for it. Every list tries again a link Linear refused,
+/// is remembered for it. One from another branch whose title names
+/// issues waiting on a link — as the Linear Ticket text asks its pull
+/// request to be titled — takes those issues too. Every list tries again a link Linear refused,
 /// up to [`ATTACH_TRIES`], so `previous` (the list before) no longer
 /// matters: a link is spent by Linear taking it, not by a list naming it.
 /// **Link PRs to Linear** decides only whether a ⌘L launch remembers its
@@ -2285,6 +2320,20 @@ pub(crate) fn attach_new_prs(
             pr.url.clone(),
             pr.number,
         );
+        let named = app
+            .linear_links
+            .begin_named_attach(project, &pr.title, &pr.head);
+        for (branch, targets) in named {
+            send_attach(
+                app,
+                project,
+                dir.clone(),
+                branch,
+                targets,
+                pr.url.clone(),
+                pr.number,
+            );
+        }
     }
 }
 
@@ -2318,13 +2367,39 @@ fn attach_link(
     pr_url: String,
     pr_number: u64,
 ) {
-    let Some(tx) = app.linear_tx.clone() else {
+    if app.linear_tx.is_none() {
         return;
-    };
+    }
     let Some(targets) = app.linear_links.begin_attach(project, branch) else {
         return;
     };
-    let (project, branch) = (Some(project.clone()), Some(branch.to_string()));
+    send_attach(
+        app,
+        project,
+        dir,
+        branch.to_string(),
+        targets,
+        pr_url,
+        pr_number,
+    );
+}
+
+/// The pull request linked to `targets` (`(id, identifier)`), the issues
+/// a link on `branch` marked out, off the loop; Linear's answer settles
+/// the link ([`LinearAnswer::Attach`]).
+fn send_attach(
+    app: &App,
+    project: &ProjectId,
+    dir: PathBuf,
+    branch: String,
+    targets: Vec<(String, String)>,
+    pr_url: String,
+    pr_number: u64,
+) {
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    let (project, branch) = (Some(project.clone()), Some(branch));
     tokio::spawn(async move {
         let run = attach_all(&dir, targets, project, branch, pr_url, pr_number).await;
         let _ = tx.send(LinearAnswer::Attach(run));
@@ -6116,6 +6191,47 @@ pub(crate) mod tests {
             app.linear_links.pending(&project, "feature-x").is_empty(),
             "taken"
         );
+    }
+
+    /// A pull request from another branch whose title names issues a
+    /// batch waits for takes those — ENG-1 named, ENG-3 not, so it waits
+    /// on — and an identifier inside a longer one is no name.
+    #[test]
+    fn a_pr_that_names_waiting_issues_takes_them() {
+        assert!(names_issue("ENG-1, eng-3: login", "ENG-3"));
+        assert!(names_issue("Fixes ENG-1.", "ENG-1"));
+        assert!(!names_issue("ENG-12: other", "ENG-1"));
+        assert!(!names_issue("XENG-1", "ENG-1"));
+        let (mut app, _dir, mut rx) = paired_with_worktrees();
+        let project = ProjectId("p1".into());
+        app.linear_links.remember(
+            &project,
+            "feature-x",
+            &[issue("1", "ENG-1", "Login"), issue("3", "ENG-3", "Signup")],
+        );
+        let previous = app.open_prs[&project].list.clone();
+        let mut fresh = previous.clone();
+        let mut opened = open_pr(45, "ENG-1: fix the login");
+        opened.head = "elsewhere".into();
+        fresh.insert(0, opened);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sent = with_graphql_stub(
+            |_, _| Ok(serde_json::json!({"data": {"attachmentLinkGitHubPR": {"success": true}}})),
+            || {
+                rt.block_on(async {
+                    attach_new_prs(&mut app, &project, Some(&previous), &fresh);
+                    let answer = rx.recv().await.expect("an answer");
+                    land_answer(&mut app, answer);
+                    assert!(rx.try_recv().is_err(), "one attach");
+                });
+                graphql_sent()
+            },
+        );
+        assert_eq!(sent, [attached("1", 45)]);
+        assert_eq!(app.linear_links.pending(&project, "feature-x"), ["ENG-3"]);
     }
 
     /// A pull request from the root checkout's branch is the release
