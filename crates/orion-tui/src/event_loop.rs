@@ -5278,9 +5278,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::config::SettingKind::LinearAccount => {
                     "email of the Linear user whose issues ⌘L lists (empty = the LINEAR_API_KEY's owner)"
                 }
-                crate::config::SettingKind::LinearTaskTemplate => {
-                    "the task ⌘L fills in: {issues}, {ids}, {first_id} expand (empty = default)"
-                }
                 crate::config::SettingKind::RunCommand => {
                     "shell line Start stack runs in a worktree's run terminal, e.g. just start (empty = the checkout's .orion.json \"run\", else docker compose start)"
                 }
@@ -29536,11 +29533,9 @@ diff --git a/src/c.rs b/src/c.rs
     /// `auto` back. ←/→ only explain themselves.
     /// The LINEAR TAB's keys: Enter on **Test connection** asks Linear
     /// (stubbed — no test reaches it) with the selected project's key and
-    /// the row reads whose it is; ←/→ there only explain. Enter on **Task
-    /// template** opens a multi-row box on the template the box would
-    /// get, ⇧Enter breaking a line, and Enter saves it back on the row.
+    /// the row reads whose it is; ←/→ there only explain.
     #[test]
-    fn the_linear_tab_tests_the_connection_and_types_the_template() {
+    fn the_linear_tab_tests_the_connection() {
         use crate::config::SettingKind;
         let config = tempfile::tempdir().unwrap();
         crate::config::with_config_path(config.path().join("config.json"), || {
@@ -29589,52 +29584,6 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(
                 crate::linear::status_value(&app, SettingKind::LinearKey).as_deref(),
                 Some("found in .env.local · demo")
-            );
-
-            // The task template: a multi-row box on the default.
-            let at = settings_view(&app).selected;
-            let (_, row) = crate::config::locate(SettingKind::LinearTaskTemplate).unwrap();
-            for _ in row..at {
-                press(&mut app, KeyCode::Char('k'), KeyModifiers::NONE, &mut out);
-            }
-            assert_eq!(settings_view(&app).selected, row);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &mut app.overlay else {
-                panic!("expected the template's box, got {:?}", app.overlay);
-            };
-            assert!(prompt.is_multiline(), "a template runs over lines");
-            assert_eq!(
-                prompt.input.as_str(),
-                crate::config::DEFAULT_LINEAR_TEMPLATE
-            );
-            prompt.input.set_text("Fix {ids}");
-            press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
-            type_text(&mut app, "{issues}", &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                crate::config::Config::load().linear_task_template,
-                "Fix {ids}\n{issues}"
-            );
-            assert_eq!(settings_view(&app).selected, row, "back on the row");
-
-            // Emptied, the box goes back to the default — never the cloud
-            // box's "needs a task", which only a cloud launch says.
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &mut app.overlay else {
-                panic!("expected the template's box, got {:?}", app.overlay);
-            };
-            prompt.input.set_text("");
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(app.overlay, Some(Overlay::Settings(_))),
-                "{:?} / {:?}",
-                app.overlay,
-                app.flash
-            );
-            assert!(app.flash.is_none(), "{:?}", app.flash);
-            assert_eq!(
-                crate::config::Config::load().linear_template(),
-                crate::config::DEFAULT_LINEAR_TEMPLATE
             );
         });
     }

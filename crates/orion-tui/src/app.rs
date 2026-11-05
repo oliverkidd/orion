@@ -1114,7 +1114,7 @@ impl PromptDialog {
                 | PromptKind::AgentPresetTask { .. }
                 | PromptKind::QuickPrompt { .. }
                 | PromptKind::IssueComment { .. }
-        ) || matches!(self.kind, PromptKind::SettingText { kind, .. } if kind.is_multiline_text())
+        )
     }
 
     fn home() -> Option<std::path::PathBuf> {

@@ -157,9 +157,6 @@ pub const AUTO_CHOICE: &str = "auto";
 /// What the Linear account row shows while it names nobody: the owner of
 /// the project's `LINEAR_API_KEY`.
 pub const LINEAR_KEY_OWNER: &str = "the key's owner";
-/// What the task template row shows while it is empty: the built-in
-/// [`DEFAULT_LINEAR_TEMPLATE`].
-pub const LINEAR_TEMPLATE_DEFAULT: &str = "default";
 /// The Project tab with no project to list.
 pub const NO_PROJECTS: &str = "no projects yet — each one you add gets its rows here";
 
@@ -531,7 +528,6 @@ pub enum SettingKind {
     Gh,
     LinearAccount,
     LinearAutoAttach,
-    LinearTaskTemplate,
     /// The Linear tab's read-only row: where the selected project's
     /// `LINEAR_API_KEY` was found, if anywhere (`linear::status_value`).
     LinearKey,
@@ -627,16 +623,9 @@ impl SettingKind {
             self,
             SettingKind::WorktreeBaseBranch
                 | SettingKind::LinearAccount
-                | SettingKind::LinearTaskTemplate
                 | SettingKind::RunCommand
                 | SettingKind::OpenCommand
         )
-    }
-
-    /// A typed row whose value runs over lines — the Linear task
-    /// template: its prompt is a multi-row box, `⇧Enter` breaking a line.
-    pub fn is_multiline_text(self) -> bool {
-        self == SettingKind::LinearTaskTemplate
     }
 
     /// A row that says how things stand rather than holding a setting:
@@ -704,7 +693,6 @@ impl SettingKind {
             | SettingKind::OutsideTerminal
             | SettingKind::LinearAccount
             | SettingKind::LinearAutoAttach
-            | SettingKind::LinearTaskTemplate
             | SettingKind::LinearKey
             | SettingKind::LinearTest
             | SettingKind::OutsideEditor => (2026, 10, 3),
@@ -1138,12 +1126,6 @@ pub const LINEAR_SETTINGS: &[SettingSpec] = &[
         group: "",
     },
     SettingSpec {
-        kind: SettingKind::LinearTaskTemplate,
-        label: "Task template",
-        hint: "The task {linear} fills the new agent's box with; Enter edits it — the issues, ids and first_id placeholders, in braces, are filled in (empty = the default)",
-        group: "",
-    },
-    SettingSpec {
         kind: SettingKind::LinearKey,
         label: "API key",
         hint: "Where the selected project's LINEAR_API_KEY comes from: its .env.local, then its .env, then orion's own environment. The key itself is never shown",
@@ -1507,13 +1489,6 @@ pub struct Config {
     /// for a key a team shares. Always written to `config.local.json`
     /// ([`LOCAL_KEYS`]), so `orion ssh` never carries it to a remote.
     pub linear_assignee_email: String,
-    /// The task ⌘L's Enter fills the QUICK PROMPT with for the picked
-    /// issues: `{issues}` becomes each issue's ID, title, link and
-    /// description, `{ids}` the IDs comma-separated, `{first_id}` the
-    /// first one. Settings → Linear → **Task template** edits it; empty —
-    /// the default — is [`DEFAULT_LINEAR_TEMPLATE`]. See
-    /// [`Config::linear_template`].
-    pub linear_task_template: String,
     /// LINEAR AUTO-ATTACH (Settings → Linear → **Link PRs to Linear**, on
     /// by default): a branch a ⌘L launch cut is remembered
     /// (`linear::LinkStore`), and when OPEN PRS first shows a pull request
@@ -2062,7 +2037,6 @@ impl Default for Config {
             close_finder_on_open: true,
             ssh_sync_config: true,
             linear_assignee_email: String::new(),
-            linear_task_template: String::new(),
             linear_auto_attach: true,
             onboarded: false,
             setup_version: 0,
@@ -2190,15 +2164,6 @@ fn default_harnesses() -> BTreeMap<String, orion_core::harness::HarnessOverride>
     );
     harnesses
 }
-
-/// The task a LINEAR box sent empty launches on when
-/// `linear_task_template` is empty. `{issues}`, `{ids}` and `{first_id}` are expanded by
-/// `linear::expand_template`.
-pub const DEFAULT_LINEAR_TEMPLATE: &str = "Fix these Linear issues together, in this worktree:
-
-{issues}
-
-Work through them one at a time and make one commit per issue, its message starting with the issue's ID (for example \"{first_id}: …\"). When every issue is fixed, push the branch and open a single pull request with `gh pr create`, titled \"{ids}: <short summary>\", whose description starts with \"Fixes {ids}\" and then says what changed for each issue.";
 
 impl Config {
     pub fn load() -> Self {
@@ -2380,15 +2345,6 @@ impl Config {
     /// `outside_terminal` resolved to the app ⇧T opens.
     pub fn outside_terminal(&self) -> OutsideTerminal {
         OutsideTerminal::parse(&self.outside_terminal)
-    }
-
-    /// The task template ⌘L expands: `linear_task_template`, or
-    /// [`DEFAULT_LINEAR_TEMPLATE`] while that is empty.
-    pub fn linear_template(&self) -> &str {
-        match self.linear_task_template.trim() {
-            "" => DEFAULT_LINEAR_TEMPLATE,
-            _ => &self.linear_task_template,
-        }
     }
 
     /// `worktree_layout` says the compact LIST rather than the cards.
@@ -3495,10 +3451,6 @@ impl Config {
                 email => email.to_string(),
             },
             SettingKind::LinearAutoAttach => on_off(self.linear_auto_attach).into(),
-            SettingKind::LinearTaskTemplate => match self.linear_task_template.trim() {
-                "" => LINEAR_TEMPLATE_DEFAULT.into(),
-                custom => format!("custom: {}", custom.lines().next().unwrap_or_default()),
-            },
             // The app's to tell (`linear::status_value`), not the file's.
             SettingKind::LinearKey | SettingKind::LinearTest => String::new(),
             SettingKind::SessionIdleTimeout => self.session_idle_timeout.clone(),
@@ -3618,9 +3570,7 @@ impl Config {
                 self.palette_enter_attaches = !self.palette_enter_attaches;
             }
             // Typed, not cycled: see `SettingKind::is_text` / `set_text`.
-            SettingKind::WorktreeBaseBranch
-            | SettingKind::LinearAccount
-            | SettingKind::LinearTaskTemplate => {}
+            SettingKind::WorktreeBaseBranch | SettingKind::LinearAccount => {}
             // Status, not a setting: nothing to cycle.
             SettingKind::LinearKey
             | SettingKind::LinearTest
@@ -3812,9 +3762,6 @@ impl Config {
         match kind {
             SettingKind::WorktreeBaseBranch => self.worktree_base_branch.clone(),
             SettingKind::LinearAccount => self.linear_assignee_email.clone(),
-            // The template the box would get, the default spelled out: an
-            // edit starts from words, not from an empty box.
-            SettingKind::LinearTaskTemplate => self.linear_template().to_string(),
             _ => String::new(),
         }
     }
@@ -3830,17 +3777,6 @@ impl Config {
             }
             SettingKind::LinearAccount => {
                 self.linear_assignee_email = value.trim().to_string();
-                true
-            }
-            // The default sent back unchanged stays the default — stored
-            // empty, so a later build's better default reaches it.
-            SettingKind::LinearTaskTemplate => {
-                let value = value.trim();
-                self.linear_task_template = if value == DEFAULT_LINEAR_TEMPLATE.trim() {
-                    String::new()
-                } else {
-                    value.to_string()
-                };
                 true
             }
             _ => false,
@@ -4199,6 +4135,10 @@ mod tests {
     }
     use crate::keymap::Keymap;
 
+    /// Keys an earlier release wrote that this build no longer reads: they
+    /// load as nothing, and a save leaves them in the file as they were.
+    const DROPPED_KEYS: &[&str] = &["linear_task_template"];
+
     /// Config files earlier releases wrote, every value off its default.
     /// Add one per release; see [`config_files_from_earlier_releases_still_load_every_key`].
     const CONFIG_FIXTURES: &[(&str, &str)] = &[
@@ -4338,6 +4278,10 @@ mod tests {
             let known = serde_json::to_value(&loaded).unwrap();
             let fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
             for (key, value) in fixture.as_object().unwrap() {
+                if DROPPED_KEYS.contains(&key.as_str()) {
+                    assert_eq!(known.get(key), None, "{release}: `{key}` is no longer read");
+                    continue;
+                }
                 assert_eq!(
                     known.get(current(key)),
                     Some(value),
@@ -4604,7 +4548,7 @@ mod tests {
 
     /// Every Linear option is on the LINEAR TAB, in one place and nowhere
     /// else: linking pull requests first — on by default — the account,
-    /// the task template, then the key's status and the connection test.
+    /// then the key's status and the connection test.
     #[test]
     fn the_linear_tab_gathers_every_linear_option() {
         let tab = SETTINGS_TABS
@@ -4618,19 +4562,9 @@ mod tests {
             [
                 SettingKind::LinearAutoAttach,
                 SettingKind::LinearAccount,
-                SettingKind::LinearTaskTemplate,
                 SettingKind::LinearKey,
                 SettingKind::LinearTest,
             ]
-        );
-        // An explanation's braces name actions (`hints::expand`): the
-        // template's placeholders must not read as one.
-        let keymap = crate::keymap::Keymap::default();
-        let template = hint_at(tab, 2);
-        assert!(!template.contains("{issues}"), "{template}");
-        assert!(
-            crate::hints::expand(&template, &keymap).contains("issues, ids and first_id"),
-            "{template}"
         );
         for kind in kinds {
             assert_eq!(
@@ -4659,10 +4593,6 @@ mod tests {
             cfg.value_label(SettingKind::LinearAccount),
             LINEAR_KEY_OWNER
         );
-        assert_eq!(
-            cfg.value_label(SettingKind::LinearTaskTemplate),
-            LINEAR_TEMPLATE_DEFAULT
-        );
         assert!(SettingKind::LinearKey.is_status() && SettingKind::LinearTest.is_status());
         assert!(!SettingKind::LinearKey.is_text());
 
@@ -4677,36 +4607,6 @@ mod tests {
             cfg.cycle(t, r, 1);
         }
         assert_eq!(serde_json::to_value(&cfg).unwrap(), before);
-    }
-
-    /// The task template is a typed row over lines: its edit starts from
-    /// the template the box would get, the default spelled out; the
-    /// default sent back unchanged stays the default, stored empty; a
-    /// custom one shows its first line.
-    #[test]
-    fn the_task_template_row_edits_the_whole_template() {
-        assert!(SettingKind::LinearTaskTemplate.is_text());
-        assert!(SettingKind::LinearTaskTemplate.is_multiline_text());
-        let mut cfg = Config::default();
-        assert_eq!(
-            cfg.text_value(SettingKind::LinearTaskTemplate),
-            DEFAULT_LINEAR_TEMPLATE
-        );
-        assert!(cfg.set_text(SettingKind::LinearTaskTemplate, DEFAULT_LINEAR_TEMPLATE));
-        assert_eq!(cfg.linear_task_template, "");
-        assert!(cfg.set_text(SettingKind::LinearTaskTemplate, "Fix {ids}\n\n{issues}\n"));
-        assert_eq!(cfg.linear_task_template, "Fix {ids}\n\n{issues}");
-        assert_eq!(cfg.linear_template(), "Fix {ids}\n\n{issues}");
-        assert_eq!(
-            cfg.value_label(SettingKind::LinearTaskTemplate),
-            "custom: Fix {ids}"
-        );
-        assert!(cfg.set_text(SettingKind::LinearTaskTemplate, "   "));
-        assert_eq!(
-            cfg.linear_template(),
-            DEFAULT_LINEAR_TEMPLATE,
-            "empty is the default"
-        );
     }
 
     #[test]

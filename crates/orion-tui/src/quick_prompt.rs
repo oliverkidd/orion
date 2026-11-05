@@ -579,7 +579,7 @@ impl QuickLaunch {
     /// The STARTING PROMPT this launch sends for `task`: the text itself,
     /// or the preset's prefix + task + postfix. A LINEAR box's task always
     /// carries its issues: sent empty it is the batch's task (the Linear
-    /// template), and typed text gets the issues written out in full
+    /// Ticket text, `linear::ticket_task`), and typed text gets the issues written out in full
     /// under it — typing never drops them.
     pub fn compose(&self, task: &str) -> String {
         let task = match &self.linear {

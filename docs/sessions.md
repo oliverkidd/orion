@@ -135,8 +135,11 @@ refuses with the reason when its entry is switched off or gone.
 
 Two presets are **system presets**, on every list and marked `system`: **PR autofix**, whose text
 wraps what broke for the agent Settings → Review → **Auto-fix PRs** sends to a broken pull request,
-and **Linear Ticket**, whose text wraps the issues a Linear launch sends — with its harness, model
-and effort — unless `⇧Tab` picks another. An empty one leaves orion's own text in place. Their text
+and **Linear Ticket**, whose text is what a Linear launch sends — with its harness, model and
+effort — unless `⇧Tab` picks another: `{issues}` becomes each issue's ID, title, link and
+description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
+`{issues}` gets them between its prefix and postfix. An empty one leaves orion's own text in place
+(one commit per issue, one pull request titled `"{ids}: …"` whose description starts `Fixes {ids}`). Their text
 can be edited like any preset's; they can't be deleted or renamed. A list from before they existed
 keeps a preset you had already named `PR autofix` or `Linear Ticket`, text and all, as that system
 preset.

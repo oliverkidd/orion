@@ -32,8 +32,7 @@
 //! never stored, never shown, and sent only to `api.linear.app` through
 //! `curl --config -`. Settings → Linear gathers every option: **Link PRs
 //! to Linear**, **Linear account** (whose issues are listed; empty = the
-//! owner of that key), the **Task template**, and where the selected
-//! project's key was found, with **Test connection** asking Linear whose
+//! owner of that key), and where the selected project's key was found, with **Test connection** asking Linear whose
 //! key it is ([`status_value`], [`test_connection`]).
 
 use std::borrow::Cow;
@@ -459,7 +458,32 @@ pub fn issue_sections(issues: &[LinearIssue]) -> String {
         .join("\n\n")
 }
 
-/// What `{issues}` / `{ids}` / `{first_id}` expand to in the task template.
+/// The **Linear Ticket** SYSTEM PRESET's built-in text: what a ⌘L launch
+/// sends while the preset holds none ([`ticket_task`]).
+pub const TICKET_TEXT: &str = "Fix these Linear issues together, in this worktree:
+
+{issues}
+
+Work through them one at a time and make one commit per issue, its message starting with the issue's ID (for example \"{first_id}: …\"). When every issue is fixed, push the branch and open a single pull request with `gh pr create`, titled \"{ids}: <short summary>\", whose description starts with \"Fixes {ids}\" and then says what changed for each issue.";
+
+/// What a ⌘L launch on `issues` sends, the one set of instructions: the
+/// **Linear Ticket** preset's text — orion's own [`TICKET_TEXT`] while it
+/// holds none — with `{issues}`, `{ids}` and `{first_id}` filled in. A
+/// preset whose text never says where the issues go has them between its
+/// prefix and its postfix, where a task goes.
+pub fn ticket_task(preset: &crate::agent_presets::AgentPreset, issues: &[LinearIssue]) -> String {
+    let marked = [&preset.prefix, &preset.postfix]
+        .iter()
+        .any(|text| text.contains("{issues}"));
+    let text = match (preset.has_wrapping(), marked) {
+        (false, _) => TICKET_TEXT.to_string(),
+        (true, true) => preset.compose(""),
+        (true, false) => preset.compose("{issues}"),
+    };
+    expand_template(&text, issues)
+}
+
+/// `template` with `{issues}`, `{ids}` and `{first_id}` filled in.
 pub fn expand_template(template: &str, issues: &[LinearIssue]) -> String {
     let ids = ids_of(issues);
     let first = issues.first().map(|i| i.identifier.as_str()).unwrap_or("");
@@ -3475,7 +3499,8 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
     };
     let project = view.project.clone();
     let cfg = crate::config::Config::load();
-    let task = expand_template(cfg.linear_template(), &issues);
+    let mut ticket = crate::agent_presets::system(crate::agent_presets::SystemPreset::LinearTicket);
+    let task = ticket_task(&ticket, &issues);
     let taken = app.project_branches(&project);
     let batch = LinearBatch { issues, task };
     // A fresh worktree named after the batch (`LinearBatch::branch`),
@@ -3487,11 +3512,12 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
         branch: batch.branch(&taken),
         existing: false,
     };
-    // The Linear Ticket SYSTEM PRESET wraps the issues by default — its
-    // harness, model and effort with it — once it holds any text; ⇧Tab
-    // in the box still picks another.
-    let ticket = crate::agent_presets::system(crate::agent_presets::SystemPreset::LinearTicket);
+    // A Linear Ticket preset with text of its own brings its harness,
+    // model and effort too; its text is the batch's task already, so it
+    // never wraps round it again. ⇧Tab in the box still picks another.
     let launch = if ticket.has_wrapping() {
+        ticket.prefix.clear();
+        ticket.postfix.clear();
         QuickLaunch::of_preset(target, ticket, &cfg)
     } else {
         QuickLaunch::from_config(target, &cfg)
@@ -5542,6 +5568,45 @@ pub(crate) mod tests {
         assert!(out.contains("### ENG-15: Logout"));
     }
 
+    /// A launch sends one set of instructions: orion's own while the
+    /// Linear Ticket preset holds no text, else the preset's alone, its
+    /// placeholders filled — the issues where it puts `{issues}`, or
+    /// between its prefix and postfix when it names no place.
+    #[test]
+    fn a_ticket_sends_the_presets_text_or_orions() {
+        use crate::agent_presets::SystemPreset;
+        let issues = [issue("1", "ENG-12", "Login")];
+        let empty = SystemPreset::LinearTicket.default_preset();
+        assert_eq!(
+            ticket_task(&empty, &issues),
+            expand_template(TICKET_TEXT, &issues)
+        );
+
+        let marked = crate::agent_presets::AgentPreset {
+            prefix: "Fix {first_id} alone:\n\n{issues}".into(),
+            ..empty.clone()
+        };
+        let sent = ticket_task(&marked, &issues);
+        assert!(
+            sent.starts_with("Fix ENG-12 alone:\n\n### ENG-12: Login"),
+            "{sent}"
+        );
+        assert!(!sent.contains("one commit per issue"), "never orion's too");
+
+        let wrapping = crate::agent_presets::AgentPreset {
+            prefix: "Plan first.".into(),
+            postfix: "Then stop.".into(),
+            ..empty
+        };
+        let sent = ticket_task(&wrapping, &issues);
+        assert!(
+            sent.starts_with("Plan first.\n\n### ENG-12: Login"),
+            "{sent}"
+        );
+        assert!(sent.ends_with("\n\nThen stop."), "{sent}");
+        assert!(!sent.contains("one commit per issue"), "never orion's too");
+    }
+
     #[test]
     fn env_key_reads_only_linear() {
         let text = "OTHER=no\nLINEAR_API_KEY=lin_api_secret\nAWS_SECRET=x\n";
@@ -6347,7 +6412,7 @@ pub(crate) mod tests {
     }
 
     /// The LINEAR TAB drawn: every row — the switch on by default, the
-    /// account, the template, where the key is and the test — and the
+    /// account, where the key is and the test — and the
     /// key's value nowhere on screen.
     #[test]
     fn the_linear_tab_draws_every_row_and_never_the_key() {
@@ -6380,8 +6445,6 @@ pub(crate) mod tests {
                 "[on]",
                 "Linear account",
                 "[the key's owner]",
-                "Task template",
-                "[default]",
                 "Connection",
                 "API key",
                 "[found in .env · demo]",

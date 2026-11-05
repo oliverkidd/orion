@@ -421,15 +421,11 @@ pub(crate) mod keys {
     /// A program a row names that isn't on PATH: its installer.
     pub const INSTALL: Key = Key::new(&["i"], "install");
     pub const SKIP: Key = Key::new(&["esc"], "skip");
-    /// A multi-row field's line break: the task template's.
-    pub const NEWLINE: Key = crate::ui::task_keys::NEWLINE;
     /// The account question's answers.
     pub const YES: Key = Key::new(&["enter", "y"], "share").show(2);
     pub const NO: Key = Key::new(&["n"], "start empty");
     #[cfg(test)]
-    pub const ALL: &[Key] = &[
-        NEXT_PAGE, PREV_PAGE, ENTER, TOGGLE, INSTALL, SKIP, NEWLINE, YES, NO,
-    ];
+    pub const ALL: &[Key] = &[NEXT_PAGE, PREV_PAGE, ENTER, TOGGLE, INSTALL, SKIP, YES, NO];
 }
 
 /// The keys on the wizard's bottom border, for the page it is on and the
@@ -437,13 +433,11 @@ pub(crate) mod keys {
 pub(crate) fn hints(cfg: &Config, view: &OnboardView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     let back = Hint::new("Esc", "back");
-    if let Some((kind, _)) = &view.field {
-        let mut hints = vec![keys::ENTER.hint_as("save").kept()];
-        if kind.is_multiline_text() {
-            hints.push(keys::NEWLINE.hint());
-        }
-        hints.push(Hint::new("Esc", "cancel"));
-        return hints;
+    if view.field.is_some() {
+        return vec![
+            keys::ENTER.hint_as("save").kept(),
+            Hint::new("Esc", "cancel"),
+        ];
     }
     if let Some(plan) = &view.install {
         let mut hints = Vec::new();
@@ -1383,10 +1377,7 @@ fn settings_page(
     let values: Vec<String> = specs
         .iter()
         .map(|spec| match editing {
-            Some((kind, input)) if *kind == spec.kind && !kind.is_multiline_text() => {
-                format!("{}▌", input.as_str())
-            }
-            Some((kind, _)) if *kind == spec.kind => "editing below".to_string(),
+            Some((kind, input)) if *kind == spec.kind => format!("{}▌", input.as_str()),
             _ => setting_value(app, cfg, spec.kind),
         })
         .collect();
@@ -1417,11 +1408,6 @@ fn settings_page(
             &widths,
             th,
         );
-    }
-    if let Some((_, input)) = editing.filter(|(kind, _)| kind.is_multiline_text()) {
-        body.blank();
-        body.lines
-            .extend(field_rows(input, width.saturating_sub(4), 6, th));
     }
     if page == Page::Worktrees {
         body.blank();
@@ -1673,42 +1659,6 @@ fn ready(body: &mut Body, app: &App, cfg: &Config, th: Theme, width: u16) {
     }
 }
 
-/// A multi-row field drawn in place: its rows at `width`, at most `max`
-/// of them — the window round the caret — the caret a `▌` where it is,
-/// and its SELECTION on the selection background every field draws one on
-/// (`ui::field_spans`).
-fn field_rows(input: &TextInput, width: u16, max: usize, th: Theme) -> Vec<Line<'static>> {
-    use crate::ui::FieldCell;
-    let text: Vec<char> = input.as_str().chars().collect();
-    let rows = input.rows(usize::from(width.max(1)));
-    let caret_row = input.caret_row(&rows);
-    let caret = input.cursor_chars();
-    let selection = input.selection_chars();
-    let first = (caret_row + 1).saturating_sub(max);
-    let plain = Style::default().fg(th.accent);
-    let selected = crate::ui::selected_style(th.accent, th);
-    rows.iter()
-        .enumerate()
-        .skip(first)
-        .take(max)
-        .map(|(i, &(start, end))| {
-            // The `▌` stands between two characters rather than on one, so
-            // every char here is text or selected, never the caret's cell.
-            let mut cells: Vec<(char, FieldCell)> = (start..end)
-                .filter(|at| text[*at] != '\n')
-                .map(|at| (text[at], FieldCell::at(at, usize::MAX, selection)))
-                .collect();
-            if i == caret_row {
-                let at = caret.saturating_sub(start).min(cells.len());
-                cells.insert(at, ('▌', FieldCell::Plain));
-            }
-            let mut spans = vec![Span::styled("   ", plain)];
-            spans.extend(crate::ui::field_spans(cells, plain, selected, plain));
-            Line::from(spans)
-        })
-        .collect()
-}
-
 fn next(app: &mut App) {
     let cfg = Config::load();
     if let Some(Overlay::Onboard(view)) = &mut app.overlay {
@@ -1820,8 +1770,7 @@ fn activate(app: &mut App) {
             match setting_rows(page).get(row).map(|spec| spec.kind) {
                 Some(kind) if kind.is_status() => crate::linear::test_connection(app),
                 Some(kind) if kind.is_text() => {
-                    let mut input = TextInput::with_text(cfg.text_value(kind));
-                    input.set_multiline(kind.is_multiline_text());
+                    let input = TextInput::with_text(cfg.text_value(kind));
                     if let Some(Overlay::Onboard(view)) = &mut app.overlay {
                         view.field = Some((kind, input));
                     }
@@ -2511,9 +2460,8 @@ mod tests {
 
     /// The Linear page mirrors Settings → Linear: the same rows, in the
     /// same order, with the same values and the tab's own explanation of
-    /// the row under the cursor. Space flips **Link PRs to Linear**, Enter
-    /// types the account in place, and the task template opens over lines
-    /// — ⇧Enter breaks one, Enter saves.
+    /// the row under the cursor. Space flips **Link PRs to Linear**, and
+    /// Enter types the account in place.
     #[test]
     fn the_linear_page_mirrors_the_linear_tab() {
         with_temp_config(|| {
@@ -2532,7 +2480,6 @@ mod tests {
             for needle in [
                 "Link PRs to Linear on",
                 "Linear account the key's owner",
-                "Task template default",
                 "Connection",
                 "API key no project selected",
             ] {
@@ -2557,39 +2504,6 @@ mod tests {
             }
             press(&mut app, KeyCode::Enter);
             assert_eq!(Config::load().linear_assignee_email, "a@b.co");
-
-            press(&mut app, KeyCode::Down);
-            press(&mut app, KeyCode::Enter);
-            assert!(
-                matches!(&view(&app).field, Some((SettingKind::LinearTaskTemplate, input))
-                    if input.as_str() == crate::config::DEFAULT_LINEAR_TEMPLATE),
-                "the edit starts from the template the box would get"
-            );
-            let keys_line = format!(
-                "Enter save · {} newline · Esc cancel",
-                keys::NEWLINE.label()
-            );
-            let shot = draw_text(&mut app);
-            assert!(shot.contains(&keys_line), "{keys_line}:\n{shot}");
-            if let Some(Overlay::Onboard(view)) = &mut app.overlay {
-                if let Some((_, input)) = &mut view.field {
-                    input.set_text("Fix {ids}");
-                }
-            }
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char('j'), crossterm::event::KeyModifiers::CONTROL),
-            );
-            for c in "{issues}".chars() {
-                press(&mut app, KeyCode::Char(c));
-            }
-            let editing = draw_text(&mut app);
-            assert!(editing.contains("Fix {ids}"), "{editing}");
-            assert!(editing.contains("{issues}▌"), "{editing}");
-            press(&mut app, KeyCode::Enter);
-            assert!(!view(&app).asking());
-            assert_eq!(Config::load().linear_task_template, "Fix {ids}\n{issues}");
-            assert!(draw_text(&mut app).contains("custom: Fix {ids}"));
         });
     }
 
