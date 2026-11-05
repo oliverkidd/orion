@@ -1,0 +1,29 @@
+crates/orion-tui/src/ui/launcher_view.rs
+  s_61e50232cdb2f2::t_e0b1d755d6036f 2605
+crates/orion-tui/src/event_loop/placeholder.rs
+  s_61e50232cdb2f2::t_8339c1dbb1fdd1 1688-1706,1713,1752,1952
+  s_61e50232cdb2f2::t_bd1e4384ae29df 1771-1772,1824,1933-1934,1960,1963,1974-1975,1987-1988,1990-1994,2043
+crates/orion-tui/src/agent_picker.rs
+  s_61e50232cdb2f2::t_a8c99888dc2124 4-5
+  s_61e50232cdb2f2::t_c18a4dcc87a5e8 3,11,192,245,399,535,617,619,625
+crates/orion-tui/src/event_loop.rs
+  s_61e50232cdb2f2::t_4a2490af62a97e 4776,7768-7769,7771
+docs/configuration.md
+  s_61e50232cdb2f2::t_79145e812e18e9 130
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1f82dea696ca3ee6be2845dea065bbcb6928d8e8",
+  "prompts": {},
+  "sessions": {
+    "s_61e50232cdb2f2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df12aa21-1ffc-4111-873e-7e452dc4702c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
