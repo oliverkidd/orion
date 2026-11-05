@@ -527,5 +527,5 @@ This replaces the warm spare pool, which never serves a launch today (it warms t
 - The ⇧D / ⇧W / ⇧F shift-letter keys and the `^` chords inside modals stay; only the grid's ctrl twins went.
 - A paste of several lines into the todos with no field open adds one item per line. Groups nested deeper than two levels are lifted into their top-level group on load.
 - Moving a folder to the Trash is macOS-only (`paths_util::move_folder_to_trash`).
-- Known flaky: `tui_autofix_sends_unasked_when_my_pr_conflicts` (passes alone). Known failing on `main` too: `tui_diff_steps_through_a_branch_commit_by_commit` (times out on "the alpha body").
+- 1E then fixed the two e2e_tui tests that failed on `main` (both were test bugs: a wait on text the viewer no longer draws, and races on the daemon's answer), removed the GitHub-issues wording that was left, and folded `claude_accounts::Places` into `paths_util::Places`. Every suite is green from here.
 
