@@ -30,7 +30,7 @@ fn is_archived(app: &App, id: &AgentId) -> bool {
 
 /// What the fold key did as the first of its two presses from inside the
 /// PANE ([`fold_key`]), for the KEY COMBO DISPLAY.
-const BACK_TO_CARD: &str = "Back to the card";
+const BACK_TO_ROW: &str = "Back to the row";
 
 /// The box: the QUICK PROMPT, aimed at the project under the list's cursor
 /// (the selected project). It lands in the checkout under the grid's
@@ -264,7 +264,7 @@ pub(super) fn fold_key(app: &mut App) -> &'static str {
     if app.focus == Focus::Terminal && !app.launcher_pane_hidden {
         super::leave_terminal_lock(app);
         app.dirty = true;
-        return BACK_TO_CARD;
+        return BACK_TO_ROW;
     }
     toggle_pane(app);
     if app.launcher_pane_hidden {
@@ -7877,7 +7877,7 @@ mod tests {
             let footer = |app: &App| crate::hints::text(&crate::ui::footer::hints(app), usize::MAX);
             assert!(footer(&app).contains("x close tab"), "{}", footer(&app));
             assert!(
-                buffer_text(&terminal).contains("Esc back to the cards"),
+                buffer_text(&terminal).contains("Esc back to the grid"),
                 "{}",
                 buffer_text(&terminal)
             );

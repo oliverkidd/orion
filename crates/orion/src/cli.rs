@@ -218,9 +218,9 @@ pub(crate) enum Command {
     /// Open orion on its setup.
     ///
     /// Four pages: Welcome; Claude — its CLI (`i` installs it) and the
-    /// accounts to sign in; your first project, its base branch and run
-    /// command; and the keys that matter. The palette's Run setup opens
-    /// the same thing.
+    /// accounts to sign in; your first project, its base branch, setup
+    /// command and run command; and the keys that matter. The palette's Run
+    /// setup opens the same thing.
     Setup,
     /// Open orion as a Mac app of its own.
     ///

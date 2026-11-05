@@ -4024,11 +4024,11 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // drop it.
     if action.is_none() && app.launcher_grid() && key.code == KeyCode::Esc {
         if app.launcher_tab_cursor.is_some() {
-            crate::key_combo::note(app, &[chord], Some("Back to the cards"));
+            crate::key_combo::note(app, &[chord], Some("Back to the grid"));
         } else if app.show_archived {
             crate::key_combo::note(app, &[chord], Some("Back to the live sessions"));
         } else if !app.launcher_unaimed {
-            crate::key_combo::note(app, &[chord], Some("Unselect the card"));
+            crate::key_combo::note(app, &[chord], Some("Unselect the row"));
         }
         launcher::escape(app, out);
         return;
@@ -26806,7 +26806,7 @@ mod tests {
                 assert!(text.contains(tab.title), "tab strip rendered:\n{text}");
             }
             assert!(
-                text.contains("A new agent's card comes under the cursor"),
+                text.contains("A new agent's row comes under the cursor"),
                 "the selected setting's explanation:\n{text}"
             );
             let Some(Overlay::Settings(view)) = &app.overlay else {

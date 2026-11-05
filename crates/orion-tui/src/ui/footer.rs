@@ -233,8 +233,8 @@ pub(crate) fn hints(app: &App) -> Vec<Hint> {
     } else if !app.launcher_grid() || app.focus == Focus::Terminal {
         pane_hints(app)
     } else if app.launcher_tab_cursor.is_some() {
-        // The PROJECT TABS holding the keys (`↑`,`↑` off the top row of
-        // cards): walking the header's cursor switches the grid as it
+        // The PROJECT TABS holding the keys (`↑`,`↑` off the grid's top
+        // row): walking the header's cursor switches the grid as it
         // goes; Enter and Esc are the ways back down.
         vec![
             acts(
@@ -242,9 +242,9 @@ pub(crate) fn hints(app: &App) -> Vec<Hint> {
                 &[Action::FocusLeft, Action::FocusRight],
                 "switch project",
             ),
-            act(km, Action::Activate, "into its cards"),
+            act(km, Action::Activate, "into its grid"),
             act(km, Action::CloseProjectTab, "close tab"),
-            Some(Hint::new("Esc", "back to the cards")),
+            Some(Hint::new("Esc", "back to the grid")),
         ]
     } else {
         grid_hints(app)
@@ -292,7 +292,7 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
     }
     let Some(band_at) = band.filter(|_| !app.launcher_unaimed) else {
         let mut list = vec![
-            acts(km, &[Action::MoveUp, Action::MoveDown], "pick a card"),
+            acts(km, &[Action::MoveUp, Action::MoveDown], "pick a row"),
             act(km, Action::QuickPrompt, "new agent"),
             act(km, Action::NewTerminal, "terminal"),
         ];

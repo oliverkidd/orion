@@ -1351,8 +1351,8 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 (
                     "NAVIGATE & SEARCH",
                     &[
-                        (Act(&[MoveDown, MoveUp]), "walk the cards (2×: tabs)"),
-                        (Act(&[FocusLeft, FocusRight]), "step along a row of cards"),
+                        (Act(&[MoveDown, MoveUp]), "walk the rows (2×: tabs)"),
+                        (Act(&[FocusLeft, FocusRight]), "out of / into the pane"),
                         (Act(&[FocusNext]), "open / fold the checkout"),
                         (Act(&[Activate]), "into the pane (attach)"),
                         (
@@ -1447,7 +1447,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                     "TERMINAL & MOUSE",
                     &[
                         (Act(&[Activate]), "lock input"),
-                        (Act(&[UnlockTerminal]), "unlock, back to the card"),
+                        (Act(&[UnlockTerminal]), "unlock, back to the row"),
                         (
                             Keys(&[crate::launcher::pane_keys::AGENT_ESC]),
                             "Esc to the agent",
@@ -1457,7 +1457,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         (Lit("click / drag"), "the app that took the mouse"),
                         (Lit("⌘/⌥/^click"), "open URL / file under cursor"),
                         (Lit("⇧drag"), "select via your terminal"),
-                        (Lit("right-click"), "card / tab menu: run, restart"),
+                        (Lit("right-click"), "row / tab menu: run, restart"),
                         (Lit("drag the pane edge"), "resize the pane"),
                         (Lit("Esc"), "close any modal (or click out)"),
                     ],

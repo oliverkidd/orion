@@ -6,8 +6,8 @@
 # orion runs on macOS. Grabs the prebuilt binary for this Mac from the latest
 # GitHub release, falling back to `cargo install --git` when no release (or no
 # matching asset) exists. Then makes sure of what orion leans on: git
-# (required), fresh, the editor it opens files in, gh for pull requests and
-# issues, and Ghostty, which orion's own app is made from. A first install
+# (required), fresh, the editor it opens files in, gh for pull requests,
+# and Ghostty, which orion's own app is made from. A first install
 # then opens orion as that app
 # — Orion.app in ~/Applications — so setup starts where its ⌘ shortcuts work
 # and orion is in the Dock from then on.
@@ -97,16 +97,16 @@ ensure_editor() {
     say "warning: couldn't install fresh — no file opens in orion until it is (https://github.com/sinelaw/fresh#installation)"
 }
 
-# gh, the GitHub CLI orion reads pull requests and issues with. Recommended,
+# gh, the GitHub CLI orion reads pull requests with. Recommended,
 # not required: installed with Homebrew when there is one, else pointed at.
 ensure_gh() {
     have gh && return 0
     if have brew; then
-        say "installing gh, the GitHub CLI orion reads pull requests and issues with (brew install gh)…"
+        say "installing gh, the GitHub CLI orion reads pull requests with (brew install gh)…"
         brew install gh && say "then sign it in: gh auth login" && return 0
-        say "warning: couldn't install gh — pull requests and issues need it: https://github.com/cli/cli#installation"
+        say "warning: couldn't install gh — pull requests need it: https://github.com/cli/cli#installation"
     else
-        say "note: orion reads pull requests and issues with gh, the GitHub CLI — install it from https://github.com/cli/cli#installation"
+        say "note: orion reads pull requests with gh, the GitHub CLI — install it from https://github.com/cli/cli#installation"
     fi
 }
 

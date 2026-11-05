@@ -538,7 +538,7 @@ pub const GENERAL_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::FollowNewSession,
         label: "Follow new session",
-        hint: "A new agent's card comes under the cursor, the grid scrolled to it, without entering it (off = stay on the card you're on)",
+        hint: "A new agent's row comes under the cursor, the grid scrolled to it, without entering it (off = stay on the row you're on)",
         group: "Launching",
     },
     SettingSpec {
