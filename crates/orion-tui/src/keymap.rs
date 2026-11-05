@@ -34,7 +34,6 @@ pub enum Scope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     // navigate
-    FocusNext,
     FocusLeft,
     FocusRight,
     MoveDown,
@@ -271,15 +270,6 @@ macro_rules! project_tab_slot {
 
 pub const ACTIONS: &[ActionSpec] = &[
     // ---- NAVIGATE ----
-    ActionSpec {
-        action: Action::FocusNext,
-        id: "focus_next",
-        label: "Open / fold checkout",
-        hint: "Open every card of the checkout under the cursor in place, or fold it back to one row — one checkout open at a time",
-        group: "NAVIGATE",
-        scope: Scope::Global,
-        defaults: &["tab"],
-    },
     ActionSpec {
         action: Action::FocusLeft,
         id: "focus_left",

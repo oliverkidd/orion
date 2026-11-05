@@ -4093,18 +4093,11 @@ fn dispatch_action(
                 crate::stacks::restart(app, &id, out);
             }
         }
-        // Tab walks forward and stops dead at the terminal pane —
-        // leaning on the key can't spill past the pane and back round to
-        // the first column. Landing on the pane takes the input lock:
-        // walking that far means the user is going to type at the agent,
-        // and the preview under the Sessions cursor is already the session
-        // they picked.
-        Action::FocusNext => walk_focus_forward(app, out),
         // h/← and l/→ walk one panel at a time, stopping at the ends of
         // the row: h never wraps into the pane. A single press at an end
         // stays put — leaning on the key can't spill over — and a double
-        // tap jumps the boundary the way Tab would: l,l at Sessions
-        // crosses into the pane and takes its input.
+        // tap jumps the boundary: l,l at Sessions crosses into the pane
+        // and takes its input.
         Action::FocusLeft => walk_focus_back(app),
         Action::Hosts => open_hosts_picker(app),
         Action::AgentPresets => crate::preset_overlays::open_agent_presets(app),
@@ -4139,8 +4132,8 @@ fn dispatch_action(
                     walk_focus_forward(app, out);
                 }
             }
-            // Standing in the pane unlocked: l,l takes the lock, as Tab
-            // does. A dead or empty pane has nothing to lock into.
+            // Standing in the pane unlocked: l,l takes the lock. A dead or
+            // empty pane has nothing to lock into.
             Focus::Terminal => {
                 let live = app.term.as_ref().is_some_and(|t| !t.exited);
                 if live && double_tapped(app, action, armed, chord, "type into terminal") {
@@ -27727,12 +27720,9 @@ mod tests {
         let text = buffer_text(&terminal);
         assert!(text.contains("Keys"), "tab strip:\n{text}");
         assert!(text.contains("NAVIGATE"), "group header:\n{text}");
+        assert!(text.contains("Focus left"), "an action label:\n{text}");
         assert!(
-            text.contains("Open / fold checkout"),
-            "an action label:\n{text}"
-        );
-        assert!(
-            text.contains("Open / fold checkout        Tab"),
+            text.contains("Focus left                  ←"),
             "its chord, in the value column:\n{text}"
         );
     }
@@ -27885,7 +27875,7 @@ mod tests {
             let mut out = Vec::new();
             open_settings_on(&mut app, crate::config::keys_tab(), &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            let before = app.keymap.label(crate::keymap::Action::FocusNext);
+            let before = app.keymap.label(crate::keymap::Action::FocusLeft);
             for code in [
                 KeyCode::Enter,
                 KeyCode::Char('a'),
@@ -27895,7 +27885,7 @@ mod tests {
             ] {
                 press(&mut app, code, KeyModifiers::NONE, &mut out);
             }
-            assert_eq!(app.keymap.label(crate::keymap::Action::FocusNext), before);
+            assert_eq!(app.keymap.label(crate::keymap::Action::FocusLeft), before);
             assert!(crate::config::Config::load().keybindings.is_empty());
             assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);

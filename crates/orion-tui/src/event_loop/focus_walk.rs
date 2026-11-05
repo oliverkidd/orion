@@ -60,10 +60,10 @@ pub(super) fn double_tapped(
     false
 }
 
-/// The forward panel walk — Tab / ^⇧L, and l/→ (double-tapped at the
-/// end) — one visible column right (a hidden Projects or Worktrees panel
-/// is skipped), stopping dead at the terminal pane so leaning on the key
-/// can't spill past it and back round to the first column. Landing on
+/// The forward panel walk — l/→, double-tapped at the end — one visible
+/// column right (a hidden Projects or Worktrees panel is skipped),
+/// stopping dead at the terminal pane so leaning on the key can't spill
+/// past it and back round to the first column. Landing on
 /// the pane takes the input lock: walking that far means the user is
 /// going to type at the agent, and the preview under the Sessions cursor
 /// is already the session they picked.
@@ -74,12 +74,10 @@ pub(super) fn walk_focus_forward(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
 }
 
-/// The backward panel walk — ⇧Tab / ^⇧H, and h/← (double-tapped at the
-/// end) — one visible column left, stopping dead at the first visible
-/// sidebar. Never wraps into the pane: ^⇧H is also the unlock hatch out of a locked
-/// pane, so a wrap made the key cycle first column → pane → Sessions → …
-/// forever, with nothing to stop against. Forward is the way into the
-/// pane, and Ctrl+→ crosses into it without taking the input lock.
+/// The backward panel walk — h/← — one visible column left, stopping
+/// dead at the first visible sidebar. Never wraps into the pane: a wrap
+/// would cycle first column → pane → Sessions → … forever, with nothing
+/// to stop against. Forward is the way into the pane.
 pub(super) fn walk_focus_back(app: &mut App) {
     app.focus = app.previous_visible_focus(app.focus);
 }
@@ -92,8 +90,8 @@ pub(super) fn walk_focus_back(app: &mut App) {
 /// opens a prompt, or dismissing a modal would be the one click in orion
 /// that acts on a row the user could not see it land on. The pane is the
 /// exception that the walk already makes: entering it is a commitment to
-/// type at the agent, so it takes the input lock the way the click and Tab
-/// both do. The LAUNCHER VIEW's pane edge and its header's tabs are
+/// type at the agent, so it takes the input lock the way a click on it
+/// does. The LAUNCHER VIEW's pane edge and its header's tabs are
 /// buttons: none of them is somewhere focus lives.
 pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut Vec<ClientRequest>) {
     match app.hit_at(column, row) {

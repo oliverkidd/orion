@@ -18,7 +18,6 @@ fn listed(action: Action) -> bool {
             | Action::FocusRight
             | Action::MoveDown
             | Action::MoveUp
-            | Action::FocusNext
             | Action::Activate
             | Action::SelectProjectTab(_)
             | Action::UnlockTerminal

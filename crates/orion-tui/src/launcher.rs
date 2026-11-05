@@ -1117,34 +1117,17 @@ pub fn last_prompt(agent: &Agent) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
-/// What carries a Claude session onto another account, in the words its
-/// card and the footer use, for the accounts `targets` names
-/// (`Config::continue_targets`): `continue on Claude B` when there is one,
-/// `continue on another account` when there are several. None with
-/// nowhere to go.
+/// What carries a Claude session onto another account, in the words the
+/// footer uses on a session stopped at a usage limit, for the accounts
+/// `targets` names (`Config::continue_targets`): `continue on Claude B`
+/// when there is one, `continue on another account` when there are
+/// several. None with nowhere to go.
 pub fn continue_does(targets: &[(String, String)]) -> Option<String> {
     match targets {
         [] => None,
         [(_, label)] => Some(format!("continue on {label}")),
         _ => Some("continue on another account".into()),
     }
-}
-
-/// The line a card stopped on a usage limit carries under Claude's words:
-/// [`continue_does`] under the key the live keymap gives it (`⇧C continue
-/// on Claude B`), or the right-click menu's way to it when the action has
-/// no key.
-pub fn continue_hint(
-    keymap: &crate::keymap::Keymap,
-    targets: &[(String, String)],
-) -> Option<String> {
-    let does = continue_does(targets)?;
-    Some(
-        match crate::hints::act(keymap, crate::keymap::Action::ContinueOn, &does) {
-            Some(hint) => format!("{} {}", hint.key, hint.does),
-            None => format!("right-click: {does}"),
-        },
-    )
 }
 
 // ---- the PROJECT DROPDOWN's list ----

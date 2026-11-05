@@ -1353,7 +1353,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                     &[
                         (Act(&[MoveDown, MoveUp]), "walk the rows (2×: tabs)"),
                         (Act(&[FocusLeft, FocusRight]), "out of / into the pane"),
-                        (Act(&[FocusNext]), "open / fold the checkout"),
                         (Act(&[Activate]), "into the pane (attach)"),
                         (
                             Act(&[NextProjectTab, PrevProjectTab]),

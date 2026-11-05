@@ -578,9 +578,6 @@ pub(super) fn handle_action(
         // band aimed at rather than any one card, its remembered card
         // (`enter_pane`'s own `cursor_or_first`).
         Action::Activate => enter_pane(app, out),
-        // Tab — the panels' "next panel" — has nothing to do on the grid:
-        // every band lists all of its entries already.
-        Action::FocusNext => {}
         // `` ` ``: the checkout's TERMINAL chips, one after another.
         Action::PaneTabs => walk_terminals(app, out),
         // `t`: a terminal in the cursor's checkout, as its chip.

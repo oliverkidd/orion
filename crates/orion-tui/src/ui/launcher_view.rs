@@ -5498,7 +5498,6 @@ mod tests {
     fn the_band_the_keys_are_on_marks_itself_and_spells_no_key() {
         let app = App::new();
         let th = app.theme;
-        let key = crate::hints::key(&app.keymap, crate::keymap::Action::FocusNext).unwrap();
         let mut band = a_band(true, "main");
         let card = band.cards[0].clone();
         band.cards.extend(std::iter::repeat_n(card, 7));
@@ -5512,7 +5511,10 @@ mod tests {
         let buf = rule_row_as(&app, &band, 96, lit);
         let text = row_string(&buf, 0);
         assert!(text.starts_with("❯  ⌂ main"), "{text:?}");
-        assert!(!text.contains(&key) && !text.contains("expand"), "{text:?}");
+        assert!(
+            !text.contains("Tab") && !text.contains("expand"),
+            "{text:?}"
+        );
         // The mark in the accent, the checkout as on any band.
         let accent = painted(&buf, 0, th.accent);
         assert!(accent.starts_with('❯'), "{accent:?}");
