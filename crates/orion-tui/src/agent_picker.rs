@@ -21,7 +21,6 @@ pub(crate) const NO_HARNESS_FLASH: &str =
 /// harness**, the action that opens it: the same new agent `⌘N` starts,
 /// with its harness asked first. It names an AGENT, never a session — a
 /// session is an agent or a terminal, and this only ever starts the first.
-/// `ContextMenu::hovered_claude_cloud` gates Cloud mode on it.
 pub(crate) const NEW_AGENT_PICKER_TITLE: &str = "New agent — choose harness";
 
 /// What one kind picker opens with: its title, where its rows launch, and
@@ -117,25 +116,14 @@ pub(crate) fn kind_rows(
 ) -> Vec<MenuItem> {
     rows.iter()
         .map(|row| {
-            // A QUICK PROMPT picker opens on the box as it stands: a box
-            // already set to CLAUDE CLOUD shows its Claude row toggled.
-            let cloud = row.kind == AgentKind::Claude
-                && row.custom.is_none()
-                && quick.is_some_and(|back| back.launch.cloud);
-            let label = label(row.kind, row.custom.as_deref());
             MenuItem::new(
-                if cloud {
-                    format!("{label}{}", crate::app::CLOUD_LABEL)
-                } else {
-                    label
-                },
+                label(row.kind, row.custom.as_deref()),
                 MenuAction::NewAgentOfKind {
                     worktree: worktree.clone(),
                     kind: row.kind,
                     custom: row.custom.clone(),
                     model: None,
                     effort: None,
-                    cloud,
                     pr: pr.cloned(),
                     quick: quick.map(|back| Box::new(back.clone())),
                 },
@@ -301,7 +289,6 @@ mod tests {
                         custom,
                         model: None,
                         effort: None,
-                        cloud: false,
                         pr: Some(pr),
                         quick: None,
                     } if worktree.as_str() == "w1"
@@ -429,7 +416,6 @@ mod tests {
                     linear: None,
                     todo: None,
                     under: None,
-                    cloud: false,
                     mode: orion_core::AgentMode::Edit,
                 },
                 text: "typed so far".into(),
@@ -479,54 +465,6 @@ mod tests {
         });
     }
 
-    /// The QUICK PROMPT's picker offers the NEW AGENT PICKER's cloud
-    /// toggle on its Claude row, and opens with it on for a box already set
-    /// to cloud — but not for a box the DAEMON would refuse a cloud task
-    /// for, one carrying a pull request or an issue.
-    #[test]
-    fn the_quick_prompt_picker_toggles_cloud_where_the_box_can_go() {
-        pinned("{}", || {
-            let worktree = WorktreeId("w1".into());
-            let claude = QuickLaunch::of_kind(
-                crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
-                AgentKind::Claude,
-                None,
-                None,
-                None,
-                &Config::load(),
-            );
-            let open = |app: &mut App, launch: QuickLaunch| -> ContextMenu {
-                let back = QuickReturn {
-                    launch,
-                    text: "typed so far".into(),
-                    from_box: true,
-                    into_pane: None,
-                };
-                open_kind_picker(app, KindPicker::quick_prompt(worktree.clone(), back));
-                match &app.overlay {
-                    Some(Overlay::Menu(menu)) => menu.clone(),
-                    other => panic!("{other:?}"),
-                }
-            };
-            let mut app = App::new();
-
-            let mut menu = open(&mut app, claude.clone());
-            assert_eq!(menu.items[menu.hover].label, "Claude");
-            assert_eq!(menu.hovered_claude_cloud(), Some(false));
-            assert!(menu.toggle_hovered_claude_cloud());
-            assert_eq!(menu.items[menu.hover].label, "Claude · cloud");
-
-            let menu = open(&mut app, claude.clone().with_cloud(true));
-            assert_eq!(menu.items[menu.hover].label, "Claude · cloud");
-            assert_eq!(menu.hovered_claude_cloud(), Some(true));
-
-            let mut menu = open(&mut app, claude.with_pr(Some(PrLaunch::of(&open_pr()))));
-            assert_eq!(menu.hovered_claude_cloud(), None, "no cloud for a PR");
-            assert!(!menu.toggle_hovered_claude_cloud());
-            assert_eq!(menu.items[menu.hover].label, "Claude");
-        });
-    }
-
     /// The NEW AGENT picker opens on its first row whatever
     /// `quick_prompt_kind` says — a pick is one session's — and the QUICK
     /// PROMPT's picker on its own box's harness.
@@ -558,7 +496,6 @@ mod tests {
                     linear: None,
                     todo: None,
                     under: None,
-                    cloud: false,
                     mode: orion_core::AgentMode::Edit,
                 },
                 text: String::new(),

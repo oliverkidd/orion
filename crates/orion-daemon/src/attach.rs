@@ -4,12 +4,12 @@
 //! resync) and across a respawn of the session's PTY (a fresh binding to
 //! the new one).
 //!
-//! The respawn case is what a restart, a WORKTREE RELOCATION
-//! (`orion worktree` → kill + `--resume` at the turn's end) and a cloud
-//! re-entry all do: the registry swaps a new `PtySession` in under the same
-//! `SessionRef`. A forward task bound to the old PTY would go quiet forever
-//! — the client still believes it is attached, so it never asks again — and
-//! the pane looks frozen until the user clicks away and back. So the task
+//! The respawn case is what a restart and a WORKTREE RELOCATION
+//! (`orion worktree` → kill + `--resume` at the turn's end) both do: the
+//! registry swaps a new `PtySession` in under the same `SessionRef`. A
+//! forward task bound to the old PTY would go quiet forever — the client
+//! still believes it is attached, so it never asks again — and the pane
+//! looks frozen until the user clicks away and back. So the task
 //! listens for `Daemon::session_installs` and, when its ref gets a new PTY,
 //! rebinds: the client sees a `Scrollback` (its parser resets, an `exited`
 //! mark clears) and then the new process's output, on the attachment it
@@ -205,14 +205,9 @@ async fn step(
         }
         // Daemon-side only: the progress edge drives the status machine
         // and reaches clients as a StatusChanged, not as session output;
-        // the cloud session id and a title change reach them as the row's
-        // own upsert (the title bytes themselves are in Output).
-        Ok(
-            PtyEvent::Progress { .. }
-            | PtyEvent::Title { .. }
-            | PtyEvent::CloudTitle { .. }
-            | PtyEvent::CloudSession { .. },
-        ) => Step::Continue,
+        // a title change reaches them as the row's own upsert (the title
+        // bytes themselves are in Output).
+        Ok(PtyEvent::Progress { .. } | PtyEvent::Title { .. }) => Step::Continue,
         Err(RecvError::Lagged(_)) => {
             // Catch up from the ring. If the missed bytes are still
             // retained, send them as a plain Output continuation so the

@@ -503,7 +503,7 @@ sends is the dim line along the bottom of the frame.
 |---|---|
 | `⇧Enter`, `⌥Enter`, `^J` | insert a line |
 | `^V` | paste the image on the clipboard (a ⌃⇧⌘4 screenshot, a copied image): it is kept in the DATA DIR's `attachments/` and its path goes in at the caret — [Dropping a screenshot on a prompt box](sessions.md#dropping-a-screenshot-on-a-prompt-box). `⌘V` is still Ghostty's text paste |
-| `Tab` | pick a different harness for this one launch (`→` drills into its model and effort); in Claude's list `Tab` toggles Claude Cloud |
+| `Tab` | pick a different harness for this one launch (`→` drills into its model and effort) |
 | `⇧Tab` | step the mode — edit, plan, ask — among the ones the harness has, as in Claude Code and Cursor; for this box only |
 | `⌘U` (`^X`) | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
 | `⌘P` (`^P`) | the PROJECT PICKER, over the box: aim it at any project on the machine, the text kept. A launch into another project runs in the background, and the footer names where it went |
@@ -537,8 +537,8 @@ branch only origin has into is that branch, too, never a fresh one cut over it.
 The COMMAND PALETTE, the OPEN MENU, a right-click menu, help, the memory modal, the ssh hosts list
 and the project pickers are all lists: type to filter where they filter, `↑`/`↓` move, `Enter` or
 a click picks, `→` / `←` step into and back out of a submenu, and `Esc` or a click outside closes
-the whole thing. Each list's keys are on its bottom border — on a session picker's Claude row
-`Tab cloud off`, on a harness `? settings` — and the COMMAND PALETTE says what the row under its
+the whole thing. Each list's keys are on its bottom border — on a harness `? settings` — and the
+COMMAND PALETTE says what the row under its
 cursor does on the line above them.
 
 In the SETTINGS OVERLAY, `Tab`/`⇧Tab`, `[`/`]` and the digits move between tabs, `↑`/`↓` move down

@@ -108,7 +108,6 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
         Some(HitTarget::PanelBg(focus)) => app.focus = focus,
         Some(
             HitTarget::TerminalPane
-            | HitTarget::CloudSessionLink
             | HitTarget::PrPageTab(_)
             | HitTarget::PrPageRow(_)
             | HitTarget::PrPageFold(_),

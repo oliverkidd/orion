@@ -2092,8 +2092,7 @@ fn draw_list_empty(f: &mut Frame, app: &mut App, area: Rect, what: &str) {
 }
 
 /// The harness (and model) a session runs on, as the PANE's breadcrumb
-/// names it: `claude opus`. A Claude Cloud row says `cloud` — the sandbox
-/// is the harness that matters there — and a CLAUDE ACCOUNT, on a machine
+/// names it: `claude opus` — and a CLAUDE ACCOUNT, on a machine
 /// with more than one, the email it is signed in as: `a@b.co opus`.
 ///
 /// `cfg` is the frame's CONFIG.JSON slot, filled on the first entry that
@@ -2101,9 +2100,6 @@ fn draw_list_empty(f: &mut Frame, app: &mut App, area: Rect, what: &str) {
 /// account's email is the last read's — so a grid of built-ins never
 /// opens it at all.
 fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
-    if a.cloud_session_id.is_some() {
-        return "cloud".into();
-    }
     let short = crate::claude_accounts::short_name(a.kind, a.custom_harness.as_deref());
     let mut out = match short {
         Some(name) => name,
@@ -2124,12 +2120,11 @@ fn harness_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) 
 /// `opus high`, `gpt-5.5 xhigh` — which is what tells one row from the
 /// next. A CLAUDE ACCOUNT's name or email is never the row's to show:
 /// on a line that narrow it pushed the model and effort out of sight (the
-/// ACCOUNT TAG says which account). A session with no model named says its harness in the model's
-/// place (`claude high`), a Claude account's as plain `claude`; a cloud
-/// row names the sandbox in place of the model, as [`harness_line`] does.
+/// ACCOUNT TAG says which account). A session with no model named says
+/// its harness in the model's place (`claude high`), a Claude account's
+/// as plain `claude`.
 fn list_runs_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>) -> String {
     let mut out = match a.model.as_deref().filter(|m| !m.is_empty()) {
-        _ if a.cloud_session_id.is_some() => "cloud".into(),
         Some(model) => model.to_string(),
         None if is_claude_account(a, cfg) => orion_core::AgentKind::Claude.as_str().into(),
         None => harness_line(a, cfg),
@@ -2776,11 +2771,7 @@ fn header_fields(
     let harness = cfg.effective_harness(launch.kind, launch.custom.as_deref());
     // Cut to a fixed width, so a CLAUDE ACCOUNT's long label leaves the
     // row room for the mode, the model and the effort beside it.
-    let mut agent = super::truncate(harness.display_label(), AGENT_W);
-    // A CLAUDE CLOUD box says so on the field that toggles it.
-    if launch.cloud {
-        agent.push_str(crate::app::CLOUD_LABEL);
-    }
+    let agent = super::truncate(harness.display_label(), AGENT_W);
     let model = crate::config::model_row_label(
         launch
             .model
@@ -2939,7 +2930,7 @@ fn launch_project(app: &App, launch: &QuickLaunch) -> String {
 /// TERMINAL is `t`, never this box). The harness, the model, the
 /// effort and an AGENT PRESET are in [`box_header`] under it, beside the
 /// keys that change them; what is left here is what the box is *for* — an
-/// issue, a pull request, a Claude Cloud task.
+/// issue, a pull request, a Linear batch.
 pub(super) fn box_title(launch: &QuickLaunch) -> String {
     let mut head = vec!["New agent".to_string()];
     if let Some(issue) = &launch.issue {
@@ -2950,9 +2941,6 @@ pub(super) fn box_title(launch: &QuickLaunch) -> String {
     }
     if let Some(linear) = &launch.linear {
         head.push(linear.title());
-    }
-    if launch.cloud {
-        head.push("Claude Cloud".into());
     }
     head.join(" · ")
 }
@@ -3472,7 +3460,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: true,
@@ -3828,9 +3815,6 @@ mod tests {
                 assert_eq!(list_runs_line(&a, &mut None), "opus high");
                 a.model = None;
                 assert_eq!(list_runs_line(&a, &mut None), "claude high");
-                a.cloud_session_id = Some("c1".into());
-                a.model = Some("opus".into());
-                assert_eq!(list_runs_line(&a, &mut None), "cloud high");
             })
         });
     }
@@ -4615,7 +4599,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -5078,7 +5061,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
@@ -5146,7 +5128,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: true,
@@ -5238,7 +5219,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: crate::app::now_ms() - 60_000,
                     alive: true,

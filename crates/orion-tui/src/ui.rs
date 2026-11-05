@@ -44,8 +44,8 @@ const TASK_PROMPT_SIZE: (u16, u16) = (80, 14);
 const FOLLOW_UP_PROMPT_SIZE: (u16, u16) = (76, 9);
 
 /// A multi-row task box's keys — the QUICK PROMPT (the New session box)
-/// and its siblings: the follow-up, the comment boxes, a preset's or a
-/// cloud launch's task. One table the box's key arm
+/// and its siblings: the follow-up, the comment boxes, a preset's task.
+/// One table the box's key arm
 /// (`event_loop::handle_overlay_key`) matches and [`task_hints`] and the
 /// QUICK PROMPT's header (`launcher_view::box_header`) spell; the line
 /// break is the line editor's own (`TextInput::takes_newline`), listed so
@@ -615,38 +615,26 @@ pub(crate) mod menu_keys {
     /// The hovered harness's section of Settings → Agents. `s` only
     /// where no filter eats letters.
     pub const SETTINGS: Key = Key::new(&["?", "s"], "settings");
-    /// Claude's launch mode, on a row that can go to the cloud.
-    pub const CLOUD: Key = Key::new(&["tab"], "cloud");
     /// Widen a type-ahead filter.
     pub const WIDEN: Key = Key::new(&["backspace"], "widen");
 
     #[cfg(test)]
     #[test]
     fn every_menu_key_parses() {
-        for key in [CHOOSE, INTO, BACK, SETTINGS, CLOUD, WIDEN] {
+        for key in [CHOOSE, INTO, BACK, SETTINGS, WIDEN] {
             assert!(key.parses(), "{:?}", key.chords);
         }
     }
 }
 
 /// The keys on a menu's bottom border — the same for every menu, with
-/// the extras the hovered row has: `Tab cloud on` on a Claude row that
-/// can go to the cloud, `? settings` on a harness, `→ more` on a row
+/// the extras the hovered row has: `? settings` on a harness, `→ more` on a row
 /// with a submenu, `← back` inside one, `⌫ widen` with a filter typed.
 /// Esc closes the whole menu — or, for a picker opened from the QUICK
 /// PROMPT, goes back to the box.
 pub(crate) fn menu_hints(menu: &crate::app::ContextMenu) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     let mut hints = vec![menu_keys::CHOOSE.hint().kept()];
-    // The launch mode is the one thing on the row Tab changes, and the
-    // border is the only place it says so: kept however narrow.
-    if let Some(on) = menu.hovered_claude_cloud() {
-        hints.push(
-            menu_keys::CLOUD
-                .hint_as(if on { "cloud on" } else { "cloud off" })
-                .kept(),
-        );
-    }
     if menu
         .items
         .get(menu.hover)
@@ -978,18 +966,11 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 (branch.width > 0).then(|| (branch.x.saturating_sub(2), branch.y + 1))
             });
             // A type-ahead submenu shows its query in the title: `Cursor
-            // model ⌕ opus`, the bare ⌕ while nothing is typed yet. A
-            // Claude list `Tab` sent to the cloud says so there as well —
-            // `Claude model · cloud ⌕` — its rows being model names.
-            let cloud = if menu.lists_claude_cloud() {
-                crate::app::CLOUD_LABEL
-            } else {
-                ""
-            };
+            // model ⌕ opus`, the bare ⌕ while nothing is typed yet.
             let title_text = menu.title.as_deref().map(|t| match &menu.filter {
-                Some(f) if !f.query.is_empty() => format!("{t}{cloud} ⌕ {}", f.query),
-                Some(_) => format!("{t}{cloud} ⌕"),
-                None => format!("{t}{cloud}"),
+                Some(f) if !f.query.is_empty() => format!("{t} ⌕ {}", f.query),
+                Some(_) => format!("{t} ⌕"),
+                None => t.to_string(),
             });
             let title_width = title_text
                 .as_deref()
@@ -1013,10 +994,10 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             // The modal is as wide as its rows or its title, whichever is
             // longer — and at least as wide as its first verb and its way
             // out, the keys on its bottom border (`menu_hints`). A hint
-            // that outgrows the rows — the pickers' `Tab cloud off · ?
-            // settings` — drops off the border's end rather than padding
-            // the modal with empty space, and hovering a row with more
-            // keys (the Claude row's Tab) never resizes it. Command-palette
+            // that outgrows the rows — the pickers' `→ more · ? settings`
+            // — drops off the border's end rather than padding the modal
+            // with empty space, and hovering a row with more keys never
+            // resizes it. Command-palette
             // rows pin their keys in a right-aligned hint column, and say
             // what they do on the EXPLANATION rows above the border.
             let hints = menu_hints(&menu);
@@ -4251,95 +4232,6 @@ fn draw_issue_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     f.render_widget(Paragraph::new(shown), inner);
 }
 
-/// The CLOUD SESSION PANEL: what the pane shows for a Claude Cloud row.
-/// The agent works in a cloud sandbox orion has no terminal into — the
-/// `claude --cloud <task>` create prints the session id and exits — so
-/// rather than a dead pane ending in "Resume with: …" the row gets a
-/// short explanation and the session's link, underlined and clickable,
-/// with the keys that open it. Nothing here is a PTY: no cursor, no
-/// scrollback, nothing to lock the keyboard into.
-fn draw_cloud_session(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
-    let th = app.theme;
-    let Some(cloud) = app.previewed_cloud() else {
-        return;
-    };
-    let left = vec![
-        Span::styled(" · ".to_string(), Style::default().fg(th.dim)),
-        Span::styled(cloud.name.clone(), Style::default().fg(th.muted)),
-    ];
-    let inner = titled_frame(f, area, "CLAUDE CLOUD", left, Vec::new(), focused, th);
-    let inner = Rect {
-        x: inner.x + 1,
-        width: inner.width.saturating_sub(1),
-        ..inner
-    };
-    app.term_area = inner;
-    // Nothing in this pane is a PTY, so the link/file scanners have nothing
-    // to find — clear them or ⌥click would still hit last frame's hits.
-    app.term_links = Vec::new();
-    app.term_file_links = Vec::new();
-
-    let w = (inner.width as usize).saturating_sub(2).max(20);
-    let prose = |text: &str, style: Style| -> Vec<Line<'static>> {
-        crate::pr_preview::wrap(text, w)
-            .into_iter()
-            .map(|t| Line::from(Span::styled(format!(" {t}"), style)))
-            .collect()
-    };
-    let mut lines: Vec<Line<'static>> = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" ◆ ", Style::default().fg(th.accent)),
-            Span::styled(
-                "This session runs in Claude Cloud",
-                Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(""),
-    ];
-    lines.extend(prose(
-        "The agent works in a cloud sandbox, not in a terminal here. Its turns, its questions and its diff are on the session's page:",
-        Style::default().fg(th.muted),
-    ));
-    lines.push(Line::from(""));
-    // The link: folded at the pane edge rather than clipped — a link with
-    // its tail cut off is a link that cannot be trusted — every row of it
-    // a hit target, registered ahead of the pane so a click on it wins.
-    let link_style = Style::default()
-        .fg(th.accent)
-        .add_modifier(Modifier::UNDERLINED);
-    let fold = (inner.width as usize).saturating_sub(1).max(1);
-    let url_chars: Vec<char> = cloud.url.chars().collect();
-    for chunk in url_chars.chunks(fold) {
-        let row = lines.len() as u16;
-        let text: String = chunk.iter().collect();
-        if row < inner.height {
-            let width = (chunk.len() as u16 + 1).min(inner.width);
-            let link = Rect::new(inner.x, inner.y + row, width, 1);
-            app.hits.push((link, HitTarget::CloudSessionLink));
-        }
-        lines.push(Line::from(Span::styled(format!(" {text}"), link_style)));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(" {}", key_hint(app, Action::Activate)),
-            crate::hints::key_style(th),
-        ),
-        Span::styled(" or click: open in browser", crate::hints::does_style(th)),
-        Span::styled("   ·   ", Style::default().fg(th.dim)),
-        Span::styled("right-click", crate::hints::key_style(th)),
-        Span::styled(": send a message", crate::hints::does_style(th)),
-    ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        format!(" {}", cloud.cloud_session_id),
-        Style::default().fg(th.dim),
-    )));
-    app.hits.push((inner, HitTarget::TerminalPane));
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
 /// Borderless terminal frame: a header row (`TERMINAL · session` plus a
 /// right-aligned state tag), a thin rule, then the content area. The
 /// header carries the focus signal.
@@ -4445,13 +4337,6 @@ fn draw_terminal(f: &mut Frame, app: &mut App, area: Rect) {
     // reads a pull request.
     if app.previewed_issue().is_some() {
         draw_issue_preview(f, app, area, focused);
-        return;
-    }
-    // A Claude Cloud row: the agent runs in the cloud sandbox, so the pane
-    // says where and links there instead of showing a PTY orion would
-    // have to keep teleporting to stay current.
-    if app.previewed_cloud().is_some() {
-        draw_cloud_session(f, app, area, focused);
         return;
     }
 
@@ -5869,10 +5754,9 @@ mod tests {
             linear: None,
             todo: None,
             under: None,
-            cloud: false,
             mode: orion_core::AgentMode::Edit,
         });
-        let cloud = PromptKind::CloudMessage {
+        let follow_up = PromptKind::FollowUp {
             id: orion_core::AgentId::from("a".to_string()),
         };
         let comment = PromptKind::IssueComment {
@@ -5897,7 +5781,7 @@ mod tests {
             crate::hints::text(&task_hints(kind), width.saturating_sub(6))
         };
         for width in 20..=TASK_PROMPT_SIZE.0 as usize {
-            for kind in [&quick, &cloud, &comment, &pr_comment] {
+            for kind in [&quick, &follow_up, &comment, &pr_comment] {
                 let hint = text(kind, width);
                 assert!(
                     hint.chars().count() + 6 <= width.max(26),
@@ -5914,7 +5798,7 @@ mod tests {
         for chord in ["^P", "^T", "^/", "^Y", "^N", "Tab agent"] {
             assert!(!full.contains(chord), "{full} repeats {chord}");
         }
-        assert!(!text(&cloud, 80).contains("Tab"));
+        assert!(!text(&follow_up, 80).contains("Tab"));
         let post = text(&pr_comment, 80);
         assert!(
             post.starts_with("Enter post") && !post.contains("Tab"),

@@ -726,9 +726,7 @@ pub(super) fn open_issue(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// shifted key opens it on the card. Nothing of the card's conversation
 /// is copied: the new session is a fresh CLI on the same footing.
 ///
-/// A CLOUD card comes up as a CLOUD box on its model and effort
-/// (`QuickLaunch::with_cloud`), since a cloud launch is nothing without
-/// its task. A PR SESSION's pull-request scope is the DAEMON's own and
+/// A PR SESSION's pull-request scope is the DAEMON's own and
 /// never on the card, so its box is an ordinary one into the same
 /// checkout.
 ///
@@ -777,8 +775,7 @@ pub(super) fn duplicate_agent(app: &mut App, id: AgentId) {
         agent.effort,
         &crate::config::Config::load(),
     )
-    .with_issue(issue)
-    .with_cloud(agent.cloud_session_id.is_some());
+    .with_issue(issue);
     crate::quick_prompt::reopen(app, launch, "");
 }
 
@@ -806,7 +803,7 @@ pub(super) fn continue_items(
 /// PALETTE: the accounts the Claude session under the cursor can be
 /// carried onto, as a small menu over the grid — the choice is the
 /// confirmation, since going ends the CLI running there. A row with
-/// nowhere to go — a terminal, a Cloud or archived session, one off
+/// nowhere to go — a terminal, an archived session, one off
 /// Claude's dialect — opens nothing; with no second account set up, the
 /// footer says where to add one.
 ///
@@ -817,9 +814,8 @@ pub(super) fn continue_on(app: &mut App) {
     let Some(agent) = app.selected_session().filter(|_| aimed) else {
         return;
     };
-    // A Claude Cloud session runs on the account that launched it, and
-    // an archived one has no CLI to carry over.
-    if agent.cloud_session_id.is_some() || agent.archived {
+    // An archived session has no CLI to carry over.
+    if agent.archived {
         return;
     }
     let cfg = crate::config::Config::load();
@@ -2151,8 +2147,8 @@ pub(super) fn enter_pane(app: &mut App, out: &mut Vec<ClientRequest>) {
                 return;
             }
             jump_to_target(app, PaletteTarget::Session(id), Landing::Attach, out);
-            // A Cloud row's Enter is its browser page, not a PTY: the jump
-            // has already opened it and there is nothing to type into.
+            // With no terminal behind the pane there is nothing to type
+            // into.
             if app.term.is_some() {
                 enter_terminal_pane(app, out);
             }
@@ -2226,7 +2222,7 @@ pub(super) fn pane_key(
         crate::key_combo::note(app, &[chord], Some("Open"));
         if let Some(url) = app.reading_url() {
             super::open_link(app, &url, out);
-        } else if !super::activate::cloud_link(app, out) {
+        } else {
             enter_terminal_pane(app, out);
         }
         return true;
@@ -2304,8 +2300,8 @@ pub(super) fn open_session(app: &mut App, out: &mut Vec<ClientRequest>) {
             }
             take_aim(app);
             jump_to_target(app, PaletteTarget::Session(id), Landing::Attach, out);
-            // A Cloud row's Enter is its browser page, not a PTY: the jump
-            // has already opened it and there is nothing to full-screen.
+            // With no terminal behind the pane there is nothing to
+            // full-screen.
             if app.term.is_some() {
                 super::zoom_pane(app, out);
             }
@@ -2440,8 +2436,6 @@ pub(super) fn open_model_picker(app: &mut App, back: QuickReturn) {
             custom,
             model: None,
             effort: None,
-            // A model picked for a CLAUDE CLOUD box keeps it one.
-            cloud: back.launch.cloud,
             pr,
             quick: Some(Box::new(back)),
         },
@@ -2477,7 +2471,6 @@ pub(super) fn open_effort_picker(app: &mut App, back: QuickReturn) {
             custom,
             model: Some(model),
             effort: None,
-            cloud: back.launch.cloud,
             pr: back.launch.pr.clone(),
             quick: Some(Box::new(back)),
         },
@@ -2869,7 +2862,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -2910,7 +2902,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -2963,7 +2954,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
@@ -5214,16 +5204,16 @@ mod tests {
     /// A row that takes no follow-up opens no box over it — the rule the
     /// SESSIONS PANEL's own composer follows (`App::takes_follow_up`).
     #[test]
-    fn a_cloud_card_opens_no_follow_up_box() {
+    fn an_archived_card_opens_no_follow_up_box() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
             let id = app.selected_session().map(|a| a.id.clone()).unwrap();
             if let Some(a) = app.tree.agents.iter_mut().find(|a| a.id == id) {
-                a.cloud_session_id = Some("cs-1".into());
+                a.archived = true;
             }
             key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
-            assert!(app.overlay.is_none(), "no box over a cloud session");
+            assert!(app.overlay.is_none(), "no box over an archived session");
             assert_eq!(app.flash, None);
         });
     }
@@ -8667,7 +8657,6 @@ mod tests {
                         model: None,
                         effort: None,
                         session_id: None,
-                        cloud_session_id: None,
                         sort_order: 0,
                         status_changed_at: crate::app::now_ms(),
                         alive: true,
@@ -8829,59 +8818,6 @@ mod tests {
                 assert!(text.contains(&format!("effort {want} ^Y")), "{text}");
                 assert!(!text.contains("effort: "), "no footer message: {text}");
             }
-        });
-    }
-
-    /// `Tab` in the `^/` model list is the pickers' Claude Cloud toggle,
-    /// and the footer names it there as it does on the picker's Claude
-    /// row. It is the launch's, not one row's: the rows keep their model
-    /// names (the title says cloud), a typed filter does not undo it, and
-    /// whichever model is picked hands back a cloud box.
-    #[test]
-    fn tab_in_the_model_list_toggles_cloud_and_the_footer_names_it() {
-        with_default_config(|| {
-            let mut app = two_sessions();
-            draw(&mut app);
-            key(&mut app, KeyCode::Char('n'), KeyModifiers::CONTROL);
-            type_text(&mut app, "hi");
-            key(&mut app, KeyCode::Char('/'), KeyModifiers::CONTROL);
-            let labels = |app: &App| -> Vec<String> {
-                match &app.overlay {
-                    Some(Overlay::Menu(menu)) => {
-                        menu.items.iter().map(|i| i.label.clone()).collect()
-                    }
-                    other => panic!("expected the model list, got {other:?}"),
-                }
-            };
-            let models = labels(&app);
-            let text = buffer_text(&draw(&mut app));
-            assert!(text.contains("Tab cloud off"), "the footer:\n{text}");
-            assert!(text.contains("Claude model ⌕"), "{text}");
-
-            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            assert_eq!(labels(&app), models, "the rows are still the models");
-            let text = buffer_text(&draw(&mut app));
-            assert!(text.contains("Tab cloud on"), "the footer:\n{text}");
-            assert!(text.contains("Claude model · cloud ⌕"), "{text}");
-
-            // Narrowing rebuilds the rows; the toggle rides along.
-            type_text(&mut app, "opus");
-            let text = buffer_text(&draw(&mut app));
-            assert!(text.contains("Tab cloud on"), "still on:\n{text}");
-            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-            let (launch, text) = launch(&app);
-            assert_eq!(text, "hi");
-            assert!(launch.cloud, "the box came back a cloud one");
-            assert_eq!(launch.model.as_deref(), Some("opus"));
-
-            // The list opens as the box stands, and Tab takes it back.
-            key(&mut app, KeyCode::Char('/'), KeyModifiers::CONTROL);
-            let text = buffer_text(&draw(&mut app));
-            assert!(text.contains("Tab cloud on"), "opens as left:\n{text}");
-            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-            let (launch, _) = self::launch(&app);
-            assert!(!launch.cloud, "and Tab again is a local launch");
         });
     }
 
@@ -9658,7 +9594,6 @@ mod tests {
                 Some((ISSUE_15, 15))
             );
             assert!(launch.preset.is_none());
-            assert!(!launch.cloud);
 
             let mut by_menu = card_with_settings();
             let at = duplicate_menu_row(&mut by_menu);
@@ -9680,7 +9615,6 @@ mod tests {
                     model,
                     effort,
                     auto_title,
-                    cloud_prompt,
                     starting_prompt,
                     issue_url,
                     ..
@@ -9691,7 +9625,6 @@ mod tests {
                     assert_eq!(model.as_deref(), Some("gpt-5"));
                     assert_eq!(effort.as_deref(), Some("high"));
                     assert!(auto_title, "the row titles itself on its first prompt");
-                    assert_eq!(cloud_prompt, &None);
                     assert_eq!(starting_prompt.as_deref(), Some("tidy the nav"));
                     assert_eq!(issue_url.as_deref(), Some(ISSUE_15));
                 }
@@ -9857,39 +9790,6 @@ mod tests {
             );
             assert_eq!(app.pending_feedback.len(), 1);
             assert_eq!(app.pending_feedback[0].limit, Some("limit reached"));
-        });
-    }
-
-    /// A CLOUD card has no local CLI to start again: `⇧P` on one opens
-    /// the box as a CLOUD one on the card's checkout, model and effort,
-    /// its Enter the cloud task.
-    #[test]
-    fn shift_p_on_a_cloud_card_opens_a_cloud_box_on_its_settings() {
-        with_default_config(|| {
-            let mut app = two_sessions();
-            draw(&mut app);
-            let mut agent = app.selected_session().expect("a card under the cursor");
-            agent.cloud_session_id = Some("session_01".into());
-            agent.model = Some("opus".into());
-            agent.effort = Some("high".into());
-            let (id, worktree) = (agent.id.clone(), agent.worktree_id.clone());
-            hse(
-                &mut app,
-                ServerEvent::EntityUpserted {
-                    entity: Entity::Agent(agent),
-                },
-            );
-            draw(&mut app);
-            assert_eq!(app.selected_session().map(|a| a.id), Some(id));
-            let sent =
-                crate::event_loop::run_action(&mut app, crate::keymap::Action::DuplicateSession);
-            assert!(sent.is_empty(), "{sent:?}");
-            let launch = quick_box(&app);
-            assert!(launch.cloud, "{launch:?}");
-            assert_eq!(launch.target, QuickTarget::Worktree(worktree));
-            assert_eq!(launch.kind, AgentKind::Claude);
-            assert_eq!(launch.model.as_deref(), Some("opus"));
-            assert_eq!(launch.effort.as_deref(), Some("high"));
         });
     }
 
@@ -11476,7 +11376,6 @@ mod tests {
                         model: None,
                         effort: None,
                         session_id: None,
-                        cloud_session_id: None,
                         sort_order: 0,
                         status_changed_at: 0,
                         alive: false,

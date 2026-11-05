@@ -115,15 +115,6 @@ impl Mention {
     }
 }
 
-/// Does `kind`'s text reach an agent that can open a file in its checkout?
-fn takes_mentions(kind: &PromptKind) -> bool {
-    match kind {
-        // A cloud box's task runs in the sandbox, not this checkout.
-        PromptKind::QuickPrompt(launch) => !launch.cloud,
-        other => other.reaches_local_agent(),
-    }
-}
-
 /// The checkout an `@` in `kind` lists: where the launch or the session
 /// runs. A fresh worktree does not exist yet, so its project's root
 /// checkout — the base it is cut from — stands in for it.
@@ -161,7 +152,7 @@ pub fn sync(app: &mut App) {
     let Some(Overlay::Prompt(prompt)) = &app.overlay else {
         return;
     };
-    if !takes_mentions(&prompt.kind) {
+    if !prompt.kind.reaches_local_agent() {
         return;
     }
     let token = token_at_caret(&prompt.input);

@@ -1703,8 +1703,8 @@ pub struct Config {
     /// fired from, so firing one off does not interrupt what you were
     /// doing — and where the cursor goes is [`Config::follow_new_session`]'s
     /// to say. Only the QUICK PROMPT reads this — every other launch
-    /// (the NEW AGENT PICKER, an AGENT PRESET, a PR SESSION, a Cloud task)
-    /// still enters the pane.
+    /// (the NEW AGENT PICKER, an AGENT PRESET, a PR SESSION) still enters
+    /// the pane.
     pub quick_prompt_focus: bool,
     /// FOLLOW NEW SESSION: a QUICK PROMPT launch lands the cursor on the
     /// new session's card — the grid scrolled to it, the pane showing it,
@@ -2447,12 +2447,12 @@ impl Config {
     /// another account: `(registry id, label)` for every other enabled
     /// Claude-dialect harness that resumes and keeps its sessions where
     /// orion can see them ([`orion_core::harness::continue_targets`]), in
-    /// registry order. Empty for a session off Claude's dialect, a Cloud
-    /// row and an archived one — none of which has anything to move. An
+    /// registry order. Empty for a session off Claude's dialect and an
+    /// archived one — neither of which has anything to move. An
     /// account signed in as the session's own email is listed as what it
     /// is — `Claude (a@b.co) · same account`, whose limit is this one's.
     pub fn continue_targets(&self, agent: &orion_core::Agent) -> Vec<(String, String)> {
-        if agent.cloud_session_id.is_some() || agent.archived {
+        if agent.archived {
             return Vec::new();
         }
         let from = self.effective_harness(agent.kind, agent.custom_harness.as_deref());
@@ -5662,7 +5662,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: Some("sid".into()),
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
@@ -5681,11 +5680,11 @@ mod tests {
         assert!(loaded
             .continue_targets(&agent(AgentKind::Codex, None))
             .is_empty());
-        let cloud = orion_core::Agent {
-            cloud_session_id: Some("session_01".into()),
+        let archived = orion_core::Agent {
+            archived: true,
             ..agent(AgentKind::Claude, None)
         };
-        assert!(loaded.continue_targets(&cloud).is_empty());
+        assert!(loaded.continue_targets(&archived).is_empty());
     }
 
     #[test]

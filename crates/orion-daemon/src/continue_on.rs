@@ -32,7 +32,7 @@ use orion_core::harness::HarnessDescriptor;
 use orion_core::{AgentId, AgentKind, AgentStatus, SessionRef};
 
 use crate::pty::{PtyEvent, DEFAULT_COLS, DEFAULT_ROWS};
-use crate::registry::{harness_registry, resolve_harness, Daemon, CLOUD_ROW_NO_LOCAL_SESSION};
+use crate::registry::{harness_registry, resolve_harness, Daemon};
 
 /// Where `session_id`'s transcript sits under any of `roots` (projects
 /// dirs), in any cwd slug: the root it was found under, and the file. An
@@ -180,15 +180,12 @@ fn not_a_target(target: &HarnessDescriptor) -> String {
 
 impl Daemon {
     /// **Continue on** another account — see the module docs. Refused, with the
-    /// footer's reason and before anything stops, for a Cloud row, an
-    /// archived one, a harness off Claude's dialect on either side, a
-    /// session with no conversation or no transcript to move, and a
-    /// destination that holds something the move would lose.
+    /// footer's reason and before anything stops, for an archived row, a
+    /// harness off Claude's dialect on either side, a session with no
+    /// conversation or no transcript to move, and a destination that holds
+    /// something the move would lose.
     pub fn continue_agent_on(self: &Arc<Self>, id: &AgentId, target_id: &str) -> Result<()> {
         let agent = self.store.get_agent(id)?.context("agent not found")?;
-        if agent.cloud_session_id.is_some() {
-            bail!("{CLOUD_ROW_NO_LOCAL_SESSION}");
-        }
         if agent.archived {
             bail!("agent is archived — unarchive it first");
         }

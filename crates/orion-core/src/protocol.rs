@@ -122,16 +122,12 @@ pub enum ClientRequest {
         /// the session eligible for one agent-driven auto-title (the CLI
         /// runs `orion rename` on its first prompt).
         auto_title: bool,
-        /// One-shot task for a fresh `claude --cloud <task>` launch. This is
-        /// deliberately request-only: prompts are not persisted with Agent.
-        #[serde(default)]
-        cloud_prompt: Option<String>,
         /// The first turn handed to the CLI as its positional prompt
         /// (`claude "<text>"`, `codex "<text>"`, `cursor-agent "<text>"`) —
         /// what an AGENT PRESET launch composes from its prefix, the task
-        /// and its postfix. Request-only like `cloud_prompt`: never
-        /// persisted, so a RESUME can never replay it. Skips PREWARM POOL
-        /// adoption, since a spare booted bare cannot be handed one.
+        /// and its postfix. Request-only: never persisted, so a RESUME can
+        /// never replay it. Skips PREWARM POOL adoption, since a spare
+        /// booted bare cannot be handed one.
         #[serde(default)]
         starting_prompt: Option<String>,
         /// The GitHub issue this session was created for — an ISSUE
@@ -319,31 +315,21 @@ pub enum ClientRequest {
     /// place under `harness`'s — never over a different file, never
     /// deleting the source — switches the row to `harness` (name, worktree,
     /// and the model and effort `harness` offers, kept), and resumes the
-    /// stored session id there. Refused for a Cloud row, an archived one,
-    /// a session with no transcript to move, and a `harness` (registry id)
-    /// that cannot take one ([`crate::harness::HarnessDescriptor::takes_claude_sessions`]).
+    /// stored session id there. Refused for an archived row, a session
+    /// with no transcript to move, and a `harness` (registry id) that
+    /// cannot take one ([`crate::harness::HarnessDescriptor::takes_claude_sessions`]).
     /// Answered with `Ack`; the row reaches every client as an upsert.
     ContinueAgentOn {
         req_id: u64,
         id: AgentId,
         harness: String,
     },
-    /// Queue a message on the Claude Cloud session a row launched
-    /// (`claude -p <message> --cloud <id>`). Fire-and-forget by nature: the
-    /// CLI acknowledges the send and returns, and the reply only ever
-    /// appears in the session's page in the browser. Rejected for rows
-    /// without a `cloud_session_id`, and checked like the launch task.
-    SendCloudMessage {
-        req_id: u64,
-        id: AgentId,
-        message: String,
-    },
     /// `text` as a local agent's next turn: typed down its PTY and
     /// submitted when its CLI is up; otherwise the CLI is booted (resuming
     /// the stored session) with `text` as the first prompt it submits on
     /// its own, at `cols`×`rows`. Either way the turn is sent — a session
-    /// the IDLE REAPER put down never swallows it. Refused for archived and
-    /// Cloud rows. Answered with `Ack`.
+    /// the IDLE REAPER put down never swallows it. Refused for archived
+    /// rows. Answered with `Ack`.
     SendTurn {
         req_id: u64,
         id: AgentId,

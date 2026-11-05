@@ -1,4 +1,3 @@
-pub mod cloud;
 pub mod cursor;
 pub use orion_core::kitty;
 mod osc;
@@ -7,7 +6,6 @@ pub mod ring;
 pub mod title;
 
 use anyhow::{Context, Result};
-use cloud::CloudScanner;
 use cursor::CursorTracker;
 use orion_core::SessionRef;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -189,17 +187,6 @@ pub enum PtyEvent {
     Title {
         title: String,
     },
-    /// The child printed the title Claude Cloud gave the session it
-    /// created — the line before the id. Only scanned for on `--cloud`
-    /// launches (`arm_cloud_scan`).
-    CloudTitle {
-        title: String,
-    },
-    /// The child printed the id of the Claude Cloud session it created.
-    /// Only scanned for on `--cloud` launches (`arm_cloud_scan`).
-    CloudSession {
-        id: String,
-    },
 }
 
 enum ReaderMsg {
@@ -227,9 +214,6 @@ pub struct PtySession {
     progress: Mutex<ProgressScanner>,
     /// OSC 0/2 window-title tracking, likewise fed from live output.
     title: Mutex<title::TitleScanner>,
-    /// Claude Cloud session id scanner; `None` until a `--cloud` launch
-    /// arms it, so ordinary sessions pay nothing.
-    cloud: Mutex<Option<CloudScanner>>,
     /// Screen for answering cursor position reports; `None` until the child
     /// first asks, so sessions that never do parse nothing.
     cursor: Mutex<Option<CursorTracker>>,
@@ -253,11 +237,6 @@ pub struct SpawnSpec {
 /// that is a prompt: orion puts no cap of its own on one, so this is where
 /// a prompt too long to launch is caught.
 pub(crate) const ARGV_TOO_LONG: &str = "the prompt is too long for this system's command line";
-
-/// Whether `err` is the OS refusing an exec for its argv and environment.
-pub(crate) fn is_argv_too_long(err: &std::io::Error) -> bool {
-    err.raw_os_error() == Some(nix::errno::Errno::E2BIG as i32)
-}
 
 /// Whether `cmd`'s exec fits the OS's ceiling on a new process's argv and
 /// environment: `ARG_MAX` over every string, its NUL and its pointer, and
@@ -346,7 +325,6 @@ impl PtySession {
             kitty: Mutex::new(kitty::KittyScanner::new()),
             progress: Mutex::new(ProgressScanner::new()),
             title: Mutex::new(title::TitleScanner::new()),
-            cloud: Mutex::new(None),
             cursor: Mutex::new(None),
         });
 
@@ -516,21 +494,6 @@ impl PtySession {
         self.title.lock().unwrap().title().map(str::to_string)
     }
 
-    /// Start watching this child's output for the Claude Cloud session id
-    /// it prints on creation (see `pty::cloud`). Output that already landed
-    /// in the ring is scanned first, so arming a moment after spawn cannot
-    /// miss a fast-printing child; the sighting then arrives as
-    /// `PtyEvent::CloudSession`.
-    pub fn arm_cloud_scan(&self) {
-        let mut scanner = CloudScanner::new();
-        let (_, replay) = self.snapshot(None);
-        let sightings = scanner.feed(&replay);
-        *self.cloud.lock().unwrap() = Some(scanner);
-        for sighting in sightings {
-            let _ = self.events.send(sighting.into());
-        }
-    }
-
     /// The bytes owed to the child for one chunk's queries, in query order.
     /// A cursor report reads the screen as it stood just past its query, so
     /// the tracker takes `chunk` up to each one in turn, then the rest: once
@@ -649,10 +612,6 @@ async fn pump(session: Arc<PtySession>, mut rx: mpsc::Receiver<ReaderMsg>) {
         }
         let busy_edge = session.progress.lock().unwrap().feed(pending);
         let title_change = session.title.lock().unwrap().feed(pending);
-        let cloud_sightings = match session.cloud.lock().unwrap().as_mut() {
-            Some(scanner) => scanner.feed(pending),
-            None => Vec::new(),
-        };
         let seq = session.ring.lock().unwrap().append(pending);
         let _ = session.events.send(PtyEvent::Output {
             seq,
@@ -669,10 +628,6 @@ async fn pump(session: Arc<PtySession>, mut rx: mpsc::Receiver<ReaderMsg>) {
         if let Some(title) = title_change {
             tracing::debug!(session = ?session.sref, %title, "child window title changed");
             let _ = session.events.send(PtyEvent::Title { title });
-        }
-        for sighting in cloud_sightings {
-            tracing::info!(session = ?session.sref, ?sighting, "cloud sighting in child output");
-            let _ = session.events.send(sighting.into());
         }
     };
 

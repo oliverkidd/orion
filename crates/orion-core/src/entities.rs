@@ -217,15 +217,6 @@ pub struct Agent {
     pub effort: Option<String>,
     /// CLI session id used for resume (claude, codex, or cursor, per `kind`).
     pub session_id: Option<String>,
-    /// The Claude Cloud session this row launched (`claude --cloud <task>`
-    /// prints the id as it creates one). Only cloud rows have it. The
-    /// agent runs in the cloud sandbox, never in a local PTY: the row's
-    /// pane is an information panel linking to the session in the browser
-    /// (see [`Agent::cloud_session_url`]), and the daemon refuses to boot a
-    /// local CLI for it — a restart or an attach would only start a bare
-    /// `claude` with no link to the work.
-    #[serde(default)]
-    pub cloud_session_id: Option<String>,
     /// The GitHub issue this session was started from — an ISSUE SESSION,
     /// launched out of the ISSUES MODAL — or None. The daemon folds it into
     /// every spawn's context; the TUI reads it for `⇧I`, which opens the
@@ -336,13 +327,6 @@ impl Agent {
             .filter(|_| self.status == AgentStatus::NeedsFeedback && !self.archived)
     }
 
-    /// Where this row's Claude Cloud session lives in the browser, when it
-    /// has one — the page the CLI printed as `View:` on creation, without
-    /// its tracking query.
-    pub fn cloud_session_url(&self) -> Option<String> {
-        self.cloud_session_id.as_deref().map(cloud_session_url)
-    }
-
     /// The number of the GitHub issue this ISSUE SESSION was started from,
     /// read off `issue_url` (`…/issues/15`, with or without a trailing
     /// path) — None for every other row.
@@ -357,11 +341,6 @@ pub fn url_number_after(url: &str, marker: &str) -> Option<u64> {
     let (_, tail) = url.split_once(marker)?;
     let digits = tail.split(['/', '?', '#']).next().unwrap_or_default();
     digits.parse::<u64>().ok().filter(|n| *n > 0)
-}
-
-/// The claude.ai page of a Claude Cloud session, from its `session_…` id.
-pub fn cloud_session_url(cloud_session_id: &str) -> String {
-    format!("https://claude.ai/code/{cloud_session_id}")
 }
 
 /// How many prompts the daemon keeps per session: the most a TUI can be

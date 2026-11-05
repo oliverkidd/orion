@@ -391,7 +391,7 @@ fn into_pane(app: &App, bands: &[crate::launcher::Band]) -> Option<Hint> {
         "focus PR"
     } else if app.previewed_issue().is_some() {
         "focus issue"
-    } else if app.term.is_some() || app.previewed_cloud().is_some() {
+    } else if app.term.is_some() {
         "focus pane"
     } else {
         return None;
@@ -482,10 +482,6 @@ fn pane_hints(app: &App) -> Vec<Option<Hint>> {
     }
     // Unlocked in the pane: reading it.
     let mut list = vec![Some(pane_keys::BACK.hint().kept())];
-    if app.previewed_cloud().is_some() && app.reading_url().is_none() {
-        list.push(act(km, Action::Activate, "open in browser"));
-        return list;
-    }
     if app.previewed_pr().is_some() {
         // The PULL REQUEST PAGE: its tabs, then what Enter and ↑/↓ do on
         // the one showing — open and walk its rows, or open the pull

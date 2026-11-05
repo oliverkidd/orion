@@ -268,17 +268,6 @@ pub(super) fn worktrees_row(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
 }
 
-/// The CLOUD SESSION PANEL's link — Enter with the pane focused, a click on
-/// the URL: the session's page opens in the browser. False when the pane
-/// is not showing a cloud session, so Enter can mean the pane's own thing.
-pub(super) fn cloud_link(app: &mut App, out: &mut Vec<ClientRequest>) -> bool {
-    let Some(url) = app.previewed_cloud().map(|cloud| cloud.url.clone()) else {
-        return false;
-    };
-    open_link(app, &url, out);
-    true
-}
-
 /// Attach `sref` and step into it — Enter on a session row, a double-click
 /// on one, **Attach** in its CONTEXT MENU: the pane shows the session, takes
 /// FOCUS and the input lock.

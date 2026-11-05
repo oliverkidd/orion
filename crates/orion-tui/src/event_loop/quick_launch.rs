@@ -25,7 +25,7 @@ use crate::quick_prompt::{QuickLaunch, QuickTarget};
 use orion_core::{AgentId, ClientRequest, WorktreeId};
 
 /// Enter in the box, with `text` already sized — and empty as often as
-/// not (`QuickLaunch::launches_empty`): sent as it is, a box an AGENT
+/// not: sent as it is, a box an AGENT
 /// PRESET is on launches on the prefix and postfix alone, any other
 /// starts the CLI with no first prompt.
 pub(super) fn submit(
@@ -245,17 +245,11 @@ pub(super) fn draft(
     );
     AgentLaunchDraft {
         custom: launch.custom.clone(),
-        // A CLAUDE CLOUD box sends the text as the cloud task instead —
-        // `claude --cloud <task>` — and no STARTING PROMPT beside it, which
-        // the DAEMON refuses (`QuickLaunch::with_cloud` keeps a preset, an
-        // issue and a PR off a cloud box).
-        cloud_prompt: launch.cloud.then(|| text.clone()),
         // Sized in `submit_prompt`, with the task — composing cannot fail.
-        // An empty box (`launches_empty`) sends a preset's prefix + postfix
-        // alone; with nothing to wrap it either, there is no first prompt,
-        // the CLI's own input is it.
-        starting_prompt: Some(launch.compose(&text))
-            .filter(|prompt| !launch.cloud && !prompt.is_empty()),
+        // An empty box sends a preset's prefix + postfix alone; with
+        // nothing to wrap it either, there is no first prompt, the CLI's
+        // own input is it.
+        starting_prompt: Some(launch.compose(&text)).filter(|prompt| !prompt.is_empty()),
         // An ISSUE SESSION's context, persisted by the DAEMON with the row
         // — or the Linear issue a TODO is linked to.
         issue_url: launch
@@ -358,7 +352,6 @@ mod tests {
                     model: None,
                     effort: None,
                     session_id: None,
-                    cloud_session_id: None,
                     sort_order: 0,
                     status_changed_at: crate::app::now_ms(),
                     alive: true,

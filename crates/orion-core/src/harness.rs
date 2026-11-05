@@ -8,10 +8,10 @@
 //! copy of Claude's row in its own config dir) into the effective
 //! [`HarnessDescriptor`]s every surface reads: the `n` picker, the `e`
 //! presets, spawn and resume, hooks, and the Agents tab. Adding a CLI is a config edit; the verification is
-//! that every behavior below is data, with the four genuinely bespoke arg
+//! that every behavior below is data, with the three genuinely bespoke arg
 //! shapings (Cursor's composed model id, Codex's `-c` config pair and its
-//! positional resume, OpenCode's `--prompt` flag, Cloud's `--cloud=`)
-//! carried as descriptor fields.
+//! positional resume, OpenCode's `--prompt` flag) carried as descriptor
+//! fields.
 //!
 //! [`AgentKind`](crate::AgentKind) stays the identity — built-ins by
 //! variant, customs by id beside `AgentKind::Custom` — so exhaustive

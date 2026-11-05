@@ -105,9 +105,6 @@ pub enum HitTarget {
     /// The GRID's background (registered after the cards, so they win).
     PanelBg(Focus),
     TerminalPane,
-    /// The session URL on the CLOUD SESSION PANEL; a click opens it in the
-    /// browser. Registered ahead of the pane it sits on, so it wins.
-    CloudSessionLink,
     /// A card in the LAUNCHER VIEW's GRID — a session or a terminal — by
     /// its place in `launcher::bands`: a click lands the cursor on it,
     /// inside its worktree.
@@ -285,9 +282,6 @@ pub fn clamp_files_width(area: Rect, boundary_x: i32) -> Option<u16> {
 pub enum MenuAction {
     Attach(SessionRef),
     RestartAgent(AgentId),
-    /// Queue a message on the row's Claude Cloud session
-    /// (`ClientRequest::SendCloudMessage`), via a prompt.
-    SendCloudMessage(AgentId),
     RenameAgent(AgentId),
     ArchiveAgent(AgentId),
     UnarchiveAgent(AgentId),
@@ -307,13 +301,10 @@ pub enum MenuAction {
         custom: Option<String>,
         model: Option<String>,
         effort: Option<String>,
-        /// One-shot launch modifier for Claude. The task itself is collected
-        /// in the CLOUD TASK box and crosses IPC only on create.
-        cloud: bool,
         /// OPEN PRS launch context (a PR SESSION): the pull request and
         /// the head branch its worktree is checked out on. Valid for every
-        /// local kind, never with `cloud`, and preserved through
-        /// model/effort submenus and the name prompt.
+        /// kind, and preserved through model/effort submenus and the name
+        /// prompt.
         pr: Option<crate::pull_request::PrLaunch>,
         /// Set when the picker was opened from the QUICK PROMPT's `Tab`:
         /// the box to put back (with its typed text) instead of creating a
@@ -584,43 +575,6 @@ impl ContextMenu {
             .any(|i| matches!(i.action, MenuAction::PickLaunchWorktree { .. }))
     }
 
-    /// Cloud mode is a launch modifier, not another agent kind. Returning
-    /// Some only while a Claude row is highlighted keeps Tab free
-    /// everywhere else: the picker's Claude row, and every row of the
-    /// Claude MODEL / EFFORT lists under it — reached with `→`, or opened
-    /// straight onto by the box's Select model and its effort field.
-    /// Two pickers offer it: the NEW AGENT PICKER (its
-    /// [`crate::agent_picker::NEW_AGENT_PICKER_TITLE`] is the gate — the PR SESSION picker and a PR row's menu share
-    /// these rows but never launch cloud, the daemon refusing a PR launch
-    /// with a cloud task) and the QUICK PROMPT's `Tab` picker, whose pick
-    /// makes the box a cloud one — unless the box is for an issue or a PR
-    /// (`QuickLaunch::takes_cloud`).
-    pub fn hovered_claude_cloud(&self) -> Option<bool> {
-        let mut root = self;
-        while let Some(parent) = &root.parent {
-            root = parent;
-        }
-        match &self.items.get(self.hover)?.action {
-            MenuAction::NewAgentOfKind {
-                kind: AgentKind::Claude,
-                custom: None,
-                cloud,
-                pr: None,
-                quick,
-                ..
-            } => {
-                let offered = match quick {
-                    Some(back) => back.launch.takes_cloud(),
-                    None => {
-                        root.title.as_deref() == Some(crate::agent_picker::NEW_AGENT_PICKER_TITLE)
-                    }
-                };
-                offered.then_some(*cloud)
-            }
-            _ => None,
-        }
-    }
-
     /// The harnessed launch under the cursor, if the hovered row starts
     /// one: the NEW AGENT PICKER, its PR sibling, the quick prompt
     /// picker, and their model/effort submenus all carry it. Gates the
@@ -631,71 +585,7 @@ impl ContextMenu {
             _ => None,
         }
     }
-
-    /// Toggle cloud for the launch the highlighted Claude row belongs to
-    /// and keep the state visible. False means Tab did not belong to this
-    /// menu/row.
-    pub fn toggle_hovered_claude_cloud(&mut self) -> bool {
-        let Some(on) = self.hovered_claude_cloud() else {
-            return false;
-        };
-        self.set_claude_cloud(!on);
-        true
-    }
-
-    /// Cloud is the whole launch's, not one row's: every Claude row of
-    /// this menu takes `on` — the rows a filter has narrowed away too, so
-    /// typing never undoes it — and so do the menus `←` backs out to, so
-    /// the picker's Claude row agrees with the list drilled from it. The
-    /// picker's row says so in its label (`Claude · cloud`); a model or
-    /// effort row keeps its own name, and the list's title carries it
-    /// instead ([`ContextMenu::lists_claude_cloud`]).
-    fn set_claude_cloud(&mut self, on: bool) {
-        let narrowed = self.filter.iter_mut().flat_map(|f| f.all.iter_mut());
-        for item in self.items.iter_mut().chain(narrowed) {
-            let MenuAction::NewAgentOfKind {
-                kind: AgentKind::Claude,
-                custom: None,
-                model,
-                cloud,
-                ..
-            } = &mut item.action
-            else {
-                continue;
-            };
-            *cloud = on;
-            if model.is_none() {
-                let name = item.label.strip_suffix(CLOUD_LABEL).unwrap_or(&item.label);
-                item.label = if on {
-                    format!("{name}{CLOUD_LABEL}")
-                } else {
-                    name.to_string()
-                };
-            }
-        }
-        if let Some(parent) = &mut self.parent {
-            parent.set_claude_cloud(on);
-        }
-    }
-
-    /// Is this a MODEL / EFFORT list whose pick launches in the cloud? Its
-    /// rows are model and effort names, so the title is where it shows.
-    pub fn lists_claude_cloud(&self) -> bool {
-        self.items.iter().any(|item| {
-            matches!(
-                &item.action,
-                MenuAction::NewAgentOfKind {
-                    model: Some(_),
-                    cloud: true,
-                    ..
-                }
-            )
-        })
-    }
 }
-
-/// What a row or a title wears while its launch is a CLAUDE CLOUD one.
-pub(crate) const CLOUD_LABEL: &str = " · cloud";
 
 /// Destructive action waiting behind a confirmation.
 #[derive(Debug, Clone, PartialEq)]
@@ -855,15 +745,6 @@ pub enum PromptKind {
         /// empty input, so the name offered is the name created.
         suggestion: String,
     },
-    /// Final task input for a one-shot `claude --cloud <task>` launch,
-    /// opened straight from the picker's `Claude · cloud` row. Multi-row:
-    /// Shift+Enter inserts task newlines where the one-line prompts submit.
-    ClaudeCloudTask {
-        worktree: WorktreeId,
-        name: String,
-        model: Option<String>,
-        effort: Option<String>,
-    },
     /// The QUICK PROMPT's task: one multi-row box, opened by its hotkey
     /// from anywhere, that launches an AGENT in the selected WORKTREE with
     /// the typed text as its STARTING PROMPT. It carries the whole launch
@@ -872,12 +753,6 @@ pub enum PromptKind {
     /// / `Shift+Tab` pickers. The NEW AGENT PICKER never ends here: its
     /// pick creates the session outright.
     QuickPrompt(crate::quick_prompt::QuickLaunch),
-    /// A message to queue on a row's Claude Cloud session
-    /// (`claude -p <message> --cloud <id>`). Multi-row like the launch task:
-    /// steering a cloud agent is rarely one line.
-    CloudMessage {
-        id: AgentId,
-    },
     /// The next turn for a session already running, typed into a small
     /// modal and sent straight down that session's PTY — the LAUNCHER
     /// VIEW's follow-up, where the SESSIONS PANEL expands the card itself
@@ -891,9 +766,9 @@ pub enum PromptKind {
     /// A comment to post on the pull request under the cursor — a
     /// PROJECT OPEN PRS GROUP row or the Sessions panel's PR ROW — with
     /// `gh pr comment` (`y`, or **Comment…** from the row's menu).
-    /// Multi-row like the cloud message: a review note is rarely one
-    /// line, and it is markdown. Carries the pull request the box was
-    /// opened on, so Enter posts where the title said it would.
+    /// Multi-row: a review note is rarely one line, and it is markdown.
+    /// Carries the pull request the box was opened on, so Enter posts where
+    /// the title said it would.
     PrComment {
         number: u64,
         url: String,
@@ -970,8 +845,8 @@ pub enum PromptKind {
 
 impl PromptKind {
     /// Does this box's text become a turn for an agent on this machine —
-    /// one that can open a file path written into it? A cloud session
-    /// can't, and the rest aren't prompts at all.
+    /// one that can open a file path written into it? The rest aren't
+    /// prompts at all.
     pub fn reaches_local_agent(&self) -> bool {
         matches!(
             self,
@@ -985,7 +860,6 @@ impl PromptKind {
     /// one of its own.
     pub fn worktree_mut(&mut self) -> Option<&mut WorktreeId> {
         match self {
-            PromptKind::ClaudeCloudTask { worktree, .. } => Some(worktree),
             PromptKind::QuickPrompt(launch) => launch.worktree_mut(),
             _ => None,
         }
@@ -1069,16 +943,13 @@ impl PromptDialog {
         matches!(self.kind, PromptKind::AddProject)
     }
 
-    /// The task prompts — the Claude Cloud launch task, a message to a live
-    /// cloud session and the QUICK PROMPT — an
+    /// The task prompts — the QUICK PROMPT and the FOLLOW-UP — an
     /// issue comment, and a typed setting that runs over lines (the Linear
     /// task template) are the ones with a multi-row editor.
     pub fn is_multiline(&self) -> bool {
         matches!(
             self.kind,
-            PromptKind::ClaudeCloudTask { .. }
-                | PromptKind::CloudMessage { .. }
-                | PromptKind::FollowUp { .. }
+            PromptKind::FollowUp { .. }
                 | PromptKind::PrComment { .. }
                 | PromptKind::QuickPrompt { .. }
                 | PromptKind::IssueComment { .. }
@@ -2451,7 +2322,6 @@ pub struct AgentLaunchDraft {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub name: String,
-    pub cloud_prompt: Option<String>,
     /// An AGENT PRESET launch's composed first prompt (see
     /// `ClientRequest::CreateAgent::starting_prompt`).
     pub starting_prompt: Option<String>,
@@ -2510,7 +2380,6 @@ impl AgentLaunchDraft {
             model,
             effort,
             name: String::new(),
-            cloud_prompt: None,
             starting_prompt: None,
             reopen_on_error: None,
             pr: None,
@@ -2538,23 +2407,15 @@ pub enum PendingIntent {
         /// into the created row, an Error drops it.
         placeholder: Option<AgentId>,
     },
-    /// Attach on success; on failure, reopen the exact Cloud task so a
-    /// transient daemon/CLI error never makes the user retype it.
-    AttachCreatedWithCloudRetry {
+    /// Attach on success; on failure, reopen the box the task was typed
+    /// into so a transient daemon/CLI error never makes the user retype it.
+    AttachCreatedWithRetry {
         kind: PromptKind,
         task: String,
         focus: bool,
         /// The stand-in session row a QUICK PROMPT put up for this create:
         /// the Ack turns it into the created row, an Error drops it.
         placeholder: Option<AgentId>,
-    },
-    /// Flash `note` on success; on failure, reopen this prompt with `text`
-    /// restored. Same bargain as the Cloud task: a message worth typing into
-    /// a multi-row editor is worth not losing to a transient error.
-    ReopenPromptOnError {
-        kind: PromptKind,
-        text: String,
-        note: String,
     },
     /// A follow-up `text` sent to agent `id` (`ClientRequest::SendTurn`).
     /// The Ack says it went — and, when the session was `booting`, that
@@ -2662,7 +2523,7 @@ impl PendingIntent {
     pub fn follows(&self) -> bool {
         match self {
             PendingIntent::AttachCreated { .. }
-            | PendingIntent::AttachCreatedWithCloudRetry { .. }
+            | PendingIntent::AttachCreatedWithRetry { .. }
             | PendingIntent::AttachCreatedPrSession { .. }
             | PendingIntent::LaunchInCreatedWorktree { .. }
             | PendingIntent::SelectCreatedProject => true,
@@ -2688,7 +2549,7 @@ impl PendingIntent {
         match self {
             PendingIntent::LaunchInCreatedWorktree { placeholder, .. }
             | PendingIntent::AttachCreatedPrSession { placeholder, .. } => Some(&placeholder.agent),
-            PendingIntent::AttachCreatedWithCloudRetry { placeholder, .. }
+            PendingIntent::AttachCreatedWithRetry { placeholder, .. }
             | PendingIntent::AttachCreated { placeholder, .. } => placeholder.as_ref(),
             PendingIntent::SelectCreatedWorktree { launch, .. } => {
                 launch.as_ref().and_then(|draft| draft.placeholder.as_ref())
@@ -3074,10 +2935,7 @@ pub fn unread_finish(agent: &Agent) -> bool {
 /// asking stopped being true with the process, so the row draws gray and
 /// still, and counts on no PROJECT TAB.
 pub fn drawn_cold(agent: &Agent) -> bool {
-    !agent.alive
-        && agent.cloud_session_id.is_none()
-        && agent.status != AgentStatus::Terminated
-        && !unread_finish(agent)
+    !agent.alive && agent.status != AgentStatus::Terminated && !unread_finish(agent)
 }
 
 /// A session put up as working before any PTY is behind it: a QUICK
@@ -3085,7 +2943,7 @@ pub fn drawn_cold(agent: &Agent) -> bool {
 /// filed. A real row is never running without its process for longer
 /// than the daemon takes to say so.
 fn starting(agent: &Agent) -> bool {
-    agent.status == AgentStatus::Running && !agent.alive && agent.cloud_session_id.is_none()
+    agent.status == AgentStatus::Running && !agent.alive
 }
 
 /// A session that is mid-turn or blocked on the user. These count as
@@ -3685,18 +3543,6 @@ pub struct PreviewedPr {
     pub label: String,
 }
 
-/// The Claude Cloud row the pane is describing (`App::previewed_cloud`):
-/// enough to title the CLOUD SESSION PANEL and open the session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CloudPreview {
-    pub id: AgentId,
-    pub name: String,
-    /// The `session_…` id the create printed.
-    pub cloud_session_id: String,
-    /// The session's page on claude.ai.
-    pub url: String,
-}
-
 /// How recently a project's open-PR list may have been fetched and still be
 /// refetched on arrival — at a project, at a sidebar panel, or back at the
 /// terminal window. Walking the project list, or a flurry of focus events,
@@ -3866,8 +3712,8 @@ pub struct FollowUp {
 /// from — one frame (`ui::draw`), one [`App::reading_url`].
 ///
 /// A frame asks a dozen times: the grid and the pane's strip for the card
-/// under the cursor, the pane for whether it is reading a pull request,
-/// an issue or a cloud row, the footer for its breadcrumb. Every asking
+/// under the cursor, the pane for whether it is reading a pull request
+/// or an issue, the footer for its breadcrumb. Every asking
 /// re-sorted the projects and the selected project's checkouts from a
 /// roll-up of every session on the machine, and cloned the checkout's
 /// session rows to hand back one of them — on a machine with a few
@@ -5660,8 +5506,7 @@ impl App {
     /// whether it wants SGR coordinates. `None` when nothing there can take
     /// a report: no session, one whose process has exited (its last screen
     /// is still worth selecting from), a stand-in pane with no PTY behind
-    /// it, or a pull request or a Cloud session's panel showing in the
-    /// pane instead of a terminal.
+    /// it, or a pull request showing in the pane instead of a terminal.
     pub fn child_mouse_mode(&self) -> (vt100::MouseProtocolMode, bool) {
         let mouseless = (vt100::MouseProtocolMode::None, false);
         let Some(term) = &self.term else {
@@ -5673,7 +5518,6 @@ impl App {
             self.pane_shows_placeholder()
                 || self.previewed_pr().is_some()
                 || self.previewed_issue().is_some()
-                || self.previewed_cloud().is_some()
         });
         if term.exited || reading_something_else {
             return mouseless;
@@ -6107,18 +5951,14 @@ impl App {
     // ---- the FOLLOW-UP COMPOSER ----
 
     /// Can this row grow a FOLLOW-UP COMPOSER? An agent with a local PTY
-    /// behind it, and only that: an ARCHIVED row's turn is over, a CLOUD
-    /// row's agent is in a sandbox with a message queue of its own (its
-    /// menu's **Send to cloud session**), a QUICK PROMPT stand-in has no
-    /// session yet, and a TERMINAL or a PULL REQUEST row was never a
-    /// conversation to follow up on.
+    /// behind it, and only that: an ARCHIVED row's turn is over, a QUICK
+    /// PROMPT stand-in has no session yet, and a TERMINAL or a PULL
+    /// REQUEST row was never a conversation to follow up on.
     pub fn takes_follow_up(&self, row: &SessionRow) -> bool {
         matches!(
             row,
             SessionRow::Agent(a)
-                if !a.archived
-                    && a.cloud_session_id.is_none()
-                    && !self.is_placeholder_agent(&a.id)
+                if !a.archived && !self.is_placeholder_agent(&a.id)
         )
     }
 
@@ -6521,32 +6361,11 @@ impl App {
         })
     }
 
-    /// The pane is reading a page — a pull request, an issue, a Claude
-    /// Cloud session — rather than showing a PTY: FOCUS in it scrolls the
-    /// page, and there is nothing to type into.
+    /// The pane is reading a page — a pull request, an issue — rather than
+    /// showing a PTY: FOCUS in it scrolls the page, and there is nothing to
+    /// type into.
     pub fn pane_reads_page(&self) -> bool {
-        self.reading_url().is_some() || self.previewed_cloud().is_some()
-    }
-
-    /// The Claude Cloud row the pane should be describing: the SESSIONS
-    /// PANEL's cursor on an agent that launched a cloud session. The agent
-    /// runs in the cloud sandbox, so the pane shows the CLOUD SESSION
-    /// PANEL — where it is, and the link to it — instead of a terminal.
-    /// Unlike the PR ROW this is not keyed on focus: there is no terminal
-    /// behind the panel to step back into, so wherever focus goes the pane
-    /// keeps pointing at the session. A pull request under the Worktrees
-    /// cursor still wins (`draw_terminal` asks for it first).
-    pub fn previewed_cloud(&self) -> Option<CloudPreview> {
-        let SessionRow::Agent(agent) = self.selected_session_row()? else {
-            return None;
-        };
-        let url = agent.cloud_session_url()?;
-        Some(CloudPreview {
-            id: agent.id,
-            name: agent.name,
-            cloud_session_id: agent.cloud_session_id.unwrap_or_default(),
-            url,
-        })
+        self.reading_url().is_some()
     }
 
     /// Session rows for the selected worktree: the live agents, then (when
@@ -6963,7 +6782,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 1_000 * (i as i64 + 1),
                 alive: true,
@@ -7253,7 +7071,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             alive: true,
             issue_url: None,
@@ -7486,7 +7303,6 @@ mod tests {
                 model: None,
                 effort: None,
                 session_id: None,
-                cloud_session_id: None,
                 sort_order: 0,
                 status_changed_at: 100 * (i as i64 + 1),
                 alive: true,

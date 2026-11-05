@@ -31,30 +31,10 @@ merged with `--list-models`, cached in `cursor_models.json` beside `config.json`
 Pi's model is a fuzzy `--model` pattern — `opus`, `sonnet`, or a `provider/id` you set in `config.json` —
 and its effort is the `--thinking` level, `off` through `max`).
 In those submenus you type to filter — `opus` narrows the rows to the Opus families, `↑`/`↓` move, `Backspace` widens, `Esc` clears — and the preset editor's Harness / Model / Effort rows take the same type-ahead.
-`Enter` anywhere takes your configured defaults. On the
-Claude row — and on any row of the Claude model and effort lists under it, whose title then reads
-`Claude model · cloud` — `Tab` toggles Cloud mode, the menu's bottom border naming the key and the
-state it is in (`Tab cloud off`): enter the task in the wrapped editor
-(`Shift+Enter`, `Option+Enter` or `Ctrl+J` adds a line) and orion launches `claude --cloud=<task>` — the value binds
-with `=` and never a space, because `--cloud` takes an *optional* value, so a separate argv item starting
-with `--` would be read as another Claude flag instead. The CLI creates the session, prints its URL and
-exits — orion reads the session id off that output, and that is where the local side ends. The agent
-runs in Claude's cloud sandbox, not in a terminal here, so the row wears a `cloud` badge and its pane is
-the **CLOUD SESSION PANEL** instead of a terminal: a line saying so, and the session's
-`https://claude.ai/code/session_…` link, underlined. The card reads like any other card's: the task
-you typed is its first prompt (the `›` line, and every message you later **Send to cloud session**
-joins the RECENT PROMPTS behind it), and the row takes the title Claude Cloud gives the session —
-the `Created cloud session:` line of the same output — as its name, since no hook ever reaches
-orion from the sandbox to let the session title itself; a name you typed stands, and `r` renames
-it whenever you like. `Enter` on the row — or a click on the link — opens
-the page in the browser. Nothing is attached, teleported or re-homed on your behalf, the checkout never
-switches branch, and **Attach** and **Restart** are not offered: there is no local session behind the
-row, and the daemon refuses to boot a bare `claude` in its name. To steer the cloud agent without a
-browser, pick **Send to cloud session** from the card's right-click menu — the same wrapped editor — and orion
-runs `claude -p <message> --cloud=<id>`; the reply lands on the session's page, the CLI never returns
-one. Otherwise `Enter` on a row opens the QUICK PROMPT set to that harness, model and effort, aimed
-at the checkout under the cursor: type the task and `Enter` launches it, or send the box empty and
-the CLI starts bare, and you type the agent's first prompt there. Nothing asks for a name — the
+`Enter` anywhere takes your configured defaults. `Enter` on a row opens the QUICK PROMPT set to
+that harness, model and effort, aimed at the checkout under the cursor: type the task and `Enter`
+launches it, or send the box empty and the CLI starts bare, and you type the agent's first prompt
+there. Nothing asks for a name — the
 session titles itself from that first prompt (AUTO-TITLE); `r` renames it whenever you like. `⌘N`
 opens the same box straight away, on the Agents tab's harness (see [Keys](keys.md)).
 
@@ -181,8 +161,7 @@ card is not opening it. So the loop is click a card, `Space`, type a line, `Ente
 card — over a folded pane (`⌘J`) if you walk the cards with the keys, since a click on a card always
 brings the pane back — never once stepping into a session or waiting for one to attach. A pane already open is left on whatever card it was reading, a terminal's chip included.
 
-Only a live local agent takes one. An archived session's turn is over, a Claude Cloud row's
-agent runs in a sandbox with a message queue of its own (**Send to cloud session** in its menu), a shell
+Only a live local agent takes one. An archived session's turn is over, a shell
 terminal takes typing in the pane, and a pull request row is not a conversation — `Space` on any of
 them opens no box. A session whose CLI is not up — reaped by the IDLE REAPER, or cold since the daemon
 started — is booted first and the box left as it is, your text still in it: nothing is typed into a
@@ -305,7 +284,7 @@ comes back at its input box: type `continue`, or whatever the next turn is. The 
 deleted, and a file the destination already holds is never overwritten unless it is an older copy
 of the same transcript — a session carried back to an account it ran on before. A session with no
 conversation yet or a transcript orion can't find is refused with the reason in the footer, before
-anything stops; a Claude Cloud session, an archived one or one off Claude has nowhere to go, and
+anything stops; an archived session or one off Claude has nowhere to go, and
 `⇧C` on it lists nothing.
 
 ## The GRID
@@ -342,12 +321,10 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   reaches its efforts), `⌘Y` steps the effort in place — `default`, then the harness's list, round
   again — and `Tab` opens the harness picker — the lists over the box, as the project picker is,
   so the task stays in front of you while you pick what will run it. The three keymap keys work
-  with any of the box's pickers open over it, and none of them closes the box. `Tab` again on the
-  picker's Claude row — or in the Claude model list `⌘/` opens — is the new-session picker's Claude
-  Cloud toggle: the box comes back as a cloud one (`agent Claude · cloud`) and Enter sends your text
-  as the cloud task — not offered in a box for an issue or a pull request. `⇧Tab` takes a preset; a
-  model or effort picked afterwards for the same harness keeps it. None of it needs the key: the
-  header is a row of buttons, and a click on a field opens what the key printed beside it opens — on
+  with any of the box's pickers open over it, and none of them closes the box. `⇧Tab` takes a
+  preset; a model or effort picked afterwards for the same harness keeps it. None of it needs the
+  key: the header is a row of buttons, and a click on a field opens what the key printed beside it
+  opens — on
   `effort`, the model's effort list — box and task still in front of you. Enter
   launches, and the cursor and the pane land on the new card as it goes up in its band, the grid
   scrolling to it and the keys still on the grid. Turn off **Follow new** under **Quick prompt** in

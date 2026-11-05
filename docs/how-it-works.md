@@ -169,11 +169,7 @@
   the ending instead of respawning — a command starts only when you pick **Start stack**. `⌘O` → **Open command** runs `open`
   once, from the TUI. See [Configuration](configuration.md#the-project-file-orionjson).
 - **Agents boot `claude`, `codex`, `cursor-agent`, `pi`, `muse`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New agent — choose harness** first asks which CLI to
-  run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree. Claude's picker can also dispatch a one-shot Cloud task as
-  `claude --cloud=<task>`; because Claude accepts that description as a process argument, don't put
-  secrets in the Cloud task. That CLI prints the new session's id and exits, and the DAEMON reads the
-  id off its output — the agent then runs in Claude's cloud, so the row's pane is the CLOUD SESSION
-  PANEL linking to it, and nothing is ever attached, teleported or restarted locally in its name.
+  run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree.
   Restored agents resume with `claude --resume <session-id>` /
   `codex resume <session-id>` / `cursor-agent --resume <session-id>` (falling back to a fresh session
   when the old one is gone) / `pi --session-id <session-id>` (which creates a missing id instead of

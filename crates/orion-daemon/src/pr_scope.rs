@@ -316,7 +316,6 @@ impl Daemon {
             model,
             effort,
             auto_title,
-            cloud_prompt: None,
             starting_prompt,
             pr_url: Some(pr_url),
             issue_url: None,

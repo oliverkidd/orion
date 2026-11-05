@@ -209,7 +209,6 @@ pub(super) fn stage_agent(
         model,
         effort,
         session_id: None,
-        cloud_session_id: None,
         sort_order: 0,
         // The DAEMON stamps a created row with its clock, which puts the
         // checkout at the top of RECENCY ORDER; the same stamp here means
@@ -676,7 +675,6 @@ mod tests {
             model: None,
             effort: None,
             session_id: None,
-            cloud_session_id: None,
             sort_order: 0,
             status_changed_at: crate::app::now_ms(),
             alive: true,
@@ -1570,7 +1568,7 @@ mod tests {
             assert!(
                 matches!(
                     app.pending.get(&create_id),
-                    Some(PendingIntent::AttachCreatedWithCloudRetry {
+                    Some(PendingIntent::AttachCreatedWithRetry {
                         kind: PromptKind::QuickPrompt(launch),
                         placeholder: Some(stand_in),
                         ..
