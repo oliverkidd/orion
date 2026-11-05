@@ -24,8 +24,9 @@
 //!   nothing to confirm — until [`AUTO_ATTEMPTS`] tries in a row have not
 //!   turned the PR green, when it stops and says so (a flash, and a desktop
 //!   notification while the window is away). `⌘G` in the PULL REQUESTS
-//!   MODAL ([`open_for`]) still opens the AUTOFIX MODAL for any PR — the
-//!   issues as a checklist and a note — whatever the setting.
+//!   MODAL, or on the pane's PULL REQUEST PAGE ([`open_asked`]), still
+//!   opens the AUTOFIX MODAL for any PR — the issues as a checklist and a
+//!   note — whatever the setting.
 //! * **As the worktree's agent.** [`dispatch`] launches a PR SESSION
 //!   (`CreatePrAgent`, so the DAEMON finds or cuts the PR's worktree) named
 //!   `autofix-<n>` on the harness, account, model and effort of the session
@@ -617,31 +618,84 @@ fn give_up(app: &mut App, form: &AutofixForm, attempts: u8) {
     app.autofix.record(&form.pr.url).handled = Some(form.fingerprint());
 }
 
-/// `⌘G`'s body landed: the form, over the PULL REQUESTS MODAL if it is
-/// still up on that pull request — from the cached body when `gh` could
-/// not answer. Not for one merged or closed since.
-fn open_pending(app: &mut App, url: &str, detail: Option<&PrDetail>) {
-    let Some(pr) = crate::pr_modal::selected_pr(app).filter(|pr| pr.url == url) else {
+/// `⌘G` — in the PULL REQUESTS MODAL, or on the pane's PULL REQUEST PAGE
+/// (and a click on its `⌘G send autofix`): the form for the pull request
+/// it shows, at once from a fresh body, else once a fresh one lands
+/// ([`land_detail`]), so it names the checks failing now.
+pub(crate) fn open_asked(app: &mut App) {
+    let Some((project, url, number)) = shown(app) else {
         return;
     };
-    let Some(Overlay::PullRequests(view)) = &app.overlay else {
+    let Some(pr) = still_open(app, &project, &url, number) else {
         return;
     };
-    let project = view.project.clone();
-    let open = app.prs.status_or_open(url).is_open();
-    match detail.or_else(|| app.pr_detail.get(url)).cloned() {
-        Some(_) if !open => {
-            app.flash = Some(Flash::note(format!("#{} is no longer open", pr.number)));
+    let fresh = app.pr_detail_fresh(&url);
+    if let (true, Some(detail)) = (fresh, app.pr_detail.get(&url).cloned()) {
+        open_for(app, project, pr, &detail);
+        return;
+    }
+    let Some(dir) = repo_dir(app, &project) else {
+        return;
+    };
+    app.autofix.pending_open = Some(url.clone());
+    app.pr_detail_failed.remove(&url);
+    app.pending_pr_detail = Some((
+        crate::app::PendingPrDetail { url, number, dir },
+        Instant::now(),
+    ));
+    app.flash = Some(Flash::working(format!("Reading #{number}'s checks…")));
+}
+
+/// The pull request `⌘G` is about, as `(project, url, number)`: the one
+/// under the PULL REQUESTS MODAL's cursor while the modal is up, else the
+/// one the pane's PULL REQUEST PAGE reads — nothing over any other modal.
+fn shown(app: &App) -> Option<(ProjectId, String, u64)> {
+    match &app.overlay {
+        Some(Overlay::PullRequests(view)) => {
+            let pr = crate::pr_modal::selected_pr(app)?;
+            Some((view.project.clone(), pr.url, pr.number))
         }
+        Some(_) => None,
+        None => {
+            let pr = app.previewed_pr()?;
+            Some((app.selected_project()?.id.clone(), pr.url, pr.number))
+        }
+    }
+}
+
+/// `url`'s row on `project`'s open list — None, and the footer saying so,
+/// for one that has merged or closed.
+fn still_open(app: &mut App, project: &ProjectId, url: &str, number: u64) -> Option<OpenPr> {
+    let status = app.prs.status_or_open(url);
+    let row = open_pr(app, project, url)
+        .filter(|_| status.is_open())
+        .cloned();
+    if row.is_none() {
+        let gone = match status.standing {
+            crate::pull_request::Standing::Merged => "has merged",
+            _ => "is no longer open",
+        };
+        app.flash = Some(Flash::note(format!("#{number} {gone}")));
+    }
+    row
+}
+
+/// `⌘G`'s body landed: the form, if what asked for it still shows that
+/// pull request — from the cached body when `gh` could not answer. Not for
+/// one merged or closed since.
+fn open_pending(app: &mut App, url: &str, detail: Option<&PrDetail>) {
+    let Some((project, _, number)) = shown(app).filter(|(_, shown, _)| shown == url) else {
+        return;
+    };
+    match detail.or_else(|| app.pr_detail.get(url)).cloned() {
         Some(detail) => {
-            app.flash = None;
-            open_for(app, project, pr, &detail);
+            if let Some(pr) = still_open(app, &project, url, number) {
+                app.flash = None;
+                open_for(app, project, pr, &detail);
+            }
         }
         None => {
-            app.flash = Some(Flash::failed(format!(
-                "Couldn't read #{}'s checks",
-                pr.number
-            )));
+            app.flash = Some(Flash::failed(format!("Couldn't read #{number}'s checks")));
         }
     }
 }
@@ -1141,17 +1195,6 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
     app.dirty = true;
 }
 
-/// Esc: not now — this breakage is not asked about again.
-fn dismiss(app: &mut App) {
-    let Some(form) = close(app) else {
-        return;
-    };
-    // `⌘G` was asked for; nothing to remember.
-    if form.under.is_none() {
-        app.autofix.record(&form.pr.url).handled = Some(form.fingerprint());
-    }
-}
-
 pub mod keys {
     use crate::hints::Key;
 
@@ -1173,8 +1216,10 @@ pub fn hints(form: &AutofixForm) -> Vec<Hint> {
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    // Esc: not now. `⌘G` asked for the form, so there is nothing to
+    // remember: an unasked send is still the breakage's to make.
     if key.code == KeyCode::Esc {
-        dismiss(app);
+        close(app);
         return;
     }
     let Some(Overlay::Autofix(form)) = &mut app.overlay else {

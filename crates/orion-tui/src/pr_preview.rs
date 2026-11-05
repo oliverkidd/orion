@@ -1862,9 +1862,9 @@ fn pane_pr(app: &crate::app::App) -> Option<(crate::app::PreviewedPr, Option<PrD
 
 /// A key while the pane holds the keys reading a pull request — asked
 /// before the pane's own (`launcher::pane_key`): `Tab`/`⇧Tab` walk the
-/// tabs; on a tab that lists things `↑`/`↓`, `PgUp`/`PgDn` and
-/// `Home`/`End` walk its rows and Enter (`activate`) acts on the one
-/// under the cursor. What it did, for the KEY COMBO DISPLAY; None for a
+/// tabs; `⌘G` is the AUTOFIX MODAL, as in the PULL REQUESTS MODAL; on a
+/// tab that lists things `↑`/`↓`, `PgUp`/`PgDn` and `Home`/`End` walk its
+/// rows and Enter (`activate`) acts on the one under the cursor. What it did, for the KEY COMBO DISPLAY; None for a
 /// key it leaves to the pane — scrolling prose, Enter's browser.
 pub(crate) fn pane_key(
     app: &mut crate::app::App,
@@ -1874,6 +1874,10 @@ pub(crate) fn pane_key(
 ) -> Option<&'static str> {
     use crossterm::event::KeyCode;
     let (pr, detail) = pane_pr(app)?;
+    if crate::pr_modal::keys::AUTOFIX.matches(key) {
+        crate::autofix::open_asked(app);
+        return Some("Autofix");
+    }
     if keys::NEXT_TAB.matches(key) || keys::PREV_TAB.matches(key) {
         let delta = if keys::NEXT_TAB.matches(key) { 1 } else { -1 };
         let tab = app.pr_tabs.tab.step(delta);

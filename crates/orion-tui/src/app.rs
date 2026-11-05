@@ -209,9 +209,9 @@ pub enum HitTarget {
     /// A `<details>` summary on that page's description or comments: a
     /// click opens or shuts it. Registered ahead of the pane, so it wins.
     PrPageFold(crate::markdown::FoldKey),
-    /// A session or an issue in that page's WORK BLOCK (`pr_work`): a
-    /// click lands on the session in the grid, or opens the issue.
-    /// Registered ahead of the pane, so it wins.
+    /// A session, an issue or `⌘G send autofix` in that page's WORK BLOCK
+    /// (`pr_work`): a click lands on the session in the grid, opens the
+    /// issue, or is `⌘G`. Registered ahead of the pane, so it wins.
     PrPageWork(crate::pr_work::WorkHit),
 }
 

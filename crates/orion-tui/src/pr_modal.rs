@@ -737,38 +737,6 @@ pub(crate) fn selected_open_pr(app: &mut App) -> Option<OpenPr> {
     Some(pr)
 }
 
-/// `⌘G`: the AUTOFIX form for the pull request under the cursor — at
-/// once from a fresh body, else once a fresh one lands
-/// (`autofix::land_detail`), so it names the checks failing now.
-fn autofix(app: &mut App) {
-    let Some(Overlay::PullRequests(view)) = &app.overlay else {
-        return;
-    };
-    let (project, dir) = (view.project.clone(), view.dir.clone());
-    let Some(pr) = selected_open_pr(app) else {
-        return;
-    };
-    let fresh = app.pr_detail_fresh(&pr.url);
-    if let (true, Some(detail)) = (fresh, app.pr_detail.get(&pr.url).cloned()) {
-        crate::autofix::open_for(app, project, pr, &detail);
-        return;
-    }
-    app.autofix.pending_open = Some(pr.url.clone());
-    app.pr_detail_failed.remove(&pr.url);
-    app.pending_pr_detail = Some((
-        crate::app::PendingPrDetail {
-            url: pr.url.clone(),
-            number: pr.number,
-            dir,
-        },
-        std::time::Instant::now(),
-    ));
-    app.flash = Some(crate::flash::Flash::working(format!(
-        "Reading #{}'s checks…",
-        pr.number
-    )));
-}
-
 /// Whether the modal is what is up.
 pub(crate) fn is_up(app: &App) -> bool {
     matches!(&app.overlay, Some(Overlay::PullRequests(_)))
@@ -1233,7 +1201,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         }
         _ if keys::CLOSE.matches(&key) => crate::pr_actions::open_close(app),
         _ if keys::READY.matches(&key) => crate::pr_actions::toggle_draft(app),
-        _ if keys::AUTOFIX.matches(&key) => autofix(app),
+        _ if keys::AUTOFIX.matches(&key) => crate::autofix::open_asked(app),
         _ if keys::CHECKOUT.matches(&key) => crate::pr_checkout::from_modal(app, out),
         // A PR PICK already came from the LINEAR VIEW: `⌘L` there would
         // stack the two views on each other, so it does nothing.

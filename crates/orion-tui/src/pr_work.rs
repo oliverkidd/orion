@@ -13,7 +13,7 @@
 //!   TAG its grid row wears.
 //!
 //! A click on a session lands on it in the grid; on an issue, opens it in
-//! the LINEAR VIEW ([`click`]).
+//! the LINEAR VIEW; on `⌘G send autofix`, is that key ([`click`]).
 
 use crate::app::App;
 use crate::theme::Theme;
@@ -29,6 +29,8 @@ pub enum WorkHit {
     Session(AgentId),
     /// Open the issue in the LINEAR VIEW.
     Issue { project: ProjectId, id: String },
+    /// `⌘G`: the AUTOFIX MODAL on the pull request.
+    SendAutofix,
 }
 
 /// One thing a line names, and what a click on it does.
@@ -148,7 +150,7 @@ fn autofix_line(app: &App, url: &str, fixer: Option<&Agent>) -> Option<WorkLine>
                     Span::styled(crate::pr_modal::keys::AUTOFIX.label(), key),
                     Span::styled(" send autofix", dim),
                 ],
-                hit: None,
+                hit: Some(WorkHit::SendAutofix),
             },
         ],
         sep: " · ",
@@ -290,11 +292,12 @@ pub(crate) fn lines(work: &Work, width: usize, th: Theme) -> (Vec<Line<'static>>
 }
 
 /// A click on a part of the block: a session landed on in the grid, an
-/// issue opened in the LINEAR VIEW.
+/// issue opened in the LINEAR VIEW, the AUTOFIX MODAL as `⌘G` opens it.
 pub(crate) fn click(app: &mut App, hit: WorkHit, out: &mut Vec<ClientRequest>) {
     match hit {
         WorkHit::Session(id) => crate::event_loop::jump_to_session(app, id, out),
         WorkHit::Issue { project, id } => crate::linear::open_at(app, &project, &id),
+        WorkHit::SendAutofix => crate::autofix::open_asked(app),
     }
 }
 
@@ -661,8 +664,9 @@ mod tests {
         let Some(Overlay::PullRequests(view)) = &app.overlay else {
             panic!("the modal");
         };
-        let (rect, hit) = view.tabs.work_hits[0].clone();
-        assert_eq!(hit, WorkHit::Session(id.clone()));
+        let hits: Vec<&WorkHit> = view.tabs.work_hits.iter().map(|(_, hit)| hit).collect();
+        assert_eq!(hits, [&WorkHit::SendAutofix, &WorkHit::Session(id.clone())]);
+        let (rect, _) = view.tabs.work_hits[1];
         assert!(screen[usize::from(rect.y)].contains("docs"));
         let mouse = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
