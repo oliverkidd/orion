@@ -1,10 +1,13 @@
-//! WEEK IN REVIEW: what was finished in the last seven days — merged pull
-//! requests, Linear issues done, todos ticked — written up as a short
-//! review to read aloud with the product on screen: what changed, by
-//! product area, with what to show and what to say.
+//! WEEK IN REVIEW: what was finished in the last seven days — or two
+//! weeks, or a month — merged pull requests, Linear issues done, todos
+//! ticked, written up as a short review to read aloud with the product on
+//! screen: what changed, by product area, with what to show and what to
+//! say. Its screen has a new review's options down the left and the
+//! reviews kept down the right; a review — the one being written, or one
+//! kept — reads on a page of its own.
 //!
 //! * **Gathering is orion's.** Opening the modal fetches every pull
-//!   request merged in the week, description and all ([`fetch_merged`]):
+//!   request merged in the range, description and all ([`fetch_merged`]):
 //!   the PULL REQUESTS MODAL's merged tail carries titles, and a review
 //!   is written from what a pull request says it does. Linear's done
 //!   issues and the ticked todos come from the lists the app already
@@ -23,7 +26,7 @@
 //!   because nothing was asked to add it up.
 //!
 //! A review is plain Markdown, kept under the DATA DIR
-//! (`reviews/<project>/<date>-<mine|everyone>.md`) with what it was
+//! (`reviews/<project>/<date>-<mine|everyone>[-2w|-month].md`) with what it was
 //! written from beside it, the last [`KEEP`] of them. Nothing here touches
 //! the disk or starts a process unless the main loop installed a
 //! directory and a channel ([`State`]): the unit tests never do.
@@ -33,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDate, TimeZone};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use orion_core::ProjectId;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -56,6 +59,9 @@ pub const DAYS: i64 = crate::pull_request::MERGED_DAYS;
 // Linear cuts its done issues to its own week on Linear's side: a review
 // reaching further back than that would find none of them there.
 const _: () = assert!(DAYS == crate::linear::DONE_DAYS as i64);
+const DAY_SECS: i64 = 24 * 60 * 60;
+/// How far back a month's review reaches.
+const MONTH_DAYS: i64 = 30;
 /// How many reviews a project keeps; the oldest go as a new one lands.
 const KEEP: usize = 12;
 /// How much of a pull request's description goes in the prompt: its
@@ -106,16 +112,92 @@ pub enum Where {
     All,
 }
 
+/// How far back a review reaches, to today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Range {
+    #[default]
+    Week,
+    Fortnight,
+    Month,
+}
+
+impl Range {
+    pub const ALL: [Range; 3] = [Range::Week, Range::Fortnight, Range::Month];
+
+    /// The days it covers, today among them.
+    pub fn days(self) -> i64 {
+        match self {
+            Range::Week => DAYS,
+            Range::Fortnight => 2 * DAYS,
+            Range::Month => MONTH_DAYS,
+        }
+    }
+
+    /// The next range along the row — `back`, the one before — round the
+    /// ends.
+    fn turned(self, back: bool) -> Range {
+        let n = Range::ALL.len();
+        let at = Range::ALL.iter().position(|r| *r == self).unwrap_or(0);
+        Range::ALL[(at + if back { n - 1 } else { 1 }) % n]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Range::Week => "Week",
+            Range::Fortnight => "2 weeks",
+            Range::Month => "Month",
+        }
+    }
+
+    /// What the review's own title calls it.
+    fn title(self) -> &'static str {
+        match self {
+            Range::Week => "Week in review",
+            Range::Fortnight => "Two weeks in review",
+            Range::Month => "Month in review",
+        }
+    }
+
+    /// What a kept review's file name adds for it: nothing for a week's,
+    /// whose name is the one reviews have always had.
+    fn file_suffix(self) -> &'static str {
+        match self {
+            Range::Week => "",
+            Range::Fortnight => "-2w",
+            Range::Month => "-month",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Scope {
     pub whose: Whose,
     pub wher: Where,
+    /// A review kept from before there was a choice is a week's.
+    #[serde(default)]
+    pub range: Range,
 }
 
 impl Scope {
     /// `just mine · this project`.
     pub fn label(self) -> String {
         format!("{} · {}", self.whose_label(), self.where_label())
+    }
+
+    /// The days a review of this scope written at `now` covers.
+    fn period(self, now: i64) -> (NaiveDate, NaiveDate) {
+        period(now, self.range.days())
+    }
+
+    /// A review's row in the list, its `name` first: `Week 45 · everyone
+    /// · all`.
+    fn row_name(self, name: &str) -> String {
+        let all = match self.wher {
+            Where::All => " · all",
+            Where::Project => "",
+        };
+        format!("{name} · {}{all}", self.slug())
     }
 
     fn whose_label(self) -> &'static str {
@@ -162,9 +244,11 @@ pub struct MergedPr {
     pub files: u64,
     /// RFC 3339.
     pub merged_at: String,
-    /// The description. Sent to the model, never kept with the review.
+    /// The description. Sent to the model, never kept with the review —
+    /// and shared, so what a review would be written from is gathered
+    /// afresh on every frame without copying a week of descriptions.
     #[serde(skip)]
-    pub body: String,
+    pub body: std::sync::Arc<str>,
 }
 
 impl MergedPr {
@@ -249,10 +333,6 @@ impl Material {
         self.prs.is_empty() && self.issues.is_empty() && self.todos.is_empty()
     }
 
-    fn len(&self) -> usize {
-        self.prs.len() + self.issues.len() + self.todos.len()
-    }
-
     /// Pull requests from more than one project: a bare `#12` would then
     /// name two of them.
     fn several_projects(&self) -> bool {
@@ -284,15 +364,15 @@ struct Page {
     more: Option<String>,
 }
 
-/// Parse one page. A pull request merged inside the window was last
-/// touched inside it too, so a page that ends on one touched before it
-/// is the last worth reading. Bots' pull requests (dependency bumps) are
-/// left out here: no review has a line for one.
-fn parse_page(json: &str, project: &str, now: i64) -> Option<Page> {
+/// Parse one page of the window from `since` (unix seconds). A pull
+/// request merged inside the window was last touched inside it too, so a
+/// page that ends on one touched before it is the last worth reading.
+/// Bots' pull requests (dependency bumps) are left out here: no review
+/// has a line for one.
+fn parse_page(json: &str, project: &str, since: i64) -> Option<Page> {
     let answer: serde_json::Value = serde_json::from_str(json).ok()?;
     let tail = answer.pointer("/data/repository/pullRequests")?;
     let nodes = tail.get("nodes")?.as_array()?;
-    let since = now - DAYS * 24 * 60 * 60;
     let rows = nodes
         .iter()
         .filter_map(|v| {
@@ -316,7 +396,7 @@ fn parse_page(json: &str, project: &str, now: i64) -> Option<Page> {
                 deletions: u64_at(v, "deletions"),
                 files: u64_at(v, "changedFiles"),
                 merged_at,
-                body: str_at(v, "body"),
+                body: str_at(v, "body").into(),
             })
         })
         .collect();
@@ -333,11 +413,17 @@ fn parse_page(json: &str, project: &str, now: i64) -> Option<Page> {
     Some(Page { rows, more })
 }
 
-/// Every pull request merged in `dir`'s repo in the last [`DAYS`], the
-/// latest merge first, descriptions and all. `None` when GitHub could not
-/// be asked, or a page of the week could not be read: a review written
-/// from part of a week would pass it off as the whole.
-pub async fn fetch_merged(dir: PathBuf, project: String, now: i64) -> Option<Vec<MergedPr>> {
+/// Every pull request merged in `dir`'s repo in the last `days` before
+/// `now`, the latest merge first, descriptions and all. `None` when
+/// GitHub could not be asked, or a page of the window could not be read:
+/// a review written from part of a week would pass it off as the whole.
+pub async fn fetch_merged(
+    dir: PathBuf,
+    project: String,
+    now: i64,
+    days: i64,
+) -> Option<Vec<MergedPr>> {
+    let since = now - days * DAY_SECS;
     let page_size = format!("n={}", crate::pull_request::MERGED_PAGE);
     let mut rows = Vec::new();
     let mut after: Option<String> = None;
@@ -349,7 +435,7 @@ pub async fn fetch_merged(dir: PathBuf, project: String, now: i64) -> Option<Vec
         }
         let out =
             crate::pull_request::repo_graphql(&dir, BODIES_QUERY, &vars, FETCH_TIMEOUT).await?;
-        let page = parse_page(&out, &project, now)?;
+        let page = parse_page(&out, &project, since)?;
         rows.extend(page.rows);
         match page.more {
             Some(cursor) => after = Some(cursor),
@@ -371,7 +457,7 @@ fn latest_first(mut rows: Vec<MergedPr>) -> Vec<MergedPr> {
 
 // ---- gathering ----
 
-/// The sources a review can be written from, in the Compose panel's order.
+/// The sources a review can be written from, in the new review's order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Prs,
@@ -407,9 +493,10 @@ fn projects_in(app: &App, project: &ProjectId, wher: Where) -> Vec<(ProjectId, S
 }
 
 /// What a review of `scope` would be written from right now: the fetched
-/// pull requests, the done issues Linear's list holds and the todos
-/// ticked, each inside the last [`DAYS`] before `now` and each only when
-/// its source is ticked in `picks`. An issue is done when Linear completed
+/// pull requests, the done issues Linear's list holds — its own week of
+/// them, however far back the range reaches — and the todos ticked, each
+/// inside the range before `now` and each only when its source is ticked
+/// in `picks`. An issue is done when Linear completed
 /// it in the week or one of its pull requests merged in it — whatever a
 /// team calls the state it waits in after that (`In Dev`, `In Staging`),
 /// its work landed. `Just mine` keeps what is yours; `Everyone` keeps all
@@ -422,12 +509,19 @@ pub fn gather(
     picks: [bool; 3],
     now: i64,
 ) -> Material {
-    let since = now - DAYS * 24 * 60 * 60;
+    let days = scope.range.days();
+    let since = now - days * DAY_SECS;
     let mine = scope.whose == Whose::Mine;
     let mut material = Material::default();
     let mut seen_issues = HashSet::new();
     let projects = projects_in(app, project, scope.wher);
-    let fetched = |id: &ProjectId| app.week_review.fetched.get(id).and_then(|f| f.prs.as_ref());
+    let fetched = |id: &ProjectId| {
+        let window = (id.clone(), days);
+        app.week_review
+            .fetched
+            .get(&window)
+            .and_then(|f| f.prs.as_ref())
+    };
     // Every project's, not just the issue's own: one Linear workspace can
     // hold the issues of several repos.
     let merged: HashMap<String, &str> = projects
@@ -664,7 +758,8 @@ pub fn prompt(
 ) -> String {
     let everyone = scope.whose == Whose::Everyone;
     let several = material.several_projects();
-    let (from, to) = period(now);
+    let (from, to) = scope.period(now);
+    let title = scope.range.title();
     let initials: HashMap<&str, &str> = people
         .iter()
         .map(|(login, initials, _)| (login.as_str(), initials.as_str()))
@@ -690,7 +785,7 @@ pub fn prompt(
     }
     text.push_str("\n## The shape, exactly\n\n```\n");
     text.push_str(&format!(
-        "# Week in review · {}\n{project} · {} · {} pull requests merged\n\n",
+        "# {title} · {}\n{project} · {} · {} pull requests merged\n\n",
         period_label(from, to, true),
         scope.whose_label(),
         material.prs.len(),
@@ -764,7 +859,9 @@ pub fn prompt(
             text.push_str(&format!("- {}\n", todo.text.replace('\n', " ")));
         }
     }
-    text.push_str("\nWrite the review now: the Markdown and nothing else, starting with the `# Week in review` line.\n");
+    text.push_str(&format!(
+        "\nWrite the review now: the Markdown and nothing else, starting with the `# {title}` line.\n"
+    ));
     text
 }
 
@@ -785,15 +882,26 @@ fn clean(body: &str, max: usize) -> String {
     lines.join("\n").chars().take(max).collect()
 }
 
-/// The period a review written at `now` covers, as local days: today and
-/// the six before it.
-fn period(now: i64) -> (NaiveDate, NaiveDate) {
+/// The period a review of `days` written at `now` covers, as local days:
+/// today and the days before it.
+fn period(now: i64, days: i64) -> (NaiveDate, NaiveDate) {
     let to = Local
         .timestamp_opt(now, 0)
         .single()
         .map(|at| at.date_naive())
         .unwrap_or_default();
-    (to - chrono::Duration::days(DAYS - 1), to)
+    (to - chrono::Duration::days(days - 1), to)
+}
+
+/// What a review of `range` to `to` is called on its row and its page:
+/// `Week 45` — the week it ends in — `Weeks 44–45`, `Month to 5 Nov`.
+fn review_name(range: Range, from: NaiveDate, to: NaiveDate) -> String {
+    use chrono::Datelike;
+    match range {
+        Range::Week => format!("Week {}", to.iso_week().week()),
+        Range::Fortnight => format!("Weeks {}–{}", from.iso_week().week(), to.iso_week().week()),
+        Range::Month => format!("Month to {}", to.format("%-d %b")),
+    }
 }
 
 /// `4 – 10 October`, or `27 September – 3 October` across a month's end;
@@ -1195,12 +1303,24 @@ pub struct Meta {
 }
 
 impl Meta {
+    fn days(&self) -> Option<(NaiveDate, NaiveDate)> {
+        let day = |text: &str| NaiveDate::parse_from_str(text, "%Y-%m-%d").ok();
+        Some((day(&self.from)?, day(&self.to)?))
+    }
+
     /// `4 – 10 Oct`.
     fn period(&self) -> String {
-        let day = |text: &str| NaiveDate::parse_from_str(text, "%Y-%m-%d").ok();
-        match (day(&self.from), day(&self.to)) {
-            (Some(from), Some(to)) => period_label(from, to, false),
-            _ => self.to.clone(),
+        match self.days() {
+            Some((from, to)) => period_label(from, to, false),
+            None => self.to.clone(),
+        }
+    }
+
+    /// `Week 41` ([`review_name`]).
+    fn name(&self) -> String {
+        match self.days() {
+            Some((from, to)) => review_name(self.scope.range, from, to),
+            None => self.to.clone(),
         }
     }
 }
@@ -1259,7 +1379,13 @@ fn load_reviews(root: &Path, project: &ProjectId) -> Vec<Saved> {
 /// folder's oldest past [`KEEP`]. The Markdown's path.
 fn save(root: &Path, project: &ProjectId, meta: &Meta, text: &str) -> std::io::Result<PathBuf> {
     let dir = folder(root, project, meta.scope.wher);
-    let path = dir.join(format!("{}-{}.md", meta.to, meta.scope.slug()));
+    let name = format!(
+        "{}-{}{}.md",
+        meta.to,
+        meta.scope.slug(),
+        meta.scope.range.file_suffix()
+    );
+    let path = dir.join(name);
     orion_core::settings::write_atomic(&path, text.as_bytes())?;
     crate::pr_cache::write_json_atomic(&path.with_extension("json"), meta)?;
     let mut kept: Vec<PathBuf> = std::fs::read_dir(&dir)?
@@ -1291,6 +1417,9 @@ pub struct Fetched {
     pub prs: Option<Vec<MergedPr>>,
 }
 
+/// What one fetch covers: a project, and how many days back.
+pub type Window = (ProjectId, i64);
+
 /// A review being written.
 #[derive(Debug)]
 pub struct Pending {
@@ -1300,7 +1429,7 @@ pub struct Pending {
     pub scope: Scope,
     pub material: Material,
     pub people: Vec<(String, String, String)>,
-    /// The Claude account writing it, by the name Compose showed.
+    /// The Claude account writing it, by the name the screen showed.
     pub account: String,
     pub model: String,
     pub effort: String,
@@ -1311,11 +1440,19 @@ pub struct Pending {
     pub task: Option<tokio::task::AbortHandle>,
 }
 
+impl Pending {
+    /// `Week 45` ([`review_name`]).
+    fn name(&self) -> String {
+        let (from, to) = self.scope.period(self.asked);
+        review_name(self.scope.range, from, to)
+    }
+}
+
 /// An answer back on the loop.
 #[derive(Debug)]
 pub enum Answer {
     Fetched {
-        project: ProjectId,
+        window: Window,
         prs: Option<Vec<MergedPr>>,
     },
     Written {
@@ -1332,48 +1469,51 @@ pub struct State {
     pub root: Option<PathBuf>,
     /// Where answers go. `None` — every unit test — starts nothing.
     pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
-    pub fetched: HashMap<ProjectId, Fetched>,
-    pub fetching: HashSet<ProjectId>,
+    pub fetched: HashMap<Window, Fetched>,
+    pub fetching: HashSet<Window>,
     pub pending: Option<Pending>,
     next_id: u64,
 }
 
-/// Ask for `project`'s week of merged pull requests, unless a fetch is out
-/// or a fresh one is in hand.
-fn request_fetch(app: &mut App, project: &ProjectId, name: &str, dir: &Path) {
+/// Ask for `project`'s last `days` of merged pull requests, unless that
+/// fetch is out or a fresh one is in hand.
+fn request_fetch(app: &mut App, project: &ProjectId, name: &str, dir: &Path, days: i64) {
     let state = &mut app.week_review;
+    let window = (project.clone(), days);
     let fresh = state
         .fetched
-        .get(project)
+        .get(&window)
         .is_some_and(|f| f.prs.is_some() && f.at.elapsed() < FRESH);
     let Some(tx) = state.tx.clone() else {
         return;
     };
-    if fresh || !state.fetching.insert(project.clone()) {
+    if fresh || !state.fetching.insert(window.clone()) {
         return;
     }
-    let (project, name, dir) = (project.clone(), name.to_string(), dir.to_path_buf());
+    let (name, dir) = (name.to_string(), dir.to_path_buf());
     let now = orion_core::clock::now_secs() as i64;
     tokio::spawn(async move {
-        let prs = fetch_merged(dir, name, now).await;
-        let _ = tx.send(Answer::Fetched { project, prs });
+        let prs = fetch_merged(dir, name, now, days).await;
+        let _ = tx.send(Answer::Fetched { window, prs });
     });
 }
 
-/// Ask for every project `scope` covers.
+/// Ask for every project `scope` covers, over its range.
 ///
 /// The lists a review reads beside the pull requests are asked for too:
 /// Linear's, where the project has a key, and the project's todos, which
-/// are in hand only once the TODOS MODAL has been opened. And a week
-/// fetched for a project no longer covered is let go once it is stale:
-/// descriptions are heavy to keep for a window that is closed.
-fn request_scope(app: &mut App, project: &ProjectId, wher: Where) {
-    let covered = projects_in(app, project, wher);
-    app.week_review.fetched.retain(|id, fetched| {
-        fetched.at.elapsed() < FRESH || covered.iter().any(|(covered, _, _)| covered == id)
+/// are in hand only once the TODOS MODAL has been opened. And a fetch
+/// `scope` no longer covers is let go once it is stale: descriptions are
+/// heavy to keep for a window that is closed.
+fn request_scope(app: &mut App, project: &ProjectId, scope: Scope) {
+    let covered = projects_in(app, project, scope.wher);
+    let days = scope.range.days();
+    app.week_review.fetched.retain(|(id, d), fetched| {
+        fetched.at.elapsed() < FRESH
+            || (*d == days && covered.iter().any(|(covered, _, _)| covered == id))
     });
     for (id, name, dir) in covered {
-        request_fetch(app, &id, &name, &dir);
+        request_fetch(app, &id, &name, &dir, days);
         crate::todos::view::load_list(app, dir.clone());
         if !app.linear.contains_key(&id) && crate::linear::key_source(&dir).is_some() {
             crate::linear::request_list(app, id, dir, false);
@@ -1381,38 +1521,47 @@ fn request_scope(app: &mut App, project: &ProjectId, wher: Where) {
     }
 }
 
+/// The windows of every project `scope` covers.
+fn windows(app: &App, project: &ProjectId, scope: Scope) -> Vec<Window> {
+    let days = scope.range.days();
+    projects_in(app, project, scope.wher)
+        .into_iter()
+        .map(|(id, _, _)| (id, days))
+        .collect()
+}
+
 /// Whether GitHub could not be asked about a project `scope` covers: its
-/// week is not known, so no review of that scope is the whole week.
-fn fetch_failed(app: &App, project: &ProjectId, wher: Where) -> bool {
-    projects_in(app, project, wher).iter().any(|(id, _, _)| {
+/// window is not known, so no review of that scope is the whole of it.
+fn fetch_failed(app: &App, project: &ProjectId, scope: Scope) -> bool {
+    windows(app, project, scope).iter().any(|window| {
         app.week_review
             .fetched
-            .get(id)
+            .get(window)
             .is_some_and(|f| f.prs.is_none())
     })
 }
 
 /// Whether any project `scope` covers is still being fetched.
-fn fetching(app: &App, project: &ProjectId, wher: Where) -> bool {
-    projects_in(app, project, wher)
+fn fetching(app: &App, project: &ProjectId, scope: Scope) -> bool {
+    windows(app, project, scope)
         .iter()
-        .any(|(id, _, _)| app.week_review.fetching.contains(id))
+        .any(|window| app.week_review.fetching.contains(window))
 }
 
 /// An answer landed on the loop.
 pub fn land_answer(app: &mut App, answer: Answer) {
     match answer {
-        Answer::Fetched { project, prs } => {
-            app.week_review.fetching.remove(&project);
+        Answer::Fetched { window, prs } => {
+            app.week_review.fetching.remove(&window);
             app.week_review.fetched.insert(
-                project,
+                window,
                 Fetched {
                     at: Instant::now(),
                     prs,
                 },
             );
             // `Enter` was pressed before this landed: the modal that was
-            // waiting, if it is still up and still on Compose, sends now.
+            // waiting, if it is still up and still on the screen, sends now.
             let waiting = match &mut app.overlay {
                 Some(Overlay::WeekReview(view)) => std::mem::take(&mut view.send_when_fetched),
                 _ => false,
@@ -1426,8 +1575,9 @@ pub fn land_answer(app: &mut App, answer: Answer) {
     app.dirty = true;
 }
 
-/// The write came back. A reply is checked, finished, kept and shown; a
-/// failure says why and puts Compose back as it was left.
+/// The write came back. A reply is checked, finished, kept and listed —
+/// and shown, on the page that was waiting for it; a failure says why
+/// and puts the new review's options back as they were left.
 fn land_written(app: &mut App, id: u64, result: Result<Reply, String>) {
     if app.week_review.pending.as_ref().map(|p| p.id) != Some(id) {
         return;
@@ -1435,18 +1585,29 @@ fn land_written(app: &mut App, id: u64, result: Result<Reply, String>) {
     let Some(pending) = app.week_review.pending.take() else {
         return;
     };
+    // The modal on this project's reviews, the row it was written in gone
+    // from its list: the cursor's row, and whether it was that one's.
+    let view = match &mut app.overlay {
+        Some(Overlay::WeekReview(view)) if view.project == pending.project => Some(view),
+        _ => None,
+    };
     let reply = match result {
         Ok(reply) => reply,
         Err(why) => {
             app.flash = Some(Flash::failed(format!("Week in review: {why}")));
-            if let Some(Overlay::WeekReview(view)) = &mut app.overlay {
-                view.mode = Mode::Compose;
+            if let Some(view) = view {
+                // The page that waited goes back to the options; anywhere
+                // else the cursor stays on its review.
+                if view.selected == 0 && view.mode == Mode::Page {
+                    view.show_form();
+                }
+                view.selected = view.selected.saturating_sub(1);
                 view.notice = Some(why);
             }
             return;
         }
     };
-    let (from, to) = period(pending.asked);
+    let (from, to) = pending.scope.period(pending.asked);
     let meta = Meta {
         from: from.format("%Y-%m-%d").to_string(),
         to: to.format("%Y-%m-%d").to_string(),
@@ -1477,18 +1638,37 @@ fn land_written(app: &mut App, id: u64, result: Result<Reply, String>) {
     // On disk it is found again by its path; with nowhere to keep it (a
     // test), it is shown from memory.
     let path = saved.unwrap_or_default();
-    view.reviews
-        .retain(|r| r.path != path || path.as_os_str().is_empty());
+    // It takes the place it was written in, first in the list — and the
+    // place of one it was written over, same day, scope and range. The
+    // cursor stays on the review it was on; on this one, or the one it
+    // replaced, it is on the new one, and a page that showed either
+    // shows it.
+    let was = view
+        .selected
+        .checked_sub(1)
+        .and_then(|i| view.reviews.get(i))
+        .map(|r| r.path.clone());
+    let replaced = |p: &PathBuf| *p == path && !path.as_os_str().is_empty();
+    let on_it = was.as_ref().is_none_or(replaced);
+    view.reviews.retain(|r| !replaced(&r.path));
     let meta = Meta {
         material: Material::default(),
         ..meta
     };
     view.reviews.insert(0, Saved { path, meta });
-    view.mode = Mode::Reviews;
-    view.selected = 0;
-    view.scroll = 0;
-    view.text = text;
-    mark_read(app);
+    view.selected = match (&was, on_it) {
+        (Some(was), false) => view
+            .reviews
+            .iter()
+            .position(|r| r.path == *was)
+            .unwrap_or(0),
+        _ => 0,
+    };
+    if on_it && view.mode == Mode::Page {
+        view.scroll = 0;
+        view.text = text;
+        mark_read(app);
+    }
 }
 
 // ---- the modal ----
@@ -1496,26 +1676,39 @@ fn land_written(app: &mut App, id: u64, result: Result<Reply, String>) {
 /// Which screen the modal is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
-    /// Choosing the scope and the sources.
+    /// A new review's options on the left, the reviews kept down the right.
     #[default]
-    Compose,
-    /// The reviews: the one being written, and the ones kept.
+    Screen,
+    /// The review under the list's cursor on a page of its own: the one
+    /// being written, or one kept.
+    Page,
+}
+
+/// Which side of the screen has the keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Side {
+    /// The new review's options.
+    #[default]
+    Form,
+    /// The reviews kept.
     Reviews,
 }
 
-/// The Compose panel's rows the cursor rests on.
+/// The new review's rows the cursor rests on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
     Whose,
     Where,
+    Range,
     Source(Source),
     Note,
 }
 
 impl Row {
-    const ALL: [Row; 6] = [
+    const ALL: [Row; 7] = [
         Row::Whose,
         Row::Where,
+        Row::Range,
         Row::Source(Source::Prs),
         Row::Source(Source::Issues),
         Row::Source(Source::Todos),
@@ -1540,13 +1733,14 @@ pub struct WeekReviewView {
     pub project: ProjectId,
     pub project_name: String,
     pub mode: Mode,
+    pub side: Side,
     pub scope: Scope,
     /// Which sources are ticked, by [`Source::index`].
     pub picks: [bool; 3],
     pub note: TextInput,
     pub row: Row,
-    /// What Compose has to say: nothing to send, the fetch still out, why
-    /// the last write failed.
+    /// What the new review has to say: nothing to send, the fetch still
+    /// out, why the last write failed.
     pub notice: Option<String>,
     /// `Enter` was pressed before the fetch landed: send when it does.
     /// On the view, so closing the modal or changing what it would send
@@ -1554,19 +1748,21 @@ pub struct WeekReviewView {
     pub send_when_fetched: bool,
     /// The reviews kept, newest first.
     pub reviews: Vec<Saved>,
-    /// Cursor into the Reviews list — the one being written first, when
-    /// one is.
+    /// Cursor into the list of reviews — the one being written first,
+    /// when one is — and the one the page shows.
     pub selected: usize,
-    /// The selected review's Markdown.
+    /// The page's review's Markdown.
     pub text: String,
-    /// Top visible line of the right panel.
+    /// Top visible line of the page.
     pub scroll: u16,
     pub view_height: u16,
     pub body_lines: usize,
     /// Whole modal rect, written back during draw so clicks outside close.
     pub area: Rect,
-    /// Each Compose row's rect as of the last draw, for the mouse.
+    /// As of the last draw, for the mouse: each option row's rect, and
+    /// each review row's by its place in the list.
     pub rows: Vec<(Rect, Row)>,
+    pub list_rows: Vec<(usize, Rect)>,
 }
 
 impl WeekReviewView {
@@ -1574,7 +1770,8 @@ impl WeekReviewView {
         Self {
             project,
             project_name,
-            mode: Mode::Compose,
+            mode: Mode::Screen,
+            side: Side::Form,
             scope: Scope::default(),
             picks: [true; 3],
             note: TextInput::new(),
@@ -1589,7 +1786,24 @@ impl WeekReviewView {
             body_lines: 0,
             area: Rect::default(),
             rows: Vec::new(),
+            list_rows: Vec::new(),
         }
+    }
+
+    /// The screen, the keys on the new review's options.
+    fn show_form(&mut self) {
+        self.mode = Mode::Screen;
+        self.side = Side::Form;
+        self.selected = 0;
+    }
+
+    /// The list's `index`th review on its page, from its top; off it, the
+    /// keys land back on the list.
+    fn show_page(&mut self, index: usize) {
+        self.mode = Mode::Page;
+        self.side = Side::Reviews;
+        self.selected = index;
+        self.scroll = 0;
     }
 
     fn max_scroll(&self) -> u16 {
@@ -1603,30 +1817,46 @@ impl WeekReviewView {
     /// Whether a `Show` is on screen to sweep: what keeps the frame clock
     /// running while the modal is up (`App::status_anim_active`).
     pub fn shimmers(&self) -> bool {
-        self.mode == Mode::Reviews && self.text.contains("- Show: ")
+        self.mode == Mode::Page && self.text.contains("- Show: ")
     }
 }
 
 /// Whether a review of the modal's project is being written.
 fn writing(app: &App, view: &WeekReviewView) -> bool {
+    pending_for(app, &view.project).is_some()
+}
+
+/// The review being written, when it is `project`'s.
+fn pending_for<'a>(app: &'a App, project: &ProjectId) -> Option<&'a Pending> {
     app.week_review
         .pending
         .as_ref()
-        .is_some_and(|p| p.project == view.project)
+        .filter(|p| &p.project == project)
 }
 
-/// The kept review under the cursor: the Reviews list has the one being
-/// written first, so the cursor is one past it while there is one.
-fn selected_saved(app: &App, view: &WeekReviewView) -> Option<usize> {
+/// How many rows the list of reviews has: the one being written, and the
+/// ones kept.
+fn list_len(app: &App, view: &WeekReviewView) -> usize {
+    view.reviews.len() + usize::from(writing(app, view))
+}
+
+/// The kept review on the list's `index`th row: the list has the one
+/// being written first, so its rows are one past them while there is one.
+fn saved_at(app: &App, view: &WeekReviewView, index: usize) -> Option<usize> {
     let offset = usize::from(writing(app, view));
-    view.selected
+    index
         .checked_sub(offset)
         .filter(|i| *i < view.reviews.len())
 }
 
-/// The hotkey: the WEEK IN REVIEW for the selected PROJECT. It opens on
-/// the review being written, else on this period's when there is one,
-/// else on Compose — and asks GitHub for the week either way.
+/// The kept review under the cursor.
+fn selected_saved(app: &App, view: &WeekReviewView) -> Option<usize> {
+    saved_at(app, view, view.selected)
+}
+
+/// The hotkey: the WEEK IN REVIEW for the selected PROJECT, on its screen
+/// — or, while one is being written or one has landed unread, on that
+/// one's page — and GitHub asked for the week either way.
 pub fn open(app: &mut App) {
     let Some(project) = app.selected_project().cloned() else {
         return;
@@ -1637,63 +1867,49 @@ pub fn open(app: &mut App) {
         let note = std::fs::read_to_string(note_path(root, &project.id)).unwrap_or_default();
         view.note.insert_str(note.trim());
     }
-    let today = period(orion_core::clock::now_secs() as i64)
-        .1
-        .format("%Y-%m-%d")
-        .to_string();
-    let this_week = view.reviews.first().is_some_and(|r| r.meta.to == today);
-    let pending = app
-        .week_review
-        .pending
-        .as_ref()
-        .is_some_and(|p| p.project == project.id);
-    if pending || this_week {
-        view.mode = Mode::Reviews;
-    }
+    let unread = view.reviews.first().is_some_and(|r| !r.meta.read);
+    let scope = view.scope;
     app.overlay = Some(Overlay::WeekReview(Box::new(view)));
-    request_scope(app, &project.id, Where::Project);
-    select(app, 0);
+    request_scope(app, &project.id, scope);
+    if pending_for(app, &project.id).is_some() || unread {
+        open_page(app, 0);
+    }
     app.dirty = true;
 }
 
-/// Put the Reviews cursor on `index`: the review's text is read, and one
-/// shown is no longer new.
-fn select(app: &mut App, index: usize) {
+/// The list's `index`th review on its page: its text read, and — one kept
+/// — no longer new.
+fn open_page(app: &mut App, index: usize) {
     let Some(Overlay::WeekReview(view)) = &app.overlay else {
         return;
     };
-    let offset = usize::from(writing(app, view));
-    let count = view.reviews.len() + offset;
-    let index = index.min(count.saturating_sub(1));
-    let path = index
-        .checked_sub(offset)
-        .and_then(|i| view.reviews.get(i))
-        .map(|r| r.path.clone());
+    let Some(last) = list_len(app, view).checked_sub(1) else {
+        return;
+    };
+    let index = index.min(last);
+    let path = saved_at(app, view, index).map(|i| view.reviews[i].path.clone());
     let Some(Overlay::WeekReview(view)) = &mut app.overlay else {
         return;
     };
-    if view.selected != index || view.text.is_empty() {
-        view.scroll = 0;
-        match path {
-            // One with nowhere to be kept is still in hand.
-            Some(path) if path.as_os_str().is_empty() => {}
-            Some(path) => view.text = std::fs::read_to_string(path).unwrap_or_default(),
-            // The one being written has no text yet.
-            None => view.text.clear(),
-        }
+    match path {
+        // One with nowhere to be kept is still in hand.
+        Some(path) if path.as_os_str().is_empty() => {}
+        Some(path) => view.text = std::fs::read_to_string(path).unwrap_or_default(),
+        // The one being written has no text yet.
+        None => view.text.clear(),
     }
-    view.selected = index;
+    view.show_page(index);
     mark_read(app);
     app.dirty = true;
 }
 
-/// The review under the cursor has been shown: it stops reading `new`,
-/// on disk too.
+/// The review on the page has been shown: it stops reading `new`, on
+/// disk too.
 fn mark_read(app: &mut App) {
     let Some(Overlay::WeekReview(view)) = &app.overlay else {
         return;
     };
-    if view.mode != Mode::Reviews {
+    if view.mode != Mode::Page {
         return;
     }
     let Some(index) = selected_saved(app, view) else {
@@ -1722,13 +1938,14 @@ fn mark_read(app: &mut App) {
     }
 }
 
-/// `Enter` on Compose: write the review. With the fetch still out it is
-/// sent as it lands; with nothing to write from, Compose says so.
+/// `Enter` on the new review: write it, and turn to a fresh page that
+/// shows it being written. With the fetch still out it is sent as it
+/// lands; with nothing to write from, the options say so.
 fn submit(app: &mut App) {
     let Some(Overlay::WeekReview(view)) = &app.overlay else {
         return;
     };
-    if view.mode != Mode::Compose {
+    if view.mode != Mode::Screen {
         return;
     }
     let (project, name, scope, picks) = (
@@ -1747,17 +1964,20 @@ fn submit(app: &mut App) {
     if app.week_review.pending.is_some() {
         return notice(app, "a review is already being written");
     }
-    if picks[Source::Prs.index()] && fetching(app, &project, scope.wher) {
+    if picks[Source::Prs.index()] && fetching(app, &project, scope) {
         if let Some(Overlay::WeekReview(view)) = &mut app.overlay {
             view.send_when_fetched = true;
         }
-        return notice(app, "asking GitHub for the week — it is sent as that lands");
-    }
-    if picks[Source::Prs.index()] && fetch_failed(app, &project, scope.wher) {
-        request_scope(app, &project, scope.wher);
         return notice(
             app,
-            "GitHub could not be asked for the week — Enter tries again, or untick the pull requests to write without them",
+            "asking GitHub for what merged — it is sent as that lands",
+        );
+    }
+    if picks[Source::Prs.index()] && fetch_failed(app, &project, scope) {
+        request_scope(app, &project, scope);
+        return notice(
+            app,
+            "GitHub could not be asked for what merged — Enter tries again, or untick the pull requests to write without them",
         );
     }
     // The account it is written through: one of orion's own, the Week
@@ -1783,9 +2003,10 @@ fn submit(app: &mut App) {
     let now = orion_core::clock::now_secs() as i64;
     let material = gather(app, &project, scope, picks, now);
     if material.is_empty() {
+        let days = scope.range.days();
         return notice(
             app,
-            &format!("nothing finished in the last {DAYS} days to write up"),
+            &format!("nothing finished in the last {days} days to write up"),
         );
     }
     if let Some(root) = &app.week_review.root {
@@ -1827,20 +2048,19 @@ fn submit(app: &mut App) {
     });
     app.flash = Some(Flash::working("Week in review: writing…"));
     if let Some(Overlay::WeekReview(view)) = &mut app.overlay {
-        view.mode = Mode::Reviews;
-        view.selected = 0;
-        view.scroll = 0;
+        view.show_page(0);
         view.notice = None;
         view.text.clear();
     }
     app.dirty = true;
 }
 
-/// `⌘W` while one is being written: the write is stopped, and Compose
-/// comes back as it was left.
+/// `⌘W` on the page of the one being written: the write is stopped, and
+/// the new review's options come back as they were left.
 fn stop(app: &mut App) {
-    let ours = matches!(&app.overlay, Some(Overlay::WeekReview(view)) if writing(app, view));
-    if !ours {
+    let on_it = matches!(&app.overlay, Some(Overlay::WeekReview(view))
+        if writing(app, view) && selected_saved(app, view).is_none());
+    if !on_it {
         return;
     }
     let Some(pending) = app.week_review.pending.take() else {
@@ -1851,14 +2071,13 @@ fn stop(app: &mut App) {
     }
     app.flash = Some(Flash::note("Week in review stopped"));
     if let Some(Overlay::WeekReview(view)) = &mut app.overlay {
-        view.mode = Mode::Compose;
-        view.selected = 0;
+        view.show_form();
     }
     app.dirty = true;
 }
 
-/// `⌘R`: write the review under the cursor again — its scope, today's
-/// week.
+/// `⌘R` on a review's page: write it again — its scope and range, to
+/// today.
 fn rewrite(app: &mut App) {
     let Some(Overlay::WeekReview(view)) = &app.overlay else {
         return;
@@ -1870,9 +2089,9 @@ fn rewrite(app: &mut App) {
     if let Some(scope) = scope {
         view.scope = scope;
     }
-    view.mode = Mode::Compose;
-    let (project, wher) = (view.project.clone(), view.scope.wher);
-    request_scope(app, &project, wher);
+    view.show_form();
+    let (project, scope) = (view.project.clone(), view.scope);
+    request_scope(app, &project, scope);
     submit(app);
 }
 
@@ -1882,70 +2101,80 @@ pub(crate) mod keys {
     use crate::hints::Key;
 
     pub const SEND: Key = Key::new(&["enter"], "write it");
+    /// A choice row's other choice.
+    pub const CHOOSE: Key = Key::new(&["left", "right"], "choose").show(2);
     pub const TICK: Key = Key::new(&["space"], "tick");
+    /// From the new review to the reviews kept, and back.
+    pub const SIDE: Key = Key::new(&["tab", "shift+tab"], "reviews");
+    pub const OPEN: Key = Key::new(&["enter"], "open");
+    pub const WALK: Key = Key::new(&["up", "down"], "reviews").show(2);
+    pub const SCROLL: Key = Key::new(&["up", "down"], "scroll").show(2);
     /// The TODOS MODAL's copy.
     pub const COPY: Key = Key::new(&["cmd+c", "ctrl+y"], "copy as Markdown");
-    pub const OPEN: Key = Key::new(&["cmd+o", "ctrl+o"], "open the file");
+    pub const FILE: Key = Key::new(&["cmd+o", "ctrl+o"], "open the file");
     pub const AGAIN: Key = Key::new(&["cmd+r", "ctrl+r"], "write it again");
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "a new one");
     pub const STOP: Key = Key::new(&["cmd+w", "ctrl+w"], "stop");
+    /// Off a review's page, back to the screen.
+    pub const BACK: Key = Key::new(&["esc"], "back");
+    #[cfg(test)]
+    pub const ALL: &[Key] = &[
+        SEND, CHOOSE, TICK, SIDE, OPEN, WALK, SCROLL, COPY, FILE, AGAIN, NEW, STOP, BACK,
+    ];
 }
 
 /// What the modal's bottom border says its keys are.
 fn hints(app: &App, view: &WeekReviewView) -> Vec<Hint> {
-    match view.mode {
-        Mode::Compose => {
+    match (view.mode, view.side) {
+        (Mode::Screen, Side::Form) => {
             let mut hints = vec![keys::SEND.hint().kept()];
             match view.row {
-                Row::Whose | Row::Where => hints.push(Hint::new("←/→", "choose")),
+                Row::Whose | Row::Where | Row::Range => hints.push(keys::CHOOSE.hint()),
                 Row::Source(_) => hints.push(keys::TICK.hint()),
                 Row::Note => {}
             }
-            if !view.reviews.is_empty() || writing(app, view) {
-                hints.push(Hint::new("Tab", "reviews"));
+            if list_len(app, view) > 0 {
+                hints.push(keys::SIDE.hint());
             }
             hints.push(crate::hints::ESC_CLOSE.hint());
             hints
         }
-        Mode::Reviews if selected_saved(app, view).is_none() => vec![
-            keys::STOP.hint().kept(),
-            Hint::new("↑/↓", "reviews"),
+        (Mode::Screen, Side::Reviews) => vec![
+            keys::OPEN.hint().kept(),
+            keys::WALK.hint(),
+            keys::SIDE.hint_as("new review"),
             crate::hints::ESC_CLOSE.hint(),
         ],
-        Mode::Reviews => vec![
+        (Mode::Page, _) if selected_saved(app, view).is_none() => {
+            vec![keys::STOP.hint().kept(), keys::BACK.hint()]
+        }
+        (Mode::Page, _) => vec![
             keys::COPY.hint().kept(),
-            keys::OPEN.hint(),
+            keys::FILE.hint(),
             keys::AGAIN.hint(),
             keys::NEW.hint(),
-            Hint::new("↑/↓", "reviews"),
-            Hint::new("⇧↑/⇧↓", "scroll"),
-            crate::hints::ESC_CLOSE.hint(),
+            keys::SCROLL.hint(),
+            keys::BACK.hint(),
         ],
     }
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
-    let Some(Overlay::WeekReview(view)) = &mut app.overlay else {
+    let Some(Overlay::WeekReview(view)) = &app.overlay else {
         return;
     };
-    if key.code == KeyCode::Esc {
-        app.overlay = None;
-        app.dirty = true;
-        return;
-    }
     app.dirty = true;
-    match view.mode {
-        Mode::Compose => compose_key(app, key),
-        Mode::Reviews => reviews_key(app, key),
+    match (view.mode, view.side) {
+        (Mode::Page, _) => page_key(app, key),
+        (Mode::Screen, _) if key.code == KeyCode::Esc => app.overlay = None,
+        (Mode::Screen, Side::Form) => form_key(app, key),
+        (Mode::Screen, Side::Reviews) => list_key(app, key),
     }
 }
 
-fn compose_key(app: &mut App, key: KeyEvent) {
-    // There is a list to go to: a review kept, or one being written.
-    let has_reviews = matches!(
-        &app.overlay,
-        Some(Overlay::WeekReview(view)) if !view.reviews.is_empty() || writing(app, view)
-    );
+fn form_key(app: &mut App, key: KeyEvent) {
+    let has_reviews =
+        matches!(&app.overlay, Some(Overlay::WeekReview(view)) if list_len(app, view) > 0);
     let Some(Overlay::WeekReview(view)) = &mut app.overlay else {
         return;
     };
@@ -1954,38 +2183,29 @@ fn compose_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => submit(app),
         KeyCode::Down => view.row = view.row.step(true),
         KeyCode::Up => view.row = view.row.step(false),
-        KeyCode::Tab | KeyCode::BackTab if has_reviews => {
-            view.mode = Mode::Reviews;
-            view.text.clear();
-            select(app, 0);
+        _ if keys::SIDE.matches(&key) => {
+            if has_reviews {
+                view.side = Side::Reviews;
+            }
         }
-        KeyCode::PageDown => view.scroll_by(i32::from(view.view_height.max(1))),
-        KeyCode::PageUp => view.scroll_by(-i32::from(view.view_height.max(1))),
         KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if !on_note => {
-            toggle(app, view_row(app));
+            let row = view.row;
+            toggle(app, row, key.code == KeyCode::Left);
         }
         _ if on_note && view.note.handle_key(&key).changed() => view.notice = None,
         _ => {}
     }
 }
 
-/// The Compose row under the cursor.
-fn view_row(app: &App) -> Row {
-    match &app.overlay {
-        Some(Overlay::WeekReview(view)) => view.row,
-        _ => Row::Whose,
-    }
-}
-
-/// Flip `row`: a scope row to its other choice, a source in or out. A
-/// wider `Where` asks GitHub about the projects it now covers.
-fn toggle(app: &mut App, row: Row) {
+/// Flip `row`: a choice row to its next choice — `back`, the one before —
+/// a source in or out. A wider `Where` or a longer range asks GitHub for
+/// what it now covers.
+fn toggle(app: &mut App, row: Row, back: bool) {
     let Some(Overlay::WeekReview(view)) = &mut app.overlay else {
         return;
     };
     view.notice = None;
     view.send_when_fetched = false;
-    view.scroll = 0;
     match row {
         Row::Whose => {
             view.scope.whose = match view.scope.whose {
@@ -1998,36 +2218,58 @@ fn toggle(app: &mut App, row: Row) {
                 Where::Project => Where::All,
                 Where::All => Where::Project,
             };
-            let (project, wher) = (view.project.clone(), view.scope.wher);
-            request_scope(app, &project, wher);
         }
+        Row::Range => view.scope.range = view.scope.range.turned(back),
         Row::Source(source) => view.picks[source.index()] ^= true,
         Row::Note => {}
+    }
+    if matches!(row, Row::Where | Row::Range) {
+        let (project, scope) = (view.project.clone(), view.scope);
+        request_scope(app, &project, scope);
     }
     app.dirty = true;
 }
 
-fn reviews_key(app: &mut App, key: KeyEvent) {
+/// A key while the list of reviews has them.
+fn list_key(app: &mut App, key: KeyEvent) {
+    let Some(Overlay::WeekReview(view)) = &app.overlay else {
+        return;
+    };
+    let count = list_len(app, view);
     let Some(Overlay::WeekReview(view)) = &mut app.overlay else {
         return;
     };
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    let page = i32::from(view.view_height.max(1));
-    let at = view.selected;
+    let at = view.selected as i64;
     match key.code {
-        KeyCode::Down if shift => view.scroll_by(1),
-        KeyCode::Up if shift => view.scroll_by(-1),
+        KeyCode::Enter => open_page(app, at as usize),
+        KeyCode::Down => view.selected = crate::app::clamp_selection(at + 1, count),
+        KeyCode::Up => view.selected = crate::app::clamp_selection(at - 1, count),
+        KeyCode::Left => view.side = Side::Form,
+        _ if keys::SIDE.matches(&key) || keys::NEW.matches(&key) => view.side = Side::Form,
+        _ => {}
+    }
+}
+
+/// A key while a review is on its page.
+fn page_key(app: &mut App, key: KeyEvent) {
+    let Some(Overlay::WeekReview(view)) = &mut app.overlay else {
+        return;
+    };
+    let page = i32::from(view.view_height.max(1));
+    match key.code {
+        // Back to the list, the cursor on this one.
+        _ if keys::BACK.matches(&key) => {
+            view.mode = Mode::Screen;
+            view.side = Side::Reviews;
+        }
+        KeyCode::Down => view.scroll_by(1),
+        KeyCode::Up => view.scroll_by(-1),
         KeyCode::PageDown => view.scroll_by(page),
         KeyCode::PageUp => view.scroll_by(-page),
         KeyCode::Home => view.scroll = 0,
         KeyCode::End => view.scroll = view.max_scroll(),
-        KeyCode::Down => select(app, at + 1),
-        KeyCode::Up => select(app, at.saturating_sub(1)),
         _ if keys::STOP.matches(&key) => stop(app),
-        _ if keys::NEW.matches(&key) => {
-            view.mode = Mode::Compose;
-            view.scroll = 0;
-        }
+        _ if keys::NEW.matches(&key) => view.show_form(),
         _ if keys::AGAIN.matches(&key) => rewrite(app),
         _ if keys::COPY.matches(&key) => {
             let text = view.text.clone();
@@ -2035,7 +2277,7 @@ fn reviews_key(app: &mut App, key: KeyEvent) {
                 crate::event_loop::copy_and_flash(app, &text, "Copied the review as Markdown");
             }
         }
-        _ if keys::OPEN.matches(&key) => {
+        _ if keys::FILE.matches(&key) => {
             let path = selected_path(app);
             if let Some((dir, file)) = path.as_ref().and_then(|p| {
                 Some((
@@ -2062,7 +2304,8 @@ fn selected_path(app: &App) -> Option<PathBuf> {
 /// A paste lands in the note.
 pub fn paste(app: &mut App, text: &str) {
     if let Some(Overlay::WeekReview(view)) = &mut app.overlay {
-        if view.mode == Mode::Compose {
+        if view.mode == Mode::Screen {
+            view.side = Side::Form;
             view.row = Row::Note;
             view.note.insert_str(&text.replace('\n', " "));
             app.dirty = true;
@@ -2070,21 +2313,27 @@ pub fn paste(app: &mut App, text: &str) {
     }
 }
 
-/// The wheel scrolls the right panel; a click on a Compose row puts the
-/// cursor there and flips it. (A click outside is Esc, as on every
-/// modal: `overlay_close`.)
+/// The wheel scrolls a review's page; on the screen a click on an option
+/// puts the cursor there and flips it, and one on a review opens it.
+/// (A click outside is Esc, as on every modal: `overlay_close`.)
 pub fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     let Some(Overlay::WeekReview(view)) = &mut app.overlay else {
         return;
     };
-    match mouse.kind {
-        MouseEventKind::ScrollDown => view.scroll_by(3),
-        MouseEventKind::ScrollUp => view.scroll_by(-3),
-        MouseEventKind::Down(MouseButton::Left) if view.mode == Mode::Compose => {
-            let at = Position::new(mouse.column, mouse.row);
+    let at = Position::new(mouse.column, mouse.row);
+    match (view.mode, mouse.kind) {
+        (Mode::Page, MouseEventKind::ScrollDown) => view.scroll_by(3),
+        (Mode::Page, MouseEventKind::ScrollUp) => view.scroll_by(-3),
+        (Mode::Screen, MouseEventKind::Down(MouseButton::Left)) => {
             if let Some(&(_, row)) = view.rows.iter().find(|(r, _)| r.contains(at)) {
+                view.side = Side::Form;
                 view.row = row;
-                toggle(app, row);
+                // The note is typed into, not flipped.
+                if row != Row::Note {
+                    toggle(app, row, false);
+                }
+            } else if let Some(index) = crate::ui::row_hit(&view.list_rows, at) {
+                open_page(app, index);
             }
         }
         _ => {}
@@ -2094,7 +2343,7 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent) {
 
 // ---- drawing ----
 
-/// The left panel's share of the modal, and its floor.
+/// The list of reviews' share of the screen, and its floor.
 const LIST_PCT: u16 = 36;
 const MIN_LIST_W: u16 = 30;
 /// The gap between a review's columns.
@@ -2105,7 +2354,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     crate::pr_preview::wrap(text, width.max(8))
 }
 
-/// A review as the right panel draws it. A point's owner and its pull
+/// A review as its page draws it. A point's owner and its pull
 /// requests sit in two columns at the right, each right-aligned; an
 /// area's contributors END on the owner column, so one contributor sits
 /// exactly over its points' owner and a longer list grows leftwards.
@@ -2376,161 +2625,135 @@ fn item_lines(material: &Material, now: i64, width: usize, th: Theme) -> Vec<Lin
     lines
 }
 
-/// How many of `source` a review of `scope` would take, as Compose's
-/// count column says it: the number, `asking…` while GitHub is out, or
-/// why there is none to count.
+/// How many of `source` a review of the view's scope would take, as its
+/// row says it: the number, `asking…` while GitHub is out, or why there
+/// is none to count — and for Linear's, past its week, how far back the
+/// list it reads reaches.
 fn count_label(app: &App, view: &WeekReviewView, source: Source, material: &Material) -> String {
+    let scope = view.scope;
+    let linear_days = crate::linear::DONE_DAYS;
     match source {
-        Source::Prs if fetching(app, &view.project, view.scope.wher) => "asking…".into(),
-        Source::Prs if fetch_failed(app, &view.project, view.scope.wher) => "couldn't ask".into(),
-        Source::Todos if view.scope.whose == Whose::Everyone => "yours only".into(),
+        Source::Prs if fetching(app, &view.project, scope) => "asking…".into(),
+        Source::Prs if fetch_failed(app, &view.project, scope) => "couldn't ask".into(),
+        Source::Todos if scope.whose == Whose::Everyone => "yours only".into(),
         Source::Prs => material.prs.len().to_string(),
+        Source::Issues if scope.range.days() > i64::from(linear_days) => {
+            format!("{} · last {linear_days} days", material.issues.len())
+        }
         Source::Issues => material.issues.len().to_string(),
         Source::Todos => material.todos.len().to_string(),
     }
 }
 
-/// `(•) this   ( ) that`: a scope row's two choices.
-fn choice_spans(first: &str, second: &str, on_first: bool, th: Theme) -> Vec<Span<'static>> {
-    let option = |name: &str, on: bool| {
-        let (mark, color) = if on {
+/// `(•) this  ( ) that`: a choice row's choices, `on` the one chosen.
+fn choice_spans(options: &[&str], on: usize, th: Theme) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (i, name) in options.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::raw("  "));
+        }
+        let chosen = i == on;
+        let (mark, color) = if chosen {
             ("(•) ", th.accent)
         } else {
             ("( ) ", th.dim)
         };
-        vec![
-            Span::styled(mark, Style::default().fg(color)),
-            Span::styled(
-                name.to_string(),
-                Style::default().fg(if on { th.text } else { th.muted }),
-            ),
-        ]
-    };
-    let mut spans = option(first, on_first);
-    spans.push(Span::raw("   "));
-    spans.extend(option(second, !on_first));
+        spans.push(Span::styled(mark, Style::default().fg(color)));
+        spans.push(Span::styled(
+            name.to_string(),
+            Style::default().fg(if chosen { th.text } else { th.muted }),
+        ));
+    }
     spans
 }
 
-/// The WEEK IN REVIEW: scope, sources and note — or the reviews — down
-/// the left, and on the right what would be sent, what is being written,
-/// or the review itself.
+/// The widest a review's page reads: past that its columns drift too
+/// far from its points.
+const PAGE_W: u16 = 96;
+
+/// The WEEK IN REVIEW: its screen — a new review's options down the
+/// left, the reviews kept down the right — or a review on its page.
 pub fn draw(f: &mut Frame, app: &mut App, view: &WeekReviewView, th: Theme) {
     let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
     f.render_widget(Clear, area);
-    let list_w = (area.width * LIST_PCT / 100)
-        .max(MIN_LIST_W)
-        .min(area.width.saturating_sub(crate::ui::SPLIT_PANE_LAYOUT_MIN));
-    let [left_a, right_a] = Layout::horizontal([
-        Constraint::Length(list_w),
-        Constraint::Min(crate::ui::SPLIT_PANE_LAYOUT_MIN),
-    ])
-    .areas(area);
     let now = orion_core::clock::now_secs() as i64;
-    let title = format!("Week in review — {}", view.project_name);
-    let compose = view.mode == Mode::Compose;
-    let left_block = panel_block(&title, compose, th);
-    let left = left_block.inner(left_a);
-    f.render_widget(left_block, left_a);
-    let mut rows = Vec::new();
-
-    let (right_title, lines) = if compose {
-        let material = gather(app, &view.project, view.scope, view.picks, now);
-        draw_compose(f, app, view, &material, left, &mut rows, now, th);
-        let right_w = usize::from(right_a.width.saturating_sub(4));
-        let mut lines = item_lines(&material, now, right_w, th);
-        if lines.is_empty() {
-            let text = if fetching(app, &view.project, view.scope.wher) {
-                "asking GitHub for the week…"
-            } else {
-                "nothing finished in the week"
-            };
-            lines.push(Line::from(Span::styled(text, Style::default().fg(th.dim))));
-        }
-        (
-            format!(
-                "What goes in · {} · {}",
-                plural(material.len(), "item", "items"),
-                view.scope.label()
-            ),
-            lines,
-        )
+    let ((rows, list_rows), (view_height, body_lines, scroll)) = match view.mode {
+        Mode::Screen => (draw_screen(f, app, view, area, now, th), (0, 0, 0)),
+        Mode::Page => (Default::default(), draw_page(f, app, view, area, now, th)),
+    };
+    let reserve = if body_lines > usize::from(view_height) {
+        12
     } else {
-        draw_reviews(f, app, view, left, now, th);
-        let right_w = usize::from(right_a.width.saturating_sub(4));
-        match (selected_saved(app, view), &app.week_review.pending) {
-            (Some(index), _) => {
-                let meta = &view.reviews[index].meta;
-                let phase = app.animations.then(|| app.sweep_phase());
-                (
-                    format!("{} · {}", meta.period(), meta.scope.label()),
-                    review_lines(&view.text, &meta.problems, right_w, phase, th),
-                )
-            }
-            (None, Some(pending)) => (
-                format!("{} · writing", period_short(pending.asked)),
-                writing_lines(app, pending, right_w, th),
-            ),
-            (None, None) => ("Week in review".to_string(), Vec::new()),
-        }
+        0
     };
-
-    let mut right_block = panel_block(&right_title, !compose, th);
-    let right_inner = right_block.inner(right_a);
-    let body = Rect {
-        x: right_inner.x + 1,
-        y: right_inner.y + 1.min(right_inner.height),
-        width: right_inner.width.saturating_sub(2),
-        height: right_inner.height.saturating_sub(1),
-    };
-    let max_scroll = (lines.len() as u16).saturating_sub(body.height.max(1));
-    let scroll = view.scroll.min(max_scroll);
-    if max_scroll > 0 {
-        right_block = right_block.title_bottom(
-            Line::from(Span::styled(
-                format!(" {}/{} ", scroll + 1, lines.len()),
-                Style::default().fg(th.dim),
-            ))
-            .right_aligned(),
-        );
-    }
-    f.render_widget(right_block, right_a);
-    let total = lines.len();
-    let shown: Vec<Line> = lines.into_iter().skip(usize::from(scroll)).collect();
-    f.render_widget(Paragraph::new(shown), body);
-    let reserve = if max_scroll > 0 { 12 } else { 0 };
     crate::hints::draw_on_border(f, area, &hints(app, view), reserve, th);
 
     if let Some(Overlay::WeekReview(live)) = &mut app.overlay {
         live.area = area;
         live.rows = rows;
-        live.view_height = body.height;
-        live.body_lines = total;
+        live.list_rows = list_rows;
+        live.view_height = view_height;
+        live.body_lines = body_lines;
         live.scroll = scroll;
     }
 }
 
-/// `4 – 10 Oct` for a review asked at `asked`.
-fn period_short(asked: i64) -> String {
-    let (from, to) = period(asked);
-    period_label(from, to, false)
+/// Where the screen drew what a click picks: each option row, and each
+/// review row by its place in the list.
+type ScreenHits = (Vec<(Rect, Row)>, Vec<(usize, Rect)>);
+
+/// The screen: the new review's options in a frame on the left, the
+/// reviews kept in one down the right, the side with the keys lit.
+fn draw_screen(
+    f: &mut Frame,
+    app: &App,
+    view: &WeekReviewView,
+    area: Rect,
+    now: i64,
+    th: Theme,
+) -> ScreenHits {
+    let list_w = (area.width * LIST_PCT / 100)
+        .max(MIN_LIST_W)
+        .min(area.width.saturating_sub(crate::ui::SPLIT_PANE_LAYOUT_MIN));
+    let [form_a, list_a] = Layout::horizontal([
+        Constraint::Min(crate::ui::SPLIT_PANE_LAYOUT_MIN),
+        Constraint::Length(list_w),
+    ])
+    .areas(area);
+    let title = format!("Week in review — {}", view.project_name);
+    let form_block = panel_block(&title, view.side == Side::Form, th);
+    let form = form_block.inner(form_a);
+    f.render_widget(form_block, form_a);
+    let material = gather(app, &view.project, view.scope, view.picks, now);
+    let rows = draw_form(f, app, view, &material, form, now, th);
+
+    let count = list_len(app, view);
+    let title = match count {
+        0 => "Reviews".to_string(),
+        n => format!("Reviews · {n}"),
+    };
+    let list_block = panel_block(&title, view.side == Side::Reviews, th);
+    let list = list_block.inner(list_a);
+    f.render_widget(list_block, list_a);
+    (rows, draw_list(f, app, view, list, now, th))
 }
 
-/// The Compose panel: the period, the scope's two rows, the sources with
-/// their counts, the model, the note, and whatever there is to say.
-#[allow(clippy::too_many_arguments)]
-fn draw_compose(
+/// The new review: what it covers, whose and where, how far back, the
+/// sources with their counts, the model, the note, whatever there is to
+/// say — then, as far as the panel reaches, what would be sent. Each
+/// option row's rect.
+fn draw_form(
     f: &mut Frame,
     app: &App,
     view: &WeekReviewView,
     material: &Material,
     area: Rect,
-    rows: &mut Vec<(Rect, Row)>,
     now: i64,
     th: Theme,
-) {
+) -> Vec<(Rect, Row)> {
+    let mut rows = Vec::new();
     let width = usize::from(area.width);
-    let (from, to) = period(now);
+    let (from, to) = view.scope.period(now);
     let rule = |name: &str| crate::ui::section_rule(name, th.muted, Vec::new(), width, th);
     let label = |name: &str| Span::styled(format!("{name:<7}"), Style::default().fg(th.muted));
     let cfg = crate::config::Config::load();
@@ -2538,36 +2761,51 @@ fn draw_compose(
     let (model, effort) = launch_of(&preset);
     let mut out: Vec<(Option<Row>, Line<'static>)> = Vec::new();
     let period = period_label(from, to, false);
-    let last = format!("Last {DAYS} days");
+    let heading = "New review";
     out.push((
         None,
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(last.clone(), Style::default().fg(th.text)),
+            Span::styled(
+                heading,
+                Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" ".repeat(
-                width.saturating_sub(2 + last.chars().count() + period.chars().count() + 1),
+                width.saturating_sub(2 + heading.chars().count() + period.chars().count() + 1),
             )),
             Span::styled(period, Style::default().fg(th.muted)),
         ]),
     ));
     out.push((None, Line::default()));
     out.push((None, rule("Scope")));
-    let mut whose = vec![Span::raw("  "), label("Whose")];
-    whose.extend(choice_spans(
-        "Just mine",
-        "Everyone",
-        view.scope.whose == Whose::Mine,
-        th,
+    let choice = |row: Row, name: &str, options: &[&str], on: usize| {
+        let mut spans = vec![Span::raw("  "), label(name)];
+        spans.extend(choice_spans(options, on, th));
+        (Some(row), Line::from(spans))
+    };
+    let scope = view.scope;
+    out.push(choice(
+        Row::Whose,
+        "Whose",
+        &["Just mine", "Everyone"],
+        usize::from(scope.whose == Whose::Everyone),
     ));
-    out.push((Some(Row::Whose), Line::from(whose)));
-    let mut wher = vec![Span::raw("  "), label("Where")];
-    wher.extend(choice_spans(
-        "This project",
-        "All projects",
-        view.scope.wher == Where::Project,
-        th,
+    out.push(choice(
+        Row::Where,
+        "Where",
+        &["This project", "All projects"],
+        usize::from(scope.wher == Where::All),
     ));
-    out.push((Some(Row::Where), Line::from(wher)));
+    let ranges: Vec<&str> = Range::ALL.iter().map(|r| r.label()).collect();
+    out.push(choice(
+        Row::Range,
+        "Range",
+        &ranges,
+        Range::ALL
+            .iter()
+            .position(|r| *r == scope.range)
+            .unwrap_or(0),
+    ));
     out.push((None, Line::default()));
     out.push((None, rule("Sources")));
     for source in Source::ALL {
@@ -2631,11 +2869,17 @@ fn draw_compose(
             ));
         }
     }
+    out.push((None, Line::default()));
+    // The panel's first row stands empty over the rest.
+    let room = usize::from(area.height).saturating_sub(1 + out.len());
+    let sent = preview_lines(app, view, material, room, width, now, th);
+    out.extend(sent.into_iter().map(|line| (None, line)));
+    let focused = view.side == Side::Form;
     for (i, (row, line)) in out.into_iter().enumerate() {
         let Some(rect) = row_rect(area, i + 1) else {
             break;
         };
-        let on = row.is_some_and(|r| r == view.row);
+        let on = focused && row.is_some_and(|r| r == view.row);
         // The field's own inset is one cell short of the rows above it.
         let field = Rect {
             x: rect.x + 1,
@@ -2672,103 +2916,219 @@ fn draw_compose(
             rows.push((rect, row));
         }
     }
+    rows
 }
 
-/// The Reviews panel: the one being written, then the ones kept — each
-/// with its period and whose it is — and, for one being written, what it
-/// includes.
-fn draw_reviews(f: &mut Frame, app: &App, view: &WeekReviewView, area: Rect, now: i64, th: Theme) {
-    let width = usize::from(area.width);
-    let mut lines: Vec<Line<'static>> = vec![Line::default()];
-    let pending = app
-        .week_review
-        .pending
-        .as_ref()
-        .filter(|p| p.project == view.project);
-    let row = |mark: Span<'static>, name: String, right: Span<'static>, on: bool| {
-        let cursor = if on {
-            Span::styled("▌ ", Style::default().fg(th.accent))
+/// What the new review would be sent, as many of its `room` rows as it
+/// fills — the last saying how many more there are when it runs over.
+fn preview_lines(
+    app: &App,
+    view: &WeekReviewView,
+    material: &Material,
+    room: usize,
+    width: usize,
+    now: i64,
+    th: Theme,
+) -> Vec<Line<'static>> {
+    let mut sent = item_lines(material, now, width.saturating_sub(1), th);
+    if sent.is_empty() {
+        let text = if fetching(app, &view.project, view.scope) {
+            "asking GitHub for what merged…"
         } else {
-            Span::raw("  ")
+            "nothing finished in the range"
         };
-        let used = 2 + 2 + name.chars().count() + right.content.chars().count() + 1;
-        let line = Line::from(vec![
-            cursor,
-            mark,
-            Span::raw(" "),
-            Span::styled(
-                name,
-                Style::default().fg(if on { th.text } else { th.muted }),
-            ),
-            Span::raw(" ".repeat(width.saturating_sub(used))),
-            right,
-        ]);
-        if on {
-            line.style(Style::default().bg(th.focus_tint))
-        } else {
-            line
-        }
-    };
-    let mut index = 0;
-    if let Some(pending) = pending {
+        sent.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(text, Style::default().fg(th.dim)),
+        ]));
+    }
+    if sent.len() > room && room > 0 {
+        let more = sent.len() - (room - 1);
+        sent.truncate(room - 1);
+        sent.push(Line::from(Span::styled(
+            format!("  + {more} more"),
+            Style::default().fg(th.dim),
+        )));
+    }
+    sent
+}
+
+/// The reviews kept, newest first, under the one being written: each its
+/// name — the week it covers — and whose it is, and at the right `new`
+/// until it has been read, how long ago after. The cursor's row lit while
+/// the list has the keys; scrolled to keep it in sight.
+fn draw_list(
+    f: &mut Frame,
+    app: &App,
+    view: &WeekReviewView,
+    area: Rect,
+    now: i64,
+    th: Theme,
+) -> Vec<(usize, Rect)> {
+    let mut list_rows = Vec::new();
+    let width = usize::from(area.width);
+    let mut entries: Vec<(Span<'static>, String, Span<'static>)> = Vec::new();
+    if let Some(pending) = pending_for(app, &view.project) {
         let glyph = crate::app::spinner_frame(app.spin_phase());
-        lines.push(row(
+        entries.push((
             Span::styled(glyph, Style::default().fg(th.warn)),
-            format!("{} · {}", period_short(pending.asked), pending.scope.slug()),
+            pending.scope.row_name(&pending.name()),
             Span::styled("writing…", Style::default().fg(th.warn)),
-            view.selected == index,
         ));
-        index += 1;
     }
     for saved in &view.reviews {
-        let age = crate::hosts::ago_short(now - saved.meta.written_at);
         let (mark, right) = if saved.meta.read {
+            let age = crate::hosts::ago_short(now - saved.meta.written_at);
             (th.dim, Span::styled(age, Style::default().fg(th.dim)))
         } else {
             (th.done, Span::styled("new", Style::default().fg(th.done)))
         };
-        let all = match saved.meta.scope.wher {
-            Where::All => " · all",
-            Where::Project => "",
-        };
-        lines.push(row(
+        entries.push((
             Span::styled("●", Style::default().fg(mark)),
-            format!("{} · {}{all}", saved.meta.period(), saved.meta.scope.slug()),
+            saved.meta.scope.row_name(&saved.meta.name()),
             right,
-            view.selected == index,
-        ));
-        index += 1;
-    }
-    if let (Some(pending), None) = (pending, selected_saved(app, view)) {
-        lines.push(Line::default());
-        lines.push(crate::ui::section_rule(
-            "Included",
-            th.muted,
-            Vec::new(),
-            width,
-            th,
-        ));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(pending.scope.label(), Style::default().fg(th.text)),
-        ]));
-        lines.push(Line::default());
-        lines.extend(item_lines(
-            &pending.material,
-            now,
-            width.saturating_sub(1),
-            th,
         ));
     }
-    f.render_widget(Paragraph::new(lines), area);
+    if entries.is_empty() {
+        for (i, (text, color)) in [
+            ("No reviews yet.", th.dim),
+            ("Enter writes the first.", th.faint),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some(rect) = row_rect(area, i + 1) {
+                let line = Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(text, Style::default().fg(color)),
+                ]);
+                f.render_widget(Paragraph::new(line), rect);
+            }
+        }
+        return list_rows;
+    }
+    let focused = view.side == Side::Reviews;
+    // The first row stands empty over the list.
+    let visible = usize::from(area.height.saturating_sub(1)).max(1);
+    let start = crate::app::window_start(view.selected, visible);
+    for (i, (mark, name, right)) in entries.into_iter().enumerate().skip(start) {
+        let Some(rect) = row_rect(area, i - start + 1) else {
+            break;
+        };
+        // The row's gutter, the mark and a space, the name, a space, the
+        // word at the right and the frame's margin.
+        let right_w = right.content.chars().count();
+        let name = truncate(&name, width.saturating_sub(1 + 2 + right_w + 2));
+        let used = 1 + 2 + name.chars().count() + right_w + 1;
+        let lit = focused && i == view.selected;
+        let spans = vec![
+            mark,
+            Span::raw(" "),
+            Span::styled(
+                name,
+                Style::default().fg(if lit { th.text } else { th.muted }),
+            ),
+            Span::raw(" ".repeat(width.saturating_sub(used))),
+            right,
+        ];
+        crate::ui::render_row(f, rect, spans, lit, lit, th);
+        list_rows.push((i, rect));
+    }
+    list_rows
 }
 
-/// The right panel while a review is being written: what it is doing,
+/// A review on a page of its own: its name, period and scope on the
+/// frame, the review itself down a column no wider than [`PAGE_W`] —
+/// or, while it is being written, what it is doing and what went in.
+/// The body's height, its lines and where it is scrolled to.
+fn draw_page(
+    f: &mut Frame,
+    app: &App,
+    view: &WeekReviewView,
+    area: Rect,
+    now: i64,
+    th: Theme,
+) -> (u16, usize, u16) {
+    let saved = selected_saved(app, view).map(|i| &view.reviews[i]);
+    let pending = pending_for(app, &view.project);
+    let title = match (saved, pending) {
+        (Some(saved), _) => format!(
+            "{} · {} · {}",
+            saved.meta.name(),
+            saved.meta.period(),
+            saved.meta.scope.label()
+        ),
+        (None, Some(pending)) => {
+            format!("{} · writing · {}", pending.name(), pending.scope.label())
+        }
+        (None, None) => "Week in review".to_string(),
+    };
+    let mut block = panel_block(&title, true, th);
+    let inner = block.inner(area);
+    // Under a row of air, in the middle, two cells clear of either edge.
+    let below = crate::ui::below_first_row(inner);
+    let body = crate::ui::centered_rect(
+        below,
+        below.width.saturating_sub(4).min(PAGE_W),
+        below.height,
+    );
+    let width = usize::from(body.width);
+    let lines = match (saved, pending) {
+        (Some(saved), _) => {
+            let phase = app.animations.then(|| app.sweep_phase());
+            review_lines(&view.text, &saved.meta.problems, width, phase, th)
+        }
+        (None, Some(pending)) => {
+            let mut lines = writing_lines(app, pending, width, th);
+            lines.push(crate::ui::section_rule(
+                "Included",
+                th.muted,
+                Vec::new(),
+                width,
+                th,
+            ));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(pending.scope.label(), Style::default().fg(th.text)),
+            ]));
+            lines.push(Line::default());
+            lines.extend(item_lines(
+                &pending.material,
+                now,
+                width.saturating_sub(1),
+                th,
+            ));
+            lines
+        }
+        (None, None) => Vec::new(),
+    };
+    let max_scroll = crate::app::max_scroll(lines.len(), body.height);
+    let scroll = view.scroll.min(max_scroll);
+    if max_scroll > 0 {
+        block = block.title_bottom(
+            Line::from(Span::styled(
+                format!(" {}/{} ", scroll + 1, lines.len()),
+                Style::default().fg(th.dim),
+            ))
+            .right_aligned(),
+        );
+    }
+    f.render_widget(block, area);
+    let total = lines.len();
+    let shown: Vec<Line> = lines.into_iter().skip(usize::from(scroll)).collect();
+    f.render_widget(Paragraph::new(shown), body);
+    (body.height, total, scroll)
+}
+
+/// The page while a review is being written: what it is doing,
 /// for how long, and that the window can be closed.
 fn writing_lines(app: &App, pending: &Pending, width: usize, th: Theme) -> Vec<Line<'static>> {
     let glyph = crate::app::spinner_frame(app.spin_phase());
     let took = format!("{}s", pending.started.elapsed().as_secs());
-    let head = format!("Writing your week · {} · {}", pending.model, pending.effort);
+    let head = format!(
+        "Writing your review · {} · {}",
+        pending.model, pending.effort
+    );
     let through = match pending.account.as_str() {
         "" => String::new(),
         name => format!("through {name}"),
@@ -2826,8 +3186,9 @@ fn writing_lines(app: &App, pending: &Pending, width: usize, th: Theme) -> Vec<L
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyModifiers;
 
-    const DAY: i64 = 24 * 60 * 60;
+    const DAY: i64 = DAY_SECS;
 
     fn stamp(now: i64, days_ago: i64) -> String {
         orion_core::crashlog::format_timestamp((now - days_ago * DAY) as u64)
@@ -2848,7 +3209,7 @@ mod tests {
             deletions: 2,
             files: 1,
             merged_at: stamp(now, 1),
-            body: format!("## Summary\nWhat change {number} does."),
+            body: format!("## Summary\nWhat change {number} does.").into(),
         }
     }
 
@@ -2865,7 +3226,7 @@ mod tests {
         });
         let now = orion_core::clock::now_secs() as i64;
         app.week_review.fetched.insert(
-            project.clone(),
+            (project.clone(), DAYS),
             Fetched {
                 at: Instant::now(),
                 prs: Some(vec![
@@ -2950,7 +3311,7 @@ mod tests {
     /// read on from only while the week can run on.
     #[test]
     fn a_page_is_the_weeks_merges_without_bots() {
-        let now = rfc3339_secs("2026-10-10T10:00:00Z").unwrap();
+        let since = rfc3339_secs("2026-10-10T10:00:00Z").unwrap() - DAYS * DAY;
         let page = |next: bool, last_touched: &str| {
             format!(
                 r#"{{"data":{{"repository":{{"pullRequests":{{
@@ -2969,7 +3330,7 @@ mod tests {
                   ]}}}}}}}}"#
             )
         };
-        let read = parse_page(&page(true, "2026-10-08T09:00:00Z"), "demo", now).expect("a page");
+        let read = parse_page(&page(true, "2026-10-08T09:00:00Z"), "demo", since).expect("a page");
         assert_eq!(read.rows.len(), 1, "the bot's and the old one are left out");
         let pr = &read.rows[0];
         assert_eq!(
@@ -2979,11 +3340,11 @@ mod tests {
         assert!(pr.mine);
         assert_eq!((pr.additions, pr.files, pr.base.as_str()), (120, 3, "main"));
         assert_eq!(read.more.as_deref(), Some("c1"), "the week may run on");
-        let last = parse_page(&page(true, "2026-09-30T09:00:00Z"), "demo", now).expect("a page");
+        let last = parse_page(&page(true, "2026-09-30T09:00:00Z"), "demo", since).expect("a page");
         assert_eq!(last.more, None, "past the week");
-        let end = parse_page(&page(false, "2026-10-08T09:00:00Z"), "demo", now).expect("a page");
+        let end = parse_page(&page(false, "2026-10-08T09:00:00Z"), "demo", since).expect("a page");
         assert_eq!(end.more, None, "GitHub has no more");
-        assert!(parse_page("{}", "demo", now).is_none());
+        assert!(parse_page("{}", "demo", since).is_none());
     }
 
     /// Initials come from the name, else the login, and two people never
@@ -3122,13 +3483,13 @@ mod tests {
         let long = "word ".repeat(400);
         let mut big = pr(500, "ada", "Ada L", true, now);
         big.additions = 9000;
-        big.body = long.clone();
+        big.body = long.as_str().into();
         let mut small = pr(501, "grace", "Grace", false, now);
-        small.body = format!("{long}\n<!-- bot footer -->\nnever sent");
+        small.body = format!("{long}\n<!-- bot footer -->\nnever sent").into();
         let mut release = pr(502, "ada", "Ada L", true, now);
         release.head = "dev".into();
         release.additions = 90000;
-        release.body = long.clone();
+        release.body = long.as_str().into();
         let material = Material {
             prs: vec![big, small, release],
             issues: vec![DoneIssue {
@@ -3368,36 +3729,73 @@ AL Ada L · GR Grace
         assert!(!one.is_release());
     }
 
-    /// Compose: the scope rows flip with ←/→ and the sources tick with
-    /// Space, the right panel following; Enter with nothing ticked sends
-    /// nothing and says why.
+    /// The rows of the screen as drawn `w` × `h`, from the column the
+    /// reviews' frame starts at.
+    fn list_column(shot: &str) -> Vec<String> {
+        let rows: Vec<&str> = shot.lines().collect();
+        let top = rows
+            .iter()
+            .position(|r| r.contains("╭ Reviews"))
+            .expect(shot);
+        let byte = rows[top].find("╭ Reviews").unwrap();
+        let x = rows[top][..byte].chars().count();
+        rows[top..]
+            .iter()
+            .map(|r| r.chars().skip(x).collect())
+            .collect()
+    }
+
+    /// The new review: the choice rows flip with ←/→ and the sources tick
+    /// with Space, what would be sent following under them; Enter with
+    /// nothing ticked sends nothing and says why.
     #[test]
-    fn compose_sets_the_scope_and_the_sources() {
+    fn the_new_review_sets_the_scope_the_range_and_the_sources() {
         pinned(|| {
             let (mut app, _, _) = app_with_week();
             open(&mut app);
-            assert_eq!(view(&app).mode, Mode::Compose);
+            assert_eq!(
+                (view(&app).mode, view(&app).side),
+                (Mode::Screen, Side::Form)
+            );
             let shot = screen(&mut app, 150, 40);
             assert!(shot.contains("Week in review — demo"), "{shot}");
-            assert!(
-                shot.contains("What goes in · 2 items · just mine · this project"),
-                "{shot}"
-            );
+            assert!(shot.contains("New review"), "{shot}");
+            assert!(shot.contains("(•) Week"), "a week by default: {shot}");
             assert!(shot.contains("↗ #412  Change 412"), "{shot}");
             assert!(!shot.contains("#398"), "Grace's is not yours: {shot}");
+            assert!(shot.contains("No reviews yet."), "{shot}");
 
             handle_key(&mut app, key(KeyCode::Right));
             assert_eq!(view(&app).scope.whose, Whose::Everyone);
             let shot = screen(&mut app, 150, 40);
-            assert!(shot.contains("What goes in · 3 items · everyone"), "{shot}");
+            assert!(shot.contains("#398  Change 398"), "{shot}");
             assert!(
                 shot.contains("yours only"),
                 "the todos row says why: {shot}"
             );
 
+            // Down past Where to the range: → a fortnight, ← back, ← round
+            // to the month.
             for _ in 0..2 {
                 handle_key(&mut app, key(KeyCode::Down));
             }
+            assert_eq!(view(&app).row, Row::Range);
+            handle_key(&mut app, key(KeyCode::Right));
+            assert_eq!(view(&app).scope.range, Range::Fortnight);
+            handle_key(&mut app, key(KeyCode::Left));
+            handle_key(&mut app, key(KeyCode::Left));
+            assert_eq!(view(&app).scope.range, Range::Month);
+            let shot = screen(&mut app, 150, 40);
+            assert!(shot.contains("(•) Month"), "{shot}");
+            assert!(shot.contains("· last 7 days"), "Linear's own week: {shot}");
+            assert!(
+                !shot.contains("#412"),
+                "a month is a fetch of its own: {shot}"
+            );
+            handle_key(&mut app, key(KeyCode::Right));
+            assert_eq!(view(&app).scope.range, Range::Week);
+
+            handle_key(&mut app, key(KeyCode::Down));
             assert_eq!(view(&app).row, Row::Source(Source::Prs));
             handle_key(&mut app, key(KeyCode::Char(' ')));
             assert!(!view(&app).picks[0]);
@@ -3407,15 +3805,81 @@ AL Ada L · GR Grace
                 view(&app).notice.as_deref(),
                 Some("nothing finished in the last 7 days to write up")
             );
+            // Tab goes nowhere with no reviews to go to.
+            handle_key(&mut app, key(KeyCode::Tab));
+            assert_eq!(view(&app).side, Side::Form);
         });
     }
 
-    /// Enter writes: the modal turns to the Reviews with this one first,
-    /// what it includes listed under it. The reply lands checked, with
-    /// orion's count, kept on disk, and shown — and the file is found
-    /// again the next time the modal opens.
+    /// A longer range reads its own window: a month's fetch holds what a
+    /// week's does not, the prompt is titled and dated for it, and its
+    /// file is named apart from the week's of the same day.
     #[test]
-    fn a_review_is_written_kept_and_shown() {
+    fn a_month_is_read_titled_and_kept_as_one() {
+        pinned(|| {
+            let (mut app, project, now) = app_with_week();
+            let mut old = pr(300, "ada", "Ada L", true, now);
+            old.merged_at = stamp(now, 20);
+            app.week_review.fetched.insert(
+                (project.clone(), Range::Month.days()),
+                Fetched {
+                    at: Instant::now(),
+                    prs: Some(vec![pr(412, "ada", "Ada L", true, now), old]),
+                },
+            );
+            let month = Scope {
+                range: Range::Month,
+                ..Scope::default()
+            };
+            let material = gather(&app, &project, month, [true; 3], now);
+            let numbers: Vec<u64> = material.prs.iter().map(|pr| pr.number).collect();
+            assert_eq!(numbers, [412, 300]);
+            let week = gather(&app, &project, Scope::default(), [true; 3], now);
+            assert_eq!(week.prs.len(), 2, "the week's fetch: 412 and 431");
+
+            let text = prompt(&material, &[], month, "demo", "", brief_rules(), now);
+            let (from, to) = period(now, 30);
+            assert_eq!((to - from).num_days(), 29);
+            assert!(
+                text.contains(&format!(
+                    "# Month in review · {}",
+                    period_label(from, to, true)
+                )),
+                "{text}"
+            );
+            assert!(text.contains("starting with the `# Month in review` line"));
+
+            let dir = tempfile::tempdir().unwrap();
+            let meta = |scope: Scope| Meta {
+                from: from.format("%Y-%m-%d").to_string(),
+                to: to.format("%Y-%m-%d").to_string(),
+                scope,
+                ..Meta::default()
+            };
+            let a = save(dir.path(), &project, &meta(month), "# Month\n").unwrap();
+            let b = save(dir.path(), &project, &meta(Scope::default()), "# Week\n").unwrap();
+            assert_ne!(a, b);
+            assert!(a.to_string_lossy().ends_with("-mine-month.md"), "{a:?}");
+            assert!(b.to_string_lossy().ends_with("-mine.md"), "{b:?}");
+            let kept = load_reviews(dir.path(), &project);
+            assert_eq!(kept.len(), 2);
+            let names: Vec<String> = kept.iter().map(|r| r.meta.name()).collect();
+            assert!(
+                names.iter().any(|n| n.starts_with("Month to ")),
+                "{names:?}"
+            );
+            assert!(names.iter().any(|n| n.starts_with("Week ")), "{names:?}");
+        });
+    }
+
+    /// Enter writes, and turns to a fresh page that shows it being written,
+    /// what it includes under it. The reply lands checked, with orion's
+    /// count, kept on disk, and on that page — its Show/Say points by area
+    /// — and Esc goes back to the screen, where it heads the list. Opened
+    /// again, the modal is on its screen with it there; Enter on it opens
+    /// its page.
+    #[test]
+    fn a_review_is_written_on_a_fresh_page_and_listed() {
         pinned(|| {
             let (mut app, project, _) = app_with_week();
             let dir = tempfile::tempdir().unwrap();
@@ -3427,16 +3891,31 @@ AL Ada L · GR Grace
             assert_eq!(pending.material.prs.len(), 3);
             assert_eq!(pending.people.len(), 2);
             let id = pending.id;
-            assert_eq!(view(&app).mode, Mode::Reviews);
+            assert_eq!(view(&app).mode, Mode::Page);
             let shot = screen(&mut app, 150, 40);
-            assert!(shot.contains("writing…"), "{shot}");
+            assert!(
+                shot.contains("· writing · everyone · this project"),
+                "{shot}"
+            );
             assert!(shot.contains("Included"), "{shot}");
-            assert!(shot.contains("everyone · this project"), "{shot}");
             assert!(
                 shot.contains("#398  Change 398"),
                 "the items, not a count: {shot}"
             );
             assert!(shot.contains("read 3 pull request descriptions"), "{shot}");
+            assert!(!shot.contains("╭ Reviews"), "a page of its own: {shot}");
+
+            // Back on the screen meanwhile, it heads the list; Enter on it
+            // is its page again.
+            handle_key(&mut app, key(KeyCode::Esc));
+            assert_eq!(
+                (view(&app).mode, view(&app).side),
+                (Mode::Screen, Side::Reviews)
+            );
+            let list = list_column(&screen(&mut app, 150, 40));
+            assert!(list[2].contains("writing…"), "{list:#?}");
+            handle_key(&mut app, key(KeyCode::Enter));
+            assert_eq!(view(&app).mode, Mode::Page);
 
             // An answer to a write stopped since changes nothing.
             land_answer(
@@ -3465,33 +3944,243 @@ AL Ada L · GR Grace
             assert!(app.week_review.pending.is_none());
             assert_eq!(app.flash.as_deref(), Some("Week in review ready"));
             let shown = view(&app);
+            assert_eq!(shown.mode, Mode::Page, "on the page that waited for it");
             assert_eq!(shown.reviews.len(), 1);
+            assert!(shown.reviews[0].meta.read, "shown, so no longer new");
             assert!(shown.reviews[0].meta.problems.is_empty());
             assert!(shown
                 .text
                 .ends_with("+ 1 other pull request merged, not listed\n"));
             let shot = screen(&mut app, 150, 40);
             assert!(shot.contains("Borders draw with a pen"), "{shot}");
+            assert!(shot.contains("Show"), "{shot}");
             assert!(
-                !shot.contains("Included"),
-                "that panel is for the wait: {shot}"
+                shot.contains("+ 1 other pull request merged, not listed"),
+                "{shot}"
             );
+            assert!(!shot.contains("Included"), "that is for the wait: {shot}");
 
             app.overlay = None;
             open(&mut app);
             let again = view(&app);
-            assert_eq!(again.mode, Mode::Reviews, "this week's is there to read");
+            assert_eq!(again.mode, Mode::Screen, "read already: the screen");
             assert_eq!(again.reviews.len(), 1);
-            assert!(again.reviews[0].meta.read, "shown once, no longer new");
-            assert!(again.text.contains("Borders draw with a pen"));
             assert_eq!(again.reviews[0].meta.scope.whose, Whose::Everyone);
+            let list = list_column(&screen(&mut app, 150, 40));
+            assert!(
+                list[2].contains("Week ") && list[2].contains("· everyone"),
+                "{list:#?}"
+            );
+            handle_key(&mut app, key(KeyCode::Tab));
+            handle_key(&mut app, key(KeyCode::Enter));
+            assert_eq!(view(&app).mode, Mode::Page);
+            assert!(view(&app).text.contains("Borders draw with a pen"));
             assert!(folder(dir.path(), &project, Where::Project)
                 .join("note.txt")
                 .is_file());
         });
     }
 
-    /// A write that fails says why and gives Compose back as it was left.
+    /// A review that lands while the modal is closed waits, new, for the
+    /// next open: that opens on its page.
+    #[test]
+    fn an_unread_review_opens_on_its_page() {
+        pinned(|| {
+            let (mut app, _, _) = app_with_week();
+            let dir = tempfile::tempdir().unwrap();
+            app.week_review.root = Some(dir.path().to_path_buf());
+            open(&mut app);
+            handle_key(&mut app, key(KeyCode::Enter));
+            let id = app.week_review.pending.as_ref().unwrap().id;
+            app.overlay = None;
+            land_answer(
+                &mut app,
+                Answer::Written {
+                    id,
+                    result: Ok(Reply {
+                        text: REVIEW.into(),
+                        cost: None,
+                    }),
+                },
+            );
+            open(&mut app);
+            assert_eq!(view(&app).mode, Mode::Page);
+            assert!(view(&app).text.contains("Large documents open at once"));
+            assert!(view(&app).reviews[0].meta.read);
+        });
+    }
+
+    /// The screen at the usual widths: the new review down the left, the
+    /// reviews kept down the right, newest first, each row on its own line
+    /// inside its frame; a click on one opens its page.
+    #[test]
+    fn the_screen_lists_the_reviews_beside_the_new_one() {
+        pinned(|| {
+            let (mut app, project, now) = app_with_week();
+            let dir = tempfile::tempdir().unwrap();
+            for (days_ago, scope) in [
+                (14, Scope::default()),
+                (
+                    7,
+                    Scope {
+                        whose: Whose::Everyone,
+                        wher: Where::All,
+                        ..Scope::default()
+                    },
+                ),
+                (0, Scope::default()),
+            ] {
+                let (from, to) = period(now - days_ago * DAY, DAYS);
+                let meta = Meta {
+                    from: from.format("%Y-%m-%d").to_string(),
+                    to: to.format("%Y-%m-%d").to_string(),
+                    scope,
+                    written_at: now - days_ago * DAY,
+                    read: true,
+                    ..Meta::default()
+                };
+                save(dir.path(), &project, &meta, REVIEW).unwrap();
+            }
+            app.week_review.root = Some(dir.path().to_path_buf());
+            open(&mut app);
+            assert_eq!(view(&app).mode, Mode::Screen);
+            let week = |days_ago: i64| {
+                let (from, to) = period(now - days_ago * DAY, DAYS);
+                review_name(Range::Week, from, to)
+            };
+            for w in [100u16, 150, 200] {
+                let shot = screen(&mut app, w, 40);
+                let list = list_column(&shot);
+                let rows: Vec<&String> = list.iter().filter(|r| r.contains('●')).collect();
+                assert_eq!(rows.len(), 3, "{shot}");
+                assert!(rows[0].contains(&week(0)), "newest first: {shot}");
+                assert!(rows[1].contains("· everyone · all"), "{shot}");
+                assert!(rows[2].contains(&week(14)), "{shot}");
+                for r in &list[1..20] {
+                    assert!(r.trim_end().ends_with('│'), "{w}: {r:?}\n{shot}");
+                }
+                // The options' rows whole inside the left frame too.
+                assert!(
+                    shot.contains("( ) All projects") && shot.contains("( ) Month"),
+                    "{shot}"
+                );
+            }
+            let shot = screen(&mut app, 150, 40);
+            let at = shot
+                .lines()
+                .enumerate()
+                .find(|(_, l)| l.contains("· everyone · all"))
+                .map(|(y, l)| {
+                    let byte = l.find("· everyone · all").unwrap();
+                    (l[..byte].chars().count() as u16, y as u16)
+                })
+                .unwrap();
+            handle_mouse(
+                &mut app,
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: at.0,
+                    row: at.1,
+                    modifiers: KeyModifiers::NONE,
+                },
+            );
+            assert_eq!((view(&app).mode, view(&app).selected), (Mode::Page, 1));
+            let shot = screen(&mut app, 150, 40);
+            assert!(shot.contains(&format!("{} · ", week(7))), "{shot}");
+            assert!(shot.contains("everyone · all projects"), "{shot}");
+            // Esc: back to the screen, the cursor on the one it was.
+            handle_key(&mut app, key(KeyCode::Esc));
+            assert_eq!((view(&app).mode, view(&app).selected), (Mode::Screen, 1));
+            handle_key(&mut app, key(KeyCode::Esc));
+            assert!(app.overlay.is_none());
+        });
+    }
+
+    /// A review written over one of the same day, scope and range takes
+    /// its place rather than standing beside it, and a cursor on another
+    /// review's page stays on that review while it lands; `⌘W` there stops
+    /// nothing.
+    #[test]
+    fn a_review_written_over_another_keeps_the_cursor_where_it_was() {
+        pinned(|| {
+            let (mut app, project, now) = app_with_week();
+            let dir = tempfile::tempdir().unwrap();
+            for (days_ago, text) in [(7, "# Last week\n"), (0, "# This week, first go\n")] {
+                let (from, to) = period(now - days_ago * DAY, DAYS);
+                let meta = Meta {
+                    from: from.format("%Y-%m-%d").to_string(),
+                    to: to.format("%Y-%m-%d").to_string(),
+                    written_at: now - days_ago * DAY,
+                    read: true,
+                    ..Meta::default()
+                };
+                save(dir.path(), &project, &meta, text).unwrap();
+            }
+            app.week_review.root = Some(dir.path().to_path_buf());
+            open(&mut app);
+            // Today's again, just mine, a week: the same file as the first go.
+            handle_key(&mut app, key(KeyCode::Enter));
+            assert!(app.week_review.pending.is_some());
+            // Off its page, down past it and today's, onto last week's.
+            handle_key(&mut app, key(KeyCode::Esc));
+            for _ in 0..2 {
+                handle_key(&mut app, key(KeyCode::Down));
+            }
+            handle_key(&mut app, key(KeyCode::Enter));
+            assert_eq!((view(&app).mode, view(&app).selected), (Mode::Page, 2));
+            assert_eq!(view(&app).text, "# Last week\n");
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            );
+            assert!(app.week_review.pending.is_some(), "not this page's to stop");
+            let id = app.week_review.pending.as_ref().unwrap().id;
+            land_answer(
+                &mut app,
+                Answer::Written {
+                    id,
+                    result: Ok(Reply {
+                        text: REVIEW.into(),
+                        cost: None,
+                    }),
+                },
+            );
+            let shown = view(&app);
+            assert_eq!(shown.reviews.len(), 2, "in the first go's place");
+            assert_eq!((shown.mode, shown.selected), (Mode::Page, 1));
+            assert_eq!(shown.text, "# Last week\n", "still the one being read");
+            assert!(!shown.reviews[0].meta.read, "the new one waits, unread");
+            let kept = std::fs::read_to_string(&shown.reviews[0].path).unwrap();
+            assert!(kept.contains("Borders draw with a pen"), "{kept}");
+        });
+    }
+
+    /// Every hint the modal draws names a key in its table.
+    #[test]
+    fn the_hints_come_from_the_table() {
+        pinned(|| {
+            let (mut app, _, _) = app_with_week();
+            open(&mut app);
+            let check =
+                |app: &App| crate::hints::assert_hints_from(&hints(app, view(app)), keys::ALL);
+            for row in Row::ALL {
+                if let Some(Overlay::WeekReview(v)) = &mut app.overlay {
+                    v.row = row;
+                }
+                check(&app);
+            }
+            handle_key(&mut app, key(KeyCode::Enter));
+            check(&app);
+            if let Some(Overlay::WeekReview(v)) = &mut app.overlay {
+                v.mode = Mode::Screen;
+                v.side = Side::Reviews;
+            }
+            check(&app);
+        });
+    }
+
+    /// A write that fails says why and gives the new review back as it was
+    /// left.
     #[test]
     fn a_failed_write_says_why() {
         pinned(|| {
@@ -3507,7 +4196,10 @@ AL Ada L · GR Grace
                 },
             );
             assert!(app.week_review.pending.is_none());
-            assert_eq!(view(&app).mode, Mode::Compose);
+            assert_eq!(
+                (view(&app).mode, view(&app).side),
+                (Mode::Screen, Side::Form)
+            );
             assert_eq!(view(&app).notice.as_deref(), Some("claude timed out"));
         });
     }
@@ -3519,7 +4211,8 @@ AL Ada L · GR Grace
     fn a_week_that_could_not_be_fetched_is_not_written_up() {
         pinned(|| {
             let (mut app, project, now) = app_with_week();
-            app.week_review.fetched.get_mut(&project).unwrap().prs = None;
+            let window = (project.clone(), DAYS);
+            app.week_review.fetched.get_mut(&window).unwrap().prs = None;
             app.linear.insert(
                 project.clone(),
                 crate::linear::LinearList {
@@ -3537,12 +4230,7 @@ AL Ada L · GR Grace
                 .as_deref()
                 .unwrap()
                 .contains("could not be asked"));
-            // ⌘W here stops nothing: there is nothing of this project's to stop.
-            handle_key(
-                &mut app,
-                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
-            );
-            for _ in 0..2 {
+            for _ in 0..3 {
                 handle_key(&mut app, key(KeyCode::Down));
             }
             handle_key(&mut app, key(KeyCode::Char(' ')));
@@ -3554,14 +4242,28 @@ AL Ada L · GR Grace
                 .expect("written from the issue");
             assert!(pending.material.prs.is_empty());
             assert_eq!(pending.material.issues.len(), 1);
-            // Tab on Compose goes back to the one being written.
+            // ⌘N on its page: the new review; Tab, the list it heads.
             handle_key(
                 &mut app,
                 KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
             );
-            assert_eq!(view(&app).mode, Mode::Compose);
+            assert_eq!(
+                (view(&app).mode, view(&app).side),
+                (Mode::Screen, Side::Form)
+            );
             handle_key(&mut app, key(KeyCode::Tab));
-            assert_eq!(view(&app).mode, Mode::Reviews);
+            assert_eq!(view(&app).side, Side::Reviews);
+            // ⌘W on its page stops it.
+            handle_key(&mut app, key(KeyCode::Enter));
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            );
+            assert!(app.week_review.pending.is_none());
+            assert_eq!(
+                (view(&app).mode, view(&app).side),
+                (Mode::Screen, Side::Form)
+            );
         });
     }
 
@@ -3569,18 +4271,19 @@ AL Ada L · GR Grace
     #[test]
     fn enter_before_the_fetch_sends_as_it_lands() {
         pinned(|| {
-            let (mut app, project, now) = app_with_week();
-            let prs = app.week_review.fetched.remove(&project).unwrap().prs;
-            app.week_review.fetching.insert(project.clone());
+            let (mut app, project, _) = app_with_week();
+            let window = (project.clone(), DAYS);
+            let prs = app.week_review.fetched.remove(&window).unwrap().prs;
+            app.week_review.fetching.insert(window.clone());
             open(&mut app);
             let shot = screen(&mut app, 150, 40);
             assert!(shot.contains("asking…"), "{shot}");
             handle_key(&mut app, key(KeyCode::Enter));
             assert!(app.week_review.pending.is_none());
             assert!(view(&app).notice.is_some());
-            land_answer(&mut app, Answer::Fetched { project, prs });
+            land_answer(&mut app, Answer::Fetched { window, prs });
             assert!(app.week_review.pending.is_some(), "sent as the week landed");
-            let _ = now;
+            assert_eq!(view(&app).mode, Mode::Page);
         });
     }
 
@@ -3636,7 +4339,7 @@ AL Ada L · GR Grace
         let everyone = std::env::var("ORION_WEEK_REVIEW_SCOPE").as_deref() != Ok("mine");
         let now = orion_core::clock::now_secs() as i64;
         let started = Instant::now();
-        let prs = fetch_merged(PathBuf::from(&dir), "live".into(), now)
+        let prs = fetch_merged(PathBuf::from(&dir), "live".into(), now, DAYS)
             .await
             .expect("GitHub answered");
         let fetched = started.elapsed();

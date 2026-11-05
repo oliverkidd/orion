@@ -625,28 +625,39 @@ rebindable (`pull_requests`).
 
 ## The WEEK IN REVIEW
 
-`⌘⇧Y` (`⇧W`) writes up what was finished in the selected PROJECT in the last 7 days — the pull
-requests merged, the Linear issues done, the todos ticked — as a review to read aloud with the
-product on screen: by product area, each point numbered, with what to **Show** and what to **Say**
-under the ones worth a demo.
+`⌘⇧Y` (`⇧W`) writes up what was finished in the selected PROJECT in the last 7 days — or 2 weeks,
+or a month — the pull requests merged, the Linear issues done, the todos ticked — as a review to
+read aloud with the product on screen: by product area, each point numbered, with what to **Show**
+and what to **Say** under the ones worth a demo.
 
-orion gathers; a model writes. Opening the modal fetches every pull request merged in the week with
+It is a screen of its own. Down the left, **New review**: its options — Whose, Where, the Range, the
+sources and the Note — and under them exactly what would be sent. Down the right, **Reviews**: the
+one being written, then the ones kept, newest first, each named for the week it ends in (`Week 45`,
+`Weeks 43–45` for two, `Month to 5 Nov`) and whose it is, `new` until it has been read. `Tab` moves
+between the two. `Enter` on the new review writes it and turns to a fresh page that shows it being
+written and what went in; when it lands, that page is the review. `Enter` (or a click) on a review
+in the list opens it on its page, and `Esc` comes back to the screen. Closed while one is being
+written, the modal opens next time on that review's page.
+
+orion gathers; a model writes. Opening the modal fetches every pull request merged in the range with
 its description (the PULL REQUESTS MODAL's merged list carries titles, and a review is written from
-what a pull request says it does), a page of 100 at a time until the week is covered. The done
-issues and ticked todos come from the lists already in hand. `Enter` then puts all of it in one
-prompt and sends it through a Claude account's print mode with no tools: text in, text out. No
-session starts, nothing runs in a checkout, and there is nothing to tidy up after.
+what a pull request says it does), a page of 100 at a time until the range is covered; a longer
+range is a fetch of its own, asked for as it is picked. The done issues and ticked todos come from
+the lists already in hand — Linear's holds the last 7 days of done issues, so a longer range has
+that week of them, as its row says. `Enter` then puts all of it in one prompt and sends it through
+a Claude account's print mode with no tools: text in, text out. No session starts, nothing runs in
+a checkout, and there is nothing to tidy up after.
 
 The account is one orion runs sessions on, never whatever a bare `claude` would sign in as: the one
 the **Week review** system preset runs on (see [Agent presets](#agent-presets); a new list puts it
 on your default agent's account), else your default agent's when that is a Claude account, and
 otherwise the first Claude account that is switched on. The model and effort are the preset's too,
 sonnet · medium unless you change them. It runs as that account's own CLI with that account's config dir, so the ask lands on
-that sign-in and that account's usage. Compose says which on its **Via** line, as Claude accounts
+that sign-in and that account's usage. The new review says which on its **Via** line, as Claude accounts
 names it — `Work (a@b.co)`, or `Work (not signed in)` — and refuses to send, saying why, when no
 Claude account is on or its CLI is not on your PATH. An account that reads as not signed in is still
 tried: that record only knows a browser sign-in, and one on an API key answers all the same; one that
-cannot answer says so itself, and Compose shows what it said. A very large
+cannot answer says so itself, and the new review shows what it said. A very large
 pull request — a feature branch merged in one go — sends far more of its description than an
 ordinary one, since its commit list is all the description it has; one that only moves a standing
 branch into `main` is marked a release and left out.
@@ -657,13 +668,13 @@ area lists who contributed to it. **Where** is this project or all of them.
 
 The model is asked to list only what a person outside the team that built it would want to know or
 see, and never to count. What it sends back is held to its shape without a model: every pull
-request it names was in the week, every owner is the author of the point's first pull request. A
+request it names was in the range, every owner is the author of the point's first pull request. A
 reply that strays is still shown, with a line under its title saying how. The last line — how many
 were merged and not listed — is orion's own subtraction, so it is exact.
 
-Reviews are kept as Markdown under the DATA DIR (`reviews/`), the last 12 per project, with what
-each was written from beside it. The **Note** typed on Compose is kept per project, so what matters
-there is said once.
+Reviews are kept as Markdown under the DATA DIR (`reviews/`), the last 12 per project (and 12 of
+all projects), with what each was written from beside it. The **Note** typed on the new review is
+kept per project, so what matters there is said once.
 
 ## TODOS
 
