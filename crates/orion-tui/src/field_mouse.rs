@@ -25,7 +25,6 @@ enum Field {
     PrQuery,
     PrCreate(crate::pr_actions::CreateField),
     PrClose,
-    PrReview,
     LinearQuery,
     DiffFilter,
     AutofixNote,
@@ -57,7 +56,6 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
                 (Field::PrCreate(CreateField::Body), &mut form.body),
             ],
             Some(PrForm::Close(form)) => vec![(Field::PrClose, &mut form.comment)],
-            Some(PrForm::Review(form)) => vec![(Field::PrReview, &mut form.body)],
             Some(PrForm::Merge(_)) => Vec::new(),
             None => vec![(Field::PrQuery, &mut v.query)],
         },
@@ -113,11 +111,6 @@ fn focus(app: &mut App, field: Field) {
         (Some(Overlay::PullRequests(v)), Field::PrClose) => {
             if let Some(crate::pr_actions::PrForm::Close(form)) = v.form.as_deref_mut() {
                 form.row = crate::pr_actions::CloseRow::Comment;
-            }
-        }
-        (Some(Overlay::PullRequests(v)), Field::PrReview) => {
-            if let Some(crate::pr_actions::PrForm::Review(form)) = v.form.as_deref_mut() {
-                form.row = crate::pr_actions::ReviewRow::Body;
             }
         }
         (Some(Overlay::Linear(v)), Field::LinearQuery) => {
