@@ -63,8 +63,9 @@ const LOGIN_SHELL_ARGS: [&str; 3] = ["-l", "-i", "-c"];
 /// stall a create forever, so on timeout the CLI is assumed present and
 /// the spawn itself gets to report.
 const CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// A RUN TERMINAL whose command exited on its own: the PTY, kept for the
-/// replay, and the exit code the OS reported.
+/// A RUN TERMINAL whose command exited on its own, or a SETUP TERMINAL
+/// whose setup failed: the PTY, kept for the replay, and the exit code
+/// the OS reported.
 type FinishedRun = (Arc<PtySession>, Option<i32>);
 /// What a RUN TERMINAL's row is called in the Sessions panel.
 const RUN_TERMINAL_NAME: &str = "run";
@@ -75,6 +76,12 @@ const NO_RUN_COMMAND: &str =
 /// Why a RUN TERMINAL with nothing left to replay will not attach — its
 /// run ended before a DAEMON restart, typically.
 const RUN_NOT_RUNNING: &str = "this run has stopped — ⌘⇧S on its worktree starts it again";
+/// What a SETUP TERMINAL's row is called in the Sessions panel.
+const SETUP_TERMINAL_NAME: &str = "setup";
+/// Why a SETUP TERMINAL with nothing left to replay will not attach: the
+/// DAEMON that ran it has restarted since, and its output went with it.
+const SETUP_NOT_RUNNING: &str =
+    "this setup ran under a daemon that has restarted since, and its output went with it";
 /// How long a RUN COMMAND has to wind down after its `^C` before it is
 /// killed outright: a compose stack's own stop waits on every container.
 const RUN_STOP_GRACE: Duration = Duration::from_secs(120);
@@ -196,7 +203,8 @@ pub struct Daemon {
     /// it to, with its exit code (`RunState::exit_code`). The PTY is kept
     /// — outside `sessions`, so the row reads as not alive — so an attach
     /// replays how the run ended instead of running it again. Dropped
-    /// when the run starts again, is stopped, or its row goes.
+    /// when the run starts again, is stopped, or its row goes. SETUP
+    /// TERMINALS that failed are kept here the same way.
     finished_runs: Mutex<HashMap<TerminalId, FinishedRun>>,
     /// RUN TERMINALS sent a `^C` by a stop or a restart and not yet gone:
     /// a second press kills them outright.
@@ -555,9 +563,10 @@ impl Daemon {
                     None => true,
                 },
                 // A RUN TERMINAL is the server `r` started: sitting quiet
-                // is what it is for, and only `r` again stops it.
+                // is what it is for, and only `r` again stops it. A SETUP
+                // TERMINAL's install may be as quiet, and must finish.
                 SessionRef::Terminal(id) => {
-                    self.is_run_terminal(id) || shell_has_children(&session)
+                    self.command_terminal(id).is_some() || shell_has_children(&session)
                 }
             };
             if spared {
@@ -815,6 +824,21 @@ impl Daemon {
         base: Option<&str>,
         existing: bool,
     ) -> Result<EntityId> {
+        let config = crate::config::Config::load();
+        self.create_worktree_with(project_id, branch, base, existing, &config)
+            .await
+    }
+
+    /// [`Daemon::create_worktree`] against a given config, for the tests
+    /// that can't pin the settings file.
+    pub async fn create_worktree_with(
+        self: &Arc<Self>,
+        project_id: &ProjectId,
+        branch: &str,
+        base: Option<&str>,
+        existing: bool,
+        config: &crate::config::Config,
+    ) -> Result<EntityId> {
         if branch.trim().is_empty() {
             bail!("branch name is empty");
         }
@@ -839,9 +863,7 @@ impl Daemon {
             }
             let (path, local) = git::add_branch_worktree(&project.repo_path, branch).await?;
             let worktree = self.register_worktree(project_id, path, &local)?;
-            self.link_env_files(&project.repo_path, &worktree.path)
-                .await;
-            self.run_worktree_hook(WorktreeHook::Create, &project.repo_path, &worktree)
+            self.provision_worktree(&project.repo_path, &worktree, config)
                 .await;
             drop(ops);
             return Ok(EntityId::Worktree(worktree.id));
@@ -853,7 +875,6 @@ impl Daemon {
         // auto-created one — starts at the project's **Base branch** when
         // one is set (`dev`, resolved the same way), else at the fetched
         // `origin/HEAD`; never at this checkout's HEAD.
-        let config = crate::config::Config::load();
         let path = match base {
             Some(base) => git::add_worktree_off_ref(&project.repo_path, branch, base).await?,
             None => match config.base_branch(&project.repo_path) {
@@ -864,18 +885,30 @@ impl Daemon {
             },
         };
         let worktree = self.register_worktree(project_id, path, branch)?;
-        self.link_env_files(&project.repo_path, &worktree.path)
-            .await;
-        // The row is out; the WORKTREE HOOK runs still under the lock, so
-        // it is ordered with the operation it belongs to — a delete of
-        // this path waits for it, two hooks never overlap — and the Ack
-        // waits for it, so whatever it provisions is in place before
-        // anything is launched in the checkout. The hook timeout bounds
-        // what that holds the lock for.
-        self.run_worktree_hook(WorktreeHook::Create, &project.repo_path, &worktree)
+        self.provision_worktree(&project.repo_path, &worktree, config)
             .await;
         drop(ops);
         Ok(EntityId::Worktree(worktree.id))
+    }
+
+    /// What a checkout orion just cut for the project at `repo` gets once
+    /// its row is out: its ENV LINKS, its WORKTREE HOOK, then its SETUP
+    /// COMMAND started. Callers hold `worktree_ops`, so the hook is ordered
+    /// with the operation it belongs to — a delete of this path waits for
+    /// it, two hooks never overlap — and the Ack waits for it, so whatever
+    /// it provisions is in place before anything is launched in the
+    /// checkout; the hook timeout bounds what that holds the lock for. The
+    /// setup only starts here, and runs on past the Ack.
+    async fn provision_worktree(
+        self: &Arc<Self>,
+        repo: &Path,
+        worktree: &Worktree,
+        config: &crate::config::Config,
+    ) {
+        self.link_env_files(repo, &worktree.path).await;
+        self.run_worktree_hook(WorktreeHook::Create, repo, worktree)
+            .await;
+        self.setup_worktree(repo, worktree, config);
     }
 
     /// The checkout every PR SESSION for pull request `number` runs in: the
@@ -908,9 +941,8 @@ impl Daemon {
         }
         let path = git::add_pr_worktree(&project.repo_path, number, head).await?;
         let worktree = self.register_worktree(project_id, path, head)?;
-        self.link_env_files(&project.repo_path, &worktree.path)
-            .await;
-        self.run_worktree_hook(WorktreeHook::Create, &project.repo_path, &worktree)
+        let config = crate::config::Config::load();
+        self.provision_worktree(&project.repo_path, &worktree, &config)
             .await;
         drop(ops);
         Ok(worktree)
@@ -2078,6 +2110,7 @@ impl Daemon {
             sort_order: 0,
             alive: false,
             run_command: None,
+            setup: false,
             run: Default::default(),
         };
         self.store.insert_terminal(&terminal)?;
@@ -2107,6 +2140,111 @@ impl Daemon {
             id: EntityId::Terminal(id.clone()),
         });
         Ok(())
+    }
+
+    // ---- setup terminals ----
+
+    /// A worktree orion just created: [`Daemon::start_setup`], with
+    /// whatever stops it starting a warning, never a failed create.
+    fn setup_worktree(
+        self: &Arc<Self>,
+        repo: &Path,
+        worktree: &Worktree,
+        config: &crate::config::Config,
+    ) {
+        if let Err(e) = self.start_setup(repo, worktree, config) {
+            self.warn_clients(format!(
+                "setup didn't start in {}: {e:#}",
+                worktree.path.display()
+            ));
+        }
+    }
+
+    /// Run the SETUP COMMAND of the project cloned at `repo` (Settings →
+    /// Projects, read from `config`) in `worktree`, in a SETUP TERMINAL in
+    /// its band: through the login shell, as a run is, for as long as it
+    /// takes. Its end is [`Daemon::setup_ended`]'s. The row's id, or None
+    /// when the project has no setup command.
+    pub(crate) fn start_setup(
+        self: &Arc<Self>,
+        repo: &Path,
+        worktree: &Worktree,
+        config: &crate::config::Config,
+    ) -> Result<Option<TerminalId>> {
+        let Some(command) = config.setup_command(repo) else {
+            return Ok(None);
+        };
+        let term = TerminalTab {
+            id: TerminalId::generate(),
+            worktree_id: worktree.id.clone(),
+            name: SETUP_TERMINAL_NAME.into(),
+            sort_order: 0,
+            alive: false,
+            run_command: Some(command.to_string()),
+            setup: true,
+            run: Default::default(),
+        };
+        let id = term.id.clone();
+        // Held across the insert and the spawn, as a run's start holds it:
+        // an attach in between must find the PTY, not a row without one.
+        let _gate = self.spawn_gate.lock().unwrap();
+        self.store.insert_terminal(&term)?;
+        let spawned = self.spawn_command(term, worktree);
+        tracing::info!(worktree = %worktree.id, command, ok = spawned.is_ok(), "setup started");
+        if let Err(e) = spawned {
+            // Nothing ran, so there is nothing for the row to show: the
+            // warning says why.
+            self.close_terminal(&id)?;
+            return Err(e);
+        }
+        Ok(Some(id))
+    }
+
+    /// SETUP TERMINAL `id`'s PTY, `session`, exited with `exit_code`. A
+    /// clean exit takes the row with it; any other keeps it, as `setup
+    /// failed (1)`, its PTY kept for the attach that wants to read why.
+    fn setup_ended(
+        self: &Arc<Self>,
+        id: &TerminalId,
+        session: &Arc<PtySession>,
+        exit_code: Option<i32>,
+    ) {
+        if exit_code != Some(0) {
+            self.keep_finished(id, session, exit_code);
+            return;
+        }
+        if let Err(e) = self.close_terminal(id) {
+            tracing::warn!(terminal = %id.0, error = %e, "finished setup's row not removed");
+        }
+    }
+
+    /// Spawn command terminal `term`'s PTY — a run's or a setup's — in
+    /// `worktree`, and send its row to every client as up. Sent under the
+    /// sessions lock, and only while the PTY is still there: one that has
+    /// already exited was dropped from the map by its exit, whose own word
+    /// on the row — the row gone, or how it ended — must come last, never
+    /// followed by a stale "up". A spawn that failed sends the row as it
+    /// is, not alive.
+    fn spawn_command(self: &Arc<Self>, mut term: TerminalTab, worktree: &Worktree) -> Result<()> {
+        let spawned = self.spawn_terminal_session(&term, worktree, DEFAULT_COLS, DEFAULT_ROWS);
+        let sessions = self.sessions.lock().unwrap();
+        term.alive = sessions.contains_key(&SessionRef::Terminal(term.id.clone()));
+        if term.alive || spawned.is_err() {
+            self.broadcast(ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(term),
+            });
+        }
+        spawned.map(drop)
+    }
+
+    /// Keep command terminal `id`'s ended PTY, `session`, and the code it
+    /// exited with, for the attach that replays how it ended and the row
+    /// that says it.
+    fn keep_finished(&self, id: &TerminalId, session: &Arc<PtySession>, exit_code: Option<i32>) {
+        self.finished_runs
+            .lock()
+            .unwrap()
+            .insert(id.clone(), (session.clone(), exit_code));
     }
 
     // ---- run terminals ----
@@ -2141,7 +2279,7 @@ impl Daemon {
             }
         }
         let command = self.run_command_in(&worktree, config)?;
-        let mut term = match existing {
+        let term = match existing {
             Some(mut term) => {
                 self.store.set_terminal_run_command(&term.id, &command)?;
                 term.run_command = Some(command.clone());
@@ -2155,6 +2293,7 @@ impl Daemon {
                     sort_order: 0,
                     alive: false,
                     run_command: Some(command.clone()),
+                    setup: false,
                     run: Default::default(),
                 };
                 self.store.insert_terminal(&term)?;
@@ -2163,20 +2302,9 @@ impl Daemon {
         };
         self.finished_runs.lock().unwrap().remove(&term.id);
         self.stopping_runs.lock().unwrap().remove(&term.id);
-        let spawned = self.spawn_terminal_session(&term, &worktree, DEFAULT_COLS, DEFAULT_ROWS);
-        tracing::info!(worktree = %worktree_id, %command, ok = spawned.is_ok(), "run started");
         let id = term.id.clone();
-        {
-            // Stamped and sent under the sessions lock: a command that exits
-            // at once is dropped from the map, and its not-alive upsert sent,
-            // only after this one — never the other way round, which would
-            // leave every client showing a finished run as still going.
-            let sessions = self.sessions.lock().unwrap();
-            term.alive = sessions.contains_key(&SessionRef::Terminal(id.clone()));
-            self.broadcast(ServerEvent::EntityUpserted {
-                entity: Entity::Terminal(term),
-            });
-        }
+        let spawned = self.spawn_command(term, &worktree);
+        tracing::info!(worktree = %worktree_id, %command, ok = spawned.is_ok(), "run started");
         spawned?;
         Ok(EntityId::Terminal(id))
     }
@@ -2342,10 +2470,7 @@ impl Daemon {
             }
             return;
         }
-        self.finished_runs
-            .lock()
-            .unwrap()
-            .insert(id.clone(), (session.clone(), exit_code));
+        self.keep_finished(id, session, exit_code);
     }
 
     /// Resend RUN TERMINAL `session`'s row when its run has printed ports
@@ -2362,18 +2487,19 @@ impl Daemon {
         }
     }
 
-    /// Whether `id` is a RUN TERMINAL's row.
-    fn is_run_terminal(&self, id: &TerminalId) -> bool {
+    /// Terminal `id`'s row when it runs a command — a RUN TERMINAL's, or a
+    /// SETUP TERMINAL's — rather than a shell.
+    fn command_terminal(&self, id: &TerminalId) -> Option<TerminalTab> {
         self.store
             .get_terminal(id)
             .ok()
             .flatten()
-            .is_some_and(|t| t.run_command.is_some())
+            .filter(|t| t.run_command.is_some())
     }
 
-    /// A RUN TERMINAL that exited on its own: its exit code (None when the
-    /// OS reported none), for the attach replaying it. None for a live
-    /// session or anything that is not a finished run.
+    /// A RUN TERMINAL that exited on its own, or a SETUP TERMINAL that
+    /// failed: its exit code (None when the OS reported none), for the
+    /// attach replaying it. None for a live session or anything else.
     pub fn finished_run_exit(&self, sref: &SessionRef) -> Option<Option<i32>> {
         let SessionRef::Terminal(id) = sref else {
             return None;
@@ -2429,13 +2555,17 @@ impl Daemon {
             SessionRef::Agent(id) => self.boot_agent(id, cols, rows, None),
             SessionRef::Terminal(id) => {
                 let term = self.store.get_terminal(id)?.context("terminal not found")?;
-                // A RUN TERMINAL is only ever started by `r`: an attach, or
-                // the prewarm sweep walking past, must never run a command
-                // that exited again. What it can show is how the run ended,
-                // while the DAEMON still holds that PTY.
+                // A RUN TERMINAL is only ever started by `r`, and a SETUP
+                // TERMINAL by its worktree's create: an attach, or the
+                // prewarm sweep walking past, must never run a command
+                // that exited again. What it can show is how the command
+                // ended, while the DAEMON still holds that PTY.
                 if term.run_command.is_some() {
                     if let Some((session, _)) = self.finished_runs.lock().unwrap().get(id) {
                         return Ok(session.clone());
+                    }
+                    if term.setup {
+                        bail!("{SETUP_NOT_RUNNING}");
                     }
                     bail!("{RUN_NOT_RUNNING}");
                 }
@@ -2576,7 +2706,7 @@ impl Daemon {
             .chain(
                 terminals
                     .iter()
-                    // A RUN TERMINAL never boots from a sweep (see
+                    // A RUN or SETUP TERMINAL never boots from a sweep (see
                     // `ensure_session`).
                     .filter(|t| &t.worktree_id == worktree_id && t.run_command.is_none())
                     .map(|t| SessionRef::Terminal(t.id.clone())),
@@ -3178,10 +3308,11 @@ impl Daemon {
         rows: u16,
     ) -> Result<Arc<PtySession>> {
         let (program, args) = match &terminal.run_command {
-            // A RUN TERMINAL runs its command line through the login +
-            // interactive shell an agent launch uses, so `npm` or `bun`
-            // resolve the way they do typed. The PTY lives exactly as long
-            // as the command, which is what makes it the RUNNING state.
+            // A RUN TERMINAL (or a SETUP TERMINAL) runs its command line
+            // through the login + interactive shell an agent launch uses,
+            // so `npm` or `bun` resolve the way they do typed. The PTY
+            // lives exactly as long as the command, which is what makes a
+            // run's the RUNNING state.
             Some(command) => login_shell_line(&orion_core::shell::user_shell(), command),
             // `-l` makes it a login shell, matching Terminal.app: zsh then
             // sources /etc/zprofile (path_helper), ~/.zprofile, and ~/.zshrc.
@@ -3195,9 +3326,9 @@ impl Daemon {
             scrub_env: env::AGENT_SESSION_VARS,
             cols,
             rows,
-            // A run's dev server says where it listens; a shell's output
-            // is the user's own.
-            scan_ports: terminal.run_command.is_some(),
+            // A run's dev server says where it listens; a setup's install
+            // and a shell's output are not for reading.
+            scan_ports: terminal.is_run(),
         };
         let sref = SessionRef::Terminal(terminal.id.clone());
         let session = PtySession::spawn(sref, spec)?;
@@ -3257,8 +3388,10 @@ impl Daemon {
                         }
                         tracing::info!(session = ?sref, exit_code, "session exited");
                         if let SessionRef::Terminal(id) = &sref {
-                            if daemon.is_run_terminal(id) {
-                                daemon.run_ended(id, &session, exit_code);
+                            match daemon.command_terminal(id) {
+                                Some(t) if t.setup => daemon.setup_ended(id, &session, exit_code),
+                                Some(_) => daemon.run_ended(id, &session, exit_code),
+                                None => {}
                             }
                         }
                         if let SessionRef::Agent(id) = &sref {
@@ -5117,9 +5250,17 @@ mod tests {
 
     /// A config whose project at `repo` has `run` for its RUN COMMAND.
     fn run_config(repo: &Path, run: &str) -> crate::config::Config {
-        let json = serde_json::json!({
-            "projects": { repo.display().to_string(): { "run_command": run } }
-        });
+        project_config(repo, serde_json::json!({ "run_command": run }))
+    }
+
+    /// A config whose project at `repo` has `setup` for its SETUP COMMAND.
+    fn setup_config(repo: &Path, setup: &str) -> crate::config::Config {
+        project_config(repo, serde_json::json!({ "setup_command": setup }))
+    }
+
+    /// A config whose project at `repo` has these Projects-tab rows.
+    fn project_config(repo: &Path, rows: serde_json::Value) -> crate::config::Config {
+        let json = serde_json::json!({ "projects": { repo.display().to_string(): rows } });
         serde_json::from_value(json).unwrap()
     }
 
@@ -5660,6 +5801,86 @@ mod tests {
             1
         );
         daemon.stop_run(&worktree.id).unwrap();
+    }
+
+    /// A SETUP COMMAND runs in the checkout in a `setup` row of its own —
+    /// out to every client alive, never the worktree's run — and a clean
+    /// exit takes the row with it.
+    #[tokio::test]
+    async fn a_setup_runs_in_its_own_row_and_a_clean_exit_removes_it() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        let mut events = daemon.events.subscribe();
+        let line = "sleep 0.3; echo ok > set-up";
+        let id = daemon
+            .start_setup(dir.path(), &worktree, &setup_config(dir.path(), line))
+            .unwrap()
+            .expect("a setup command makes a row");
+
+        let row = daemon.store.get_terminal(&id).unwrap().unwrap();
+        assert!(row.setup && !row.is_run());
+        assert_eq!(row.name, "setup");
+        assert_eq!(row.run_command.as_deref(), Some(line));
+        assert!(daemon
+            .store
+            .run_terminals_in(&worktree.id)
+            .unwrap()
+            .is_empty());
+        let sent = next_terminal_event(&mut events, &id)
+            .await
+            .expect("the row goes out");
+        assert!(sent.alive && sent.setup, "setting up…");
+        assert!(
+            next_terminal_event(&mut events, &id).await.is_none(),
+            "a clean exit takes the row"
+        );
+        assert!(daemon.store.get_terminal(&id).unwrap().is_none());
+        assert!(dir.path().join("set-up").exists(), "it ran in the checkout");
+    }
+
+    /// A setup that fails keeps its row, carrying the code it exited with
+    /// (`setup failed (3)`), and an attach replays it rather than running
+    /// it again.
+    #[tokio::test]
+    async fn a_failed_setup_keeps_its_row_with_the_exit_code() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        let mut events = daemon.events.subscribe();
+        let cfg = setup_config(dir.path(), "echo no-npm; exit 3");
+        let id = daemon
+            .start_setup(dir.path(), &worktree, &cfg)
+            .unwrap()
+            .unwrap();
+        let failed = terminal_row_until(&mut events, &id, |row| !row.alive).await;
+        assert_eq!(failed.run.exit_code, Some(3));
+        let sref = SessionRef::Terminal(id.clone());
+        let session = daemon.ensure_session(&sref, 80, 24).unwrap();
+        assert!(!daemon.is_alive(&sref), "an attach ran nothing");
+        let (_, bytes) = session.snapshot(None);
+        assert!(String::from_utf8_lossy(&bytes).contains("no-npm"));
+
+        // Under a later DAEMON its output is gone, and the attach says so.
+        daemon.finished_runs.lock().unwrap().clear();
+        let Err(err) = daemon.ensure_session(&sref, 80, 24) else {
+            panic!("an attach ran the setup again");
+        };
+        assert!(err.to_string().contains("setup"), "{err}");
+    }
+
+    /// A project with no setup command gets no row.
+    #[tokio::test]
+    async fn no_setup_command_is_no_setup_row() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        for cfg in [
+            crate::config::Config::default(),
+            setup_config(dir.path(), "  "),
+            run_config(dir.path(), "just start"),
+        ] {
+            let started = daemon.start_setup(dir.path(), &worktree, &cfg).unwrap();
+            assert_eq!(started, None);
+        }
+        assert_eq!(daemon.store.count_terminals(&worktree.id).unwrap(), 0);
     }
 
     #[tokio::test]
@@ -6906,6 +7127,60 @@ mod tests {
             drain_warnings(&mut events).is_empty(),
             "a clean run warns nobody"
         );
+    }
+
+    /// A new worktree runs its project's SETUP COMMAND in its own band,
+    /// after its `.env` links are in, and the create's answer doesn't wait
+    /// for it. A new worktree of a project without one gets no row.
+    #[tokio::test]
+    async fn create_worktree_runs_the_setup_command_in_the_new_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = init_repo(&root);
+        std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+        std::fs::write(repo.join(".env"), "TOKEN=1\n").unwrap();
+        let daemon = test_daemon();
+        let project = project_at(&daemon, &repo);
+        let cfg = setup_config(&repo, "sleep 0.3; cat .env > set-up");
+        let mut events = daemon.events.subscribe();
+
+        let EntityId::Worktree(id) = daemon
+            .create_worktree_with(&project.id, "feat", None, false, &cfg)
+            .await
+            .unwrap()
+        else {
+            panic!("a worktree id");
+        };
+        let worktree = daemon.store.get_worktree(&id).unwrap().unwrap();
+        let setups = daemon.store.setup_terminals_in(&id).unwrap();
+        assert_eq!(setups.len(), 1, "{setups:#?}");
+        assert!(
+            daemon.is_alive(&SessionRef::Terminal(setups[0].id.clone())),
+            "still setting up when the create answers"
+        );
+        let setup = terminal_row_until(&mut events, &setups[0].id, |row| row.alive).await;
+        assert!(setup.setup, "out as setting up");
+        assert!(
+            next_terminal_event(&mut events, &setup.id).await.is_none(),
+            "the setup finished and took its row"
+        );
+        let marker = worktree.path.join("set-up");
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "TOKEN=1\n");
+
+        let EntityId::Worktree(bare) = daemon
+            .create_worktree_with(
+                &project.id,
+                "bare",
+                None,
+                false,
+                &crate::config::Config::default(),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("a worktree id");
+        };
+        assert_eq!(daemon.store.count_terminals(&bare).unwrap(), 0);
     }
 
     /// ENV LINKS: a new worktree gets the main checkout's ignored `.env`

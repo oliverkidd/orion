@@ -356,6 +356,7 @@ mod tests {
             sort_order: 0,
             alive: true,
             run_command: None,
+            setup: false,
             run: Default::default(),
         });
         app.term = Some(AttachedTerm::new(SessionRef::Terminal(id), 80, 24));

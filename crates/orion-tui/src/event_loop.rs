@@ -4711,6 +4711,9 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::config::SettingKind::BaseBranch => {
                     "branch this project's new worktrees start from (empty = auto: origin's default branch)"
                 }
+                crate::config::SettingKind::SetupCommand => {
+                    "shell line run once in each new worktree, e.g. just setup-worktree (empty = none)"
+                }
                 crate::config::SettingKind::RunCommand => {
                     "shell line Start stack runs in a worktree's run terminal, e.g. just start (empty = none)"
                 }
@@ -7187,7 +7190,7 @@ fn menu_items_for_terminal(app: &App, t: &orion_core::TerminalTab) -> Vec<MenuIt
         "Attach",
         MenuAction::Attach(SessionRef::Terminal(t.id.clone())),
     )];
-    if t.run_command.is_some() {
+    if t.is_run() {
         let w = &t.worktree_id;
         items.push(MenuItem::new(
             crate::stacks::menu_label(app, w),
@@ -20158,6 +20161,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: None,
+                    setup: false,
                     run: Default::default(),
                 }),
             },
@@ -20194,6 +20198,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("npm run dev".into()),
+                    setup: false,
                     run: Default::default(),
                 }),
             },
@@ -20256,6 +20261,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("bun dev".into()),
+                    setup: false,
                     run: Default::default(),
                 }),
             },
@@ -20299,6 +20305,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("npm run dev".into()),
+                    setup: false,
                     run: Default::default(),
                 }),
             };
@@ -27708,6 +27715,7 @@ mod tests {
             sort_order: 0,
             alive,
             run_command: Some("just start".into()),
+            setup: false,
             run: orion_core::RunState {
                 stopping_until,
                 ..Default::default()
@@ -27775,6 +27783,44 @@ mod tests {
         );
     }
 
+    /// A SETUP LINE is never the checkout's run: while it sets up, `⌘⇧S`
+    /// still starts the stack, and its menu has no stack verbs.
+    #[test]
+    fn a_setup_line_is_not_the_checkouts_run() {
+        use orion_core::{Entity, TerminalId, TerminalTab};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let setup = TerminalTab {
+            id: TerminalId("setup1".into()),
+            worktree_id: orion_core::WorktreeId("w1".into()),
+            name: "setup".into(),
+            sort_order: 0,
+            alive: true,
+            run_command: Some("just setup-worktree".into()),
+            setup: true,
+            run: Default::default(),
+        };
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(setup.clone()),
+            },
+        );
+        let w1 = orion_core::WorktreeId("w1".into());
+        assert!(app.run_terminal(&w1).is_none());
+        assert!(!app.worktree_running(&w1));
+        let out = run_action(&mut app, crate::keymap::Action::ToggleStack);
+        assert!(
+            matches!(out.as_slice(), [ClientRequest::StartRun { .. }]),
+            "{out:?}"
+        );
+        let labels: Vec<_> = menu_items_for_terminal(&app, &setup)
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert!(!labels.iter().any(|l| l.contains("stack")), "{labels:?}");
+    }
+
     /// **Stop all stacks** stops every checkout's run, and nothing when
     /// none runs: a stack orion didn't start is left as it is.
     #[test]
@@ -27797,6 +27843,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("just start".into()),
+                    setup: false,
                     run: Default::default(),
                 }),
             },

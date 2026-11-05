@@ -6489,7 +6489,7 @@ impl App {
         self.tree
             .terminals
             .iter()
-            .find(|t| &t.worktree_id == worktree_id && t.run_command.is_some())
+            .find(|t| &t.worktree_id == worktree_id && t.is_run())
     }
 
     /// Whether the worktree's RUN COMMAND is up right now: the RUNNING
@@ -6957,6 +6957,7 @@ mod tests {
             sort_order: 0,
             alive: true,
             run_command: None,
+            setup: false,
             run: Default::default(),
         });
         app.tree

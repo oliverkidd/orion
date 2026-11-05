@@ -359,6 +359,13 @@ const MIGRATIONS: &[&str] = &[
         unseen = 0
       WHERE kind IN ('pi', 'muse');
     ",
+    // 32: a SETUP TERMINAL (`TerminalTab::setup`): the project's setup
+    // command, run once in a worktree orion created. Its command rides
+    // `run_command` as a run's does, so this tells the two apart. Every
+    // existing terminal is a shell or a run.
+    "
+    ALTER TABLE terminals ADD COLUMN setup INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 pub struct Store {
@@ -847,8 +854,8 @@ impl Store {
 
     pub fn insert_terminal(&self, t: &TerminalTab) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO terminals (id, worktree_id, name, sort_order, created_at, run_command) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![t.id.as_str(), t.worktree_id.as_str(), t.name, t.sort_order, now_ms(), t.run_command],
+            "INSERT INTO terminals (id, worktree_id, name, sort_order, created_at, run_command, setup) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![t.id.as_str(), t.worktree_id.as_str(), t.name, t.sort_order, now_ms(), t.run_command, t.setup],
         )?;
         Ok(())
     }
@@ -1026,12 +1033,28 @@ impl Store {
     /// The worktree's RUN TERMINALS, oldest first. The DAEMON keeps one per
     /// worktree; a list, so a stray second row can still be found and stopped.
     pub fn run_terminals_in(&self, worktree_id: &WorktreeId) -> Result<Vec<TerminalTab>> {
+        self.command_terminals_in(worktree_id, false)
+    }
+
+    /// The worktree's SETUP TERMINALS, oldest first: the one its create
+    /// ran, while it runs or after it failed.
+    pub fn setup_terminals_in(&self, worktree_id: &WorktreeId) -> Result<Vec<TerminalTab>> {
+        self.command_terminals_in(worktree_id, true)
+    }
+
+    /// The worktree's terminals that run a command: its setup's when
+    /// `setup`, else its run's.
+    fn command_terminals_in(
+        &self,
+        worktree_id: &WorktreeId,
+        setup: bool,
+    ) -> Result<Vec<TerminalTab>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
-            "SELECT {TERMINAL_COLUMNS} FROM terminals WHERE worktree_id = ?1 AND run_command IS NOT NULL ORDER BY created_at"
+            "SELECT {TERMINAL_COLUMNS} FROM terminals WHERE worktree_id = ?1 AND run_command IS NOT NULL AND setup = ?2 ORDER BY created_at"
         ))?;
         let rows = stmt
-            .query_map(params![worktree_id.as_str()], row_to_terminal)?
+            .query_map(params![worktree_id.as_str(), setup], row_to_terminal)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -1104,7 +1127,7 @@ const AGENT_COLUMNS: &str = "id, worktree_id, name, status, archived, kind, \
                              claude_session_id, sort_order, status_changed_at, model, effort, \
                              archived_at, unseen, recent_prompts, custom_harness, \
                              usage_limit";
-const TERMINAL_COLUMNS: &str = "id, worktree_id, name, sort_order, run_command";
+const TERMINAL_COLUMNS: &str = "id, worktree_id, name, sort_order, run_command, setup";
 const LINK_COLUMNS: &str = "id, worktree_id, url, sort_order";
 
 fn row_to_project(r: &rusqlite::Row) -> rusqlite::Result<Project> {
@@ -1198,6 +1221,7 @@ fn row_to_terminal(r: &rusqlite::Row) -> rusqlite::Result<TerminalTab> {
         sort_order: r.get(3)?,
         alive: false,
         run_command: r.get(4)?,
+        setup: r.get(5)?,
         run: Default::default(),
     })
 }
@@ -2128,6 +2152,7 @@ mod tests {
                 sort_order: 0,
                 alive: false,
                 run_command: None,
+                setup: false,
                 run: Default::default(),
             })
             .unwrap();
@@ -2137,6 +2162,57 @@ mod tests {
         assert!(projects.is_empty());
         assert!(worktrees.is_empty());
         assert!(terminals.is_empty());
+    }
+
+    /// A SETUP TERMINAL's command rides `run_command` as a run's does; the
+    /// `setup` column keeps it out of the worktree's runs, and it reads
+    /// back as setup.
+    #[test]
+    fn setup_and_run_terminals_are_told_apart() {
+        let store = Store::open_in_memory().unwrap();
+        let project = Project {
+            id: ProjectId::generate(),
+            name: "demo".into(),
+            repo_path: "/tmp/demo".into(),
+            sort_order: 0,
+        };
+        store.insert_project(&project).unwrap();
+        let worktree = Worktree {
+            id: WorktreeId::generate(),
+            project_id: project.id.clone(),
+            path: "/tmp/demo".into(),
+            branch: "main".into(),
+            is_main: true,
+            sort_order: 0,
+        };
+        store.insert_worktree(&worktree).unwrap();
+        let command = |name: &str, setup| TerminalTab {
+            id: TerminalId(name.into()),
+            worktree_id: worktree.id.clone(),
+            name: name.into(),
+            sort_order: 0,
+            alive: false,
+            run_command: Some(format!("just {name}")),
+            setup,
+            run: Default::default(),
+        };
+        store.insert_terminal(&command("setup", true)).unwrap();
+        store.insert_terminal(&command("run", false)).unwrap();
+
+        let names = |rows: Vec<TerminalTab>| rows.into_iter().map(|t| t.name).collect::<Vec<_>>();
+        assert_eq!(
+            names(store.run_terminals_in(&worktree.id).unwrap()),
+            ["run"]
+        );
+        assert_eq!(
+            names(store.setup_terminals_in(&worktree.id).unwrap()),
+            ["setup"]
+        );
+        let setup = store
+            .get_terminal(&TerminalId("setup".into()))
+            .unwrap()
+            .unwrap();
+        assert!(setup.setup && !setup.is_run());
     }
 
     #[test]

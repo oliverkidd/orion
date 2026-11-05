@@ -592,6 +592,7 @@ mod tests {
                         sort_order: 0,
                         alive: true,
                         run_command: None,
+                        setup: false,
                         run: Default::default(),
                     }),
                 },

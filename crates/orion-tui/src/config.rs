@@ -72,8 +72,8 @@ pub const AUTO_CHOICE: &str = "auto";
 /// The Projects tab with no project to list.
 pub const NO_PROJECTS: &str = "no projects yet — each one you add gets its rows here";
 
-/// What the Projects tab's **Run command** and **Open command** rows show
-/// while they are empty: there is nothing to run then.
+/// What the Projects tab's **Setup command**, **Run command** and **Open
+/// command** rows show while they are empty: there is nothing to run then.
 pub const NO_COMMAND: &str = "not set";
 
 // The static model/effort lists live in the core registry table now
@@ -393,6 +393,8 @@ pub enum SettingKind {
     QuickPromptKind,
     /// A project's base branch: what its new worktrees start from.
     BaseBranch,
+    /// A project's SETUP COMMAND: what runs once in each new worktree.
+    SetupCommand,
     RunCommand,
     OpenCommand,
     /// A project's ON WORKTREE DELETE: what deleting one of its worktrees
@@ -446,7 +448,10 @@ impl SettingKind {
     pub fn is_text(self) -> bool {
         matches!(
             self,
-            SettingKind::BaseBranch | SettingKind::RunCommand | SettingKind::OpenCommand
+            SettingKind::BaseBranch
+                | SettingKind::SetupCommand
+                | SettingKind::RunCommand
+                | SettingKind::OpenCommand
         )
     }
 
@@ -467,6 +472,7 @@ impl SettingKind {
         matches!(
             self,
             SettingKind::BaseBranch
+                | SettingKind::SetupCommand
                 | SettingKind::RunCommand
                 | SettingKind::OpenCommand
                 | SettingKind::WorktreeContainers
@@ -593,6 +599,12 @@ pub const PROJECT_SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::BaseBranch,
         label: "Base branch",
         hint: "Branch this project's new worktrees start from; Enter types one (empty = origin's default branch)",
+        group: "",
+    },
+    SettingSpec {
+        kind: SettingKind::SetupCommand,
+        label: "Setup command",
+        hint: "Shell line run once in each new worktree of this project, on a setup line in its band, e.g. just setup-worktree",
         group: "",
     },
     SettingSpec {
@@ -1119,6 +1131,13 @@ pub struct ProjectSettings {
     /// DAEMON reads it (`orion-daemon/src/config.rs`); the TUI edits it.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub base_branch: String,
+    /// The SETUP COMMAND the DAEMON runs once in each worktree it creates
+    /// for this project, on a setup line in its band — `just
+    /// setup-worktree`, say. Empty (shown as `not set`) is none. The
+    /// DAEMON reads it; the TUI only edits it. Left out of the file while
+    /// empty, like `run_command`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub setup_command: String,
     /// The RUN COMMAND a menu's **Run** starts in this project's
     /// worktrees, typed on the Projects tab. Empty — the default, shown as
     /// `not set` — is none. The DAEMON reads it
@@ -1162,6 +1181,7 @@ impl ProjectSettings {
     pub fn value_label(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::BaseBranch => blank_as(&self.base_branch, AUTO_CHOICE),
+            SettingKind::SetupCommand => blank_as(&self.setup_command, NO_COMMAND),
             SettingKind::RunCommand => blank_as(&self.run_command, NO_COMMAND),
             SettingKind::OpenCommand => blank_as(&self.open_command, NO_COMMAND),
             SettingKind::WorktreeContainers => self.containers().as_str().into(),
@@ -1181,6 +1201,7 @@ impl ProjectSettings {
     pub fn text_value(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::BaseBranch => self.base_branch.clone(),
+            SettingKind::SetupCommand => self.setup_command.clone(),
             SettingKind::RunCommand => self.run_command.clone(),
             SettingKind::OpenCommand => self.open_command.clone(),
             _ => String::new(),
@@ -1193,6 +1214,7 @@ impl ProjectSettings {
     pub fn set_text(&mut self, kind: SettingKind, value: &str) -> bool {
         let field = match kind {
             SettingKind::BaseBranch => &mut self.base_branch,
+            SettingKind::SetupCommand => &mut self.setup_command,
             SettingKind::RunCommand => &mut self.run_command,
             SettingKind::OpenCommand => &mut self.open_command,
             _ => return false,
@@ -2521,6 +2543,7 @@ impl Config {
             // an entry would show. The Linear key is the app's to tell
             // (`linear::key_status`), not the file's.
             SettingKind::BaseBranch
+            | SettingKind::SetupCommand
             | SettingKind::RunCommand
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
@@ -2601,6 +2624,7 @@ impl Config {
             // One project's, not the file's: see `set_project_text` and
             // `cycle_project`. The presets row opens a list.
             SettingKind::BaseBranch
+            | SettingKind::SetupCommand
             | SettingKind::RunCommand
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
@@ -3729,7 +3753,7 @@ mod tests {
         assert!(SettingKind::RunCommand.is_project());
         let (tab, row) = locate(SettingKind::RunCommand).unwrap();
         assert_eq!(tab, project_tab());
-        assert_eq!(row, 1, "under the base branch");
+        assert_eq!(row, 2, "under the setup command");
         assert_eq!(cfg.project(demo).run_command, "");
         assert_eq!(
             cfg.project(demo).value_label(SettingKind::RunCommand),
@@ -3795,6 +3819,48 @@ mod tests {
             read_json_file(&path)["projects"],
             serde_json::json!({ "/tmp/other": { "open_command": "open x" } })
         );
+    }
+
+    /// **Setup command** on the Projects tab: the same typed per-project
+    /// row as Run command, between the base branch and it, kept as
+    /// `setup_command` — what the DAEMON runs in each new worktree. Its
+    /// own key, left out of the file while empty.
+    #[test]
+    fn setup_command_is_a_typed_project_row_over_run_command() {
+        let demo = Path::new("/tmp/demo");
+        let mut cfg = Config::default();
+        assert!(SettingKind::SetupCommand.is_text());
+        assert!(SettingKind::SetupCommand.is_project());
+        let (tab, row) = locate(SettingKind::SetupCommand).unwrap();
+        assert_eq!(tab, project_tab());
+        assert_eq!(row, 1, "under the base branch");
+        assert_eq!(
+            cfg.project(demo).value_label(SettingKind::SetupCommand),
+            NO_COMMAND
+        );
+        cfg.cycle(tab, row, 0);
+        assert!(cfg.projects.is_empty(), "a typed row cycles nothing");
+
+        assert!(cfg.set_project_text(demo, SettingKind::SetupCommand, " just setup-worktree "));
+        assert_eq!(cfg.project(demo).setup_command, "just setup-worktree");
+        assert_eq!(cfg.project(demo).run_command, "", "run's key is untouched");
+        assert_eq!(
+            cfg.project_text_value(demo, SettingKind::SetupCommand),
+            "just setup-worktree"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        assert_eq!(
+            read_json_file(&path)["projects"],
+            serde_json::json!({ "/tmp/demo": { "setup_command": "just setup-worktree" } })
+        );
+        assert_eq!(
+            load_from(&path).project(demo).setup_command,
+            "just setup-worktree"
+        );
+        assert!(cfg.set_project_text(demo, SettingKind::SetupCommand, ""));
+        assert!(cfg.projects.is_empty(), "empty unsets it");
     }
 
     /// **Open command** on the Projects tab: the same typed per-project row
@@ -3882,14 +3948,15 @@ mod tests {
             PROJECT_SETTINGS.iter().map(|s| s.kind).collect::<Vec<_>>(),
             [
                 SettingKind::BaseBranch,
+                SettingKind::SetupCommand,
                 SettingKind::RunCommand,
                 SettingKind::OpenCommand,
                 SettingKind::WorktreeContainers,
                 SettingKind::LinearKey,
             ]
         );
-        assert_eq!(kind(n + 1), Some(SettingKind::RunCommand));
-        assert_eq!(kind(n + 2), Some(SettingKind::OpenCommand));
+        assert_eq!(kind(n + 1), Some(SettingKind::SetupCommand));
+        assert_eq!(kind(n + 2), Some(SettingKind::RunCommand));
         assert_eq!(project_at(tab, n - 1), Some(0));
         assert_eq!(project_at(tab, n), Some(1));
         assert_eq!(project_at(0, 2), None);
@@ -4604,6 +4671,7 @@ mod tests {
             project,
             [
                 "Base branch",
+                "Setup command",
                 "Run command",
                 "Open command",
                 "On worktree delete",

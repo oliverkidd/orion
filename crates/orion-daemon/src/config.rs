@@ -41,12 +41,13 @@ pub struct Config {
     /// rest, keyed by the project's repo path as the store holds it. The
     /// TUI's Projects tab owns the map; the daemon reads the keys in it
     /// that are its to act on ([`Config::base_branch`],
-    /// [`Config::run_command`], [`Config::worktree_containers`]).
+    /// [`Config::setup_command`], [`Config::run_command`],
+    /// [`Config::worktree_containers`]).
     pub projects: BTreeMap<PathBuf, ProjectConfig>,
 }
 
 /// One project's entry under `projects` — the rows of the TUI's Projects
-/// tab, of which the daemon reads three. The rest (`open_command`) are the
+/// tab, of which the daemon reads four. The rest (`open_command`) are the
 /// TUI's and pass through unread.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -60,6 +61,10 @@ pub struct ProjectConfig {
     /// branch at all — the default again, with a warning in the daemon
     /// log. Read through [`Config::base_branch`].
     pub base_branch: String,
+    /// The SETUP COMMAND run once in each worktree orion creates for this
+    /// project, in a setup row in its band, typed into Settings →
+    /// Projects. Empty means there is none.
+    pub setup_command: String,
     /// The RUN COMMAND a menu's **Run** starts in this project's
     /// worktrees, typed into Settings → Projects. Empty means there is
     /// none.
@@ -132,9 +137,21 @@ impl Config {
     /// Settings → Projects, trimmed; None when the project has no entry or
     /// the row is empty.
     pub fn run_command(&self, repo_path: &Path) -> Option<&str> {
+        self.command_line(repo_path, |p| &p.run_command)
+    }
+
+    /// The SETUP COMMAND set for the project checked out at `repo_path`,
+    /// read as [`Config::run_command`] is.
+    pub fn setup_command(&self, repo_path: &Path) -> Option<&str> {
+        self.command_line(repo_path, |p| &p.setup_command)
+    }
+
+    /// One of the project's typed command lines, trimmed; None for no
+    /// entry or an empty row.
+    fn command_line(&self, repo_path: &Path, field: fn(&ProjectConfig) -> &String) -> Option<&str> {
         self.projects
             .get(repo_path)
-            .map(|p| p.run_command.trim())
+            .map(|p| field(p).trim())
             .filter(|c| !c.is_empty())
     }
 }
@@ -322,6 +339,29 @@ mod tests {
         assert_eq!(cfg.run_command(Path::new("/tmp/demo")), None);
         assert_eq!(cfg.session_idle_timeout, "1h");
         assert_eq!(skipped.into_iter().collect::<Vec<_>>(), ["projects"]);
+    }
+
+    /// The Projects tab's `setup_command` reads as `run_command` does, and
+    /// apart from it.
+    #[test]
+    fn setup_command_is_read_per_project_apart_from_the_run_command() {
+        assert_eq!(
+            Config::default().setup_command(Path::new("/tmp/demo")),
+            None
+        );
+        let cfg: Config = serde_json::from_str(
+            r#"{"projects": {
+                "/tmp/demo": { "setup_command": " just setup-worktree  ", "run_command": "just start" },
+                "/tmp/run-only": { "run_command": "just start" },
+                "/tmp/blank": { "setup_command": "  " }
+            }}"#,
+        )
+        .unwrap();
+        let demo = Path::new("/tmp/demo");
+        assert_eq!(cfg.setup_command(demo), Some("just setup-worktree"));
+        assert_eq!(cfg.run_command(demo), Some("just start"));
+        assert_eq!(cfg.setup_command(Path::new("/tmp/run-only")), None);
+        assert_eq!(cfg.setup_command(Path::new("/tmp/blank")), None);
     }
 
     #[test]
