@@ -34,11 +34,13 @@ fn path_names_every_settings_file() {
     }
 }
 
-/// The settings backup is gone: `export` and `import` are no commands.
+/// The settings backup is gone — `export` and `import` are no commands —
+/// and so is `harnesses`: what a harness runs is orion's, and what is the
+/// user's is in config.json to read.
 #[test]
-fn there_is_no_settings_export_or_import() {
+fn there_is_no_settings_export_import_or_harnesses() {
     let data = tempfile::tempdir().unwrap();
-    for command in ["export", "import"] {
+    for command in ["export", "import", "harnesses"] {
         let out = orion(data.path(), &["config", command]);
         assert!(!out.status.success(), "`orion config {command}` ran");
         assert!(

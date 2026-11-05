@@ -4,20 +4,19 @@
 //! and the config dirs on this machine no account runs in any more,
 //! which can be added back or moved to the Trash.
 //!
-//! An account is a registry harness that runs Claude in a config dir
-//! orion can see ([`HarnessDescriptor::is_claude_account`]): built-in
-//! Claude — the DEFAULT ACCOUNT — a `claude_accounts` entry, or a
-//! hand-written `harnesses` entry whose `env` pins `CLAUDE_CONFIG_DIR`.
+//! An account is a registry row that runs Claude in a config dir of its
+//! own ([`HarnessDescriptor::is_claude_account`]): built-in Claude — the
+//! DEFAULT ACCOUNT — or a `claude_accounts` entry, its sessions Claude's
+//! with the account's id beside.
 //! Everywhere one is listed it goes by its name and the email Claude
 //! Code records it signed in as, `Work (a@b.co)` — `Claude (a@b.co)`
 //! while it has no name of its own ([`label`], [`name_of`]); a card, a
 //! list row, the quick prompt and a preset — short of room — say the
 //! name alone, else the email, and only on a machine with more than one
 //! account, where `claude` would not say which ([`short_name`]). The
-//! name is the user's ([`rename`]): a `claude_accounts` entry's `name`,
-//! or a `harnesses` label for the default account and a hand-written
-//! one. The id and the dir never change with it — sessions point back
-//! at the id, and the login lives in the dir.
+//! name is the user's ([`rename`]): its `harnesses.<id>.label`, beside
+//! its model and effort. The id and the dir never change with it —
+//! sessions point back at the id, and the login lives in the dir.
 //!
 //! Removing an account leaves its dir, login and all, where it was —
 //! unless the remove sends it to the Trash — and a later add whose name
@@ -353,11 +352,10 @@ pub fn tilde(path: &Path) -> String {
 /// Claude's label, before the email it is signed in as.
 pub const DEFAULT_NAME: &str = "Claude";
 
-/// The name `entry` goes by when the user gave it one: a
-/// `claude_accounts` entry's `name`, a `harnesses` label on the default
-/// account or on a hand-written one. None while it has none — `Claude`
-/// wherever it is listed. Read off a raw registry row
-/// ([`Config::raw_harness_registry`]), not one [`label`] already named.
+/// The name `entry` goes by when the user gave it one: its `harnesses`
+/// label. None while it has none — `Claude` wherever it is listed. Read
+/// off a raw registry row ([`Config::raw_harness_registry`]), not one
+/// [`label`] already named.
 pub fn name_of(entry: &HarnessDescriptor) -> Option<String> {
     let label = entry.label.trim();
     (!label.is_empty() && label != DEFAULT_NAME).then(|| label.to_string())
@@ -1332,11 +1330,11 @@ mod tests {
         });
     }
 
-    /// A hand-written harness whose env pins a dir is an account too: its
-    /// own label stays and gains the email. A wrapper that exports the
-    /// variable itself is not — nothing says which login it runs.
+    /// A `harnesses` entry is no account, whatever its `env` pins and
+    /// whatever an older release let it say about hooks: it runs the
+    /// program its id names, with no email to its name.
     #[test]
-    fn a_hand_written_account_keeps_its_label() {
+    fn a_harnesses_entry_is_no_account() {
         let m = Machine::new("{}");
         let b = m.home.path().join(".claude-b");
         std::fs::write(
@@ -1344,8 +1342,7 @@ mod tests {
             serde_json::json!({"harnesses": {
                 "claude-b": {"label": "Claude B", "program": "claude", "hooks": "claude",
                              "resume_flag": "--resume",
-                             "env": {"CLAUDE_CONFIG_DIR": b.display().to_string()}},
-                "wrapped": {"label": "Wrapped", "program": "/bin/claude-w", "hooks": "claude"}
+                             "env": {"CLAUDE_CONFIG_DIR": b.display().to_string()}}
             }})
             .to_string(),
         )
@@ -1354,8 +1351,14 @@ mod tests {
         m.run(|| {
             refresh_now();
             let cfg = Config::load();
-            assert_eq!(label_of(&cfg, "claude-b"), "Claude B (b@b.co)");
-            assert_eq!(label_of(&cfg, "wrapped"), "Wrapped");
+            assert_eq!(label_of(&cfg, "claude-b"), "Claude B");
+            let entry = cfg.effective_harness_by_id("claude-b");
+            assert!(!entry.is_claude_account());
+            assert_eq!(entry.program, "claude-b");
+            assert!(!cfg
+                .account_rows()
+                .contains(&crate::config::AccountRow::Account("claude-b".into())));
+            assert!(rename("claude-b", "X").is_err(), "no Claude account");
         });
     }
 
@@ -2033,17 +2036,11 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
     fn renaming_moves_only_the_name() {
         let m = Machine::new("{}");
         let two = m.home.path().join(".claude-2");
-        let b = m.home.path().join(".claude-b");
         config(
             &m,
             serde_json::json!({
                 "claude_accounts": [{"id": "claude-2", "config_dir": two.display().to_string()}],
-                "harnesses": {
-                    "claude-2": {"model_default": "opus"},
-                    "claude-b": {"label": "Claude B", "program": "claude", "hooks": "claude",
-                                 "resume_flag": "--resume",
-                                 "env": {"CLAUDE_CONFIG_DIR": b.display().to_string()}}
-                }
+                "harnesses": {"claude-2": {"model_default": "opus"}}
             }),
         );
         m.sign(".claude.json", Some("a@b.co"));
@@ -2088,21 +2085,6 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             let cfg = Config::load();
             assert!(!cfg.harnesses.contains_key("claude"), "nothing left of it");
             assert_eq!(label_of(&cfg, "claude"), "Claude (a@b.co)");
-
-            // A hand-written one.
-            assert_eq!(current_name(&cfg, "claude-b"), "Claude B");
-            rename("claude-b", "Side").unwrap();
-            let cfg = Config::load();
-            assert_eq!(cfg.harnesses["claude-b"].label.as_deref(), Some("Side"));
-            assert!(
-                matches!(
-                    cfg.harnesses["claude-b"].env,
-                    orion_core::harness::Clearable::Set(_)
-                ),
-                "the rest of it kept"
-            );
-            rename("claude-b", "").unwrap();
-            assert_eq!(current_name(&Config::load(), "claude-b"), "");
 
             assert!(rename("codex", "X").is_err(), "no Claude account");
         });

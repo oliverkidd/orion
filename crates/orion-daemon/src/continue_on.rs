@@ -1,8 +1,7 @@
 //! CONTINUE ON ANOTHER ACCOUNT — carrying a Claude session onto another
-//! Claude account: the default one, a `claude_accounts` entry — Claude's
-//! own row with `CLAUDE_CONFIG_DIR` pointing at its config dir, its
-//! sessions Claude's with the account's id beside — or any Claude-dialect
-//! harness whose `env` pins one. Claude Code keeps a session's whole conversation in its
+//! Claude account: the default one, or a `claude_accounts` entry —
+//! Claude's own row with `CLAUDE_CONFIG_DIR` pointing at its config dir,
+//! its sessions Claude's with the account's id beside. Claude Code keeps a session's whole conversation in its
 //! config dir, at `projects/<cwd slug>/<session id>.jsonl`, with a
 //! `<session id>/` folder beside it for what hangs off it (subagent
 //! transcripts, the title `/rename` set). A resume reads it from its own
@@ -174,8 +173,7 @@ fn not_a_target(target: &HarnessDescriptor) -> String {
         return format!("{label} has no resume flag — it couldn't pick the conversation up");
     }
     format!(
-        "{label} keeps its sessions where orion can't see — add its config dir as a Claude \
-         account (Settings → Accounts), or set CLAUDE_CONFIG_DIR in its `env`"
+        "{label} is no Claude account — add one in Settings → Accounts to carry a session there"
     )
 }
 
@@ -291,7 +289,7 @@ impl Daemon {
     /// Where to look for `session_id`'s transcript before moving it: the
     /// file the session's hooks last named, while the daemon remembers it,
     /// then wherever its harness keeps them — the resume safeguards' roots,
-    /// else (a wrapper orion can't see into) this process's default.
+    /// else this process's default.
     fn continue_roots(
         &self,
         agent: &orion_core::Agent,
@@ -431,23 +429,25 @@ mod tests {
     }
 
     #[test]
-    fn only_a_claude_harness_that_resumes_where_orion_can_see_is_a_target() {
-        let mut wrapper = orion_core::harness::builtin("claude").unwrap();
-        wrapper.id = "claude-b".into();
-        wrapper.label = "Claude B".into();
-        wrapper.program = "/home/me/bin/claude-b".into();
-        assert!(!wrapper.takes_claude_sessions());
-        assert!(
-            not_a_target(&wrapper).contains("CLAUDE_CONFIG_DIR"),
-            "{}",
-            not_a_target(&wrapper)
-        );
-        wrapper
+    fn only_a_claude_account_that_resumes_is_a_target() {
+        let claude = orion_core::harness::builtin("claude").unwrap();
+        let mut account = orion_core::claude_account::ClaudeAccount {
+            id: "claude-b".into(),
+            config_dir: "~/.claude-b".into(),
+            name: "Claude B".into(),
+            enabled: true,
+        }
+        .descriptor(&claude);
+        assert!(account.takes_claude_sessions());
+        account.resume.flag = None;
+        assert!(not_a_target(&account).contains("no resume flag"));
+        // A CLI the `harnesses` map adds is none, whatever its env pins.
+        let mut pinned = orion_core::harness::placeholder("claude-w");
+        pinned
             .env
-            .insert("CLAUDE_CONFIG_DIR".into(), "~/.claude-b".into());
-        assert!(wrapper.takes_claude_sessions());
-        wrapper.resume.flag = None;
-        assert!(not_a_target(&wrapper).contains("no resume flag"));
+            .insert("CLAUDE_CONFIG_DIR".into(), "~/.claude-w".into());
+        assert!(!pinned.takes_claude_sessions());
+        assert!(not_a_target(&pinned).contains("hook dialect"));
         let codex = orion_core::harness::builtin("codex").unwrap();
         assert!(not_a_target(&codex).contains("hook dialect"));
     }

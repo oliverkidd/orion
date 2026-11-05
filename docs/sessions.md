@@ -18,12 +18,12 @@ switched off on the settings overlay's Accounts tab and drops out of the menu en
 listed by the account it is signed in as, `Claude (you@example.com)`, and every other CLAUDE
 ACCOUNT you have added has a row of its own right after it ([below](#usage-limits-and-a-second-account)). The menu
 lists only enabled harnesses whose CLI is found on PATH (the daemon still
-checks through the login shell at launch). Your own CLIs join the menu too: add them to config.json
-`harnesses` (see [Configuration](configuration.md)) and they appear after the built-ins under their
-own labels, each toggled in its own section on the Accounts tab, with the session card wearing the
-entry's label as its badge. An entry with only a `program` launches with it and a `--model` flag,
-boots fresh every time (no resume mapping), and — unless it names a built-in hook dialect — stays
-process-based: working while the PTY is live, done when it ends, never needing you. `→` on any row drills
+checks through the login shell at launch). Your own CLIs join the menu too: add one to config.json
+`harnesses` by the name of its program (see [Configuration](configuration.md#the-harness-registry))
+and it appears after the built-ins under its own label, toggled in its own section on the Accounts
+tab, with the session card wearing the entry's label as its badge. It launches with a `--model`
+flag, boots fresh every time (no resume), and stays process-based: working while the PTY is live,
+done when it ends, never needing you. `→` on any row drills
 into model and reasoning-effort submenus (Cursor's model is a family such as `claude-opus-5-thinking`, and
 its effort list follows the family, `-fast` variants included — `cursor-agent --list-models` bakes both
 into the id, so orion launches `--model claude-opus-5-thinking-high-fast`; the list is a built-in seed
@@ -45,8 +45,7 @@ is spawned with no permission flag at all and keeps its normal prompts — it st
 things it is configured to ask about. Codex is spawned with `--yolo` and Cursor with `--force`, so
 **neither of those two ever stops to ask**: they edit files and run commands on their own judgment for
 the life of the SESSION, and nothing in the picker or the settings overlay softens that. OpenCode keeps its own permission prompts: orion passes no `--auto`, so it
-stops and asks like Claude does, and a `permissions_flag` of `--auto` in its `harnesses` entry is how you
-opt out of that. Grok Build keeps its own prompts too — orion passes no `--always-approve` — but
+stops and asks like Claude does. Grok Build keeps its own prompts too — orion passes no `--always-approve` — but
 unlike those two it has no hook that says it is asking (below). Pick the
 harness with that in mind, especially in the ROOT WORKTREE.
 

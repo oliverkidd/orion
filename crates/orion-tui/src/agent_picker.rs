@@ -320,9 +320,9 @@ mod tests {
     #[test]
     fn picker_lists_usable_custom_entries_after_the_builtins() {
         let json = r#"{"harnesses": {
-            "agy": {"label": "Agy", "program": "agy"},
-            "off": {"label": "Off", "program": "off", "enabled": false},
-            "broken": {"label": "Broken", "program": ""}
+            "agy": {"label": "Agy"},
+            "off": {"label": "Off", "enabled": false},
+            "broken": {"label": "Broken", "env": {"MY-VAR": "x"}}
         }}"#;
         pinned(json, || {
             let worktree = WorktreeId("w1".into());

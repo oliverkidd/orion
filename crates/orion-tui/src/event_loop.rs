@@ -8666,9 +8666,8 @@ fn confirm_sign_out(app: &mut App, index: usize) {
 
 /// `⌫` on a CLAUDE ACCOUNTS row: take an added account out of
 /// config.json, behind a confirm asking whether its config dir goes to
-/// the Trash too — kept unless `t` says so. The default account and a
-/// hand-written `harnesses` entry are not orion's to remove: the notice
-/// says what to do instead.
+/// the Trash too — kept unless `t` says so. The default account is not
+/// orion's to remove: the notice says to switch it off instead.
 fn confirm_remove_account(app: &mut App, index: usize) {
     let cfg = crate::config::Config::load();
     let id = match cfg.account_row(index) {
@@ -8676,13 +8675,8 @@ fn confirm_remove_account(app: &mut App, index: usize) {
         _ => return,
     };
     if !cfg.is_extra_account(&id) {
-        let why = if AgentKind::parse(&id) == Some(AgentKind::Claude) {
-            "the default account stays — ←/→ switches it off".to_string()
-        } else {
-            format!("{id} is a harnesses entry in config.json — edit the file to remove it")
-        };
         if let Some(view) = settings_mut(app) {
-            view.warn(why);
+            view.warn("the default account stays — ←/→ switches it off".to_string());
         }
         return;
     }

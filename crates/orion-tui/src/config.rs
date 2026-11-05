@@ -426,8 +426,7 @@ pub enum HarnessField {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountRow {
     /// A Claude account, by registry id: built-in Claude (the default
-    /// account), a `claude_accounts` entry, or a hand-written harness
-    /// whose `env` pins a config dir.
+    /// account) or a `claude_accounts` entry.
     Account(String),
     /// **Add account**: a new config dir and its entry.
     Add,
@@ -1524,8 +1523,7 @@ impl Config {
     /// (`claude_enabled`, `codex_enabled`, …) wherever the map stays
     /// silent on them. Every row's model, effort and label are its own
     /// `harnesses.<id>` entry's: one store per harness, a Claude account
-    /// included. What `orion config harnesses` prints: labels as written,
-    /// no email.
+    /// included. Labels as written, no email.
     pub fn raw_harness_registry(&self) -> Vec<HarnessDescriptor> {
         let mut all = orion_core::harness::registry(&self.harnesses, &self.claude_accounts);
         for entry in &mut all {
@@ -4122,15 +4120,15 @@ mod tests {
         assert_eq!(saved["harnesses"]["grok"]["effort_default"], "high");
     }
 
-    /// A second Claude account's `env` survives the Accounts tab saving its
-    /// section — the map is written back typed — and makes it a place a
-    /// Claude session can be carried to; a Codex row has nowhere to go.
+    /// A second Claude account's own entry survives the Accounts tab
+    /// saving its section — the map is written back typed — and the
+    /// account is a place a Claude session can be carried to, and back; a
+    /// Codex row has nowhere to go.
     #[test]
-    fn a_second_accounts_env_survives_a_save_and_makes_it_a_target() {
+    fn a_second_accounts_entry_survives_a_save_and_makes_it_a_target() {
         let mut cfg: Config = serde_json::from_str(
-            r#"{"harnesses": {"claude-b": {"label": "Claude B", "program": "claude",
-                "hooks": "claude", "resume_flag": "--resume",
-                "env": {"CLAUDE_CONFIG_DIR": "~/.claude-b"}}}}"#,
+            r#"{"claude_accounts": [{"id": "claude-b", "config_dir": "~/.claude-b"}],
+                "harnesses": {"claude-b": {"label": "Claude B"}}}"#,
         )
         .unwrap();
         cfg.set_harness_model("claude-b", "opus".into());
@@ -4140,8 +4138,8 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            saved["harnesses"]["claude-b"]["env"]["CLAUDE_CONFIG_DIR"],
-            "~/.claude-b"
+            saved["harnesses"]["claude-b"],
+            serde_json::json!({"label": "Claude B", "model_default": "opus"})
         );
         let loaded = load_from(&path);
         let agent = |kind: AgentKind, custom: Option<&str>| orion_core::Agent {
@@ -4168,7 +4166,7 @@ mod tests {
             vec![("claude-b".to_string(), "Claude B".to_string())]
         );
         assert_eq!(
-            loaded.continue_targets(&agent(AgentKind::Custom, Some("claude-b"))),
+            loaded.continue_targets(&agent(AgentKind::Claude, Some("claude-b"))),
             vec![("claude".to_string(), "Claude".to_string())]
         );
         assert!(loaded
@@ -4199,9 +4197,9 @@ mod tests {
         // (with their reason) so they can be fixed.
         let cfg: Config = serde_json::from_str(
             r#"{"harnesses": {
-                "agy": {"program": "agy"},
-                "off": {"program": "off", "enabled": false},
-                "broken": {"program": ""}
+                "agy": {},
+                "off": {"enabled": false},
+                "broken": {"env": {"MY-VAR": "x"}}
             }}"#,
         )
         .unwrap();
@@ -4223,8 +4221,8 @@ mod tests {
         std::fs::write(dir.path().join("agy"), "").unwrap();
         let hiding = serde_json::from_str::<Config>(
             r#"{"harnesses": {
-                "agy": {"program": "agy"},
-                "missing": {"program": "definitely-not-on-path"}
+                "agy": {},
+                "definitely-not-on-path": {}
             }}"#,
         )
         .unwrap();
@@ -4241,8 +4239,8 @@ mod tests {
     fn a_broken_harness_entry_isolates_itself() {
         let cfg: Config = serde_json::from_str(
             r#"{"harnesses": {
-                "codex": {"program": ""},
-                "agy": {"program": "agy", "resume_flag": "--resume"}
+                "codex": {"env": {"1ABC": "x"}},
+                "agy": {}
             }}"#,
         )
         .unwrap();
@@ -4264,10 +4262,10 @@ mod tests {
         // launches refuse it with the reason.
         let codex = cfg.effective_harness_by_id("codex");
         assert!(codex.problem().is_some());
-        assert_eq!(
+        assert!(
             orion_core::harness::resolve(&cfg.harness_registry(), AgentKind::Codex, None)
-                .unwrap_err(),
-            "harness `codex` has no program"
+                .unwrap_err()
+                .contains("env `1ABC`")
         );
     }
 
@@ -4866,14 +4864,7 @@ mod tests {
             std::fs::write(
                 &path,
                 r#"{"harnesses": {
-                    "agy": {
-                        "program": "agy",
-                        "model_default": "big-1",
-                        "effort_flag": "--effort",
-                        "efforts": ["low", "high"],
-                        "resume_flag": "--resume",
-                        "hooks": "claude"
-                    }
+                    "agy": {"model_default": "big-1", "models": [{"id": "big-1"}, {"id": "big-2"}]}
                 }}"#,
             )
             .unwrap();
@@ -4902,9 +4893,10 @@ mod tests {
                 let (_, model_row) =
                     locate_agent("agy", HarnessField::Model).expect("the newcomer locates");
                 assert_eq!(cfg.agent_value("agy", HarnessField::Model), "big-1");
-                let (_, effort_row) =
-                    locate_agent("agy", HarnessField::Effort).expect("its effort row shows");
-                assert_eq!(cfg.agent_value("agy", HarnessField::Effort), "default");
+                assert!(
+                    locate_agent("agy", HarnessField::Effort).is_none(),
+                    "a CLI added by its name takes no effort"
+                );
                 assert_eq!(
                     tab_len(tab, 1),
                     ACCOUNTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
@@ -4915,18 +4907,16 @@ mod tests {
                     offered.last(),
                     Some(&(AgentKind::Custom, Some("agy".to_string())))
                 );
-                // Cycling its rows edits the map entry a save persists:
-                // an off-list hand edit steps onto the list, effort
-                // steps forward through its rows.
+                // Cycling its model row walks its own list in the map
+                // entry a save persists.
                 let mut cfg = cfg;
+                cfg.cycle(tab, model_row, 0);
+                assert_eq!(cfg.harnesses["agy"].model_default.as_deref(), Some("big-2"));
                 cfg.cycle(tab, model_row, 0);
                 assert_eq!(
                     cfg.harnesses["agy"].model_default.as_deref(),
-                    Some("default"),
-                    "an off-list hand edit steps onto the offered rows"
+                    Some("default")
                 );
-                cfg.cycle(tab, effort_row, 1);
-                assert_eq!(cfg.harnesses["agy"].effort_default.as_deref(), Some("low"));
             });
         });
     }

@@ -327,8 +327,7 @@ Examples:
 
 const CONFIG_EXAMPLES: &str = "\
 Examples:
-  orion config path               where each settings file lives
-  orion config harnesses          the harness registry launches read";
+  orion config path               where each settings file lives";
 
 const DOCTOR_EXAMPLES: &str = "\
 Examples:
@@ -364,11 +363,4 @@ pub(crate) enum ConfigCommand {
     /// checkout, say; `ORION_DATA_DIR` moves them all.
     #[command(after_help = "Example:\n  orion config path")]
     Path,
-    /// Print the effective harness registry: every harness orion knows —
-    /// the built-ins, Claude accounts and `harnesses` map ids —
-    /// with the program, flags, resume shape, hook dialect and defaults a
-    /// launch actually uses. Copy a row into config.json `harnesses` to
-    /// override it.
-    #[command(after_help = "Example:\n  orion config harnesses")]
-    Harnesses,
 }
