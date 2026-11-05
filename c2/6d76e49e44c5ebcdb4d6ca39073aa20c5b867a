@@ -1,0 +1,67 @@
+crates/orion-daemon/src/metrics.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 6,10,30,50,57,122-123,132-135,140,148
+crates/orion-tui/src/ui/footer.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 781-783,789
+docs/keys.md
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 682
+crates/orion-core/src/protocol.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 99-106,138,144,412-424,448-450,452
+crates/orion-daemon/src/lib.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 20,183,255-271
+  s_61e50232cdb2f2::t_98f62daf7a75f4 272-275
+crates/orion-daemon/src/server.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 303,312-324
+crates/orion-tui/src/event_loop.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 9076,9389,9462,10435,17700,17731-17732,18355-18356,18378,18380,18387-18394,18510,19366,19384,32793,33368-33375,33586,34588-34595,34657-34662,34664
+crates/orion-daemon/src/git.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 70-72,77-79,193-326,598-599,612-623
+  s_61e50232cdb2f2::t_7be7045315e2a0 624
+crates/orion-daemon/src/prompt_history.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 87-88
+ARCHITECTURE.md
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 32,71,79,85
+  s_61e50232cdb2f2::t_746a100fc6b803 86
+docs/how-it-works.md
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 170-189,397-398,405-406
+crates/orion-core/src/env.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 30-32
+crates/orion-tui/src/config.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 1064
+crates/orion/tests/e2e_pty.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 391,1102,2252-2284,2286,2289-2292,2298,2301-2302,2308-2309,2312-2324,2326,2329-2341,2346-2373,2379-2381,2384-2387,2392-2394,2396,2403,2411-2412,2414-2415,2418-2420
+docs/configuration.md
+  s_61e50232cdb2f2::t_0f3f72d27bf5ce 90
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 17,23,27,29-30,92,229-268
+crates/orion-daemon/src/config.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 9,20,45-51,91-92,132-172,237,242-245,291-293,295-346
+crates/orion-tui/src/event_loop/quick_launch.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 101-110,126
+docs/sessions.md
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 348-351
+docs/client-daemon-interaction.html
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 215
+crates/orion-core/src/entities.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 156-168
+crates/orion-tui/src/branch_list.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 70-71,90-92,355-362,376
+crates/orion-daemon/src/spare.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 1-1863
+crates/orion-daemon/src/registry.rs
+  s_61e50232cdb2f2::t_b34cbaa5dde38b 14-15,128,130,187-189,218,238-242,248,260,262-264,269-270,353-357,361,363-369,397-399,424-431,448-450,470,535,705,759-760,765-770,801,1002,1030,1040,1192-1208,1210-1213,1220,1246-1256,1283-1284,1331-1333,1353,1359,1361,1958,3155,3242-3244,3246-3253,3662-3677,3715,3957,4859,5957,6088,6095,6146-6152,6913,6929,7189
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c26d76e49e44c5ebcdb4d6ca39073aa20c5b867a",
+  "prompts": {},
+  "sessions": {
+    "s_61e50232cdb2f2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df12aa21-1ffc-4111-873e-7e452dc4702c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
