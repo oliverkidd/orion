@@ -1475,13 +1475,8 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
         keys::BROWSER.hint()
     };
     if view.focus == PrFocus::Page {
-        let act_does = if tab == PrTab::Reviews {
-            "review"
-        } else {
-            tab.act_does()
-        };
         return vec![
-            keys::ACT.hint_as(act_does).kept(),
+            keys::ACT.hint_as(tab.act_does()).kept(),
             keys::PAGE_TABS.hint(),
             keys::PAGE_ROWS.hint_as(if tab.lists() { "pick" } else { "scroll" }),
             keys::BACK.hint(),

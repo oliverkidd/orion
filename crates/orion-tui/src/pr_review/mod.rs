@@ -556,6 +556,16 @@ pub(crate) fn open_from_modal(app: &mut App) {
     open(app, view);
 }
 
+/// Enter on the pane's PULL REQUEST PAGE, on its Reviews tab: the pull
+/// request it reads, reviewed over the panels.
+pub(crate) fn open_from_pane(app: &mut App, pr: &crate::app::PreviewedPr) {
+    let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
+        return;
+    };
+    let view = ReviewScreen::new(pr.url.clone(), pr.number, pr.label.clone(), dir, false);
+    open(app, view);
+}
+
 /// Put `view` up, its threads and its diff asked for. The pull request's
 /// page must be in — its head commit and base are what the diff is read
 /// between — and the threads it read open the screen while GitHub is

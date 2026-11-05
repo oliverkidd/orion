@@ -16,7 +16,8 @@
 //! * **Checks** — failed first, each with its status and how long it
 //!   ran; acting on one opens its page in the browser.
 //! * **Reviews** — GitHub's review decision, each reviewer's latest word,
-//!   then the reviews themselves.
+//!   then the reviews themselves, and the review threads grouped by file;
+//!   acting on it opens the PR REVIEW (`pr_review`).
 //!
 //! Everything is one `gh pr view` (`pull_request::detail`), fetched off
 //! the loop on the pane's debounce and kept with the rest (`pr_cache`), so
@@ -268,14 +269,16 @@ impl PrTab {
     }
 
     /// What acting on the row under the cursor does here, for the key
-    /// hints: the DIFF VIEWER on a file or a commit, a check's page —
-    /// and, on the tabs with no rows, the pull request in the browser.
+    /// hints: the DIFF VIEWER on a file or a commit, a check's page — on
+    /// Reviews the PR REVIEW, and on the Description the pull request in
+    /// the browser.
     pub fn act_does(self) -> &'static str {
         match self {
             PrTab::Changes => "diff the file",
             PrTab::Commits => "diff the commit",
             PrTab::Checks => "open the check",
-            PrTab::Description | PrTab::Reviews => "open in browser",
+            PrTab::Reviews => "review",
+            PrTab::Description => "open in browser",
         }
     }
 }
@@ -1512,6 +1515,110 @@ fn reviews(p: &mut Prose, detail: &PrDetail, now: i64) {
             comment_lines(p, c, i + 1, now);
         }
     }
+    review_threads(p, detail, now);
+}
+
+/// Where a review thread's comments sit among the page's FOLDS: past every
+/// conversation comment's.
+const THREAD_BODIES: usize = 100_000;
+
+/// The Reviews tab's threads, grouped by file — the ones the PR REVIEW
+/// sets under their lines, read here as a list: each thread's place and
+/// how it stands, then who said what. A resolved thread is its first words.
+fn review_threads(p: &mut Prose, detail: &PrDetail, now: i64) {
+    if detail.threads.is_empty() {
+        return;
+    }
+    let (th, width) = (p.th, p.width);
+    let dim = Style::default().fg(th.dim);
+    let open = detail.threads.iter().filter(|t| !t.resolved).count();
+    let mut tally = format!("{open} open");
+    if open < detail.threads.len() {
+        tally.push_str(&format!(" · {} resolved", detail.threads.len() - open));
+    }
+    p.lines.push(Line::from(""));
+    p.lines.push(crate::ui::section_rule(
+        "Threads",
+        th.muted,
+        vec![Span::styled(tally, dim)],
+        width,
+        th,
+    ));
+    let mut threads: Vec<&crate::pr_review::github::ReviewThread> = detail.threads.iter().collect();
+    threads.sort_by(|a, b| (&a.path, a.shown_line()).cmp(&(&b.path, b.shown_line())));
+    let mut file: Option<&str> = None;
+    let mut body = THREAD_BODIES;
+    for t in threads {
+        if file != Some(t.path.as_str()) {
+            file = Some(&t.path);
+            p.lines.push(Line::from(""));
+            p.lines.push(Line::from(vec![
+                Span::raw(BODY),
+                Span::styled(
+                    crate::ui::truncate_left(&t.path, width.saturating_sub(BODY.len())),
+                    Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+        let mut head = vec![
+            Span::raw(BODY),
+            Span::styled(t.place(), Style::default().fg(th.muted)),
+        ];
+        if t.outdated {
+            head.push(Span::styled(" · outdated", Style::default().fg(th.warn)));
+        }
+        if t.resolved {
+            head.push(Span::styled(" · ✓ resolved", Style::default().fg(th.ok)));
+        }
+        match t.pending_count() {
+            0 => {}
+            n => head.push(Span::styled(
+                format!(" · {n} pending"),
+                Style::default().fg(th.accent),
+            )),
+        }
+        p.lines.push(fit(head, width));
+        if t.resolved {
+            if let Some(first) = t.comments.first() {
+                let said = first.body.lines().next().unwrap_or_default();
+                p.lines.push(fit(
+                    vec![
+                        Span::raw(format!("{BODY}  ")),
+                        Span::styled(format!("{}: {said}", first.author), dim),
+                    ],
+                    width,
+                ));
+            }
+            continue;
+        }
+        for c in &t.comments {
+            let left = vec![
+                Span::raw(format!("{BODY}  ")),
+                Span::styled(
+                    c.author.clone(),
+                    Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+                ),
+            ];
+            let right = if c.pending {
+                Span::styled("pending", Style::default().fg(th.accent))
+            } else {
+                Span::styled(ago(&c.at, now), dim)
+            };
+            p.lines.push(Line::from(columns(left, vec![right], width)));
+            if !c.body.trim().is_empty() {
+                body += 1;
+                p.github(c.body.trim_end(), body);
+            }
+        }
+    }
+}
+
+/// `2h`: how long before `now` (Unix seconds) `at` (RFC 3339) was —
+/// nothing for a stamp that doesn't read.
+pub(crate) fn ago(at: &str, now: i64) -> String {
+    crate::pull_request::rfc3339_secs(at)
+        .map(|at| crate::hosts::ago_short(now - at))
+        .unwrap_or_default()
 }
 
 /// One comment: who said it, bold, and their verdict when it came as a
@@ -1538,12 +1645,9 @@ fn comment_lines(p: &mut Prose, c: &PrComment, body: usize, now: i64) {
             Style::default().fg(color),
         ));
     }
-    let age = crate::pull_request::rfc3339_secs(&c.at)
-        .map(|at| crate::hosts::ago_short(now - at))
-        .unwrap_or_default();
     p.lines.push(Line::from(columns(
         left,
-        vec![Span::styled(age, Style::default().fg(th.dim))],
+        vec![Span::styled(ago(&c.at, now), Style::default().fg(th.dim))],
         width,
     )));
     if !c.body.trim().is_empty() {
@@ -1751,6 +1855,11 @@ pub(crate) fn pane_key(
         } else {
             "Previous tab"
         });
+    }
+    // Enter on Reviews: the PR REVIEW, over the panels.
+    if activate && app.pr_tabs.tab == PrTab::Reviews {
+        crate::pr_review::open_from_pane(app, &pr);
+        return Some("Review");
     }
     if !app.pr_tabs.tab.lists() {
         return None;
@@ -2201,6 +2310,69 @@ mod tests {
         assert!(reviews.contains("  ✗ kate  changes requested"), "{reviews}");
         assert!(reviews.contains(" ── Reviews ─"), "{reviews}");
         assert!(reviews.contains("one nit"), "{reviews}");
+    }
+
+    /// Reviews lists the review threads after the reviews, file by file in
+    /// path order: each thread's place and how it stands, then who said
+    /// what — a resolved one only its first words.
+    #[test]
+    fn the_reviews_tab_lists_the_threads_by_file() {
+        use crate::pr_review::github::{ReviewThread, Side, ThreadComment};
+        let said = |id: &str, who: &str, body: &str, mine: bool, pending: bool| ThreadComment {
+            id: id.into(),
+            author: who.into(),
+            body: body.into(),
+            at: "2026-11-05T10:00:00Z".into(),
+            mine,
+            pending,
+        };
+        let thread = |id: &str, path: &str, line: u32, comments| ReviewThread {
+            id: id.into(),
+            path: path.into(),
+            line: Some(line),
+            start_line: None,
+            original_line: Some(line),
+            side: Side::Right,
+            resolved: false,
+            outdated: false,
+            comments,
+        };
+        let mut d = full();
+        let mut done = thread(
+            "T_b",
+            "src/b.rs",
+            3,
+            vec![said("C_3", "bo", "why beta?\nmore", false, false)],
+        );
+        done.resolved = true;
+        d.threads = vec![
+            done,
+            thread(
+                "T_a",
+                "src/a.rs",
+                12,
+                vec![
+                    said("C_1", "ada", "rename this", false, false),
+                    said("C_2", "me", "will do", true, true),
+                ],
+            ),
+        ];
+        let th = Theme::default();
+        let reviews = text(&page(&input(Some(&d)), &on(PrTab::Reviews), true, 100, th).body);
+        assert!(reviews.contains(" ── Threads ─"), "{reviews}");
+        assert!(reviews.contains("1 open · 1 resolved"), "{reviews}");
+        let at = |needle: &str| {
+            reviews
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {reviews}"))
+        };
+        assert!(at("src/a.rs") < at("src/b.rs"), "path order");
+        assert!(reviews.contains("line 12 · 1 pending"), "{reviews}");
+        assert!(at("rename this") < at("will do"), "{reviews}");
+        assert!(reviews.contains("line 3 · ✓ resolved"), "{reviews}");
+        assert!(reviews.contains("bo: why beta?"), "{reviews}");
+        assert!(!reviews.contains("more"), "a resolved one, its first words");
+        assert_eq!(PrTab::Reviews.act_does(), "review");
     }
 
     /// Checks group by the workflow they ran in, the group with the worst

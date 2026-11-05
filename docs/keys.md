@@ -156,7 +156,7 @@ footer says so, leading with the way back.
 | `↑` / `↓` | a line of the page, or of the session's scrollback (a program that took the mouse, like Claude Code, gets the wheel's notches); on a pull request's Changes, Commits or Checks tab, the row cursor |
 | `PgUp` / `PgDn`, `Home` / `End` | a page; the top and the end — on a tab that lists things, its rows a page at a time and the first and last |
 | `Tab` / `⇧Tab` | a pull request's next and previous tab ([below](#the-pull-request-page)) |
-| `Enter` | into what it shows: a session takes the input lock; on a pull request, what its tab's row is — the DIFF VIEWER at the file, the commit's diff, the check's page — and the pull request in the browser on Description and Reviews |
+| `Enter` | into what it shows: a session takes the input lock; on a pull request, what its tab's row is — the DIFF VIEWER at the file, the commit's diff, the check's page — the [PR review](#the-pr-review) on Reviews, and the pull request in the browser on Description |
 | `Esc`, `←` (the pane beside the cards), a click on a card | back to the grid |
 | mouse wheel | scrolls whatever is under the pointer — the pane or the grid — wherever the keys are |
 
@@ -183,7 +183,7 @@ at the top.
 | **Changes** `11` | every file: its status (`M`, `A`, `D`, `R`) and its `+`/`−`. GitHub hands back the first hundred; past that the tab says so and `⌘E` reads every file | the DIFF VIEWER on the pull request, at that file |
 | **Commits** `4` | newest first: short sha, subject, author and age, and how big it is — `+12 −3 · 4 files` | the DIFF VIEWER on that commit's own diff |
 | **Checks** | failed first, then running, passed and skipped: `✗` / `●` / `✓` / `–`, the name, its workflow and how long it ran. The tab reads `✗ Checks 44/45` with one failed (44 of 45 fine), `● Checks 3/5` while some still run, `✓ Checks` when every one passed | the check's page — its log — in the browser |
-| **Reviews** | GitHub's review decision (`✓ Approved`, `✗ Changes requested`, `● Review required`), each reviewer's latest word, who has been asked and not answered, then the reviews themselves. The tab wears the decision's mark | in the modal, the [PR review](#the-pr-review); in the pane, the pull request in the browser |
+| **Reviews** | GitHub's review decision (`✓ Approved`, `✗ Changes requested`, `● Review required`), each reviewer's latest word, who has been asked and not answered, then the reviews themselves, then the review **Threads** file by file — each one's line and how it stands (`outdated`, `✓ resolved`, `2 pending`), who said what, a resolved one only its first words. The tab wears the decision's mark | the [PR review](#the-pr-review) |
 
 In the pane the tabs are `Tab` / `⇧Tab` and a click on a label. In the modal `Tab` / `⇧Tab` hand
 the keys between the list and the page, as the DIFF VIEWER's panels do: with the page holding them
@@ -445,8 +445,8 @@ branch, a fork's) is fetched by its pull ref first.
 
 ### The PR review
 
-`⌘⇧R` in the PULL REQUESTS MODAL — or `Enter` on its Reviews tab — reviews the pull request under
-the cursor in orion, a level inside the modal. On the left, the files it changes, each with how
+`⌘⇧R` in the PULL REQUESTS MODAL — or `Enter` on a pull request page's Reviews tab, in the modal or
+the pane — reviews the pull request in orion; opened from the modal it is a level inside it. On the left, the files it changes, each with how
 many review threads are on it (`✓2` when all of them are resolved, a `●` while one holds a pending
 comment of yours); on the right, the selected file's diff, read from the repo as the diff viewer
 reads a pull request, with every thread a block under the line it is on: the other reviewers'
@@ -490,7 +490,7 @@ tab, its page read again; refused, the bar says why and everything stays pending
 | `⌘⇧R`; `Enter` on the bar | anywhere | submit the review |
 | `⌘R` | anywhere | ask GitHub for the threads again |
 | the wheel, a click | | the wheel scrolls the diff; a click picks a file, puts the cursor on the line or thread under it, or picks a verdict |
-| `Esc` | | from the bar, back to the diff; else back to the pull request |
+| `Esc` | | from the bar, back to the diff; else back to the pull request (or, opened from the pane, the grid) |
 
 ## The quick prompt
 

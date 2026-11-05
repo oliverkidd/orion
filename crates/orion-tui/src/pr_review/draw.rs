@@ -438,13 +438,6 @@ fn composer_lines(
     (out, at)
 }
 
-/// `2h`: how long ago `at` (RFC 3339) was.
-fn ago(at: &str, now: i64) -> String {
-    crate::pull_request::rfc3339_secs(at)
-        .map(|at| crate::hosts::ago_short(now - at))
-        .unwrap_or_default()
-}
-
 /// The rule a comment hangs on: the accent for yours, grey for theirs.
 fn rule(c: &ThreadComment, indent: usize, th: Theme) -> Vec<Span<'static>> {
     let color = if c.mine { th.accent } else { th.dim };
@@ -499,7 +492,10 @@ fn thread_lines(
         if c.pending {
             head.push(Span::styled(" · pending", Style::default().fg(th.accent)));
         } else {
-            head.push(Span::styled(format!(" · {}", ago(&c.at, now)), dim));
+            head.push(Span::styled(
+                format!(" · {}", crate::pr_preview::ago(&c.at, now)),
+                dim,
+            ));
         }
         if n == 0 {
             for (tag, style) in &tags {
