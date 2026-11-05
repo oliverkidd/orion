@@ -921,17 +921,28 @@ fn right_in(text: &str, w: usize, style: Style) -> Span<'static> {
 /// (a commit status, an app's run) groups under `Other`, or under `Checks`
 /// when nothing ran in a workflow at all.
 pub(crate) fn checks_in_order(d: &PrDetail) -> Vec<(String, Vec<&PrCheck>)> {
+    let mut groups = by_workflow(&d.checks);
+    for (_, rows) in &mut groups {
+        rows.sort_by_key(|c| c.state);
+    }
+    groups.sort_by_key(|(_, rows)| rows.first().map(|c| c.state));
+    groups
+}
+
+/// `checks` grouped by the workflow they ran in, a group per workflow in
+/// the order they come: the Checks tab's groups ([`checks_in_order`]) and
+/// AUTOFIX's **Failing checks** list. A check from no workflow groups
+/// under `Other`, or under `Checks` when none ran in a workflow at all.
+pub(crate) fn by_workflow<'a>(
+    checks: impl IntoIterator<Item = &'a PrCheck>,
+) -> Vec<(String, Vec<&'a PrCheck>)> {
     let mut groups: Vec<(String, Vec<&PrCheck>)> = Vec::new();
-    for check in &d.checks {
+    for check in checks {
         match groups.iter_mut().find(|(wf, _)| *wf == check.workflow) {
             Some((_, rows)) => rows.push(check),
             None => groups.push((check.workflow.clone(), vec![check])),
         }
     }
-    for (_, rows) in &mut groups {
-        rows.sort_by_key(|c| c.state);
-    }
-    groups.sort_by_key(|(_, rows)| rows.first().map(|c| c.state));
     let only = groups.len() == 1;
     for (wf, _) in &mut groups {
         if wf.is_empty() {

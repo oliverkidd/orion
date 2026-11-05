@@ -43,8 +43,10 @@
 //!   says why ([`note_stand_downs`]). A live session whose conversation
 //!   can't be read holds it back instead, as every busy one used to.
 //!
-//! Unit vs e2e is read off each check's name ([`classify`]) — GitHub has
-//! no such distinction.
+//! What failed is one **Failing checks** list, grouped by the workflow
+//! each check ran in, as GitHub groups them: which of them is a unit test,
+//! an e2e spec or a lint is the agent's to read off the logs, under the
+//! preset's rules for each.
 
 use crate::agent_presets::AgentPreset;
 use crate::app::{App, Overlay};
@@ -107,44 +109,20 @@ impl Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Issue {
     Conflicts,
-    Unit,
-    E2e,
-    Other,
+    Checks,
 }
 
 /// What is ticked, by [`Issue`] index.
 pub type Picks = [bool; Issue::ALL.len()];
 
 impl Issue {
-    pub const ALL: [Issue; 4] = [Issue::Conflicts, Issue::Unit, Issue::E2e, Issue::Other];
+    pub const ALL: [Issue; 2] = [Issue::Conflicts, Issue::Checks];
 
-    /// Its row on the form.
+    /// Its row on the form, and its heading in the prompt's list.
     pub fn label(self) -> &'static str {
         match self {
             Issue::Conflicts => "Merge conflicts",
-            Issue::Unit => "Unit tests",
-            Issue::E2e => "E2E tests",
-            Issue::Other => "Other checks",
-        }
-    }
-
-    /// What the prompt calls it, in its list and over its instructions.
-    fn heading(self) -> &'static str {
-        match self {
-            Issue::Conflicts => "Merge conflicts",
-            Issue::Unit => "Failing unit tests",
-            Issue::E2e => "Failing e2e tests",
-            Issue::Other => "Other failing checks",
-        }
-    }
-
-    /// One word for its failed checks in a summary (`2 unit failing`).
-    fn noun(self) -> &'static str {
-        match self {
-            Issue::Conflicts => "conflicts",
-            Issue::Unit => "unit",
-            Issue::E2e => "e2e",
-            Issue::Other => "other",
+            Issue::Checks => "Failing checks",
         }
     }
 
@@ -153,44 +131,12 @@ impl Issue {
     }
 }
 
-/// Words in a check's workflow or name that make it an e2e suite — read
-/// first, since "e2e tests" says "test" too.
-const E2E_WORDS: &[&str] = &[
-    "e2e",
-    "end-to-end",
-    "end to end",
-    "playwright",
-    "cypress",
-    "integration",
-    "smoke",
-    "acceptance",
-];
-/// And a unit suite.
-const UNIT_WORDS: &[&str] = &[
-    "test", "unit", "jest", "vitest", "spec", "pytest", "nextest",
-];
-
-/// Which kind of failure a check is, by its workflow and name: e2e, unit,
-/// or anything else (lint, typecheck, build). Never [`Issue::Conflicts`].
-pub fn classify(check: &PrCheck) -> Issue {
-    let words = format!("{} {}", check.workflow, check.name).to_ascii_lowercase();
-    if E2E_WORDS.iter().any(|w| words.contains(w)) {
-        Issue::E2e
-    } else if UNIT_WORDS.iter().any(|w| words.contains(w)) {
-        Issue::Unit
-    } else {
-        Issue::Other
-    }
-}
-
 /// What is wrong with a pull request, as its body says.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Diagnosis {
     pub conflicts: bool,
-    /// The failed checks of each kind.
-    pub unit: Vec<PrCheck>,
-    pub e2e: Vec<PrCheck>,
-    pub other: Vec<PrCheck>,
+    /// The failed checks, in the order GitHub listed them.
+    pub failing: Vec<PrCheck>,
     /// Some check has not finished.
     pub running: bool,
 }
@@ -205,11 +151,7 @@ pub fn diagnose(detail: &PrDetail, conflicts: bool) -> Diagnosis {
     };
     for check in &detail.checks {
         match check.state {
-            CheckState::Failed => match classify(check) {
-                Issue::E2e => out.e2e.push(check.clone()),
-                Issue::Unit => out.unit.push(check.clone()),
-                _ => out.other.push(check.clone()),
-            },
+            CheckState::Failed => out.failing.push(check.clone()),
             CheckState::Running => out.running = true,
             CheckState::Passed | CheckState::Skipped => {}
         }
@@ -218,45 +160,33 @@ pub fn diagnose(detail: &PrDetail, conflicts: bool) -> Diagnosis {
 }
 
 impl Diagnosis {
-    fn has_failed_checks(&self) -> bool {
-        !(self.unit.is_empty() && self.e2e.is_empty() && self.other.is_empty())
-    }
-
     /// Nothing to fix.
     pub fn is_empty(&self) -> bool {
-        !self.conflicts && !self.has_failed_checks()
+        !self.conflicts && self.failing.is_empty()
     }
 
     /// Only conflicts — nothing failed that running checks could add to.
     fn conflicts_only(&self) -> bool {
-        self.conflicts && !self.has_failed_checks()
+        self.conflicts && self.failing.is_empty()
     }
 
     /// Whether `issue` was seen.
     pub fn has(&self, issue: Issue) -> bool {
         match issue {
             Issue::Conflicts => self.conflicts,
-            _ => !self.failing(issue).is_empty(),
+            Issue::Checks => !self.failing.is_empty(),
         }
     }
 
-    /// The failed checks behind `issue` (none for conflicts).
-    pub fn failing(&self, issue: Issue) -> &[PrCheck] {
-        match issue {
-            Issue::Conflicts => &[],
-            Issue::Unit => &self.unit,
-            Issue::E2e => &self.e2e,
-            Issue::Other => &self.other,
-        }
+    /// The failed checks grouped by workflow, as the prompt and the form
+    /// list them (`pr_preview::by_workflow`).
+    pub fn failing_by_workflow(&self) -> Vec<(String, Vec<&PrCheck>)> {
+        crate::pr_preview::by_workflow(&self.failing)
     }
 
     /// This breakage, at `head_sha`.
     pub fn fingerprint(&self, head_sha: &str) -> Fingerprint {
-        let mut checks: Vec<String> = [&self.unit, &self.e2e, &self.other]
-            .into_iter()
-            .flatten()
-            .map(|c| c.name.clone())
-            .collect();
+        let mut checks: Vec<String> = self.failing.iter().map(|c| c.name.clone()).collect();
         checks.sort_unstable();
         Fingerprint {
             sha: head_sha.to_string(),
@@ -265,17 +195,14 @@ impl Diagnosis {
         }
     }
 
-    /// `merge conflicts · 2 unit failing · 1 other failing`.
+    /// `merge conflicts · 2 failing checks`.
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         if self.conflicts {
             parts.push("merge conflicts".to_string());
         }
-        for issue in [Issue::Unit, Issue::E2e, Issue::Other] {
-            let n = self.failing(issue).len();
-            if n > 0 {
-                parts.push(format!("{n} {} failing", issue.noun()));
-            }
+        if !self.failing.is_empty() {
+            parts.push(crate::flash::plural(self.failing.len(), "failing check"));
         }
         if parts.is_empty() {
             "nothing failing".into()
@@ -892,14 +819,15 @@ pub const PRESET_TEXT: (&str, &str) = (
 Rules:
 - Fix only what is listed under \"Fix\" below.
 - Merge conflicts: fetch the base branch from origin and merge it. Resolve each conflict by understanding both sides' intent; never drop one side's work silently. Regenerate lockfiles and generated files rather than hand-merging them, and commit the merge.
-- Failing unit tests: read the failure logs (`gh pr checks`, then `gh run view <run-id> --log-failed`), reproduce each failing test locally with this repo's test command, and fix it. Change a test only when this pull request meant to change the behaviour it checks.
-- Failing e2e tests: take the failing specs from the CI logs and re-run only those specs locally, never the full suite — unless earlier attempts failed the same way, then run the full suite once.
-- Any other failing check (lint, typecheck, build): reproduce it locally and fix it.",
+- Failing checks: read each one's failure logs (`gh pr checks`, then `gh run view <run-id> --log-failed`) to see what kind of check it is.
+  - Unit tests: reproduce each failing test locally with this repo's test command, and fix it. Change a test only when this pull request meant to change the behaviour it checks.
+  - E2E tests: take the failing specs from the CI logs and re-run only those specs locally, never the full suite — unless earlier attempts failed the same way, then run the full suite once.
+  - Any other check (lint, typecheck, build): reproduce it locally and fix it.",
     "Then commit with a message that says what you fixed and `git push`. Watch the pull request with `gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again. Finish with a short summary: what you changed, and anything you could not fix and why.",
 );
 
 /// The agent's first prompt: the pull request and the ticked issues —
-/// with the failed checks behind each — and the user's note, between the
+/// the failed checks by workflow — and the user's note, between the
 /// PR autofix preset's prefix and postfix — orion's own
 /// ([`PRESET_TEXT`]) while it holds none of the user's.
 pub fn prompt(
@@ -925,7 +853,8 @@ pub fn prompt(
 }
 
 /// What the agent is pointed at: the pull request, its branches, each
-/// ticked issue with the checks behind it, and the user's note.
+/// ticked issue — the failing checks under their workflows — and the
+/// user's note.
 fn context(
     pr: &OpenPr,
     refs: &PrRefs,
@@ -949,17 +878,19 @@ fn context(
         "Fix:".to_string(),
     ];
     for issue in ticked {
-        let heading = issue.heading();
-        let checks = diagnosis.failing(*issue);
+        let heading = issue.label();
         match issue {
             Issue::Conflicts => lines.push(format!("- {heading} with {base}")),
-            _ if checks.is_empty() => lines.push(format!(
+            Issue::Checks if diagnosis.failing.is_empty() => lines.push(format!(
                 "- {heading} (none named by GitHub — check `gh pr checks {}`)",
                 pr.number
             )),
-            _ => {
+            Issue::Checks => {
                 lines.push(format!("- {heading}:"));
-                lines.extend(checks.iter().map(|c| format!("  - {}", check_line(c))));
+                for (workflow, checks) in diagnosis.failing_by_workflow() {
+                    lines.push(format!("  - {workflow}:"));
+                    lines.extend(checks.iter().map(|c| format!("    - {}", check_line(c))));
+                }
             }
         }
     }
@@ -971,12 +902,10 @@ fn context(
     lines.join("\n")
 }
 
-/// `name (workflow) url`, leaving out what GitHub did not say.
+/// `name url` — its workflow is the line over it — leaving out a page
+/// GitHub did not give.
 fn check_line(check: &PrCheck) -> String {
     let mut line = check.name.clone();
-    if !check.workflow.is_empty() && check.workflow != check.name {
-        line.push_str(&format!(" ({})", check.workflow));
-    }
     if !check.url.is_empty() {
         line.push_str(&format!(" {}", check.url));
     }
@@ -993,11 +922,9 @@ pub enum Row {
 }
 
 impl Row {
-    const ORDER: [Row; 5] = [
+    const ORDER: [Row; 3] = [
         Row::Issue(Issue::Conflicts),
-        Row::Issue(Issue::Unit),
-        Row::Issue(Issue::E2e),
-        Row::Issue(Issue::Other),
+        Row::Issue(Issue::Checks),
         Row::Note,
     ];
 
@@ -1296,20 +1223,40 @@ const SOME_BASE: &str = "its base";
 const EXPLAIN: &str = "The agent runs in the PR's worktree on your default agent: it fixes what is ticked, runs the tests locally until they pass, then commits and pushes to the PR.";
 const EXPLAIN_ROWS: u16 = 3;
 
-/// What each issue row says after its box.
+/// What each issue row says after its box; the failing checks' names
+/// follow on lines of their own, a workflow each ([`workflow_rows`]).
 fn row_note(form: &AutofixForm, issue: Issue) -> String {
-    let failing = form.diagnosis.failing(issue);
     match issue {
-        Issue::Conflicts if form.diagnosis.conflicts => format!(
+        _ if !form.diagnosis.has(issue) => "none detected".into(),
+        Issue::Conflicts => format!(
             "{} has moved on — merge it in and resolve",
             form.refs.base_or(SOME_BASE)
         ),
-        _ if !form.diagnosis.has(issue) => "none detected".into(),
-        _ => {
-            let names: Vec<&str> = failing.iter().map(|c| c.name.as_str()).collect();
-            format!("{} failing: {}", failing.len(), names.join(", "))
-        }
+        Issue::Checks => format!("{} failing", form.diagnosis.failing.len()),
     }
+}
+
+/// Under the **Failing checks** row, a line per workflow: its name in the
+/// labels' column, then the checks that failed in it.
+fn workflow_rows(form: &AutofixForm, th: Theme) -> Vec<Vec<Span<'static>>> {
+    // Past the caret and the box, under the label.
+    const UNDER_LABEL: &str = "       ";
+    form.diagnosis
+        .failing_by_workflow()
+        .into_iter()
+        .map(|(workflow, checks)| {
+            let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+            let workflow = crate::ui::truncate(&workflow, LABEL_W - 1);
+            vec![
+                Span::raw(UNDER_LABEL),
+                Span::styled(
+                    format!("{workflow:<LABEL_W$}"),
+                    Style::default().fg(th.muted),
+                ),
+                Span::styled(names.join(", "), Style::default().fg(th.warn)),
+            ]
+        })
+        .collect()
 }
 
 /// One issue's row: the caret, its box, its name and what was found.
@@ -1371,11 +1318,12 @@ fn lines(form: &AutofixForm, th: Theme) -> Vec<(Option<Row>, Vec<Span<'static>>)
         ),
         (None, Vec::new()),
     ];
-    lines.extend(
-        Issue::ALL
-            .into_iter()
-            .map(|issue| (Some(Row::Issue(issue)), issue_row(form, issue, th))),
-    );
+    for issue in Issue::ALL {
+        lines.push((Some(Row::Issue(issue)), issue_row(form, issue, th)));
+        if issue == Issue::Checks {
+            lines.extend(workflow_rows(form, th).into_iter().map(|row| (None, row)));
+        }
+    }
     lines.push((None, Vec::new()));
     // Drawn where it lands (`draw`), for the mouse to find it there.
     lines.push((Some(Row::Note), Vec::new()));
@@ -1534,17 +1482,6 @@ mod tests {
     }
 
     #[test]
-    fn checks_are_classified_by_name() {
-        let kind = |name: &str, wf: &str| classify(&check(name, wf, CheckState::Failed));
-        assert_eq!(kind("e2e tests (shard 2)", "CI"), Issue::E2e);
-        assert_eq!(kind("chromium", "Playwright"), Issue::E2e);
-        assert_eq!(kind("unit tests", "CI"), Issue::Unit);
-        assert_eq!(kind("vitest", ""), Issue::Unit);
-        assert_eq!(kind("lint", "CI"), Issue::Other);
-        assert_eq!(kind("typecheck", ""), Issue::Other);
-    }
-
-    #[test]
     fn diagnosis_lists_failures_and_notices_running_checks() {
         let d = diag(&detail(
             true,
@@ -1555,10 +1492,9 @@ mod tests {
             ],
         ));
         assert!(d.conflicts);
-        assert_eq!(d.other.len(), 1);
-        assert!(d.unit.is_empty() && d.e2e.is_empty());
+        assert_eq!(d.failing, [check("lint", "", CheckState::Failed)]);
         assert!(d.running);
-        assert_eq!(d.summary(), "merge conflicts · 1 other failing");
+        assert_eq!(d.summary(), "merge conflicts · 1 failing check");
     }
 
     #[test]
@@ -1597,7 +1533,7 @@ mod tests {
             &pr(),
             &PrRefs::of(&detail),
             &diag(&detail),
-            &[false, false, true, false],
+            &[false, true],
             "flaky on CI",
             &orions(),
         );
@@ -1607,14 +1543,15 @@ mod tests {
         assert!(text.contains("https://ci/e2e"));
         assert!(text.contains("Note from the user: flaky on CI"));
         let fix = &text[text.find("\nFix:\n").unwrap()..text.find("Note from the user").unwrap()];
-        assert!(fix.contains("- Failing e2e tests:"), "{fix}");
+        assert!(fix.contains("- Failing checks:"), "{fix}");
         assert!(!fix.contains("- Merge conflicts"), "{fix}");
-        assert!(!fix.contains("- Failing unit tests"), "{fix}");
         for rule in [
             "Fix only what is listed",
+            "fetch the base branch from origin and merge it",
             "re-run only those specs locally, never the full suite — unless earlier attempts failed the same way",
             "reproduce each failing test locally",
-            "`gh pr checks --watch` until it is green",
+            "Any other check (lint, typecheck, build): reproduce it locally and fix it",
+            "`gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again",
         ] {
             assert!(text.contains(rule), "{rule}:\n{text}");
         }
@@ -1638,7 +1575,7 @@ mod tests {
             &pr(),
             &PrRefs::of(&detail),
             &diag(&detail),
-            &[true, false, false, false],
+            &[true, false],
             "",
             &preset,
         );
@@ -1652,8 +1589,51 @@ mod tests {
     fn the_form_ticks_what_was_detected() {
         let detail = detail(false, vec![check("unit", "", CheckState::Failed)]);
         let form = AutofixForm::new(ProjectId("p".into()), pr(), &detail, false);
-        assert_eq!(form.picks, [false, true, false, false]);
-        assert_eq!(form.row, Row::Issue(Issue::Unit));
+        assert_eq!(form.picks, [false, true]);
+        assert_eq!(form.row, Row::Issue(Issue::Checks));
+    }
+
+    /// Unit, e2e and the rest are one **Failing checks** list, grouped by
+    /// the workflow each ran in as GitHub groups them, a check from none
+    /// under `Other`: nothing is guessed from a check's name.
+    #[test]
+    fn failing_checks_are_one_list_grouped_by_workflow() {
+        let detail = detail(
+            false,
+            vec![
+                check("unit tests", "CI", CheckState::Failed),
+                check("chromium", "Playwright", CheckState::Failed),
+                check("lint", "CI", CheckState::Failed),
+                check("build", "CI", CheckState::Passed),
+                check("vercel", "", CheckState::Failed),
+            ],
+        );
+        let form = AutofixForm::new(ProjectId("p".into()), pr(), &detail, false);
+        assert_eq!(form.diagnosis.summary(), "4 failing checks");
+        let text = prompt(
+            &pr(),
+            &form.refs,
+            &form.diagnosis,
+            &form.picks,
+            "",
+            &orions(),
+        );
+        let fix = &text[text.find("\nFix:\n").unwrap()..text.find("Then commit").unwrap()];
+        assert_eq!(
+            fix.trim(),
+            [
+                "Fix:",
+                "- Failing checks:",
+                "  - CI:",
+                "    - unit tests https://ci/unit tests",
+                "    - lint https://ci/lint",
+                "  - Playwright:",
+                "    - chromium https://ci/chromium",
+                "  - Other:",
+                "    - vercel https://ci/vercel",
+            ]
+            .join("\n")
+        );
     }
 
     #[test]
@@ -2167,13 +2147,11 @@ mod tests {
         for text in [
             "Autofix #7",
             "#7 Add things",
-            "merge conflicts · 1 unit failing · 1 other failing",
+            "merge conflicts · 2 failing checks",
             "[x] Merge conflicts",
-            "[x] Unit tests",
-            "1 failing: unit tests",
-            "[ ] E2E tests",
-            "none detected",
-            "[x] Other checks",
+            "main has moved on",
+            "[x] Failing checks  2 failing",
+            "CI              unit tests, lint",
             "Note",
             "send autofix",
             "not now",
