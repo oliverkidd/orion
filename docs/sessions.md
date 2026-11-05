@@ -139,10 +139,13 @@ itself:
   medium unless you change them. Following the box, it is written through your default agent's
   account; an account it pins that is off falls back to that.
 
-A system preset always holds text: its editor opens on orion's text, and saving it unchanged, or
-cleared, keeps nothing of yours, so it says orion's text from then on — including a better one a
-later release ships. Its text, harness, model and effort can be edited like any preset's; it can't
-be deleted or renamed. A list from before they existed keeps a preset you had already named `PR
+A system preset always holds text. While it holds none of yours its editor's box is empty, orion's
+text greyed in it — what the agent is sent — and `^R` puts that text in the box to edit from, or
+back over yours; saving it unchanged, or cleared, keeps nothing of yours, so it says orion's text
+from then on — including a better one a later release ships. Its text, harness, model and effort
+can be edited like any preset's; its name and its task are orion's, so the editor has no Name or
+Task field for it, and it can't be deleted or renamed. The box's border says what orion puts at
+its marker: what broke at PR autofix's `{task}`, the issues at Linear Ticket's `{issues}`. A list from before they existed keeps a preset you had already named `PR
 autofix`, `Linear Ticket` or `Week review`, text and all, as that system preset. The settings older
 releases kept for these agents in `config.json` — `autofix_model`, `autofix_effort`,
 `review_account`, `review_model`, `review_effort` — move onto them once, an account the old key

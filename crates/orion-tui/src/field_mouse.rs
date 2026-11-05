@@ -45,10 +45,14 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         Overlay::Tree(v) => vec![(Field::Only, &mut v.filter)],
         Overlay::Diff(v) => vec![(Field::DiffFilter, &mut v.filter)],
         Overlay::Hosts(v) => v.input.iter_mut().map(|i| (Field::Only, i)).collect(),
-        Overlay::AgentPresetEditor(e) => vec![
-            (Field::Preset(PresetField::Name), &mut e.name),
-            (Field::Preset(PresetField::Text), &mut e.text),
-        ],
+        // A SYSTEM PRESET's name is orion's: drawn, never a field.
+        Overlay::AgentPresetEditor(e) => {
+            let mut fields = vec![(Field::Preset(PresetField::Text), &mut e.text)];
+            if e.system.is_none() {
+                fields.insert(0, (Field::Preset(PresetField::Name), &mut e.name));
+            }
+            fields
+        }
         Overlay::PullRequests(v) => match v.form.as_deref_mut() {
             Some(PrForm::Create(form)) => vec![
                 (Field::PrCreate(CreateField::From), &mut form.from),

@@ -12,7 +12,7 @@
 //! (`event_loop::submit_prompt_now`) — and the create it ends in goes
 //! through `event_loop::create_agent` like every other session.
 
-use crate::agent_presets::AgentPreset;
+use crate::agent_presets::{AgentPreset, SystemPreset};
 use crate::app::{clamp_selection, window_start, App, Focus, Overlay, PromptKind};
 use crate::quick_prompt::QuickTarget;
 use crate::text_input::TextInput;
@@ -272,11 +272,14 @@ impl PresetField {
         self
     }
 
-    /// Whether the form shows the field at all: Model and Effort follow
-    /// the harness (with its model chosen).
+    /// Whether the form offers the field at all: Model and Effort follow
+    /// the harness (with its model chosen); a SYSTEM PRESET's name is
+    /// orion's, never renamed, and its task orion's to supply, so neither
+    /// is a field there.
     pub fn available(self, editor: &AgentPresetEditor) -> bool {
         let (kind, custom) = (editor.kind, editor.custom.as_deref());
         match self {
+            PresetField::Name | PresetField::Task => editor.system.is_none(),
             PresetField::Model => !crate::config::model_choices(kind, custom).is_empty(),
             PresetField::Effort => {
                 !crate::config::effort_choices(kind, Some(&editor.model), custom).is_empty()
@@ -322,6 +325,10 @@ pub struct AgentPresetEditor {
     /// The Settings → Presets row the form was opened from (`presets_tab`):
     /// Esc lands back on it, and a save on the saved preset's row.
     pub settings_row: usize,
+    /// The SYSTEM PRESET being edited, if it is one: its name and task are
+    /// orion's, and its empty text box shows orion's text greyed — what it
+    /// sends while the box holds none of the user's.
+    pub system: Option<SystemPreset>,
     /// Index into the stored list when editing; None when creating.
     pub editing: Option<usize>,
     pub name: TextInput,
@@ -364,6 +371,7 @@ impl AgentPresetEditor {
     pub fn new(from: usize) -> Self {
         Self {
             settings_row: from,
+            system: None,
             editing: None,
             name: TextInput::new(),
             follow: true,
@@ -381,15 +389,16 @@ impl AgentPresetEditor {
     }
 
     /// The form pre-filled from a stored preset. A SYSTEM PRESET on
-    /// orion's text opens on that text, to edit from.
+    /// orion's text opens with its box empty, orion's text greyed in it,
+    /// and the caret on its first field, the harness.
     pub fn from_preset(from: usize, index: usize, preset: &AgentPreset) -> Self {
-        let preset = &preset.clone().with_builtin_text();
         let choice = |v: &Option<String>| {
             v.clone()
                 .unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into())
         };
         Self {
             settings_row: from,
+            system: preset.system,
             editing: Some(index),
             name: TextInput::with_text(preset.name.clone()),
             follow: preset.follows_box(),
@@ -399,10 +408,37 @@ impl AgentPresetEditor {
             effort: choice(&preset.effort),
             text: TextInput::multiline_with_text(preset.text.clone()),
             skip_task: preset.skip_task,
-            field: PresetField::Name,
+            field: match preset.system {
+                Some(_) => PresetField::Kind,
+                None => PresetField::Name,
+            },
             area: Rect::default(),
             filter: String::new(),
             error: None,
+        }
+    }
+
+    /// orion's own text, while the form is a SYSTEM PRESET's.
+    pub fn builtin_text(&self) -> Option<&'static str> {
+        self.system.map(SystemPreset::builtin_text)
+    }
+
+    /// Whether `^R` has anything to do: a SYSTEM PRESET whose box holds
+    /// other than orion's text — nothing, to start from it, or the user's,
+    /// to put it back.
+    pub fn can_restore(&self) -> bool {
+        self.builtin_text()
+            .is_some_and(|builtin| self.text.trim() != builtin.trim())
+    }
+
+    /// `^R`: orion's text into the box, the caret at its end — to edit
+    /// from, or to send as it stands. Nothing is saved until Enter, and
+    /// Esc leaves the preset as it was.
+    pub fn restore_text(&mut self) {
+        if let Some(builtin) = self.builtin_text().filter(|_| self.can_restore()) {
+            self.text.set_text(builtin);
+            self.field = PresetField::Text;
+            self.filter.clear();
         }
     }
 
@@ -1036,6 +1072,7 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent) {
     match key.code {
         // Esc first clears a choice row's type-ahead, then backs out.
         KeyCode::Esc if !editor.filter.is_empty() => editor.filter.clear(),
+        _ if keys::RESTORE.matches(&key) => editor.restore_text(),
         // Back to the Settings → Presets row it came from, unsaved.
         KeyCode::Esc => {
             let at = editor.settings_row;
@@ -1150,8 +1187,10 @@ pub(crate) mod keys {
     pub const FIELD: Key = Key::new(&["tab", "down"], "field");
     pub const CHOOSE: Key = Key::new(&["left", "right"], "choose").show(2);
     pub const SAVE: Key = Key::new(&["enter"], "save");
+    /// A SYSTEM PRESET's: orion's text into the box.
+    pub const RESTORE: Key = Key::new(&["ctrl+r"], "orion's text");
     #[cfg(test)]
-    pub const ALL: &[Key] = &[LAUNCH, WORKTREE, FIELD, CHOOSE, SAVE];
+    pub const ALL: &[Key] = &[LAUNCH, WORKTREE, FIELD, CHOOSE, SAVE, RESTORE];
 }
 
 /// The keys on the list's frame, by mode: Enter's verb, the NEW WORKTREE
@@ -1181,15 +1220,25 @@ pub(crate) fn list_hints(view: &AgentPresetsView) -> Vec<crate::hints::Hint> {
     hints
 }
 
-/// The keys on the PRESET EDITOR's frame.
-pub(crate) fn editor_hints() -> Vec<crate::hints::Hint> {
-    vec![
+/// The keys on the PRESET EDITOR's frame: `^R` only on a SYSTEM PRESET
+/// whose box holds other than orion's text — "start from" it while the box
+/// is empty.
+pub(crate) fn editor_hints(editor: &AgentPresetEditor) -> Vec<crate::hints::Hint> {
+    let mut hints = vec![
         keys::FIELD.hint(),
         keys::CHOOSE.hint(),
         crate::ui::task_keys::NEWLINE.hint(),
-        keys::SAVE.hint().kept(),
-        crate::hints::Hint::new("Esc", "back to Settings"),
-    ]
+    ];
+    // The way back to orion's text is one a narrow frame keeps.
+    if editor.can_restore() {
+        hints.push(match editor.text.trim().is_empty() {
+            true => keys::RESTORE.hint_as("start from orion's text").kept(),
+            false => keys::RESTORE.hint().kept(),
+        });
+    }
+    hints.push(keys::SAVE.hint().kept());
+    hints.push(crate::hints::Hint::new("Esc", "back to Settings"));
+    hints
 }
 
 /// The AGENT PRESETS list modal.
@@ -1392,7 +1441,12 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
     } else {
         " New preset ".to_string()
     };
-    let block = crate::hints::modal_block(modal_block(title, th), &editor_hints(), area.width, th);
+    let block = crate::hints::modal_block(
+        modal_block(title, th),
+        &editor_hints(editor),
+        area.width,
+        th,
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -1411,14 +1465,19 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
 
     let label_w = 9usize;
     let top = usize::from(banner);
-    // The five rows above the box.
-    let single = [
-        (PresetField::Name, top),
-        (PresetField::Kind, top + 1),
-        (PresetField::Model, top + 2),
-        (PresetField::Effort, top + 3),
-        (PresetField::Task, top + 4),
-    ];
+    // The rows above the box. A SYSTEM PRESET's task is orion's: no row.
+    let single: Vec<(PresetField, usize)> = [
+        PresetField::Name,
+        PresetField::Kind,
+        PresetField::Model,
+        PresetField::Effort,
+        PresetField::Task,
+    ]
+    .into_iter()
+    .filter(|field| editor.system.is_none() || *field != PresetField::Task)
+    .enumerate()
+    .map(|(row, field)| (field, top + row))
+    .collect();
     for (field, row) in single.iter() {
         let Some(row_area) = row_rect(inner, *row) else {
             break;
@@ -1443,6 +1502,14 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
         )];
         let budget = (inner.width as usize).saturating_sub(2 + label_w + 2);
         match field {
+            // orion's own name, and the word that it stays so.
+            PresetField::Name if editor.system.is_some() => {
+                spans.push(Span::raw(truncate(editor.name.as_str(), budget)));
+                spans.push(Span::styled(
+                    format!("  {} — can't be renamed", crate::presets_tab::ORION_TAG),
+                    Style::default().fg(th.dim),
+                ));
+            }
             PresetField::Name => {
                 // Past the row's mark and the label.
                 let at = crate::ui::field_after(row_area, 1 + label_w + 2);
@@ -1529,9 +1596,10 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
 
     // The text box under a blank row, to the frame's foot.
     let mut focused_view = None;
+    let above = banner + single.len() as u16 + 1;
     let box_area = Rect {
-        y: inner.y.saturating_add(banner + EDITOR_ROWS),
-        height: inner.height.saturating_sub(banner + EDITOR_ROWS),
+        y: inner.y.saturating_add(above),
+        height: inner.height.saturating_sub(above),
         ..inner
     };
     if box_area.height >= 3 {
@@ -1541,21 +1609,29 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border))
-            .title(Span::styled(TEXT_TITLE, Style::default().fg(border)));
+            .title(Span::styled(
+                text_title(editor.system),
+                Style::default().fg(border),
+            ));
         let box_inner = block.inner(box_area);
         f.render_widget(block, box_area);
+        // An empty SYSTEM PRESET says orion's text, greyed: what it sends.
+        if let Some(builtin) = editor
+            .builtin_text()
+            .filter(|_| editor.text.trim().is_empty())
+        {
+            draw_greyed(f, builtin, box_inner, th);
+        }
         if focused {
             let (view, rows) = draw_multiline_input(f, &editor.text, box_inner, th);
             draw_scroll_marks(f, box_area, view, rows, th.dim);
             focused_view = Some(view);
         } else {
-            crate::ui::draw_multiline_idle(
-                f,
-                &editor.text,
-                box_inner,
-                "sent with your task, or alone (optional)",
-                th,
-            );
+            let empty = match editor.system {
+                Some(_) => "",
+                None => "sent with your task, or alone (optional)",
+            };
+            crate::ui::draw_multiline_idle(f, &editor.text, box_inner, empty, th);
         }
     }
 
@@ -1567,6 +1643,36 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
             input.set_view(view);
         }
     }
+}
+
+/// What the text box's border says of its marker: where a task goes —
+/// for orion's own presets, what orion puts there.
+fn text_title(system: Option<SystemPreset>) -> &'static str {
+    match system {
+        None => TEXT_TITLE,
+        Some(SystemPreset::PrAutofix) => " Text — {task} is where what broke goes ",
+        Some(SystemPreset::LinearTicket) => " Text — {issues} is where the issues go ",
+        Some(SystemPreset::WeekReview) => " Text — the rules your review is written by ",
+    }
+}
+
+/// orion's own `text`, wrapped as the box wraps its own and greyed: what
+/// an empty SYSTEM PRESET sends.
+fn draw_greyed(f: &mut Frame, text: &str, area: Rect, th: Theme) {
+    let input = TextInput::multiline_with_text(text);
+    let chars: Vec<char> = input.chars().collect();
+    let lines: Vec<Line> = input
+        .rows(area.width.max(1).into())
+        .into_iter()
+        .take(area.height.into())
+        .map(|(start, end)| {
+            Line::from(Span::styled(
+                chars[start..end].iter().collect::<String>(),
+                Style::default().fg(th.dim),
+            ))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 #[cfg(test)]
@@ -1662,11 +1768,13 @@ mod tests {
         });
     }
 
-    /// A system preset on orion's text opens on that text, to edit from;
-    /// saving it unchanged, or cleared, keeps nothing, and a rename is
-    /// not kept.
+    /// A system preset on orion's text opens with its box empty — orion's
+    /// text greyed in it — and the caret on its harness: its name and task
+    /// are orion's, no fields at all, so Tab never lands on them. `^R`
+    /// puts orion's text in the box to edit from; saving that unchanged,
+    /// or the box empty, keeps nothing, and a rename is not kept.
     #[test]
-    fn a_system_preset_opens_on_orions_text_and_keeps_it_as_none() {
+    fn a_system_preset_opens_empty_on_orions_text_and_keeps_it_as_none() {
         use crate::agent_presets::SystemPreset;
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("agent_presets.json");
@@ -1679,7 +1787,26 @@ mod tests {
                     .position(|p| p.system == Some(SystemPreset::LinearTicket))
                     .unwrap();
                 let mut editor = AgentPresetEditor::from_preset(0, at, &presets[at]);
+                assert_eq!(
+                    editor.text.as_str(),
+                    "",
+                    "orion's text is greyed, not typed"
+                );
+                assert_eq!(editor.builtin_text(), Some(crate::linear::TICKET_TEXT));
+                assert_eq!(editor.field, PresetField::Kind);
+                let mut field = editor.field;
+                for _ in 0..PresetField::ALL.len() {
+                    field = field.step(&editor, 1);
+                    assert!(
+                        !matches!(field, PresetField::Name | PresetField::Task),
+                        "{field:?}"
+                    );
+                }
+                assert!(editor.can_restore());
+                editor.restore_text();
                 assert_eq!(editor.text.as_str(), crate::linear::TICKET_TEXT);
+                assert_eq!(editor.field, PresetField::Text);
+                assert!(!editor.can_restore(), "nothing left to put back");
                 editor.name = TextInput::with_text("Renamed".to_string());
                 let mut app = App::new();
                 save_agent_preset_editor(&mut app, editor);
@@ -1693,6 +1820,81 @@ mod tests {
                     crate::linear::TICKET_TEXT
                 );
             })
+        });
+    }
+
+    fn screen(app: &mut App, width: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 30)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+
+    /// The editor of one of orion's presets: its name with the word that
+    /// it stays, no Task row, the box's border naming what orion puts at
+    /// its marker, orion's text greyed in the empty box, and `^R` on the
+    /// frame — "start from" it while the box is empty, "orion's text" over
+    /// the user's own, and nowhere on a preset of the user's.
+    #[test]
+    fn an_empty_system_preset_shows_orions_text_greyed() {
+        use crate::agent_presets::SystemPreset;
+        pinned("{}", || {
+            let autofix = SystemPreset::PrAutofix.default_preset();
+            let mut app = App::new();
+            app.overlay = Some(Overlay::AgentPresetEditor(AgentPresetEditor::from_preset(
+                0, 0, &autofix,
+            )));
+            let text = screen(&mut app, 100);
+            assert!(
+                text.contains("PR autofix  orion — can't be renamed"),
+                "{text}"
+            );
+            assert!(!text.contains("Task "), "no task row:\n{text}");
+            assert!(text.contains("{task} is where what broke goes"), "{text}");
+            assert!(
+                text.contains("You are orion's PR autofixer."),
+                "greyed:\n{text}"
+            );
+            assert!(text.contains("^R start from orion's text"), "{text}");
+            // The greyed text is dim, not the text colour.
+            let th = app.theme;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let at = (0..buffer.area.height).find_map(|y| {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect();
+                row.find("You are orion")
+                    .map(|byte| (row[..byte].chars().count() as u16, y))
+            });
+            let (x, y) = at.expect("orion's text on screen");
+            assert_eq!(buffer[(x, y)].fg, th.dim);
+
+            let Some(Overlay::AgentPresetEditor(editor)) = &mut app.overlay else {
+                unreachable!()
+            };
+            editor.text = TextInput::multiline_with_text("Mine, {task}.");
+            let text = screen(&mut app, 100);
+            assert!(!text.contains("You are orion's PR autofixer."), "{text}");
+            assert!(text.contains("^R orion's text"), "{text}");
+
+            app.overlay = Some(Overlay::AgentPresetEditor(AgentPresetEditor::new(0)));
+            let text = screen(&mut app, 100);
+            assert!(
+                !text.contains("^R"),
+                "a preset of the user's has none:\n{text}"
+            );
+            assert!(text.contains("Task "), "{text}");
         });
     }
 

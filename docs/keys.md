@@ -630,7 +630,8 @@ Presets tab the keys follow the row, and the frame names only the ones that work
 orion's presets (**Used by orion**) `Enter` edits it and `^R` puts back orion's text while it holds
 yours, after a confirmation — it can't be deleted or renamed, so its row has neither; on one of
 **Yours** `Enter` edits, `^N` makes a new one and `^D` deletes it (with a confirmation); `Enter` on
-**+ New preset** makes one ([Sessions](sessions.md#agent-presets)). On a row whose
+**+ New preset** makes one ([Sessions](sessions.md#agent-presets)). In the editor of one of orion's,
+`^R` puts orion's text in its box — hinted only while the box holds something else. On a row whose
 program isn't on PATH — a Claude account, a harness's **Enabled** row —
 `i` puts the command that installs it where the row's explanation was, `Enter` runs it in the editor
 modal and anything else leaves it unrun ([Installing editors and agent
