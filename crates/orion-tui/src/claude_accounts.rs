@@ -692,17 +692,10 @@ pub fn same_account_groups(entries: &[HarnessDescriptor]) -> Vec<(String, Vec<St
 /// the settings overlay, the wizard — and short enough a line for both:
 /// which dirs share an email, what that costs, and how to fix it.
 pub fn same_account_warning(email: &str, dirs: &[String]) -> Vec<String> {
-    let fix = if cfg!(target_os = "macos") {
-        [
-            "  it in again, in a private browser window: sign in there as",
-            "  the other account, or type its email (claude auth login --email).",
-        ]
-    } else {
-        [
-            "  it in again: from a private browser window (or after signing out",
-            "  of claude.ai), or type the other email (claude auth login --email).",
-        ]
-    };
+    let fix = [
+        "  it in again, in a private browser window: sign in there as",
+        "  the other account, or type its email (claude auth login --email).",
+    ];
     let mut lines = vec![
         format!("⚠ {} are signed in as one account,", and_list(dirs)),
         format!("  {email}: one subscription, one limit. Enter on one signs"),
@@ -794,13 +787,9 @@ const PRIVATE_BROWSERS: &[(&str, &str)] = &[
 ];
 
 /// The program a sign-in names as Claude Code's `BROWSER`:
-/// [`private_browser_script`], written to orion's data dir. None off a
-/// Mac, or when it can't be written — Claude then opens its page the way
-/// it always does.
+/// [`private_browser_script`], written to orion's data dir. None when it
+/// can't be written — Claude then opens its page the way it always does.
 fn private_browser() -> Option<PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
     let dir = if cfg!(test) {
         std::env::temp_dir().join("orion-unit-tests-browser")
     } else {
@@ -1659,7 +1648,7 @@ mod tests {
         entry
             .env
             .insert("CLAUDE_CONFIG_DIR".into(), two.display().to_string());
-        // On a Mac the sign-in's browser is orion's private-window opener.
+        // The sign-in's browser is orion's private-window opener.
         let browser = |env: &[(String, String)]| {
             env.iter()
                 .find(|(name, _)| name == "BROWSER")
@@ -1673,12 +1662,9 @@ mod tests {
                 login.env[0],
                 ("CLAUDE_CONFIG_DIR".to_string(), two.display().to_string())
             );
-            let opener = browser(&login.env);
-            assert_eq!(opener.is_some(), cfg!(target_os = "macos"));
-            if let Some(opener) = opener {
-                assert!(opener.ends_with("claude-sign-in-browser"), "{opener:?}");
-                assert!(opener.is_file());
-            }
+            let opener = browser(&login.env).expect("the private-window opener");
+            assert!(opener.ends_with("claude-sign-in-browser"), "{opener:?}");
+            assert!(opener.is_file());
             assert_eq!(login.cwd, two);
             assert_eq!(login.title, "Sign in · ~/.claude-2");
             assert_eq!(login_command(&entry, Some("")).args, ["auth", "login"]);

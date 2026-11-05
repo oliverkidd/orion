@@ -209,7 +209,7 @@ pub fn relaunch() -> Result<()> {
     use std::os::unix::process::CommandExt as _;
     let mut args = std::env::args_os();
     // argv[0] over `current_exe`: a binary replaced since launch is the
-    // one wanted, and Linux spells the old one `… (deleted)`.
+    // one wanted.
     let program = match args.next() {
         Some(arg0) => std::path::PathBuf::from(arg0),
         None => std::env::current_exe().context("resolve current_exe")?,

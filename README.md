@@ -6,7 +6,7 @@
 
 Run Claude Code, Codex, Cursor, Pi, Muse, Grok and OpenCode across every project and worktree, from one grid. They keep working when you close it.
 
-macOS · Linux
+macOS
 
 <img src="assets/screenshot.png" alt="orion home screen: the ORION wordmark under a starfield" width="100%">
 
@@ -21,12 +21,12 @@ macOS · Linux
 curl -fsSL https://raw.githubusercontent.com/oliverkidd/orion/main/install.sh | sh
 ```
 
-That is the whole install. It needs git. On a Mac it also gets Ghostty if you don't have it, then opens orion as its own app, **Orion.app**.
+That is the whole install. It needs git. It also gets Ghostty if you don't have it, then opens orion as its own app, **Orion.app**.
 
 ## Run
 
-- **Mac:** open **Orion** from the Dock or Spotlight. Typing `orion` in a terminal opens the same app.
-- **Linux, ssh, tmux:** run `orion` in a terminal.
+- Open **Orion** from the Dock or Spotlight. Typing `orion` in a terminal opens the same app.
+- **Over ssh or in tmux:** `orion` runs in the terminal it was typed in.
 
 The first launch walks you through setup, including installing an agent if you have none. `orion upgrade` gets the latest release.
 

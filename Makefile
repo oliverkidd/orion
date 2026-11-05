@@ -84,10 +84,7 @@ dev-prep:
 # puts it (orion-core/src/paths.rs); keep the two in step.
 dev-seed: ## Copy real projects/settings into the dev instance (only if it has no DB yet)
 	@[ ! -e $(DEV_DATA)/orion.db ] || exit 0; \
-	case "$$(uname -s)" in \
-		Darwin) real="$$HOME/Library/Application Support/dev.orion.orion";; \
-		*)      real="$${XDG_DATA_HOME:-$$HOME/.local/share}/orion";; \
-	esac; \
+	real="$$HOME/Library/Application Support/dev.orion.orion"; \
 	if [ ! -f "$$real/orion.db" ]; then \
 		echo "no real orion data at $$real — dev instance starts empty"; exit 0; fi; \
 	if ! command -v sqlite3 >/dev/null 2>&1; then \

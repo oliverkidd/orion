@@ -249,7 +249,7 @@ pub struct SpawnSpec {
 }
 
 /// What a launch says when its command line is over the OS's `ARG_MAX`
-/// (about 1 MiB on macOS, 128 KiB for one argument on Linux). In practice
+/// (about 1 MiB on macOS). In practice
 /// that is a prompt: orion puts no cap of its own on one, so this is where
 /// a prompt too long to launch is caught.
 pub(crate) const ARGV_TOO_LONG: &str = "the prompt is too long for this system's command line";
@@ -260,32 +260,21 @@ pub(crate) fn is_argv_too_long(err: &std::io::Error) -> bool {
 }
 
 /// Whether `cmd`'s exec fits the OS's ceiling on a new process's argv and
-/// environment: `ARG_MAX` over every string, its NUL and its pointer, and
-/// on Linux 32 pages for any one string as well. An unreadable limit fits.
+/// environment: `ARG_MAX` over every string, its NUL and its pointer. An
+/// unreadable limit fits.
 fn exec_fits(cmd: &CommandBuilder) -> bool {
     use nix::unistd::{sysconf, SysconfVar};
-    let limit = |var| {
-        sysconf(var)
-            .ok()
-            .flatten()
-            .map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX))
-    };
-    let arg_max = limit(SysconfVar::ARG_MAX);
-    #[cfg(target_os = "linux")]
-    let max_one = limit(SysconfVar::PAGE_SIZE).saturating_mul(32);
-    #[cfg(not(target_os = "linux"))]
-    let max_one = usize::MAX;
+    let arg_max = sysconf(SysconfVar::ARG_MAX)
+        .ok()
+        .flatten()
+        .map_or(usize::MAX, |n| usize::try_from(n).unwrap_or(usize::MAX));
     let strings = cmd.get_argv().iter().map(|arg| arg.len()).chain(
         cmd.iter_full_env_as_str()
             .map(|(name, value)| name.len() + 1 + value.len()),
     );
-    let mut total = 0usize;
-    for len in strings {
-        if len + 1 > max_one {
-            return false;
-        }
-        total += len + 1 + std::mem::size_of::<usize>();
-    }
+    let total: usize = strings
+        .map(|len| len + 1 + std::mem::size_of::<usize>())
+        .sum();
     total <= arg_max
 }
 

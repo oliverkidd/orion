@@ -5799,9 +5799,6 @@ fn hand_off(app: &mut App, open: impl FnOnce() -> Result<(), String> + Send + 's
 /// Ghostty.app where macOS installs put it: `/Applications` for the DMG drag
 /// and Homebrew's cask, `~/Applications` for a per-user drag.
 pub(crate) fn ghostty_app() -> Option<std::path::PathBuf> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
     let mut roots = vec![std::path::PathBuf::from("/")];
     roots.extend(std::env::var_os("HOME").map(std::path::PathBuf::from));
     ghostty_app_in(&roots)
@@ -12248,8 +12245,7 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-/// Copy to *this machine's* system clipboard.
-/// macOS: pbcopy. Linux: wl-copy on Wayland, xclip (or xsel) on X11.
+/// Copy to *this machine's* system clipboard, through pbcopy.
 fn copy_to_clipboard(text: &str) -> bool {
     // Unit tests exercise the selection flow; don't clobber the developer's
     // real clipboard from `cargo test`.
@@ -12260,38 +12256,18 @@ fn copy_to_clipboard(text: &str) -> bool {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
-    let copy_via = |cmd: &str, args: &[&str]| -> bool {
-        let Ok(mut child) = Command::new(cmd)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            return false;
-        };
-        let wrote = child
-            .stdin
-            .take()
-            .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-        wrote && child.wait().is_ok_and(|status| status.success())
+    let Ok(mut child) = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
     };
-
-    #[cfg(target_os = "macos")]
-    {
-        copy_via("pbcopy", &[])
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            return copy_via("wl-copy", &[]);
-        }
-        // X11: prefer xclip, fall back to xsel
-        if copy_via("xclip", &["-selection", "clipboard"]) {
-            return true;
-        }
-        copy_via("xsel", &["--clipboard", "--input"])
-    }
+    let wrote = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    wrote && child.wait().is_ok_and(|status| status.success())
 }
 
 /// Open a URL in the default browser via open(1) (this tool targets macOS).
@@ -12306,16 +12282,9 @@ pub(crate) fn open_url(url: &str) -> bool {
         OPENED.with(|opened| opened.borrow_mut().push(url.to_string()));
         return true;
     }
-    #[cfg(target_os = "macos")]
-    {
-        let mut open = std::process::Command::new("open");
-        open.arg(url);
-        spawn_and_reap(open, "open url")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        false
-    }
+    let mut open = std::process::Command::new("open");
+    open.arg(url);
+    spawn_and_reap(open, "open url")
 }
 
 #[cfg(test)]
@@ -13569,10 +13538,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         MouseEventKind::Down(MouseButton::Right) => {
             // macOS makes ^click a secondary click, and a host may report
             // it as the right button: on a link it is still the open.
-            if cfg!(target_os = "macos")
-                && mouse.modifiers.contains(KeyModifiers::CONTROL)
-                && open_link_under(app, &mouse)
-            {
+            if mouse.modifiers.contains(KeyModifiers::CONTROL) && open_link_under(app, &mouse) {
                 return;
             }
             // The right button is two steps: the cursor moves onto the row

@@ -49,8 +49,8 @@ pub fn buildstamp_path() -> PathBuf {
     runtime_dir().join("daemon.build")
 }
 
-/// The platform's per-user dirs for this app (`~/Library/Application
-/// Support/dev.orion.orion` on macOS, `~/.local/share/orion` on Linux).
+/// The per-user dirs for this app (`~/Library/Application
+/// Support/dev.orion.orion`).
 fn project_dirs() -> Option<directories::ProjectDirs> {
     directories::ProjectDirs::from("dev", "orion", "orion")
 }

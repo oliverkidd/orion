@@ -108,8 +108,7 @@ pub enum Choice {
     #[default]
     Auto,
     App(App),
-    /// `open <file>` (`xdg-open` off macOS): whatever the system opens
-    /// that kind of file with.
+    /// `open <file>`: whatever the system opens that kind of file with.
     System,
 }
 
@@ -153,7 +152,7 @@ pub enum Launcher {
     Cli(PathBuf),
     /// `open -a <bundle>`: the file, at its top.
     Bundle(PathBuf),
-    /// `open` / `xdg-open`.
+    /// `open`.
     System,
 }
 
@@ -167,7 +166,7 @@ pub struct Target {
 }
 
 /// Where apps are looked for: the folders holding an `Applications` folder
-/// (`/` and the home directory, on macOS only) and the PATH.
+/// (`/` and the home directory) and the PATH.
 #[derive(Debug, Clone, Default)]
 pub struct Places {
     pub roots: Vec<PathBuf>,
@@ -177,11 +176,8 @@ pub struct Places {
 impl Places {
     /// This machine's.
     pub fn here() -> Self {
-        let mut roots = Vec::new();
-        if cfg!(target_os = "macos") {
-            roots.push(PathBuf::from("/"));
-            roots.extend(orion_core::env::home_dir());
-        }
+        let mut roots = vec![PathBuf::from("/")];
+        roots.extend(orion_core::env::home_dir());
         Self {
             roots,
             path: std::env::var_os("PATH"),
@@ -376,11 +372,7 @@ impl Target {
 }
 
 fn system_opener() -> PathBuf {
-    PathBuf::from(if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    })
+    PathBuf::from("open")
 }
 
 /// How long [`launch`] waits for a tool to fail before taking it as
@@ -655,7 +647,7 @@ mod tests {
         );
         let system = resolve(Choice::System, &m.places()).unwrap();
         let (program, args) = system.file_command(root, "src/a.rs", 7);
-        assert!(program == Path::new("open") || program == Path::new("xdg-open"));
+        assert_eq!(program, Path::new("open"));
         assert_eq!(args, ["/repo/src/a.rs"], "no line to go to");
     }
 }

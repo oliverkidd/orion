@@ -102,9 +102,8 @@ impl Note {
 /// them itself — its name, its icon, and a click that brings its window
 /// back — asked through the terminal it is ([`host_escape`]): they are
 /// queued here and written by the loop ([`write_host_notes`]). Anywhere
-/// else a notifier is run, detached, on a helper thread that also reaps
-/// it: `osascript` on macOS, `notify-send` elsewhere. One that is missing
-/// or exits non-zero is logged at debug and otherwise ignored: the sound
+/// else `osascript` is run, detached, on a helper thread that also reaps
+/// it. One that is missing or exits non-zero is logged at debug and otherwise ignored: the sound
 /// already rang (or was folded into one that just did), and a box with no
 /// desktop is not an error.
 pub(super) fn notify_desktop(alerts: &[FeedbackAlert]) {
@@ -167,7 +166,7 @@ fn post(notes: Vec<Note>) {
     }
     std::thread::spawn(move || {
         for note in &notes {
-            let (program, args) = notifier_command(note, cfg!(target_os = "macos"));
+            let (program, args) = notifier_command(note);
             match Command::new(program)
                 .args(&args)
                 .stdin(Stdio::null())
@@ -199,35 +198,23 @@ fn summary(alert: &FeedbackAlert) -> String {
 }
 
 /// The notifier for `note` outside Orion.app, as a program and its argv —
-/// never a shell line, so the only quoting is AppleScript's own. macOS shows
-/// *orion* / the summary / the place; `notify-send` gets the same as app
-/// name, summary and body.
-fn notifier_command(note: &Note, macos: bool) -> (&'static str, Vec<String>) {
-    if macos {
-        let script = if note.place.is_empty() {
-            // No body to show: the subtitle carries the whole message.
-            format!(
-                "display notification {} with title \"orion\"",
-                applescript_str(&note.summary)
-            )
-        } else {
-            format!(
-                "display notification {} with title \"orion\" subtitle {}",
-                applescript_str(&note.place),
-                applescript_str(&note.summary)
-            )
-        };
-        ("osascript", vec!["-e".into(), script])
-    } else {
-        (
-            "notify-send",
-            vec![
-                "--app-name=orion".into(),
-                note.summary.clone(),
-                note.place.clone(),
-            ],
+/// never a shell line, so the only quoting is AppleScript's own. It shows
+/// *orion* / the summary / the place.
+fn notifier_command(note: &Note) -> (&'static str, Vec<String>) {
+    let script = if note.place.is_empty() {
+        // No body to show: the subtitle carries the whole message.
+        format!(
+            "display notification {} with title \"orion\"",
+            applescript_str(&note.summary)
         )
-    }
+    } else {
+        format!(
+            "display notification {} with title \"orion\" subtitle {}",
+            applescript_str(&note.place),
+            applescript_str(&note.summary)
+        )
+    };
+    ("osascript", vec!["-e".into(), script])
 }
 
 /// `s` as an AppleScript string literal: backslashes and double quotes
@@ -274,13 +261,12 @@ mod tests {
         assert_eq!(applescript_str("demo · main"), r#""demo · main""#);
     }
 
-    /// The macOS notifier is `osascript -e <one display notification>`,
-    /// orion as the title, the session as the subtitle, the place as the
-    /// body — and just the session when there is no place to name. Linux
-    /// gets `notify-send` with the same three under its own names.
+    /// The notifier is `osascript -e <one display notification>`, orion as
+    /// the title, the session as the subtitle, the place as the body — and
+    /// just the session when there is no place to name.
     #[test]
     fn notifier_command_names_the_session_and_its_place() {
-        let (program, args) = notifier_command(&Note::of(&alert("Fix Login", "demo · main")), true);
+        let (program, args) = notifier_command(&Note::of(&alert("Fix Login", "demo · main")));
         assert_eq!(program, "osascript");
         assert_eq!(
             args,
@@ -290,22 +276,10 @@ mod tests {
             ]
         );
 
-        let (_, args) = notifier_command(&Note::of(&alert("agent-2", "")), true);
+        let (_, args) = notifier_command(&Note::of(&alert("agent-2", "")));
         assert_eq!(
             args[1],
             r#"display notification "agent-2 needs feedback" with title "orion""#
-        );
-
-        let (program, args) =
-            notifier_command(&Note::of(&alert("Fix Login", "demo · main")), false);
-        assert_eq!(program, "notify-send");
-        assert_eq!(
-            args,
-            [
-                "--app-name=orion",
-                "Fix Login needs feedback",
-                "demo · main"
-            ]
         );
 
         // A session stopped on a usage limit says so instead.
@@ -313,8 +287,11 @@ mod tests {
             limit: Some("limit reached"),
             ..alert("Fix Login", "demo · main")
         };
-        let (_, args) = notifier_command(&Note::of(&limited), false);
-        assert_eq!(args[1], "Fix Login: limit reached");
+        let (_, args) = notifier_command(&Note::of(&limited));
+        assert_eq!(
+            args[1],
+            r#"display notification "demo · main" with title "orion" subtitle "Fix Login: limit reached""#
+        );
 
         // A crash and an unseen finish say what happened, in the same
         // place; a limit still recorded on a row that left red says nothing.
@@ -322,7 +299,7 @@ mod tests {
             kind: AlertKind::Crashed,
             ..alert("Fix Login", "demo · main")
         };
-        let (_, args) = notifier_command(&Note::of(&crashed), true);
+        let (_, args) = notifier_command(&Note::of(&crashed));
         assert_eq!(
             args[1],
             r#"display notification "demo · main" with title "orion" subtitle "Fix Login stopped with an error""#
@@ -332,10 +309,10 @@ mod tests {
             limit: Some("limit reached"),
             ..alert("Fix Login", "demo · main")
         };
-        let (_, args) = notifier_command(&Note::of(&finished), false);
+        let (_, args) = notifier_command(&Note::of(&finished));
         assert_eq!(
-            args,
-            ["--app-name=orion", "Fix Login finished", "demo · main"]
+            args[1],
+            r#"display notification "demo · main" with title "orion" subtitle "Fix Login finished""#
         );
     }
 

@@ -1118,18 +1118,15 @@ fn scrolled(screen: &vt100::Screen) -> usize {
 /// A drag-select past the pane's top edge scrolls the history under the
 /// pointer on the event loop's own beat — with no further mouse report —
 /// and the release copies rows that were never on screen together. A stub
-/// clipboard tool on PATH catches the copy.
+/// `pbcopy` on PATH catches the copy.
 #[test]
 fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
     use std::os::unix::fs::PermissionsExt;
     let stub_bin = tempfile::tempdir().unwrap();
     let copied = stub_bin.path().join("copied");
-    // Whichever tool this platform's copy reaches for.
-    for tool in ["pbcopy", "xclip", "xsel", "wl-copy"] {
-        let stub = stub_bin.path().join(tool);
-        std::fs::write(&stub, format!("#!/bin/sh\ncat > {}\n", copied.display())).unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    let stub = stub_bin.path().join("pbcopy");
+    std::fs::write(&stub, format!("#!/bin/sh\ncat > {}\n", copied.display())).unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!(
         "{}:{}",
         stub_bin.path().display(),

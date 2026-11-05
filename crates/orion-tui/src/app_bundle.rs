@@ -253,8 +253,7 @@ pub fn bundle_in(home: &Path) -> PathBuf {
 /// offers the move wherever it has not happened.
 #[cfg(not(test))]
 pub fn can_move() -> bool {
-    cfg!(target_os = "macos")
-        && !orion_core::host::is_remote_session()
+    !orion_core::host::is_remote_session()
         && !inside()
         && std::env::var_os("TMUX").is_none()
         && crate::event_loop::ghostty_app().is_some()
@@ -836,7 +835,6 @@ mod tests {
     /// The real thing, where there is a Ghostty to copy: a built bundle
     /// passes `codesign`'s own check, and its Ghostty is signed as the app.
     #[test]
-    #[cfg(target_os = "macos")]
     fn a_built_bundles_ghostty_carries_the_apps_id() {
         let source = Path::new("/Applications/Ghostty.app");
         if !source.join("Contents/MacOS/ghostty").is_file() {

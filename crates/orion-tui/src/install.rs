@@ -224,11 +224,8 @@ fn outside_app(program: &str) -> Option<crate::outside_editor::App> {
 }
 
 /// How the **Open in app** choice `word` gets onto a Mac: its cask. None
-/// for `auto`, `system`, or off macOS.
+/// for `auto` or `system`.
 pub fn app_plan(word: &str, brew: Option<&Path>) -> Option<Plan> {
-    if !cfg!(target_os = "macos") {
-        return None;
-    }
     let (word, cask, link) = APPS.iter().find(|(name, _, _)| *name == word)?;
     Some(brew_plan(word, cask, true, link, brew))
 }
@@ -337,13 +334,9 @@ pub fn agent_plan(program: &str, brew: Option<&Path>, npm: Option<&Path>) -> Opt
     })
 }
 
-/// Where Homebrew installs itself, by platform, for a `brew` a PATH
-/// without its shellenv doesn't name.
-const BREW_PREFIXES: &[&str] = &[
-    "/opt/homebrew/bin/brew",
-    "/usr/local/bin/brew",
-    "/home/linuxbrew/.linuxbrew/bin/brew",
-];
+/// Where Homebrew installs itself — Apple silicon, then Intel — for a
+/// `brew` a PATH without its shellenv doesn't name.
+const BREW_PREFIXES: &[&str] = &["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
 
 /// The first `program` in the directories `path` lists — a PATH lookup.
 pub fn which(path: &OsStr, program: &str) -> Option<PathBuf> {
@@ -636,11 +629,9 @@ mod tests {
             "https://git-scm.com/downloads"
         );
         assert!(cli_plan("hg", Some(brew)).is_none());
-        if cfg!(target_os = "macos") {
-            let plan = app_plan("vscode", Some(brew)).unwrap();
-            assert_eq!(plan.line, "brew install --cask visual-studio-code");
-            assert!(app_plan("auto", Some(brew)).is_none());
-        }
+        let plan = app_plan("vscode", Some(brew)).unwrap();
+        assert_eq!(plan.line, "brew install --cask visual-studio-code");
+        assert!(app_plan("auto", Some(brew)).is_none());
     }
 
     /// Every editor the **File editor** row cycles through but vim has a

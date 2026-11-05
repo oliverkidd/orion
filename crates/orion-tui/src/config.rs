@@ -3843,17 +3843,12 @@ pub enum Sound {
 impl Config {
     /// The sound to play for an unseen finish, or `None` for silence —
     /// which also stands down the `<session> finished` desktop
-    /// notification. A named system sound only resolves to its file on
-    /// macOS, on a local
-    /// terminal, and when the file exists — over ssh `afplay` would ring
-    /// the *remote* box, so the bell stands in there, as it does off
-    /// macOS and for a name the sound folder doesn't hold.
+    /// notification. A named system sound only resolves to its file on a
+    /// local terminal, and when the file exists — over ssh `afplay` would
+    /// ring the *remote* box, so the bell stands in there, as it does for a
+    /// name the sound folder doesn't hold.
     pub fn done_sound(&self) -> Option<Sound> {
-        resolve_sound(
-            &self.done_sound,
-            orion_core::host::is_remote_session(),
-            cfg!(target_os = "macos"),
-        )
+        resolve_sound(&self.done_sound, orion_core::host::is_remote_session())
     }
 
     /// The sound to play when a turn stops to ask the user or dies
@@ -3862,20 +3857,16 @@ impl Config {
     /// `feedback_sound` is the one switch for both. Same fallbacks as
     /// [`Config::done_sound`].
     pub fn feedback_sound(&self) -> Option<Sound> {
-        resolve_sound(
-            &self.feedback_sound,
-            orion_core::host::is_remote_session(),
-            cfg!(target_os = "macos"),
-        )
+        resolve_sound(&self.feedback_sound, orion_core::host::is_remote_session())
     }
 }
 
-fn resolve_sound(configured: &str, remote: bool, macos: bool) -> Option<Sound> {
+fn resolve_sound(configured: &str, remote: bool) -> Option<Sound> {
     let name = configured.trim();
     if name.is_empty() || name.eq_ignore_ascii_case("off") {
         return None;
     }
-    if name.eq_ignore_ascii_case("bell") || remote || !macos {
+    if name.eq_ignore_ascii_case("bell") || remote {
         return Some(Sound::Bell);
     }
     // A sound name is a bare file stem; anything else (a path, a dot) is
@@ -4908,28 +4899,19 @@ mod tests {
         assert_eq!(load_from(&path).done_sound, "Glass");
 
         // Silence, the bell, and every reason a name falls back to it.
-        assert_eq!(resolve_sound("off", false, true), None);
-        assert_eq!(resolve_sound("OFF", false, true), None);
-        assert_eq!(resolve_sound("", false, true), None);
-        assert_eq!(resolve_sound("bell", false, true), Some(Sound::Bell));
+        assert_eq!(resolve_sound("off", false), None);
+        assert_eq!(resolve_sound("OFF", false), None);
+        assert_eq!(resolve_sound("", false), None);
+        assert_eq!(resolve_sound("bell", false), Some(Sound::Bell));
         assert_eq!(
-            resolve_sound("Glass", true, true),
+            resolve_sound("Glass", true),
             Some(Sound::Bell),
             "over ssh afplay would ring the remote box"
         );
+        assert_eq!(resolve_sound("NoSuchSound", false), Some(Sound::Bell));
+        assert_eq!(resolve_sound("../etc/passwd", false), Some(Sound::Bell));
         assert_eq!(
-            resolve_sound("Glass", false, false),
-            Some(Sound::Bell),
-            "no system sounds off macOS"
-        );
-        assert_eq!(resolve_sound("NoSuchSound", false, true), Some(Sound::Bell));
-        assert_eq!(
-            resolve_sound("../etc/passwd", false, true),
-            Some(Sound::Bell)
-        );
-        #[cfg(target_os = "macos")]
-        assert_eq!(
-            resolve_sound("Glass", false, true),
+            resolve_sound("Glass", false),
             Some(Sound::File(Path::new(MACOS_SOUNDS_DIR).join("Glass.aiff")))
         );
     }
@@ -4973,13 +4955,11 @@ mod tests {
         assert_eq!(loaded.feedback_sound(), None, "off is silence for both");
         assert_eq!(loaded.done_sound, "Glass");
 
-        // The same resolution as the done sound: the bell over ssh and off
-        // macOS, silence for off.
-        assert_eq!(resolve_sound("Sosumi", true, true), Some(Sound::Bell));
-        assert_eq!(resolve_sound("Sosumi", false, false), Some(Sound::Bell));
-        #[cfg(target_os = "macos")]
+        // The same resolution as the done sound: the bell over ssh,
+        // silence for off.
+        assert_eq!(resolve_sound("Sosumi", true), Some(Sound::Bell));
         assert_eq!(
-            resolve_sound("Sosumi", false, true),
+            resolve_sound("Sosumi", false),
             Some(Sound::File(Path::new(MACOS_SOUNDS_DIR).join("Sosumi.aiff")))
         );
     }

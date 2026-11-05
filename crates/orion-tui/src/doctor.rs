@@ -93,7 +93,6 @@ pub struct Machine {
     pub home: Option<PathBuf>,
     pub app_roots: Vec<PathBuf>,
     pub cwd: PathBuf,
-    pub macos: bool,
     /// `ORION_EDITOR`.
     pub editor_env: Option<String>,
 }
@@ -102,18 +101,13 @@ impl Machine {
     /// This machine, as orion would see it from this shell.
     pub fn here() -> Self {
         let home = orion_core::env::home_dir();
-        let macos = cfg!(target_os = "macos");
-        let mut app_roots = Vec::new();
-        if macos {
-            app_roots.push(PathBuf::from("/"));
-            app_roots.extend(home.clone());
-        }
+        let mut app_roots = vec![PathBuf::from("/")];
+        app_roots.extend(home.clone());
         Self {
             path: std::env::var_os("PATH").unwrap_or_default(),
             home,
             app_roots,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            macos,
             editor_env: orion_core::env::non_empty(orion_core::env::EDITOR),
         }
     }
@@ -195,11 +189,7 @@ fn plan_fix(plan: crate::install::Plan) -> String {
 }
 
 fn git(m: &Machine) -> Check {
-    let fix = if m.macos {
-        "xcode-select --install"
-    } else {
-        "https://git-scm.com/downloads"
-    };
+    let fix = "xcode-select --install";
     match m.find("git") {
         None => Check::new(
             "git",
@@ -334,9 +324,6 @@ fn open_in_app(cfg: &Config, m: &Machine) -> Check {
 /// made — the one place orion's ⌘ chords reach it.
 fn orion_app(m: &Machine) -> Check {
     const NAME: &str = "Orion.app";
-    if !m.macos {
-        return Check::new(NAME, Status::Skipped, "macOS only");
-    }
     if crate::event_loop::ghostty_app_in(&m.app_roots).is_none() {
         return Check::new(
             NAME,
@@ -582,7 +569,6 @@ mod tests {
                 home: Some(root.join("home")),
                 app_roots: vec![root.join("root")],
                 cwd: root.join("project"),
-                macos: true,
                 editor_env: None,
             }
         }
@@ -775,7 +761,7 @@ mod tests {
     #[test]
     fn orion_app_and_the_ghostty_it_is_made_from() {
         let stubs = Stubs::new();
-        let mut m = stubs.machine();
+        let m = stubs.machine();
         let check = orion_app(&m);
         assert_eq!(check.status, Status::Missing);
         assert!(
@@ -797,9 +783,6 @@ mod tests {
             check.detail.ends_with("Applications/Orion.app"),
             "{check:?}"
         );
-
-        m.macos = false;
-        assert_eq!(orion_app(&m).status, Status::Skipped);
     }
 
     /// The project's key: where it was found, never what it is.
