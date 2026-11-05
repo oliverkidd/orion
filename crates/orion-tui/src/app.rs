@@ -206,9 +206,6 @@ pub enum HitTarget {
     /// click opens the QUICK PROMPT, through the very
     /// `event_loop::launcher::open_box` the key runs.
     LauncherWelcomePrompt,
-    /// The footer's right-edge readout (`2 agents · 412 MB`): a
-    /// click opens the memory modal — the one `⇧M` opens.
-    FooterUsage,
     /// The footer's nameplate at the far left (`v1.0.0`): a click goes
     /// HOME, or back from it — what `⌘G` does.
     FooterHome,
@@ -2354,38 +2351,6 @@ impl SettingsView {
     }
 }
 
-/// Memory-usage modal (`M`): how much RAM orion and every live session's
-/// process tree (claude, codex, shells and their children) are using. The
-/// daemon's half arrives async as `ServerEvent::Metrics`; the event loop
-/// re-requests on a slow poll while the modal is open.
-#[derive(Debug, Clone, Default)]
-pub struct MetricsView {
-    /// Last daemon reading; None until the first reply lands.
-    pub snapshot: Option<orion_core::MetricsSnapshot>,
-    /// This TUI process's own RSS, sampled client-side with each request
-    /// (the daemon can't see us — we're not its child).
-    pub client_rss_bytes: u64,
-    /// Cursor into `rows`; Enter opens the session under it.
-    pub selected: usize,
-    /// Scroll offset into the per-session rows, clamped during draw.
-    pub scroll: usize,
-    /// Display order of the rows, written back during draw so the key and
-    /// mouse handlers agree with what's on screen. `None` = one of orion's
-    /// own processes (daemon / this UI) — selectable but not openable.
-    pub rows: Vec<Option<SessionRef>>,
-    /// Whole modal rect, written back during draw so clicks outside close.
-    pub area: Rect,
-    /// Screen rect of the session rows, written back during draw so clicks
-    /// can hit-test rows.
-    pub list_area: Rect,
-}
-
-impl MetricsView {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum Overlay {
     Menu(ContextMenu),
@@ -2402,7 +2367,6 @@ pub enum Overlay {
     Tree(crate::tree_browser::TreeBrowser),
     /// `orion open <file>…` from a session: the FILE TABS.
     FileTabs(crate::file_tabs::FileTabsView),
-    Metrics(MetricsView),
     /// `⇧U`: ACCOUNT USAGE — how much is left on each linked account.
     Usage(crate::usage::UsageView),
     /// `⇧S`: STACK STATUS — every docker compose stack, to start or stop.
@@ -4272,8 +4236,8 @@ pub struct App {
     pub hover_launcher_pane: bool,
     /// The header button under the pointer, from the last mouse report:
     /// a PROJECT TAB, its `×`, the `+` after them, a full-screen
-    /// session's `‹ sessions`, or the footer's memory readout (the one
-    /// button off the header). The header marks that one for as long as
+    /// session's `‹ sessions`, or one of the footer's buttons. The header
+    /// marks that one for as long as
     /// it is there, so a word reads as the button it is before anyone
     /// clicks to find out. Carries `hover_launcher_pane`'s caveat — only
     /// terminals that report plain motion ever set it, and elsewhere the
@@ -4878,8 +4842,7 @@ pub struct App {
     /// base branch, on the **Fetch base branch** beat (`crate::base_sync`).
     pub base_sync: crate::base_sync::Shared,
     /// Latest daemon metrics reading (daemon + per-session process trees),
-    /// for the footer's memory/session readout. Refreshed on a slow poll;
-    /// the metrics modal shares the same replies at a faster cadence.
+    /// for the footer's memory/session readout. Refreshed on a slow poll.
     pub last_metrics: Option<orion_core::MetricsSnapshot>,
     /// This TUI process's own RSS, sampled alongside each metrics request
     /// (the daemon can't see us).

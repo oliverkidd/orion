@@ -20,9 +20,7 @@
 //! never inline in an input handler. `handle_mouse` holding an action of
 //! its own is the smell to look for in review.
 
-use super::{
-    attach_now, jump_to_target, open_link, open_session, run_menu_action, Landing, SettingsCmd,
-};
+use super::{attach_now, jump_to_target, open_link, run_menu_action, Landing, SettingsCmd};
 use crate::app::{
     App, ConfirmDialog, DiffFocus, DiffView, Focus, FollowUp, Overlay, PendingAction, SessionRow,
 };
@@ -67,21 +65,6 @@ pub(super) fn host(app: &mut App, entry: crate::hosts::HostEntry) {
     app.overlay = None;
     app.pending_ssh = Some(entry);
     app.should_quit = true;
-}
-
-/// The METRICS modal's selected row — Enter, or a click on the row the
-/// cursor is already on: the modal goes and the panels land on that
-/// session. Orion's own rows (the daemon, this UI) carry no session and
-/// do nothing.
-pub(super) fn metrics_row(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let Some(Overlay::Metrics(view)) = &app.overlay else {
-        return;
-    };
-    let Some(Some(sref)) = view.rows.get(view.selected).cloned() else {
-        return;
-    };
-    app.overlay = None;
-    open_session(app, sref, out);
 }
 
 /// Move the DIFF modal's file cursor to `index` (clamped) and read that

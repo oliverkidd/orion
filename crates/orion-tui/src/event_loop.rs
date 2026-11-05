@@ -4,8 +4,8 @@ use crate::agent_picker::{self, kind_label, KindPicker};
 use crate::app::{
     clamp_selection, AgentLaunchDraft, App, AttachedTerm, ConfirmDialog, ConnState, ContextMenu,
     DiffView, FileFinder, Focus, GrepView, HelpView, HitTarget, LinkRow, MenuAction, MenuFilter,
-    MenuItem, MetricsView, Overlay, Palette, PaletteTarget, PendingAction, PendingIntent,
-    PointerShape, PromptDialog, PromptKind, SessionRow, SettingsView, SubmenuKind, TermSelection,
+    MenuItem, Overlay, Palette, PaletteTarget, PendingAction, PendingIntent, PointerShape,
+    PromptDialog, PromptKind, SessionRow, SettingsView, SubmenuKind, TermSelection,
     WorktreeRollback,
 };
 use crate::app::{AlertKind, PrCommentAnswer, PrDiffAnswer};
@@ -207,12 +207,7 @@ pub(crate) const PR_DETAIL_DEBOUNCE: Duration = Duration::from_millis(300);
 /// MODAL's own row is read again on this window while it stays on it.
 pub(crate) const PR_DETAIL_FRESH: Duration = Duration::from_secs(30);
 
-/// While the metrics modal is open, how often a fresh memory reading is
-/// requested from the daemon.
-const METRICS_POLL: Duration = Duration::from_secs(2);
-
-/// With the modal closed, how often the footer's memory/session readout is
-/// refreshed.
+/// How often the footer's memory/session readout is refreshed.
 const FOOTER_METRICS_POLL: Duration = Duration::from_secs(5);
 
 /// How often the grid asks the daemon what each TERMINAL on it last
@@ -560,17 +555,11 @@ async fn main_loop(
                 sweep_pull_request(&mut app, &pr_tx);
                 lookup_open_prs(&mut app, &prs_tx, &mut out);
             }
-            // Metrics poll: always on for the footer's memory/session
-            // readout, tightened while the metrics modal is open (its
-            // initial reading is requested by the M keypress itself).
+            // Metrics poll: always on, for the footer's memory/session
+            // readout.
             _ = tokio::time::sleep_until(next_metrics_poll), if matches!(app.conn, ConnState::Connected) => {
                 request_metrics(&mut app, &mut out);
-                let period = if matches!(app.overlay, Some(Overlay::Metrics(_))) {
-                    METRICS_POLL
-                } else {
-                    FOOTER_METRICS_POLL
-                };
-                next_metrics_poll = tokio::time::Instant::now() + period;
+                next_metrics_poll = tokio::time::Instant::now() + FOOTER_METRICS_POLL;
             }
             // The grid's TERMINAL cards: what each shell last printed, asked
             // on a beat of its own for as long as any is on screen — with
@@ -3222,8 +3211,8 @@ fn note_focus_change(app: &mut App) {
     }
 }
 
-/// Fire one memory reading for the metrics modal: sample this client's own
-/// RSS now (the daemon can't see us), ask the daemon for itself plus every
+/// Fire one memory reading for the footer's readout: sample this client's
+/// own RSS now (the daemon can't see us), ask the daemon for itself plus every
 /// session's process tree. The reply arrives as `ServerEvent::Metrics`.
 ///
 /// The client's own reading is a `ps`, and this runs on the footer's beat —
@@ -3297,19 +3286,8 @@ fn land_terminal_tail(app: &mut App, id: TerminalId, tail: Option<orion_core::Ou
     entry.end_seq = tail.end_seq;
 }
 
-/// Open the memory modal — `⇧M`, and a click on the footer's readout.
-/// A reading is requested right away: the main loop's poll may be up to
-/// FOOTER_METRICS_POLL out.
-fn open_metrics(app: &mut App, out: &mut Vec<ClientRequest>) {
-    app.overlay = Some(Overlay::Metrics(MetricsView::new()));
-    request_metrics(app, out);
-}
-
 fn land_client_rss(app: &mut App, bytes: u64) {
     app.client_rss_bytes = bytes;
-    if let Some(Overlay::Metrics(view)) = &mut app.overlay {
-        view.client_rss_bytes = bytes;
-    }
 }
 
 /// Queue a request that wants no follow-up when its Ack lands.
@@ -4271,7 +4249,6 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::Grep(_)
         | Overlay::Tree(_)
         | Overlay::FileTabs(_)
-        | Overlay::Metrics(_)
         | Overlay::Usage(_)
         | Overlay::CleanWorktrees(_)
         | Overlay::ProjectPicker(_) => true,
@@ -4641,7 +4618,6 @@ fn dispatch_action(
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
         Action::Settings => open_settings(app),
         Action::ClaudeAccounts => open_claude_accounts(app, None),
-        Action::Metrics => open_metrics(app, out),
         Action::Usage => crate::usage::open(app),
         Action::Stacks => crate::stacks::open(app),
         Action::StopAllStacks => crate::stacks::stop_all(app, out),
@@ -5551,7 +5527,6 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::Help
             | Action::Settings
             | Action::ClaudeAccounts
-            | Action::Metrics
             | Action::Usage
             | Action::Stacks
             | Action::Hosts
@@ -8124,17 +8099,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 app.overlay = None;
             }
         }
-        Overlay::Metrics(view) => match key.code {
-            _ if ui::metrics_keys::CLOSE.matches(&key) => app.overlay = None,
-            KeyCode::Char('j') | KeyCode::Down => {
-                view.selected = clamp_selection(view.selected as i64 + (1), view.rows.len());
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                view.selected = clamp_selection(view.selected as i64 + (-1), view.rows.len());
-            }
-            _ if ui::metrics_keys::OPEN.matches(&key) => activate::metrics_row(app, out),
-            _ => {}
-        },
         Overlay::Hosts(view) => {
             // Typing a new destination (`a`): the input owns printable keys.
             if let Some(input) = &mut view.input {
@@ -10960,52 +10924,6 @@ fn jump_to_target_inner(
     }
 }
 
-/// Land the panel selection on `sref`'s session and attach it — the metrics
-/// modal's Enter. The same walk as the palette's session jump, generalized
-/// to terminal tabs.
-fn open_session(app: &mut App, sref: SessionRef, out: &mut Vec<ClientRequest>) {
-    let worktree = match &sref {
-        SessionRef::Agent(id) => app
-            .tree
-            .agents
-            .iter()
-            .find(|a| &a.id == id)
-            .map(|a| a.worktree_id.clone()),
-        SessionRef::Terminal(id) => app
-            .tree
-            .terminals
-            .iter()
-            .find(|t| &t.id == id)
-            .map(|t| t.worktree_id.clone()),
-    };
-    let found = worktree.as_ref().is_some_and(|wid| {
-        app.tree
-            .worktrees
-            .iter()
-            .find(|w| &w.id == wid)
-            .map(|w| w.project_id.clone())
-            .is_some_and(|pid| select_project_row_by_id(app, &pid))
-    });
-    let wt_index = found
-        .then(|| worktree.as_ref().and_then(|wid| app.worktree_row_of(wid)))
-        .flatten();
-    let Some(wt_index) = wt_index else {
-        return;
-    };
-    app.set_sel_worktree(wt_index);
-    let Some(index) = app
-        .visible_session_rows()
-        .iter()
-        .position(|r| r.sref().as_ref() == Some(&sref))
-    else {
-        restore_session(app, out);
-        app.focus = Focus::Sessions;
-        return;
-    };
-    app.set_sel_session(index);
-    attach_selected(app, out);
-}
-
 /// What a palette pick does once it has found its session row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Landing {
@@ -12414,7 +12332,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
     // a card, which has its own highlight, or the background.
     // The header's PR & ISSUE COUNTS are buttons of the same kind, and
     // take the same underline; so are the pane's CLOSE and SIDE BUTTONS
-    // and the footer's memory readout. A card's PULL REQUEST LINE is a
+    // and the footer's buttons. A card's PULL REQUEST LINE is a
     // link on a card whose own highlight marks the cursor, not the
     // pointer, so the line takes it for itself.
     let crumb = hit.filter(|h| {
@@ -12438,7 +12356,6 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherPullRequests
                 | HitTarget::LauncherIssues
                 | HitTarget::LauncherWelcomePrompt
-                | HitTarget::FooterUsage
                 | HitTarget::FooterHome
                 | HitTarget::FooterUpgrade
                 | HitTarget::FooterSpotify(_)
@@ -13087,38 +13004,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         }
         return;
     }
-    // Metrics: the wheel moves the selection, a click on a row selects it
-    // (a click on the selected row opens it); everything else inside the box
-    // is swallowed.
-    if let Some(Overlay::Metrics(view)) = &mut app.overlay {
-        let mut open = false;
-        match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                view.selected = clamp_selection(view.selected as i64 + (-1), view.rows.len());
-                app.dirty = true;
-            }
-            MouseEventKind::ScrollDown => {
-                view.selected = clamp_selection(view.selected as i64 + (1), view.rows.len());
-                app.dirty = true;
-            }
-            MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(index) =
-                    crate::list_hit::row_at(view.list_area, view.scroll, view.rows.len(), mouse_pos)
-                {
-                    // A click selects; on the row already selected it is
-                    // Enter.
-                    open = view.selected == index;
-                    view.selected = index;
-                }
-                app.dirty = true;
-            }
-            _ => {}
-        }
-        if open {
-            activate::metrics_row(app, out);
-        }
-        return;
-    }
     // Other overlays: keyboard only; ignore mouse.
     if app.overlay.is_some() {
         return;
@@ -13251,9 +13136,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // function `v` / `i` run — the click is the key's twin.
                 Some(HitTarget::LauncherPullRequests) => crate::pr_modal::open(app),
                 Some(HitTarget::LauncherIssues) => crate::issues::open_issues(app),
-                // The footer's memory readout: the modal `⇧M` opens,
-                // through the same `open_metrics`.
-                Some(HitTarget::FooterUsage) => open_metrics(app, out),
                 // The footer's nameplate: HOME, through the `toggle_home`
                 // its key runs — and from HOME, back down to the grid.
                 Some(HitTarget::FooterHome) => toggle_home(app),
@@ -14008,10 +13890,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
         ServerEvent::Metrics { req_id, snapshot } => {
             // Answered with Metrics, not Ack — clear the pending slot by hand.
             app.pending.remove(&req_id);
-            if let Some(Overlay::Metrics(view)) = &mut app.overlay {
-                view.snapshot = Some(snapshot.clone());
-            }
-            // The footer's readout keeps the latest reading either way.
             app.last_metrics = Some(snapshot);
             app.dirty = true;
         }
@@ -20595,7 +20473,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(
-            app.hit_rect(&HitTarget::FooterUsage).is_none(),
+            !footer_row(&terminal).contains(" MB"),
             "no readout before the first reading"
         );
 
@@ -20715,92 +20593,6 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.pull_requests.contains_key(&w1));
         assert!(app.pr_lookup_due(&w1), "asked again at once");
         assert_eq!(app.worktree_ahead_behind(&w1), (0, 0));
-    }
-
-    /// INPUT PARITY: the footer's readout is a button. Its target is the
-    /// words alone, the pointer on it underlines them, and a click opens
-    /// the memory modal — the one `⇧M` opens, through the same
-    /// `open_metrics`, reading requested and all.
-    #[test]
-    fn clicking_the_footer_readout_opens_the_memory_modal() {
-        use crossterm::event::Event;
-        use orion_core::{MetricsSnapshot, SessionMetrics};
-        use ratatui::style::Modifier;
-        let mut app = App::new();
-        seed_tree(&mut app);
-        app.client_rss_bytes = 100 * 1024 * 1024;
-        app.last_metrics = Some(MetricsSnapshot {
-            daemon_pid: 1,
-            daemon_rss_bytes: 200 * 1024 * 1024,
-            system_total_bytes: 0,
-            sessions: vec![SessionMetrics {
-                session: SessionRef::Agent(AgentId("a1".into())),
-                pid: 10,
-                rss_bytes: 724 * 1024 * 1024,
-                procs: 3,
-                prewarm: None,
-            }],
-        });
-        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let rect = app
-            .hit_rect(&HitTarget::FooterUsage)
-            .expect("the readout was drawn");
-        let row = |terminal: &Terminal<TestBackend>, underlined: bool| -> String {
-            let buf = terminal.backend().buffer();
-            (0..buf.area.width)
-                .filter_map(|x| buf.cell((x, rect.y)))
-                .filter(|c| !underlined || c.modifier.contains(Modifier::UNDERLINED))
-                .map(|c| c.symbol())
-                .collect()
-        };
-        let line: Vec<char> = row(&terminal, false).chars().collect();
-        let word: String = line[rect.x as usize..(rect.x + rect.width) as usize]
-            .iter()
-            .collect();
-        assert_eq!(word, "1 agent · 1.0 GB", "the words, no padding");
-        assert_eq!(rect.y, 29, "on the bar's own row");
-        assert_eq!(row(&terminal, true), "", "at rest, nothing is underlined");
-
-        let mouse = |app: &mut App, kind: MouseEventKind, out: &mut Vec<ClientRequest>| {
-            handle_terminal_event(app, Event::Mouse(mev(kind, rect.x, rect.y)), out);
-        };
-        let mut out = Vec::new();
-        mouse(&mut app, MouseEventKind::Moved, &mut out);
-        assert_eq!(app.hover_crumb, Some(HitTarget::FooterUsage));
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert_eq!(row(&terminal, true), word, "the pointer underlines it");
-
-        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), &mut out);
-        assert!(
-            matches!(app.overlay, Some(Overlay::Metrics(_))),
-            "the click opens the memory modal: {:?}",
-            app.overlay
-        );
-        assert!(
-            matches!(out.last(), Some(ClientRequest::GetMetrics { .. })),
-            "and asks for a reading at once: {out:?}"
-        );
-        // The client's own RSS is a live `ps` of this test process, and
-        // moves between the two readings: it is the one field let go.
-        let steady = |overlay: Option<Overlay>| match overlay {
-            Some(Overlay::Metrics(mut view)) => {
-                view.client_rss_bytes = 0;
-                format!("{view:?}")
-            }
-            other => panic!("expected the memory modal, got {other:?}"),
-        };
-        let clicked = steady(app.overlay.take());
-        let keyed = run_action(&mut app, crate::keymap::Action::Metrics);
-        assert_eq!(
-            steady(app.overlay.take()),
-            clicked,
-            "the click is the palette's **Memory**"
-        );
-        assert!(matches!(
-            keyed.last(),
-            Some(ClientRequest::GetMetrics { .. })
-        ));
     }
 
     /// An app with a metrics reading (so the footer has its `1 agent · 1.0
@@ -30840,7 +30632,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             let mut out = Vec::new();
             open_settings_on(&mut app, crate::config::hotkeys_tab(), &mut out);
-            let row = crate::keymap::index_of(crate::keymap::Action::Metrics).unwrap();
+            let row = crate::keymap::index_of(crate::keymap::Action::Usage).unwrap();
             for _ in 0..row {
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
@@ -30999,81 +30791,6 @@ diff --git a/src/c.rs b/src/c.rs
             &mut out,
         );
         assert_eq!(settings_view(&app).tab, 2, "clicked the third tab");
-    }
-
-    // ---- `M` metrics modal ----
-
-    #[test]
-    fn metrics_modal_opens_requests_and_renders() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(
-            &mut app,
-            crate::keymap::Action::Metrics,
-        ));
-        assert!(matches!(app.overlay, Some(Overlay::Metrics(_))));
-
-        // The keypress itself fires the initial reading's request.
-        let req_id = match out.last() {
-            Some(ClientRequest::GetMetrics { req_id }) => *req_id,
-            other => panic!("expected GetMetrics, got {other:?}"),
-        };
-        hse(
-            &mut app,
-            ServerEvent::Metrics {
-                req_id,
-                snapshot: orion_core::MetricsSnapshot {
-                    daemon_pid: 42,
-                    daemon_rss_bytes: 40 * 1024 * 1024,
-                    system_total_bytes: 32 * 1024 * 1024 * 1024,
-                    sessions: vec![orion_core::SessionMetrics {
-                        session: SessionRef::Agent(AgentId("a1".into())),
-                        pid: 4321,
-                        rss_bytes: 1_610_612_736, // 1.5 GB
-                        procs: 3,
-                        prewarm: None,
-                    }],
-                },
-            },
-        );
-        assert!(
-            app.pending.is_empty(),
-            "the Metrics reply must clear its pending slot"
-        );
-        let Some(Overlay::Metrics(view)) = &app.overlay else {
-            panic!("metrics closed");
-        };
-        assert!(view.snapshot.is_some());
-
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("Memory"), "title rendered:\n{text}");
-        assert!(
-            text.contains("1 session · 3 procs"),
-            "claude rollup rendered:\n{text}"
-        );
-        assert!(
-            text.contains("agent-1 (claude)") && text.contains("demo/main"),
-            "session row joined with the tree:\n{text}"
-        );
-        assert!(text.contains("1.5 GB"), "subtree memory rendered:\n{text}");
-        assert!(
-            text.contains("orion daemon") && text.contains("40 MB"),
-            "daemon row rendered:\n{text}"
-        );
-        assert!(
-            text.contains("% of 32 GB installed"),
-            "system share rendered:\n{text}"
-        );
-        let Some(Overlay::Metrics(view)) = &app.overlay else {
-            panic!("metrics closed");
-        };
-        assert!(view.area.width > 0, "draw writes the hit-test area back");
-
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none());
     }
 
     // ---- `⇧S` stacks ----
@@ -31557,245 +31274,6 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(view.selected, 1);
         press(&mut app, KeyCode::Char('U'), KeyModifiers::SHIFT, &mut out);
         assert!(app.overlay.is_none());
-    }
-
-    /// Prewarm-pool spares have no agent row; without the home the daemon
-    /// reports they'd render as "(unknown agent)". They group under one
-    /// header as a small tree, named by kind/model and placed by worktree,
-    /// with their own rollup line — and stay out of the live-agent counts.
-    #[test]
-    fn metrics_groups_prewarm_spares_under_their_own_header() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(
-            &mut app,
-            crate::keymap::Action::Metrics,
-        ));
-        let req_id = match out.last() {
-            Some(ClientRequest::GetMetrics { req_id }) => *req_id,
-            other => panic!("expected GetMetrics, got {other:?}"),
-        };
-        let spare = |id: &str, pid: u32, mb: u64, model: Option<&str>| orion_core::SessionMetrics {
-            session: SessionRef::Agent(AgentId(id.into())),
-            pid,
-            rss_bytes: mb * 1024 * 1024,
-            procs: 3,
-            prewarm: Some(orion_core::PrewarmInfo {
-                worktree: orion_core::WorktreeId("w1".into()),
-                kind: orion_core::AgentKind::Claude,
-                model: model.map(str::to_string),
-            }),
-        };
-        hse(
-            &mut app,
-            ServerEvent::Metrics {
-                req_id,
-                snapshot: orion_core::MetricsSnapshot {
-                    daemon_pid: 42,
-                    daemon_rss_bytes: 40 * 1024 * 1024,
-                    system_total_bytes: 0,
-                    sessions: vec![
-                        orion_core::SessionMetrics {
-                            session: SessionRef::Agent(AgentId("a1".into())),
-                            pid: 4321,
-                            rss_bytes: 500 * 1024 * 1024,
-                            procs: 4,
-                            prewarm: None,
-                        },
-                        spare("warm-1", 7001, 300, Some("opus")),
-                        spare("warm-2", 7002, 250, None),
-                    ],
-                },
-            },
-        );
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(
-            !text.contains("(unknown agent)"),
-            "spares are named, not unknown:\n{text}"
-        );
-        assert!(
-            text.contains("1 session · 4 procs"),
-            "claude rollup counts live sessions only:\n{text}"
-        );
-        assert!(
-            text.contains("2 spares · 6 procs · pre-booted for new agents"),
-            "spares get their own rollup line:\n{text}"
-        );
-        let pos = |s: &str| {
-            text.find(s)
-                .unwrap_or_else(|| panic!("{s} missing:\n{text}"))
-        };
-        assert!(
-            pos("agent-1 (claude)") < pos("warm spares (2)")
-                && pos("warm spares (2)") < pos("├ claude · opus")
-                && pos("├ claude · opus") < pos("└ claude")
-                && pos("└ claude") < pos("orion daemon"),
-            "live rows, then the spares tree, then orion's own:\n{text}"
-        );
-        let leaf = text
-            .lines()
-            .find(|l| l.contains("├ claude · opus"))
-            .expect("spare row");
-        assert!(
-            leaf.contains("demo/main") && leaf.contains("7001") && leaf.contains("300 MB"),
-            "a spare is placed in its worktree with its own reading: {leaf}"
-        );
-        let header = text
-            .lines()
-            .find(|l| l.contains("warm spares (2)"))
-            .expect("header row");
-        assert!(
-            header.contains("550 MB") && !header.contains("7001"),
-            "the header sums its spares and points at no pid: {header}"
-        );
-
-        // Enter on a spare opens nothing: there's no agent row to attach
-        // until a CreateAgent adopts it.
-        let Some(Overlay::Metrics(view)) = &mut app.overlay else {
-            panic!("metrics closed");
-        };
-        view.selected = 2;
-        out.clear();
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert!(
-            matches!(app.overlay, Some(Overlay::Metrics(_))) && out.is_empty(),
-            "a spare row is inert: {out:?}"
-        );
-    }
-
-    #[test]
-    fn metrics_enter_opens_selected_session() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(
-            &mut app,
-            crate::keymap::Action::Metrics,
-        ));
-        request_metrics(&mut app, &mut out);
-        let req_id = match out.last() {
-            Some(ClientRequest::GetMetrics { req_id }) => *req_id,
-            other => panic!("expected GetMetrics, got {other:?}"),
-        };
-        let snapshot = orion_core::MetricsSnapshot {
-            daemon_pid: 42,
-            daemon_rss_bytes: 1024,
-            system_total_bytes: 0,
-            sessions: vec![orion_core::SessionMetrics {
-                session: SessionRef::Agent(AgentId("a1".into())),
-                pid: 4321,
-                rss_bytes: 2048,
-                procs: 1,
-                prewarm: None,
-            }],
-        };
-        hse(
-            &mut app,
-            ServerEvent::Metrics {
-                req_id,
-                snapshot: snapshot.clone(),
-            },
-        );
-
-        // A draw writes the row order back into the view; Enter reads it.
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let Some(Overlay::Metrics(view)) = &app.overlay else {
-            panic!("metrics closed");
-        };
-        assert_eq!(view.rows.len(), 3, "session + daemon + ui rows");
-        assert_eq!(view.selected, 0, "cursor starts on the biggest session");
-
-        out.clear();
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "Enter closes the modal");
-        assert_eq!(app.focus, Focus::Terminal);
-        assert!(app.term_locked, "opened session locks input like an attach");
-        let sref = SessionRef::Agent(AgentId("a1".into()));
-        assert!(
-            out.iter()
-                .any(|r| matches!(r, ClientRequest::Attach { session, .. } if *session == sref)),
-            "Enter attaches the selected session: {out:?}"
-        );
-        assert_eq!(
-            app.visible_session_rows()
-                .get(app.sel_session())
-                .and_then(|r| r.sref()),
-            Some(sref),
-            "the panel selection landed on the opened session"
-        );
-
-        // Reopen (Ctrl+q first — the attach locked input to the terminal);
-        // Enter on one of orion's own rows (no session) is inert.
-        press(
-            &mut app,
-            KeyCode::Char('q'),
-            KeyModifiers::CONTROL,
-            &mut out,
-        );
-        out.extend(crate::event_loop::run_action(
-            &mut app,
-            crate::keymap::Action::Metrics,
-        ));
-        request_metrics(&mut app, &mut out);
-        let req_id = match out.last() {
-            Some(ClientRequest::GetMetrics { req_id }) => *req_id,
-            other => panic!("expected GetMetrics, got {other:?}"),
-        };
-        hse(&mut app, ServerEvent::Metrics { req_id, snapshot });
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-        let Some(Overlay::Metrics(view)) = &app.overlay else {
-            panic!("metrics closed");
-        };
-        assert_eq!(view.selected, 2, "j walks down to the ui row");
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-        let Some(Overlay::Metrics(view)) = &app.overlay else {
-            panic!("metrics closed");
-        };
-        assert_eq!(view.selected, 2, "selection does not run past the last row");
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert!(
-            matches!(app.overlay, Some(Overlay::Metrics(_))),
-            "Enter on a orion row keeps the modal open"
-        );
-    }
-
-    #[test]
-    fn metrics_reply_after_close_is_dropped() {
-        let mut app = App::new();
-        let mut out = Vec::new();
-        out.extend(crate::event_loop::run_action(
-            &mut app,
-            crate::keymap::Action::Metrics,
-        ));
-        let req_id = match out.last() {
-            Some(ClientRequest::GetMetrics { req_id }) => *req_id,
-            other => panic!("expected GetMetrics, got {other:?}"),
-        };
-        press(&mut app, KeyCode::Char('q'), KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "q closes the modal");
-        hse(
-            &mut app,
-            ServerEvent::Metrics {
-                req_id,
-                snapshot: orion_core::MetricsSnapshot {
-                    daemon_pid: 42,
-                    daemon_rss_bytes: 0,
-                    system_total_bytes: 0,
-                    sessions: vec![],
-                },
-            },
-        );
-        assert!(
-            app.overlay.is_none(),
-            "late reply must not reopen the modal"
-        );
-        assert!(app.pending.is_empty(), "late reply still clears its slot");
     }
 
     // ---- `f` fuzzy file finder ----
@@ -40224,11 +39702,6 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
-                "Metrics",
-                |app| app.overlay = Some(Overlay::Metrics(MetricsView::new())),
-                None,
-            ),
-            (
                 "Issues",
                 |app| {
                     seed_tree(app);
@@ -40498,7 +39971,6 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::Grep(_) => "Grep",
             Overlay::Tree(_) => "Tree",
             Overlay::FileTabs(_) => "FileTabs",
-            Overlay::Metrics(_) => "Metrics",
             Overlay::Usage(_) => "Usage",
             Overlay::Stacks(_) => "Stacks",
             Overlay::CleanWorktrees(_) => "CleanWorktrees",
@@ -40543,7 +40015,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 25, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 24, "a variant came or went: {seen:?}");
         });
     }
 

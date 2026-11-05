@@ -215,7 +215,6 @@ pub enum Action {
     /// The settings overlay on the Agents tab's CLAUDE ACCOUNTS: who each
     /// Claude Code login is, signing one in or out, adding another.
     ClaudeAccounts,
-    Metrics,
     /// `⇧U`: ACCOUNT USAGE — how much is left on each Claude and Cursor
     /// account, window by window.
     Usage,
@@ -936,15 +935,6 @@ pub const ACTIONS: &[ActionSpec] = &[
         id: "claude_accounts",
         label: "Claude accounts",
         hint: "Settings → Agents → Claude accounts: who each Claude Code login is signed in as, sign one in or out, add another",
-        group: "GENERAL",
-        scope: Scope::Global,
-        defaults: &[],
-    },
-    ActionSpec {
-        action: Action::Metrics,
-        id: "metrics",
-        label: "Memory usage",
-        hint: "RAM used by orion and every live agent's process tree",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],

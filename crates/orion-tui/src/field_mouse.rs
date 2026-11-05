@@ -91,7 +91,6 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         | Overlay::Help(_)
         | Overlay::Settings(_)
         | Overlay::FileTabs(_)
-        | Overlay::Metrics(_)
         | Overlay::Usage(_)
         | Overlay::Stacks(_)
         | Overlay::Conflicts(_)

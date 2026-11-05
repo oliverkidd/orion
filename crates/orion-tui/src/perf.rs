@@ -159,7 +159,6 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::Grep(_)) => "Grep",
         Some(Overlay::Tree(_)) => "Tree",
         Some(Overlay::FileTabs(_)) => "FileTabs",
-        Some(Overlay::Metrics(_)) => "Metrics",
         Some(Overlay::Usage(_)) => "Usage",
         Some(Overlay::Stacks(_)) => "Stacks",
         Some(Overlay::CleanWorktrees(_)) => "CleanWorktrees",

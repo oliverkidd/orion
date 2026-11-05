@@ -687,24 +687,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             width: right_w,
             ..area
         };
-        // The readout is a button — a click opens the memory modal, as
-        // `⇧M` does — and nothing about a dim figure says so, so the
-        // pointer on it lifts it to full text and underlines it, as the
-        // header's buttons are. Only the words are the target, laid where
-        // the right alignment puts them, not the padding beside them.
-        let span = Span::styled(
-            usage,
-            footer_button_style(th, app.hover_crumb == Some(HitTarget::FooterUsage)),
-        );
-        let width = (span.width() as u16).min(right.width);
-        app.hits.push((
-            Rect {
-                x: right.x + right.width - width,
-                width,
-                ..right
-            },
-            HitTarget::FooterUsage,
-        ));
+        let span = Span::styled(usage, Style::default().fg(th.dim));
         f.render_widget(
             Paragraph::new(Line::from(span)).alignment(ratatui::layout::Alignment::Right),
             right,
@@ -712,8 +695,8 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// A dim button on the bar — the nameplate, the memory readout, the
-/// Spotify glyphs — as it is drawn: lifted to full text and underlined
+/// A dim button on the bar — the nameplate, the Spotify glyphs — as it
+/// is drawn: lifted to full text and underlined
 /// while the pointer is on it (`hovered`), since nothing about a dim word
 /// says it can be clicked.
 pub(crate) fn footer_button_style(th: crate::theme::Theme, hovered: bool) -> Style {
@@ -745,8 +728,8 @@ fn push_hit(app: &mut App, within: Rect, x: u16, width: u16, target: HitTarget) 
 /// The footer's right-edge readout: the agents running and orion's total
 /// memory footprint (TUI + daemon + every session's process subtree), `8
 /// agents · 44 MB`. Terminals and the prewarm pool's spares count toward
-/// the memory but not the agents — the memory modal it opens breaks it
-/// all down. None until the first metrics reply arrives.
+/// the memory but not the agents. None until the first metrics reply
+/// arrives.
 fn footer_usage(app: &App) -> Option<String> {
     let m = app.last_metrics.as_ref()?;
     let agents = m

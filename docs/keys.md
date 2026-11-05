@@ -133,7 +133,7 @@ or `Esc` folds it back.
 
 The actions with no key of their own — **New agent — choose harness** (the NEW AGENT PICKER), **Agent presets**,
 **Duplicate session**, **Comment on pull request**, **Delete all sessions**, **SSH hosts**,
-**Memory usage**, **Keyboard shortcuts**, **Open a folder as a project**, **Claude accounts**,
+**Keyboard shortcuts**, **Open a folder as a project**, **Claude accounts**,
 **Open skills folder** (your Claude Code skills, `~/.claude/skills`, in the TREE BROWSER) — are
 in the COMMAND PALETTE and, where they apply to a card, its right-click menu. Bind any of them in
 Settings → Hotkeys.
@@ -535,7 +535,7 @@ branch only origin has into is that branch, too, never a fresh one cut over it.
 
 ## Menus and lists
 
-The COMMAND PALETTE, the OPEN MENU, a right-click menu, help, the memory modal, the ssh hosts list
+The COMMAND PALETTE, the OPEN MENU, a right-click menu, help, the ssh hosts list
 and the project pickers are all lists: type to filter where they filter, `↑`/`↓` move, `Enter` or
 a click picks, `→` / `←` step into and back out of a submenu, and `Esc` or a click outside closes
 the whole thing. Each list's keys are on its bottom border — on a session picker's Claude row
@@ -596,7 +596,7 @@ The FOOTER carries the rest, left to right:
 | `demo ⎇ feat ◐ fix-login  · archived` after it | where you are, in the marks the grid draws it with: the project, the checkout behind its SCOPE MARK (`⌂` the root, `⎇` a worktree), and the card under the cursor behind its STATUS MARK, then `· archived`, `· full screen` or `· home` when the view is not the grid of live sessions. Each part is a link: a click goes back down onto the grid there — the project's whole grid, the checkout's band, the session's card |
 | a message in place of the hints | a FLASH, until the next key, led by what kind it is: `✕` a failure in crimson, `⚠` a setting to change in gold, `✓` a result nothing else shows in green, the gold spinner over muted words for a wait, `·` a heads-up in muted |
 | `♪ Midnight City · M83  ⏮ ⏸ ⏭` before it | what Spotify is playing (macOS, the `spotify` setting), dimmed while paused. Each glyph is a button: back, play/pause, next. Gone while Spotify is closed or stopped |
-| `2 agents · 412 MB` at the right edge | the agents running and orion's whole memory footprint, re-read every 5 seconds; a click opens the memory modal, which breaks it down by session, terminal and spare |
+| `2 agents · 412 MB` at the right edge | the agents running and orion's whole memory footprint (this UI, the DAEMON and every session's processes), re-read every 5 seconds |
 | `↓ - Move down` on the row above the bar | the KEY COMBO DISPLAY: the key you just pressed and what it did, for anyone watching a screen share. Keys typed into a LOCKED PANE never show |
 
 ## Mouse

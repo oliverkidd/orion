@@ -135,7 +135,6 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             | HitTarget::LauncherPullRequests
             | HitTarget::LauncherIssues
             | HitTarget::LauncherWelcomePrompt
-            | HitTarget::FooterUsage
             | HitTarget::FooterHome
             | HitTarget::FooterUpgrade
             | HitTarget::FooterSpotify(_)
