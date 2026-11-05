@@ -26,7 +26,7 @@ use orion_core::{AgentId, ClientRequest, WorktreeId};
 
 /// Enter in the box, with `text` already sized — and empty as often as
 /// not: sent as it is, a box an AGENT
-/// PRESET is on launches on the prefix and postfix alone, any other
+/// PRESET is on launches on its text alone, any other
 /// starts the CLI with no first prompt.
 pub(super) fn submit(
     app: &mut App,
@@ -234,7 +234,7 @@ pub(super) fn draft(
     AgentLaunchDraft {
         custom: launch.custom.clone(),
         // Sized in `submit_prompt`, with the task — composing cannot fail.
-        // An empty box sends a preset's prefix + postfix alone; with
+        // An empty box sends a preset's text alone; with
         // nothing to wrap it either, there is no first prompt, the CLI's
         // own input is it.
         starting_prompt: Some(launch.compose(&text)).filter(|prompt| !prompt.is_empty()),

@@ -170,7 +170,7 @@ impl Screen {
         let preset = self.preset(at).map(|(_, p)| p);
         Offers {
             manage: preset.is_some_and(|p| p.system.is_none()),
-            restore: preset.is_some_and(|p| p.system.is_some() && p.has_wrapping()),
+            restore: preset.is_some_and(|p| p.system.is_some() && p.has_text()),
         }
     }
 
@@ -222,7 +222,7 @@ impl Screen {
         let runs = format!("Runs on {}", preset.spec_label());
         match preset.system {
             Some(which) => {
-                let text = if preset.has_wrapping() {
+                let text = if preset.has_text() {
                     format!(
                         "Its text is yours; {} puts back orion's",
                         keys::RESTORE.label()
@@ -241,9 +241,9 @@ impl Screen {
                 } else {
                     ""
                 };
-                let sends = match excerpt(&[&preset.prefix, &preset.postfix]) {
-                    sends if sends.is_empty() => "your task alone".to_string(),
-                    sends => sends,
+                let sends = match preset.has_text() {
+                    true => excerpt(&preset.text),
+                    false => "your task alone".to_string(),
                 };
                 format!("{runs}{ask}. Sends: {sends}")
             }
@@ -305,11 +305,7 @@ fn system_cells(
         Span::styled(ORION_TAG, dim),
         Span::styled(format!("{gap}{purpose}"), dim),
     ];
-    let right = if preset.has_wrapping() {
-        "your text"
-    } else {
-        ""
-    };
+    let right = if preset.has_text() { "your text" } else { "" };
     (left, right)
 }
 
@@ -333,14 +329,11 @@ fn explain_purpose(which: SystemPreset) -> &'static str {
     }
 }
 
-/// The first [`EXCERPT`] words of `texts` on one line, cut to as many
-/// characters: however long the text, the work stops there.
-fn excerpt(texts: &[&str]) -> String {
-    let words: Vec<&str> = texts
-        .iter()
-        .flat_map(|text| text.split_whitespace())
-        .take(EXCERPT)
-        .collect();
+/// The first [`EXCERPT`] words of `text` on one line, cut to as many
+/// characters: however long the text, the work stops there. Its `{task}`
+/// stays, saying where the task goes.
+fn excerpt(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().take(EXCERPT).collect();
     truncate(&words.join(" "), EXCERPT)
 }
 
@@ -455,8 +448,7 @@ pub fn restore(app: &mut App, index: usize) {
         let Some(preset) = presets.get_mut(index).filter(|p| p.system.is_some()) else {
             return false;
         };
-        preset.prefix.clear();
-        preset.postfix.clear();
+        preset.text.clear();
         name = Some(preset.name.clone());
         true
     });
@@ -517,8 +509,7 @@ mod tests {
             follow_box: Some(true),
             model: None,
             effort: None,
-            prefix: "Please review it.".into(),
-            postfix: String::new(),
+            text: "Please review it.".into(),
             skip_task: false,
             system: None,
         }
@@ -530,11 +521,11 @@ mod tests {
     fn users_list() -> Vec<AgentPreset> {
         let mut presets = vec![
             AgentPreset {
-                prefix: "Plan the issues first.".into(),
+                text: "Plan the issues first.".into(),
                 ..mine("Linear Ticket")
             },
             AgentPreset {
-                prefix: "Fix the failing checks.".into(),
+                text: "Fix the failing checks.".into(),
                 skip_task: true,
                 ..mine("PR autofix")
             },

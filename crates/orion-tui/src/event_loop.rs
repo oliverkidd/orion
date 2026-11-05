@@ -3418,7 +3418,7 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
             Some(input) => input.insert_str(text),
             None => return false,
         },
-        // The name is one line; prefix and postfix keep their newlines.
+        // The name is one line; the text box keeps its newlines.
         Overlay::AgentPresetEditor(editor) => {
             if !editor.paste(text) {
                 return false;
@@ -8951,7 +8951,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
     // to the folder's own name, which is the only way back from a rename —
     // an empty typed setting is that row's default (`auto`), which is the
     // only way back to it, an AGENT PRESET's task is optional — a QUICK
-    // PROMPT it is on launches on prefix + postfix alone — and
+    // PROMPT it is on launches on its text alone — and
     // a QUICK PROMPT sent empty starts the CLI with no first prompt, the
     // way `n` does. For every other prompt an empty field is a cancel.
     let empty_is_a_default = matches!(
@@ -31475,8 +31475,7 @@ mod tests {
                         follow_box: None,
                         model: Some("opus".into()),
                         effort: Some("high".into()),
-                        prefix: "Be strict.".into(),
-                        postfix: "Run the tests.".into(),
+                        text: "Be strict.\n\n{task}\n\nRun the tests.".into(),
                         skip_task: false,
                         system: None,
                     },
@@ -31487,8 +31486,7 @@ mod tests {
                         follow_box: None,
                         model: Some("gpt-6-luna".into()),
                         effort: None,
-                        prefix: String::new(),
-                        postfix: String::new(),
+                        text: String::new(),
                         skip_task: false,
                         system: None,
                     },
@@ -31559,8 +31557,7 @@ mod tests {
                 follow_box: None,
                 model: None,
                 effort: None,
-                prefix: "Investigate whether this pull request should be merged.".into(),
-                postfix: String::new(),
+                text: "Investigate whether this pull request should be merged.".into(),
                 skip_task: true,
                 system: None,
             });
@@ -31719,7 +31716,7 @@ mod tests {
     /// SESSION: the pick hands the QUICK PROMPT back titled for the PR,
     /// Select worktree in it is refused (the DAEMON picks the checkout), and
     /// Enter sends one `CreatePrAgent` — the PR's URL and head branch,
-    /// the preset's harness / model / effort, and prefix + task + postfix
+    /// the preset's harness / model / effort, and its text with the task
     /// as its STARTING PROMPT — with the stand-in rows up for the checkout
     /// the DAEMON is about to cut. A checkout already on the head branch
     /// stages nothing: the DAEMON reuses it. A `skip`-task preset launches
@@ -31877,7 +31874,7 @@ mod tests {
             out.clear();
 
             // A `skip`-task preset launches from the picker at once, on
-            // its prefix and postfix alone.
+            // its text alone.
             let mut presets = crate::agent_presets::load();
             presets.push(crate::agent_presets::AgentPreset {
                 name: "ship".into(),
@@ -31886,8 +31883,7 @@ mod tests {
                 follow_box: None,
                 model: None,
                 effort: None,
-                prefix: "Commit and push.".into(),
-                postfix: String::new(),
+                text: "Commit and push.".into(),
                 skip_task: true,
                 system: None,
             });
@@ -32013,27 +32009,24 @@ mod tests {
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            // Effort, then the Text row: a new preset starts on `prefix`
-            // alone — one box, and no Postfix row for Tab to land on.
+            // Effort, then Task, then the one text box.
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 panic!("editor should stay open, got {:?}", app.overlay);
             };
             assert_eq!(editor.field, PresetField::Text);
-            assert_eq!(editor.text, crate::agent_presets::PresetText::Prefix);
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let text = buffer_text(&terminal);
-            assert!(text.contains("Text  ◂ prefix ▸"), "text row:\n{text}");
-            assert!(text.contains("Prefix (optional)"), "one box:\n{text}");
             assert!(
-                !text.contains("Postfix (optional)"),
-                "no postfix box on `prefix`:\n{text}"
+                text.contains("Text — {task} is where your task goes"),
+                "one box, its marker named:\n{text}"
             );
-            // → → : postfix, then both sides — and the Postfix row is back.
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            assert!(
+                !text.contains("Prefix") && !text.contains("Postfix"),
+                "{text}"
+            );
             assert!(paste_into_overlay(&mut app, "Line one"));
             press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
             assert!(paste_into_overlay(&mut app, "Line two"));
@@ -32053,16 +32046,16 @@ mod tests {
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 panic!("editor should stay open, got {:?}", app.overlay);
             };
-            assert_eq!(editor.field, PresetField::Prefix);
+            assert_eq!(editor.field, PresetField::Text);
             assert_eq!(
-                editor.prefix.cursor_chars(),
+                editor.text.cursor_chars(),
                 "Line one\nLine two\n".len(),
                 "↑ from the end of line four lands on the empty third line"
             );
-            // … and ↓ past the last line steps to the next field, as Tab does.
+            // … and ↓ past the last line steps to the next field, as Tab
+            // does — round to the name.
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            type_text(&mut app, "END", &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 panic!("editor should stay open, got {:?}", app.overlay);
             };
@@ -32070,19 +32063,15 @@ mod tests {
             assert_eq!(editor.kind, AgentKind::Codex);
             assert_eq!(editor.model, "gpt-6-astra", "→ steps off the default");
             assert_eq!(editor.effort, "low");
-            assert_eq!(editor.prefix.as_str(), "Line one\nLine two\n\nLine four");
-            assert_eq!(editor.field, PresetField::Postfix);
+            assert_eq!(editor.text.as_str(), "Line one\nLine two\n\nLine four");
+            assert_eq!(editor.field, PresetField::Name);
 
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
             let text = buffer_text(&terminal);
             assert!(text.contains("New preset"), "title:\n{text}");
             assert!(text.contains("Harness  codex"), "kind row:\n{text}");
-            assert!(text.contains("Line two"), "prefix box:\n{text}");
-            assert!(
-                text.contains("◂ END ▸") || text.contains("END"),
-                "postfix caret:\n{text}"
-            );
+            assert!(text.contains("Line two"), "the box:\n{text}");
 
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Settings(view)) = &app.overlay else {
@@ -32101,8 +32090,7 @@ mod tests {
             assert_eq!(saved.kind, AgentKind::Codex);
             assert_eq!(saved.model.as_deref(), Some("gpt-6-astra"));
             assert_eq!(saved.effort.as_deref(), Some("low"));
-            assert_eq!(saved.prefix, "Line one\nLine two\n\nLine four");
-            assert_eq!(saved.postfix, "END");
+            assert_eq!(saved.text, "Line one\nLine two\n\nLine four");
             assert!(
                 out.is_empty(),
                 "editing sends nothing to the daemon: {out:?}"
@@ -32125,12 +32113,13 @@ mod tests {
             let mut app = App::new();
             let mut out = Vec::new();
             open_preset_editor(&mut app, None);
-            // Enter from the far end of the form.
+            // Enter from the far end of the form: the text box, where a
+            // plain Enter is the save too.
             press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 panic!("the editor, got {:?}", app.overlay);
             };
-            assert_eq!(editor.field, PresetField::Task);
+            assert_eq!(editor.field, PresetField::Text);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 panic!("a refused save keeps the form, got {:?}", app.overlay);
@@ -32446,7 +32435,7 @@ mod tests {
     }
 
     /// The task is optional: an empty Enter on the box launches — the
-    /// prefix and postfix alone for a wrapping preset, no STARTING PROMPT
+    /// its text alone for a preset with one, no STARTING PROMPT
     /// at all for a bare one.
     #[test]
     fn preset_task_is_optional() {
@@ -32486,7 +32475,7 @@ mod tests {
                 "one create with no first prompt: {out:?}"
             );
 
-            // The wrapping preset, sent empty: prefix + postfix alone, as
+            // The preset with text, sent empty: its text alone, as
             // the box shows them round the caret.
             out.clear();
             crate::preset_overlays::open_launcher(&mut app, worktree);
@@ -32509,7 +32498,7 @@ mod tests {
 
     /// A `skip_task` preset asks for nothing: the editor's Task row turns
     /// it on, Settings → Presets and the picker mark the row, and Enter on
-    /// it in the picker launches straight away on prefix + postfix — no
+    /// it in the picker launches straight away on its text alone — no
     /// task box in between.
     #[test]
     fn a_skip_task_preset_launches_from_the_picker_without_asking() {
@@ -32521,9 +32510,10 @@ mod tests {
             app.focus = Focus::Sessions;
             let worktree = app.selected_worktree().unwrap().id.clone();
 
-            // "reviewer" in the editor; Task is the last field, so ⇧Tab
-            // from Name wraps onto it.
+            // "reviewer" in the editor; Task sits above the text box, the
+            // last field, so ⇧Tab twice from Name wraps onto it.
             open_preset_editor(&mut app, Some(0));
+            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
             press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 panic!("the editor, got {:?}", app.overlay);
@@ -32572,7 +32562,7 @@ mod tests {
                         && model == "opus"
                         && text == "Be strict.\n\nRun the tests."
                 ),
-                "one create on prefix + postfix: {out:?}"
+                "one create on the text alone: {out:?}"
             );
 
             // A refused create hands back the (empty) box rather than
@@ -33565,7 +33555,7 @@ mod tests {
     }
 
     /// `^X` picks a saved AGENT PRESET for this launch: its harness,
-    /// its MODEL / EFFORT, and its prefix/postfix written into the box
+    /// its MODEL / EFFORT, and its text written into the box
     /// around what was typed — on screen, the caret where the task goes.
     #[test]
     fn the_preset_key_writes_the_preset_into_the_box() {
@@ -33650,7 +33640,7 @@ mod tests {
     }
 
     /// A preset's task is optional in the QUICK PROMPT too: picked over an
-    /// empty box it fills it with prefix + postfix, sent as they stand. A
+    /// empty box it fills it with its text, sent as it stands. A
     /// `skip_task` preset picked over an empty box launches at once; over
     /// typed text it is only written in.
     #[test]
@@ -33687,7 +33677,7 @@ mod tests {
             assert_eq!(
                 prompt.input.as_str(),
                 "Be strict.\n\n\n\nRun the tests.",
-                "a blank line for the task between prefix and postfix"
+                "a blank line for the task where its marker is"
             );
             assert!(out.is_empty(), "{out:?}");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -34264,7 +34254,7 @@ mod tests {
             let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
                 unreachable!()
             };
-            assert_eq!(editor.field, PresetField::Text, "Tab skips the n/a effort");
+            assert_eq!(editor.field, PresetField::Task, "Tab skips the n/a effort");
             press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
 
             // → → : default → auto → claude-fable-5, whose efforts exist.
@@ -34593,8 +34583,7 @@ mod tests {
                 follow_box: None,
                 model: None,
                 effort: None,
-                prefix: "Review this pull request.".into(),
-                postfix: String::new(),
+                text: "Review this pull request.".into(),
                 skip_task: true,
                 system: None,
             });

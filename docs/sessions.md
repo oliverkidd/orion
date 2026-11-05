@@ -87,17 +87,16 @@ request — and it only picks: making, changing and deleting presets is Settings
 offers it. From the palette the launch lands in that card's checkout — its last row says which, and
 `Tab` flips it to a fresh worktree. Over the quick prompt the box's header says where instead, and its `⌘.` picks, so that row and its `Tab` are not drawn there. Type to find one by name: letters
 narrow the list to the fuzzy matches, `↑`/`↓` move, `Backspace` widens and `Esc` clears — as in the
-model and effort submenus. The editor is a small form — name, harness, model, effort, **Text**
-(which side of the task the preset's text goes: `prefix`, `postfix` or `prefix & postfix`, with a
-box for each side it names) and **Task** (`ask` or `skip`). A new preset starts on the side
-`preset_text` in CONFIG.JSON names, by hand — `prefix` unless you change it: one
-box, sent before your task — and cycling the row shows the other box or both; a side the row leaves
-out saves blank. Editing a preset also shows any side that already holds text, so one saved with
-both never loses either. `Enter` on a
-preset opens the QUICK PROMPT on it, the prefix and postfix written round the caret, and `Enter` there
-launches the CLI with `prefix + task + postfix` as its very first prompt. The task is optional:
-send the box with nothing typed and the prefix and postfix go on their own (a preset with neither starts the CLI
-with no first prompt). Set **Task** to `skip` for a preset that never needs one — a "commit and push" —
+model and effort submenus. The editor is a small form — name, harness, model, effort, **Task**
+(`ask` or `skip`) and one **Text** box: what the preset sends, with `{task}` where your task goes.
+Text with no `{task}` has the task after it, a blank line between, so a preset that only frames the
+task needs no marker at all. `Enter` on a preset opens the QUICK PROMPT on it, its text written
+round the caret — the caret where `{task}` is — and `Enter` there launches the CLI with that text,
+your task in its place, as its very first prompt. The task is optional: send the box with nothing
+typed and the text goes on its own, the marker and the blank lines round it gone (a preset with no
+text starts the CLI with no first prompt). A preset saved by an older orion, with a prefix and a
+postfix round the task, reads as its prefix, `{task}` and its postfix, and is saved that way the
+first time orion starts. Set **Task** to `skip` for a preset that never needs one — a "commit and push" —
 and `Enter` launches it at once, no box at all; the list marks those rows `no task`. A `skip` preset
 picked in a quick prompt (`⌘U`) launches the same way when
 the box is still empty, while text you already typed stays yours to send. The row it creates is an
@@ -133,7 +132,7 @@ itself:
   launch starts on your `⌘N` account, at the model and effort it pins once its text is yours —
   unless `⇧Tab` picks another: `{issues}` becomes each issue's ID, title, link and
   description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
-  `{issues}` gets them between its prefix and postfix. orion's text: one commit per issue, one pull
+  `{issues}` gets them where its `{task}` is — after its text when it names neither. orion's text: one commit per issue, one pull
   request titled `"{ids}: …"` whose description starts `Fixes {ids}`.
 - **Week review** holds the rules a WEEK IN REVIEW (`⌘⇧Y`) is written by — what earns a line, Show
   and Say, how a point is written — and the Claude account, model and effort that write it: sonnet ·
@@ -154,7 +153,7 @@ picker for it: the preset you pick launches a PR SESSION on that pull request. T
 box comes back with the preset applied and the PR in its title, and `Enter` starts the agent in the
 project's worktree on the PR's head branch — reused when one is already checked out on it, cut by
 the daemon otherwise — with the PR link and its work rule in the system prompt and the preset's
-`prefix + task + postfix` as the first prompt, so the agent is already working on the PR when the
+text, your task at its `{task}`, as the first prompt, so the agent is already working on the PR when the
 pane opens. A `skip`-task preset launches straight from the picker. `Enter` on the pull request is the same launch
 without a preset: the box titled for the PR, your text alone as the first prompt, and the checkout's
 row up under the pull request as soon as you press `Enter` — never a random-branch worktree the

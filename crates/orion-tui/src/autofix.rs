@@ -848,12 +848,11 @@ impl PrRefs {
     }
 }
 
-/// orion's own text for the PR autofix SYSTEM PRESET, as `(prefix,
-/// postfix)`: the rules, then — after what broke — how to finish. What the
-/// agent is told while the preset holds none of the user's
+/// orion's own text for the PR autofix SYSTEM PRESET: the rules, then —
+/// at `{task}`, what broke — how to finish. What the agent is told while
+/// the preset holds none of the user's
 /// ([`crate::agent_presets::SystemPreset::builtin_text`]).
-pub const PRESET_TEXT: (&str, &str) = (
-    "You are orion's PR autofixer. Fix the pull request below so it can merge, and push the fix to its branch. Do not open a new pull request, force-push, merge it, or change unrelated code.
+pub const PRESET_TEXT: &str = "You are orion's PR autofixer. Fix the pull request below so it can merge, and push the fix to its branch. Do not open a new pull request, force-push, merge it, or change unrelated code.
 
 Rules:
 - Fix only what is listed under \"Fix\" below.
@@ -861,14 +860,16 @@ Rules:
 - Failing checks: read each one's failure logs (`gh pr checks`, then `gh run view <run-id> --log-failed`) to see what kind of check it is.
   - Unit tests: reproduce each failing test locally with this repo's test command, and fix it. Change a test only when this pull request meant to change the behaviour it checks.
   - E2E tests: take the failing specs from the CI logs and re-run only those specs locally, never the full suite — unless earlier attempts failed the same way, then run the full suite once.
-  - Any other check (lint, typecheck, build): reproduce it locally and fix it.",
-    "Then commit with a message that says what you fixed and `git push`. Watch the pull request with `gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again. Finish with a short summary: what you changed, and anything you could not fix and why.",
-);
+  - Any other check (lint, typecheck, build): reproduce it locally and fix it.
+
+{task}
+
+Then commit with a message that says what you fixed and `git push`. Watch the pull request with `gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again. Finish with a short summary: what you changed, and anything you could not fix and why.";
 
 /// The agent's first prompt: the pull request and the ticked issues —
-/// the failed checks by workflow — and the user's note, between the
-/// PR autofix preset's prefix and postfix — orion's own
-/// ([`PRESET_TEXT`]) while it holds none of the user's.
+/// the failed checks by workflow — and the user's note, at the PR autofix
+/// preset's `{task}` — orion's own text ([`PRESET_TEXT`]) while it holds
+/// none of the user's.
 pub fn prompt(
     pr: &OpenPr,
     refs: &PrRefs,
@@ -1728,8 +1729,7 @@ mod tests {
     fn a_preset_replaces_orions_text_but_keeps_the_context() {
         let detail = detail(true, Vec::new());
         let preset = AgentPreset {
-            prefix: "Do it my way.".into(),
-            postfix: "Then push.".into(),
+            text: "Do it my way.\n\n{task}\n\nThen push.".into(),
             ..orions()
         };
         let text = prompt(

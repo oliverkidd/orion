@@ -11,7 +11,7 @@
 //! key `config.local.json` holds is written back there, never into the
 //! portable file.
 
-use crate::agent_presets::{AgentPreset, PresetText};
+use crate::agent_presets::AgentPreset;
 use orion_core::compose::{WorktreeContainers, WORKTREE_CONTAINERS};
 use orion_core::harness::HarnessDescriptor;
 use orion_core::AgentKind;
@@ -958,14 +958,6 @@ pub struct Config {
     /// notification an unfocused terminal window gets: "off" silences the
     /// pair.
     pub feedback_sound: String,
-    /// PRESET TEXT: which side of the task a new AGENT PRESET's text goes
-    /// — `prefix` (one box, sent before the task), `postfix` (one box,
-    /// sent after it) or `prefix & postfix` (both). The PRESET EDITOR
-    /// opens a new preset on the box(es) named here, and its Text row
-    /// changes one preset; a stored side with text always shows. Resolved
-    /// by [`Config::preset_text`]; `prefix` by default, the framing most
-    /// people reach for and one box to fill. Hand-edited: no Settings row.
-    pub preset_text: String,
     /// Color theme name (see `theme::THEMES`). Unknown names fall back to
     /// the default theme.
     pub theme: String,
@@ -1277,7 +1269,6 @@ impl Default for Config {
             session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             done_sound: "Glass".into(),
             feedback_sound: "Sosumi".into(),
-            preset_text: PresetText::DEFAULT.as_str().into(),
             theme: "default".into(),
             animations: true,
             spotify: true,
@@ -1694,13 +1685,6 @@ impl Config {
             .iter()
             .find(|entry| entry.id == id)
             .is_some_and(|entry| entry.enabled && entry.problem().is_none())
-    }
-
-    /// PRESET TEXT resolved: the side(s) of the task a new AGENT PRESET's
-    /// text goes. `prefix` for a config that never set it or a hand edit
-    /// off the list; `both` is taken for `prefix & postfix`.
-    pub fn preset_text(&self) -> PresetText {
-        PresetText::parse(&self.preset_text).unwrap_or(PresetText::DEFAULT)
     }
 
     /// The effective descriptor for a registry id, or a placeholder under

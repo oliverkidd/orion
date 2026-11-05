@@ -76,8 +76,8 @@ pub struct QuickLaunch {
     pub custom: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// The AGENT PRESET `⌘U` / `^X` picked: its prefix and postfix wrap
-    /// the typed text into the STARTING PROMPT, and it pins the harness.
+    /// The AGENT PRESET `⌘U` / `^X` picked: its text, the typed text at
+    /// its `{task}`, is the STARTING PROMPT, and it pins the harness.
     /// `Tab` picking a harness clears it — a launch spec has one source.
     /// Boxed, so every prompt kind is not as large as a preset.
     pub preset: Option<Box<AgentPreset>>,
@@ -478,8 +478,8 @@ impl QuickLaunch {
         self
     }
 
-    /// The launch an AGENT PRESET describes, its prefix/postfix kept for
-    /// the compose. A preset that FOLLOWS THE BOX
+    /// The launch an AGENT PRESET describes, its text kept for the
+    /// compose. A preset that FOLLOWS THE BOX
     /// ([`AgentPreset::follows_box`]) keeps the account and harness of
     /// `on` — the box it is picked in — or, with no box up, the `⌘N`
     /// default's, and its model and effort with them, taking only the
@@ -553,7 +553,7 @@ impl QuickLaunch {
     }
 
     /// The STARTING PROMPT this launch sends for `task`: the text itself,
-    /// or the preset's prefix + task + postfix. A LINEAR box's task always
+    /// or the preset's text with the task at its `{task}`. A LINEAR box's task always
     /// carries its issues: sent empty it is the batch's task (the Linear
     /// Ticket text, `linear::ticket_task`), and typed text gets the issues written out in full
     /// under it — typing never drops them.
@@ -573,15 +573,16 @@ impl QuickLaunch {
         }
     }
 
-    /// The box with its preset's prefix and postfix written into `text`
-    /// rather than wrapped round it unseen at Enter: the box shows what
-    /// will be sent, and every word is the user's to edit. The launch
-    /// keeps the preset for its name and harness, its text emptied so
-    /// [`Self::compose`] never wraps twice. `replacing` is the preset the
-    /// box was on before, as saved: its text, where the box still starts
-    /// or ends with it, comes off first, so a swap never stacks two. The
-    /// text comes back in two halves, the caret's place between them:
-    /// prefix and task, then the postfix — typing goes where the task does.
+    /// The box with its preset's text written into `text` rather than
+    /// wrapped round it unseen at Enter: the box shows what will be sent,
+    /// and every word is the user's to edit. The launch keeps the preset
+    /// for its name and harness, its text emptied so [`Self::compose`]
+    /// never wraps twice. `replacing` is the preset the box was on before,
+    /// as saved: its text, where the box still starts or ends with it,
+    /// comes off first, so a swap never stacks two. The text comes back in
+    /// two halves, the caret's place between them — where the preset's
+    /// `{task}` is ([`AgentPreset::halves`]): what goes before it and the
+    /// task, then what follows — typing goes where the task does.
     pub fn inline_preset(
         mut self,
         text: &str,
@@ -589,31 +590,22 @@ impl QuickLaunch {
     ) -> (Self, String, String) {
         let mut task = text.trim();
         if let Some(old) = replacing {
-            let (prefix, postfix) = (old.prefix.trim(), old.postfix.trim());
-            if !prefix.is_empty() {
-                task = task.strip_prefix(prefix).unwrap_or(task).trim_start();
+            let (before, after) = old.halves();
+            let (before, after) = (before.trim(), after.trim());
+            if !before.is_empty() {
+                task = task.strip_prefix(before).unwrap_or(task).trim_start();
             }
-            if !postfix.is_empty() {
-                task = task.strip_suffix(postfix).unwrap_or(task).trim_end();
+            if !after.is_empty() {
+                task = task.strip_suffix(after).unwrap_or(task).trim_end();
             }
         }
         let Some(preset) = self.preset.as_mut() else {
             return (self, text.to_string(), String::new());
         };
-        let (prefix, postfix) = (preset.prefix.trim(), preset.postfix.trim());
-        let head = match (prefix.is_empty(), task.is_empty()) {
-            (true, _) => task.to_string(),
-            (false, true) => format!("{prefix}\n\n"),
-            (false, false) => format!("{prefix}\n\n{task}"),
-        };
-        let tail = if postfix.is_empty() {
-            String::new()
-        } else {
-            format!("\n\n{postfix}")
-        };
-        preset.prefix.clear();
-        preset.postfix.clear();
-        (self, head, tail)
+        let (before, after) = preset.halves();
+        let head = format!("{before}{task}");
+        preset.text.clear();
+        (self, head, after)
     }
 
     /// The dialog's title: the pull request or the Linear issues (when the
@@ -651,14 +643,14 @@ impl QuickLaunch {
         let linear = self.linear.is_some();
         match (&self.preset, &self.pr) {
             (Some(preset), _) => {
-                let sends = if preset.has_wrapping() {
-                    "prefix + your task + postfix"
+                let sends = if preset.has_text() {
+                    "its text with your task"
                 } else {
                     "sent as the first prompt"
                 };
-                let empty = match (linear, preset.has_wrapping()) {
+                let empty = match (linear, preset.has_text()) {
                     (true, _) => "fix the issues",
-                    (false, true) => "prefix + postfix only",
+                    (false, true) => "its text alone",
                     (false, false) => "start with no prompt",
                 };
                 let issues = if linear {
@@ -870,7 +862,7 @@ pub(crate) fn reopen(app: &mut App, launch: QuickLaunch, text: &str) {
 
 /// [`reopen`] with the caret between `head` and `tail` rather than at the
 /// end: a preset just written in (`QuickLaunch::inline_preset`) puts it
-/// where the task goes, above the postfix.
+/// where the task goes, above the text after it.
 pub(crate) fn reopen_around(app: &mut App, launch: QuickLaunch, head: &str, tail: &str) {
     // A picker may have re-aimed the box: its draft follows it.
     crate::saved_draft::followed(app, &launch.target, &format!("{head}{tail}"));
@@ -1016,8 +1008,7 @@ mod tests {
             follow_box: Some(false),
             model: None,
             effort: None,
-            prefix: String::new(),
-            postfix: String::new(),
+            text: String::new(),
             skip_task: false,
             system: None,
         }
@@ -1149,8 +1140,7 @@ mod tests {
         cfg.set_default("claude", HarnessField::Effort, "high");
         let reviewer = AgentPreset {
             model: Some("opus".into()),
-            prefix: "Be strict.".into(),
-            postfix: "Run the tests.".into(),
+            text: "Be strict.\n\n{task}\n\nRun the tests.".into(),
             ..preset("reviewer", AgentKind::Claude)
         };
         let launch = QuickLaunch::of_preset(worktree(), reviewer, None, &cfg);
@@ -1193,7 +1183,7 @@ mod tests {
         let wrapped = QuickLaunch::of_preset(
             worktree(),
             AgentPreset {
-                prefix: "Plan first.".into(),
+                text: "Plan first.".into(),
                 ..preset("linear", AgentKind::Claude)
             },
             None,
@@ -1262,7 +1252,7 @@ mod tests {
         let wrapped = QuickLaunch::of_preset(
             worktree(),
             AgentPreset {
-                prefix: "Be strict.".into(),
+                text: "Be strict.".into(),
                 ..preset("reviewer", AgentKind::Cursor)
             },
             None,
@@ -1271,7 +1261,7 @@ mod tests {
         assert_eq!(wrapped.title(), "Quick prompt · reviewer (cursor)");
         assert_eq!(
             wrapped.label(),
-            "reviewer — prefix + your task + postfix (empty = prefix + postfix only)"
+            "reviewer — its text with your task (empty = its text alone)"
         );
 
         let bare =
@@ -1305,7 +1295,7 @@ mod tests {
         let wrapped = QuickLaunch::of_preset(
             worktree(),
             AgentPreset {
-                prefix: "Be strict.".into(),
+                text: "Be strict.".into(),
                 ..preset("reviewer", AgentKind::Cursor)
             },
             None,
@@ -1316,7 +1306,7 @@ mod tests {
         assert_eq!(wrapped.title(), "Quick prompt · PR #42 · reviewer (cursor)");
         assert_eq!(
             wrapped.label(),
-            "reviewer — prefix + your task + postfix (empty = prefix + postfix only)"
+            "reviewer — its text with your task (empty = its text alone)"
         );
         assert_eq!(wrapped.compose("fix it"), "Be strict.\n\nfix it");
     }
@@ -1356,14 +1346,13 @@ mod tests {
     }
 
     /// A preset picked onto a box is written into its text, the caret's
-    /// place between task and postfix, and never wrapped again at Enter;
+    /// place between the task and the text after it, and never wrapped again at Enter;
     /// swapping presets takes the old one's text out first.
     #[test]
     fn a_preset_is_written_into_the_box_and_swaps_cleanly() {
         let cfg = Config::default();
         let strict = AgentPreset {
-            prefix: "Be strict.".into(),
-            postfix: "Run the tests.".into(),
+            text: "Be strict.\n\n{task}\n\nRun the tests.".into(),
             ..preset("reviewer", AgentKind::Claude)
         };
         let (launch, head, tail) = QuickLaunch::of_preset(worktree(), strict.clone(), None, &cfg)
@@ -1377,7 +1366,7 @@ mod tests {
         );
 
         let planner = AgentPreset {
-            prefix: "Plan first.".into(),
+            text: "Plan first.".into(),
             ..preset("planner", AgentKind::Claude)
         };
         let (_, head, tail) = QuickLaunch::of_preset(worktree(), planner.clone(), None, &cfg)

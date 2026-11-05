@@ -12,7 +12,7 @@
 //! (`event_loop::submit_prompt_now`) — and the create it ends in goes
 //! through `event_loop::create_agent` like every other session.
 
-use crate::agent_presets::{AgentPreset, PresetText};
+use crate::agent_presets::AgentPreset;
 use crate::app::{clamp_selection, window_start, App, Focus, Overlay, PromptKind};
 use crate::quick_prompt::QuickTarget;
 use crate::text_input::TextInput;
@@ -31,11 +31,14 @@ use ratatui::Frame;
 
 const AGENT_PRESETS_W: u16 = 72;
 /// The PRESET EDITOR's width and the tallest it draws (five single rows, a
-/// blank, the text boxes — two 4-row prefix / postfix boxes with their
-/// borders, or one twice as tall — and the Task row under them) — one row
-/// more while a refused save's banner is up.
+/// blank and the text box under them) — one row more while a refused
+/// save's banner is up.
 const PRESET_EDITOR_W: u16 = 76;
 const PRESET_EDITOR_H: u16 = 21;
+/// The rows above the text box: the five single rows and a blank.
+const EDITOR_ROWS: u16 = 6;
+/// What the text box's border says of its marker.
+const TEXT_TITLE: &str = " Text — {task} is where your task goes ";
 /// The Task row's two choices: ask for an (optional) task on launch, or
 /// launch at once (`AgentPreset::skip_task`).
 const TASK_ASK: &str = "ask";
@@ -226,38 +229,36 @@ impl AgentPresetsView {
     }
 }
 
-/// One field of the PRESET EDITOR, in Tab order.
+/// One field of the PRESET EDITOR, in Tab order: the rows, then the text
+/// box under them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PresetField {
     Name,
     Kind,
     Model,
     Effort,
-    /// Which side(s) of the task the text goes: the boxes below.
-    Text,
-    Prefix,
-    Postfix,
     Task,
+    /// The one text box: what the preset sends, `{task}` where the task
+    /// goes.
+    Text,
 }
 
 use crate::config::fits;
 
 impl PresetField {
-    pub const ALL: [PresetField; 8] = [
+    pub const ALL: [PresetField; 6] = [
         PresetField::Name,
         PresetField::Kind,
         PresetField::Model,
         PresetField::Effort,
-        PresetField::Text,
-        PresetField::Prefix,
-        PresetField::Postfix,
         PresetField::Task,
+        PresetField::Text,
     ];
 
     /// The field `delta` steps away in Tab order, wrapping, and skipping
     /// what the form has no row for: an Effort the (harness, model) pair
     /// has no choice for — a Cursor family without effort variants, or no
-    /// Cursor model yet — and the box on a side the Text row leaves out.
+    /// Cursor model yet.
     pub fn step(self, editor: &AgentPresetEditor, delta: i32) -> PresetField {
         let n = Self::ALL.len() as i32;
         let mut pos = Self::ALL.iter().position(|f| *f == self).unwrap_or(0) as i32;
@@ -272,8 +273,7 @@ impl PresetField {
     }
 
     /// Whether the form shows the field at all: Model and Effort follow
-    /// the harness (with its model chosen), Prefix and Postfix the Text
-    /// row.
+    /// the harness (with its model chosen).
     pub fn available(self, editor: &AgentPresetEditor) -> bool {
         let (kind, custom) = (editor.kind, editor.custom.as_deref());
         match self {
@@ -281,19 +281,13 @@ impl PresetField {
             PresetField::Effort => {
                 !crate::config::effort_choices(kind, Some(&editor.model), custom).is_empty()
             }
-            PresetField::Prefix => editor.text.has_prefix(),
-            PresetField::Postfix => editor.text.has_postfix(),
             _ => true,
         }
     }
 
-    /// Name, Prefix and Postfix take typed text; the rest — the Text row
-    /// among them — cycle a choice.
+    /// Name and Text take typed text; the rest cycle a choice.
     pub fn is_typed(self) -> bool {
-        matches!(
-            self,
-            PresetField::Name | PresetField::Prefix | PresetField::Postfix
-        )
+        matches!(self, PresetField::Name | PresetField::Text)
     }
 
     pub fn label(self) -> &'static str {
@@ -302,10 +296,8 @@ impl PresetField {
             PresetField::Kind => "Harness",
             PresetField::Model => "Model",
             PresetField::Effort => "Effort",
-            PresetField::Text => "Text",
-            PresetField::Prefix => "Prefix",
-            PresetField::Postfix => "Postfix",
             PresetField::Task => "Task",
+            PresetField::Text => "Text",
         }
     }
 }
@@ -343,13 +335,9 @@ pub struct AgentPresetEditor {
     pub custom: Option<String>,
     pub model: String,
     pub effort: String,
-    /// Which side(s) of the task the preset's text goes — the boxes the
-    /// form shows and the sides `to_preset` keeps. A hidden box keeps its
-    /// text while the form is open (cycling back shows it again) and
-    /// saves blank, so the form never saves what it doesn't show.
-    pub text: PresetText,
-    pub prefix: TextInput,
-    pub postfix: TextInput,
+    /// What the preset sends (`AgentPreset::text`): `{task}` marks where
+    /// the task goes.
+    pub text: TextInput,
     /// Launch without asking for a task (`AgentPreset::skip_task`); the
     /// Task row shows it as `ask` / `skip`.
     pub skip_task: bool,
@@ -370,11 +358,12 @@ pub struct AgentPresetEditor {
 }
 
 impl AgentPresetEditor {
-    /// A blank form: Claude at the configured defaults, the box(es) the
-    /// **Preset text** setting names (`text`), caret on the name.
-    pub fn new(text: PresetText) -> Self {
+    /// A blank form opened on Settings → Presets' row `from`: following
+    /// the box at the configured defaults, the text box empty, caret on
+    /// the name.
+    pub fn new(from: usize) -> Self {
         Self {
-            settings_row: 0,
+            settings_row: from,
             editing: None,
             name: TextInput::new(),
             follow: true,
@@ -382,9 +371,7 @@ impl AgentPresetEditor {
             custom: None,
             model: crate::config::DEFAULT_CHOICE.into(),
             effort: crate::config::DEFAULT_CHOICE.into(),
-            text,
-            prefix: TextInput::multiline(),
-            postfix: TextInput::multiline(),
+            text: TextInput::multiline(),
             skip_task: false,
             field: PresetField::Name,
             area: Rect::default(),
@@ -393,18 +380,16 @@ impl AgentPresetEditor {
         }
     }
 
-    /// The form pre-filled from a stored preset, showing every side it
-    /// holds text on as well as the side(s) the **Preset text** setting
-    /// (`default`) names — nothing saved is hidden. A SYSTEM PRESET on
+    /// The form pre-filled from a stored preset. A SYSTEM PRESET on
     /// orion's text opens on that text, to edit from.
-    pub fn from_preset(index: usize, preset: &AgentPreset, default: PresetText) -> Self {
+    pub fn from_preset(from: usize, index: usize, preset: &AgentPreset) -> Self {
         let preset = &preset.clone().with_builtin_text();
         let choice = |v: &Option<String>| {
             v.clone()
                 .unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into())
         };
         Self {
-            settings_row: 0,
+            settings_row: from,
             editing: Some(index),
             name: TextInput::with_text(preset.name.clone()),
             follow: preset.follows_box(),
@@ -412,9 +397,7 @@ impl AgentPresetEditor {
             custom: preset.custom_harness.clone(),
             model: choice(&preset.model),
             effort: choice(&preset.effort),
-            text: PresetText::for_preset(preset, default),
-            prefix: TextInput::multiline_with_text(preset.prefix.clone()),
-            postfix: TextInput::multiline_with_text(preset.postfix.clone()),
+            text: TextInput::multiline_with_text(preset.text.clone()),
             skip_task: preset.skip_task,
             field: PresetField::Name,
             area: Rect::default(),
@@ -449,7 +432,7 @@ impl AgentPresetEditor {
         }
         self.fit_effort();
         if !self.field.available(self) {
-            self.field = PresetField::Text;
+            self.field = self.field.step(self, 1);
         }
     }
 
@@ -472,8 +455,8 @@ impl AgentPresetEditor {
     }
 
     /// The choices the focused row cycles: harness names, the kind's
-    /// models, the (kind, model) pair's efforts, the Text row's sides, or
-    /// `ask` / `skip`. Empty on a typed row and on an `n/a` row.
+    /// models, the (kind, model) pair's efforts, or `ask` / `skip`. Empty
+    /// on a typed row and on an `n/a` row.
     fn row_choices(&self) -> Vec<String> {
         match self.field {
             // Every offered harness by id — built-ins and customs alike,
@@ -493,10 +476,6 @@ impl AgentPresetEditor {
             PresetField::Effort => {
                 crate::config::effort_choices(self.kind, Some(&self.model), self.custom.as_deref())
             }
-            PresetField::Text => PresetText::ALL
-                .iter()
-                .map(|side| side.as_str().to_string())
-                .collect(),
             PresetField::Task => vec![TASK_ASK.to_string(), TASK_SKIP.to_string()],
             _ => Vec::new(),
         }
@@ -507,7 +486,6 @@ impl AgentPresetEditor {
             PresetField::Kind => self.harness_value(),
             PresetField::Model => self.model.clone(),
             PresetField::Effort => self.effort.clone(),
-            PresetField::Text => self.text.as_str().to_string(),
             PresetField::Task => self.task_choice().to_string(),
             _ => String::new(),
         }
@@ -545,11 +523,6 @@ impl AgentPresetEditor {
                 self.fit_effort();
             }
             PresetField::Effort => self.effort = value.to_string(),
-            PresetField::Text => {
-                if let Some(side) = PresetText::parse(value) {
-                    self.text = side;
-                }
-            }
             PresetField::Task => self.skip_task = value == TASK_SKIP,
             _ => {}
         }
@@ -614,8 +587,7 @@ impl AgentPresetEditor {
     pub fn text_field(&self) -> Option<&TextInput> {
         match self.field {
             PresetField::Name => Some(&self.name),
-            PresetField::Prefix => Some(&self.prefix),
-            PresetField::Postfix => Some(&self.postfix),
+            PresetField::Text => Some(&self.text),
             _ => None,
         }
     }
@@ -624,8 +596,7 @@ impl AgentPresetEditor {
     pub fn text_field_mut(&mut self) -> Option<&mut TextInput> {
         match self.field {
             PresetField::Name => Some(&mut self.name),
-            PresetField::Prefix => Some(&mut self.prefix),
-            PresetField::Postfix => Some(&mut self.postfix),
+            PresetField::Text => Some(&mut self.text),
             _ => None,
         }
     }
@@ -643,7 +614,7 @@ impl AgentPresetEditor {
     }
 
     /// A bracketed paste into the focused text field — lines kept in the
-    /// prefix / postfix, flattened in the one-line name — clearing a banner
+    /// text box, flattened in the one-line name — clearing a banner
     /// that points at it, as a typed key does. False when a choice row has
     /// the caret and there is nowhere to paste.
     pub fn paste(&mut self, text: &str) -> bool {
@@ -674,17 +645,8 @@ impl AgentPresetEditor {
     }
 
     /// The preset the form describes right now (name trimmed, default
-    /// choices folded to None, a side the Text row leaves out blank).
+    /// choices folded to None).
     pub fn to_preset(&self) -> AgentPreset {
-        // A hidden box saves empty: the form never saves what it doesn't
-        // show. Its text waits in the form until then.
-        let side = |shown: bool, input: &TextInput| {
-            if shown {
-                input.as_str().to_string()
-            } else {
-                String::new()
-            }
-        };
         AgentPreset {
             name: self.name.trim().to_string(),
             kind: self.kind,
@@ -692,8 +654,7 @@ impl AgentPresetEditor {
             follow_box: Some(self.follow),
             model: crate::config::non_default(&self.model),
             effort: crate::config::non_default(&self.effort),
-            prefix: side(self.text.has_prefix(), &self.prefix),
-            postfix: side(self.text.has_postfix(), &self.postfix),
+            text: self.text.as_str().to_string(),
             skip_task: self.skip_task,
             // The list's own, kept on save (`save_agent_preset_editor`).
             system: None,
@@ -759,12 +720,10 @@ pub(crate) fn open_editor_from_settings(
     from: usize,
     editing: Option<(usize, &AgentPreset)>,
 ) {
-    let text = crate::config::Config::load().preset_text();
-    let mut editor = match editing {
-        Some((index, preset)) => AgentPresetEditor::from_preset(index, preset, text),
-        None => AgentPresetEditor::new(text),
+    let editor = match editing {
+        Some((index, preset)) => AgentPresetEditor::from_preset(from, index, preset),
+        None => AgentPresetEditor::new(from),
     };
-    editor.settings_row = from;
     app.overlay = Some(Overlay::AgentPresetEditor(editor));
 }
 
@@ -808,8 +767,8 @@ pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEdi
     crate::presets_tab::reopen(app, at.unwrap_or(0));
 }
 
-/// The list's Enter: ask for the optional task that the preset's prefix and
-/// postfix will wrap — or, for a `skip_task` preset, launch on them at once,
+/// The list's Enter: ask for the optional task the preset's text will
+/// carry — or, for a `skip_task` preset, launch on the text at once,
 /// through the same submit an empty task box takes. A harness switched off
 /// in Settings → Accounts is refused here, where the row is, rather than by a
 /// failed spawn later.
@@ -856,9 +815,8 @@ fn turned_off(preset: &AgentPreset) -> crate::flash::Flash {
 }
 
 /// The picker's Enter: adopt the hovered AGENT PRESET — its harness,
-/// MODEL / EFFORT and prefix/postfix — for the QUICK PROMPT that opened
-/// the list, and hand the box back with the prefix and postfix written
-/// round its text (`QuickLaunch::inline_preset`) — or, for a `skip_task`
+/// MODEL / EFFORT and text — for the QUICK PROMPT that opened the list,
+/// and hand the box back with that text written round its own (`QuickLaunch::inline_preset`) — or, for a `skip_task`
 /// preset picked over an empty box, launch it as Enter on that box would;
 /// typed text stays the user's to send. A harness switched off in
 /// Settings → Accounts is refused here, where the row is, rather than by a
@@ -886,8 +844,8 @@ fn apply_preset_to_quick_prompt(
     }
 }
 
-/// Hand the box `back` again with `preset` adopted and its prefix and
-/// postfix written round the text (`QuickLaunch::inline_preset`), the
+/// Hand the box `back` again with `preset` adopted and its text written
+/// round the box's (`QuickLaunch::inline_preset`), the
 /// caret where the task goes. The preset the box was on before, as saved,
 /// has its text in the box already: a swap takes that out first.
 fn reopen_box_with_preset(
@@ -909,7 +867,7 @@ fn reopen_box_with_preset(
 }
 
 /// The box `back` with `preset` adopted — its harness, MODEL / EFFORT and
-/// prefix/postfix — keeping where it lands, its pull request, Linear
+/// text — keeping where it lands, its pull request, Linear
 /// batch, todo, mode and the modal it stands on.
 fn preset_on_box(
     back: crate::quick_prompt::QuickReturn,
@@ -1083,7 +1041,7 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent) {
             let at = editor.settings_row;
             crate::presets_tab::reopen(app, at);
         }
-        // ↓/↑ inside the prefix or postfix walk its lines first, as in
+        // ↓/↑ inside the text box walk its lines first, as in
         // Claude Code's prompt; past the last (or first) line — and on
         // every other row — they step fields, as Tab does. Leaving a
         // choice row drops its type-ahead.
@@ -1107,7 +1065,7 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent) {
                 editor.field = editor.field.step(editor, -1);
             }
         }
-        // A line break in the prefix or postfix — Shift+Enter, Option+Enter
+        // A line break in the text box — Shift+Enter, Option+Enter
         // or Ctrl+J, as in the task editor — is the field's own (the `_`
         // arm below); the guard keeps the save off a shifted Enter.
         KeyCode::Enter
@@ -1306,15 +1264,9 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
             break;
         };
         let budget = (inner.width as usize).saturating_sub(2);
-        // "name  claude · opus · high" left, a dim "+prefix +postfix
-        // no task" pinned right for what the preset adds to a launch.
+        // "name  claude · opus · high" left, a dim "no task orion" pinned
+        // right for what the preset does on a launch and whose it is.
         let mut marks = Vec::new();
-        if !preset.prefix.trim().is_empty() {
-            marks.push("+prefix");
-        }
-        if !preset.postfix.trim().is_empty() {
-            marks.push("+postfix");
-        }
         if preset.skip_task {
             marks.push("no task");
         }
@@ -1423,18 +1375,16 @@ fn worktree_line(app: &App, view: &AgentPresetsView, width: u16, th: Theme) -> L
 /// nothing, while that still applies, with the field it names in the error
 /// color.
 pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEditor, th: Theme) {
-    // Five single rows, a blank, the text boxes, then the Task row — all
-    // one row down while the banner is up; the boxes give up rows first on
-    // a short screen, down to one line each. A lone side takes both boxes'
-    // rows, so the frame never resizes as the Text row cycles.
+    // Five single rows and a blank, then the text box — all one row down
+    // while the banner is up; the box gives up rows first on a short
+    // screen, down to three.
     let banner = u16::from(editor.error.is_some());
     let frame_h = f.area().height.max(10);
-    let box_h = ((frame_h
+    let box_h = frame_h
         .min(PRESET_EDITOR_H + banner)
-        .saturating_sub(9 + banner))
-        / 2)
-    .clamp(3, 6);
-    let height = 9 + banner + 2 * box_h;
+        .saturating_sub(EDITOR_ROWS + 3 + banner)
+        .clamp(3, 12);
+    let height = EDITOR_ROWS + 3 + banner + box_h;
     let area = centered_rect(f.area(), PRESET_EDITOR_W, height);
     f.render_widget(Clear, area);
     let title = if editor.is_edit() {
@@ -1461,14 +1411,13 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
 
     let label_w = 9usize;
     let top = usize::from(banner);
-    // The five rows above the boxes, and the Task row below them.
+    // The five rows above the box.
     let single = [
         (PresetField::Name, top),
         (PresetField::Kind, top + 1),
         (PresetField::Model, top + 2),
         (PresetField::Effort, top + 3),
-        (PresetField::Text, top + 4),
-        (PresetField::Task, top + 6 + 2 * box_h as usize),
+        (PresetField::Task, top + 4),
     ];
     for (field, row) in single.iter() {
         let Some(row_area) = row_rect(inner, *row) else {
@@ -1528,7 +1477,6 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
                     PresetField::Kind => editor.harness_value(),
                     PresetField::Model => editor.model.clone(),
                     PresetField::Effort => editor.effort.clone(),
-                    PresetField::Text => editor.text.as_str().to_string(),
                     PresetField::Task => editor.task_choice().to_string(),
                     _ => String::new(),
                 };
@@ -1566,17 +1514,9 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
                         ));
                     }
                 }
-                if *field == PresetField::Text {
-                    let what = match editor.text {
-                        PresetText::Prefix => "  one box, sent before your task",
-                        PresetText::Postfix => "  one box, sent after your task",
-                        PresetText::Both => "  two boxes, around your task",
-                    };
-                    spans.push(Span::styled(what, Style::default().fg(th.dim)));
-                }
                 if *field == PresetField::Task {
                     let what = if editor.skip_task {
-                        "  Enter launches at once on prefix + postfix"
+                        "  Enter launches at once on the text alone"
                     } else {
                         "  Enter asks for a task (optional)"
                     };
@@ -1587,61 +1527,35 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
         render_row(f, row_area, spans, focused, true, th);
     }
 
-    // The text boxes under a blank row: one per side the Text row names,
-    // stacked when it names both; a lone side takes both boxes' rows.
-    let sides = [
-        (
-            PresetField::Prefix,
-            &editor.prefix,
-            " Prefix (optional) ",
-            "sent before your task",
-        ),
-        (
-            PresetField::Postfix,
-            &editor.postfix,
-            " Postfix (optional) ",
-            "sent after your task",
-        ),
-    ];
-    let shown: Vec<_> = sides
-        .iter()
-        .filter(|(field, ..)| field.available(editor))
-        .collect();
-    let each = if shown.len() > 1 { box_h } else { 2 * box_h };
+    // The text box under a blank row, to the frame's foot.
     let mut focused_view = None;
-    for (n, (field, input, title, placeholder)) in shown.into_iter().enumerate() {
-        let y = inner.y.saturating_add(banner + 6 + n as u16 * each);
-        if y + each > inner.y + inner.height {
-            break;
-        }
-        let box_area = Rect {
-            x: inner.x,
-            y,
-            width: inner.width,
-            height: each,
-        };
-        let focused = editor.field == *field;
-        let bad = editor.error.as_ref().is_some_and(|e| e.field == *field);
-        let border = if bad {
-            th.err
-        } else if focused {
-            th.accent
-        } else {
-            th.dim
-        };
+    let box_area = Rect {
+        y: inner.y.saturating_add(banner + EDITOR_ROWS),
+        height: inner.height.saturating_sub(banner + EDITOR_ROWS),
+        ..inner
+    };
+    if box_area.height >= 3 {
+        let focused = editor.field == PresetField::Text;
+        let border = if focused { th.accent } else { th.dim };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border))
-            .title(Span::styled(*title, Style::default().fg(border)));
+            .title(Span::styled(TEXT_TITLE, Style::default().fg(border)));
         let box_inner = block.inner(box_area);
         f.render_widget(block, box_area);
         if focused {
-            let (view, rows) = draw_multiline_input(f, input, box_inner, th);
+            let (view, rows) = draw_multiline_input(f, &editor.text, box_inner, th);
             draw_scroll_marks(f, box_area, view, rows, th.dim);
             focused_view = Some(view);
         } else {
-            crate::ui::draw_multiline_idle(f, input, box_inner, placeholder, th);
+            crate::ui::draw_multiline_idle(
+                f,
+                &editor.text,
+                box_inner,
+                "sent with your task, or alone (optional)",
+                th,
+            );
         }
     }
 
@@ -1764,19 +1678,18 @@ mod tests {
                     .iter()
                     .position(|p| p.system == Some(SystemPreset::LinearTicket))
                     .unwrap();
-                let mut editor =
-                    AgentPresetEditor::from_preset(at, &presets[at], PresetText::Prefix);
-                assert_eq!(editor.prefix.as_str(), crate::linear::TICKET_TEXT);
+                let mut editor = AgentPresetEditor::from_preset(0, at, &presets[at]);
+                assert_eq!(editor.text.as_str(), crate::linear::TICKET_TEXT);
                 editor.name = TextInput::with_text("Renamed".to_string());
                 let mut app = App::new();
                 save_agent_preset_editor(&mut app, editor);
                 let saved = &crate::agent_presets::load()[at];
                 assert_eq!(saved.name, "Linear Ticket", "not renamed");
-                assert!(!saved.has_wrapping(), "orion's text kept as none");
+                assert!(!saved.has_text(), "orion's text kept as none");
                 assert_eq!(
                     crate::agent_presets::system(SystemPreset::LinearTicket)
                         .with_builtin_text()
-                        .prefix,
+                        .text,
                     crate::linear::TICKET_TEXT
                 );
             })
@@ -1790,11 +1703,11 @@ mod tests {
         crate::config::with_config_path(path, f)
     }
 
-    fn editor(text: PresetText) -> AgentPresetEditor {
-        AgentPresetEditor::new(text)
+    fn editor() -> AgentPresetEditor {
+        AgentPresetEditor::new(0)
     }
 
-    fn stored(prefix: &str, postfix: &str) -> AgentPreset {
+    fn stored(text: &str) -> AgentPreset {
         AgentPreset {
             name: "reviewer".into(),
             kind: AgentKind::Claude,
@@ -1802,112 +1715,32 @@ mod tests {
             follow_box: None,
             model: None,
             effort: None,
-            prefix: prefix.into(),
-            postfix: postfix.into(),
+            text: text.into(),
             skip_task: false,
             system: None,
         }
     }
 
-    /// The Text row: one box on the side it names, both when it says so.
-    /// Tab order skips the box that isn't there, and a side left out saves
-    /// blank — though its text waits in the form until then, so cycling
-    /// back brings it back.
+    /// One text box, last in Tab order after the Task row; what it holds
+    /// is what saves, `{task}` and all, and a stored preset opens on it.
     #[test]
-    fn the_text_row_picks_the_boxes_and_a_hidden_side_saves_blank() {
-        let mut e = editor(PresetText::Prefix);
-        assert_eq!(e.text, PresetText::Prefix);
-        assert!(PresetField::Prefix.available(&e));
-        assert!(!PresetField::Postfix.available(&e));
-        assert_eq!(PresetField::Effort.step(&e, 1), PresetField::Text);
-        assert_eq!(PresetField::Text.step(&e, 1), PresetField::Prefix);
-        assert_eq!(
-            PresetField::Prefix.step(&e, 1),
-            PresetField::Task,
-            "no postfix box to land on"
-        );
-        assert_eq!(PresetField::Task.step(&e, -1), PresetField::Prefix);
-
+    fn one_text_box_holds_the_text_and_its_task_marker() {
+        let mut e = editor();
+        assert_eq!(PresetField::Effort.step(&e, 1), PresetField::Task);
+        assert_eq!(PresetField::Task.step(&e, 1), PresetField::Text);
+        assert_eq!(PresetField::Text.step(&e, 1), PresetField::Name, "wraps");
+        assert!(PresetField::Text.is_typed());
         e.name = TextInput::with_text("p");
-        e.prefix = TextInput::with_text("PRE");
-        e.postfix = TextInput::with_text("POST");
+        e.text = TextInput::multiline_with_text("Be strict.\n\n{task}\n\nRun the tests.");
         let saved = e.to_preset();
-        assert_eq!(saved.prefix, "PRE");
+        assert_eq!(saved.text, "Be strict.\n\n{task}\n\nRun the tests.");
         assert_eq!(
-            saved.postfix, "",
-            "a side the form doesn't show saves blank"
+            saved.compose("Fix auth"),
+            "Be strict.\n\nFix auth\n\nRun the tests."
         );
-
-        // ← / → on the Text row walk the sides; the postfix text was
-        // waiting all along.
-        e.field = PresetField::Text;
-        e.cycle(1);
-        assert_eq!(e.text, PresetText::Postfix);
-        assert_eq!(e.row_value(), "postfix");
-        assert!(!PresetField::Prefix.available(&e));
-        assert!(PresetField::Postfix.available(&e));
-        assert_eq!(PresetField::Text.step(&e, 1), PresetField::Postfix);
-        assert_eq!(PresetField::Postfix.step(&e, -1), PresetField::Text);
-        let saved = e.to_preset();
-        assert_eq!(
-            (saved.prefix.as_str(), saved.postfix.as_str()),
-            ("", "POST")
-        );
-        e.cycle(1);
-        assert_eq!(e.text, PresetText::Both);
-        assert_eq!(e.row_value(), "prefix & postfix");
-        assert_eq!(PresetField::Prefix.step(&e, 1), PresetField::Postfix);
-        let saved = e.to_preset();
-        assert_eq!(
-            (saved.prefix.as_str(), saved.postfix.as_str()),
-            ("PRE", "POST")
-        );
-        e.cycle(1);
-        assert_eq!(e.text, PresetText::Prefix, "wraps");
-        e.cycle(-1);
-        assert_eq!(e.text, PresetText::Both, "← steps back");
-        assert_eq!(
-            e.row_choices(),
-            vec!["prefix", "postfix", "prefix & postfix"],
-            "the row's choices are the sides, in cycle order"
-        );
-        // A choice the row doesn't list leaves it alone.
-        e.set_row_value("suffix");
-        assert_eq!(e.text, PresetText::Both);
-    }
-
-    /// Editing a stored preset shows every side that holds text on top of
-    /// the setting's — a both-sided preset from before the setting opens
-    /// with both boxes under the `prefix` default, and a blank one opens
-    /// like a new one.
-    #[test]
-    fn editing_shows_a_stored_side_whatever_the_setting_says() {
-        let post = stored("", "Run the tests.");
-        let e = AgentPresetEditor::from_preset(0, &post, PresetText::Prefix);
-        assert_eq!(
-            e.text,
-            PresetText::Both,
-            "the postfix it holds plus the prefix box the setting wants"
-        );
-        assert_eq!(
-            e.to_preset().postfix,
-            "Run the tests.",
-            "opening the form drops nothing saved"
-        );
-        let e = AgentPresetEditor::from_preset(0, &post, PresetText::Postfix);
-        assert_eq!(e.text, PresetText::Postfix);
-        let e = AgentPresetEditor::from_preset(
-            0,
-            &stored("Be strict.", "Run the tests."),
-            PresetText::Prefix,
-        );
-        assert_eq!(e.text, PresetText::Both);
-        let e = AgentPresetEditor::from_preset(0, &stored("", ""), PresetText::Postfix);
-        assert_eq!(
-            e.text,
-            PresetText::Postfix,
-            "a blank preset follows the setting"
-        );
+        let reopened = AgentPresetEditor::from_preset(0, 0, &saved);
+        assert_eq!(reopened.text.as_str(), saved.text, "nothing saved is lost");
+        assert_eq!(stored("").text, "");
     }
 
     /// The Harness row lists custom entries by id after the built-ins —
@@ -1915,7 +1748,7 @@ mod tests {
     #[test]
     fn kind_choices_list_custom_entries_by_id() {
         pinned(r#"{"harnesses": {"agy": {"program": "agy"}}}"#, || {
-            let mut editor = editor(PresetText::Prefix);
+            let mut editor = editor();
             editor.field = PresetField::Kind;
             let choices = editor.row_choices();
             assert!(choices.contains(&"claude".to_string()), "{choices:?}");
@@ -1938,11 +1771,11 @@ mod tests {
     /// A refused save moves the caret onto the field the error names,
     /// wherever it was; the first change to that field's text takes the
     /// error down, a change elsewhere leaves it — the name is still the
-    /// problem. Pastes land like typed keys: lines kept in the prefix,
+    /// problem. Pastes land like typed keys: lines kept in the text box,
     /// flattened in the name, nowhere on a choice row.
     #[test]
     fn reject_points_at_the_field_and_its_first_edit_clears() {
-        let mut editor = AgentPresetEditor::new(PresetText::Prefix);
+        let mut editor = AgentPresetEditor::new(0);
         let error = editor.validate(&[]).unwrap_err();
         assert_eq!(
             error,
@@ -1952,7 +1785,7 @@ mod tests {
             }
         );
 
-        editor.field = PresetField::Postfix;
+        editor.field = PresetField::Text;
         editor.filter = "x".into();
         editor.reject(error.clone());
         assert_eq!(
@@ -1964,9 +1797,9 @@ mod tests {
         assert_eq!(editor.error.as_ref(), Some(&error));
 
         // Typing into another field leaves the banner up.
-        editor.field = PresetField::Prefix;
+        editor.field = PresetField::Text;
         assert!(editor.paste("one\ntwo"));
-        assert_eq!(editor.prefix.as_str(), "one\ntwo", "lines kept in the box");
+        assert_eq!(editor.text.as_str(), "one\ntwo", "lines kept in the box");
         assert_eq!(editor.error.as_ref(), Some(&error));
 
         // A choice row has nowhere to paste, and changes nothing.

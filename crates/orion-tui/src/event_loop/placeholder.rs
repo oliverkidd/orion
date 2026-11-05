@@ -1453,7 +1453,7 @@ mod tests {
                 "{:?}",
                 app.overlay
             );
-            // An empty task launches on the preset's prefix and postfix.
+            // An empty task launches on the preset's text.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
             assert!(
