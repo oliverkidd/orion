@@ -97,16 +97,32 @@ live in `agent_presets.json` beside `config.json`. The form's Harness row lists 
 by id alongside the built-ins — a preset on one launches with the entry's program and defaults, and
 refuses with the reason when its entry is switched off or gone.
 
-Two presets are **system presets**, on every list and marked `system`: **PR autofix**, whose text
-wraps what broke for the agent Settings → Review → **Auto-fix PRs** sends to a broken pull request,
-and **Linear Ticket**, whose text is what a Linear launch sends — with its harness, model and
-effort — unless `⇧Tab` picks another: `{issues}` becomes each issue's ID, title, link and
-description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
-`{issues}` gets them between its prefix and postfix. An empty one leaves orion's own text in place
-(one commit per issue, one pull request titled `"{ids}: …"` whose description starts `Fixes {ids}`). Their text
-can be edited like any preset's; they can't be deleted or renamed. A list from before they existed
-keeps a preset you had already named `PR autofix` or `Linear Ticket`, text and all, as that system
-preset.
+Three presets are **system presets**, on every list and marked `system` — the agents orion starts
+itself:
+
+- **PR autofix** wraps what broke for the agent **Auto-fix PRs** sends to a broken pull request.
+  That agent runs on the PR's own agent — the session that did the work on its branch — and, with
+  none, on your default agent at this preset's model and effort. orion's text: fix only what is
+  listed; resolve conflicts; reproduce each failing unit test locally and fix it; re-run only the
+  e2e specs that failed, never the full suite, unless earlier attempts failed the same way; push;
+  watch the PR until it is green and go round again.
+- **Linear Ticket** is what a Linear launch sends — with its harness, model and effort once its text
+  is yours — unless `⇧Tab` picks another: `{issues}` becomes each issue's ID, title, link and
+  description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
+  `{issues}` gets them between its prefix and postfix. orion's text: one commit per issue, one pull
+  request titled `"{ids}: …"` whose description starts `Fixes {ids}`.
+- **Week review** holds the rules a WEEK IN REVIEW (`⌘⇧Y`) is written by — what earns a line, Show
+  and Say, how a point is written — and the Claude account, model and effort that write it: sonnet ·
+  medium unless you change them. An account that is off falls back to your default agent's.
+
+A system preset always holds text: its editor opens on orion's text, and saving it unchanged, or
+cleared, keeps nothing of yours, so it says orion's text from then on — including a better one a
+later release ships. Its text, harness, model and effort can be edited like any preset's; it can't
+be deleted or renamed. A list from before they existed keeps a preset you had already named `PR
+autofix`, `Linear Ticket` or `Week review`, text and all, as that system preset. The settings older
+releases kept for these agents in `config.json` — `autofix_model`, `autofix_effort`,
+`review_account`, `review_model`, `review_effort` — move onto them once, the review's account as it
+resolved then, and leave the file.
 
 In the PULL REQUESTS MODAL (`v`), `Shift+Tab` on a pull request is a
 picker instead of the manager: the preset you pick launches a PR SESSION on that pull request. The
@@ -619,10 +635,11 @@ issues and ticked todos come from the lists already in hand. `Enter` then puts a
 prompt and sends it through a Claude account's print mode with no tools: text in, text out. No
 session starts, nothing runs in a checkout, and there is nothing to tidy up after.
 
-The account is one orion runs sessions on, never whatever a bare `claude` would sign in as: your
-default agent's (Settings → Agents) when that is a Claude account, the one Settings → Review →
-**Review account** names when you pick one there, and otherwise the first Claude account that is
-switched on. It runs as that account's own CLI with that account's config dir, so the ask lands on
+The account is one orion runs sessions on, never whatever a bare `claude` would sign in as: the one
+the **Week review** system preset runs on (see [Agent presets](#agent-presets); a new list puts it
+on your default agent's account), else your default agent's when that is a Claude account, and
+otherwise the first Claude account that is switched on. The model and effort are the preset's too,
+sonnet · medium unless you change them. It runs as that account's own CLI with that account's config dir, so the ask lands on
 that sign-in and that account's usage. Compose says which on its **Via** line, as Claude accounts
 names it — `Work (a@b.co)`, or `Work (not signed in)` — and refuses to send, saying why, when no
 Claude account is on or its CLI is not on your PATH. An account that reads as not signed in is still

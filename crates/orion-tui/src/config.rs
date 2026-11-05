@@ -11,7 +11,7 @@
 //! key `config.local.json` holds is written back there, never into the
 //! portable file.
 
-use crate::agent_presets::PresetText;
+use crate::agent_presets::{AgentPreset, PresetText};
 use orion_core::compose::{WorktreeContainers, WORKTREE_CONTAINERS};
 use orion_core::harness::HarnessDescriptor;
 use orion_core::AgentKind;
@@ -474,11 +474,6 @@ pub enum SettingKind {
     PrDraft,
     BaseFetch,
     PrAutofix,
-    AutofixModel,
-    AutofixEffort,
-    ReviewAccount,
-    ReviewModel,
-    ReviewEffort,
 }
 
 /// One harness field row in the Agents tab. The tab renders one section
@@ -774,38 +769,8 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::PrAutofix,
                 label: "Auto-fix PRs",
-                hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work. It is told the PR autofix system preset's text (Agent presets), or orion's own instructions while that is empty. ^G in the pull requests modal sends one whatever this says",
+                hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work — with none, your default agent at the PR autofix preset's model and effort. It is told that preset's text. ^G in the pull requests modal sends one whatever this says",
                 group: "Autofix",
-            },
-            SettingSpec {
-                kind: SettingKind::AutofixModel,
-                label: "Autofix fallback model",
-                hint: "The autofix agent's model when no session on the PR's branch has run here to copy — it then runs on your default agent (Settings → Agents)",
-                group: "Autofix",
-            },
-            SettingSpec {
-                kind: SettingKind::AutofixEffort,
-                label: "Autofix fallback effort",
-                hint: "The autofix agent's effort when there is no session to copy",
-                group: "Autofix",
-            },
-            SettingSpec {
-                kind: SettingKind::ReviewAccount,
-                label: "Review account",
-                hint: "The Claude account My week in review is written through. Default is your default agent's (Settings → Agents) when that is a Claude account, else the first Claude account that is on; or pick one here. It is asked once, with no tools; no session is started",
-                group: "Week in review",
-            },
-            SettingSpec {
-                kind: SettingKind::ReviewModel,
-                label: "Review model",
-                hint: "The model that writes My week in review. Sonnet was the best blend of speed and judgement when it was measured",
-                group: "Week in review",
-            },
-            SettingSpec {
-                kind: SettingKind::ReviewEffort,
-                label: "Review effort",
-                hint: "How hard it thinks: medium takes about 45 seconds on a busy week, low about 30 with fewer details",
-                group: "Week in review",
             },
         ]),
     },
@@ -1354,19 +1319,24 @@ pub struct Config {
     /// orion's `ask` is rewritten to `auto` on load ([`Config::migrate`]).
     /// See `crate::autofix`.
     pub pr_autofix: String,
-    /// The autofix agent's model; empty = the default agent's own default.
-    pub autofix_model: String,
-    /// The autofix agent's effort; empty = the default agent's own default.
-    pub autofix_effort: String,
-    /// The Claude account the WEEK IN REVIEW is written through, by its
-    /// harness id (`claude`, `claude-2`); empty, or one that is off, = the
-    /// default agent's when that is a Claude account, else the first on.
-    pub review_account: String,
-    /// The model the WEEK IN REVIEW is written by (`week_review::MODELS`);
-    /// empty = the first of them.
-    pub review_model: String,
-    /// Its effort (`week_review::EFFORTS`); empty = the first of them.
-    pub review_effort: String,
+    /// MOVED to the **PR autofix** SYSTEM PRESET's model and effort:
+    /// through 2.x the autofix agent's fallback model and effort. Read,
+    /// never written; [`Config::move_into_presets`] carries them across as
+    /// orion starts, and the save after drops them.
+    #[serde(skip_serializing)]
+    pub autofix_model: Option<String>,
+    #[serde(skip_serializing)]
+    pub autofix_effort: Option<String>,
+    /// MOVED to the **Week review** SYSTEM PRESET's harness, model and
+    /// effort, as `autofix_model`: the Claude account the week in review
+    /// was written through (empty = the default agent's), and its model
+    /// and effort (empty = sonnet, medium).
+    #[serde(skip_serializing)]
+    pub review_account: Option<String>,
+    #[serde(skip_serializing)]
+    pub review_model: Option<String>,
+    #[serde(skip_serializing)]
+    pub review_effort: Option<String>,
     /// RETIRED with the line counts always drawn. Through 0.37 the **Card
     /// line counts** SETTING (Settings → Appearance, off by default)
     /// switched each card's `+3 files` to `+3 files +120 -45`. Every card
@@ -1726,11 +1696,11 @@ impl Default for Config {
             pr_draft: false,
             base_fetch: crate::base_sync::INTERVALS[0].into(),
             pr_autofix: crate::autofix::Mode::Auto.as_str().into(),
-            autofix_model: String::new(),
-            autofix_effort: String::new(),
-            review_account: String::new(),
-            review_model: String::new(),
-            review_effort: String::new(),
+            autofix_model: None,
+            autofix_effort: None,
+            review_account: None,
+            review_model: None,
+            review_effort: None,
             card_line_changes: false,
             skip_session_naming: false,
             confirm_on_archive: false,
@@ -1948,10 +1918,15 @@ impl Config {
     /// elsewhere, each with whether its value is still waiting to move
     /// ([`Config::adopt_project_keys`]). Never written; a save drops each
     /// one once it is spent.
-    fn moved_keys(&self) -> [(&'static str, bool); 2] {
+    fn moved_keys(&self) -> [(&'static str, bool); 7] {
         [
             ("worktree_base_branch", self.worktree_base_branch.is_some()),
             ("worktree_containers", self.worktree_containers.is_some()),
+            ("autofix_model", self.autofix_model.is_some()),
+            ("autofix_effort", self.autofix_effort.is_some()),
+            ("review_account", self.review_account.is_some()),
+            ("review_model", self.review_model.is_some()),
+            ("review_effort", self.review_effort.is_some()),
         ]
     }
 
@@ -2756,46 +2731,26 @@ impl Config {
         crate::autofix::Mode::parse(&self.pr_autofix)
     }
 
-    /// What the **Autofix model** row cycles: empty (the default agent's
-    /// own default) and then every model that harness offers.
-    pub fn autofix_model_choices(&self) -> Vec<String> {
-        headed_by("", model_choices_in(&self.autofix_harness()))
-    }
-
-    /// What the **Autofix effort** row cycles, for the model it would run
-    /// on: empty and then that harness's efforts — just empty when it
-    /// offers none.
-    pub fn autofix_effort_choices(&self) -> Vec<String> {
-        let descriptor = self.autofix_harness();
-        let model = self.autofix_model_in(&descriptor);
-        headed_by("", effort_choices_in(&descriptor, model.as_deref()))
-    }
-
-    /// The default agent's descriptor — what the AUTOFIX agent runs on.
-    fn autofix_harness(&self) -> HarnessDescriptor {
-        let (kind, custom) = self.quick_prompt_harness();
-        self.effective_harness(kind, custom.as_deref())
-    }
-
-    /// The **Autofix model** on `descriptor`: the row's pick while that
-    /// harness still offers it, else its own default.
-    fn autofix_model_in(&self, descriptor: &HarnessDescriptor) -> Option<String> {
-        picked(&self.autofix_model, &model_choices_in(descriptor))
-            .or_else(|| descriptor.default_model().map(str::to_string))
-    }
-
-    /// What the AUTOFIX agent launches on: the default agent
-    /// ([`Config::quick_prompt_harness`]) at the **Autofix model** /
-    /// **Autofix effort** rows — each falling back to that harness's own
-    /// default when blank or no longer offered (the default agent changed
-    /// since it was picked), and the effort fitted to the model, as every
-    /// launch surface does. `(kind, custom, model, effort)`.
-    pub fn autofix_launch(&self) -> (AgentKind, Option<String>, Option<String>, Option<String>) {
+    /// What the AUTOFIX agent launches on when no session on the branch
+    /// has run here to copy: the default agent
+    /// ([`Config::quick_prompt_harness`]) at `preset`'s model and effort —
+    /// the **PR autofix** SYSTEM PRESET's — each falling back to that
+    /// harness's own default when unset or not offered there (the default
+    /// agent changed since it was picked), and the effort fitted to the
+    /// model, as every launch surface does. `(kind, custom, model, effort)`.
+    pub fn autofix_launch(
+        &self,
+        preset: &AgentPreset,
+    ) -> (AgentKind, Option<String>, Option<String>, Option<String>) {
         let (kind, custom) = self.quick_prompt_harness();
         let descriptor = self.effective_harness(kind, custom.as_deref());
-        let model = self.autofix_model_in(&descriptor);
+        let model = picked(
+            preset.model.as_deref().unwrap_or_default(),
+            &model_choices_in(&descriptor),
+        )
+        .or_else(|| descriptor.default_model().map(str::to_string));
         let effort = picked(
-            &self.autofix_effort,
+            preset.effort.as_deref().unwrap_or_default(),
             &effort_choices_in(&descriptor, model.as_deref()),
         )
         .or_else(|| descriptor.default_effort().map(str::to_string));
@@ -2803,22 +2758,12 @@ impl Config {
         (kind, custom, model, effort)
     }
 
-    /// The Claude accounts that are switched on and usable, by harness id:
-    /// built-in Claude and every extra account.
-    fn claude_account_ids(&self) -> Vec<String> {
-        let all = self.harness_registry();
-        claude_accounts_on(&all)
-            .into_iter()
-            .map(|entry| entry.id.clone())
-            .collect()
-    }
-
-    /// The Claude account the WEEK IN REVIEW is written through: the
-    /// **Review account** row's when it names one that is on, else the
-    /// default agent's when that is a Claude account
-    /// ([`Config::quick_prompt_harness`]), else the first Claude account
-    /// that is on. None with no Claude account on at all.
-    pub fn review_account(&self) -> Option<HarnessDescriptor> {
+    /// The Claude account the WEEK IN REVIEW is written through: `pinned`
+    /// — the **Week review** SYSTEM PRESET's harness id — when that is a
+    /// Claude account that is on, else the default agent's when that is
+    /// one ([`Config::quick_prompt_harness`]), else the first Claude
+    /// account that is on. None with no Claude account on at all.
+    pub fn review_account(&self, pinned: &str) -> Option<HarnessDescriptor> {
         let all = self.harness_registry();
         let on = claude_accounts_on(&all);
         let (kind, custom) = self.quick_prompt_harness();
@@ -2826,7 +2771,7 @@ impl Config {
             AgentKind::Custom => custom.unwrap_or_default(),
             other => other.as_str().to_string(),
         };
-        let chosen = [self.review_account.trim(), default_agent.as_str()]
+        let chosen = [pinned.trim(), default_agent.as_str()]
             .into_iter()
             .find_map(|id| on.iter().find(|entry| entry.id == id))
             .or(on.first())
@@ -2834,21 +2779,60 @@ impl Config {
         chosen
     }
 
-    /// What the WEEK IN REVIEW is written by: the **Review model** and
-    /// **Review effort** rows, each the first of its choices when blank or
-    /// off the list. `(model, effort)`.
-    pub fn review_launch(&self) -> (String, String) {
-        let pick = |value: &str, choices: &[&str]| {
-            choices
-                .iter()
-                .find(|c| c.eq_ignore_ascii_case(value.trim()))
-                .unwrap_or(&choices[0])
-                .to_string()
-        };
-        (
-            pick(&self.review_model, crate::week_review::MODELS),
-            pick(&self.review_effort, crate::week_review::EFFORTS),
-        )
+    /// Carry what an older release kept in this file for the agents orion
+    /// starts itself onto their SYSTEM PRESETS in `presets`, which
+    /// [`crate::agent_presets::ensure_system`] has seeded: the autofix
+    /// agent's fallback model and effort onto **PR autofix**; the week
+    /// review's account, model and effort onto **Week review** — the
+    /// account as it resolves now, so the review goes on being written
+    /// where it was. A Week review preset `new_review` — just added — is
+    /// put on that account too, with no old key to say otherwise. The old
+    /// keys are spent, and the next save drops them. Whether any were
+    /// there to move.
+    pub fn move_into_presets(&mut self, presets: &mut [AgentPreset], new_review: bool) -> bool {
+        use crate::agent_presets::SystemPreset;
+        let (model, effort) = (self.autofix_model.take(), self.autofix_effort.take());
+        let autofix = model.is_some() || effort.is_some();
+        if let Some(preset) = presets
+            .iter_mut()
+            .find(|p| autofix && p.system == Some(SystemPreset::PrAutofix))
+        {
+            // The preset's own model and effort meant nothing to autofix
+            // before: the old keys' are what it ran at.
+            if let Some(model) = model {
+                preset.model = non_default(&model);
+            }
+            if let Some(effort) = effort {
+                preset.effort = non_default(&effort);
+            }
+        }
+        let (account, model, effort) = (
+            self.review_account.take(),
+            self.review_model.take(),
+            self.review_effort.take(),
+        );
+        let review = account.is_some() || model.is_some() || effort.is_some();
+        let through = (review || new_review)
+            .then(|| self.review_account(account.as_deref().unwrap_or_default()))
+            .flatten();
+        if let Some(preset) = presets
+            .iter_mut()
+            .find(|p| (review || new_review) && p.system == Some(SystemPreset::WeekReview))
+        {
+            if let Some(entry) = through {
+                (preset.kind, preset.custom_harness) = match AgentKind::parse(&entry.id) {
+                    Some(kind) => (kind, None),
+                    None => (AgentKind::Custom, Some(entry.id)),
+                };
+            }
+            if let Some(model) = model.as_deref().and_then(non_default) {
+                preset.model = Some(model);
+            }
+            if let Some(effort) = effort.as_deref().and_then(non_default) {
+                preset.effort = Some(effort);
+            }
+        }
+        autofix || review
     }
 
     /// Hotkeys as the event loop dispatches them: defaults with this
@@ -3003,21 +2987,6 @@ impl Config {
             SettingKind::PrAutofix => {
                 on_off(self.autofix_mode() == crate::autofix::Mode::Auto).into()
             }
-            SettingKind::AutofixModel => blank_as(&self.autofix_model, DEFAULT_CHOICE),
-            SettingKind::AutofixEffort => blank_as(&self.autofix_effort, DEFAULT_CHOICE),
-            // The one picked, by name — or, with none picked (or one that
-            // is off now), which account the default comes to.
-            SettingKind::ReviewAccount => {
-                let picked = self.review_account.trim();
-                let is_on = self.claude_account_ids().iter().any(|id| id == picked);
-                match self.review_account() {
-                    Some(entry) if is_on => entry.display_label().to_string(),
-                    Some(entry) => format!("{DEFAULT_CHOICE} · {}", entry.display_label()),
-                    None => "no Claude account on".into(),
-                }
-            }
-            SettingKind::ReviewModel => self.review_launch().0,
-            SettingKind::ReviewEffort => self.review_launch().1,
             // A project row with no project to speak of: what one without
             // an entry would show. The Linear key is the app's to tell
             // (`linear::key_status`), not the file's.
@@ -3172,32 +3141,6 @@ impl Config {
             SettingKind::PrAutofix => {
                 let on = self.autofix_mode() == crate::autofix::Mode::Auto;
                 self.pr_autofix = AUTOFIX_MODES[usize::from(!on)].into();
-            }
-            SettingKind::AutofixModel => {
-                let choices = self.autofix_model_choices();
-                self.autofix_model = cycle_owned(&self.autofix_model, &choices, step);
-                // A new model can leave the effort off its list.
-                if !fits(&self.autofix_effort, &self.autofix_effort_choices()) {
-                    self.autofix_effort.clear();
-                }
-            }
-            SettingKind::AutofixEffort => {
-                let choices = self.autofix_effort_choices();
-                self.autofix_effort = cycle_owned(&self.autofix_effort, &choices, step);
-            }
-            SettingKind::ReviewAccount => {
-                let mut choices = vec![String::new()];
-                choices.extend(self.claude_account_ids());
-                self.review_account = cycle_owned(&self.review_account, &choices, step);
-            }
-            SettingKind::ReviewModel => {
-                let current = self.review_launch().0;
-                self.review_model = cycle_choice(&current, crate::week_review::MODELS, step).into();
-            }
-            SettingKind::ReviewEffort => {
-                let current = self.review_launch().1;
-                self.review_effort =
-                    cycle_choice(&current, crate::week_review::EFFORTS, step).into();
             }
             // One project's, not the file's: see `set_project_text` and
             // `cycle_project`.
@@ -4547,11 +4490,12 @@ mod tests {
         assert!(cfg.animations);
     }
 
-    /// The Autofix rows: **Auto-fix PRs** on by default, toggling off and
-    /// back on; and a fallback model the default agent no longer offers
-    /// launching on its default instead.
+    /// **Auto-fix PRs** is on by default, toggling off and back on; with
+    /// no session to copy, the agent runs on the default agent at the PR
+    /// autofix preset's model — one that harness no longer offers falls
+    /// back to its own default.
     #[test]
-    fn autofix_rows_cycle_and_fall_back_to_the_defaults() {
+    fn autofix_toggles_and_falls_back_to_the_presets_model() {
         let mut cfg = Config::default();
         assert_eq!(cfg.value_label(SettingKind::PrAutofix), "on");
         cfg.cycle_kind(SettingKind::PrAutofix, 1);
@@ -4561,20 +4505,98 @@ mod tests {
         assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Auto);
         let missing: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(missing.autofix_mode(), crate::autofix::Mode::Auto);
-        assert_eq!(cfg.value_label(SettingKind::AutofixModel), DEFAULT_CHOICE);
-        let defaults = cfg.autofix_launch();
-        cfg.autofix_model = "no-such-model".into();
-        assert_eq!(cfg.autofix_launch(), defaults);
-        let choices = cfg.autofix_model_choices();
-        assert_eq!(choices.first().map(String::as_str), Some(""));
-        if let Some(model) = choices.get(1) {
-            cfg.cycle_kind(SettingKind::AutofixModel, 1);
-            assert_eq!(&cfg.autofix_model, model);
-            assert_eq!(cfg.autofix_launch().2.as_ref(), Some(model));
+
+        let preset = crate::agent_presets::SystemPreset::PrAutofix.default_preset();
+        let defaults = cfg.autofix_launch(&preset);
+        let gone = AgentPreset {
+            model: Some("no-such-model".into()),
+            ..preset.clone()
+        };
+        assert_eq!(cfg.autofix_launch(&gone), defaults);
+        let descriptor = cfg.effective_harness(AgentKind::Claude, None);
+        if let Some(model) = model_choices_in(&descriptor).get(1) {
+            let picked = AgentPreset {
+                model: Some(model.clone()),
+                ..preset
+            };
+            assert_eq!(cfg.autofix_launch(&picked).2.as_ref(), Some(model));
         }
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: Config = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.pr_autofix, "auto");
+    }
+
+    /// The autofix and week review settings an older release kept in the
+    /// file move onto their system presets once — the review's account as
+    /// it resolved then, the default agent's — and the save after drops
+    /// the old keys. Empty values mean what they meant: the default
+    /// agent's own model, sonnet · medium for the review.
+    #[test]
+    fn the_old_autofix_and_review_keys_move_onto_the_system_presets() {
+        use crate::agent_presets::{ensure_system, SystemPreset};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let work = dir.path().join("work");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"autofix_model": "", "autofix_effort": "high",
+                    "review_account": "", "review_model": "", "review_effort": "low",
+                    "quick_prompt_kind": "claude-work",
+                    "claude_accounts": [{{"id": "claude-work", "config_dir": "{}"}}]}}"#,
+                work.display()
+            ),
+        )
+        .unwrap();
+        let mut cfg = load_from(&path);
+        assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
+        let mut presets = vec![AgentPreset {
+            model: Some("opus".into()),
+            ..SystemPreset::PrAutofix.default_preset()
+        }];
+        ensure_system(&mut presets);
+        assert!(cfg.move_into_presets(&mut presets, true));
+        let of = |which| presets.iter().find(|p| p.system == Some(which)).unwrap();
+        let autofix = of(SystemPreset::PrAutofix);
+        assert_eq!(autofix.model, None, "empty was the default agent's own");
+        assert_eq!(autofix.effort.as_deref(), Some("high"));
+        let review = of(SystemPreset::WeekReview);
+        assert_eq!(
+            (review.kind, review.custom_harness.as_deref()),
+            (AgentKind::Custom, Some("claude-work")),
+            "written where it was: the default agent's account"
+        );
+        assert_eq!(review.model.as_deref(), Some("sonnet"));
+        assert_eq!(review.effort.as_deref(), Some("low"));
+        assert!(!cfg.move_into_presets(&mut presets, false), "once");
+
+        cfg.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        for key in [
+            "autofix_model",
+            "autofix_effort",
+            "review_account",
+            "review_model",
+            "review_effort",
+        ] {
+            assert!(saved.get(key).is_none(), "{key} dropped: {saved}");
+        }
+        assert_eq!(saved["quick_prompt_kind"], "claude-work");
+
+        // A file from before the review had keys of its own: a new Week
+        // review preset still goes on the account it was written through,
+        // the default agent's, and nothing in the file moved.
+        let mut cfg: Config = serde_json::from_str(&format!(
+            r#"{{"quick_prompt_kind": "claude-work",
+                "claude_accounts": [{{"id": "claude-work", "config_dir": "{}"}}]}}"#,
+            work.display()
+        ))
+        .unwrap();
+        let mut presets = Vec::new();
+        ensure_system(&mut presets);
+        assert!(!cfg.move_into_presets(&mut presets, true));
+        let review = presets
+            .iter()
+            .find(|p| p.system == Some(SystemPreset::WeekReview))
+            .unwrap();
+        assert_eq!(review.custom_harness.as_deref(), Some("claude-work"));
     }
 
     /// The REVIEW TAB: how the changes viewer opens — the tree, the keys

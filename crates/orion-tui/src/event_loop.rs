@@ -278,8 +278,8 @@ async fn main_loop(
     let cfg = crate::config::Config::load();
     apply_config(&mut app, &cfg);
     app.keymap = cfg.keymap();
-    // The SYSTEM PRESETS (PR autofix, Linear Ticket) on every list, so the
-    // presets list shows them and their text can be edited there.
+    // The SYSTEM PRESETS (PR autofix, Linear Ticket, Week review) on every
+    // list, so the presets list shows them and their text can be edited there.
     crate::agent_presets::seed_system();
     // Every pull request the last run knew about, painted before the
     // daemon's snapshot even lands; the lookups below refresh them all in

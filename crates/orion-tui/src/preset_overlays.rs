@@ -90,9 +90,14 @@ pub struct AgentPresetsView {
 }
 
 impl AgentPresetsView {
+    /// The list over `presets`, each as it launches: a SYSTEM PRESET on
+    /// orion's text carries that text.
     pub fn new(worktree: WorktreeId, presets: Vec<AgentPreset>) -> Self {
         Self {
-            presets,
+            presets: presets
+                .into_iter()
+                .map(AgentPreset::with_builtin_text)
+                .collect(),
             selected: 0,
             filter: String::new(),
             worktree,
@@ -396,13 +401,15 @@ impl AgentPresetEditor {
 
     /// The form pre-filled from a stored preset, showing every side it
     /// holds text on as well as the side(s) the **Preset text** setting
-    /// (`default`) names — nothing saved is hidden.
+    /// (`default`) names — nothing saved is hidden. A SYSTEM PRESET on
+    /// orion's text opens on that text, to edit from.
     pub fn from_preset(
         worktree: WorktreeId,
         index: usize,
         preset: &AgentPreset,
         default: PresetText,
     ) -> Self {
+        let preset = &preset.clone().with_builtin_text();
         let choice = |v: &Option<String>| {
             v.clone()
                 .unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into())
@@ -814,13 +821,15 @@ pub(crate) fn save_agent_preset_editor(
     let index = match editor.editing {
         Some(index) if index < presets.len() => {
             // A SYSTEM PRESET stays one, under its own name: orion finds
-            // it by what it is for, and the list by what it is called.
+            // it by what it is for, and the list by what it is called. Its
+            // text, left as orion's or cleared, is kept as nothing, which
+            // reads as orion's from then on.
             let mut preset = preset;
             if let Some(which) = presets[index].system {
                 preset.system = Some(which);
                 preset.name = presets[index].name.clone();
             }
-            presets[index] = preset;
+            presets[index] = preset.without_builtin_text();
             index
         }
         _ => {
@@ -982,6 +991,7 @@ fn reopen_box_with_preset(
         crate::agent_presets::load()
             .into_iter()
             .find(|saved| saved.name == on.name)
+            .map(AgentPreset::with_builtin_text)
     });
     let text = back.text.clone();
     let (launch, head, tail) =
@@ -1800,6 +1810,42 @@ mod tests {
         view.selected = 1;
         open_delete_preset_confirm(&mut app, &view);
         assert!(matches!(app.overlay, Some(Overlay::Confirm(_))));
+    }
+
+    /// A system preset on orion's text opens on that text, to edit from;
+    /// saving it unchanged, or cleared, keeps nothing, and a rename is
+    /// not kept.
+    #[test]
+    fn a_system_preset_opens_on_orions_text_and_keeps_it_as_none() {
+        use crate::agent_presets::SystemPreset;
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("agent_presets.json");
+        pinned("{}", || {
+            crate::agent_presets::with_presets_path(store, || {
+                crate::agent_presets::seed_system();
+                let presets = crate::agent_presets::load();
+                let at = presets
+                    .iter()
+                    .position(|p| p.system == Some(SystemPreset::LinearTicket))
+                    .unwrap();
+                let w = WorktreeId("w".into());
+                let mut editor =
+                    AgentPresetEditor::from_preset(w.clone(), at, &presets[at], PresetText::Prefix);
+                assert_eq!(editor.prefix.as_str(), crate::linear::TICKET_TEXT);
+                editor.name = TextInput::with_text("Renamed".to_string());
+                let mut app = App::new();
+                save_agent_preset_editor(&mut app, editor, &mut Vec::new());
+                let saved = &crate::agent_presets::load()[at];
+                assert_eq!(saved.name, "Linear Ticket", "not renamed");
+                assert!(!saved.has_wrapping(), "orion's text kept as none");
+                assert_eq!(
+                    crate::agent_presets::system(SystemPreset::LinearTicket)
+                        .with_builtin_text()
+                        .prefix,
+                    crate::linear::TICKET_TEXT
+                );
+            })
+        });
     }
 
     fn pinned<T>(json: &str, f: impl FnOnce() -> T) -> T {

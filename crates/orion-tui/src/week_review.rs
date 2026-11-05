@@ -11,8 +11,8 @@
 //!   holds ([`gather`]).
 //! * **Writing is a model's, in one ask.** [`prompt`] puts everything in
 //!   one text and [`write`] sends it through the print mode of a Claude
-//!   account orion runs — the default agent's, or the **Review account**
-//!   row's ([`account`]) — with no tools: nothing runs in a checkout, no
+//!   account orion runs — the **Week review** SYSTEM PRESET's, else the
+//!   default agent's ([`account_through`]) — with no tools: nothing runs in a checkout, no
 //!   session appears on the grid, and there is nothing to tidy up after. Measured on a week
 //!   of 162 pull requests: under a minute, where an agent session that
 //!   fetched for itself took over two.
@@ -80,11 +80,13 @@ const PAGES_MAX: usize = 10;
 /// How long the write may take before it is given up on.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// The **Review model** row's choices, the first the default: the best
-/// blend of speed and judgement when the brief was tried on a real week.
-pub const MODELS: &[&str] = &["sonnet", "opus", "haiku"];
-/// The **Review effort** row's choices; `medium` is the default.
-pub const EFFORTS: &[&str] = &["medium", "low", "high"];
+/// The model a review is written by while the **Week review** SYSTEM
+/// PRESET names none: the best blend of speed and judgement when the
+/// brief was tried on a real week.
+pub const DEFAULT_MODEL: &str = "sonnet";
+/// Its effort while the preset names none: medium takes about 45 seconds
+/// on a busy week, low about 30 with fewer details.
+pub const DEFAULT_EFFORT: &str = "medium";
 
 /// Whose work a review covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -620,6 +622,13 @@ const BRIEF_EARNS: &str = "
 - Use only what the descriptions say. Never invent a number, a name or a behaviour.
 ";
 
+/// orion's own rules for what earns a line and how a point is written:
+/// the **Week review** SYSTEM PRESET's text while it holds none of the
+/// user's ([`crate::agent_presets::SystemPreset::builtin_text`]).
+pub fn brief_rules() -> &'static str {
+    BRIEF_EARNS.trim()
+}
+
 const BRIEF_CLOSING: &str = "
 - Do not count or list what you leave out: the smaller fixes, releases, dependency bumps, CI, tests and tooling simply do not appear. The total left unlisted is added afterwards.
 - No introduction, no summary, nothing after the last point.
@@ -639,16 +648,18 @@ The asker's own notes, for context only: what was on their mind. Never a point b
 
 ";
 
-/// What the model is asked, whole: the brief, the shape, the asker's
-/// note, and every pull request, issue and todo of `material`. `people`
-/// is [`legend`]'s, used in an `Everyone` review to name each point's
-/// owner.
+/// What the model is asked, whole: the brief — `rules` its own rules for
+/// what earns a line, the **Week review** preset's text — the shape, the
+/// asker's note, and every pull request, issue and todo of `material`.
+/// `people` is [`legend`]'s, used in an `Everyone` review to name each
+/// point's owner.
 pub fn prompt(
     material: &Material,
     people: &[(String, String, String)],
     scope: Scope,
     project: &str,
     note: &str,
+    rules: &str,
     now: i64,
 ) -> String {
     let everyone = scope.whose == Whose::Everyone;
@@ -673,7 +684,7 @@ pub fn prompt(
     if everyone {
         text.push_str(&format!("People, by initials: {roster}.\n"));
     }
-    text.push_str(BRIEF_EARNS);
+    text.push_str(&format!("\n{}\n", rules.trim()));
     if everyone {
         text.push_str("- A point's owner is the author of the first pull request it lists. Exactly one owner a point, by the initials given.\n");
     }
@@ -835,15 +846,41 @@ pub struct Account {
     pub label: String,
 }
 
-/// The account `cfg` writes reviews through (`Config::review_account`);
-/// None with no Claude account switched on.
-pub fn account(cfg: &crate::config::Config) -> Option<Account> {
-    let entry = cfg.review_account()?;
+/// The **Week review** SYSTEM PRESET: the rules a review is written by,
+/// and the Claude account, model and effort that write it.
+fn preset() -> crate::agent_presets::AgentPreset {
+    crate::agent_presets::system(crate::agent_presets::SystemPreset::WeekReview)
+}
+
+/// The account `cfg` writes reviews through: the one `preset` — the
+/// **Week review** preset — runs on (`Config::review_account`); None with
+/// no Claude account switched on.
+fn account_through(
+    cfg: &crate::config::Config,
+    preset: &crate::agent_presets::AgentPreset,
+) -> Option<Account> {
+    let pinned = match preset.kind {
+        orion_core::AgentKind::Custom => preset.custom_harness.clone().unwrap_or_default(),
+        kind => kind.as_str().to_string(),
+    };
+    let entry = cfg.review_account(&pinned)?;
     Some(Account {
         program: entry.program.trim().to_string(),
         env: entry.launch_env(),
         label: entry.display_label().to_string(),
     })
+}
+
+/// The model and effort `preset` writes reviews at — sonnet · medium
+/// where it names none.
+fn launch_of(preset: &crate::agent_presets::AgentPreset) -> (String, String) {
+    (
+        preset.model.clone().unwrap_or_else(|| DEFAULT_MODEL.into()),
+        preset
+            .effort
+            .clone()
+            .unwrap_or_else(|| DEFAULT_EFFORT.into()),
+    )
 }
 
 /// Send `prompt` to `model` at `effort` through `account`'s CLI in print
@@ -1723,10 +1760,11 @@ fn submit(app: &mut App) {
             "GitHub could not be asked for the week — Enter tries again, or untick the pull requests to write without them",
         );
     }
-    // The account it is written through: one of orion's own. A unit test
-    // starts nothing, so it needs none.
+    // The account it is written through: one of orion's own, the Week
+    // review preset's. A unit test starts nothing, so it needs none.
     let cfg = crate::config::Config::load();
-    let through = account(&cfg);
+    let preset = preset();
+    let through = account_through(&cfg, &preset);
     if app.week_review.tx.is_some() {
         if orion_core::env::non_empty(orion_core::env::AGENT_CMD).is_some() {
             return notice(app, "off while ORION_AGENT_CMD stands in for the agents");
@@ -1761,8 +1799,9 @@ fn submit(app: &mut App) {
         Where::Project => name.clone(),
         Where::All => "all projects".to_string(),
     };
-    let text = prompt(&material, &people, scope, &label, &note, now);
-    let (model, effort) = cfg.review_launch();
+    let rules = preset.clone().with_builtin_text().compose("");
+    let text = prompt(&material, &people, scope, &label, &note, &rules, now);
+    let (model, effort) = launch_of(&preset);
     app.week_review.next_id += 1;
     let id = app.week_review.next_id;
     let task = app.week_review.tx.clone().map(|tx| {
@@ -2495,7 +2534,8 @@ fn draw_compose(
     let rule = |name: &str| crate::ui::section_rule(name, th.muted, Vec::new(), width, th);
     let label = |name: &str| Span::styled(format!("{name:<7}"), Style::default().fg(th.muted));
     let cfg = crate::config::Config::load();
-    let (model, effort) = cfg.review_launch();
+    let preset = preset();
+    let (model, effort) = launch_of(&preset);
     let mut out: Vec<(Option<Row>, Line<'static>)> = Vec::new();
     let period = period_label(from, to, false);
     let last = format!("Last {DAYS} days");
@@ -2566,7 +2606,7 @@ fn draw_compose(
             Span::styled(format!("{effort} effort"), Style::default().fg(th.text)),
         ]),
     ));
-    let through = match account(&cfg) {
+    let through = match account_through(&cfg, &preset) {
         Some(through) => Span::styled(
             truncate(&through.label, width.saturating_sub(2 + 7 + 1)),
             Style::default().fg(th.text),
@@ -3112,6 +3152,7 @@ mod tests {
             everyone,
             "demo",
             "lead with search",
+            brief_rules(),
             now,
         );
         assert!(
@@ -3135,12 +3176,25 @@ mod tests {
         assert!(entry(501).len() < 800, "an ordinary one is cut short");
         assert!(entry(502).len() < 800, "and so is a release, however large");
 
-        let mine = prompt(&material, &[], Scope::default(), "demo", "", now);
+        let mine = prompt(
+            &material,
+            &[],
+            Scope::default(),
+            "demo",
+            "",
+            "Only the big ones.",
+            now,
+        );
         assert!(!mine.contains("People, by initials"));
         assert!(!mine.contains("<owner>"));
         assert!(mine.contains("1. <what changed> · #412"));
         assert!(!mine.contains("Note from the person asking"));
         assert!(mine.contains("#500 · +9000"));
+        assert!(
+            mine.contains("\nOnly the big ones.\n") && !mine.contains("## What earns a line"),
+            "the preset's rules in orion's place"
+        );
+        assert!(text.contains("## What earns a line"), "orion's own rules");
     }
 
     const REVIEW: &str = "\
@@ -3234,12 +3288,20 @@ AL Ada L · GR Grace
         assert_eq!(finish(&through, &material), all);
     }
 
-    /// A review is written through a Claude account orion runs: the
-    /// default agent's, with the config dir that pins it; the **Review
-    /// account** row's when one is picked; and, where the default agent is
-    /// not Claude at all, the first Claude account that is on.
+    /// A review is written through a Claude account orion runs: the one
+    /// the **Week review** preset runs on; with that one gone, the default
+    /// agent's, with the config dir that pins it; and, where the default
+    /// agent is not Claude at all, the first Claude account that is on. It
+    /// runs at the preset's model and effort, sonnet · medium unset.
     #[test]
     fn a_review_is_written_through_one_of_orions_claude_accounts() {
+        use crate::agent_presets::{AgentPreset, SystemPreset};
+        let on = |kind: orion_core::AgentKind, custom: Option<&str>| AgentPreset {
+            kind,
+            custom_harness: custom.map(String::from),
+            ..SystemPreset::WeekReview.default_preset()
+        };
+        let gone = on(orion_core::AgentKind::Custom, Some("gone"));
         let dir = tempfile::tempdir().unwrap();
         let work = dir.path().join("work");
         let config = dir.path().join("config.json");
@@ -3260,27 +3322,35 @@ AL Ada L · GR Grace
                     .map(|(_, dir)| dir.clone())
             };
             let mut cfg = crate::config::Config::load();
-            let through = account(&cfg).expect("the default agent's account");
+            let through = account_through(&cfg, &gone).expect("the default agent's account");
             assert_eq!(through.program, "claude");
             assert_eq!(pinned(&through), Some(work.display().to_string()));
             assert!(through.label.starts_with("Work"), "{}", through.label);
 
-            cfg.review_account = "claude".into();
-            let through = account(&cfg).expect("the one picked");
+            let claude = on(orion_core::AgentKind::Claude, None);
+            let through = account_through(&cfg, &claude).expect("the one pinned");
             assert_eq!(pinned(&through), None, "built-in Claude, its own sign-in");
+            let work_on = on(orion_core::AgentKind::Custom, Some("claude-work"));
+            assert!(pinned(&account_through(&cfg, &work_on).unwrap()).is_some());
 
-            cfg.review_account = "gone".into();
-            assert!(
-                pinned(&account(&cfg).unwrap()).is_some(),
-                "back to the default agent's"
-            );
-
-            cfg.review_account.clear();
             cfg.quick_prompt_kind = "codex".into();
             assert_eq!(
-                account(&cfg).expect("a Claude account that is on").program,
+                account_through(&cfg, &gone)
+                    .expect("a Claude account that is on")
+                    .program,
                 "claude"
             );
+
+            assert_eq!(
+                launch_of(&claude),
+                ("sonnet".to_string(), "medium".to_string())
+            );
+            let unset = AgentPreset {
+                model: None,
+                effort: None,
+                ..claude
+            };
+            assert_eq!(launch_of(&unset), launch_of(&work_on), "the defaults");
         });
     }
 
@@ -3586,17 +3656,23 @@ AL Ada L · GR Grace
         } else {
             Vec::new()
         };
-        let text = prompt(&material, &people, scope, "live", "", now);
+        let text = prompt(&material, &people, scope, "live", "", brief_rules(), now);
         let started = Instant::now();
-        let mut cfg = crate::config::Config::load();
+        let cfg = crate::config::Config::load();
+        let mut preset = preset();
         if let Some(id) = orion_core::env::non_empty("ORION_WEEK_REVIEW_ACCOUNT") {
-            cfg.review_account = id;
+            (preset.kind, preset.custom_harness) = (orion_core::AgentKind::Custom, Some(id));
         }
-        let through = account(&cfg).expect("a Claude account is on");
+        let through = account_through(&cfg, &preset).expect("a Claude account is on");
         println!("through {} ({})", through.label, through.program);
-        let reply = write(text.clone(), MODELS[0].into(), EFFORTS[0].into(), through)
-            .await
-            .expect("the model answered");
+        let reply = write(
+            text.clone(),
+            DEFAULT_MODEL.into(),
+            DEFAULT_EFFORT.into(),
+            through,
+        )
+        .await
+        .expect("the model answered");
         let review = finish(&reply.text, &material);
         println!(
             "{} pull requests, prompt {} bytes, fetched in {:?}, written in {:?}, cost {:?}\n\n{review}",

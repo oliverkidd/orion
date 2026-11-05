@@ -203,11 +203,7 @@ fn mark_seen(cfg: &mut Config) -> bool {
 const WORKTREE_ROWS: &[SettingKind] = &[SettingKind::LinkEnvFiles];
 
 /// The Autofix page's rows: Settings → Review's Autofix group.
-const AUTOFIX_ROWS: &[SettingKind] = &[
-    SettingKind::PrAutofix,
-    SettingKind::AutofixModel,
-    SettingKind::AutofixEffort,
-];
+const AUTOFIX_ROWS: &[SettingKind] = &[SettingKind::PrAutofix];
 
 /// The settings rows a page mirrors, in order — the overlay's own specs,
 /// so each row's label and explanation are its tab's word for word. The

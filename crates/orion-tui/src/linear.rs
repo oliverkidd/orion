@@ -469,17 +469,18 @@ Work through them one at a time and make one commit per issue, its message start
 
 /// What a ⌘L launch on `issues` sends, the one set of instructions: the
 /// **Linear Ticket** preset's text — orion's own [`TICKET_TEXT`] while it
-/// holds none — with `{issues}`, `{ids}` and `{first_id}` filled in. A
-/// preset whose text never says where the issues go has them between its
-/// prefix and its postfix, where a task goes.
+/// holds none of the user's — with `{issues}`, `{ids}` and `{first_id}`
+/// filled in. A preset whose text never says where the issues go has them
+/// between its prefix and its postfix, where a task goes.
 pub fn ticket_task(preset: &crate::agent_presets::AgentPreset, issues: &[LinearIssue]) -> String {
+    let preset = preset.clone().with_builtin_text();
     let marked = [&preset.prefix, &preset.postfix]
         .iter()
         .any(|text| text.contains("{issues}"));
-    let text = match (preset.has_wrapping(), marked) {
-        (false, _) => TICKET_TEXT.to_string(),
-        (true, true) => preset.compose(""),
-        (true, false) => preset.compose("{issues}"),
+    let text = if marked {
+        preset.compose("")
+    } else {
+        preset.compose("{issues}")
     };
     expand_template(&text, issues)
 }
@@ -3647,10 +3648,12 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
         branch: batch.branch(&taken),
         existing: false,
     };
-    // A Linear Ticket preset with text of its own brings its harness,
-    // model and effort too; its text is the batch's task already, so it
-    // never wraps round it again. ⇧Tab in the box still picks another.
-    let launch = if ticket.has_wrapping() {
+    // A Linear Ticket preset the user changed — its text, harness, model
+    // or effort — brings its harness, model and effort; untouched, the
+    // box's own. Its text is the batch's task already, so it never wraps
+    // round it again. ⇧Tab in the box still picks another.
+    let untouched = crate::agent_presets::SystemPreset::LinearTicket.default_preset();
+    let launch = if ticket != untouched {
         ticket.prefix.clear();
         ticket.postfix.clear();
         QuickLaunch::of_preset(target, ticket, &cfg)
