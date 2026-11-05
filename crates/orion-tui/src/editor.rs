@@ -23,20 +23,20 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_EDITOR: &str = "fresh";
 
 /// The settings in orion's own fresh config, merged into the file: a key
-/// the user set — at any depth — stays as they set it. The one file asked for and nothing around it: no menu bar, tab
-/// bar, scrollbar, `~` past the end, whitespace dots, edge fade or
-/// animation; no workspace dock (the `orchestrator` plugin), no file
-/// explorer, no session restored around the file; no update checks. The
-/// status bar keeps the cursor, the cursor count and fresh's messages on
-/// the left and the language on the right. The theme is orion's own
-/// ([`FRESH_THEME`]): Cursor's default Cursor Dark — its background, its
-/// colours for keywords, strings, functions, types and comments, VS Code's
-/// gold/orchid/blue bracket pairs — with VS Code's selection blue and a
-/// current line barely lifted off the background, so what is selected
-/// inside the cursor's line stands out.
-/// fresh's cursor animations stay on. The `default` keymap, not the `macos` one fresh picks
-/// on a Mac (it moves `Ctrl+A` to the line start), is the one
-/// [`Kind::mac_key`]'s keys are read in.
+/// the user set — at any depth — stays as they set it. The one file asked
+/// for and nothing around it: no menu bar, tab bar, scrollbar, `~` past
+/// the end, whitespace dots or edge fade; no workspace dock (the
+/// `orchestrator` plugin), no file explorer, no session restored around
+/// the file; no update checks. fresh's animations, the cursor's jump among
+/// them, stay on. The status bar keeps the cursor, the cursor count and
+/// fresh's messages on the left and the language on the right. The theme
+/// is orion's own ([`FRESH_THEME`]): Cursor's default Cursor Dark — its
+/// background, its colours for keywords, strings, functions, types and
+/// comments, VS Code's gold/orchid/blue bracket pairs — with VS Code's
+/// selection blue and a current line barely lifted off the background, so
+/// what is selected inside the cursor's line stands out. The `default`
+/// keymap, not the `macos` one fresh picks on a Mac (it moves `Ctrl+A` to
+/// the line start), is the one [`Kind::mac_key`]'s keys are read in.
 pub const FRESH_CONFIG: &str = r#"{
   "theme": "orion",
   "check_for_updates": false,

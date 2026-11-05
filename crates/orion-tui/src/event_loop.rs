@@ -4348,10 +4348,9 @@ fn dispatch_action(
         Action::OpenInCursor => open_checkout_outside(app),
         Action::OpenOutside => menus::open_outside_menu(app),
         Action::CommandPalette => menus::open_command_palette(app),
-        // Shift+Enter / Shift+O: the selected worktree's OPEN COMMAND, from
-        // any panel — the cursor's worktree is the context wherever the
-        // cursor stands, as it is for `g`, `f` and `b`, so the key is never
-        // quietly dropped on Sessions.
+        // The selected worktree's OPEN COMMAND (the palette, ⌘O's menu):
+        // the cursor's worktree is the context wherever the cursor stands,
+        // so it is never quietly dropped on Sessions.
         Action::OpenWorktree => open_selected_worktree(app),
         Action::OpenApp => crate::stacks::open_app(app),
         // AddProject adds a project from ANY panel — unlike New it never
@@ -5281,7 +5280,8 @@ pub(crate) fn toggle_stack_in(
     });
 }
 
-/// `Shift+Enter` / `Shift+O`: fire the selected checkout's OPEN COMMAND.
+/// **Open checkout in editor** (the palette, ⌘O's menu): fire the
+/// selected checkout's OPEN COMMAND.
 fn open_selected_worktree(app: &mut App) {
     // A pull request row has no checkout to open.
     if app.selected_worktree_pr().is_some() {
@@ -5482,8 +5482,9 @@ fn show_diff_listing(
 /// Fuzzy file finder over every tracked + untracked file of the selected
 /// worktree (`f`). Same shell as `open_diff_view`: nothing opens with no
 /// worktree, and the footer says why when the path is gone or git fails.
-/// `Shift+H`: destinations remembered by `orion ssh`, newest first. Opens even
-/// when empty — the modal's hint is how the feature introduces itself.
+/// **SSH hosts** (the palette; no key by default): destinations remembered
+/// by `orion ssh`, newest first. Opens even when empty — the modal's hint
+/// is how the feature introduces itself.
 fn open_hosts_picker(app: &mut App) {
     app.overlay = Some(Overlay::Hosts(crate::app::HostsView::new(
         crate::hosts::load(),

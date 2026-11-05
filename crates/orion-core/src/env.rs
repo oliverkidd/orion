@@ -37,7 +37,7 @@ pub const STACK_POLL_MS: &str = "ORION_STACK_POLL_MS";
 pub const LOG: &str = "ORION_LOG";
 /// Overrides the install script URL `orion upgrade` / `orion ssh` fetch.
 pub const INSTALL_URL: &str = "ORION_INSTALL_URL";
-/// Editor command the file modals open, ahead of the config's `editor`.
+/// Editor command the file modals open in place of fresh.
 pub const EDITOR: &str = "ORION_EDITOR";
 /// Cadence in seconds of the TUI's check for a newer published release
 /// (the footer's `⇡ vX.Y.Z` update indicator); `0` turns it off, as the

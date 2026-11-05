@@ -1,4 +1,5 @@
-//! Recently-used `orion ssh` destinations, backing the TUI's `Shift+H` picker.
+//! Recently-used `orion ssh` destinations, backing the TUI's SSH hosts
+//! picker (the palette's **SSH hosts**; no key by default).
 //!
 //! A plain JSON list in the data dir, most-recent first. `orion ssh`
 //! records every launch (typed invocations and picker handoffs both run

@@ -25,7 +25,7 @@
 //!
 //! `Enter` on the list puts an agent on the pull request: the QUICK
 //! PROMPT for a PR SESSION, launched exactly as the group's row launches
-//! it (`quick_prompt::pr_launch_for`) — the box's own `Tab` and `⇧Tab`
+//! it (`quick_prompt::pr_launch_for`) — the box's own `Tab` and `⌘U`
 //! pick another harness or an AGENT PRESET. The create is a
 //! `CreatePrAgent`: the DAEMON runs the session in the project's checkout
 //! of the pull request's head branch — reused when one is there, cut
@@ -999,8 +999,8 @@ fn launch_for_selected(app: &App) -> Option<QuickLaunch> {
 /// `Enter` on the list: the QUICK PROMPT for a PR SESSION on the pull
 /// request. The box goes up over the modal, which stays on screen under
 /// it: Esc puts the modal back on the row (`QuickLaunch::under`), and the
-/// launch closes it onto the new session's card. The box's own `Tab` and
-/// `⇧Tab` pick another harness or an AGENT PRESET for it.
+/// launch closes it onto the new session's row. The box's own `Tab` and
+/// `⌘U` pick another harness or an AGENT PRESET for it.
 fn open_prompt_for_selected(app: &mut App) {
     if selected_open_pr(app).is_none() {
         return;
@@ -2430,8 +2430,8 @@ mod tests {
     }
 
     /// Enter on the list opens the QUICK PROMPT for a PR SESSION on the
-    /// row under the cursor — the box's own Tab and Shift+Tab pick a
-    /// harness or a preset for it, so the modal keeps neither.
+    /// row under the cursor — the box's own Tab and ⌘U pick a harness or
+    /// a preset for it, so the modal keeps neither.
     #[test]
     fn enter_starts_a_pr_session_on_the_row() {
         pinned(|| {

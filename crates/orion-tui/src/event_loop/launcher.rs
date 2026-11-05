@@ -599,12 +599,13 @@ pub(super) fn handle_action(
         // the card itself has no room to grow one, and the pane stays
         // exactly as it is.
         Action::FollowUp => follow_up(app),
-        // `⇧V` on a card: the pull request its `#42 title` line names, in
-        // the browser.
+        // The pull request the cursor's band names on its rule, in the
+        // browser (no key by default).
         Action::OpenPullRequest => open_pull_request(app, out),
-        // `⇧P` on a card: another session with its settings, nothing typed.
+        // Another session with the row's settings, nothing typed (no key
+        // by default).
         Action::DuplicateSession => duplicate_session(app),
-        // `⇧C` on a card: the Claude session carried onto another account.
+        // `⇧C` on a row: the Claude session carried onto another account.
         Action::ContinueOn => continue_on(app),
         // The fold is a preference the view keeps, and its key is the way
         // out of the pane first ([`fold_key`]).

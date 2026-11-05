@@ -106,13 +106,10 @@ pub enum Action {
     /// `⇧P`: PUSH the selected checkout's branch — fast-forward its
     /// upstream, or publish a branch that tracks nothing; never a force.
     PushWorktree,
-    /// `Shift+Enter` / `Shift+O` / `Alt+Enter`, on the grid: fire the
-    /// selected worktree's OPEN COMMAND — the project's **Open command**
-    /// setting (`open http://localhost:3000`, say). Three chords because only the kitty protocol carries a shifted
-    /// Enter: Terminal.app sends a plain one and tmux flattens it, while
-    /// `ESC CR` — what `/terminal-setup` gives Shift+Enter in VS Code, and
-    /// Option+Enter on a Mac with Option as Meta — gets through both and
-    /// parses as Alt+Enter. Its RUN COMMAND is the project menu's **Run**.
+    /// Fire the selected worktree's OPEN COMMAND — the project's **Open
+    /// command** setting (`open http://localhost:3000`, say) — from the
+    /// COMMAND PALETTE or ⌘O's OPEN MENU; no key by default. Its RUN
+    /// COMMAND is what ⌘⇧S starts ([`Action::ToggleStack`]).
     OpenWorktree,
     /// ⌘O's **Open app**: the first localhost port the cursor's
     /// checkout's run printed, in the browser (`crate::stacks::open_app`).

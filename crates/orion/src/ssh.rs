@@ -35,9 +35,9 @@ const REMOTE_SCRIPT: &str = concat!(
 );
 
 pub fn run_ssh(host: &str, path: Option<&str>) -> Result<()> {
-    // Remember the destination for the TUI's `Shift+H` picker. Before the exec on
-    // purpose (there is no after); a host that fails to connect still lists,
-    // and `d` can drop it.
+    // Remember the destination for the TUI's SSH hosts picker. Before the
+    // exec on purpose (there is no after); a host that fails to connect
+    // still lists, and `d` can drop it.
     orion_tui::hosts::record(host, path);
     let cmd = remote_command(&crate::upgrade::install_url(), path);
     // exec: ssh owns the tty from here and its exit status propagates

@@ -1,11 +1,12 @@
 //! First-run SETUP: four pages over the empty grid — Welcome; Claude, its
 //! CLI and the accounts to sign in; the first project, with the branch
-//! its worktrees start from and its run command; and Ready, the keys that
-//! matter. Opened once from `main_loop` while `config.onboarded` is still
-//! false, and again from the palette's **Run setup** and `orion setup`;
-//! Esc / a click outside skips and stamps the flag so it does not come
-//! back. WHAT'S NEW, after an upgrade, is a sheet of its own
-//! (`crate::whats_new`), drawn in the same frame ([`draw_sheet`]).
+//! its worktrees start from, its setup command and its run command; and
+//! Ready, the keys that matter. Opened once from `main_loop` while
+//! `config.onboarded` is still false, and again from the palette's **Run
+//! setup** and `orion setup`; Esc / a click outside skips and stamps the
+//! flag so it does not come back. WHAT'S NEW, after an upgrade, is a
+//! sheet of its own (`crate::whats_new`), drawn in the same frame
+//! ([`draw_sheet`]).
 //!
 //! Every page is one modal laid out the way every modal is (docs/keys.md,
 //! "How the screen is laid out"): the STEP STRIP across its top names each
@@ -42,7 +43,7 @@ enum Page {
     Welcome,
     /// CLAUDE: the CLI, then every account — sign each in, add one.
     Claude,
-    /// FIRST PROJECT: the repo, its base branch and run command.
+    /// FIRST PROJECT: the repo, its base branch, setup and run commands.
     Project,
     Ready,
 }
@@ -94,8 +95,8 @@ pub struct OnboardView {
     pub page: usize,
     pub row: usize,
     pub area: Rect,
-    /// A typed row being edited in place — the project's base branch or
-    /// run command — and its text so far.
+    /// A typed row being edited in place — the project's base branch,
+    /// setup command or run command — and its text so far.
     pub field: Option<(SettingKind, TextInput)>,
     /// What the Claude page is asking, when it is asking.
     pub account: AccountStep,
@@ -817,8 +818,9 @@ fn claude(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width: u
 }
 
 /// The First project page: the project the grid is on — or the repo
-/// orion was started in, to open — then its **Base branch** and **Run
-/// command**, the rows Settings → Projects has for it, typed in place.
+/// orion was started in, to open — then its **Base branch**, **Setup
+/// command** and **Run command**, the rows Settings → Projects has for it,
+/// typed in place.
 fn project(body: &mut Body, app: &App, cfg: &Config, view: &OnboardView, th: Theme, width: u16) {
     let dim = Style::default().fg(th.dim);
     body.prose(

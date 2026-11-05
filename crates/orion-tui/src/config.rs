@@ -928,8 +928,8 @@ pub struct Config {
     /// the owner of the project's `LINEAR_API_KEY`, which for a personal
     /// key is the user; an email names another member of the workspace,
     /// for a key a team shares. Always written to `config.local.json`
-    /// ([`LOCAL_KEYS`]), so `orion ssh` never carries it to a remote.
-    /// Hand-edited: no Settings row.
+    /// ([`LOCAL_KEYS`]), so a `config.json` copied to another machine never
+    /// carries it. Hand-edited: no Settings row.
     pub linear_assignee_email: String,
     /// FIRST-RUN ONBOARDING has been finished or skipped. Local-only so a
     /// shared `config.json` does not skip the wizard on a new machine.
@@ -1150,17 +1150,17 @@ pub struct ProjectSettings {
     /// empty, like `run_command`.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub setup_command: String,
-    /// The RUN COMMAND a menu's **Run** starts in this project's
-    /// worktrees, typed on the Projects tab. Empty — the default, shown as
+    /// The RUN COMMAND ⌘⇧S (a menu's **Start stack**) starts in this
+    /// project's worktrees, typed on the Projects tab. Empty — the default, shown as
     /// `not set` — is none. The DAEMON reads it
     /// (`orion-daemon/src/config.rs`); the TUI only edits it. Left out
     /// of the file while empty, so an entry written before the row reads
     /// the same after a save.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub run_command: String,
-    /// The OPEN COMMAND `Shift+Enter` / `Shift+O` fires on this project's
-    /// worktrees, typed on the Projects tab — `open http://localhost:3000`,
-    /// say. Empty (shown as `not set`) is none. The TUI both edits and runs it
+    /// The OPEN COMMAND ⌘O's OPEN MENU (or the palette's **Open checkout
+    /// in editor**) fires on this project's worktrees, typed on the
+    /// Projects tab — `open http://localhost:3000`, say. Empty (shown as `not set`) is none. The TUI both edits and runs it
     /// (`event_loop::open_worktree`): what it opens belongs on the machine
     /// the user sits at, never the DAEMON's. Left out of the file while
     /// empty, like `run_command`.
@@ -1311,8 +1311,8 @@ impl Default for Config {
 }
 
 /// Keys a save always writes to `config.local.json`, never to the
-/// `config.json` that `orion ssh` carries to other machines: who the user
-/// is stays on this one. The local file is created for a key set away
+/// `config.json` that is copied or shared between machines (a dotfiles
+/// checkout, a backup): who the user is stays on this one. The local file is created for a key set away
 /// from its default, and an unreadable one is never rewritten — the key
 /// goes unsaved instead.
 const LOCAL_KEYS: &[&str] = &["linear_assignee_email", "onboarded", "seen_version"];
@@ -3912,7 +3912,7 @@ mod tests {
 
     /// **Open command** on the Projects tab: the same typed per-project row
     /// as Run command, right under it, kept as `open_command` — what
-    /// `Shift+Enter` / `Shift+O` runs.
+    /// **Open checkout in editor** runs.
     /// Its own key, so setting it leaves `run_command` alone; empty drops
     /// it from the entry.
     #[test]

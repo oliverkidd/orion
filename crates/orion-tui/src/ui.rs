@@ -1477,9 +1477,9 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             // each action currently answers to but the ⌘ aliases
             // (`Keymap::shown_chords`).
             // An action bound to more chords than the key column holds —
-            // open's ⇧Enter ⇧O ⌥Enter — loses whole chords off the end
-            // and gains an ellipsis, never a cut mid-chord; the Hotkeys
-            // tab lists every one.
+            // the unlock's Esc ^Q ^] ^⇧H — loses whole chords off the end
+            // and gains an ellipsis, never a cut mid-chord; the Keys tab
+            // lists every one.
             let keys_of = |k: &HelpKeys| -> String {
                 match k {
                     Lit(s) => (*s).to_string(),
