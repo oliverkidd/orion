@@ -177,16 +177,14 @@ pub(super) fn stage_agent(
     let agent = AgentId::generate();
     // The stamp below re-sorts the PROJECTS PANEL as well: the newest
     // session under any project, it puts the checkout's project on the
-    // top row. `sel_project` is a row index, so the project is held by
-    // id across the push — left alone, the cursor would highlight
-    // whichever project slid into the vacated row, and `worktree_row_of`
-    // below would look for the stand-in among that project's checkouts.
+    // top row. The project cursor holds its project by id, so it moves
+    // up with it, and `worktree_row_of` below looks for the stand-in
+    // among the right project's checkouts.
     //
     // A BACKGROUND LAUNCH (`launcher::is_background` — a box aimed at
     // another project with `^P`) is the one that holds nothing: its rows
     // go up in that project's list and the screen stays where the user
     // is, cursor and pane included. See the early return below.
-    let project = app.selected_project().map(|p| p.id.clone());
     let background = app
         .tree
         .worktrees
@@ -194,7 +192,6 @@ pub(super) fn stage_agent(
         .find(|w| &w.id == worktree)
         .map(|w| w.project_id.clone())
         .is_some_and(|landed| crate::launcher::is_background(app, &landed));
-    let before = selection_snapshot(app);
     app.tree.agents.push(Agent {
         id: agent.clone(),
         worktree_id: worktree.clone(),
@@ -223,16 +220,9 @@ pub(super) fn stage_agent(
         recent_prompts: Vec::new(),
         usage_limit: None,
     });
-    if let Some(i) = project.and_then(|id| {
-        app.project_rows()
-            .iter()
-            .position(|i| app.tree.projects[*i].id == id)
-    }) {
-        app.sel_project = i;
-    }
     // A prompt fired into another project is not a place to go: the row
-    // is in the tree for that project's list, the cursor above only held
-    // its ground through the re-sort, and nothing else here runs — the
+    // is in the tree for that project's list, the cursors hold their
+    // ground through the re-sort on their own, and nothing else here runs — the
     // grid, the worktree cursor and the pane stay on the work in front
     // of the user. The create's Ack is left behind for the same reason
     // (`quick_launch::submit`).
@@ -241,19 +231,18 @@ pub(super) fn stage_agent(
         return agent;
     }
     // A launch into this very project that leaves the user put: the
-    // stamp re-sorted the checkouts and the new row leads its own, so
-    // the cursors go back onto the rows they were on.
+    // stamp re-sorts the checkouts and the new row leads its own, under
+    // cursors that hold the rows they are on.
     if !follow {
-        reconcile_selection_inner(app, before, out);
         app.dirty = true;
         return agent;
     }
-    // That stamp just moved the row to the top — or, for a PR SESSION's
-    // stand-in, under its pull request's row: re-seat the cursor on it.
+    // Following the launch: onto the stand-in's checkout, wherever the
+    // stamp put it — the top, or under a PR SESSION's pull request.
     if let Some(i) = app.worktree_row_of(worktree) {
-        app.sel_worktree = i;
+        app.set_sel_worktree(i);
     }
-    app.sel_session = 0;
+    app.set_sel_session(0);
     // The pane shows the row as it would a session whose CLI is booting.
     // Built by hand rather than through `attach`: the intent that marks
     // the row a stand-in is allocated by the caller after this returns,
@@ -279,9 +268,7 @@ pub(super) fn stage_agent(
 /// the real one either way. The cursor follows the checkout by id: the
 /// real row's id is not the stand-in's, and the grid orders on ids.
 pub(super) fn resolve_worktree(app: &mut App, placeholder: &WorktreeId, real: &WorktreeId) {
-    let was_selected = app
-        .selected_worktree()
-        .is_some_and(|w| &w.id == placeholder);
+    app.rekey_worktree(placeholder, real);
     if app.tree.worktrees.iter().any(|w| &w.id == real) {
         app.tree.worktrees.retain(|w| &w.id != placeholder);
     } else if let Some(w) = app.tree.worktrees.iter_mut().find(|w| &w.id == placeholder) {
@@ -320,11 +307,6 @@ pub(super) fn resolve_worktree(app: &mut App, placeholder: &WorktreeId, real: &W
         }
     }
     forget_worktree(app, placeholder);
-    if was_selected {
-        if let Some(i) = app.worktree_row_of(real) {
-            app.sel_worktree = i;
-        }
-    }
     app.dirty = true;
 }
 
@@ -409,6 +391,7 @@ pub(super) fn resolve_agent(app: &mut App, placeholder: &AgentId, real: &AgentId
         a.id = real.clone();
     }
     let stand_in = SessionRef::Agent(placeholder.clone());
+    app.rekey_session(&stand_in, &SessionRef::Agent(real.clone()));
     for sref in app.last_session_for_worktree.values_mut() {
         if *sref == stand_in {
             *sref = SessionRef::Agent(real.clone());
@@ -616,7 +599,7 @@ mod tests {
         seed_tree(app);
         seed_feat_worktree(app, "w2", "feat");
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         assert_eq!(
             app.selected_worktree().map(|w| w.branch.as_str()),
             Some("feat")
@@ -739,7 +722,7 @@ mod tests {
                 sessions[0].sref(),
                 Some(SessionRef::Agent(rows.agent.clone()))
             );
-            assert_eq!(app.sel_session, 0);
+            assert_eq!(app.sel_session(), 0);
             assert!(app.is_placeholder_agent(&rows.agent));
 
             let term = app.term.as_ref().expect("the pane shows the stand-in");
@@ -836,7 +819,7 @@ mod tests {
                 sessions[0].sref(),
                 Some(SessionRef::Agent(AgentId("a9".into())))
             );
-            assert_eq!(app.sel_session, 0);
+            assert_eq!(app.sel_session(), 0);
             assert!(
                 !app.tree.agents.iter().any(|a| a.id == rows.agent),
                 "the stand-in is gone"
@@ -1164,7 +1147,7 @@ mod tests {
             assert_eq!(selected.id, placeholder, "the cursor is on the stand-in");
             assert!(app.is_placeholder_worktree(&placeholder));
             assert_eq!(app.focus, Focus::Sessions, "as the Ack left it before");
-            assert_eq!(app.sel_session, 0);
+            assert_eq!(app.sel_session(), 0);
             assert!(app.visible_session_rows().is_empty());
             assert!(app.term.is_none(), "nothing to show yet");
             let text = screen(&mut app);
@@ -1214,7 +1197,7 @@ mod tests {
             assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w2"));
             assert!(!app.tree.worktrees.iter().any(|w| w.id == placeholder));
             assert_eq!(app.focus, Focus::Sessions);
-            assert_eq!(app.sel_session, 0);
+            assert_eq!(app.sel_session(), 0);
             assert!(app.pending.is_empty(), "{:?}", app.pending);
             assert_eq!(
                 app.pending_prewarm.as_ref().map(|(w, _)| w.0.as_str()),
@@ -1712,7 +1695,7 @@ mod tests {
         seed_open_prs(app, &[(7, "Attach links")]);
         app.focus = Focus::Worktrees;
         // The checkouts come first; the pull request is the row after.
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         super::super::open_pr_agent_picker(app);
         assert!(
             matches!(app.overlay, Some(Overlay::Menu(_))),
@@ -1762,7 +1745,7 @@ mod tests {
             seed_tree(&mut app);
             seed_open_prs(&mut app, &[(7, "Attach links")]);
             app.focus = Focus::Worktrees;
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             super::super::open_pr_agent_picker(&mut app);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(app.overlay.is_none(), "{:?}", app.overlay);
@@ -1959,7 +1942,7 @@ mod tests {
             seed_open_prs(&mut app, &[(7, "Attach links")]);
             app.focus = Focus::Worktrees;
             // The pull request's row; its checkout is the row under it.
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
             assert_eq!(
                 app.worktree_row_of(&WorktreeId("w2".into())),
@@ -1999,7 +1982,7 @@ mod tests {
 
             // Back on the pull request's row — the stand-in checkout sits
             // under it, so the pull request is the row after the root.
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
             super::super::open_pr_agent_picker(&mut app);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -2126,7 +2109,7 @@ mod tests {
             },
         );
         assert_eq!(project_names(app), ["two", "demo"]);
-        app.sel_project = 1;
+        app.set_sel_project(1);
         assert_eq!(
             app.selected_project().map(|p| p.name.as_str()),
             Some("demo")
@@ -2144,10 +2127,9 @@ mod tests {
     /// `p` on the WORKTREES PANEL of the project on the BOTTOM row of the
     /// PROJECTS PANEL. The stand-in session's fresh stamp is the newest
     /// under any project, so the row moves to the top — and the cursor
-    /// moves with it. `sel_project` is a row index: left alone it would
-    /// highlight whichever project slid into the vacated bottom row, with
-    /// that project's checkouts in the WORKTREES PANEL instead of the
-    /// stand-in. The cursor keeps following through the Acks that turn
+    /// moves with it — not onto whichever project slid into the vacated
+    /// bottom row, with that project's checkouts in the WORKTREES PANEL
+    /// instead of the stand-in. The cursor keeps following through the Acks that turn
     /// the stand-ins into the real rows.
     #[test]
     fn the_stand_in_moves_its_project_to_the_top_and_the_cursor_follows() {
@@ -2162,7 +2144,7 @@ mod tests {
                 ["demo", "two"],
                 "the launch moved demo to the top"
             );
-            assert_eq!(app.sel_project, 0, "the cursor moved with it");
+            assert_eq!(app.sel_project(), 0, "the cursor moved with it");
             assert_eq!(
                 app.selected_project().map(|p| p.name.as_str()),
                 Some("demo")
@@ -2172,7 +2154,7 @@ mod tests {
                 Some(rows.worktree.clone()),
                 "its WORKTREES PANEL holds the stand-in, selected"
             );
-            assert_eq!(app.sel_session, 0);
+            assert_eq!(app.sel_session(), 0);
             assert_eq!(app.focus, Focus::Worktrees);
 
             // The DAEMON's answers keep it there.
@@ -2197,7 +2179,7 @@ mod tests {
                 &mut out,
             );
             assert_eq!(project_names(&app), ["demo", "two"]);
-            assert_eq!(app.sel_project, 0);
+            assert_eq!(app.sel_project(), 0);
             assert_eq!(
                 app.selected_project().map(|p| p.name.as_str()),
                 Some("demo")
@@ -2243,7 +2225,7 @@ mod tests {
             };
             out.clear();
             assert_eq!(project_names(&app), ["two", "demo"], "nothing staged");
-            assert_eq!(app.sel_project, 1);
+            assert_eq!(app.sel_project(), 1);
 
             hse(
                 &mut app,
@@ -2256,7 +2238,7 @@ mod tests {
                 ["demo", "two"],
                 "the upsert moved demo up"
             );
-            assert_eq!(app.sel_project, 0, "the cursor moved with it");
+            assert_eq!(app.sel_project(), 0, "the cursor moved with it");
             handle_server_event(
                 &mut app,
                 ServerEvent::Ack {
@@ -2275,7 +2257,7 @@ mod tests {
                 },
             );
             assert_eq!(project_names(&app), ["demo", "two"]);
-            assert_eq!(app.sel_project, 0);
+            assert_eq!(app.sel_project(), 0);
             assert_eq!(
                 app.selected_project().map(|p| p.name.as_str()),
                 Some("demo")

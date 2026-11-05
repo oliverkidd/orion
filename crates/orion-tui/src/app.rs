@@ -2853,8 +2853,8 @@ impl SessionRow {
     }
 }
 
-/// One row of the WORKTREES PANEL, in cursor order — what `sel_worktree`
-/// indexes (see [`App::worktree_rows`]).
+/// One row of the WORKTREES PANEL, in cursor order — what
+/// [`App::sel_worktree`] is a place in (see [`App::worktree_rows`]).
 #[derive(Debug, Clone, Copy)]
 pub enum WorktreeRow<'a> {
     /// A checkout listed on its own: the ROOT WORKTREE, or a branch no
@@ -2900,6 +2900,140 @@ impl<'a> WorktreeRow<'a> {
         match self {
             WorktreeRow::Pr(pr) => Some(pr),
             WorktreeRow::Checkout(_) | WorktreeRow::PrCheckout(_) | WorktreeRow::Issue(_) => None,
+        }
+    }
+}
+
+/// A PANEL CURSOR: the row it is on BY IDENTITY, and where that row last
+/// stood. Every list the cursors walk re-sorts under them on its own — on
+/// a turn finishing, a session read or reaped, a checkout going dormant, a
+/// pull request list landing — so the row is what is kept, and its index
+/// is looked up in the rows as they stand ([`PanelCursor::index`]).
+///
+/// `last_index` answers only when the row is not in the list: it left
+/// (deleted, archived away, another project's), or the cursor was put
+/// where no row is yet. The cursor then stands where its row last was,
+/// which is the row that slid up into its slot — the neighbour
+/// [`App::reseat_cursors`] re-seats it on.
+#[derive(Debug)]
+struct PanelCursor<K> {
+    key: Option<K>,
+    last_index: std::cell::Cell<usize>,
+}
+
+impl<K> Default for PanelCursor<K> {
+    fn default() -> Self {
+        Self {
+            key: None,
+            last_index: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl<K> PanelCursor<K> {
+    /// The cursor's index: where `find` finds its row, else where it last
+    /// stood. A row found is remembered there, so a row that leaves later
+    /// hands the cursor to the one in its last place, not its first.
+    fn index(&self, find: impl FnOnce(&K) -> Option<usize>) -> usize {
+        match self.key.as_ref().and_then(find) {
+            Some(i) => {
+                self.last_index.set(i);
+                i
+            }
+            None => self.last_index.get(),
+        }
+    }
+
+    /// Where to re-seat a cursor whose row is not among the `len` rows
+    /// `find` searches: the row now in its last place, or the last row
+    /// once the list is shorter than that. None for a cursor still on its
+    /// row, or already resting on the empty list's nothing.
+    fn reseat_at(&self, find: impl FnOnce(&K) -> Option<usize>, len: usize) -> Option<usize> {
+        if self.key.as_ref().and_then(find).is_some() {
+            return None;
+        }
+        let last = self.last_index.get();
+        let at = last.min(len.saturating_sub(1));
+        (len > 0 || self.key.is_some() || at != last).then_some(at)
+    }
+
+    fn set(&mut self, key: Option<K>, at: usize) {
+        self.key = key;
+        self.last_index.set(at);
+    }
+}
+
+/// A WORKTREES PANEL row by what it is, for its cursor: a checkout keeps
+/// its key whether it sits among the plain ones or under its pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorktreeRowKey {
+    Checkout(WorktreeId),
+    Pr(String),
+    Issue(String),
+}
+
+impl WorktreeRow<'_> {
+    fn key(self) -> WorktreeRowKey {
+        match self {
+            WorktreeRow::Checkout(w) | WorktreeRow::PrCheckout(w) => {
+                WorktreeRowKey::Checkout(w.id.clone())
+            }
+            WorktreeRow::Pr(pr) => WorktreeRowKey::Pr(pr.url.clone()),
+            WorktreeRow::Issue(issue) => WorktreeRowKey::Issue(issue.url.clone()),
+        }
+    }
+
+    /// [`WorktreeRow::key`] `== key`, without building one.
+    fn has_key(self, key: &WorktreeRowKey) -> bool {
+        match (self, key) {
+            (
+                WorktreeRow::Checkout(w) | WorktreeRow::PrCheckout(w),
+                WorktreeRowKey::Checkout(id),
+            ) => &w.id == id,
+            (WorktreeRow::Pr(pr), WorktreeRowKey::Pr(url)) => &pr.url == url,
+            (WorktreeRow::Issue(issue), WorktreeRowKey::Issue(url)) => &issue.url == url,
+            _ => false,
+        }
+    }
+}
+
+/// A SESSIONS PANEL row by what it is, for its cursor: a session or a
+/// terminal by its ref, a saved link by its id, the branch's detected pull
+/// request by its URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionRowKey {
+    Session(SessionRef),
+    Link(LinkId),
+    PullRequest(String),
+}
+
+impl SessionRow {
+    fn key(&self) -> SessionRowKey {
+        match self {
+            SessionRow::Agent(_) | SessionRow::Terminal(_) => {
+                SessionRowKey::Session(self.sref().expect("a session row has a ref"))
+            }
+            SessionRow::Link(LinkRow::Saved { link, .. }) => SessionRowKey::Link(link.id.clone()),
+            SessionRow::Link(LinkRow::PullRequest(pr)) => {
+                SessionRowKey::PullRequest(pr.url.clone())
+            }
+        }
+    }
+
+    /// [`SessionRow::key`] `== key`, without building one.
+    fn has_key(&self, key: &SessionRowKey) -> bool {
+        match (self, key) {
+            (SessionRow::Agent(a), SessionRowKey::Session(SessionRef::Agent(id))) => &a.id == id,
+            (SessionRow::Terminal(t), SessionRowKey::Session(SessionRef::Terminal(id))) => {
+                &t.id == id
+            }
+            (SessionRow::Link(LinkRow::Saved { link, .. }), SessionRowKey::Link(id)) => {
+                &link.id == id
+            }
+            (SessionRow::Link(LinkRow::PullRequest(pr)), SessionRowKey::PullRequest(url)) => {
+                &pr.url == url
+            }
+            _ => false,
         }
     }
 }
@@ -3017,12 +3151,9 @@ pub fn is_active_status(s: AgentStatus) -> bool {
 /// the clock: newer than any stamp, whenever the sort runs.
 ///
 /// Never the clock. A sort read off the clock re-orders rows with nothing
-/// in the tree changed, and every panel cursor is an index into its rows.
-/// A session finishing in the same millisecond the client handled it tied
-/// a working one at `now`, the raw stamps broke the tie the finished way,
-/// the cursor was re-seated there — and the next frame's clock broke it
-/// the other way under the cursor, which snapped to the project whose
-/// session had just finished.
+/// in the tree changed: a session finishing in the same millisecond the
+/// client handled it tied a working one at `now`, and the rows swapped
+/// back and forth between frames as the clock broke the tie each way.
 pub fn last_interaction_ms(a: &Agent) -> i64 {
     if is_active_status(a.status) {
         i64::MAX
@@ -3834,11 +3965,12 @@ pub struct RowsMemo {
     sessions: std::cell::RefCell<Option<Vec<SessionRow>>>,
 }
 
-/// What the kept rows were built for: the three cursors and how many of
-/// each thing the tree holds.
+/// What the kept rows were built for: the selection (by how many times a
+/// cursor has moved, [`App::cursor_moves`]) and how many of each thing the
+/// tree holds.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct RowsKey {
-    cursor: (usize, usize, usize),
+    cursor: u64,
     shape: [usize; 5],
     show_archived: bool,
     /// How many ARCHIVED DRAWERS are open: an open one lists its
@@ -3909,11 +4041,17 @@ impl RowsMemo {
 pub struct App {
     pub tree: Tree,
     pub focus: Focus,
-    /// Selected row in the Projects panel — indexes `project_rows()`,
-    /// every project in display order.
-    pub sel_project: usize,
-    pub sel_worktree: usize,
-    pub sel_session: usize,
+    /// The three panel cursors — the project, the Worktrees row and the
+    /// Sessions row — each held by the row it is on, not by where that row
+    /// stands ([`PanelCursor`]). Read with [`App::sel_project`] and the
+    /// rest, moved with [`App::set_sel_project`] and the rest.
+    project_cursor: PanelCursor<ProjectId>,
+    worktree_cursor: PanelCursor<WorktreeRowKey>,
+    session_cursor: PanelCursor<SessionRowKey>,
+    /// Bumped on every cursor move: what the ROWS MEMO keys on
+    /// ([`RowsKey`]), so rows kept for one selection are never read for
+    /// another.
+    cursor_moves: u64,
     pub term: Option<AttachedTerm>,
     /// Screens of the sessions the pane showed most recently, most recent
     /// first — at most [`TERM_CACHE_MAX`], each under [`TERM_CACHE_CELLS`].
@@ -4828,9 +4966,10 @@ impl App {
             // The GRID is where FOCUS lives; the PANE under it is the only
             // other place it can go.
             focus: Focus::Sessions,
-            sel_project: 0,
-            sel_worktree: 0,
-            sel_session: 0,
+            project_cursor: PanelCursor::default(),
+            worktree_cursor: PanelCursor::default(),
+            session_cursor: PanelCursor::default(),
+            cursor_moves: 0,
             follow_up: None,
             term: None,
             term_cache: Vec::new(),
@@ -5773,7 +5912,7 @@ impl App {
     /// What [`RowsMemo::with`] keys the kept rows on.
     fn rows_key(&self) -> RowsKey {
         RowsKey {
-            cursor: (self.sel_project, self.sel_worktree, self.sel_session),
+            cursor: self.cursor_moves,
             shape: [
                 self.tree.projects.len(),
                 self.tree.worktrees.len(),
@@ -5815,7 +5954,131 @@ impl App {
 
     /// Index into `tree.projects` of the selected Projects-panel row.
     pub fn selected_project_index(&self) -> Option<usize> {
-        self.project_rows().get(self.sel_project).copied()
+        let rows = self.project_rows();
+        rows.get(self.project_index_in(&rows)).copied()
+    }
+
+    // ---- the PANEL CURSORS ([`PanelCursor`]) ----
+
+    /// Where the project cursor stands in [`App::project_rows`].
+    pub fn sel_project(&self) -> usize {
+        self.project_index_in(&self.project_rows())
+    }
+
+    fn project_index_in(&self, rows: &[usize]) -> usize {
+        self.project_cursor
+            .index(|id| rows.iter().position(|&i| &self.tree.projects[i].id == id))
+    }
+
+    /// Put the project cursor on row `index` of [`App::project_rows`]: on
+    /// that project, wherever it moves from here.
+    pub fn set_sel_project(&mut self, index: usize) {
+        let key = self
+            .project_rows()
+            .get(index)
+            .map(|&i| self.tree.projects[i].id.clone());
+        self.project_cursor.set(key, index);
+        self.cursor_moves += 1;
+    }
+
+    /// Where the Worktrees cursor stands in [`App::worktree_rows`].
+    pub fn sel_worktree(&self) -> usize {
+        self.worktree_index_in(&self.worktree_rows())
+    }
+
+    /// [`App::sel_worktree`] in `rows`, the Worktrees rows already in hand.
+    pub fn worktree_index_in(&self, rows: &[WorktreeRow<'_>]) -> usize {
+        self.worktree_cursor
+            .index(|key| rows.iter().position(|row| row.has_key(key)))
+    }
+
+    /// The row the Worktrees cursor is on, as the rows stand now.
+    fn selected_worktree_row(&self) -> Option<WorktreeRow<'_>> {
+        let rows = self.worktree_rows();
+        rows.get(self.worktree_index_in(&rows)).copied()
+    }
+
+    /// Put the Worktrees cursor on row `index` of [`App::worktree_rows`].
+    pub fn set_sel_worktree(&mut self, index: usize) {
+        let key = self.worktree_rows().get(index).map(|row| row.key());
+        self.worktree_cursor.set(key, index);
+        self.cursor_moves += 1;
+    }
+
+    /// Where the Sessions cursor stands in [`App::visible_session_rows`].
+    pub fn sel_session(&self) -> usize {
+        self.with_session_rows(|rows| self.session_index_in(rows))
+    }
+
+    /// [`App::sel_session`] in `rows`, the session rows already in hand.
+    pub fn session_index_in(&self, rows: &[SessionRow]) -> usize {
+        self.session_cursor
+            .index(|key| rows.iter().position(|row| row.has_key(key)))
+    }
+
+    /// Put the Sessions cursor on row `index` of
+    /// [`App::visible_session_rows`].
+    pub fn set_sel_session(&mut self, index: usize) {
+        let key = self.with_session_rows(|rows| rows.get(index).map(SessionRow::key));
+        self.session_cursor.set(key, index);
+        self.cursor_moves += 1;
+    }
+
+    /// Re-seat each cursor whose row has left its list onto the row now in
+    /// its place ([`PanelCursor::reseat_at`]), the project first, since the
+    /// rows under it are its project's. A cursor still on its row stays
+    /// on it, wherever it moved.
+    pub fn reseat_cursors(&mut self) {
+        let project = {
+            let rows = self.project_rows();
+            let find = |id: &ProjectId| rows.iter().position(|&i| &self.tree.projects[i].id == id);
+            self.project_cursor
+                .reseat_at(find, rows.len())
+                .map(|at| (rows.get(at).map(|&i| self.tree.projects[i].id.clone()), at))
+        };
+        if let Some((key, at)) = project {
+            self.project_cursor.set(key, at);
+            self.cursor_moves += 1;
+        }
+        let worktree = {
+            let rows = self.worktree_rows();
+            let find = |key: &WorktreeRowKey| rows.iter().position(|row| row.has_key(key));
+            self.worktree_cursor
+                .reseat_at(find, rows.len())
+                .map(|at| (rows.get(at).map(|row| row.key()), at))
+        };
+        if let Some((key, at)) = worktree {
+            self.worktree_cursor.set(key, at);
+            self.cursor_moves += 1;
+        }
+        let session = self.with_session_rows(|rows| {
+            let find = |key: &SessionRowKey| rows.iter().position(|row| row.has_key(key));
+            self.session_cursor
+                .reseat_at(find, rows.len())
+                .map(|at| (rows.get(at).map(SessionRow::key), at))
+        });
+        if let Some((key, at)) = session {
+            self.session_cursor.set(key, at);
+            self.cursor_moves += 1;
+        }
+    }
+
+    /// Checkout `from` is `to` from here on — a stand-in replaced by the
+    /// real row the DAEMON cut: a cursor on it stays on it.
+    pub fn rekey_worktree(&mut self, from: &WorktreeId, to: &WorktreeId) {
+        if self.worktree_cursor.key.as_ref() == Some(&WorktreeRowKey::Checkout(from.clone())) {
+            self.worktree_cursor.key = Some(WorktreeRowKey::Checkout(to.clone()));
+            self.cursor_moves += 1;
+        }
+    }
+
+    /// Session `from` is `to` from here on — a stand-in replaced by the
+    /// real row: a cursor on it stays on it.
+    pub fn rekey_session(&mut self, from: &SessionRef, to: &SessionRef) {
+        if self.session_cursor.key.as_ref() == Some(&SessionRowKey::Session(from.clone())) {
+            self.session_cursor.key = Some(SessionRowKey::Session(to.clone()));
+            self.cursor_moves += 1;
+        }
     }
 
     /// The project giving the current selection its context.
@@ -5837,9 +6100,7 @@ impl App {
     /// The checkout under the Worktrees cursor — a plain row or one nested
     /// under its pull request. None while the cursor is on a pull request.
     pub fn selected_worktree(&self) -> Option<&Worktree> {
-        self.worktree_rows()
-            .get(self.sel_worktree)
-            .and_then(|row| row.checkout())
+        self.selected_worktree_row().and_then(WorktreeRow::checkout)
     }
 
     /// A checkout's last-read changed-file count, for its cards: None until
@@ -5944,7 +6205,8 @@ impl App {
         });
     }
 
-    /// The full row list the panel shows — `sel_session` indexes this.
+    /// The full row list the panel shows — what [`App::sel_session`] is a
+    /// place in.
     pub fn visible_session_rows(&self) -> Vec<SessionRow> {
         self.with_session_rows(<[SessionRow]>::to_vec)
     }
@@ -6038,7 +6300,7 @@ impl App {
     }
 
     pub fn selected_session_row(&self) -> Option<SessionRow> {
-        self.with_session_rows(|rows| rows.get(self.sel_session).cloned())
+        self.with_session_rows(|rows| rows.get(self.session_index_in(rows)).cloned())
     }
 
     /// The selected row's agent, when it is one (terminal rows return None).
@@ -6282,8 +6544,8 @@ impl App {
         self.listed_issues()
     }
 
-    /// The Worktrees panel's rows in cursor order — what `sel_worktree`
-    /// indexes: the project's checkouts, then the pull requests still open
+    /// The Worktrees panel's rows in cursor order — what
+    /// [`App::sel_worktree`] is a place in: the project's checkouts, then the pull requests still open
     /// on its repo, each followed by the checkout on its head branch when
     /// the project has one. A PR SESSION works in a checkout of the pull
     /// request's head branch (`CreatePrAgent` cuts it, or reuses the one
@@ -6380,17 +6642,14 @@ impl App {
     /// row has no checkout, and a checkout nested under a pull request is
     /// still a checkout, not the pull request.
     pub fn selected_worktree_pr(&self) -> Option<&OpenPr> {
-        self.worktree_rows()
-            .get(self.sel_worktree)
-            .and_then(|row| row.open_pr())
+        self.selected_worktree_row().and_then(WorktreeRow::open_pr)
     }
 
     /// The issue under the Worktrees cursor — a PROJECT ISSUES GROUP row.
     /// None on a checkout or a pull request.
     pub fn selected_worktree_issue(&self) -> Option<&crate::issues::Issue> {
-        self.worktree_rows()
-            .get(self.sel_worktree)
-            .and_then(|row| row.open_issue())
+        self.selected_worktree_row()
+            .and_then(WorktreeRow::open_issue)
     }
 
     /// The pull request the pane should be reading: the PROJECT OPEN PRS
@@ -6946,7 +7205,7 @@ mod tests {
     #[test]
     fn a_stretch_rebuilds_for_a_moved_cursor_or_a_new_row() {
         let mut app = a_memo_tree();
-        app.sel_project = 1; // `api`, behind `web`
+        app.set_sel_project(1); // `api`, behind `web`
         app.rows_memo.arm();
         let ids = |app: &App| -> Vec<String> {
             app.visible_worktrees()
@@ -6960,7 +7219,7 @@ mod tests {
             _ => None,
         };
         assert_eq!(session(&app).as_deref(), Some("a0"));
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         assert_eq!(
             session(&app).as_deref(),
             Some("a1"),

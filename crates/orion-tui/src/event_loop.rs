@@ -1820,9 +1820,9 @@ fn note_open_prs_answer_at(
     asked: crate::fetch::Asked,
     out: &mut Vec<ClientRequest>,
 ) {
-    // Where the cursor rests, before the list under it changes: see
-    // `WorktreeCursor`.
-    let kept = WorktreeCursor::take(app);
+    // The pull request row the cursor rests on, before the list under it
+    // changes (`reconcile_open_pr_cursor`).
+    let was_on = app.selected_worktree_pr().cloned();
     let mut status_changed = false;
     let mut merged = None;
     // Whether the merged tail is the whole week is for an answer that
@@ -1933,7 +1933,7 @@ fn note_open_prs_answer_at(
         },
     );
     forget_retired_prs(app);
-    kept.restore(app, out);
+    reconcile_open_pr_cursor(app, was_on, out);
     // An open `/` palette lists these rows too: a pull request marked
     // ready for review (or turned back into a draft) since the last answer
     // must change its word there as well, and one merged since must leave.
@@ -2091,52 +2091,30 @@ fn reconcile_open_pr_cursor(
     let Some(was) = was else {
         return;
     };
-    match app.open_pr_row_of(&was.url) {
-        // Same pull request, possibly at a new index. Nothing is re-armed:
-        // `schedule_pr_detail` zeroes `pr_preview_scroll`, and a refresh
-        // landing every minute must not yank a reader back to the top of a
-        // conversation they're halfway down.
-        Some(i) => app.sel_worktree = i,
-        None => {
-            let rows = app.worktree_row_count();
-            if app.sel_worktree >= rows {
-                app.sel_worktree = rows.saturating_sub(1);
-            }
-            if app.selected_worktree().is_some() {
-                restore_session(app, out);
-            }
-            // The pane is showing something else now: rewind it and fetch
-            // whatever the cursor landed on.
-            schedule_pr_detail(app);
-            app.dirty = true;
-        }
+    if settle_pr_cursor(app, &was) {
+        restore_session(app, out);
     }
 }
 
-/// Where the Worktrees cursor rests — the pull request row it is on, or
-/// the checkout — taken before something changes the open-PR lists and
-/// put back after. A merge or a close retires a pull request's row, and
-/// the checkout nested under it moves back among the plain ones
-/// (`App::worktree_rows`): every row below shifts, and an index left
-/// alone lands on another worktree. Every path that changes the lists
-/// takes one first, so none can forget the checkout half.
-struct WorktreeCursor {
-    pr: Option<crate::pull_request::OpenPr>,
-    checkout: Option<WorktreeId>,
-}
-
-impl WorktreeCursor {
-    fn take(app: &App) -> Self {
-        Self {
-            pr: app.selected_worktree_pr().cloned(),
-            checkout: app.selected_worktree().map(|w| w.id.clone()),
-        }
+/// After the open-PR rows changed under a cursor that was on pull request
+/// `was`. Still listed, it is still under the cursor, wherever it moved,
+/// and nothing is re-armed: `schedule_pr_detail` zeroes
+/// `pr_preview_scroll`, and a refresh landing every minute must not yank
+/// a reader back to the top of a conversation they're halfway down. Gone,
+/// the cursor takes the row now in its place and the pane is told to read
+/// it. True when that row is a checkout, whose session the caller brings
+/// up.
+fn settle_pr_cursor(app: &mut App, was: &crate::pull_request::OpenPr) -> bool {
+    if app
+        .selected_worktree_pr()
+        .is_some_and(|pr| pr.url == was.url)
+    {
+        return false;
     }
-
-    fn restore(self, app: &mut App, out: &mut Vec<ClientRequest>) {
-        reconcile_open_pr_cursor(app, self.pr, out);
-        follow_checkout(app, self.checkout.as_ref());
-    }
+    app.reseat_cursors();
+    schedule_pr_detail(app);
+    app.dirty = true;
+    app.selected_worktree().is_some()
 }
 
 /// Forget the description and conversation of every pull request that is no
@@ -2195,7 +2173,7 @@ fn adopt_pr_state(app: &mut App, url: &str, was_merged: bool) {
 /// the minute anyway; this is for the case where the user is looking
 /// straight at it.
 fn drop_retired_pr(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
-    let kept = WorktreeCursor::take(app);
+    let was_on = app.selected_worktree_pr().cloned();
     let mut removed = false;
     for open in app.open_prs.values_mut() {
         let before = open.list.len();
@@ -2205,7 +2183,7 @@ fn drop_retired_pr(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
     if !removed {
         return;
     }
-    kept.restore(app, out);
+    reconcile_open_pr_cursor(app, was_on, out);
     refresh_palette(app);
     crate::pr_modal::list_changed(app);
     app.dirty = true;
@@ -3490,12 +3468,12 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
             .iter()
             .position(|i| app.tree.projects[*i].id.as_str() == pid);
         if let Some(i) = row {
-            app.sel_project = i;
+            app.set_sel_project(i);
         }
     }
     if let Some(wid) = &state.worktree {
         if let Some(i) = app.worktree_row_of(&WorktreeId(wid.clone())) {
-            app.sel_worktree = i;
+            app.set_sel_worktree(i);
         }
     }
     let mut session_landed = false;
@@ -3505,7 +3483,7 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
             .iter()
             .position(|r| matches!(r, SessionRow::Agent(a) if a.id.as_str() == sid))
         {
-            app.sel_session = i;
+            app.set_sel_session(i);
             session_landed = true;
         }
     }
@@ -7061,15 +7039,13 @@ fn toggle_archived(app: &mut App, out: &mut Vec<ClientRequest>) {
 fn toggle_open_prs(app: &mut App, out: &mut Vec<ClientRequest>) {
     let on_pr = app.selected_worktree_pr().is_some();
     // A checkout under a pull request rejoins the plain rows when the
-    // group folds, and leaves them again when it opens: the cursor keeps
+    // group folds, and leaves them again when it opens: the cursor holds
     // the checkout, wherever the fold puts it.
-    let checkout = app.selected_worktree().map(|w| w.id.clone());
     app.open_prs_collapsed = !app.open_prs_collapsed;
-    follow_checkout(app, checkout.as_ref());
     if on_pr {
         // The last checkout — not the last row, which with an ISSUES
         // group open below would be an issue.
-        app.sel_worktree = last_checkout_row(app);
+        app.set_sel_worktree(last_checkout_row(app));
         if app.selected_worktree().is_some() {
             restore_session(app, out);
             // A fold is an explicit act, like an archive: the row the
@@ -7101,29 +7077,13 @@ fn toggle_issues(app: &mut App, out: &mut Vec<ClientRequest>) {
     let on_issue = app.selected_worktree_issue().is_some();
     app.issues_collapsed = !app.issues_collapsed;
     if on_issue {
-        app.sel_worktree = app.worktree_row_count().saturating_sub(1);
+        app.set_sel_worktree(app.worktree_row_count().saturating_sub(1));
         if app.selected_worktree().is_some() {
             restore_session(app, out);
             fire_pending_attach(app, out);
         }
     }
     app.dirty = true;
-}
-
-/// Re-seat the Worktrees cursor on checkout `id` after the rows regrouped
-/// under it — a fold, a draft toggle, a fresh open-list answer — each
-/// of which can move a checkout under its pull request's row or back out
-/// among the plain ones (`App::worktree_rows`). The pane needs nothing:
-/// the worktree under the cursor is the one it was showing. A cursor
-/// that was not on a checkout, or whose checkout is no longer a row, is
-/// left for the caller's own landing.
-fn follow_checkout(app: &mut App, id: Option<&WorktreeId>) {
-    if let Some(i) = id.and_then(|id| app.worktree_row_of(id)) {
-        if app.sel_worktree != i {
-            app.sel_worktree = i;
-            app.dirty = true;
-        }
-    }
 }
 
 /// Shift+T: create a shell terminal whose pwd is the selection's checkout —
@@ -8125,7 +8085,7 @@ fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientReq
 /// archived row and a link row are selected and preview nothing
 /// (`preview_inner`).
 fn select_session_row(app: &mut App, i: usize, debounce: Duration, out: &mut Vec<ClientRequest>) {
-    app.sel_session = i;
+    app.set_sel_session(i);
     preview_inner(app, debounce, out);
 }
 
@@ -9793,8 +9753,8 @@ pub(crate) fn close_settings(app: &mut App) {
 /// Show or hide the drafts in the PROJECT OPEN PRS GROUP and `/` (Settings
 /// → Appearance, or the panel menu's **Hide draft PRs**). Nothing stored
 /// changes — `listed_open_prs` reads the flag — but the rows under the
-/// cursor do, so it follows its pull request by URL, as
-/// `reconcile_open_pr_cursor` does after a refresh. A cursor on a draft
+/// cursor do, so its cursor stays on its pull request, as
+/// after a refresh (`reconcile_open_pr_cursor`). A cursor on a draft
 /// that just went has nothing to follow: it lands on the nearest row left
 /// and the pane is told to read whatever that is. True when that landing
 /// was a checkout, so a caller with a request buffer can bring its session
@@ -9806,25 +9766,13 @@ fn set_hide_draft_prs(app: &mut App, hidden: bool) -> bool {
         return false;
     }
     let was = app.selected_worktree_pr().cloned();
-    let checkout = app.selected_worktree().map(|w| w.id.clone());
     app.hide_draft_prs = hidden;
     app.dirty = true;
     refresh_palette(app);
     // A checkout on a draft's branch nests under it while the draft is
     // listed and is a plain row while it is not: either way it stays
-    // under the cursor.
-    follow_checkout(app, checkout.as_ref());
-    let Some(was) = was else {
-        return false;
-    };
-    if let Some(i) = app.open_pr_row_of(&was.url) {
-        app.sel_worktree = i;
-        return false;
-    }
-    let last = app.worktree_row_count().saturating_sub(1);
-    app.sel_worktree = app.sel_worktree.min(last);
-    schedule_pr_detail(app);
-    app.selected_worktree().is_some()
+    // under the cursor, as a pull request still listed does.
+    was.is_some_and(|was| settle_pr_cursor(app, &was))
 }
 
 /// **Hide draft PRs** / **Show draft PRs** on the Worktrees panel menu:
@@ -10714,14 +10662,14 @@ fn restore_context(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// on its own — its grid draws no pane, so attaching the project's last
 /// session would boot a PTY nobody is looking at.
 fn restore_project_cursors(app: &mut App) {
-    app.sel_worktree = 0;
+    app.set_sel_worktree(0);
     schedule_open_prs_lookup(app);
     crate::issues::schedule_prefetch(app);
     schedule_pr_detail(app);
     if let Some(pid) = app.selected_project().map(|p| p.id.clone()) {
         if let Some(wid) = app.last_worktree_for_project.get(&pid).cloned() {
             if let Some(i) = app.worktree_row_of(&wid) {
-                app.sel_worktree = i;
+                app.set_sel_worktree(i);
             }
         }
     }
@@ -10735,7 +10683,6 @@ fn restore_project_cursors(app: &mut App) {
 /// Only a worktree with no attachable row at all blanks the pane, rather
 /// than keep showing the previous context's session.
 fn restore_session(app: &mut App, out: &mut Vec<ClientRequest>) {
-    app.sel_session = 0;
     schedule_prewarm(app);
     schedule_pr_lookup(app);
     let rows = app.visible_session_rows();
@@ -10752,10 +10699,11 @@ fn restore_session(app: &mut App, out: &mut Vec<ClientRequest>) {
         .and_then(|i| rows[i].sref().map(|sref| (i, sref)));
     match target {
         Some((index, sref)) => {
-            app.sel_session = index;
+            app.set_sel_session(index);
             attach(app, sref, out);
         }
         None => {
+            app.set_sel_session(0);
             if app.term.is_some() {
                 detach_pane(app, out);
             }
@@ -10777,7 +10725,7 @@ fn land_pending_selection(app: &mut App, out: &mut Vec<ClientRequest>) {
         .iter()
         .position(|r| r.sref().as_ref() == Some(&pending_sref))
     {
-        app.sel_session = index;
+        app.set_sel_session(index);
         app.select_when_seen = None;
         // The pane follows the cursor; a session about to be attached
         // outright (the create flow's Ack) dedupes in attach().
@@ -10805,7 +10753,7 @@ fn land_pending_selection(app: &mut App, out: &mut Vec<ClientRequest>) {
                 .iter()
                 .position(|r| r.sref().as_ref() == Some(&pending_sref))
             {
-                app.sel_session = index;
+                app.set_sel_session(index);
                 preview_selected(app, out);
             }
             app.select_when_seen = None;
@@ -10823,9 +10771,9 @@ pub(crate) fn select_worktree_by_id(
     let Some(index) = app.worktree_row_of(id) else {
         return false;
     };
-    if app.sel_worktree != index {
+    if app.sel_worktree() != index {
         remember_context(app);
-        app.sel_worktree = index;
+        app.set_sel_worktree(index);
         restore_session(app, out);
     }
     // Land on the sessions panel so `n` immediately creates a session here.
@@ -10867,7 +10815,7 @@ fn select_project_row_by_id(app: &mut App, id: &orion_core::ProjectId) -> bool {
     app.select_worktree_when_seen = None;
     remember_context(app);
     let left = app.selected_project().map(|p| p.id.clone());
-    app.sel_project = row;
+    app.set_sel_project(row);
     app.reopen_projects();
     carry_open_band(app, left);
     true
@@ -10952,7 +10900,7 @@ fn jump_to_target_inner(
             let Some(index) = index else {
                 return;
             };
-            app.sel_worktree = index;
+            app.set_sel_worktree(index);
             restore_session(app, out);
             app.focus = Focus::Sessions;
             // A checkout picked by name is its BAND on the grid, with the
@@ -10980,7 +10928,7 @@ fn jump_to_target_inner(
             let Some(wt_index) = wt_index else {
                 return;
             };
-            app.sel_worktree = wt_index;
+            app.set_sel_worktree(wt_index);
             let Some(index) = app
                 .visible_session_rows()
                 .iter()
@@ -10992,7 +10940,7 @@ fn jump_to_target_inner(
                 app.focus = Focus::Sessions;
                 return;
             };
-            app.sel_session = index;
+            app.set_sel_session(index);
             // A session picked by name is its card on the grid, aimed at.
             launcher::land_on_grid(app);
             match landing {
@@ -11033,7 +10981,7 @@ fn jump_to_target_inner(
             // Re-picking the row the cursor is already on keeps the
             // reader's scroll; a move re-arms the detail fetch as any
             // cursor move onto the row does.
-            if app.sel_worktree != row {
+            if app.sel_worktree() != row {
                 select_worktree_row(app, row, out);
             }
             app.focus = Focus::Worktrees;
@@ -11076,7 +11024,7 @@ fn open_session(app: &mut App, sref: SessionRef, out: &mut Vec<ClientRequest>) {
     let Some(wt_index) = wt_index else {
         return;
     };
-    app.sel_worktree = wt_index;
+    app.set_sel_worktree(wt_index);
     let Some(index) = app
         .visible_session_rows()
         .iter()
@@ -11086,7 +11034,7 @@ fn open_session(app: &mut App, sref: SessionRef, out: &mut Vec<ClientRequest>) {
         app.focus = Focus::Sessions;
         return;
     };
-    app.sel_session = index;
+    app.set_sel_session(index);
     attach_selected(app, out);
 }
 
@@ -11187,16 +11135,17 @@ fn jump_attention(app: &mut App, step: i64, attaches: bool, out: &mut Vec<Client
 fn move_selection(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) {
     // (row count, cursor) of the focused column.
     let (len, sel) = match app.focus {
-        Focus::Projects => (app.project_rows().len(), app.sel_project),
+        Focus::Projects => (app.project_rows().len(), app.sel_project()),
         Focus::Worktrees => {
             // Stepping down off the last row into a folded OPEN PRS group
             // opens it and lands on its first pull request: the rows are
             // where the cursor is headed, so there is no sense stopping
             // at the header.
             let checkouts = app.worktree_row_count();
+            let sel = app.sel_worktree();
             if delta > 0
                 && app.open_prs_collapsed
-                && app.sel_worktree + 1 >= checkouts
+                && sel + 1 >= checkouts
                 && !app.listed_open_prs().is_empty()
             {
                 app.open_prs_collapsed = false;
@@ -11217,7 +11166,7 @@ fn move_selection(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) {
             // into that group, the same way.
             if delta > 0
                 && app.issues_collapsed
-                && app.sel_worktree + 1 >= checkouts
+                && sel + 1 >= checkouts
                 && !app.listed_issues().is_empty()
             {
                 app.issues_collapsed = false;
@@ -11230,9 +11179,12 @@ fn move_selection(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) {
                 select_worktree_row(app, first, out);
                 return;
             }
-            (checkouts, app.sel_worktree)
+            (checkouts, sel)
         }
-        Focus::Sessions => (app.visible_session_rows().len(), app.sel_session),
+        Focus::Sessions => {
+            let rows = app.visible_session_rows();
+            (rows.len(), app.session_index_in(&rows))
+        }
         Focus::Terminal => return,
     };
     if len == 0 {
@@ -11258,7 +11210,7 @@ fn select_project_row(app: &mut App, i: usize, out: &mut Vec<ClientRequest>) {
     app.select_worktree_when_seen = None;
     remember_context(app);
     let owner_before = app.selected_project().map(|p| p.id.clone());
-    app.sel_project = i;
+    app.set_sel_project(i);
     app.reopen_projects();
     carry_open_band(app, owner_before.clone());
     if app.selected_project().map(|p| p.id.clone()) != owner_before {
@@ -11273,7 +11225,7 @@ fn select_project_row(app: &mut App, i: usize, out: &mut Vec<ClientRequest>) {
 pub(super) fn select_worktree_row(app: &mut App, i: usize, out: &mut Vec<ClientRequest>) {
     app.select_worktree_when_seen = None;
     remember_context(app);
-    app.sel_worktree = i;
+    app.set_sel_worktree(i);
     if app.selected_worktree().is_some() {
         restore_session(app, out);
     }
@@ -11314,8 +11266,7 @@ fn preview_inner(app: &mut App, delay: Duration, out: &mut Vec<ClientRequest>) {
 /// Enter on the Sessions panel: attach the session under the cursor, or —
 /// on a link row — hand its URL to the browser and stay put.
 fn attach_selected(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let rows = app.visible_session_rows();
-    let Some(row) = rows.get(app.sel_session) else {
+    let Some(row) = app.selected_session_row() else {
         return;
     };
     let Some(sref) = row.sref() else {
@@ -13712,7 +13663,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             let session_restored = ui_state
                 .as_deref()
                 .is_some_and(|json| restore_ui_state(app, json));
-            clamp_selections(app);
+            app.reseat_cursors();
             refresh_palette(app);
             // Boot the restored worktree's sessions right away — the first
             // thing the user does after launch is walk into one of them.
@@ -14221,7 +14172,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                     // wherever `restore_context` falls back to.
                     if on_stand_in {
                         if let Some(row) = app.open_pr_row_of(&pr_url) {
-                            if app.sel_worktree != row {
+                            if app.sel_worktree() != row {
                                 select_worktree_row(app, row, out);
                             }
                         }
@@ -14276,9 +14227,6 @@ fn attach_created(
     if let (Some(stand_in), EntityId::Agent(real)) = (&placeholder, &id) {
         placeholder::resolve_agent(app, stand_in, real);
     }
-    // Where the user is, by id: the lead taken below re-sorts the band
-    // the card landed in, and the cursor there is a row index.
-    let before = selection_snapshot(app);
     // The card leads the sessions lists until its first turn starts, with
     // or without `follow`: where the cursor goes is one question, and
     // where the newest session sorts is another.
@@ -14293,8 +14241,9 @@ fn attach_created(
     let Some(sref) = sref else {
         return;
     };
+    // Without `follow` the cursors stay on the rows they hold, through
+    // the lead the new card takes.
     if !follow {
-        reconcile_selection_inner(app, before, out);
         let stand_in_shown = placeholder.is_some_and(|stand_in| {
             app.term
                 .as_ref()
@@ -14339,21 +14288,11 @@ fn apply_upsert(app: &mut App, entity: orion_core::Entity) {
     use orion_core::Entity;
     match entity {
         Entity::Project(p) => {
-            let selected = app.selected_project().map(|p| p.id.clone());
             upsert_by(&mut app.tree.projects, p, |x, y| x.id == y.id);
             // Reorders arrive as plain upserts with new sort_orders; stable
             // sort keeps snapshot order for legacy all-zero ties. The
-            // selection follows the project it was on, so children stay put.
+            // project cursor holds its project by id through the sort.
             app.tree.projects.sort_by_key(|x| x.sort_order);
-            if let Some(id) = selected {
-                let found = app
-                    .project_rows()
-                    .iter()
-                    .position(|i| app.tree.projects[*i].id == id);
-                if let Some(i) = found {
-                    app.sel_project = i;
-                }
-            }
         }
         Entity::Worktree(w) => {
             // A checkout switched to another branch outside orion: what
@@ -14477,7 +14416,7 @@ fn remove_worktree_rows(app: &mut App, id: &WorktreeId) -> Option<WorktreeRollba
         }
     }
     app.tree.agents = kept;
-    clamp_selections(app);
+    app.reseat_cursors();
     Some(WorktreeRollback {
         index,
         worktree,
@@ -14488,10 +14427,9 @@ fn remove_worktree_rows(app: &mut App, id: &WorktreeId) -> Option<WorktreeRollba
 /// Rollback of `remove_worktree_rows`: reinsert the rows at (or near) their
 /// old positions. Skips anything the daemon re-upserted in the meantime.
 fn restore_worktree_rows(app: &mut App, rollback: WorktreeRollback, out: &mut Vec<ClientRequest>) {
-    // The rows coming back re-sort the projects and checkouts, and the
-    // cursors are row indices: held by id across the insert, or the grid
-    // under a confirm — and under the Esc that answers it — is another
-    // project's.
+    // The rows coming back re-sort the projects and checkouts under the
+    // cursors, which hold their rows by id; the re-seat below settles one
+    // whose row the delete took.
     let before = selection_snapshot(app);
     let WorktreeRollback {
         index,
@@ -14527,13 +14465,10 @@ struct SelectionSnapshot {
     project: Option<orion_core::ProjectId>,
     worktree: Option<WorktreeId>,
     /// The OPEN PRS row under the Worktrees cursor, by URL, when it is on
-    /// one (`worktree` is None then). The pull requests list below the
-    /// checkouts, so every checkout that comes or goes shifts them: left
-    /// to its index, the cursor slid onto the next pull request — and a
-    /// launch with no box (`n`, a `skip`-task preset) then ran against a
-    /// pull request nobody picked.
+    /// one (`worktree` is None then), and the ISSUES row the same way: no
+    /// re-seat reads them — a row that left takes its cursor's neighbour —
+    /// but they make two snapshots on different rows differ.
     pr: Option<String>,
-    /// The ISSUES row under it, the same way.
     issue: Option<String>,
     session: Option<SessionRef>,
     /// The Sessions panel row the cursor was on, and the group that row
@@ -14565,15 +14500,17 @@ fn session_group(row: &SessionRow) -> SessionGroup {
 }
 
 fn selection_snapshot(app: &App) -> SelectionSnapshot {
-    let row = app.selected_session_row();
+    let rows = app.visible_session_rows();
+    let session_index = app.session_index_in(&rows);
+    let row = rows.get(session_index);
     SelectionSnapshot {
         project: app.selected_project().map(|p| p.id.clone()),
         worktree: app.selected_worktree().map(|w| w.id.clone()),
         pr: app.selected_worktree_pr().map(|pr| pr.url.clone()),
         issue: app.selected_worktree_issue().map(|i| i.url.clone()),
-        session_index: app.sel_session,
-        session_group: row.as_ref().map(session_group),
-        session: row.and_then(|r| r.sref()),
+        session_index,
+        session_group: row.map(session_group),
+        session: row.and_then(SessionRow::sref),
     }
 }
 
@@ -14598,7 +14535,12 @@ fn reconcile_selection_inner(
     before: SelectionSnapshot,
     out: &mut Vec<ClientRequest>,
 ) {
-    clamp_selections(app);
+    // Every cursor holds its row by identity (`App::sel_worktree`), so a
+    // row that only moved is still under it. What is left to settle here
+    // is a row that LEFT its list: its cursor stands where the row last
+    // was — on the neighbour that slid up into the slot — and is re-seated
+    // there, with that neighbour shown.
+    app.reseat_cursors();
     if let Some(pid) = &before.project {
         if !app.tree.projects.iter().any(|p| &p.id == pid) {
             // The selected row's project is gone; the cursor landed on a
@@ -14610,95 +14552,65 @@ fn reconcile_selection_inner(
             restore_context(app, out);
             return;
         }
-        if app.selected_project().map(|p| p.id.clone()).as_ref() != Some(pid) {
-            let rows = app.project_rows();
-            let found = rows.iter().position(|i| &app.tree.projects[*i].id == pid);
-            if let Some(i) = found {
-                app.sel_project = i;
-            }
-        }
     }
+    // A pull request or issue row that left is followed nowhere: the
+    // cursor stays on the row that took its place.
     if let Some(wid) = &before.worktree {
-        if app.selected_worktree().map(|w| w.id.clone()).as_ref() != Some(wid) {
-            match app.worktree_row_of(wid) {
-                Some(i) => app.sel_worktree = i,
-                None => {
-                    restore_session(app, out);
-                    return;
-                }
-            }
-        }
-    } else if let Some(url) = &before.pr {
-        // A pull request that is still listed keeps the cursor; one that
-        // left is followed nowhere, and the cursor stays where it landed.
-        if app.selected_worktree_pr().map(|pr| &pr.url) != Some(url) {
-            if let Some(i) = app.open_pr_row_of(url) {
-                app.sel_worktree = i;
-            }
-        }
-    } else if let Some(url) = &before.issue {
-        if app.selected_worktree_issue().map(|i| &i.url) != Some(url) {
-            if let Some(i) = app.issue_row_of(url) {
-                app.sel_worktree = i;
-            }
+        if app.selected_worktree().map(|w| &w.id) != Some(wid) {
+            restore_session(app, out);
+            return;
         }
     }
-    if let Some(sref) = &before.session {
-        let rows = app.visible_session_rows();
-        if rows.get(app.sel_session).and_then(|r| r.sref()).as_ref() != Some(sref) {
-            let found = rows.iter().position(|r| {
-                r.sref().as_ref() == Some(sref)
-                    && (before.session_group == Some(SessionGroup::Archived)
-                        || !r.is_archived_agent())
-            });
-            match found {
-                Some(i) => app.sel_session = i,
-                None => {
-                    // The row below slid up into the cursor's slot, so
-                    // that is the neighbor it lands on: archive the top
-                    // agent and the cursor moves down. But the last row of
-                    // a group has no row below it in the group — the slot
-                    // now holds the next group's first row, a terminal
-                    // under the last live agent — so the cursor steps up
-                    // onto the row above instead, while one is left in the
-                    // group. A cursor the list's shrinking already pulled
-                    // up (the removed row was the very last) stays put.
-                    let group_at = |i: usize| rows.get(i).map(session_group);
-                    if app.sel_session == before.session_index
-                        && app.sel_session > 0
-                        && group_at(app.sel_session) != before.session_group
-                        && group_at(app.sel_session - 1) == before.session_group
-                    {
-                        app.sel_session -= 1;
-                    }
-                    preview_selected(app, out);
-                    // Nothing previewable left (empty list, or only archived
-                    // rows): don't keep showing a session that's gone.
-                    if let Some(tref) = app.term.as_ref().map(|t| t.sref.clone()) {
-                        let alive = match &tref {
-                            SessionRef::Agent(id) => app.tree.agents.iter().any(|a| &a.id == id),
-                            SessionRef::Terminal(id) => {
-                                app.tree.terminals.iter().any(|t| &t.id == id)
-                            }
-                        };
-                        if !alive {
-                            detach_if_attached(app, &tref, out);
-                        }
-                    }
-                }
-            }
+    let Some(sref) = &before.session else {
+        return;
+    };
+    let rows = app.visible_session_rows();
+    let at = app.session_index_in(&rows);
+    let same = rows
+        .get(at)
+        .is_some_and(|r| r.sref().as_ref() == Some(sref));
+    // A live row archived with its checkout's drawer open is still listed,
+    // down in the ARCHIVED group — but the cursor was on a live session,
+    // and does not follow it there: the row left the live list.
+    let into_archive = same
+        && before.session_group != Some(SessionGroup::Archived)
+        && rows[at].is_archived_agent();
+    if same && !into_archive {
+        return;
+    }
+    let mut at = if into_archive {
+        before.session_index.min(rows.len().saturating_sub(1))
+    } else {
+        at
+    };
+    // The row below slid up into the cursor's slot, so that is the
+    // neighbor it lands on: archive the top agent and the cursor moves
+    // down. But the last row of a group has no row below it in the group —
+    // the slot now holds the next group's first row, a terminal under the
+    // last live agent — so the cursor steps up onto the row above instead,
+    // while one is left in the group. A cursor the list's shrinking already
+    // pulled up (the removed row was the very last) stays put.
+    let group_at = |i: usize| rows.get(i).map(session_group);
+    if at == before.session_index
+        && at > 0
+        && group_at(at) != before.session_group
+        && group_at(at - 1) == before.session_group
+    {
+        at -= 1;
+    }
+    app.set_sel_session(at);
+    preview_selected(app, out);
+    // Nothing previewable left (empty list, or only archived rows): don't
+    // keep showing a session that's gone.
+    if let Some(tref) = app.term.as_ref().map(|t| t.sref.clone()) {
+        let alive = match &tref {
+            SessionRef::Agent(id) => app.tree.agents.iter().any(|a| &a.id == id),
+            SessionRef::Terminal(id) => app.tree.terminals.iter().any(|t| &t.id == id),
+        };
+        if !alive {
+            detach_if_attached(app, &tref, out);
         }
     }
-}
-
-/// Keep selections valid after the tree shrinks.
-fn clamp_selections(app: &mut App) {
-    let project_rows = app.project_rows().len();
-    app.sel_project = clamp_selection(app.sel_project as i64, project_rows);
-    let wt_len = app.worktree_row_count();
-    app.sel_worktree = clamp_selection(app.sel_worktree as i64, wt_len);
-    let sess_len = app.visible_session_rows().len();
-    app.sel_session = clamp_selection(app.sel_session as i64, sess_len);
 }
 
 #[cfg(test)]
@@ -14799,7 +14711,7 @@ mod tests {
             10,
         ));
         app.focus = Focus::Sessions;
-        app.sel_session = row_of(&app, "a1");
+        app.set_sel_session(row_of(&app, "a1"));
 
         hse(
             &mut app,
@@ -14813,15 +14725,15 @@ mod tests {
         assert_eq!(app.worktree_unseen(&w1), 1, "one terminal to go read");
         assert_eq!(app.project_unseen(&p1), 1);
         assert_eq!(
-            app.sel_session,
+            app.sel_session(),
             row_of(&app, "a1"),
             "the cursor stayed on the session it was on"
         );
 
         let mut out = Vec::new();
-        let delta = row_of(&app, "a2") as i64 - app.sel_session as i64;
+        let delta = row_of(&app, "a2") as i64 - app.sel_session() as i64;
         move_selection(&mut app, delta, &mut out);
-        assert_eq!(app.sel_session, row_of(&app, "a2"));
+        assert_eq!(app.sel_session(), row_of(&app, "a2"));
         assert_eq!(app.worktree_unseen(&w1), 0, "landing on the row reads it");
         assert_eq!(app.project_unseen(&p1), 0);
         assert!(
@@ -16053,7 +15965,7 @@ mod tests {
         let mut out = Vec::new();
         make_cloud_row(&mut app, &mut out);
         app.focus = Focus::Sessions;
-        app.sel_session = 0;
+        app.set_sel_session(0);
         out.clear();
 
         preview_selected_now(&mut app, &mut out);
@@ -16277,11 +16189,12 @@ mod tests {
             .iter()
             .position(|p| p.id == ProjectId("p2".into()))
             .expect("the other project");
-        app.sel_project = app
-            .project_rows()
-            .iter()
-            .position(|i| *i == p2)
-            .expect("its row");
+        app.set_sel_project(
+            app.project_rows()
+                .iter()
+                .position(|i| *i == p2)
+                .expect("its row"),
+        );
         assert_eq!(
             app.selected_project().map(|p| p.name.as_str()),
             Some("other")
@@ -16598,11 +16511,12 @@ mod tests {
             },
         );
         app.focus = Focus::Sessions;
-        app.sel_session = app
-            .visible_session_rows()
-            .iter()
-            .position(|r| r.as_link().is_some())
-            .expect("link row");
+        app.set_sel_session(
+            app.visible_session_rows()
+                .iter()
+                .position(|r| r.as_link().is_some())
+                .expect("link row"),
+        );
     }
 
     /// The double tap is a gesture, not a state: a second press that comes
@@ -16798,10 +16712,10 @@ mod tests {
         assert!(app.selected_worktree().is_some(), "row 0 is the checkout");
         assert!(app.selected_worktree_pr().is_none());
 
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         assert!(app.selected_worktree().is_none(), "row 1 is a pull request");
         assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
-        app.sel_worktree = 2;
+        app.set_sel_worktree(2);
         assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(9));
     }
 
@@ -16835,10 +16749,10 @@ mod tests {
         assert_eq!(rows(&app), ["main", "feat", "#7", "└ pr-7-head", "#9"]);
         assert_eq!(app.worktree_row_count(), 5);
 
-        app.sel_worktree = 2;
+        app.set_sel_worktree(2);
         assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
         assert!(app.selected_worktree().is_none(), "a pull request row");
-        app.sel_worktree = 3;
+        app.set_sel_worktree(3);
         assert_eq!(
             app.selected_worktree().map(|w| w.id.0.clone()),
             Some("w2".into()),
@@ -16891,7 +16805,7 @@ mod tests {
         let mut out = Vec::new();
         let w2 = WorktreeId("w2".into());
         let on_w2 = |app: &App| app.selected_worktree().map(|w| w.id.clone()) == Some(w2.clone());
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         assert!(on_w2(&app));
         let pid = app.selected_project().expect("a project").id.clone();
         let listed = vec![crate::pull_request::OpenPr {
@@ -16909,16 +16823,16 @@ mod tests {
         // The list lands: the checkout moves under #7, the cursor with it.
         note_open_prs_answer(&mut app, pid.clone(), Some(listed), &mut out);
         assert_eq!(app.worktree_row_of(&w2), Some(2));
-        assert_eq!(app.sel_worktree, 2);
+        assert_eq!(app.sel_worktree(), 2);
         assert!(on_w2(&app));
 
         // Folding frees it; unfolding nests it again.
         toggle_open_prs(&mut app, &mut out);
         assert!(app.open_prs_collapsed);
-        assert_eq!(app.sel_worktree, 1);
+        assert_eq!(app.sel_worktree(), 1);
         assert!(on_w2(&app));
         toggle_open_prs(&mut app, &mut out);
-        assert_eq!(app.sel_worktree, 2);
+        assert_eq!(app.sel_worktree(), 2);
         assert!(on_w2(&app));
 
         // A draft hidden by the setting frees its checkout; shown, it
@@ -16933,17 +16847,17 @@ mod tests {
             !set_hide_draft_prs(&mut app, true),
             "the cursor never left a checkout"
         );
-        assert_eq!(app.sel_worktree, 1);
+        assert_eq!(app.sel_worktree(), 1);
         assert!(on_w2(&app));
         set_hide_draft_prs(&mut app, false);
-        assert_eq!(app.sel_worktree, 2);
+        assert_eq!(app.sel_worktree(), 2);
         assert!(on_w2(&app));
 
         // The pull request merges: the next answer lists it no more, and
         // the checkout is a plain row, still under the cursor.
         note_open_prs_answer(&mut app, pid, Some(Vec::new()), &mut out);
         assert_eq!(app.worktree_row_count(), 2);
-        assert_eq!(app.sel_worktree, 1);
+        assert_eq!(app.sel_worktree(), 1);
         assert!(on_w2(&app));
     }
 
@@ -17157,7 +17071,7 @@ mod tests {
             assert!(open_pr_numbers(&app).is_empty());
             app.focus = Focus::Worktrees;
             app.open_prs_collapsed = true;
-            app.sel_worktree = app.visible_worktrees().len() - 1;
+            app.set_sel_worktree(app.visible_worktrees().len() - 1);
             let mut out = Vec::new();
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             assert!(app.open_prs_collapsed, "nothing to step into");
@@ -17208,7 +17122,11 @@ mod tests {
         assert!(app.overlay.is_none(), "the palette closes");
         assert_eq!(app.flash, None, "no browser opened: {:?}", app.flash);
         assert_eq!(app.focus, Focus::Worktrees);
-        assert_eq!(app.sel_worktree, 2, "the row after the one checkout and #7");
+        assert_eq!(
+            app.sel_worktree(),
+            2,
+            "the row after the one checkout and #7"
+        );
         assert_eq!(
             app.selected_worktree_pr().map(|pr| pr.number),
             Some(9),
@@ -17434,7 +17352,7 @@ mod tests {
         );
         assert!(app.flash.is_none());
         assert!(app.selected_worktree_pr().is_none());
-        assert_eq!(app.sel_worktree, 0, "the cursor stays on the checkout");
+        assert_eq!(app.sel_worktree(), 0, "the cursor stays on the checkout");
     }
 
     /// A space in the query is an AND between terms, not a char to match: the
@@ -17501,7 +17419,7 @@ mod tests {
         assert_eq!(app.worktree_row_count(), 3, "the checkout, then both PRs");
         app.pr_detail
             .insert(pr_url(7), a_detail(7, "read on a hover", vec![]));
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
 
         // #7 is merged: the next list doesn't mention it.
@@ -17540,7 +17458,7 @@ mod tests {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(9, "Number lines"), (7, "Attach links")]);
-        app.sel_worktree = 2;
+        app.set_sel_worktree(2);
         assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
 
         let pid = app.selected_project().expect("a project").id.clone();
@@ -17588,7 +17506,7 @@ mod tests {
             Some(7),
             "still on #7, two rows further down"
         );
-        assert_eq!(app.sel_worktree, 3);
+        assert_eq!(app.sel_worktree(), 3);
         assert_eq!(
             app.pr_preview_scroll, 12,
             "and still where they were reading — a beat this quick must not \
@@ -17605,7 +17523,7 @@ mod tests {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Number lines")]);
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
 
         let mut merged = a_detail(7, "shipped", vec![]);
         merged.answered_state = "MERGED".into();
@@ -17645,7 +17563,7 @@ mod tests {
         app.focus = Focus::Worktrees;
         let w2 = WorktreeId("w2".into());
         let nested = app.worktree_row_of(&w2).expect("w2 is a row");
-        app.sel_worktree = nested;
+        app.set_sel_worktree(nested);
         assert_eq!(app.selected_worktree().map(|w| &w.id), Some(&w2));
 
         drop_retired_pr(&mut app, &pr_url(7), &mut Vec::new());
@@ -17653,7 +17571,7 @@ mod tests {
         assert_eq!(open_pr_numbers(&app), vec![9]);
         assert_ne!(app.worktree_row_of(&w2), Some(nested), "the rows moved");
         assert_eq!(app.selected_worktree().map(|w| &w.id), Some(&w2));
-        assert_eq!(Some(app.sel_worktree), app.worktree_row_of(&w2));
+        assert_eq!(Some(app.sel_worktree()), app.worktree_row_of(&w2));
 
         // The list answer that follows, without #7, leaves it there too.
         let pid = app.selected_project().expect("a project").id.clone();
@@ -17780,7 +17698,7 @@ mod tests {
         seed_open_prs(&mut app, &[(7, "Attach links")]);
         let pid = app.selected_project().expect("a project").id.clone();
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
         app.pending_pr_detail = None;
         app.pr_preview_scroll = 4;
@@ -17852,7 +17770,7 @@ mod tests {
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         app.pr_detail_failed
             .insert("https://github.com/o/r/pull/7".into());
         let mut terminal = Terminal::new(TestBackend::new(140, 30)).unwrap();
@@ -17940,7 +17858,7 @@ mod tests {
             "a session row arms nothing"
         );
         let before = app.previewed_pr().map(|pr| pr.url);
-        app.sel_session = sessions_pr_row(&app);
+        app.set_sel_session(sessions_pr_row(&app));
         note_preview_change(&mut app, before);
         let (pending, _) = app.pending_pr_detail.clone().expect("armed on #7");
         assert_eq!(pending.number, 7);
@@ -17977,7 +17895,7 @@ mod tests {
         seed_tree(&mut app);
         seed_branch_pr(&mut app, 7, "Attach links");
         app.focus = Focus::Sessions;
-        app.sel_session = sessions_pr_row(&app);
+        app.set_sel_session(sessions_pr_row(&app));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.pr_diff_tx = Some(tx);
         app.pr_diff_inflight = Some(7);
@@ -18014,7 +17932,7 @@ mod tests {
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         let mut out = Vec::new();
         out.extend(run_action(
             &mut app,
@@ -18055,10 +17973,10 @@ mod tests {
 
         // The Sessions panel's PR ROW opens it too, and so does its menu.
         app.overlay = None;
-        app.sel_worktree = 0;
+        app.set_sel_worktree(0);
         seed_branch_pr(&mut app, 9, "Fix login");
         app.focus = Focus::Sessions;
-        app.sel_session = sessions_pr_row(&app);
+        app.set_sel_session(sessions_pr_row(&app));
         out.extend(run_action(
             &mut app,
             crate::keymap::Action::CommentPullRequest,
@@ -18076,9 +17994,11 @@ mod tests {
         // pull request — its checkout's, the one ⌘O's menu opens.
         app.overlay = None;
         let pr_row = sessions_pr_row(&app);
-        app.sel_session = (0..app.visible_session_rows().len())
-            .find(|i| *i != pr_row)
-            .expect("an agent row");
+        app.set_sel_session(
+            (0..app.visible_session_rows().len())
+                .find(|i| *i != pr_row)
+                .expect("an agent row"),
+        );
         out.extend(run_action(
             &mut app,
             crate::keymap::Action::CommentPullRequest,
@@ -18105,7 +18025,7 @@ mod tests {
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         app.tree.projects[0].repo_path = "/nonexistent/orion-demo".into();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         app.pr_comment_tx = Some(tx);
@@ -18218,7 +18138,7 @@ mod tests {
 
         // Posted on a pull request the pane has since left: stale, so the
         // next visit reads it afresh.
-        app.sel_worktree = 0;
+        app.set_sel_worktree(0);
         app.pending_pr_detail = None;
         land_pr_comment(&mut app, answer("Looks good", Ok(String::new())));
         assert!(app.pending_pr_detail.is_none());
@@ -18233,7 +18153,7 @@ mod tests {
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         let body = (0..200)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
@@ -18264,7 +18184,7 @@ mod tests {
 
         // Moving to another row starts its preview at the top.
         app.pr_preview_scroll = paged;
-        app.sel_worktree = 0;
+        app.set_sel_worktree(0);
         schedule_pr_detail(&mut app);
         assert_eq!(app.pr_preview_scroll, 0);
     }
@@ -18277,7 +18197,7 @@ mod tests {
         let mut app = App::new();
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         let diff = "\
 diff --git a/src/a.rs b/src/a.rs
 --- a/src/a.rs
@@ -18342,7 +18262,7 @@ diff --git a/src/b.rs b/src/b.rs
         let mut app = App::new();
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         let diff = "\
 diff --git a/src/a.rs b/src/a.rs
 new file mode 100644
@@ -18494,7 +18414,7 @@ diff --git a/docs/keys.md b/docs/keys.md
         let mut app = App::new();
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         app.diff_tree = tree;
         open_pr_diff_view(
             &mut app,
@@ -18735,7 +18655,7 @@ diff --git a/docs/keys.md b/docs/keys.md
         let mut app = App::new();
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
 
         app.pr_diff_inflight = Some(7);
         open_pr_diff_view(
@@ -18787,7 +18707,7 @@ diff --git a/docs/keys.md b/docs/keys.md
         let mut app = App::new();
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         let diff = "\
 diff --git a/src/a.rs b/src/a.rs
 --- a/src/a.rs
@@ -19114,7 +19034,7 @@ diff --git a/src/b.rs b/src/b.rs
             .insert(url.clone(), a_detail(7, "from the cache", Vec::new()));
         app.pr_detail_stale.insert(url.clone());
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         schedule_pr_detail(&mut app);
         assert_eq!(
             app.pending_pr_detail.as_ref().map(|(p, _)| p.url.as_str()),
@@ -19603,7 +19523,7 @@ diff --git a/src/b.rs b/src/b.rs
         app.pr_cache = Some(crate::pr_cache::PrCache::at(dir.path().to_path_buf()));
         seed_tree(&mut app);
         seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         let url = pr_url(7);
         let title = || "#7 Attach links".to_string();
         let cached = "\
@@ -19810,7 +19730,7 @@ diff --git a/src/c.rs b/src/c.rs
         // The same from an open-PR row of the group, which the pane is
         // reading: its conversation is asked for again too.
         seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.sel_worktree = app.visible_worktrees().len();
+        app.set_sel_worktree(app.visible_worktrees().len());
         app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
         app.pr_refresh_requested = false;
         press(
@@ -19854,11 +19774,12 @@ diff --git a/src/c.rs b/src/c.rs
         );
         note_pr_answer(&mut app, &wid, true);
         app.focus = Focus::Sessions;
-        app.sel_session = app
-            .visible_session_rows()
-            .iter()
-            .position(|r| r.as_link().is_some())
-            .expect("pull-request row");
+        app.set_sel_session(
+            app.visible_session_rows()
+                .iter()
+                .position(|r| r.as_link().is_some())
+                .expect("pull-request row"),
+        );
         // Read once, refused once since, and the reader is partway down.
         app.pr_detail
             .insert(url.clone(), a_detail(7, "body", vec![]));
@@ -19908,7 +19829,7 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.pending_pr_detail.is_none());
 
         // From an agent row the key refreshes all the same…
-        app.sel_session = 0;
+        app.set_sel_session(0);
         app.pr_refresh_requested = false;
         app.flash = None;
         press(
@@ -20335,7 +20256,7 @@ diff --git a/src/c.rs b/src/c.rs
         app.pr_inflight.clear();
         app.pr_recheck.clear();
         app.focus = Focus::Worktrees;
-        app.sel_worktree = order.iter().position(|id| *id == w2).unwrap();
+        app.set_sel_worktree(order.iter().position(|id| *id == w2).unwrap());
         assert_eq!(
             app.selected_worktree().map(|w| w.id.clone()),
             Some(w2.clone())
@@ -21352,7 +21273,7 @@ diff --git a/src/c.rs b/src/c.rs
             },
         );
         app.focus = Focus::Sessions;
-        app.sel_session = 1; // agent-2
+        app.set_sel_session(1); // agent-2
 
         hse(
             &mut app,
@@ -21369,7 +21290,7 @@ diff --git a/src/c.rs b/src/c.rs
             "the stamped agent bubbled to the top"
         );
         assert_eq!(app.session_group_counts(), (2, 0));
-        assert_eq!(app.sel_session, 0, "selection followed agent-2");
+        assert_eq!(app.sel_session(), 0, "selection followed agent-2");
     }
 
     /// Confirming a worktree delete drops the row (and its agents)
@@ -23242,7 +23163,7 @@ diff --git a/src/c.rs b/src/c.rs
                 }),
             },
         );
-        app.sel_worktree = 1; // the feat worktree
+        app.set_sel_worktree(1); // the feat worktree
         app.focus = Focus::Projects;
         let mut out = Vec::new();
 
@@ -23293,7 +23214,11 @@ diff --git a/src/c.rs b/src/c.rs
         );
         assert_eq!(app.focus, Focus::Terminal);
         assert!(app.term_locked, "a created terminal takes the input lock");
-        assert_eq!(app.sel_session, 1, "selection follows the new terminal row");
+        assert_eq!(
+            app.sel_session(),
+            1,
+            "selection follows the new terminal row"
+        );
     }
 
     #[test]
@@ -23303,7 +23228,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_terminal(&mut app, "t1", "term-1");
         app.focus = Focus::Sessions;
-        app.sel_session = 1;
+        app.set_sel_session(1);
         let mut out = Vec::new();
 
         handle_key(
@@ -23334,7 +23259,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_terminal(&mut app, "t1", "term-1");
         app.focus = Focus::Sessions;
-        app.sel_session = 1;
+        app.set_sel_session(1);
         let mut out = Vec::new();
 
         handle_key(
@@ -23378,7 +23303,7 @@ diff --git a/src/c.rs b/src/c.rs
         }
         let via_key = |app: &mut App, focus: Focus, row: usize| {
             app.focus = focus;
-            app.sel_session = row;
+            app.set_sel_session(row);
             press(app, KeyCode::Backspace, KeyModifiers::NONE, &mut Vec::new());
             take_confirm(app)
         };
@@ -25815,14 +25740,14 @@ diff --git a/src/c.rs b/src/c.rs
 
         // An agent that is NOT selected moving elsewhere leaves the cursor
         // where the user put it.
-        app.sel_worktree = 0;
+        app.set_sel_worktree(0);
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
                 entity: Entity::Agent(moved("w1")),
             },
         );
-        app.sel_session = 0;
+        app.set_sel_session(0);
         let before = app.selected_worktree().map(|w| w.id.clone());
         hse(
             &mut app,
@@ -26032,9 +25957,9 @@ diff --git a/src/c.rs b/src/c.rs
         // Rest on "two", then its session finishes a turn: the project
         // heads the column and the cursor stays on it.
         app.focus = Focus::Projects;
-        app.sel_project = 1;
-        app.sel_worktree = 0;
-        app.sel_session = 0;
+        app.set_sel_project(1);
+        app.set_sel_worktree(0);
+        app.set_sel_session(0);
         let now = crate::app::now_ms();
         hse(
             &mut app,
@@ -26047,7 +25972,8 @@ diff --git a/src/c.rs b/src/c.rs
         );
         assert_eq!(names(&app), ["two", "demo"]);
         assert_eq!(
-            app.sel_project, 0,
+            app.sel_project(),
+            0,
             "selection follows the project it was on"
         );
         assert_eq!(app.selected_worktree().map(|w| w.id.as_str()), Some("w2"));
@@ -26064,7 +25990,7 @@ diff --git a/src/c.rs b/src/c.rs
             },
         );
         assert_eq!(names(&app), ["demo", "two"]);
-        assert_eq!(app.sel_project, 1, "still on \"two\"");
+        assert_eq!(app.sel_project(), 1, "still on \"two\"");
     }
 
     /// A session in another project finishing must never move the cursor
@@ -26110,11 +26036,12 @@ diff --git a/src/c.rs b/src/c.rs
         hse(&mut app, flip("a1", AgentStatus::Running, now - 60_000));
         hse(&mut app, flip("a2", AgentStatus::Running, now - 30_000));
         let demo = |app: &App| app.selected_project().map(|p| p.name.clone());
-        app.sel_project = app
-            .project_rows()
-            .iter()
-            .position(|&i| app.tree.projects[i].id.0 == "p1")
-            .unwrap();
+        app.set_sel_project(
+            app.project_rows()
+                .iter()
+                .position(|&i| app.tree.projects[i].id.0 == "p1")
+                .unwrap(),
+        );
         assert_eq!(demo(&app).as_deref(), Some("demo"));
 
         // "two" finishes, stamped just past the clock this client handles
@@ -26187,7 +26114,7 @@ diff --git a/src/c.rs b/src/c.rs
 
         // A turn on "older" starting and finishing moves nothing.
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 2;
+        app.set_sel_worktree(2);
         for status in [AgentStatus::Running, AgentStatus::Finished] {
             hse(
                 &mut app,
@@ -26199,7 +26126,7 @@ diff --git a/src/c.rs b/src/c.rs
                 },
             );
             assert_eq!(branches(&app), ["main", "feat", "older"]);
-            assert_eq!(app.sel_worktree, 2);
+            assert_eq!(app.sel_worktree(), 2);
         }
 
         // "feat"'s one session goes cold: the checkout sinks below
@@ -26284,7 +26211,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
         assert_eq!(app.focus, Focus::Sessions);
         assert_eq!(app.selected_worktree().map(|w| w.id.clone()), Some(w2.id));
-        assert_eq!(app.sel_session, 0);
+        assert_eq!(app.sel_session(), 0);
     }
 
     /// A branch is often described as a sentence ("fix login redirect");
@@ -26434,7 +26361,7 @@ diff --git a/src/c.rs b/src/c.rs
             Some("other".into())
         );
         fire_pending_attach(&mut app, &mut out);
-        assert_eq!(app.sel_session, 0, "cursor on the top row");
+        assert_eq!(app.sel_session(), 0, "cursor on the top row");
         assert_eq!(
             app.term.as_ref().map(|t| t.sref.clone()),
             Some(a3.clone()),
@@ -26460,7 +26387,7 @@ diff --git a/src/c.rs b/src/c.rs
         out.clear();
         select_worktree_row(&mut app, 1, &mut out);
         fire_pending_attach(&mut app, &mut out);
-        assert_eq!(app.sel_session, 0);
+        assert_eq!(app.sel_session(), 0);
         assert_eq!(
             app.term.as_ref().map(|t| t.sref.clone()),
             Some(a3.clone()),
@@ -26534,7 +26461,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.term.as_ref().map(|t| t.sref.clone()),
             Some(sref.clone())
         );
-        assert_eq!(app.sel_session, 0);
+        assert_eq!(app.sel_session(), 0);
 
         // Project switches remember the whole context: leaving p1 blanks
         // (p2 has no history), returning restores worktree AND session.
@@ -26556,7 +26483,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.selected_project().map(|p| p.name.clone()),
             Some("demo".into())
         );
-        assert_eq!(app.sel_worktree, 0, "p1 remembered its worktree row");
+        assert_eq!(app.sel_worktree(), 0, "p1 remembered its worktree row");
         assert_eq!(
             app.term.as_ref().map(|t| t.sref.clone()),
             Some(sref),
@@ -26686,7 +26613,7 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(mains, [true, false], "the root row leads");
 
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
         assert!(app.overlay.is_none(), "{:?}", app.overlay);
         assert_eq!(app.flash, None);
@@ -26701,7 +26628,7 @@ diff --git a/src/c.rs b/src/c.rs
         app.overlay = None;
 
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 0;
+        app.set_sel_worktree(0);
         press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
         assert_eq!(branch_switch_target(&app), Some(root));
     }
@@ -26724,14 +26651,14 @@ diff --git a/src/c.rs b/src/c.rs
             other => panic!("no menu: {other:?}"),
         };
 
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         open_row_menu(&mut app);
         let linked = labels(&app);
         assert!(linked.iter().any(|l| l == "Delete worktree"), "{linked:?}");
         assert!(!linked.iter().any(|l| l == "Switch branch…"), "{linked:?}");
         app.overlay = None;
 
-        app.sel_worktree = 0;
+        app.set_sel_worktree(0);
         open_row_menu(&mut app);
         let root = labels(&app);
         assert!(!root.iter().any(|l| l == "Delete worktree"), "{root:?}");
@@ -26756,7 +26683,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_linked_worktree(&mut app);
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         let linked = app.selected_worktree().unwrap().id.clone();
         assert!(!app.selected_worktree().unwrap().is_main);
 
@@ -26789,7 +26716,7 @@ diff --git a/src/c.rs b/src/c.rs
             .unwrap()
             .status = orion_core::AgentStatus::Running;
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 0;
+        app.set_sel_worktree(0);
         let root = WorktreeId("w1".into());
 
         press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
@@ -26816,7 +26743,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_tree(&mut app);
         seed_linked_worktree(&mut app);
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 0;
+        app.set_sel_worktree(0);
         let root = WorktreeId("w1".into());
         let linked = WorktreeId("w2".into());
         let old = std::time::Instant::now();
@@ -26862,7 +26789,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             for (row, id) in [(0, "w1"), (1, "w2")] {
                 app.overlay = None;
-                app.sel_worktree = row;
+                app.set_sel_worktree(row);
                 open_row_menu(&mut app);
                 let at = match &app.overlay {
                     Some(Overlay::Menu(menu)) => menu
@@ -26899,7 +26826,7 @@ diff --git a/src/c.rs b/src/c.rs
             .iter_mut()
             .for_each(|a| a.status = orion_core::AgentStatus::Running);
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 1;
+        app.set_sel_worktree(1);
         let linked = WorktreeId("w2".into());
 
         press(&mut app, KeyCode::Char('P'), KeyModifiers::SHIFT, &mut out);
@@ -26922,7 +26849,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut out = Vec::new();
         seed_tree(&mut app);
         app.focus = Focus::Worktrees;
-        app.sel_worktree = 0;
+        app.set_sel_worktree(0);
         let root = WorktreeId("w1".into());
         let shift_p = |app: &mut App, out: &mut Vec<ClientRequest>| {
             press(app, KeyCode::Char('P'), KeyModifiers::SHIFT, out)
@@ -28401,7 +28328,7 @@ diff --git a/src/c.rs b/src/c.rs
             _ => panic!("diff overlay gone"),
         }
 
-        let (focus_before, sel_before) = (app.focus, app.sel_project);
+        let (focus_before, sel_before) = (app.focus, app.sel_project());
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 2,
@@ -28414,7 +28341,7 @@ diff --git a/src/c.rs b/src/c.rs
             "clicks do not close the modal"
         );
         assert_eq!(app.focus, focus_before, "clicks do not change focus");
-        assert_eq!(app.sel_project, sel_before);
+        assert_eq!(app.sel_project(), sel_before);
         assert!(out.is_empty(), "mouse in the modal sends nothing");
     }
 
@@ -29049,7 +28976,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_attention_ring(&mut app);
         app.show_archived = true;
         app.focus = Focus::Sessions;
-        app.sel_session = row_of(&app, "a1");
+        app.set_sel_session(row_of(&app, "a1"));
 
         assert_eq!(
             walk_attention(&mut app, 1, 6),
@@ -29068,7 +28995,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_second_project(&mut app);
         seed_attention_ring(&mut app);
         app.focus = Focus::Sessions;
-        app.sel_session = row_of(&app, "a1");
+        app.set_sel_session(row_of(&app, "a1"));
 
         assert_eq!(
             walk_attention(&mut app, -1, 6),
@@ -29124,7 +29051,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_second_project(&mut app);
         seed_attention_ring(&mut app);
         app.focus = Focus::Projects;
-        app.sel_session = row_of(&app, "a1");
+        app.set_sel_session(row_of(&app, "a1"));
         let mut out = Vec::new();
 
         with_default_config(|| {
@@ -29163,7 +29090,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_second_project(&mut app);
         seed_attention_ring(&mut app);
         app.focus = Focus::Sessions;
-        app.sel_session = row_of(&app, "a1");
+        app.set_sel_session(row_of(&app, "a1"));
         let mut out = Vec::new();
 
         with_config_json(r#"{"palette_enter_attaches": false}"#, || {
@@ -29190,7 +29117,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_second_project(&mut app);
         seed_attention_ring(&mut app);
         app.focus = Focus::Sessions;
-        app.sel_session = row_of(&app, "a1");
+        app.set_sel_session(row_of(&app, "a1"));
         let mut out = Vec::new();
 
         with_config_json(r#"{"palette_enter_attaches": false}"#, || {
@@ -29219,7 +29146,7 @@ diff --git a/src/c.rs b/src/c.rs
         seed_other_project(&mut app);
         seed_background_run(&mut app);
         app.focus = Focus::Sessions;
-        app.sel_session = row_of(&app, "a1");
+        app.set_sel_session(row_of(&app, "a1"));
         let mut out = Vec::new();
 
         jump_attention(&mut app, 1, false, &mut out);
@@ -29256,7 +29183,7 @@ diff --git a/src/c.rs b/src/c.rs
             10,
         ));
         app.focus = Focus::Sessions;
-        app.sel_session = row_of(&app, "a1");
+        app.set_sel_session(row_of(&app, "a1"));
         hse(
             &mut app,
             ServerEvent::StatusChanged {
@@ -29348,7 +29275,7 @@ diff --git a/src/c.rs b/src/c.rs
         // on its top row and previews it, exactly like a manual switch —
         // a preview, not Enter on the row, so the pane is not locked.
         let a2 = SessionRef::Agent(AgentId("a2".into()));
-        assert_eq!(app.sel_session, 0);
+        assert_eq!(app.sel_session(), 0);
         assert_eq!(app.term.as_ref().map(|t| t.sref.clone()), Some(a2.clone()));
         assert!(!app.term_locked);
         assert!(
@@ -31831,7 +31758,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
         assert_eq!(
             app.visible_session_rows()
-                .get(app.sel_session)
+                .get(app.sel_session())
                 .and_then(|r| r.sref()),
             Some(sref),
             "the panel selection landed on the opened session"
@@ -33975,7 +33902,7 @@ diff --git a/src/c.rs b/src/c.rs
             },
         );
         app.focus = Focus::Sessions;
-        app.sel_session = 0; // a1
+        app.set_sel_session(0); // a1
         let a1 = SessionRef::Agent(AgentId("a1".into()));
         app.term = Some(AttachedTerm::new(a1.clone(), 40, 10));
 
@@ -34041,7 +33968,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut app = App::new();
             seed_tree(&mut app); // p1 / w1(main) / a1
             app.focus = Focus::Sessions;
-            app.sel_session = 0;
+            app.set_sel_session(0);
             let a1 = SessionRef::Agent(AgentId("a1".into()));
             app.term = Some(AttachedTerm::new(a1.clone(), 40, 10));
             let mut out = Vec::new();
@@ -34138,7 +34065,7 @@ diff --git a/src/c.rs b/src/c.rs
             },
         );
         app.focus = Focus::Sessions;
-        app.sel_session = 1; // a2
+        app.set_sel_session(1); // a2
         let a2 = SessionRef::Agent(AgentId("a2".into()));
         app.term = Some(AttachedTerm::new(a2.clone(), 40, 10));
 
@@ -34184,10 +34111,10 @@ diff --git a/src/c.rs b/src/c.rs
         }
         seed_terminal(&mut app, "t1", "shell");
         app.focus = Focus::Sessions;
-        app.sel_session = row_of(&app, "a3");
+        app.set_sel_session(row_of(&app, "a3"));
         assert!(
             matches!(
-                app.visible_session_rows().get(app.sel_session + 1),
+                app.visible_session_rows().get(app.sel_session() + 1),
                 Some(SessionRow::Terminal(_))
             ),
             "agent-3 is the last live agent, the terminal right under it"
@@ -34217,7 +34144,7 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(app.term.as_ref().map(|t| t.sref.clone()), Some(a2.clone()));
 
         // From the top of the list the cursor moves down, as before.
-        app.sel_session = row_of(&app, "a1");
+        app.set_sel_session(row_of(&app, "a1"));
         let a1 = SessionRef::Agent(AgentId("a1".into()));
         app.term = Some(AttachedTerm::new(a1, 40, 10));
         out.clear();
@@ -34250,7 +34177,7 @@ diff --git a/src/c.rs b/src/c.rs
             },
         );
         app.focus = Focus::Sessions;
-        app.sel_session = 0; // a1
+        app.set_sel_session(0); // a1
         let a1 = SessionRef::Agent(AgentId("a1".into()));
         app.term = Some(AttachedTerm::new(a1.clone(), 40, 10));
 
@@ -34328,8 +34255,8 @@ diff --git a/src/c.rs b/src/c.rs
             .iter()
             .position(|w| w.id.0 == "w2")
             .unwrap();
-        app.sel_worktree = w2_index;
-        app.sel_session = 0; // a2
+        app.set_sel_worktree(w2_index);
+        app.set_sel_session(0); // a2
         app.focus = Focus::Worktrees;
         let a1 = SessionRef::Agent(AgentId("a1".into()));
         let a2 = SessionRef::Agent(AgentId("a2".into()));
@@ -34385,9 +34312,9 @@ diff --git a/src/c.rs b/src/c.rs
                 entity: agent_entity("a2", "w2", "agent-2", false),
             },
         );
-        app.sel_project = 1; // p2
-        app.sel_worktree = 0; // w2
-        app.sel_session = 0; // a2
+        app.set_sel_project(1); // p2
+        app.set_sel_worktree(0); // w2
+        app.set_sel_session(0); // a2
         app.focus = Focus::Projects;
         let a1 = SessionRef::Agent(AgentId("a1".into()));
         let a2 = SessionRef::Agent(AgentId("a2".into()));
@@ -34794,8 +34721,8 @@ diff --git a/src/c.rs b/src/c.rs
             );
             let url = "https://github.com/o/r/pull/129";
             app.focus = Focus::Worktrees;
-            app.sel_worktree = app.open_pr_row_of(url).expect("#129 is a row");
-            let pr_row = app.sel_worktree;
+            app.set_sel_worktree(app.open_pr_row_of(url).expect("#129 is a row"));
+            let pr_row = app.sel_worktree();
             let agents_under_root = |app: &App| {
                 app.tree
                     .agents
@@ -34859,7 +34786,7 @@ diff --git a/src/c.rs b/src/c.rs
                 Some(pr_row + 1),
                 "nested under the pull request's row"
             );
-            assert_eq!(app.sel_worktree, pr_row + 1, "the cursor is on it");
+            assert_eq!(app.sel_worktree(), pr_row + 1, "the cursor is on it");
             assert_eq!(
                 agents_under_root(&app),
                 before,
@@ -34889,7 +34816,7 @@ diff --git a/src/c.rs b/src/c.rs
                 let mut app = App::new();
                 seed_tree(&mut app);
                 seed_open_prs(&mut app, &[(7, "Attach links")]);
-                app.sel_worktree = 1;
+                app.set_sel_worktree(1);
                 app.focus = focus;
                 assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
                 let mut out = Vec::new();
@@ -34923,7 +34850,7 @@ diff --git a/src/c.rs b/src/c.rs
             seed_tree(&mut app);
             seed_open_prs(&mut app, &[(7, "Attach links")]);
             app.focus = Focus::Worktrees;
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             let mut out = Vec::new();
             out.extend(crate::event_loop::run_action(
                 &mut app,
@@ -35058,7 +34985,7 @@ diff --git a/src/c.rs b/src/c.rs
             seed_tree(&mut app);
             seed_open_prs(&mut app, &[(7, "Attach links")]);
             app.focus = Focus::Worktrees;
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
             let mut out = Vec::new();
 
@@ -35183,7 +35110,7 @@ diff --git a/src/c.rs b/src/c.rs
             app.focus = Focus::Worktrees;
             // The checkout on the head branch lists under the pull
             // request, so the pull request's row is looked up, not counted.
-            app.sel_worktree = app.open_pr_row_of(&pr_url(7)).expect("#7 is a row");
+            app.set_sel_worktree(app.open_pr_row_of(&pr_url(7)).expect("#7 is a row"));
             assert_eq!(app.selected_worktree_pr().map(|p| p.number), Some(7));
             let rows = app.tree.worktrees.len();
             out.extend(crate::event_loop::run_action(
@@ -35338,7 +35265,7 @@ diff --git a/src/c.rs b/src/c.rs
                 let mut app = App::new();
                 seed_tree(&mut app);
                 seed_feat_worktree(&mut app, "w2", "feat");
-                app.sel_worktree = 1;
+                app.set_sel_worktree(1);
                 assert_eq!(
                     app.selected_worktree().map(|w| w.branch.as_str()),
                     Some("feat")
@@ -36605,7 +36532,7 @@ diff --git a/src/c.rs b/src/c.rs
                     }),
                 },
             );
-            app.sel_project = 0;
+            app.set_sel_project(0);
             let tab = crate::config::project_tab();
             let (_, row) = crate::config::locate(RunCommand).unwrap();
             let open_at = |app: &mut App, out: &mut Vec<ClientRequest>, row: usize| {
@@ -36761,7 +36688,7 @@ diff --git a/src/c.rs b/src/c.rs
             seed_tree(&mut app);
             seed_feat_worktree(&mut app, "w2", "feat");
             app.focus = Focus::Worktrees;
-            app.sel_worktree = 0;
+            app.set_sel_worktree(0);
             assert_eq!(
                 app.selected_worktree().map(|w| w.branch.as_str()),
                 Some("main"),
@@ -37297,7 +37224,7 @@ diff --git a/src/c.rs b/src/c.rs
             // the root branch, so it is the same box and comes back whole.
             let root =
                 crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w1".into()));
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             assert_eq!(
                 app.selected_worktree().map(|w| w.branch.as_str()),
                 Some("feat")
@@ -37342,7 +37269,7 @@ diff --git a/src/c.rs b/src/c.rs
             assert!(paste_into_overlay(&mut app, "For main"));
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             seed_agent_in(&mut app, "a2", &orion_core::WorktreeId("w2".into()));
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             assert_eq!(
                 app.selected_worktree().map(|w| w.branch.as_str()),
                 Some("feat")
@@ -37366,7 +37293,7 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert!(paste_into_overlay(&mut app, "For feat"));
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            app.sel_worktree = 0;
+            app.set_sel_worktree(0);
             press(
                 &mut app,
                 KeyCode::Char('n'),
@@ -37375,7 +37302,7 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert_eq!(box_text(&app), "For main");
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             press(
                 &mut app,
                 KeyCode::Char('n'),
@@ -38759,7 +38686,7 @@ diff --git a/src/c.rs b/src/c.rs
             seed_tree(&mut app);
             seed_open_prs(&mut app, &[(7, "Attach links")]);
             app.focus = Focus::Worktrees;
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             let mut out = Vec::new();
             out.extend(crate::event_loop::run_action(
                 &mut app,
@@ -38839,7 +38766,7 @@ diff --git a/src/c.rs b/src/c.rs
             seed_tree(&mut app);
             seed_open_prs(&mut app, &[(7, "Attach links")]);
             app.focus = Focus::Worktrees;
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             let mut out = Vec::new();
             out.extend(crate::event_loop::run_action(
                 &mut app,
@@ -39088,7 +39015,7 @@ diff --git a/src/c.rs b/src/c.rs
         let mut app = App::new();
         seed_tree(&mut app);
         app.focus = Focus::Sessions;
-        app.sel_session = 0;
+        app.set_sel_session(0);
         app
     }
 
@@ -39470,7 +39397,7 @@ diff --git a/src/c.rs b/src/c.rs
             open_quick_box(&mut app, &mut out);
             type_into(&mut app, "For main", &mut out);
             app.overlay = None;
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             open_quick_box(&mut app, &mut out);
             assert_eq!(box_text(&app), "", "main's draft is not feat's");
             type_into(&mut app, "For feat", &mut out);
@@ -39483,7 +39410,7 @@ diff --git a/src/c.rs b/src/c.rs
             open_quick_box(&mut app, &mut out);
             assert_eq!(box_text(&app), "For main");
             app.overlay = None;
-            app.sel_worktree = 1;
+            app.set_sel_worktree(1);
             open_quick_box(&mut app, &mut out);
             assert_eq!(box_text(&app), "For feat");
         });
@@ -39617,9 +39544,9 @@ diff --git a/src/c.rs b/src/c.rs
             "overlay={overlay} focus={:?} cursors=({},{},{}) pane={:?} locked={} editor={} \
              flash={:?} quit={} out={out:?}",
             app.focus,
-            app.sel_project,
-            app.sel_worktree,
-            app.sel_session,
+            app.sel_project(),
+            app.sel_worktree(),
+            app.sel_session(),
             app.term.as_ref().map(|t| t.sref.clone()),
             app.term_locked,
             app.vim.is_some(),
@@ -39710,7 +39637,7 @@ diff --git a/src/c.rs b/src/c.rs
             .expect("the root is a row");
         let mut out = Vec::new();
         select_worktree_row(&mut app, root, &mut out);
-        app.sel_worktree = root;
+        app.set_sel_worktree(root);
         app
     }
 
@@ -39882,7 +39809,7 @@ diff --git a/src/c.rs b/src/c.rs
             };
             let pr_presets: Open = |app, out| {
                 seed_open_prs(app, &[(7, "Attach links")]);
-                app.sel_worktree = app.open_pr_row_of(&pr_url(7)).expect("#7 is a row");
+                app.set_sel_worktree(app.open_pr_row_of(&pr_url(7)).expect("#7 is a row"));
                 out.extend(crate::event_loop::run_action(
                     app,
                     crate::keymap::Action::AgentPresets,
@@ -41248,12 +41175,13 @@ diff --git a/src/c.rs b/src/c.rs
             app.overlay = None;
 
             app.focus = Focus::Sessions;
-            app.sel_worktree = app
-                .visible_worktrees()
-                .iter()
-                .position(|w| w.id.0 == "w2")
-                .unwrap();
-            app.sel_session = 0;
+            app.set_sel_worktree(
+                app.visible_worktrees()
+                    .iter()
+                    .position(|w| w.id.0 == "w2")
+                    .unwrap(),
+            );
+            app.set_sel_session(0);
             let mut out = Vec::new();
             press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             let by_key = match &app.overlay {
@@ -41404,11 +41332,12 @@ diff --git a/src/c.rs b/src/c.rs
                 a.status_changed_at = at;
             }
             let demo = |app: &App| app.selected_project().map(|p| p.name.clone());
-            app.sel_project = app
-                .project_rows()
-                .iter()
-                .position(|&i| app.tree.projects[i].id.0 == "p1")
-                .unwrap();
+            app.set_sel_project(
+                app.project_rows()
+                    .iter()
+                    .position(|&i| app.tree.projects[i].id.0 == "p1")
+                    .unwrap(),
+            );
 
             menu_delete(&mut app, "a2");
             let mut out = Vec::new();
@@ -41598,11 +41527,12 @@ diff --git a/src/c.rs b/src/c.rs
                 },
             );
             app.focus = Focus::Sessions;
-            app.sel_worktree = app
-                .visible_worktrees()
-                .iter()
-                .position(|w| w.id.0 == "w2")
-                .unwrap();
+            app.set_sel_worktree(
+                app.visible_worktrees()
+                    .iter()
+                    .position(|w| w.id.0 == "w2")
+                    .unwrap(),
+            );
             open_delete_all_confirm(&mut app);
             let action = match &app.overlay {
                 Some(Overlay::Confirm(c)) => c.action.clone(),

@@ -2485,11 +2485,12 @@ mod tests {
                 is_main: false,
                 sort_order: 1,
             });
-            app.sel_worktree = app
-                .worktree_rows()
-                .iter()
-                .position(|row| row.checkout().is_some_and(|w| w.id.0 == "w-feature"))
-                .expect("the feature checkout has a row");
+            app.set_sel_worktree(
+                app.worktree_rows()
+                    .iter()
+                    .position(|row| row.checkout().is_some_and(|w| w.id.0 == "w-feature"))
+                    .expect("the feature checkout has a row"),
+            );
             open(&mut app);
             let mut out = Vec::new();
             handle_key(&mut app, ctrl('n'), &mut out);

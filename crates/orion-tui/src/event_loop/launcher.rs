@@ -447,7 +447,7 @@ fn select_terminal(app: &mut App, id: orion_core::TerminalId, out: &mut Vec<Clie
     let Some(wt_index) = landed else {
         return;
     };
-    app.sel_worktree = wt_index;
+    app.set_sel_worktree(wt_index);
     let Some(index) = app
         .visible_session_rows()
         .iter()
@@ -455,7 +455,7 @@ fn select_terminal(app: &mut App, id: orion_core::TerminalId, out: &mut Vec<Clie
     else {
         return;
     };
-    app.sel_session = index;
+    app.set_sel_session(index);
     app.focus = Focus::Sessions;
     app.dirty = true;
     super::preview_selected(app, out);
@@ -7530,9 +7530,12 @@ mod tests {
             assert!(app.launcher_tabs.is_empty());
 
             // Keys that would walk the hidden rows do nothing.
-            let before = (app.sel_project, app.sel_worktree, app.sel_session);
+            let before = (app.sel_project(), app.sel_worktree(), app.sel_session());
             keys(&mut app, &[KeyCode::Down, KeyCode::Right]);
-            assert_eq!((app.sel_project, app.sel_worktree, app.sel_session), before);
+            assert_eq!(
+                (app.sel_project(), app.sel_worktree(), app.sel_session()),
+                before
+            );
             assert!(app.projects_closed);
 
             let json = super::super::ui_state_json(&app);
@@ -8810,7 +8813,7 @@ mod tests {
             assert_eq!(selected(&by_click), selected(&by_key));
             assert_eq!(pane(&by_click), pane(&by_key));
             assert_eq!(by_click.focus, by_key.focus);
-            assert_eq!(by_click.sel_project, by_key.sel_project);
+            assert_eq!(by_click.sel_project(), by_key.sel_project());
             assert_ne!(
                 by_click.focus,
                 Focus::Terminal,
@@ -10769,10 +10772,11 @@ mod tests {
                 a.unseen = unseen;
                 a.status_changed_at = at;
                 let rows = app.project_rows();
-                app.sel_project = rows
-                    .iter()
-                    .position(|&i| app.tree.projects[i].id.0 == "p1")
-                    .unwrap();
+                app.set_sel_project(
+                    rows.iter()
+                        .position(|&i| app.tree.projects[i].id.0 == "p1")
+                        .unwrap(),
+                );
             };
 
             let term = draw(&mut app);
@@ -11029,13 +11033,13 @@ mod tests {
         seed_tree(&mut app);
         seed_feat(&mut app, feat.path().to_path_buf());
         seed_web(&mut app);
-        app.sel_project = project_row(&app, "p1");
+        app.set_sel_project(project_row(&app, "p1"));
         let (id, _) = sweep_target(&mut app).expect("demo's other checkout is listed");
         assert_eq!(id, WorktreeId("w2".into()));
 
         // Walked into `web`, whose only checkout is its root: the sweep
         // went with the level and has nothing to spend the tick on.
-        app.sel_project = project_row(&app, "p2");
+        app.set_sel_project(project_row(&app, "p2"));
         assert_eq!(sweep_target(&mut app), None, "the sweep followed the level");
     }
 
@@ -11051,14 +11055,14 @@ mod tests {
             draw(&mut by_click);
             let (x, y) = air(&by_click);
             by_click.flash = None;
-            let was = by_click.sel_session;
+            let was = by_click.sel_session();
             mouse(&mut by_click, MouseEventKind::Down(MouseButton::Left), x, y);
             assert!(
                 !by_click.launcher_unaimed,
                 "the click on the air let the card go"
             );
             assert_eq!(by_click.flash, None, "and it said something about it");
-            assert_eq!(by_click.sel_session, was, "it moved the cursor");
+            assert_eq!(by_click.sel_session(), was, "it moved the cursor");
             assert_eq!(by_click.focus, Focus::Sessions, "the keys are the grid's");
 
             let mut by_key = two_sessions();
@@ -12457,5 +12461,155 @@ mod tests {
 
     fn selected_sref(app: &App) -> Option<SessionRef> {
         app.selected_session_row().and_then(|r| r.sref())
+    }
+
+    /// Back after a while away: `demo`'s root, then two checkouts whose
+    /// sessions the IDLE REAPER took — `old` (cut first), running the
+    /// session the user left on, read; and `new`, whose `new-chat`
+    /// finished a turn nobody has read yet. That unread finish is what
+    /// keeps `new` among the LIVE checkouts, above the dormant `old`; the
+    /// cursor is on `old-chat`, where the user left it.
+    fn back_from_away() -> App {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        for (id, branch, sort_order) in [("wOld", "old", 1), ("wNew", "new", 2)] {
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Worktree(Worktree {
+                        id: WorktreeId(id.into()),
+                        project_id: ProjectId("p1".into()),
+                        path: format!("/tmp/demo-{branch}").into(),
+                        branch: branch.into(),
+                        is_main: false,
+                        sort_order,
+                    }),
+                },
+            );
+        }
+        for (id, worktree, unseen) in [("old-chat", "wOld", false), ("new-chat", "wNew", true)] {
+            hse(
+                &mut app,
+                ServerEvent::EntityUpserted {
+                    entity: Entity::Agent(Agent {
+                        id: AgentId(id.into()),
+                        worktree_id: WorktreeId(worktree.into()),
+                        name: id.into(),
+                        status: AgentStatus::Finished,
+                        archived: false,
+                        archived_at: 0,
+                        unseen,
+                        kind: AgentKind::Claude,
+                        custom_harness: None,
+                        model: None,
+                        effort: None,
+                        session_id: None,
+                        cloud_session_id: None,
+                        sort_order: 0,
+                        status_changed_at: 0,
+                        alive: false,
+                        issue_url: None,
+                        recent_prompts: Vec::new(),
+                        usage_limit: None,
+                    }),
+                },
+            );
+        }
+        let mut out = Vec::new();
+        super::select_card(&mut app, agent_ref("old-chat"), &mut out);
+        assert_eq!(
+            band_order(&app),
+            ["w1", "wNew", "wOld"],
+            "the unread finish keeps `new` live"
+        );
+        app
+    }
+
+    fn agent_ref(id: &str) -> SessionRef {
+        SessionRef::Agent(AgentId(id.into()))
+    }
+
+    fn band_order(app: &App) -> Vec<String> {
+        app.visible_worktrees()
+            .iter()
+            .map(|w| w.id.0.clone())
+            .collect()
+    }
+
+    /// Clicking the unread card reads it, and with its CLI reaped that
+    /// sends its checkout down among the dormant ones — under `old`, cut
+    /// first. The cursor was an index: it stayed on the slot, which `old`
+    /// slid up into, and the grid lit `old-chat` while the pane showed
+    /// `new-chat`. It is the card clicked.
+    #[test]
+    fn a_click_that_sends_its_checkout_dormant_keeps_the_cursor_on_the_card() {
+        let mut app = back_from_away();
+        let mut out = Vec::new();
+        super::select_card(&mut app, agent_ref("new-chat"), &mut out);
+        assert_eq!(
+            band_order(&app),
+            ["w1", "wOld", "wNew"],
+            "read, `new` is dormant"
+        );
+        assert_eq!(selected_sref(&app), Some(agent_ref("new-chat")));
+        assert_eq!(
+            app.selected_worktree().map(|w| w.id.0.as_str()),
+            Some("wNew")
+        );
+        assert_eq!(
+            app.term.as_ref().map(|t| t.sref.clone()),
+            Some(agent_ref("new-chat")),
+            "the pane and the cursor are on the same card"
+        );
+    }
+
+    /// The attach boots the reaped CLI, and the DAEMON's word that it is
+    /// alive brings `new` back up among the live checkouts: the cursor
+    /// goes with the card, as the pane does.
+    #[test]
+    fn the_cursor_stays_on_the_card_as_its_session_boots_back_up() {
+        let mut app = back_from_away();
+        let mut out = Vec::new();
+        super::select_card(&mut app, agent_ref("new-chat"), &mut out);
+        let mut booted = app
+            .tree
+            .agents
+            .iter()
+            .find(|a| a.id.0 == "new-chat")
+            .cloned()
+            .expect("new-chat");
+        booted.alive = true;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Agent(booted),
+            },
+        );
+        assert_eq!(
+            band_order(&app),
+            ["w1", "wNew", "wOld"],
+            "alive, `new` is live again"
+        );
+        assert_eq!(selected_sref(&app), Some(agent_ref("new-chat")));
+        assert_eq!(
+            app.term.as_ref().map(|t| t.sref.clone()),
+            Some(agent_ref("new-chat"))
+        );
+    }
+
+    /// Nothing but the client's own state moved the rows — no tree event,
+    /// no re-seat ran — and the cursor is still on the card it was on.
+    #[test]
+    fn a_reorder_with_no_tree_event_leaves_the_cursor_on_its_card() {
+        let mut app = back_from_away();
+        if let Some(a) = app.tree.agents.iter_mut().find(|a| a.id.0 == "new-chat") {
+            a.unseen = false;
+        }
+        assert_eq!(band_order(&app), ["w1", "wOld", "wNew"]);
+        assert_eq!(selected_sref(&app), Some(agent_ref("old-chat")));
+        assert_eq!(
+            app.selected_worktree().map(|w| w.id.0.as_str()),
+            Some("wOld")
+        );
     }
 }

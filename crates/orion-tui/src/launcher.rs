@@ -77,7 +77,7 @@ impl RowPr {
 /// takes over ([`crate::app::App::just_launched`]).
 ///
 /// The list is the SELECTED PROJECT's alone — the one whose PROJECT TAB is
-/// lit in the header. Every jump moves `sel_project` with it, so the
+/// lit in the header. Every jump moves the project cursor with it, so the
 /// cursor only ever rests on a session the list holds, and the tabs (or
 /// the `+` after them) are the way to the projects beside it.
 pub fn rows(app: &App) -> Vec<LauncherRow> {
@@ -2354,7 +2354,7 @@ mod tests {
 
         // Switched to `web`, and the list is its one session instead —
         // the same cursor, one tab over.
-        app.sel_project = web_row(&app);
+        app.set_sel_project(web_row(&app));
         assert_eq!(names(&super::rows(&app)), ["tidy-css"]);
 
         app.tree.agents[2].archived = true;
@@ -2507,7 +2507,7 @@ mod tests {
         let mut app = self::app();
         // The open list is `web`'s, so the level has to be in `web` to
         // hold a row that reads it.
-        app.sel_project = web_row(&app);
+        app.set_sel_project(web_row(&app));
         app.open_prs.insert(
             ProjectId("p2".into()),
             crate::app::OpenPrs {
@@ -2640,11 +2640,12 @@ mod tests {
             "the cursor opens on the root's band, not the remembered one"
         );
         // The cursor on api's other checkout: the box goes there.
-        app.sel_worktree = app
-            .worktree_rows()
-            .iter()
-            .position(|r| r.checkout().is_some_and(|w| w.id.0 == "w2"))
-            .expect("api has a second checkout to park the cursor on");
+        app.set_sel_worktree(
+            app.worktree_rows()
+                .iter()
+                .position(|r| r.checkout().is_some_and(|w| w.id.0 == "w2"))
+                .expect("api has a second checkout to park the cursor on"),
+        );
         assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w2"));
         assert_eq!(
             target_for(&app, &api, false),
@@ -2771,17 +2772,18 @@ mod tests {
         app.settle_project_tabs();
         assert_eq!(ids(&app), ["api"], "the project the view opened on");
 
-        app.sel_project = web_row(&app);
+        app.set_sel_project(web_row(&app));
         app.settle_project_tabs();
         assert_eq!(ids(&app), ["api", "web"], "the newest opened goes last");
 
         // Back to `api`: it is already open, so nothing moves — only which
         // tab is lit.
-        app.sel_project = app
-            .project_rows()
-            .iter()
-            .position(|i| app.tree.projects[*i].id.0 == "p1")
-            .expect("api has a row");
+        app.set_sel_project(
+            app.project_rows()
+                .iter()
+                .position(|i| app.tree.projects[*i].id.0 == "p1")
+                .expect("api has a row"),
+        );
         app.settle_project_tabs();
         let tabs = project_tabs(&app);
         assert_eq!(ids(&app), ["api", "web"]);

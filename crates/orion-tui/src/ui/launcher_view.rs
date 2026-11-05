@@ -4456,11 +4456,12 @@ mod tests {
     /// Aim the SESSIONS cursor at the session with this id, whichever
     /// row of the panels' list it happens to be on.
     fn aim_at(app: &mut App, id: &str) {
-        app.sel_session = app
-            .visible_session_rows()
-            .iter()
-            .position(|row| matches!(row, crate::app::SessionRow::Agent(a) if a.id.0 == id))
-            .expect("a row for the session");
+        app.set_sel_session(
+            app.visible_session_rows()
+                .iter()
+                .position(|row| matches!(row, crate::app::SessionRow::Agent(a) if a.id.0 == id))
+                .expect("a row for the session"),
+        );
     }
 
     /// The whole view, drawn with its one band open on the ACCORDION: a
@@ -4535,11 +4536,14 @@ mod tests {
                 run_command: None,
             });
         }
-        app.sel_session = app
-            .visible_session_rows()
-            .iter()
-            .position(|row| matches!(row, crate::app::SessionRow::Terminal(t) if t.id.0 == "t1"))
-            .expect("a row for the terminal");
+        app.set_sel_session(
+            app.visible_session_rows()
+                .iter()
+                .position(
+                    |row| matches!(row, crate::app::SessionRow::Terminal(t) if t.id.0 == "t1"),
+                )
+                .expect("a row for the terminal"),
+        );
         let body = Rect::new(0, 0, 100, 58);
         let lines = drawn_lines(&mut app, body);
         assert_eq!(
@@ -5110,9 +5114,10 @@ mod tests {
 
     /// Put the cursor on the band of checkout `id`, at the band level.
     fn aim_at_band(app: &mut App, id: &str) {
-        app.sel_worktree = app
-            .worktree_row_of(&orion_core::WorktreeId(id.into()))
-            .expect("a row for the checkout");
+        app.set_sel_worktree(
+            app.worktree_row_of(&orion_core::WorktreeId(id.into()))
+                .expect("a row for the checkout"),
+        );
         app.launcher_expanded = None;
     }
 
@@ -5180,11 +5185,12 @@ mod tests {
     /// index and a turn starting anywhere reorders the rows, so a test
     /// that starts one has to say again which project the grid is on.
     fn select(app: &mut App, name: &str) {
-        app.sel_project = app
-            .project_rows()
-            .iter()
-            .position(|i| app.tree.projects[*i].name == name)
-            .expect("a row for the project");
+        app.set_sel_project(
+            app.project_rows()
+                .iter()
+                .position(|i| app.tree.projects[*i].name == name)
+                .expect("a row for the project"),
+        );
     }
 
     /// The HIDDEN MARKER: a grid that holds every card says nothing, and

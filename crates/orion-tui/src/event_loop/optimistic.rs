@@ -317,9 +317,8 @@ fn taken_back(app: &App, before: &Entity, shown: &Entity) -> Option<Entity> {
 /// (un)archived row's changed fields where nothing newer has replaced
 /// them, a deleted row in its old place as the DAEMON last had it.
 pub(super) fn undo(app: &mut App, undo: Undo, out: &mut Vec<ClientRequest>) {
-    // Where the user is, by id, before the row goes back: the reinsert
-    // re-sorts the lists under row-index cursors ahead of the upsert's
-    // own snapshot, which would record wherever that left them.
+    // Where the user is before the row goes back, for the re-seat below
+    // to settle a cursor whose row the undo takes away again.
     let before = selection_snapshot(app);
     let entity = match undo {
         Undo::Restore { before, shown } => match taken_back(app, &before, &shown) {
