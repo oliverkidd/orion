@@ -30,11 +30,6 @@ pub const DIFF_STARTS: &[&str] = &["commits", START_ON_FILES, START_ON_DIFF];
 const START_ON_FILES: &str = "files";
 const START_ON_DIFF: &str = "diff";
 
-/// The **Ticked commits** choices (Settings → Review): how the DIFF
-/// VIEWER reads two or more ticked commits when it opens.
-pub const DIFF_TICKED: &[&str] = &["together", ONE_AT_A_TIME];
-const ONE_AT_A_TIME: &str = "one at a time";
-
 /// The **Merge method** choices (Settings → Review), the default first
 /// (`pr_actions::MergeMethod`).
 pub const MERGE_METHODS: &[&str] = &[
@@ -102,9 +97,9 @@ pub const LINEAR_KEY_OWNER: &str = "the key's owner";
 /// The Project tab with no project to list.
 pub const NO_PROJECTS: &str = "no projects yet — each one you add gets its rows here";
 
-/// What the Project tab's **Run command** row shows while it is empty:
-/// the checkout's `.orion.json` is what `r` reads then.
-pub const PROJECT_FILE_CHOICE: &str = orion_core::project_file::FILE_NAME;
+/// What the Project tab's **Run command** and **Open command** rows show
+/// while they are empty: there is nothing to run then.
+pub const NO_COMMAND: &str = "not set";
 
 // The static model/effort lists live in the core registry table now
 // ([`orion_core::harness::builtin`]); what the pickers show is built
@@ -463,7 +458,6 @@ pub enum SettingKind {
     Animations,
     Spotify,
     BlackBackground,
-    CardIssueNumber,
     HideDraftPrs,
     QuickPromptKind,
     QuickPromptFocus,
@@ -473,7 +467,6 @@ pub enum SettingKind {
     OpenCommand,
     DiffTreeView,
     DiffStart,
-    DiffTicked,
     PrMergeMethod,
     PrDeleteBranch,
     PrDraft,
@@ -758,12 +751,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 group: "Changes",
             },
             SettingSpec {
-                kind: SettingKind::DiffTicked,
-                label: "Ticked commits",
-                hint: "How two or more ticked commits read when the viewer opens: together as one diff, or one at a time from the oldest (^G flips it)",
-                group: "Changes",
-            },
-            SettingSpec {
                 kind: SettingKind::PrMergeMethod,
                 label: "Merge method",
                 hint: "How a pull request's merge (^X in the pull requests modal) lands: squash, a merge commit or a rebase — the first the repo allows when it refuses this one",
@@ -841,13 +828,13 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::RunCommand,
                 label: "Run command",
-                hint: "Shell line {toggle_stack} (Start stack) runs in a worktree's run terminal, e.g. just start (empty = its .orion.json \"run\", else docker compose start)",
+                hint: "Shell line {toggle_stack} (Start stack) runs in a worktree's run terminal, e.g. just start",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::OpenCommand,
                 label: "Open command",
-                hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000 (empty = its .orion.json \"open\")",
+                hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000",
                 group: "",
             },
         ]),
@@ -1324,10 +1311,6 @@ pub struct Config {
     /// row and nothing reads it. Still loaded and written back as stored,
     /// so an older build sharing the file keeps the choice its user made.
     pub hide_card_prompt: bool,
-    /// RETIRED: GitHub issue numbers on session cards. Orion uses Linear,
-    /// so no tab shows the row and the grid never paints `#15`. Still
-    /// loaded and written back as stored.
-    pub card_issue_number: bool,
     /// Leave draft pull requests out of the PROJECT OPEN PRS GROUP and the
     /// `/` PALETTE's pull-request rows, so browsing what's open shows only
     /// the rows asking for a reviewer. A view filter, not a fetch filter:
@@ -1347,9 +1330,6 @@ pub struct Config {
     /// the ticks come first), `files` or `diff`. Read through
     /// [`Config::diff_start`]; a word off the list is the commits.
     pub diff_start: String,
-    /// How the DIFF VIEWER reads ticked commits when it opens: `together`
-    /// as one diff, the default, or `one at a time` (`^G` flips it).
-    pub diff_ticked: String,
     /// How the PULL REQUESTS MODAL's merge form opens (Settings →
     /// Review): `squash`, `merge` or `rebase` — the first the repo allows
     /// when it refuses this one.
@@ -1604,9 +1584,8 @@ pub struct Config {
 #[serde(default)]
 pub struct ProjectSettings {
     /// The RUN COMMAND a menu's **Run** starts in this project's
-    /// worktrees, typed on the Project tab. Empty — the default, shown as `.orion.json` — is
-    /// the checkout's PROJECT FILE `run`, where the command lived before
-    /// the row existed; set, it wins over the file. The DAEMON reads it
+    /// worktrees, typed on the Project tab. Empty — the default, shown as
+    /// `not set` — is none. The DAEMON reads it
     /// (`orion-daemon/src/config.rs`); the TUI only edits it. Left out
     /// of the file while empty, so an entry written before the row reads
     /// the same after a save.
@@ -1614,8 +1593,7 @@ pub struct ProjectSettings {
     pub run_command: String,
     /// The OPEN COMMAND `Shift+Enter` / `Shift+O` fires on this project's
     /// worktrees, typed on the Project tab — `open http://localhost:3000`,
-    /// say. Empty (shown as `.orion.json`) is the checkout's PROJECT FILE
-    /// `open`; set, it wins over the file. The TUI both edits and runs it
+    /// say. Empty (shown as `not set`) is none. The TUI both edits and runs it
     /// (`event_loop::open_worktree`): what it opens belongs on the machine
     /// the user sits at, never the DAEMON's. Left out of the file while
     /// empty, like `run_command`.
@@ -1635,11 +1613,11 @@ impl ProjectSettings {
     pub fn value_label(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::RunCommand => match self.run_command.trim() {
-                "" => PROJECT_FILE_CHOICE.into(),
+                "" => NO_COMMAND.into(),
                 command => command.to_string(),
             },
             SettingKind::OpenCommand => match self.open_command.trim() {
-                "" => PROJECT_FILE_CHOICE.into(),
+                "" => NO_COMMAND.into(),
                 command => command.to_string(),
             },
             _ => String::new(),
@@ -1647,8 +1625,8 @@ impl ProjectSettings {
     }
 
     /// The stored text of a typed PROJECT TAB row as its prompt pre-fills
-    /// it — `""` for an unset row, never the `.orion.json` the overlay
-    /// shows in its place. Empty for a row that is not typed.
+    /// it — `""` for an unset row, never the `not set` the overlay shows
+    /// in its place. Empty for a row that is not typed.
     pub fn text_value(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::RunCommand => self.run_command.clone(),
@@ -1705,11 +1683,9 @@ impl Default for Config {
             spotify: true,
             black_background: true,
             hide_card_prompt: false,
-            card_issue_number: true,
             hide_draft_prs: false,
             diff_tree_view: true,
             diff_start: DIFF_STARTS[0].into(),
-            diff_ticked: DIFF_TICKED[0].into(),
             pr_merge_method: MERGE_METHODS[0].into(),
             pr_delete_branch: true,
             pr_draft: false,
@@ -1941,17 +1917,6 @@ impl Config {
             START_ON_DIFF => crate::app::DiffFocus::Diff,
             _ => crate::app::DiffFocus::Commits,
         }
-    }
-
-    /// `diff_ticked` as one of [`DIFF_TICKED`]; a word off the list is
-    /// together.
-    fn diff_ticked_word(&self) -> &'static str {
-        DIFF_TICKED[cycled_index(&self.diff_ticked, DIFF_TICKED, 0)]
-    }
-
-    /// The **Ticked commits** SETTING says one at a time.
-    pub fn diff_one_at_a_time(&self) -> bool {
-        self.diff_ticked_word() == ONE_AT_A_TIME
     }
 
     /// The editor the file overlays launch: `ORION_EDITOR` when set,
@@ -2914,11 +2879,9 @@ impl Config {
             SettingKind::Animations => on_off(self.animations).into(),
             SettingKind::Spotify => on_off(self.spotify).into(),
             SettingKind::BlackBackground => on_off(self.black_background).into(),
-            SettingKind::CardIssueNumber => on_off(self.card_issue_number).into(),
             SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
             SettingKind::DiffTreeView => on_off(self.diff_tree_view).into(),
             SettingKind::DiffStart => self.diff_start_word().into(),
-            SettingKind::DiffTicked => self.diff_ticked_word().into(),
             SettingKind::PrMergeMethod => {
                 crate::pr_actions::MergeMethod::parse(&self.pr_merge_method)
                     .as_str()
@@ -3081,9 +3044,6 @@ impl Config {
             SettingKind::BlackBackground => {
                 self.black_background = !self.black_background;
             }
-            SettingKind::CardIssueNumber => {
-                self.card_issue_number = !self.card_issue_number;
-            }
             SettingKind::HideDraftPrs => {
                 self.hide_draft_prs = !self.hide_draft_prs;
             }
@@ -3094,9 +3054,6 @@ impl Config {
             // it reads as.
             SettingKind::DiffStart => {
                 self.diff_start = cycle_choice(&self.diff_start, DIFF_STARTS, step).into();
-            }
-            SettingKind::DiffTicked => {
-                self.diff_ticked = cycle_choice(&self.diff_ticked, DIFF_TICKED, step).into();
             }
             SettingKind::PrMergeMethod => {
                 self.pr_merge_method =
@@ -4446,7 +4403,7 @@ mod tests {
     }
 
     /// The REVIEW TAB: how the changes viewer opens — the tree, the keys
-    /// on the commits, ticked commits together — and how the pull request
+    /// on the commits — and how the pull request
     /// forms open — a squash, the branch deleted, not a draft — each row
     /// cycling its own words and a word off the list reading as the
     /// default.
@@ -4456,13 +4413,11 @@ mod tests {
         let mut cfg = Config::default();
         assert!(cfg.diff_tree_view);
         assert_eq!(cfg.diff_start(), DiffFocus::Commits);
-        assert!(!cfg.diff_one_at_a_time());
         assert_eq!(cfg.value_label(SettingKind::PrMergeMethod), "squash");
         assert!(cfg.pr_delete_branch && !cfg.pr_draft);
         for kind in [
             SettingKind::DiffTreeView,
             SettingKind::DiffStart,
-            SettingKind::DiffTicked,
             SettingKind::PrMergeMethod,
             SettingKind::PrDeleteBranch,
             SettingKind::PrDraft,
@@ -4478,9 +4433,6 @@ mod tests {
         assert_eq!(cfg.value_label(SettingKind::DiffStart), "diff");
         cfg.cycle(tab, row, 1);
         assert_eq!(cfg.diff_start(), DiffFocus::Commits, "round again");
-        let (tab, row) = locate(SettingKind::DiffTicked).unwrap();
-        cfg.cycle(tab, row, 1);
-        assert!(cfg.diff_one_at_a_time());
         let (tab, row) = locate(SettingKind::PrMergeMethod).unwrap();
         cfg.cycle(tab, row, -1);
         assert_eq!(cfg.pr_merge_method, "rebase");
@@ -4580,22 +4532,6 @@ mod tests {
             }),
             "no tab shows the row"
         );
-    }
-
-    /// CARD ISSUE NUMBER is retired: no tab shows the row, a stored key
-    /// still loads, and an empty file keeps the historical default.
-    #[test]
-    fn card_issue_number_is_retired_from_the_appearance_tab() {
-        assert!(
-            locate(SettingKind::CardIssueNumber).is_none(),
-            "no tab shows the row"
-        );
-        let cfg = Config::default();
-        assert!(cfg.card_issue_number, "stored default unchanged");
-        let legacy: Config = serde_json::from_str("{}").unwrap();
-        assert!(legacy.card_issue_number);
-        let loaded: Config = serde_json::from_str(r#"{"card_issue_number": false}"#).unwrap();
-        assert!(!loaded.card_issue_number);
     }
 
     /// CARD LINE COUNTS: retired with every card counting its lines. The
@@ -4746,8 +4682,8 @@ mod tests {
 
     /// **Run command** on the Project tab: a typed row (Enter prompts,
     /// ←/→ and cycle change nothing) kept per repo path as `run_command`,
-    /// shown as `.orion.json` while empty — the file decides then — and
-    /// left out of the file while empty, so an entry with nothing else in
+    /// shown as `not set` while empty and left out of the file while
+    /// empty, so an entry with nothing else in
     /// it is dropped rather than written.
     #[test]
     fn run_command_is_a_typed_project_row_kept_per_repo_path() {
@@ -4762,9 +4698,9 @@ mod tests {
         assert_eq!(cfg.project(demo).run_command, "");
         assert_eq!(
             cfg.project(demo).value_label(SettingKind::RunCommand),
-            PROJECT_FILE_CHOICE
+            NO_COMMAND
         );
-        assert_eq!(cfg.value_label(SettingKind::RunCommand), ".orion.json");
+        assert_eq!(cfg.value_label(SettingKind::RunCommand), "not set");
         assert_eq!(cfg.project_text_value(demo, SettingKind::RunCommand), "");
 
         // The tab's cycle never touches a typed row.
@@ -4794,7 +4730,7 @@ mod tests {
         );
         assert_eq!(
             cfg.project(other).value_label(SettingKind::RunCommand),
-            PROJECT_FILE_CHOICE,
+            NO_COMMAND,
             "one project's, not every project's"
         );
         assert_eq!(
@@ -4820,7 +4756,7 @@ mod tests {
         assert_eq!(loaded.project(demo).run_command, "npm run dev");
         assert_eq!(loaded.project(other).run_command, "");
 
-        // Empty is the way back to the file — and drops the entry.
+        // Empty unsets it — and drops the entry.
         assert!(cfg.set_project_text(demo, SettingKind::RunCommand, "   "));
         assert_eq!(cfg.projects.keys().collect::<Vec<_>>(), [other]);
         cfg.save_to(&path).unwrap();
@@ -4832,7 +4768,7 @@ mod tests {
 
     /// **Open command** on the Project tab: the same typed per-project row
     /// as Run command, right under it, kept as `open_command` — what
-    /// `Shift+Enter` / `Shift+O` runs before looking at `.orion.json`.
+    /// `Shift+Enter` / `Shift+O` runs.
     /// Its own key, so setting it leaves `run_command` alone; empty drops
     /// it from the entry.
     #[test]
@@ -4851,9 +4787,9 @@ mod tests {
         assert_eq!(cfg.project(demo).open_command, "");
         assert_eq!(
             cfg.project(demo).value_label(SettingKind::OpenCommand),
-            PROJECT_FILE_CHOICE
+            NO_COMMAND
         );
-        assert_eq!(cfg.value_label(SettingKind::OpenCommand), ".orion.json");
+        assert_eq!(cfg.value_label(SettingKind::OpenCommand), "not set");
 
         // A typed row: cycling its tab row changes nothing, and the
         // top-level setter is not its.
@@ -4891,7 +4827,7 @@ mod tests {
             "open http://localhost:3000"
         );
 
-        // Empty is the way back to the file — and drops the entry.
+        // Empty unsets it — and drops the entry.
         assert!(cfg.set_project_text(demo, SettingKind::OpenCommand, " "));
         assert!(cfg.projects.is_empty());
     }
@@ -5074,7 +5010,7 @@ mod tests {
     /// PR & ISSUE COUNTS: retired with the header always counting. The
     /// key an older build wrote (`pr_issue_counts`, on by default) still
     /// loads to what it wrote and is written back as stored, but no tab
-    /// shows it any more — Experimental ends on REMEMBER HARNESS.
+    /// shows it any more.
     #[test]
     fn pr_issue_counts_is_retired_but_still_round_trips() {
         let cfg = Config::default();
@@ -5264,7 +5200,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };

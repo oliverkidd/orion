@@ -1,17 +1,17 @@
 //! STACK STATUS: every docker compose project on the machine — running or
 //! stopped, started from a worktree orion knows or not — polled every few
 //! seconds and broadcast as `StacksChanged` when it changes, for the band's
-//! `⬡` and the Stacks modal. The modal's start / stop / take down run here
-//! too (`ClientRequest::StackAction`).
+//! `⬡`.
 //!
-//! One poll serves every client, and goes on while none is attached so the
-//! first frame of the next one is current. Docker out of reach — no CLI,
-//! the engine stopped — is a state like any other, sent once; the poller
-//! then asks less often until it answers again.
+//! One poll serves every client, and runs only while one is subscribed:
+//! with none, docker is left alone, and the next to subscribe pokes it for
+//! a fresh listing (`server`). Docker out of reach — no CLI, the engine
+//! stopped — is a state like any other, sent once; the poller then asks
+//! less often until it answers again.
 
-use crate::containers::{self, find_docker, COMPOSE_TIMEOUT, PS_TIMEOUT};
+use crate::containers::{self, find_docker, PS_TIMEOUT};
 use crate::registry::Daemon;
-use orion_core::compose::{self, Stack, StackVerb};
+use orion_core::compose::{self, Stack};
 use orion_core::protocol::ServerEvent;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -50,12 +50,7 @@ impl StackWatch {
         self.last.lock().unwrap().event()
     }
 
-    /// The stacks the last poll found; None while docker isn't answering.
-    pub fn stacks(&self) -> Option<Vec<Stack>> {
-        self.last.lock().unwrap().stacks.clone()
-    }
-
-    /// Ask the poller for a fresh listing now — after a verb changed one.
+    /// Ask the poller for a fresh listing now — a client has subscribed.
     pub fn poke(&self) {
         self.poke.notify_one();
     }
@@ -82,6 +77,9 @@ pub async fn watch(daemon: Arc<Daemon>, mut interval: tokio::time::Interval) {
             _ = interval.tick() => false,
             _ = daemon.stacks.poke.notified() => true,
         };
+        if daemon.events.receiver_count() == 0 {
+            continue;
+        }
         if !poked && failed_at.is_some_and(|at| at.elapsed() < UNREACHABLE_BACKOFF) {
             continue;
         }
@@ -111,23 +109,6 @@ pub async fn poll(docker: Option<&Path>) -> Listing {
             error: Some(e),
         },
     }
-}
-
-/// Apply `verb` to compose project `project`, then have the poller look
-/// again so every client sees the result.
-pub async fn act(daemon: &Daemon, project: &str, verb: StackVerb) -> anyhow::Result<()> {
-    let result = match find_docker() {
-        Some(docker) => act_with(&docker, project, verb).await,
-        None => Err(compose::NO_DOCKER_CLI.to_string()),
-    };
-    daemon.stacks.poke();
-    result.map_err(|e| anyhow::anyhow!("couldn't {} {project}: {e}", verb.as_str()))
-}
-
-async fn act_with(docker: &Path, project: &str, verb: StackVerb) -> Result<(), String> {
-    containers::run(docker, &verb.compose_args(project), COMPOSE_TIMEOUT).await?;
-    tracing::info!(project, "compose project {}", verb.past_tense());
-    Ok(())
 }
 
 #[cfg(test)]
@@ -161,22 +142,6 @@ mod tests {
             poll(None).await.error.as_deref(),
             Some(compose::NO_DOCKER_CLI)
         );
-    }
-
-    #[tokio::test]
-    async fn a_verb_runs_compose_and_surfaces_its_error() {
-        let stub = Stub::new(
-            "echo \"$*\" >> \"$(dirname \"$0\")/calls\"\n\
-             [ \"$4\" = stop ] && { echo 'no such project' >&2; exit 1; }\nexit 0",
-        );
-        act_with(&stub.docker(), "p", StackVerb::Start)
-            .await
-            .unwrap();
-        let err = act_with(&stub.docker(), "p", StackVerb::Stop)
-            .await
-            .unwrap_err();
-        assert_eq!(err, "no such project");
-        assert_eq!(stub.calls(), ["compose -p p start", "compose -p p stop"]);
     }
 
     #[test]

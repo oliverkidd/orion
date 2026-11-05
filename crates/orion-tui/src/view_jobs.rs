@@ -1,8 +1,9 @@
 //! BACKGROUND READS for the worktree views — the DIFF VIEWER (`g`), the FILE
 //! FINDER (`f`), its grep view (`F`) and the TREE BROWSER (`b`).
 //!
-//! Every one of them is git and the disk: `git status -uall` to list what
-//! changed, `git ls-files` for the finder and the tree, a `git diff` per
+//! Every one of them is git and the disk — and, for a pull request the
+//! repo lacks, a `git fetch` of its pull ref: `git status -uall` to list
+//! what changed, `git ls-files` for the finder and the tree, a `git diff` per
 //! file walked past, a `git grep` per character typed, a file read and
 //! highlighted per tree row. They used to run inside the key handler, on
 //! the grounds that they are fast — and on a small checkout they are: 10 to

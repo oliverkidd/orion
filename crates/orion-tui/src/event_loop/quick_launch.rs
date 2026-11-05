@@ -246,12 +246,10 @@ pub(super) fn draft(
     AgentLaunchDraft {
         custom: launch.custom.clone(),
         // Sized in `submit_prompt`, with the task — composing cannot fail.
-        // An empty box (`launches_empty`) sends a preset's prefix + postfix
-        // alone; with nothing to wrap it either, there is no first prompt,
-        // the CLI's own input is it.
+        // An empty box sends a preset's prefix + postfix alone; with
+        // nothing to wrap it either, there is no first prompt, the CLI's
+        // own input is it.
         starting_prompt: Some(launch.compose(&text)).filter(|prompt| !prompt.is_empty()),
-        // An ISSUE SESSION's context, persisted by the DAEMON with the row.
-        issue_url: launch.issue.as_ref().map(|issue| issue.url.clone()),
         todo: launch.todo.clone(),
         // A PR SESSION's: the create goes to the PROJECT as a
         // `CreatePrAgent`, and `worktree` only names which.
@@ -350,7 +348,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: crate::app::now_ms(),
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),

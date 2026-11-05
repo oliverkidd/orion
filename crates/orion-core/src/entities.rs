@@ -200,12 +200,6 @@ pub struct Agent {
     pub effort: Option<String>,
     /// CLI session id used for resume (claude, codex, or cursor, per `kind`).
     pub session_id: Option<String>,
-    /// The GitHub issue this session was started from — an ISSUE SESSION,
-    /// launched out of the ISSUES MODAL — or None. The daemon folds it into
-    /// every spawn's context; the TUI reads it for `⇧I`, which opens the
-    /// issue in the browser.
-    #[serde(default)]
-    pub issue_url: Option<String>,
     pub sort_order: i64,
     /// True when the daemon currently holds a live PTY for this agent.
     pub alive: bool,
@@ -309,13 +303,6 @@ impl Agent {
             .as_ref()
             .filter(|_| self.status == AgentStatus::NeedsFeedback && !self.archived)
     }
-
-    /// The number of the GitHub issue this ISSUE SESSION was started from,
-    /// read off `issue_url` (`…/issues/15`, with or without a trailing
-    /// path) — None for every other row.
-    pub fn issue_number(&self) -> Option<u64> {
-        url_number_after(self.issue_url.as_deref()?, "/issues/")
-    }
 }
 
 /// The positive number that follows `marker` in `url` (`/issues/`,
@@ -350,7 +337,7 @@ pub struct TerminalTab {
     /// True when the daemon currently holds a live PTY for this terminal.
     pub alive: bool,
     /// Set on a RUN TERMINAL — the one `r` starts on a worktree: the
-    /// `.orion.json` `run` command it was launched with, run through the
+    /// project's run command it was launched with, run through the
     /// login shell in place of an interactive one. While its PTY is alive
     /// the worktree is RUNNING. None for a plain shell tab.
     #[serde(default)]

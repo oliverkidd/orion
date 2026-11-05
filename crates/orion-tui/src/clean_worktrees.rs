@@ -751,7 +751,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: !archived,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         }

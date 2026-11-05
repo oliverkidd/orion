@@ -114,7 +114,7 @@ pub const NO_TEXT: &str = "(no textual changes)";
 /// create '.git/index.lock': File exists" (issue #15). Nothing the TUI
 /// runs needs the refresh persisted — the agent CLIs themselves run their
 /// background git with `--no-optional-locks` for the same reason — and
-/// commands that must lock (the BRANCH SWITCHER's switch, stash and commit) still do: `GIT_OPTIONAL_LOCKS=0`
+/// commands that must lock (a pull's merge, a commit) still do: `GIT_OPTIONAL_LOCKS=0`
 /// only skips the optional ones. Every TUI-side git goes through here.
 pub(crate) fn git_command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
@@ -793,10 +793,7 @@ pub fn fill_view(view: &mut DiffView, mut listing: crate::view_jobs::DiffListing
 }
 
 /// Reload `view.diff` for the currently selected file and reset the scroll.
-/// A view whose diffs were fetched whole (a pull request) reads them out of
-/// `prefetched` instead of shelling out — there is no local commit to ask
-/// git about, and the text is already in hand. A directory row of the
-/// tree list has no diff of its own: the pane lists what changed under
+/// A directory row of the tree list has no diff of its own: the pane lists what changed under
 /// it. Every diff is taken against the COMMIT LIST row on screen
 /// (`DiffView::scope`).
 ///
@@ -823,14 +820,6 @@ pub fn load_selected_diff(view: &mut DiffView) {
         view.show_diff(None, summary, false);
         return;
     };
-    if let Some(chunks) = &view.prefetched {
-        let diff = chunks
-            .get(&file.path)
-            .cloned()
-            .unwrap_or_else(|| "(no diff for this file)".to_string());
-        view.show_diff(Some(&file.path), diff, false);
-        return;
-    }
     let Some(jobs) = view.jobs.clone() else {
         let diff = scoped_diff(&view.root, &view.scope, &file, view.head_ok);
         view.show_diff(Some(&file.path), diff, false);

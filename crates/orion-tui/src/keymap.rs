@@ -76,26 +76,17 @@ pub enum Action {
     /// browser — the `#42 title` line on the card. `⌘U` lists the
     /// project's pull requests in orion; this one goes to GitHub.
     OpenPullRequest,
-    /// `Shift+I`: the GitHub issue the session card under the cursor was
-    /// started from, in the browser. `i` lists the project's issues in
-    /// orion; the shifted key goes to GitHub.
-    OpenIssue,
     /// A terminal *outside* orion — a new Ghostty tab in the selected
     /// worktree's directory, where `t` opens one inside orion; a silent
     /// no-op over ssh.
     OpenOutsideTerminal,
     /// `Shift+R`: reload from GitHub now, past every timer — the project's
-    /// open pull requests and issues, the worktree's PR, the one the pane
-    /// is reading.
+    /// open pull requests, the worktree's PR, the one the pane is reading.
     RefreshPullRequests,
     /// `y`: reply — the COMMENT BOX on the card's pull request (the one
     /// `Shift+V` opens), or on the one the pane is reading, posted to
     /// GitHub with `gh pr comment` on Enter.
     CommentPullRequest,
-    /// `i`: the ISSUES MODAL — the project's open GitHub issues, read in
-    /// place, commented on, with a QUICK PROMPT or an AGENT PRESET launched
-    /// on one.
-    Issues,
     /// `⌘U`: the PULL REQUESTS MODAL — the project's open pull requests,
     /// read in place, commented on, with a PR SESSION launched on one.
     PullRequests,
@@ -110,9 +101,6 @@ pub enum Action {
     /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
     /// days, written up by product area with what to show and say.
     WeekReview,
-    /// `c`: the BRANCH SWITCHER — move the project's ROOT WORKTREE onto
-    /// another branch, asking what to do with uncommitted changes.
-    SwitchBranch,
     /// `p`: PULL the selected checkout — fetch, then fast-forward onto its
     /// upstream, never a merge or a rebase (`crate::git_sync`).
     PullWorktree,
@@ -121,8 +109,7 @@ pub enum Action {
     PushWorktree,
     /// `Shift+Enter` / `Shift+O` / `Alt+Enter`, on the grid: fire the
     /// selected worktree's OPEN COMMAND — the project's **Open command**
-    /// setting, else its `.orion.json` `open` (`open http://localhost:3000`,
-    /// say). Three chords because only the kitty protocol carries a shifted
+    /// setting (`open http://localhost:3000`, say). Three chords because only the kitty protocol carries a shifted
     /// Enter: Terminal.app sends a plain one and tmux flattens it, while
     /// `ESC CR` — what `/terminal-setup` gives Shift+Enter in VS Code, and
     /// Option+Enter on a Mac with Option as Meta — gets through both and
@@ -208,7 +195,6 @@ pub enum Action {
     /// `⇧U`: ACCOUNT USAGE — how much is left on each Claude and Cursor
     /// account, window by window.
     Usage,
-    Stacks,
     /// `⌘⇧S`: start the cursor's checkout's stack — its RUN COMMAND, in
     /// the pane — or stop it.
     ToggleStack,
@@ -454,19 +440,10 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &[],
     },
     ActionSpec {
-        action: Action::OpenIssue,
-        id: "open_issue",
-        label: "Open issue in browser",
-        hint: "Send the GitHub issue the session card under the cursor was started from to your browser. i lists the issues in orion",
-        group: "PROJECTS & WORKTREES",
-        scope: Scope::Global,
-        defaults: &[],
-    },
-    ActionSpec {
         action: Action::RefreshPullRequests,
         id: "refresh_pull_requests",
         label: "Reload from GitHub",
-        hint: "Ask GitHub again now for the project's open pull requests and issues, the selected worktree's PR and the one the pane is reading",
+        hint: "Ask GitHub again now for the project's open pull requests, the selected worktree's PR and the one the pane is reading",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["cmd+r"],
@@ -479,15 +456,6 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
-    },
-    ActionSpec {
-        action: Action::Issues,
-        id: "issues",
-        label: "GitHub issues",
-        hint: "List the project's open issues; Enter prompts an agent on one, ⇧Tab launches a preset on it",
-        group: "PROJECTS & WORKTREES",
-        scope: Scope::Global,
-        defaults: &["i"],
     },
     ActionSpec {
         action: Action::PullRequests,
@@ -543,15 +511,6 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &["cmd+shift+y", "shift+w"],
     },
     ActionSpec {
-        action: Action::SwitchBranch,
-        id: "switch_branch",
-        label: "Switch root branch",
-        hint: "Fuzzy-pick a branch or remote for the project's root checkout; uncommitted changes get stash / bring / commit / discard",
-        group: "PROJECTS & WORKTREES",
-        scope: Scope::Global,
-        defaults: &["c"],
-    },
-    ActionSpec {
         action: Action::PullWorktree,
         id: "pull_worktree",
         label: "Pull from remote",
@@ -573,7 +532,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::OpenWorktree,
         id: "open_worktree",
         label: "Open checkout in editor",
-        hint: "Open the selected checkout outside orion, usually in your editor: its project's Open command (Settings → Project), else .orion.json \"open\" — e.g. open http://localhost:3000",
+        hint: "Open the selected checkout outside orion, usually in your editor: its project's Open command (Settings → Projects) — e.g. open http://localhost:3000",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
@@ -932,19 +891,10 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &["shift+u"],
     },
     ActionSpec {
-        action: Action::Stacks,
-        id: "stacks",
-        label: "Stacks",
-        hint: "Every docker compose stack on this machine and the worktree it belongs to — start, stop or take one down",
-        group: "GENERAL",
-        scope: Scope::Global,
-        defaults: &["shift+s"],
-    },
-    ActionSpec {
         action: Action::ToggleStack,
         id: "toggle_stack",
         label: "Start/stop stack",
-        hint: "Start the selected checkout's stack — its run command (Settings → Project, or .orion.json \"run\"), else its compose stack — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
+        hint: "Start the selected checkout's stack — its run command (Settings → Projects) — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["cmd+shift+s"],
@@ -953,7 +903,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::StopAllStacks,
         id: "stop_all_stacks",
         label: "Stop all stacks",
-        hint: "Stop every running docker compose stack on this machine — containers and data are kept",
+        hint: "Stop every checkout's running stack — a ^C to each run, so each winds down in view",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],

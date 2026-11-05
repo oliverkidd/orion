@@ -81,34 +81,28 @@ pub struct QuickLaunch {
     /// `Tab` picking a harness clears it — a launch spec has one source.
     /// Boxed, so every prompt kind is not as large as a preset.
     pub preset: Option<Box<AgentPreset>>,
-    /// The GitHub issue this launch is for, when the box was opened from
-    /// the ISSUES MODAL: named in the title, sent to the DAEMON as the
-    /// session's persisted context (`CreateAgent::issue_url`), the name
-    /// of the fresh worktree the WORKTREE PICKER offers, and the task when
-    /// the box is sent empty. Kept across the box's pickers — the harness and the preset
-    /// change what runs, not what it is for.
-    pub issue: Option<crate::issues::IssueRef>,
     /// The pull request this launch is for, when the box was opened from
     /// a PROJECT OPEN PRS GROUP row (`e` on it): named in the title and
     /// the header's worktree field, and sent to the DAEMON as a PR SESSION
     /// (`CreatePrAgent`) — it runs in the PROJECT's checkout of the PR's
     /// head branch, reused when one is there and cut by the DAEMON
     /// otherwise, never in `target`, which only names the PROJECT (its
-    /// ROOT WORKTREE). Kept across the box's pickers, as the issue is;
-    /// the WORKTREE PICKER is refused, the checkout being the DAEMON's to
-    /// pick.
+    /// ROOT WORKTREE). Kept across the box's pickers — the harness and
+    /// the preset change what runs, not what it is for; the WORKTREE
+    /// PICKER is refused, the checkout being the DAEMON's to pick.
     pub pr: Option<PrLaunch>,
     /// The LINEAR issues this launch fixes together, when the box was
     /// opened from ⌘L: named in the title, the name of the worktree a
     /// fresh checkout gets, and — once Enter sends it — remembered with
     /// that branch (`linear::LinkStore`) so the pull request it opens is
     /// attached to every one of them. Kept across the box's pickers, as
-    /// the issue is; `^P` is refused, the issues being this project's.
+    /// the pull request is; `^P` is refused, the issues being this
+    /// project's.
     pub linear: Option<crate::linear::LinearBatch>,
     /// The TODO this launch is sent at, when the box was opened from the
     /// TODOS MODAL: its Ack writes the new session onto the item
     /// (`todos::agent_started`). Kept across the box's pickers, as the
-    /// issue is.
+    /// pull request is.
     pub todo: Option<crate::todos::TodoRef>,
     /// The mode the CLI starts in — edit, plan or ask — stepped by Cycle
     /// `⇧Tab` — as in Claude Code and Cursor — or a click on the header's
@@ -117,11 +111,12 @@ pub struct QuickLaunch {
     /// harness pick is: every box opens on edit, the mode every CLI starts
     /// in, so a plan launch is always one somebody asked for.
     pub mode: AgentMode,
-    /// The modal the box was opened over — `Enter` / `p` in the ISSUES
-    /// MODAL or the PULL REQUESTS MODAL — which it stands on rather than
-    /// takes away: drawn under the box, and put back when the box goes
-    /// without launching. A launch closes it, the new session's card being
-    /// what there is to see. Kept across the box's pickers, as the issue is.
+    /// The modal the box was opened over — `Enter` / `p` in the PULL
+    /// REQUESTS MODAL, the LINEAR VIEW or the TODOS MODAL — which it
+    /// stands on rather than takes away: drawn under the box, and put back
+    /// when the box goes without launching. A launch closes it, the new
+    /// session's card being what there is to see. Kept across the box's
+    /// pickers, as the pull request is.
     pub under: Option<ModalUnder>,
 }
 
@@ -130,7 +125,6 @@ pub struct QuickLaunch {
 /// The rows are the [`App`]'s, so it is drawn fresh under the box.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ModalUnder {
-    Issues(Box<crate::issues::IssuesView>),
     PullRequests(Box<crate::pr_modal::PullRequestsView>),
     Linear(Box<crate::linear::LinearView>),
     Todos(Box<crate::todos::TodoView>),
@@ -140,7 +134,6 @@ impl ModalUnder {
     /// The modal `overlay` is, when it is one a box can stand on.
     pub fn of(overlay: Option<&Overlay>) -> Option<Self> {
         match overlay? {
-            Overlay::Issues(view) => Some(Self::Issues(Box::new(view.clone()))),
             Overlay::PullRequests(view) => Some(Self::PullRequests(Box::new(view.clone()))),
             Overlay::Linear(view) => Some(Self::Linear(Box::new(view.clone()))),
             Overlay::Todos(view) => Some(Self::Todos(Box::new(view.clone()))),
@@ -151,7 +144,6 @@ impl ModalUnder {
     /// Put the modal back up, on the row it was left on.
     pub fn reopen(self, app: &mut App) {
         match self {
-            Self::Issues(view) => crate::issues::reopen(app, *view),
             Self::PullRequests(view) => crate::pr_modal::reopen(app, *view),
             Self::Linear(view) => crate::linear::reopen(app, *view),
             Self::Todos(view) => crate::todos::reopen(app, *view),
@@ -162,8 +154,7 @@ impl ModalUnder {
 /// The modal under `overlay`: the box's own, or the one under the box a
 /// picker opened from it is drawn over — `Tab`'s harness list, `^P`'s
 /// PROJECT PICKER, `^X`'s AGENT PRESETS — so the layers stay put
-/// while the box's spec is rewritten. A picker the modal opened itself
-/// (`Shift+Tab` in the ISSUES MODAL) stands on it the same way.
+/// while the box's spec is rewritten.
 pub(crate) fn modal_under(overlay: &Overlay) -> Option<ModalUnder> {
     match overlay {
         Overlay::Prompt(prompt) => match &prompt.kind {
@@ -214,7 +205,7 @@ pub struct QuickReturn {
     pub text: String,
     /// Was the box up when the picker opened (`Tab` / `^X` in it)?
     /// Esc puts the box back only then. A picker reached with no box up —
-    /// `e` on a pull request or an issue — closes on Esc instead, as the
+    /// `e` on a pull request — closes on Esc instead, as the
     /// manager does: it used to put up an empty box nobody asked for. A
     /// pick opens the box either way.
     pub from_box: bool,
@@ -424,7 +415,6 @@ impl QuickLaunch {
             model,
             effort,
             preset: None,
-            issue: None,
             pr: None,
             linear: None,
             todo: None,
@@ -443,23 +433,15 @@ impl QuickLaunch {
 
     /// The same launch, for the pull request `pr` (or for none). What
     /// every picker's return trip does to the launch it rebuilt, so the
-    /// PR survives a `Tab` or `^X` pick as the issue does.
+    /// PR survives a `Tab` or `^X` pick.
     pub fn with_pr(mut self, pr: Option<PrLaunch>) -> Self {
         self.pr = pr;
         self
     }
 
-    /// The same launch, for `issue` (or for nothing, with `None`). What
-    /// every picker's return trip does to the launch it rebuilt, so the
-    /// issue survives a `Tab` or `^X` pick.
-    pub fn with_issue(mut self, issue: Option<crate::issues::IssueRef>) -> Self {
-        self.issue = issue;
-        self
-    }
-
     /// The same launch, for the LINEAR issues `linear` (or for none). What
     /// every picker's return trip does to the launch it rebuilt, so the
-    /// batch survives a `Tab` or `^X` pick as the issue does.
+    /// batch survives a `Tab` or `^X` pick as the PR does.
     pub fn with_linear(mut self, linear: Option<crate::linear::LinearBatch>) -> Self {
         self.linear = linear;
         self
@@ -467,7 +449,7 @@ impl QuickLaunch {
 
     /// The same launch, for the TODO `todo` (or for none). What every
     /// picker's return trip does to the launch it rebuilt, so the todo
-    /// survives a `Tab` or `^X` pick as the issue does.
+    /// survives a `Tab` or `^X` pick as the PR does.
     pub fn with_todo(mut self, todo: Option<crate::todos::TodoRef>) -> Self {
         self.todo = todo;
         self
@@ -494,15 +476,6 @@ impl QuickLaunch {
             AgentMode::Edit
         };
         self
-    }
-
-    /// The task Enter sends when the box is empty: an ISSUE SESSION's box
-    /// may be sent as it is, the issue being the task. `None` for every
-    /// other launch, whose empty box sends no task at all — the CLI starts
-    /// bare. A LINEAR box's empty task is its batch's,
-    /// which [`compose`](Self::compose) supplies instead.
-    pub fn default_task(&self) -> Option<String> {
-        self.issue.as_ref().map(|issue| issue.default_task())
     }
 
     /// The launch an AGENT PRESET describes: its harness, its pinned
@@ -596,13 +569,12 @@ impl QuickLaunch {
         (self, head, tail)
     }
 
-    /// The dialog's title: the issue (when the box is for one), the preset
-    /// (when one is applied), the worktree Enter will cut first (when it
+    /// The dialog's title: the pull request or the Linear issues (when the
+    /// box is for them), the preset (when one is applied), the worktree Enter will cut first (when it
     /// is a new one) and the flags it will actually launch with, so Enter
     /// is never a surprise —
     /// `Quick prompt · reviewer (claude · opus · high)`,
     /// `Quick prompt · new worktree yellow-fox-jumps (claude)`,
-    /// `Quick prompt · issue #15 · reviewer (claude · opus)`,
     /// `Quick prompt · PR #42 · reviewer (claude · opus)`.
     pub fn title(&self) -> String {
         let harness = harness_name(self.kind, self.custom.as_deref());
@@ -612,9 +584,6 @@ impl QuickLaunch {
             .chain(self.effort.as_deref())
             .collect();
         let mut head = vec!["Quick prompt".to_string()];
-        if let Some(issue) = &self.issue {
-            head.push(format!("issue #{}", issue.number));
-        }
         if let Some(pr) = &self.pr {
             head.push(format!("PR #{}", pr.number));
         }
@@ -632,47 +601,41 @@ impl QuickLaunch {
 
     /// The line under the title: what Enter will send.
     pub fn label(&self) -> String {
-        match (&self.preset, &self.issue) {
-            (Some(preset), issue) => {
-                let fix = match (issue, &self.linear) {
-                    (Some(_), _) => Some("fix the issue"),
-                    (None, Some(_)) => Some("fix the issues"),
-                    (None, None) => None,
+        let linear = self.linear.is_some();
+        match (&self.preset, &self.pr) {
+            (Some(preset), _) => {
+                let sends = if preset.has_wrapping() {
+                    "prefix + your task + postfix"
+                } else {
+                    "sent as the first prompt"
                 };
-                let (sends, empty) = match (preset.has_wrapping(), fix) {
-                    (true, Some(fix)) => ("prefix + your task + postfix", fix),
-                    (true, None) => ("prefix + your task + postfix", "prefix + postfix only"),
-                    (false, Some(fix)) => ("sent as the first prompt", fix),
-                    (false, None) => ("sent as the first prompt", "start with no prompt"),
+                let empty = match (linear, preset.has_wrapping()) {
+                    (true, _) => "fix the issues",
+                    (false, true) => "prefix + postfix only",
+                    (false, false) => "start with no prompt",
                 };
-                let issues = if self.linear.is_some() {
+                let issues = if linear {
                     ", the Linear issues added"
                 } else {
                     ""
                 };
                 format!("{} — {sends}{issues} (empty = {empty})", preset.name)
             }
-            (None, Some(issue)) => format!(
-                "what should the agent do about #{}? (empty = fix the issue)",
-                issue.number
+            (None, Some(pr)) => format!(
+                "what should the agent do about PR #{}? (empty = start with no prompt)",
+                pr.number
             ),
-            (None, None) => match &self.pr {
-                None if self.linear.is_some() => {
-                    "what should the agent do? the Linear issues are added below it (empty = fix them together)"
-                        .into()
-                }
-                Some(pr) => format!(
-                    "what should the agent do about PR #{}? (empty = start with no prompt)",
-                    pr.number
-                ),
-                None => "what should the agent do? (empty = start with no prompt)".into(),
-            },
+            (None, None) if linear => {
+                "what should the agent do? the Linear issues are added below it (empty = fix them together)"
+                    .into()
+            }
+            (None, None) => "what should the agent do? (empty = start with no prompt)".into(),
         }
     }
 
     /// Are two launches aimed at the same place — the same checkout, or a
-    /// fresh one in the same PROJECT, for the same issue, the same pull
-    /// request and the same todo? The branch a fresh worktree gets is minted when the box
+    /// fresh one in the same PROJECT, for the same pull request, the same
+    /// Linear issues and the same todo? The branch a fresh worktree gets is minted when the box
     /// opens, so two boxes aimed at a new checkout in one project are aimed
     /// alike however their names differ. What a parked [`QuickDraft`] is
     /// matched on: the same aim is the same box reopened, so the whole of
@@ -687,7 +650,6 @@ impl QuickLaunch {
             _ => false,
         };
         same_place
-            && self.issue == other.issue
             && self.pr == other.pr
             && self.linear == other.linear
             && self.todo_item() == other.todo_item()
@@ -743,12 +705,6 @@ impl QuickLaunch {
 pub(crate) fn open_quick_prompt(app: &mut App) {
     if app.selected_worktree_pr().is_some() {
         open_for_pr(app);
-        return;
-    }
-    // An issue row is the ISSUES MODAL's row, in the panel: the box
-    // carries the issue, into the project's root checkout.
-    if app.selected_worktree_issue().is_some() {
-        crate::issues::open_prompt_for_row(app);
         return;
     }
     // The WORKTREES PANEL, and anywhere with the QUICK PROMPT NEW
@@ -1150,7 +1106,7 @@ mod tests {
     }
 
     /// A parked DRAFT comes back whole only into the box it left: the
-    /// same checkout, issue and pull request. The branch a fresh worktree
+    /// same checkout and pull request. The branch a fresh worktree
     /// would get is minted per box, so it never decides the match.
     #[test]
     fn a_draft_matches_the_box_it_was_typed_in() {
@@ -1175,17 +1131,8 @@ mod tests {
             &cfg
         )));
 
-        // The issue and the pull request are part of the aim: a box for
-        // one is not the box for another, nor for none.
-        let issue = |number| crate::issues::IssueRef {
-            url: format!("https://github.com/o/r/issues/{number}"),
-            number,
-            title: "Fix login".into(),
-        };
-        let for_15 = here.clone().with_issue(Some(issue(15)));
-        assert!(for_15.aimed_like(&here.clone().with_issue(Some(issue(15)))));
-        assert!(!for_15.aimed_like(&here.clone().with_issue(Some(issue(16)))));
-        assert!(!for_15.aimed_like(&here));
+        // The pull request is part of the aim: a box for one is not the
+        // box for none.
         let for_pr = here.clone().with_pr(Some(PrLaunch {
             url: "https://github.com/o/r/pull/42".into(),
             head: "feat".into(),
@@ -1233,53 +1180,9 @@ mod tests {
         );
     }
 
-    /// An ISSUE SESSION's box names the issue first, offers the issue as
-    /// the task when sent empty, and keeps the issue through a preset.
-    #[test]
-    fn an_issue_launch_names_the_issue_and_has_a_default_task() {
-        let cfg = Config::default();
-        let issue = crate::issues::IssueRef {
-            url: "https://github.com/o/r/issues/15".into(),
-            number: 15,
-            title: "Fix login redirect".into(),
-        };
-        let plain = QuickLaunch::of_kind(worktree(), AgentKind::Claude, None, None, None, &cfg)
-            .with_issue(Some(issue.clone()));
-        assert_eq!(plain.title(), "Quick prompt · issue #15 (claude)");
-        assert_eq!(
-            plain.label(),
-            "what should the agent do about #15? (empty = fix the issue)"
-        );
-        assert_eq!(
-            plain.default_task().as_deref(),
-            Some("Fix GitHub issue #15: Fix login redirect (https://github.com/o/r/issues/15)")
-        );
-        let wrapped = QuickLaunch::of_preset(
-            new_worktree("issue-15-fix-login-redirect"),
-            preset("reviewer", AgentKind::Cursor),
-            &cfg,
-        )
-        .with_issue(Some(issue));
-        assert_eq!(
-            wrapped.title(),
-            "Quick prompt · issue #15 · reviewer · new worktree issue-15-fix-login-redirect (cursor)"
-        );
-        assert_eq!(
-            wrapped.label(),
-            "reviewer — sent as the first prompt (empty = fix the issue)"
-        );
-        assert!(wrapped.default_task().is_some());
-        let none = QuickLaunch::of_kind(worktree(), AgentKind::Claude, None, None, None, &cfg);
-        assert_eq!(
-            none.default_task(),
-            None,
-            "an empty ordinary box sends no task"
-        );
-    }
-
     /// A PR SESSION's box names the pull request, keeps it through a
-    /// preset, and — unlike an issue's — offers no task when sent empty:
-    /// the PR rides the system prompt, the preset's text is the task.
+    /// preset, and offers no task when sent empty: the PR rides the
+    /// system prompt, the preset's text is the task.
     #[test]
     fn a_pr_launch_names_the_pull_request_and_keeps_it_through_a_preset() {
         let cfg = Config::default();
@@ -1295,7 +1198,6 @@ mod tests {
             plain.label(),
             "what should the agent do about PR #42? (empty = start with no prompt)"
         );
-        assert_eq!(plain.default_task(), None);
         assert!(!plain.is_new_worktree());
 
         let wrapped = QuickLaunch::of_preset(

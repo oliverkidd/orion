@@ -389,8 +389,6 @@ fn into_pane(app: &App, bands: &[crate::launcher::Band]) -> Option<Hint> {
     app.launcher_split(app.launcher_body).1?;
     let what = if app.previewed_pr().is_some() {
         "focus PR"
-    } else if app.previewed_issue().is_some() {
-        "focus issue"
     } else if app.term.is_some() {
         "focus pane"
     } else {

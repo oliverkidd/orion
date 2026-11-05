@@ -22,11 +22,9 @@ enum Field {
     /// highlighted lets Enter go back to the text.
     Prompt,
     Preset(crate::preset_overlays::PresetField),
-    Issue(crate::issues::EditField),
     PrQuery,
     PrCreate(crate::pr_actions::CreateField),
     PrClose,
-    PrReview,
     LinearQuery,
     DiffFilter,
     AutofixNote,
@@ -50,13 +48,6 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
             (Field::Preset(PresetField::Prefix), &mut e.prefix),
             (Field::Preset(PresetField::Postfix), &mut e.postfix),
         ],
-        Overlay::Issues(v) => match &mut v.editor {
-            Some(e) => vec![
-                (Field::Issue(crate::issues::EditField::Title), &mut e.title),
-                (Field::Issue(crate::issues::EditField::Body), &mut e.body),
-            ],
-            None => vec![(Field::Only, &mut v.query)],
-        },
         Overlay::PullRequests(v) => match v.form.as_deref_mut() {
             Some(PrForm::Create(form)) => vec![
                 (Field::PrCreate(CreateField::From), &mut form.from),
@@ -65,15 +56,10 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
                 (Field::PrCreate(CreateField::Body), &mut form.body),
             ],
             Some(PrForm::Close(form)) => vec![(Field::PrClose, &mut form.comment)],
-            Some(PrForm::Review(form)) => vec![(Field::PrReview, &mut form.body)],
             Some(PrForm::Merge(_)) => Vec::new(),
             None => vec![(Field::PrQuery, &mut v.query)],
         },
         Overlay::Linear(v) => vec![(Field::LinearQuery, &mut v.query)],
-        Overlay::BranchSwitch(v) => match &mut v.stage {
-            crate::branch_switch::Stage::Commit { message, .. } => vec![(Field::Only, message)],
-            _ => vec![(Field::Only, &mut v.query)],
-        },
         Overlay::ProjectPicker(p) => vec![(Field::Only, &mut p.query)],
         Overlay::Autofix(form) => vec![(Field::AutofixNote, &mut form.note)],
         Overlay::WeekReview(v) => match v.mode {
@@ -92,7 +78,6 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         | Overlay::Settings(_)
         | Overlay::FileTabs(_)
         | Overlay::Usage(_)
-        | Overlay::Stacks(_)
         | Overlay::Conflicts(_)
         | Overlay::CleanWorktrees(_)
         | Overlay::AgentPresets(_) => Vec::new(),
@@ -110,11 +95,6 @@ fn focus(app: &mut App, field: Field) {
                 e.field = to;
             }
         }
-        (Some(Overlay::Issues(v)), Field::Issue(to)) => {
-            if let Some(e) = &mut v.editor {
-                e.field = to;
-            }
-        }
         (Some(Overlay::PullRequests(v)), Field::PrQuery) => {
             v.focus = crate::pr_modal::PrFocus::List;
         }
@@ -124,11 +104,6 @@ fn focus(app: &mut App, field: Field) {
         (Some(Overlay::PullRequests(v)), Field::PrClose) => {
             if let Some(crate::pr_actions::PrForm::Close(form)) = v.form.as_deref_mut() {
                 form.row = crate::pr_actions::CloseRow::Comment;
-            }
-        }
-        (Some(Overlay::PullRequests(v)), Field::PrReview) => {
-            if let Some(crate::pr_actions::PrForm::Review(form)) = v.form.as_deref_mut() {
-                form.row = crate::pr_actions::ReviewRow::Body;
             }
         }
         (Some(Overlay::Linear(v)), Field::LinearQuery) => {

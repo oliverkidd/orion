@@ -1725,7 +1725,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 1,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         });

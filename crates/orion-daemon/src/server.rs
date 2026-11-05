@@ -130,10 +130,20 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     let _ = out_tx.send(snapshot).await;
                     let _ = out_tx.send(daemon.stacks.current()).await;
                     let mut rx = daemon.events.subscribe();
+                    // The docker poll sleeps while nobody is subscribed: a
+                    // client arriving gets the last listing at once, and a
+                    // fresh one right after.
+                    daemon.stacks.poke();
                     let tx = out_tx.clone();
                     tokio::spawn(async move {
                         loop {
-                            match rx.recv().await {
+                            // A client gone drops its subscription at once,
+                            // not on the next event, so the poll can tell.
+                            let ev = tokio::select! {
+                                _ = tx.closed() => break,
+                                ev = rx.recv() => ev,
+                            };
+                            match ev {
                                 Ok(ev) => {
                                     if tx.send(ev).await.is_err() {
                                         break;
@@ -309,20 +319,6 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         .await;
                     });
                 }
-                ClientRequest::StackAction {
-                    req_id,
-                    project,
-                    verb,
-                } => {
-                    // `compose stop` waits up to 10s a container; off the
-                    // request loop like a worktree delete.
-                    let daemon = daemon.clone();
-                    let out_tx = out_tx.clone();
-                    tokio::spawn(async move {
-                        let result = crate::stacks::act(&daemon, &project, verb).await;
-                        reply_done(&out_tx, req_id, result).await;
-                    });
-                }
                 ClientRequest::DeleteWorktree { req_id, id, force } => {
                     // `git worktree remove` can take seconds on a large
                     // checkout; run it off the request loop so Input/Attach
@@ -351,16 +347,10 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     effort,
                     auto_title,
                     starting_prompt,
-                    issue_url,
                     mode,
                 } => {
-                    // Logged by mode only — never the prompt text or issue
-                    // URL.
-                    let launch_mode = match (&starting_prompt, &issue_url) {
-                        (_, Some(_)) => Some("issue"),
-                        (Some(_), None) => Some("preset"),
-                        (None, None) => None,
-                    };
+                    // Logged by mode only — never the prompt text.
+                    let launch_mode = starting_prompt.as_ref().map(|_| "preset");
                     let result = daemon
                         .create_agent(CreateAgentSpec {
                             worktree: worktree.clone(),
@@ -372,7 +362,6 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             auto_title,
                             starting_prompt,
                             pr_url: None,
-                            issue_url,
                             mode,
                         })
                         .await;

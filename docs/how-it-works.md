@@ -107,8 +107,8 @@
   in the same background job as the viewer's `git status`, and a branch past 50 commits is read 50
   at a time, the next page when the cursor reaches `… N older commits` — `git log` diffs each
   commit it lists to count its lines, so three hundred commits are never diffed to show six. A pull
-  request's diff has no commit list: `gh pr diff` hands it over whole. One of its commits opens on
-  its own (`event_loop::open_pr_review`) when the project's repo has it.
+  request is read the same way (`event_loop::open_pr_review`), its head fetched by its pull ref
+  (`refs/pull/N/head`) when the project's repo lacks it.
 - **The diff pane is read, not paged — `diff_doc`.** A file's `git diff` is read once, as it lands,
   into lines that say what they are: its headers into the facts on the pane's edge (added, renamed
   from, `+20 −3`), each `@@` into the line it starts on, each line of code into its old and new
@@ -124,19 +124,12 @@
   `stat` calls (`ORION_WORKTREE_SYNC_MS` overrides the 2 s beat; the e2e tests turn it down to
   100 ms). This structural sync is the *only* git polling the DAEMON does — the pull request lookups
   further down are the TUI's own.
-- **The root checkout changes branch in place — the BRANCH SWITCHER.** `c` on a root-branch card (or
-  with no card selected) lists the repo's branches with one `git for-each-ref` and switches with
-  `git switch`, asking first when the checkout has uncommitted changes whether to stash, bring along,
-  commit or discard them. That git is the TUI's, like the diff viewer's: the writes and the background
-  `git fetch --all` run in a session of their own with stdin closed, so an `ssh` passphrase prompt fails
-  instead of painting over the screen, and the TUI renames the root row the moment git says yes. The
-  WORKTREE SYNC above then sees the moved `.git/HEAD` and confirms the branch from the DAEMON's side.
-  Linked worktrees don't switch: each is named after the branch it was cut for.
 - **A checkout keeps step with its remote on `p` and `⇧P` — a PULL and a PUSH.** orion fetches when it
-  cuts a worktree, when the BRANCH SWITCHER opens, and on `p` or `⇧P`, never on a timer, so a band
+  cuts a worktree, when the WORKTREE PICKER opens, and on `p` or `⇧P`, never on a timer, so a band
   rule's `⇡⇣` count against
   whatever the last fetch left. `p` runs `git fetch` and then `git merge --ff-only @{u}` in the band's
-  checkout — the TUI's git, detached like the switcher's — rather than `git pull`, so `pull.rebase` /
+  checkout — the TUI's git, run in a session of its own with stdin closed, so an `ssh` passphrase
+  prompt fails instead of painting over the screen — rather than `git pull`, so `pull.rebase` /
   `pull.ff` can't change what it does: a branch only ever moves forward onto its upstream, and one that
   has diverged, or has uncommitted changes git would overwrite, is left alone with the reason in the
   FLASH. A branch that tracks nothing (linked worktrees are cut `--no-track` until the New-PR form
@@ -157,9 +150,8 @@
   releasing it — and under a 30 s timeout that kills the hook and everything it started; a failure is
   a warning in every client, never a rolled-back create or delete. Per repo in git config rather than in CONFIG.JSON, and never a file inside the
   checkout. See [Configuration](configuration.md#worktree-hooks).
-- **A worktree runs its own project — the PROJECT FILE.** A committed `.orion.json` names a `run` and
-  an `open` command; the Project tab of the SETTINGS OVERLAY can hold either instead, per project in
-  `config.json`, and wins over the file while it is set. `⌘⇧S`, or **Start stack** in a card's or the
+- **A worktree runs its own project — the RUN COMMAND.** The Project tab of the SETTINGS OVERLAY
+  holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a card's or the
   project tab's right-click menu, has the DAEMON start `run` in a RUN TERMINAL — a terminal row
   that carries its command and spawns `$SHELL -l -i -c '<run>'` instead of an interactive shell — so the
   PTY's life is the worktree's RUNNING state, broadcast as that terminal's `alive` and drawn as its
@@ -167,7 +159,7 @@
   kills the process tree and drops the row only on a second stop or after two minutes. The idle reaper and the prewarm
   sweep leave that terminal alone, and a run that exits on its own keeps its PTY, so an attach replays
   the ending instead of respawning — a command starts only when you pick **Start stack**. `⌘O` → **Open command** runs `open`
-  once, from the TUI. See [Configuration](configuration.md#the-project-file-orionjson).
+  once, from the TUI. See [Configuration](configuration.md#run-and-open-commands).
 - **Agents boot `claude`, `codex`, `cursor-agent`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New agent — choose harness** first asks which CLI to
   run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree.
   Restored agents resume with `claude --resume <session-id>` /
@@ -187,10 +179,7 @@
   instead — the live conversation, which detaching (Ctrl+Z) or archiving the row leaves running. A
   refused resume the job-dir look missed is asked about the same way and re-opened attached. An AGENT created from the PULL REQUESTS MODAL also receives the PR URL and a PR-only
   work rule — Claude through `--append-system-prompt` and Grok Build through `--rules` on every spawn, Codex, Cursor and OpenCode as the first prompt of
-  their cold spawn (their transcripts carry it through a resume); orion persists that URL. An AGENT
-  launched from the ISSUES MODAL (`i`) carries the GitHub issue's URL the same way — persisted with
-  the row, rebuilt into an issue-context rule on every spawn and resume — so the harness knows which
-  issue the session is for (see [Sessions](sessions.md#the-issues-modal-and-issue-sessions)).
+  their cold spawn (their transcripts carry it through a resume); orion persists that URL.
 - **Status via agent-CLI hooks, not MCP.** At agent spawn, orion merges managed hooks into the
   worktree's `.claude/settings.local.json` (Claude Code) or `.cursor/hooks.json` (Cursor CLI), and into
   `~/.codex/hooks.json` (Codex — codex records hook approvals against the hook file's path, so a
@@ -307,13 +296,12 @@
   Pure capture: nothing is injected into the
   model's context and no extra turn runs. See [Sessions](sessions.md#recent-prompts).
 - **The header counts what is waiting on the repo.** The GRID's header says
-  `4 sessions  3 prs · 2 issues` for the
-  selected project, both counts muted, a count being a fact rather than a status — the open
+  `4 sessions  3 prs` for the
+  selected project, the count muted, a count being a fact rather than a status — the open
   pull requests the OPEN PRS sweep already keeps warm for every project (drafts left out while
-  `hide_draft_prs` is on), and the open issues, which a sweep of their own asks for one project per
-  tick on a five-minute beat. Zero says nothing, and a narrow column
-  drops the badge before the name. Each count is a button: a click opens the PULL REQUESTS or
-  ISSUES MODAL for that project, as `v` and `i` do. See [Configuration](configuration.md#every-setting).
+  `hide_draft_prs` is on). Zero says nothing, and a narrow column
+  drops the badge before the name. The count is a button: a click opens the PULL REQUESTS MODAL
+  for that project, as `v` does. See [Configuration](configuration.md#every-setting).
 - **Ask the agent for a worktree and it moves there.** Tell a Claude session "do this in a worktree" and
   it runs `orion worktree <name>` instead of its own `EnterWorktree` tool (whose checkouts land under
   `<repo>/.claude/worktrees/` on a `worktree-*` branch). orion creates the checkout in its usual
@@ -393,7 +381,7 @@ attachment is gone; links an earlier version saved stay in the database, so no d
 though the grid draws none of them.
 
 This is the one part of orion the TUI asks for itself rather than the DAEMON: every `gh pr view`,
-open-list query (`gh api graphql`) and `gh pr diff` — and the ISSUES MODAL's `gh issue list`, `gh issue view` and `gh issue comment` — is spawned by the client, which is why the lookups stop the moment you
+open-list query (`gh api graphql`) — is spawned by the client, which is why the lookups stop the moment you
 quit, and why a machine with no `gh` — or one that is unauthenticated, or pointed at a checkout with no
 remote — just shows no rows instead of an error. The selected project is asked about most: its
 selected worktree's pull request and its open list on every tick, one process each, and its other
@@ -418,13 +406,8 @@ list` asks for every check on every pull request instead, which on a busy repo t
 lookup that fails keeps the last list that worked on screen, and the PULL REQUESTS MODAL says
 `couldn't refresh` under its filter until an answer lands. The same query brings the modal's
 **Merged** section: the merged pull requests most recently touched — name, author and merge
-time, no checks — cut to the ones merged in the last 7 days (`pull_request::MERGED_DAYS`). There is
-no cap on how many: GitHub cannot be asked for "merged since", so when a page of 100 ends on a pull
-request still touched inside the week, the next page is asked for, until one reaches back past it.
-That walk runs every five minutes at most; in between, the first page — where every new merge lands —
-is folded into the list already held, so a repo that merges 160 a week costs no more per refresh than
-a quiet one. If a page cannot be
-read, the section's count says `99+` rather than pass a short list off as the week.
+time, no checks — cut to the ones merged in the last 7 days (`pull_request::MERGED_DAYS`). It is
+the first page of them, the 100 most recently touched, which is where every new merge lands.
 
 The open list, the failing-checks recheck, a checkout's own lookup and the page the cursor rests on
 all say where the same pull request stands, on their own beats, and land in whatever order the
@@ -435,7 +418,7 @@ the merge form and AUTOFIX — draws from that store. The newest-asked answer wi
 before a page can't undo what the page said; an answer that doesn't know (GitHub's `mergeable:
 UNKNOWN` right after a push, a recheck cut short) never replaces one that does; and the cache from the
 last launch loses to any live answer, the page saying `cached` beside its state until one lands. Linear's
-list, the ISSUES MODAL and the git counts on the bands keep their answers by the same rules.
+list and the git counts on the bands keep their answers by the same rules.
 
 Settings and hotkeys live in [Configuration](configuration.md). The process model, the IPC CODEC and
 the crate layout are covered in more depth in [ARCHITECTURE.md](../ARCHITECTURE.md).

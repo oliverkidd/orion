@@ -244,7 +244,7 @@ pub fn readout(
     hovered: Option<Button>,
     sweep: Option<usize>,
 ) -> Option<Readout> {
-    use crate::branch_switch::{cells, fit};
+    use crate::ui::{cells, truncate_cells};
     let toggle = if np.playing { "⏸" } else { "⏵" };
     let glyphs = [
         (Button::Previous, "⏮"),
@@ -261,7 +261,7 @@ pub fn readout(
     let artist_w = cells(&np.artist);
     let sep_w = cells(SEP);
     let (title, artist) = if np.artist.is_empty() {
-        (fit(&np.title, room), None)
+        (truncate_cells(&np.title, room), None)
     } else if title_w + sep_w + artist_w <= room {
         (np.title.clone(), Some(np.artist.clone()))
     } else {
@@ -274,13 +274,13 @@ pub fn readout(
             .filter(|&t| t >= title_w.min(KEEP_TITLE));
         match beside {
             Some(t) => {
-                let title = fit(&np.title, t);
+                let title = truncate_cells(&np.title, t);
                 // A wide character the cut couldn't split leaves the title
                 // a cell short: the artist takes it.
-                let artist = fit(&np.artist, room - sep_w - cells(&title));
+                let artist = truncate_cells(&np.artist, room - sep_w - cells(&title));
                 (title, Some(artist))
             }
-            None => (fit(&np.title, room), None),
+            None => (truncate_cells(&np.title, room), None),
         }
     };
 
@@ -522,7 +522,7 @@ mod tests {
     /// columns are where they are drawn.
     #[test]
     fn a_wide_title_cannot_push_the_buttons_out() {
-        use crate::branch_switch::cells;
+        use crate::ui::cells;
         let th = crate::theme::Theme::default();
         let np = track(true, "夜に駆ける 🎵 YOASOBI 夜に駆ける", "YOASOBI");
         for max in 18..=60 {

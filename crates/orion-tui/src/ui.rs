@@ -104,7 +104,6 @@ pub(crate) fn task_hints(kind: &crate::app::PromptKind) -> Vec<crate::hints::Hin
         PromptKind::QuickPrompt(launch) => {
             use crate::quick_prompt::ModalUnder;
             let back = match &launch.under {
-                Some(ModalUnder::Issues(_)) => "back to issues",
                 Some(ModalUnder::PullRequests(_)) => "back to pull requests",
                 Some(ModalUnder::Linear(_)) => "back to Linear",
                 Some(ModalUnder::Todos(_)) => "back to todos",
@@ -120,9 +119,6 @@ pub(crate) fn task_hints(kind: &crate::app::PromptKind) -> Vec<crate::hints::Hin
         }
         // The FOLLOW-UP MODAL sends a turn to a session already running.
         PromptKind::FollowUp { .. } => ("send", "cancel"),
-        // A comment posts; Esc goes back to the ISSUES MODAL it stood in
-        // for.
-        PromptKind::IssueComment { .. } => ("post", "back"),
         PromptKind::PrComment { .. } => ("post", "cancel"),
         // A setting over lines (the Linear task template) saves, and Esc
         // goes back to the overlay.
@@ -684,8 +680,8 @@ fn menu_explain_rows(menu: &crate::app::ContextMenu) -> u16 {
 /// under it — returned as its rect, for [`over_box_rect`], and where its
 /// branch landed this frame, for the WORKTREE PICKER that hangs from it
 /// (empty when the header had no room for it). A menu with no box
-/// behind it — a context menu, a picker reached from a PR or an issue row
-/// with no box up — draws nothing and floats where it always did.
+/// behind it — a context menu, a picker reached from a PR row with no
+/// box up — draws nothing and floats where it always did.
 fn draw_menu_backdrop(
     f: &mut Frame,
     app: &mut App,
@@ -919,12 +915,11 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         return;
     };
     dim_backdrop(f);
-    // A box opened from the ISSUES MODAL or the PULL REQUESTS MODAL stands
-    // on it rather than taking it away: the modal is the bottom layer, the
+    // A box opened from the PULL REQUESTS MODAL (or the LINEAR VIEW, the
+    // TODOS MODAL) stands on it rather than taking it away: the modal is the bottom layer, the
     // box — and any picker the box has up — is drawn over it.
     use crate::quick_prompt::ModalUnder;
     match crate::quick_prompt::modal_under(&overlay) {
-        Some(ModalUnder::Issues(view)) => crate::issues::draw(f, app, &view, th, true),
         Some(ModalUnder::PullRequests(view)) => crate::pr_modal::draw(f, app, &view, th, true),
         Some(ModalUnder::Linear(view)) => crate::linear::draw(f, app, &view, th, true),
         Some(ModalUnder::Todos(view)) => crate::todos::draw(f, app, &view, th, true),
@@ -1346,12 +1341,10 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                     &[
                         (Act(&[OpenOutside]), "open: GitHub, your editor, terminal"),
                         (Act(&[GitDiff]), "changes: commits, files, diff"),
-                        (Act(&[RefreshPullRequests]), "reload PRs + issues (GitHub)"),
-                        (Act(&[Issues]), "issues: prompt, preset, edit"),
+                        (Act(&[RefreshPullRequests]), "reload PRs (GitHub)"),
                         (Act(&[PullRequests]), "pull requests: read / launch"),
                         (Act(&[Linear]), "Linear issues"),
                         (Act(&[Todos]), "todos: tick, prioritise, import"),
-                        (Act(&[SwitchBranch]), "switch the ⌂ root's branch"),
                     ],
                 ),
                 (
@@ -2268,7 +2261,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::AgentPresetEditor(editor) => {
             crate::preset_overlays::draw_editor(f, app, &editor, th)
         }
-        Overlay::Issues(view) => crate::issues::draw(f, app, &view, th, false),
         Overlay::PullRequests(view) => crate::pr_modal::draw(f, app, &view, th, false),
         Overlay::Linear(view) => crate::linear::draw(f, app, &view, th, false),
         Overlay::Todos(view) => crate::todos::draw(f, app, &view, th, false),
@@ -2277,9 +2269,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
-        Overlay::Stacks(view) => crate::stacks::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
-        Overlay::BranchSwitch(view) => crate::branch_switch::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {
             // The TREE BROWSER's footprint: the editor Enter opens wants the
             // room, and the preview is a whole file.
@@ -3216,7 +3206,7 @@ pub(crate) fn border_tail(
 pub(crate) const BROWSER_BUTTON: &str = " ↗ open in browser ";
 
 /// The `↗ open in browser` BUTTON on a reading pane's top border — the
-/// ISSUES and PULL REQUESTS MODALS' right frame (`HitTarget::ModalBrowser`).
+/// PULL REQUESTS MODAL's and the LINEAR VIEW's right frame (`HitTarget::ModalBrowser`).
 /// Drawn over the border after the block has, pinned right, and its rect
 /// handed back for the modal to write into its view, where the click
 /// (`handle_mouse`) and the pointer ([`browser_button_under`]) find it.
@@ -3262,61 +3252,41 @@ pub(crate) fn browser_button(
 pub(crate) fn browser_button_under(app: &App, pos: Position) -> Option<HitTarget> {
     let button = match &app.overlay {
         Some(Overlay::PullRequests(v)) => v.browser_area,
-        Some(Overlay::Issues(v)) => v.browser_area,
         Some(Overlay::Linear(v)) => v.browser_area,
         _ => return None,
     };
     button.contains(pos).then_some(HitTarget::ModalBrowser)
 }
 
-/// One piece of the PR & ISSUE COUNTS badge: its text, its style, and the
-/// button it is, if it is one.
+/// One piece of the PR COUNT badge: its text, its style, and the button it
+/// is, if it is one.
 pub(crate) type BadgePart = (String, Style, Option<HitTarget>);
 
-/// The PR & ISSUE COUNTS badge (always on; through 0.37 an Experimental
-/// switch, `pr_issue_counts`):
-/// ` 3 prs · 2 issues` — both in muted, a count being a fact rather than a
-/// status or the focus (the accent is the cursor's, the greens and reds
-/// are the sessions'), a dim `·` between — as spans, with the columns they take
-/// together so the name can be truncated around them. A count that is
-/// zero, or not known yet, leaves its word out, and the badge goes with
-/// both; one `pr` or `issue` is singular; a list cut off at the fetch cap
-/// counts `100+`, as the OPEN PRS header does.
+/// The PR COUNT badge: ` 3 prs` — the selected project's open pull
+/// requests as its OPEN PRS GROUP lists them (`App::listed_open_prs`) — in
+/// muted, a count being a fact rather than a status or the focus (the
+/// accent is the cursor's, the greens and reds are the sessions'). None,
+/// or a list not landed yet, is no badge; one `pr` is singular; a list cut
+/// off at the fetch cap counts `100+`.
 ///
-/// Each count carries the button it is: `2 prs` opens the PULL REQUESTS
-/// MODAL and `1 issue` the ISSUES MODAL. The air before the first and the
-/// `·` between them carry none, so a click lands on a word or on nothing.
-pub(crate) fn open_counts_badge(
-    counts: (Option<usize>, Option<usize>),
-    th: Theme,
-) -> Option<(Vec<BadgePart>, usize)> {
-    fn word(n: usize, one: &str, many: &str, cap: usize) -> Option<String> {
-        match n {
-            0 => None,
-            1 => Some(format!("1 {one}")),
-            n if n >= cap => Some(format!("{cap}+ {many}")),
-            n => Some(format!("{n} {many}")),
-        }
-    }
-    let (prs, issues) = counts;
-    let parts = [
-        prs.and_then(|n| word(n, "pr", "prs", crate::pull_request::LIST_LIMIT))
-            .map(|text| (text, th.muted, HitTarget::LauncherPullRequests)),
-        issues
-            .and_then(|n| word(n, "issue", "issues", crate::issues::LIST_LIMIT))
-            .map(|text| (text, th.muted, HitTarget::LauncherIssues)),
-    ];
-    let mut spans: Vec<BadgePart> = Vec::new();
-    for (text, color, hit) in parts.into_iter().flatten() {
-        let gap = if spans.is_empty() { " " } else { " · " };
-        spans.push((gap.into(), Style::default().fg(th.dim), None));
-        spans.push((text, Style::default().fg(color), Some(hit)));
-    }
-    if spans.is_empty() {
-        return None;
-    }
-    let len = spans.iter().map(|(s, _, _)| s.chars().count()).sum();
-    Some((spans, len))
+/// The count is the button that opens the PULL REQUESTS MODAL; the air
+/// before it carries none, so a click lands on the word or on nothing.
+pub(crate) fn open_prs_badge(count: usize, th: Theme) -> Option<Vec<BadgePart>> {
+    let cap = crate::pull_request::LIST_LIMIT;
+    let text = match count {
+        0 => return None,
+        1 => "1 pr".to_string(),
+        n if n >= cap => format!("{cap}+ prs"),
+        n => format!("{n} prs"),
+    };
+    Some(vec![
+        (" ".into(), Style::default().fg(th.dim), None),
+        (
+            text,
+            Style::default().fg(th.muted),
+            Some(HitTarget::LauncherPullRequests),
+        ),
+    ])
 }
 
 /// Sweep shades for a session's name, or `None` for a name that holds
@@ -3461,8 +3431,8 @@ pub(crate) fn status_color(status: Option<AgentStatus>, unseen: bool, th: Theme)
 }
 
 /// A changed file's two-letter git status (`xy`) in the color every diff
-/// surface gives it — the DIFF VIEWER, the PULL REQUEST PAGE's Changes,
-/// the branch switcher's uncommitted files: added (or untracked) sage,
+/// surface gives it — the DIFF VIEWER, the PULL REQUEST PAGE's Changes:
+/// added (or untracked) sage,
 /// deleted rose, a rename or copy muted, anything else the modified sand.
 pub(crate) fn change_color(xy: [char; 2], th: Theme) -> Color {
     match (xy[0], xy[1]) {
@@ -3823,53 +3793,6 @@ fn draw_pr_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     app.pr_preview_scroll = drawn.scroll;
 }
 
-/// The ISSUE PREVIEW: what the pane shows while the Worktrees cursor rests
-/// on a PROJECT ISSUES GROUP row (`App::previewed_issue`) — the ISSUES
-/// MODAL's reading pane, in the pane: headline, description, then the
-/// conversation once it lands, scrolled by `pr_preview_scroll` like the
-/// pull request's. The description rides the list, so there is nothing to
-/// wait for before the first paint; only the comments are fetched on the
-/// rest, and `issues::lines` says so until they land.
-fn draw_issue_preview(f: &mut Frame, app: &mut App, area: Rect, focused: bool) {
-    let th = app.theme;
-    let Some(issue) = app.previewed_issue().cloned() else {
-        return;
-    };
-    let left = vec![
-        Span::styled(" · ".to_string(), Style::default().fg(th.dim)),
-        Span::styled(format!("#{}", issue.number), Style::default().fg(th.muted)),
-    ];
-    let inner = titled_frame(f, area, "ISSUE", left, Vec::new(), focused, th);
-    let inner = Rect {
-        x: inner.x + 1,
-        width: inner.width.saturating_sub(1),
-        ..inner
-    };
-    app.term_area = inner;
-    app.hits.push((inner, HitTarget::TerminalPane));
-    // Nothing in this pane is a PTY, so the link/file scanners have nothing
-    // to find — clear them or ⌥click would still hit last frame's hits.
-    app.term_links = Vec::new();
-    app.term_file_links = Vec::new();
-
-    let lines = crate::issues::lines(
-        &issue,
-        app.issue_detail.get(&issue.url),
-        app.issue_detail_failed.contains(&issue.url),
-        app.issue_comment_inflight.contains(&issue.url),
-        inner.width as usize,
-        th,
-    );
-    app.pr_preview_lines = lines.len();
-    // Clamp here, as the pull request's pane does: this is what knows how
-    // many rows the prose wrapped to.
-    let max = (lines.len() as u16).saturating_sub(inner.height.max(1));
-    let scroll = app.pr_preview_scroll.min(max);
-    app.pr_preview_scroll = scroll;
-    let shown: Vec<Line> = lines.into_iter().skip(scroll as usize).collect();
-    f.render_widget(Paragraph::new(shown), inner);
-}
-
 /// Borderless terminal frame: a header row (`TERMINAL · session` plus a
 /// right-aligned state tag), a thin rule, then the content area. The
 /// header carries the focus signal.
@@ -3969,12 +3892,6 @@ fn draw_terminal(f: &mut Frame, app: &mut App, area: Rect) {
     // detach/attach.
     if app.previewed_pr().is_some() {
         draw_pr_preview(f, app, area, focused);
-        return;
-    }
-    // An open issue under the Worktrees cursor: the pane reads it, as it
-    // reads a pull request.
-    if app.previewed_issue().is_some() {
-        draw_issue_preview(f, app, area, focused);
         return;
     }
 
@@ -4394,8 +4311,8 @@ pub(crate) fn field_after(row: Rect, lead: usize) -> Rect {
 /// How wide a form row's label is drawn, past its inset: `Title  `.
 const FORM_LABEL_W: usize = 7;
 
-/// The frame a form in a modal's reading pane wears — the ISSUE EDITOR,
-/// the PULL REQUESTS MODAL's create and merge (`pr_actions`): the title
+/// The frame a form in a modal's reading pane wears — the PULL REQUESTS
+/// MODAL's create and merge (`pr_actions`): the title
 /// chip, and on the bottom border's right why the last Enter went nowhere
 /// (`notice`, red) or what is on its way (`saving`), cut to fit. Its
 /// inside, and how wide the foot is, for the keys to keep clear of.
@@ -5066,6 +4983,11 @@ fn fmt_mem(bytes: u64) -> String {
     }
 }
 
+/// Screen cells `s` takes: a gitmoji or a CJK subject is two a character.
+pub(crate) fn cells(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
 /// [`truncate`] by terminal cells rather than chars, for a row whose text
 /// a wide glyph (an emoji, CJK) must not push past what is pinned to its
 /// right. What it keeps is a prefix of `s`, so char positions into `s`
@@ -5257,6 +5179,16 @@ mod tests {
     }
 
     #[test]
+    fn cells_count_wide_characters_twice_and_truncate_cells_cuts_by_them() {
+        assert_eq!(cells("ab"), 2);
+        assert_eq!(cells("修复"), 4);
+        let cut = truncate_cells("修复登录重定向", 7);
+        assert!(cells(&cut) <= 7, "{cut:?}");
+        assert!(cut.ends_with('…'));
+        assert_eq!(truncate_cells("short", 10), "short");
+    }
+
+    #[test]
     fn truncate_clips_to_max_chars_with_an_ellipsis() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("exact", 5), "exact");
@@ -5387,7 +5319,6 @@ mod tests {
             model: None,
             effort: None,
             preset: None,
-            issue: None,
             pr: None,
             linear: None,
             todo: None,
@@ -5396,18 +5327,6 @@ mod tests {
         });
         let follow_up = PromptKind::FollowUp {
             id: orion_core::AgentId::from("a".to_string()),
-        };
-        let comment = PromptKind::IssueComment {
-            view: crate::issues::IssuesView::new(
-                orion_core::ProjectId("p".into()),
-                "p".into(),
-                "/tmp/p".into(),
-            ),
-            issue: crate::issues::IssueRef {
-                url: "https://github.com/o/r/issues/1".into(),
-                number: 1,
-                title: "t".into(),
-            },
         };
         let pr_comment = PromptKind::PrComment {
             number: 7,
@@ -5419,7 +5338,7 @@ mod tests {
             crate::hints::text(&task_hints(kind), width.saturating_sub(6))
         };
         for width in 20..=TASK_PROMPT_SIZE.0 as usize {
-            for kind in [&quick, &follow_up, &comment, &pr_comment] {
+            for kind in [&quick, &follow_up, &pr_comment] {
                 let hint = text(kind, width);
                 assert!(
                     hint.chars().count() + 6 <= width.max(26),
@@ -5441,11 +5360,6 @@ mod tests {
         assert!(
             post.starts_with("Enter post") && !post.contains("Tab"),
             "{post}"
-        );
-        let back = text(&comment, 80);
-        assert!(
-            back.starts_with("Enter post") && back.ends_with("Esc back"),
-            "{back}"
         );
     }
 

@@ -146,10 +146,7 @@ fn next_due(app: &App) -> Option<(ProjectId, PathBuf, bool)> {
         .min_by_key(|(due, _)| *due)
         .and_then(|(_, p)| {
             let root = app.root_worktree(&p.id)?;
-            if app.is_placeholder_worktree(&root)
-                || app.git_sync.inflight.contains_key(&root)
-                || app.branch_switch.switching.contains_key(&root)
-            {
+            if app.is_placeholder_worktree(&root) || app.git_sync.inflight.contains_key(&root) {
                 return None;
             }
             let path = app

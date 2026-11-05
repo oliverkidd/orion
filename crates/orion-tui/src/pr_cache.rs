@@ -2,7 +2,7 @@
 //!
 //! Every answer `gh` gives — each checkout's own pull request (the PR ROW),
 //! each project's open list (the PROJECT OPEN PRS GROUP), the body and
-//! conversation the pane read, the diff the modal showed — is remembered
+//! conversation the pane read — is remembered
 //! here, so the next launch paints all of it at once from what the last
 //! one knew, and the lookups that would otherwise leave the panels blank
 //! for their first seconds run underneath to bring it up to date. Stale for
@@ -23,7 +23,6 @@
 //! ```text
 //! pr-cache/pull-requests.json   rows and lists, one document
 //! pr-cache/details/<url>.json   one pull request's page: body, tabs, talk
-//! pr-cache/diffs/<url>.diff     one whole `gh pr diff` per pull request
 //! ```
 //!
 //! The document is rewritten whole, atomically, whenever something in it
@@ -31,10 +30,8 @@
 //! small: a line or two per row. A page is tens of kilobytes — nine tenths
 //! of what the cache holds — so each lives in a file of its own, written
 //! only when that page was read again, and a busy repo's hundred pages are
-//! never rewritten because one row's checks moved. Diffs are
-//! big and change on their own schedule, so each lives in its own file,
-//! read only when `g` asks for it. Pages and diffs are pruned along with
-//! the document to the pull requests still on some row.
+//! never rewritten because one row's checks moved. Pages are pruned along
+//! with the document to the pull requests still on some row.
 //!
 //! Nothing here touches the disk unless an [`App`] carries a [`PrCache`]:
 //! the main loop installs one at startup, the unit tests never do, so no
@@ -55,8 +52,9 @@ use crate::pull_request::{OpenPr, PrDetail, PullRequest};
 const DIR: &str = "pr-cache";
 /// The one document: rows, lists and bodies.
 const STORE_FILE: &str = "pull-requests.json";
-/// Where the per-pull-request diffs go, inside [`DIR`].
-const DIFFS_DIR: &str = "diffs";
+/// Where earlier builds kept a whole diff per pull request, inside [`DIR`]:
+/// removed on load, a pull request's diff being read through git now.
+const LEGACY_DIFFS_DIR: &str = "diffs";
 /// Where the per-pull-request pages go, inside [`DIR`].
 const DETAILS_DIR: &str = "details";
 /// Bumped when the document's shape changes incompatibly; an older
@@ -123,10 +121,6 @@ impl PrCache {
         self.root.join(STORE_FILE)
     }
 
-    fn diffs_dir(&self) -> PathBuf {
-        self.root.join(DIFFS_DIR)
-    }
-
     fn details_dir(&self) -> PathBuf {
         self.root.join(DETAILS_DIR)
     }
@@ -138,8 +132,10 @@ impl PrCache {
     /// A document written before the pages had files of their own carries
     /// them inline: each moves out to its file here, once — a page already
     /// in a file is the newer — and the document is written back without
-    /// them.
+    /// them. The whole diffs earlier builds kept go too
+    /// ([`LEGACY_DIFFS_DIR`]).
     pub fn load_store(&self) -> Option<Store> {
+        let _ = std::fs::remove_dir_all(self.root.join(LEGACY_DIFFS_DIR));
         let path = self.store_path();
         let raw = std::fs::read_to_string(&path).ok()?;
         let mut store: Store = match serde_json::from_str(&raw) {
@@ -208,43 +204,9 @@ impl PrCache {
             .collect()
     }
 
-    fn diff_path(&self, url: &str) -> PathBuf {
-        self.diffs_dir().join(file_name(url, "diff"))
-    }
-
-    /// The last diff read for `url`, if one was kept. The file's first line
-    /// is the URL it was fetched for, and a file whose line disagrees is
-    /// not this pull request's — two URLs can sanitise to one name — so it
-    /// is a miss, never someone else's diff.
-    pub fn load_diff(&self, url: &str) -> Option<String> {
-        let raw = std::fs::read_to_string(self.diff_path(url)).ok()?;
-        let (header, diff) = raw.split_once('\n')?;
-        (header == url).then(|| diff.to_string())
-    }
-
-    /// Keep `diff` as the last one read for `url`. Atomic, like the
-    /// document.
-    pub fn store_diff(&self, url: &str, diff: &str) -> std::io::Result<()> {
-        let path = self.diff_path(url);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let tmp = temp_path(&path);
-        std::fs::write(&tmp, format!("{url}\n{diff}"))?;
-        std::fs::rename(&tmp, &path)
-    }
-
-    /// Drop every diff file that isn't one of `live`'s — the pull requests
-    /// still on some row — and any temp file a crash left behind. The
-    /// directory is orion's own, so anything in it that isn't a live diff
-    /// is garbage by definition.
-    pub fn prune_diffs(&self, live: &HashSet<String>) {
-        prune_dir(&self.diffs_dir(), live, "diff");
-    }
-
-    /// [`prune_diffs`](Self::prune_diffs) for the pages: one whose pull
-    /// request left every row goes, so the directory holds what is on
-    /// screen and never a history of what was.
+    /// Drop every page whose pull request left every row — and any temp
+    /// file a crash left behind — so the directory holds what is on screen
+    /// and never a history of what was.
     pub fn prune_details(&self, live: &HashSet<String>) {
         prune_dir(&self.details_dir(), live, "json");
     }
@@ -279,11 +241,11 @@ fn prune_dir(dir: &Path, live: &HashSet<String>, ext: &str) {
     }
 }
 
-/// A file name for what is kept about one pull request — its diff, its
-/// page: the URL with everything that isn't a letter or digit turned into
-/// `_`. Readable in a directory listing, safe on every filesystem, and
-/// unique enough for GitHub's `owner/repo/pull/N` shape — the file says
-/// inside which URL it is for anyway ([`PrCache::load_diff`]).
+/// A file name for what is kept about one pull request — its page: the
+/// URL with everything that isn't a letter or digit turned into `_`.
+/// Readable in a directory listing, safe on every filesystem, and unique
+/// enough for GitHub's `owner/repo/pull/N` shape — the file says inside
+/// which URL it is for anyway.
 fn file_name(url: &str, ext: &str) -> String {
     let stem: String = url
         .trim_start_matches("https://")
@@ -292,11 +254,6 @@ fn file_name(url: &str, ext: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     format!("{stem}.{ext}")
-}
-
-/// [`file_name`] for a diff.
-pub fn diff_file_name(url: &str) -> String {
-    file_name(url, "diff")
 }
 
 /// Write `value` to `path` as pretty JSON with a trailing newline, creating
@@ -473,7 +430,7 @@ pub fn snapshot(app: &App) -> Store {
 }
 
 /// Everything a flush writes: the cache to write to, the document, and the
-/// pull requests whose diffs may stay. `None` when nothing changed since
+/// pull requests whose pages may stay. `None` when nothing changed since
 /// the last flush or the app has no cache; either way the dirty flag is
 /// taken, so the caller — the loop, off-thread; the quit path, inline —
 /// only ever writes once per change.
@@ -489,7 +446,7 @@ pub fn take_flush(app: &mut App) -> Option<(PrCache, Store, HashSet<String>)> {
 }
 
 /// Write a flush out: the document and the pages read since the last
-/// one, then the prune of the pages and diffs no row names. Failures are
+/// one, then the prune of the pages no row names. Failures are
 /// logged, never surfaced — a cache that couldn't be written is a slower
 /// next launch, not a broken one.
 pub fn write_all(cache: &PrCache, store: &Store, live: &HashSet<String>) {
@@ -497,28 +454,6 @@ pub fn write_all(cache: &PrCache, store: &Store, live: &HashSet<String>) {
         tracing::warn!("pull-request cache not written: {err}");
     }
     cache.prune_details(live);
-    cache.prune_diffs(live);
-}
-
-/// Keep the diff just read for `url`, when the app has a cache. Only a
-/// diff with files in it is worth keeping: an empty one is a flash, not a
-/// modal, and would be re-fetched to find that out anyway.
-pub fn remember_diff(app: &App, url: &str, diff: &str) {
-    let Some(cache) = &app.pr_cache else {
-        return;
-    };
-    if crate::pull_request::split_unified_diff(diff).is_empty() {
-        return;
-    }
-    if let Err(err) = cache.store_diff(url, diff) {
-        tracing::warn!("pull-request diff not cached: {err}");
-    }
-}
-
-/// The diff last read for `url`, when the app has a cache and kept one.
-/// Read on the loop: it is a local file, and `g` is waiting on it.
-pub fn recall_diff(app: &App, url: &str) -> Option<String> {
-    app.pr_cache.as_ref()?.load_diff(url)
 }
 
 #[cfg(test)]
@@ -849,74 +784,16 @@ mod tests {
         assert!(take_flush(&mut app).is_none(), "spent");
     }
 
-    /// Diffs come back for their own URL only, and the prune keeps just
-    /// the live pull requests' — temp files and strangers included.
-    #[test]
-    fn diffs_round_trip_per_url_and_prune_to_the_live_set() {
-        let (_dir, cache) = cache();
-        let seven = "https://github.com/o/r/pull/7";
-        let nine = "https://github.com/o/r/pull/9";
-        assert!(cache.load_diff(seven).is_none());
-        cache.store_diff(seven, "diff --git a/x b/x\n+y\n").unwrap();
-        cache.store_diff(nine, "diff --git a/z b/z\n+w\n").unwrap();
-        assert_eq!(
-            cache.load_diff(seven).as_deref(),
-            Some("diff --git a/x b/x\n+y\n")
-        );
-        // A file whose header names another URL is a miss, not a wrong
-        // diff — the sanitised names can collide, the headers can't.
-        std::fs::write(
-            cache.diff_path("https://github.com/o/r/pull/8"),
-            "https://github.com/o_r/pull/8\nnot yours\n",
-        )
-        .unwrap();
-        assert!(cache.load_diff("https://github.com/o/r/pull/8").is_none());
-        std::fs::write(cache.diffs_dir().join("leftover.diff.tmp"), "x").unwrap();
-
-        cache.prune_diffs(&[seven.to_string()].into_iter().collect());
-        let mut left: Vec<String> = std::fs::read_dir(cache.diffs_dir())
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        left.sort();
-        assert_eq!(left, [diff_file_name(seven)]);
-        assert!(cache.load_diff(nine).is_none());
-    }
-
     /// The file name is the URL, readable and filesystem-safe.
     #[test]
-    fn diff_file_names_are_readable_and_safe() {
+    fn page_file_names_are_readable_and_safe() {
         assert_eq!(
-            diff_file_name("https://github.com/o/r/pull/42"),
-            "github_com_o_r_pull_42.diff"
+            file_name("https://github.com/o/r/pull/42", "json"),
+            "github_com_o_r_pull_42.json"
         );
         assert_eq!(
-            diff_file_name("http://ghe.corp/Org-1/re.po/pull/1"),
-            "ghe_corp_Org_1_re_po_pull_1.diff"
-        );
-    }
-
-    /// The app-level helpers are no-ops without a cache, and only keep a
-    /// diff that has files in it.
-    #[test]
-    fn diff_helpers_need_a_cache_and_a_real_diff() {
-        let mut app = App::new();
-        let url = "https://github.com/o/r/pull/7";
-        remember_diff(&app, url, "diff --git a/x b/x\n+y\n");
-        assert!(recall_diff(&app, url).is_none(), "no cache, nothing kept");
-
-        let (_dir, cache) = cache();
-        app.pr_cache = Some(cache);
-        remember_diff(&app, url, "");
-        assert!(
-            recall_diff(&app, url).is_none(),
-            "an empty diff is not kept"
-        );
-        remember_diff(&app, url, "diff --git a/x b/x\n+y\n");
-        assert_eq!(
-            recall_diff(&app, url).as_deref(),
-            Some("diff --git a/x b/x\n+y\n")
+            file_name("http://ghe.corp/Org-1/re.po/pull/1", "json"),
+            "ghe_corp_Org_1_re_po_pull_1.json"
         );
     }
 }

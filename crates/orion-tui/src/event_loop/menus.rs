@@ -79,7 +79,6 @@ pub(super) fn open_command_palette(app: &mut App) {
 const OPEN_ROWS: &[(Action, &str)] = &[
     (Action::OpenRepo, "Repository on GitHub"),
     (Action::OpenPullRequest, "Pull request on GitHub"),
-    (Action::OpenIssue, "Issue on GitHub"),
     (Action::OpenInCursor, "Checkout in"),
     (Action::OpenOutsideTerminal, "Terminal in the checkout"),
     (Action::OpenWorktree, "Open command"),

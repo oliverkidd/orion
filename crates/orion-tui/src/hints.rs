@@ -263,6 +263,16 @@ pub fn in_app_hint() -> Hint {
 /// The way out of every modal.
 pub const ESC_CLOSE: Key = Key::new(&["esc"], "close");
 
+// The verbs several modals over a filtered list share — the PULL
+// REQUESTS MODAL and the LINEAR VIEW both. Their letters are the
+// filter's, so the verbs are chords, and one chord does the same thing
+// in each.
+
+/// The grid's open-outside chord (`Action::OpenOutside`).
+pub const BROWSER: Key = Key::new(&["cmd+o", "ctrl+o"], "browser");
+/// The grid's refresh chord (`Action::RefreshPullRequests`).
+pub const REFRESH: Key = Key::new(&["cmd+r", "ctrl+r"], "refresh");
+
 /// `hints` cut to `width` cells: whole hints dropped from the right end,
 /// the kept ones ([`Hint::keep`]) last of all, never a hint cut short.
 pub fn fit(hints: &[Hint], width: usize) -> Vec<&Hint> {
@@ -576,11 +586,6 @@ mod tests {
         };
         let newline = crate::ui::task_keys::NEWLINE;
 
-        let mut issues = crate::issues::IssuesView::new(project(), "p".into(), "/tmp/p".into());
-        assert_hints_from(&crate::issues::hints(&issues), crate::issues::keys::ALL);
-        issues.query.insert_str("x");
-        assert_hints_from(&crate::issues::hints(&issues), crate::issues::keys::ALL);
-
         let mut prs =
             crate::pr_modal::PullRequestsView::new(project(), "p".into(), "/tmp/p".into());
         for tab in crate::pr_preview::PrTab::ALL {
@@ -616,11 +621,6 @@ mod tests {
             },
         );
         assert_hints_from(&crate::linear::hints(&attach), crate::linear::keys::ALL);
-
-        assert_hints_from(
-            &crate::branch_switch::hints(&crate::branch_switch::Stage::Pick),
-            crate::branch_switch::keys::ALL,
-        );
 
         let presets = crate::preset_overlays::AgentPresetsView::new(
             WorktreeId::from("w".to_string()),

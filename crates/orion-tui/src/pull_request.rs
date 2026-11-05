@@ -618,28 +618,11 @@ pub const LIST_LIMIT: usize = 100;
 /// lineage and not only as what is left to do.
 pub const MERGED_DAYS: i64 = 7;
 
-/// How many merged pull requests one page asks for, most recently touched
-/// first: all GitHub gives in a request. GitHub cannot be asked for
-/// "merged since", but a pull request merged inside the window was updated
-/// inside it too — so the pages are read on ([`rest_of_merged`]) until one
-/// ends on a pull request last touched before the window, and by then
-/// every merge of the week has been seen. There is no cap on how many that
-/// is: a busy repo merges a hundred a week, and the list is exact.
+/// How many merged pull requests the list asks for, most recently touched
+/// first: all GitHub gives in a request, and the PULL REQUESTS MODAL's
+/// `Merged` section is that first page — the ones merged within
+/// [`MERGED_DAYS`] of it.
 pub const MERGED_PAGE: usize = 100;
-
-/// How many pages [`rest_of_merged`] reads before it stops and says the
-/// list is short ([`ListAnswer::merged_short`]): a guard against a walk
-/// that never ends, set where no repo's week reaches — a thousand merged
-/// pull requests touched in seven days.
-pub(crate) const MERGED_PAGES_MAX: usize = 10;
-
-/// How often a project's merged tail is walked past its first page. The
-/// list is asked every few seconds, and a busy repo's week runs to a
-/// second page: walking it on every ask would cost a request each time to
-/// learn nothing, since a new merge always lands on the first page. In
-/// between, that page is folded into the tail already held
-/// ([`fold_merged`]).
-pub(crate) const MERGED_WALK_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// The one GraphQL query [`list`] runs — `gh pr list`'s own fields, in its
 /// own newest-first order, save the checks, and what the PULL REQUESTS
@@ -654,7 +637,7 @@ pub(crate) const MERGED_WALK_EVERY: std::time::Duration = std::time::Duration::f
 /// signed-in user, whose review requests the modal sorts to the top.
 ///
 /// `merged` rides along: the pull requests that landed lately, for the
-/// modal's `Merged` section ([`merged_page`]) — a row's name, author and
+/// modal's `Merged` section ([`parse_merged`]) — a row's name, author and
 /// `mergedAt`, never its checks, so it adds next to nothing to the ask.
 const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!, $merged: Int!) { \
     viewer { login } \
@@ -669,34 +652,10 @@ const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!, $
     contexts(first: 1) { checkRunCountsByState { state count } \
     statusContextCountsByState { state count } } } } } } } } \
     merged: pullRequests(states: MERGED, first: $merged, orderBy: {field: UPDATED_AT, direction: DESC}) { \
-    pageInfo { hasNextPage endCursor } \
     nodes { number url title headRefName isCrossRepository \
     headRepositoryOwner { login } viewerDidAuthor headRefOid \
     createdAt updatedAt mergedAt author { login } comments { totalCount } \
     labels(first: 10) { nodes { name color } } } } } }";
-
-/// [`LIST_QUERY`]'s `merged` connection on its own, from `$after` on: the
-/// pages past the first, for a repo whose week of merges runs past one
-/// ([`rest_of_merged`]).
-const MERGED_QUERY: &str = "query($owner: String!, $repo: String!, $merged: Int!, $after: String!) { \
-    repository(owner: $owner, name: $repo) { \
-    merged: pullRequests(states: MERGED, first: $merged, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) { \
-    pageInfo { hasNextPage endCursor } \
-    nodes { number url title headRefName isCrossRepository \
-    headRepositoryOwner { login } viewerDidAuthor headRefOid \
-    createdAt updatedAt mergedAt author { login } comments { totalCount } \
-    labels(first: 10) { nodes { name color } } } } } }";
-
-/// [`LIST_QUERY`] as it was before the rows grew their meta line: the
-/// fields the panels need and nothing else. [`list`] falls back on it when
-/// the full query fails, so a GitHub that balks at the extra fields costs
-/// the modal its meta line, never the list its refresh.
-const LIST_QUERY_SLIM: &str = "query($owner: String!, $repo: String!, $limit: Int!) { \
-    repository(owner: $owner, name: $repo) { \
-    pullRequests(states: OPEN, first: $limit, orderBy: {field: CREATED_AT, direction: DESC}) { \
-    nodes { number url title isDraft headRefName isCrossRepository \
-    headRepositoryOwner { login } mergeable viewerDidAuthor headRefOid \
-    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }";
 
 /// GitHub's verdict on a pull request's reviews (`reviewDecision`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -755,7 +714,7 @@ impl CheckTally {
 
 /// What the PULL REQUESTS MODAL's second line says about a row: who opened
 /// it and when, how its review and checks stand, how much talk and which
-/// labels. Empty for a row the slim query or an older cache brought.
+/// labels. Empty for a row an older cache brought.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrMeta {
@@ -770,7 +729,7 @@ pub struct PrMeta {
     /// None where the head commit has no checks, or nobody asked.
     pub checks: Option<CheckTally>,
     /// `mergedAt`, RFC 3339: set on the `Merged` section's rows
-    /// ([`merged_page`]), empty on every open one.
+    /// ([`parse_merged`]), empty on every open one.
     pub merged_at: String,
 }
 
@@ -951,93 +910,17 @@ impl PrLaunch {
 /// in `{owner}` and `{repo}` from the checkout, the way `gh pr list`
 /// resolves its repo.
 ///
-/// `whole_week` walks the merged tail to its end ([`rest_of_merged`]);
-/// without it a week that runs past the first page brings that page alone
-/// ([`ListAnswer::merged_head`]).
-pub async fn list(dir: &Path, whole_week: bool) -> Option<ListAnswer> {
+pub async fn list(dir: &Path) -> Option<ListAnswer> {
     let limit = format!("limit={LIST_LIMIT}");
     let merged = format!("merged={MERGED_PAGE}");
-    match run_repo_graphql(dir, LIST_QUERY, &[&limit, &merged], TIMEOUT).await {
-        Ok(out) => {
-            if let Some(mut rows) = parse_list(&out) {
-                let cut = recheck_failing(dir, &mut rows).await;
-                let now = orion_core::clock::now_secs() as i64;
-                let (merged, merged_short, merged_head) = match merged_page(&out, now) {
-                    Some(first) if whole_week || first.more.is_none() => {
-                        let (rows, short) = rest_of_merged(dir, first, now).await;
-                        (Some(rows), short, false)
-                    }
-                    Some(first) => (Some(latest_first(first.rows)), false, true),
-                    None => (None, false, false),
-                };
-                return Some(ListAnswer {
-                    rows,
-                    slim: false,
-                    cut,
-                    merged,
-                    merged_short,
-                    merged_head,
-                });
-            }
-        }
-        // `gh` could not be run, or timed out: the slim query would fare
-        // no better, and asking it would only double the wait.
-        Err(stderr) if stderr.is_empty() => return None,
-        // GitHub answered, and refused the full query.
-        Err(_) => {}
-    }
-    let out = repo_graphql(dir, LIST_QUERY_SLIM, &[&limit], TIMEOUT).await?;
+    let out = repo_graphql(dir, LIST_QUERY, &[&limit, &merged], TIMEOUT).await?;
     let mut rows = parse_list(&out)?;
     let cut = recheck_failing(dir, &mut rows).await;
-    Some(ListAnswer {
-        rows,
-        slim: true,
-        cut,
-        merged: None,
-        merged_short: false,
-        merged_head: false,
-    })
+    let merged = parse_merged(&out, orion_core::clock::now_secs() as i64);
+    Some(ListAnswer { rows, cut, merged })
 }
 
-/// The week's merges in full: `first`'s rows, and every page after it
-/// until one ends on a pull request last touched before the window
-/// ([`MergedPage::more`]). One extra ask per hundred merged pull requests
-/// touched in the week — none at all for most repos. True beside the rows
-/// when the walk stopped early — a page GitHub would not give, or
-/// [`MERGED_PAGES_MAX`] of them — so the caller can say the list is short
-/// instead of passing it off as the week.
-async fn rest_of_merged(dir: &Path, first: MergedPage, now: i64) -> (Vec<OpenPr>, bool) {
-    let page_size = format!("merged={MERGED_PAGE}");
-    let mut rows = first.rows;
-    let mut more = first.more;
-    let mut pages = 1;
-    let mut short = false;
-    while let Some(cursor) = more.take() {
-        if pages == MERGED_PAGES_MAX {
-            short = true;
-            break;
-        }
-        let after = format!("after={cursor}");
-        let page = repo_graphql(dir, MERGED_QUERY, &[&page_size, &after], TIMEOUT)
-            .await
-            .and_then(|out| merged_page(&out, now));
-        let Some(page) = page else {
-            short = true;
-            break;
-        };
-        rows.extend(page.rows);
-        more = page.more;
-        pages += 1;
-    }
-    (latest_first(rows), short)
-}
-
-/// What [`list`] got back: the rows, and whether they came from
-/// [`LIST_QUERY_SLIM`] — which never asks for the meta line, nor for who
-/// is asked to review, so a slim row's `meta` (and the section that hangs
-/// off it) is "not asked", not "empty". The caller carries the last full
-/// answer's over by URL rather than let the rows jump sections on every
-/// beat GitHub balks at the full query.
+/// What [`list`] got back: the rows, and the merged tail.
 ///
 /// `cut` names, by URL, the rows whose recheck found more checks than one
 /// page holds ([`apply_recheck`]): their verdict is GitHub's rollup word
@@ -1046,19 +929,11 @@ async fn rest_of_merged(dir: &Path, first: MergedPage, now: i64) -> (Vec<OpenPr>
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListAnswer {
     pub rows: Vec<OpenPr>,
-    pub slim: bool,
     pub cut: std::collections::HashSet<String>,
     /// The pull requests merged within [`MERGED_DAYS`], the latest merge
-    /// first ([`rest_of_merged`]). `None` where the answer did not say — the
-    /// slim query never asks — and the caller keeps the last ones it had.
+    /// first — the first page of them ([`MERGED_PAGE`]). `None` where the
+    /// answer did not say, and the caller keeps the last ones it had.
     pub merged: Option<Vec<OpenPr>>,
-    /// `merged` is not the whole week: the walk through its pages stopped
-    /// early ([`rest_of_merged`]).
-    pub merged_short: bool,
-    /// `merged` is the tail's first page alone, of a week that runs on
-    /// past it: the caller folds it into the tail it holds
-    /// ([`fold_merged`]) rather than take it for the week.
-    pub merged_head: bool,
 }
 
 /// How many failing rows one refresh reads the checks of
@@ -1152,8 +1027,8 @@ fn apply_recheck(json: &str, rows: &mut [OpenPr]) -> std::collections::HashSet<S
             continue;
         };
         pr.answered.checks = Some(checks(contexts));
-        // The tally rides on the full query only: a slim row has none to
-        // correct, and gains none here.
+        // A row with no tally (no checks, or an older cache's) gains none
+        // here.
         if pr.meta.checks.is_some() {
             pr.meta.checks = tally(contexts);
         }
@@ -1274,30 +1149,13 @@ fn row(v: &serde_json::Value, viewer: &str) -> Option<OpenPr> {
 /// [`MERGED_DAYS`] of `now` (unix seconds), the latest merge first. The
 /// query's own order is by last update, which a comment on an old pull
 /// request moves, so the window and the order are both worked out here,
-/// off `mergedAt`. `None` for an answer with no merged tail: the slim
-/// query's, or one from a `gh` that was never asked for it.
-#[cfg(test)]
+/// off `mergedAt`. `None` for an answer with no merged tail, from a `gh`
+/// that was never asked for it.
 pub(crate) fn parse_merged(json: &str, now: i64) -> Option<Vec<OpenPr>> {
-    merged_page(json, now).map(|page| latest_first(page.rows))
-}
-
-/// One page of the merged tail: its rows inside the window, each with
-/// when it merged, and where the next page starts while there can be more
-/// of the week on it.
-struct MergedPage {
-    rows: Vec<(i64, OpenPr)>,
-    /// The cursor to read on from. `None` once GitHub has no further page,
-    /// or this one ended on a pull request last touched before the window:
-    /// the pages run newest-touched first, and nothing merged inside the
-    /// window was last touched before it.
-    more: Option<String>,
-}
-
-/// [`parse_merged`] for one page, the paging kept ([`MergedPage`]).
-fn merged_page(json: &str, now: i64) -> Option<MergedPage> {
     let answer = serde_json::from_str::<serde_json::Value>(json).ok()?;
-    let tail = answer.pointer("/data/repository/merged")?;
-    let nodes = tail.get("nodes")?.as_array()?;
+    let nodes = answer
+        .pointer("/data/repository/merged/nodes")?
+        .as_array()?;
     let since = now - MERGED_DAYS * 24 * 60 * 60;
     let rows = nodes
         .iter()
@@ -1306,38 +1164,11 @@ fn merged_page(json: &str, now: i64) -> Option<MergedPage> {
             Some((at, row(v, "")?))
         })
         .collect();
-    let past_window = nodes
-        .last()
-        .and_then(|v| rfc3339_secs(&str_at(v, "updatedAt")))
-        .is_some_and(|touched| touched < since);
-    let more = tail
-        .pointer("/pageInfo/endCursor")
-        .and_then(|c| c.as_str())
-        .filter(|_| bool_at(&tail["pageInfo"], "hasNextPage") && !past_window)
-        .map(str::to_string);
-    Some(MergedPage { rows, more })
+    Some(latest_first(rows))
 }
 
-/// The merged tail between two walks of the whole week: `head` — the
-/// first page, where every new merge lands — over the tail `held`, each
-/// pull request once (the fresher row, `head`'s, kept), the ones merged
-/// before the window gone, the latest merge first.
-pub(crate) fn fold_merged(head: Vec<OpenPr>, held: &[OpenPr], now: i64) -> Vec<OpenPr> {
-    let since = now - MERGED_DAYS * 24 * 60 * 60;
-    let rows = head
-        .into_iter()
-        .chain(held.iter().cloned())
-        .filter_map(|pr| {
-            let at = rfc3339_secs(&pr.meta.merged_at).filter(|at| *at >= since)?;
-            Some((at, pr))
-        })
-        .collect();
-    latest_first(rows)
-}
-
-/// The pages' rows as the list keeps them: the latest merge first, each
-/// pull request once — a page read a moment after the last can repeat one
-/// that was touched in between.
+/// The merged rows as the list keeps them: the latest merge first, each
+/// pull request once.
 fn latest_first(mut rows: Vec<(i64, OpenPr)>) -> Vec<OpenPr> {
     rows.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
     let mut seen = std::collections::HashSet::new();
@@ -1430,12 +1261,6 @@ pub fn drafts_last(list: &mut [OpenPr], prs: &crate::pr_store::PrStore) {
             .is_some_and(|s| s.standing == Standing::Draft)
     });
 }
-
-/// How long a `gh pr diff` may run. Diffs are bigger than metadata and
-/// GitHub can be slow to assemble one for a large pull request, so this is
-/// looser than [`TIMEOUT`] — but still bounded, because the user is sitting
-/// in front of a "loading" flash while it runs.
-const DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 /// The readable contents of one pull request: what it says it does, what
 /// people said back, and what the PULL REQUEST PAGE's other tabs list —
@@ -1981,41 +1806,6 @@ fn conversation(v: &serde_json::Value) -> Vec<PrComment> {
     out
 }
 
-/// The whole unified diff of a pull request, in one call. `None` when `gh`
-/// couldn't answer.
-pub async fn diff(dir: &Path, number: u64) -> Option<String> {
-    gh(
-        Some(dir),
-        &["pr", "diff", &number.to_string()],
-        DIFF_TIMEOUT,
-    )
-    .await
-}
-
-/// The unified diff of one commit of a pull request, from GitHub — the
-/// commit need not be fetched into any checkout here — in the shape `gh
-/// pr diff` gives a whole pull request. `gh` fills `{owner}` and `{repo}`
-/// from the checkout. `None` when `gh` couldn't answer, or for a sha that
-/// is not one.
-pub async fn commit_diff(dir: &Path, sha: &str) -> Option<String> {
-    if sha.is_empty() || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    let path = format!("repos/{{owner}}/{{repo}}/commits/{sha}");
-    gh(
-        Some(dir),
-        &["api", &path, "-H", "Accept: application/vnd.github.diff"],
-        DIFF_TIMEOUT,
-    )
-    .await
-}
-
-/// A commit's page inside its pull request — `…/pull/42/commits/<sha>` —
-/// the URL its diff is fetched, cached and opened under.
-pub fn commit_url(pr_url: &str, sha: &str) -> String {
-    format!("{}/commits/{sha}", pr_url.trim_end_matches('/'))
-}
-
 /// How long a `gh pr comment` may run. The body is small and the call
 /// is one request, so the metadata budget serves — but the person who
 /// pressed Enter is watching the footer, so it is bounded all the same.
@@ -2102,63 +1892,6 @@ fn first_line(stderr: &str) -> Option<String> {
 /// nothing at all.
 pub fn comment_error(stderr: &str) -> String {
     first_line(stderr).unwrap_or_else(|| GH_NOT_RUN.to_string())
-}
-
-/// Cut a unified diff into one chunk per file, in the order git emitted
-/// them: `(path, that file's diff text)`.
-///
-/// The path comes from the `+++ b/…` line when there is one and falls back
-/// to the `diff --git` header, so a deleted file (whose `+++` is
-/// `/dev/null`) still reports the path it had. Anything before the first
-/// `diff --git` — `gh` prints nothing there today, but a future banner
-/// would land there — is dropped rather than shown as a nameless file.
-pub fn split_unified_diff(text: &str) -> Vec<(String, String)> {
-    let mut files: Vec<(String, String)> = Vec::new();
-    let mut path = String::new();
-    let mut lines: Vec<&str> = Vec::new();
-    let flush = |files: &mut Vec<(String, String)>, path: &mut String, lines: &mut Vec<&str>| {
-        if !path.is_empty() {
-            files.push((std::mem::take(path), lines.join("\n")));
-        }
-        lines.clear();
-    };
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            flush(&mut files, &mut path, &mut lines);
-            path = header_path(rest);
-        }
-        if path.is_empty() {
-            continue; // preamble before the first file
-        }
-        // `+++ b/x` is authoritative: it survives the quoting and the
-        // spaces-in-names ambiguity that makes `diff --git` hard to split.
-        if let Some(rest) = line.strip_prefix("+++ ") {
-            if rest != "/dev/null" {
-                path = rest.strip_prefix("b/").unwrap_or(rest).to_string();
-            }
-        }
-        lines.push(line);
-    }
-    flush(&mut files, &mut path, &mut lines);
-    files
-}
-
-/// Best-effort path out of a `diff --git a/x b/x` header. The two halves
-/// are the same path for everything but a rename, so the second half is
-/// taken and the `b/` prefix stripped; a name containing spaces makes this
-/// ambiguous, which is why the `+++` line overrides it when one follows.
-fn header_path(rest: &str) -> String {
-    let rest = rest.trim();
-    match rest.split_once(" b/") {
-        Some((_, b)) => b.to_string(),
-        None => rest
-            .rsplit(' ')
-            .next()
-            .unwrap_or(rest)
-            .strip_prefix("b/")
-            .unwrap_or(rest)
-            .to_string(),
-    }
 }
 
 /// Test-only accessors: nothing in the app reads these — screens read
@@ -2588,19 +2321,14 @@ mod tests {
     /// repo and froze the list on its last good answer (#106).
     #[test]
     fn the_list_query_asks_for_the_rollup_state_alone() {
-        for query in [LIST_QUERY, LIST_QUERY_SLIM] {
-            assert!(query.contains("statusCheckRollup { state"));
-            assert!(query.contains("states: OPEN"));
-            assert!(query.contains("orderBy: {field: CREATED_AT, direction: DESC}"));
-        }
-        // The full query's checks are GitHub's tally, never the contexts
-        // themselves; the slim one asks for nothing past the state.
+        assert!(LIST_QUERY.contains("statusCheckRollup { state"));
+        assert!(LIST_QUERY.contains("states: OPEN"));
+        assert!(LIST_QUERY.contains("orderBy: {field: CREATED_AT, direction: DESC}"));
+        // The checks are GitHub's tally, never the contexts themselves.
         assert!(LIST_QUERY.contains("contexts(first: 1) { checkRunCountsByState"));
         assert!(!LIST_QUERY.contains("nodes { ... on CheckRun"));
-        assert!(LIST_QUERY_SLIM.contains("statusCheckRollup { state }"));
-        assert!(!LIST_QUERY_SLIM.contains("contexts"));
-        // The merged tail rides the full query only, most recently
-        // touched first, and asks for no checks at all.
+        // The merged tail rides the same query, most recently touched
+        // first — its first page alone — and asks for no checks at all.
         let (open, merged) = LIST_QUERY
             .split_once("merged: pullRequests(states: MERGED, first: $merged")
             .expect("the merged tail");
@@ -2608,7 +2336,7 @@ mod tests {
         assert!(merged.contains("orderBy: {field: UPDATED_AT, direction: DESC}"));
         assert!(merged.contains("mergedAt"));
         assert!(!merged.contains("statusCheckRollup"));
-        assert!(!LIST_QUERY_SLIM.contains("MERGED"));
+        assert!(!merged.contains("pageInfo"));
     }
 
     /// The merged tail is the week's merges, the latest first — by
@@ -2646,75 +2374,6 @@ mod tests {
             "the open rows are their own"
         );
         assert_eq!(parse_merged(&list_answer("[]"), now), None, "never asked");
-    }
-
-    /// The merged tail has no cap: a full page whose last pull request was
-    /// touched inside the window is read on from, and the walk ends on the
-    /// page that reaches back past it — or the last GitHub has. A pull
-    /// request two pages both carried is listed once.
-    #[test]
-    fn the_merged_tail_reads_on_until_it_is_past_the_week() {
-        let page = |next: bool, last_touched: &str| {
-            format!(
-                r#"{{"data":{{"repository":{{"merged":{{
-                  "pageInfo":{{"hasNextPage":{next},"endCursor":"c1"}},
-                  "nodes":[
-                    {{"number":40,"url":"https://github.com/o/r/pull/40",
-                      "mergedAt":"2026-10-09T10:00:00Z","updatedAt":"2026-10-09T11:00:00Z"}},
-                    {{"number":12,"url":"https://github.com/o/r/pull/12",
-                      "mergedAt":"2026-08-01T10:00:00Z","updatedAt":"{last_touched}"}}
-                  ]}}}}}}}}"#
-            )
-        };
-        let now = rfc3339_secs("2026-10-10T10:00:00Z").expect("a stamp");
-        let more = |json: String| merged_page(&json, now).expect("a page").more;
-        assert_eq!(
-            more(page(true, "2026-10-08T09:00:00Z")).as_deref(),
-            Some("c1"),
-            "an old pull request commented on this week: the week may run on"
-        );
-        assert_eq!(more(page(true, "2026-09-30T09:00:00Z")), None, "past it");
-        assert_eq!(more(page(false, "2026-10-08T09:00:00Z")), None, "the last");
-
-        let first = merged_page(&page(true, "2026-10-08T09:00:00Z"), now).expect("a page");
-        let again = merged_page(&page(false, "2026-09-30T09:00:00Z"), now).expect("a page");
-        let rows: Vec<_> = first.rows.into_iter().chain(again.rows).collect();
-        let numbers: Vec<u64> = latest_first(rows).iter().map(|pr| pr.number).collect();
-        assert_eq!(numbers, [40], "once, and only the week's");
-        assert!(MERGED_QUERY.contains("after: $after"));
-
-        // Between walks the first page is folded into the tail held: a new
-        // merge joins, a row both carry is the fresher one, and one that
-        // has aged out of the week leaves.
-        let row = |number: u64, title: &str, merged_at: &str| {
-            let json = format!(
-                r#"{{"data":{{"repository":{{"merged":{{"nodes":[
-                  {{"number":{number},"url":"https://github.com/o/r/pull/{number}",
-                    "title":"{title}","mergedAt":"{merged_at}"}}]}}}}}}}}"#
-            );
-            let wide = rfc3339_secs("2026-01-01T00:00:00Z").expect("a stamp");
-            merged_page(&json, wide).expect("a page").rows.remove(0).1
-        };
-        let held = [
-            row(40, "Old title", "2026-10-09T10:00:00Z"),
-            row(30, "Aged out", "2026-10-01T10:00:00Z"),
-            row(35, "On page two", "2026-10-05T10:00:00Z"),
-        ];
-        let head = vec![
-            row(41, "Just merged", "2026-10-10T09:00:00Z"),
-            row(40, "Renamed", "2026-10-09T10:00:00Z"),
-        ];
-        let folded = fold_merged(head, &held, now);
-        let got: Vec<(u64, &str)> = folded
-            .iter()
-            .map(|pr| (pr.number, pr.title.as_str()))
-            .collect();
-        assert_eq!(
-            got,
-            [(41, "Just merged"), (40, "Renamed"), (35, "On page two")]
-        );
-        assert!(LIST_QUERY
-            .contains("pageInfo { hasNextPage endCursor } nodes { number url title headRefName"));
     }
 
     /// The meta line's fields come off the node; the sections off who
@@ -2765,13 +2424,13 @@ mod tests {
         assert_eq!(prs[1].meta.checks, None);
         assert_eq!(prs[2].section(), PrSection::Others);
         assert_eq!(prs[2].meta, PrMeta::default());
-        // The slim answer (no viewer, no meta) still lists, its meta empty.
-        let slim = parse_list(&list_answer(
+        // An answer with no viewer and no meta still lists, its meta empty.
+        let bare = parse_list(&list_answer(
             r#"[{"number":4,"url":"https://github.com/o/r/pull/4","viewerDidAuthor":true}]"#,
         ))
         .expect("parsed");
-        assert_eq!(slim[0].meta, PrMeta::default());
-        assert_eq!(slim[0].section(), PrSection::Yours);
+        assert_eq!(bare[0].meta, PrMeta::default());
+        assert_eq!(bare[0].section(), PrSection::Yours);
     }
 
     /// Trouble is an open pull request's: a merged or closed one is past
@@ -3267,10 +2926,6 @@ mod tests {
         assert_eq!(duration_label(45), "45s");
         assert_eq!(duration_label(192), "3m 12s");
         assert_eq!(duration_label(3840), "1h 4m");
-        assert_eq!(
-            commit_url("https://github.com/o/r/pull/42", "abc"),
-            "https://github.com/o/r/pull/42/commits/abc"
-        );
     }
 
     /// Missing optional fields are zeros and empty strings, not a failed
@@ -3282,74 +2937,6 @@ mod tests {
         assert_eq!(d.answered_state, "OPEN");
         assert!(d.comments.is_empty());
         assert!(parse_detail("{}").is_none());
-    }
-
-    /// The diff is cut per file, in git's order, with the `+++ b/…` line
-    /// naming each chunk.
-    #[test]
-    fn a_unified_diff_splits_per_file() {
-        let text = "\
-diff --git a/src/a.rs b/src/a.rs
-index 111..222 100644
---- a/src/a.rs
-+++ b/src/a.rs
-@@ -1,2 +1,2 @@
--old
-+new
-diff --git a/src/b.rs b/src/b.rs
---- a/src/b.rs
-+++ b/src/b.rs
-@@ -1 +1 @@
--x
-+y
-";
-        let files = split_unified_diff(text);
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].0, "src/a.rs");
-        assert!(files[0].1.starts_with("diff --git a/src/a.rs"));
-        assert!(files[0].1.contains("+new"));
-        assert!(
-            !files[0].1.contains("src/b.rs"),
-            "the chunk stops at the next file: {}",
-            files[0].1
-        );
-        assert_eq!(files[1].0, "src/b.rs");
-        // Nothing is lost and nothing is duplicated: every input line lands
-        // in exactly one chunk. Checked against real `gh pr diff` output
-        // too, which is what this invariant is really guarding.
-        let total: usize = files.iter().map(|(_, d)| d.lines().count()).sum();
-        assert_eq!(total, text.lines().count());
-    }
-
-    /// A deleted file's `+++` is `/dev/null`, so the name has to come from
-    /// the `diff --git` header — and a rename reports the new path.
-    #[test]
-    fn deleted_and_renamed_files_still_get_a_name() {
-        let files = split_unified_diff(
-            "\
-diff --git a/gone.rs b/gone.rs
-deleted file mode 100644
---- a/gone.rs
-+++ /dev/null
-@@ -1 +0,0 @@
--x
-diff --git a/old.rs b/new.rs
-similarity index 90%
-rename from old.rs
-rename to new.rs
---- a/old.rs
-+++ b/new.rs
-",
-        );
-        assert_eq!(files[0].0, "gone.rs");
-        assert_eq!(files[1].0, "new.rs");
-    }
-
-    /// Nothing to split is an empty list, not a nameless file.
-    #[test]
-    fn an_empty_diff_yields_no_files() {
-        assert!(split_unified_diff("").is_empty());
-        assert!(split_unified_diff("some banner\nwith no diff\n").is_empty());
     }
 
     /// `gh pr view` exits 1 both for a branch with no pull request and for

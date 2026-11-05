@@ -1,4 +1,4 @@
-use crate::compose::{Stack, StackVerb};
+use crate::compose::Stack;
 use crate::entities::{
     Agent, AgentKind, AgentStatus, Entity, EntityId, Link, Project, TerminalTab, Worktree,
 };
@@ -130,15 +130,6 @@ pub enum ClientRequest {
         /// booted bare cannot be handed one.
         #[serde(default)]
         starting_prompt: Option<String>,
-        /// The GitHub issue this session was created for — an ISSUE
-        /// SESSION, launched from the ISSUES MODAL. Persisted with the row
-        /// like a PR SESSION's URL, so every cold spawn and RESUME rebuilds
-        /// the same issue context: Claude and Pi take it as an appended
-        /// system prompt, a Codex / Cursor cold spawn as the opening of its
-        /// first prompt. Skips PREWARM POOL adoption like `starting_prompt`,
-        /// since a spare booted bare never got it.
-        #[serde(default)]
-        issue_url: Option<String>,
         /// The mode the CLI starts in — plan, ask, or the edit it always
         /// starts in ([`crate::harness::AgentMode`]). Request-only like
         /// `starting_prompt`: a RESUME starts where the session left off,
@@ -363,14 +354,13 @@ pub enum ClientRequest {
         req_id: u64,
         id: TerminalId,
     },
-    /// `r` on a worktree: start the project's RUN COMMAND — the `run` of
-    /// the `.orion.json` in that checkout, else the main checkout's, read
-    /// fresh — in the worktree's RUN TERMINAL, a login shell running that
+    /// `r` on a worktree: start the project's RUN COMMAND — its **Run
+    /// command** setting, read fresh — in the worktree's RUN TERMINAL, a login shell running that
     /// line and nothing else. An exited run's row is reused; a run still
     /// going is left alone and named in the reply, so a second client's
     /// press never starts a second one. Answered with
-    /// `Ack { created: Some(EntityId::Terminal(..)) }`; no file or no
-    /// command is an Error saying what to add.
+    /// `Ack { created: Some(EntityId::Terminal(..)) }`; no command is an
+    /// Error saying where to set one.
     StartRun {
         req_id: u64,
         worktree: WorktreeId,
@@ -406,15 +396,6 @@ pub enum ClientRequest {
     /// the same req_id (not an Ack).
     GetMetrics {
         req_id: u64,
-    },
-
-    /// STACK STATUS: start, stop or take down compose project `project`
-    /// (`docker compose -p`). Acked once docker returns; the new state
-    /// follows as a `StacksChanged`.
-    StackAction {
-        req_id: u64,
-        project: String,
-        verb: StackVerb,
     },
 
     Shutdown,
@@ -603,17 +584,6 @@ mod stack_tests {
 
     #[test]
     fn stack_frames_round_trip() {
-        let req = ClientRequest::StackAction {
-            req_id: 3,
-            project: "riplo-wt".into(),
-            verb: StackVerb::DownVolumes,
-        };
-        let back: ClientRequest = rmp_serde::from_slice(&rmp_serde::to_vec(&req).unwrap()).unwrap();
-        assert!(matches!(
-            back,
-            ClientRequest::StackAction { req_id: 3, ref project, verb: StackVerb::DownVolumes }
-                if project == "riplo-wt"
-        ));
         let ev = ServerEvent::StacksChanged {
             stacks: Some(vec![Stack {
                 project: "riplo-wt".into(),

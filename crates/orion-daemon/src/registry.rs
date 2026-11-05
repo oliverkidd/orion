@@ -11,7 +11,6 @@ use crate::worktree_hooks::{self, HookContext, WorktreeHook};
 use anyhow::{bail, Context, Result};
 use orion_core::env;
 use orion_core::harness::HarnessDescriptor;
-use orion_core::project_file::{self, ProjectCommand};
 use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, EnterOutcome, Entity, EntityId, LinkId, PrewarmInfo,
     Project, ProjectId, ServerEvent, SessionRef, TerminalId, TerminalTab, Worktree, WorktreeId,
@@ -69,11 +68,10 @@ const CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 type FinishedRun = (Arc<PtySession>, Option<i32>);
 /// What a RUN TERMINAL's row is called in the Sessions panel.
 const RUN_TERMINAL_NAME: &str = "run";
-/// `⌘⇧S` on a worktree with nothing to run: the footer line naming both
-/// places a RUN COMMAND can come from.
+/// `⌘⇧S` on a worktree with nothing to run: the footer line naming where
+/// a RUN COMMAND is set.
 const NO_RUN_COMMAND: &str =
-    "no run command and no compose stack for this worktree — set one in Settings (s) → Project, \
-                              or add .orion.json with {\"run\": \"npm run dev\"}";
+    "no run command for this project — set one in Settings → Projects (Run command)";
 /// Why a RUN TERMINAL with nothing left to replay will not attach — its
 /// run ended before a DAEMON restart, typically.
 const RUN_NOT_RUNNING: &str = "this run has stopped — ⌘⇧S on its worktree starts it again";
@@ -94,9 +92,6 @@ pub(crate) struct CreateAgentSpec {
     /// The CLI's positional first prompt (an AGENT PRESET launch). Request-only.
     pub starting_prompt: Option<String>,
     pub pr_url: Option<String>,
-    /// The GitHub issue an ISSUE SESSION was launched for (see
-    /// `pr_scope::issue_rule`). Persisted like `pr_url`.
-    pub issue_url: Option<String>,
     /// The mode the CLI starts in (plan, ask, edit). Request-only.
     pub mode: orion_core::harness::AgentMode,
 }
@@ -1153,7 +1148,6 @@ impl Daemon {
             auto_title,
             starting_prompt,
             pr_url,
-            issue_url,
             mode,
         } = spec;
         let starting_prompt = match starting_prompt {
@@ -1162,10 +1156,6 @@ impl Daemon {
         };
         let pr_url = match pr_url {
             Some(url) => Some(crate::pr_scope::validate_pr_url(&url)?),
-            None => None,
-        };
-        let issue_url = match issue_url {
-            Some(url) => Some(crate::pr_scope::validate_issue_url(&url)?),
             None => None,
         };
         // Every harness resolves against the current registry before
@@ -1182,7 +1172,7 @@ impl Daemon {
         let optimistic_run = Self::launch_submits_first_prompt(
             &harness,
             starting_prompt.as_deref(),
-            pr_url.is_some() || issue_url.is_some(),
+            pr_url.is_some(),
         );
         let worktree = self
             .store
@@ -1192,10 +1182,9 @@ impl Daemon {
         // its pre-generated id — the CLI booted while the user typed the
         // name, so the create feels instant. A starting prompt rides the
         // CLI's argv, and a spare already booted bare cannot be handed one;
-        // neither can it be handed a PR or issue rule.
+        // neither can it be handed a PR rule.
         // Nor can one booted in edit mode be handed plan or ask.
         let adopted = (pr_url.is_none()
-            && issue_url.is_none()
             && starting_prompt.is_none()
             && mode == orion_core::harness::AgentMode::Edit)
             .then(|| self.take_prewarmed(&worktree_id, kind, model.as_deref(), effort.as_deref()))
@@ -1238,16 +1227,11 @@ impl Daemon {
             sort_order: 0,
             status_changed_at: orion_core::clock::now_ms(),
             alive: false,
-            issue_url: issue_url.clone(),
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
-        self.store.insert_agent_with_launch_context(
-            &agent,
-            auto_title,
-            pr_url.as_deref(),
-            issue_url.as_deref(),
-        )?;
+        self.store
+            .insert_agent_with_launch_context(&agent, auto_title, pr_url.as_deref())?;
         if optimistic_run {
             // Seeded by hand, ahead of the spawn, so the CLI's own startup
             // progress-clear cannot green the row out before its turn has
@@ -1289,7 +1273,7 @@ impl Daemon {
     /// turn that makes a created row `running` before a single hook has
     /// fired? Asked of the two places that decide it, so it cannot drift
     /// from them: [`crate::pr_scope::launch_prompts`], which folds a launch
-    /// rule (a PR SESSION's, an ISSUE SESSION's) into the first prompt on a
+    /// rule (a PR SESSION's) into the first prompt on a
     /// harness with no system-prompt flag, and the argv builder's prepend
     /// shape, which puts orion's guidance there
     /// ([`agent_spawn_command_with`]). The rule's text is built per spawn
@@ -1392,7 +1376,6 @@ impl Daemon {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -2088,10 +2071,8 @@ impl Daemon {
     // ---- run terminals ----
 
     /// `⌘⇧S` on a worktree: start its RUN COMMAND — the project's
-    /// `run_command` setting (Settings → Project), else `.orion.json`'s
-    /// `run`, read fresh from the worktree's checkout, else the main
-    /// checkout's, else `docker compose start` on the checkout's own
-    /// stack — in the worktree's RUN TERMINAL. A run that already
+    /// `run_command` setting (Settings → Projects), read fresh — in the
+    /// worktree's RUN TERMINAL; with none, the refusal says so. A run that already
     /// exited lends its row; one still going is the answer as it stands,
     /// so a second client's press never starts a second server.
     pub fn start_run(self: &Arc<Self>, worktree_id: &WorktreeId) -> Result<EntityId> {
@@ -2122,14 +2103,8 @@ impl Daemon {
             .store
             .get_project(&worktree.project_id)?
             .map_or_else(|| worktree.path.clone(), |p| p.repo_path);
-        let command = match config.run_command(&main) {
-            Some(command) => command.to_string(),
-            None => match project_file::lookup(&worktree.path, &main, ProjectCommand::Run)
-                .map_err(anyhow::Error::msg)?
-            {
-                Some(command) => command,
-                None => self.stack_start_line(&worktree).context(NO_RUN_COMMAND)?,
-            },
+        let Some(command) = config.run_command(&main).map(str::to_string) else {
+            bail!(NO_RUN_COMMAND);
         };
         let mut term = match existing {
             Some(mut term) => {
@@ -2168,23 +2143,6 @@ impl Daemon {
         }
         spawned?;
         Ok(EntityId::Terminal(id))
-    }
-
-    /// With no RUN COMMAND set anywhere, the worktree's own compose stack
-    /// is what it runs: `docker compose start` on it, in the RUN TERMINAL,
-    /// so the start shows there like any other. None without a stack.
-    fn stack_start_line(&self, worktree: &Worktree) -> Option<String> {
-        let stacks = self.stacks.stacks()?;
-        let worktrees = self.store.load_tree().ok()?.1;
-        let checkouts: Vec<&Path> = worktrees.iter().map(|w| w.path.as_path()).collect();
-        let stack = orion_core::compose::stack_in(&stacks, &worktree.path, &checkouts)?;
-        let docker = crate::containers::find_docker()?;
-        let args = orion_core::compose::StackVerb::Start.compose_args(&stack.project);
-        let words = std::iter::once(docker.to_string_lossy().into_owned())
-            .chain(args)
-            .map(|w| orion_core::shell::single_quote(&w))
-            .collect::<Vec<_>>();
-        Some(words.join(" "))
     }
 
     /// Stop a worktree's run: a `^C` into its RUN TERMINAL, as a person at
@@ -2734,15 +2692,11 @@ impl Daemon {
             }
             _ => agent,
         };
-        // A PR SESSION's rule — or an ISSUE SESSION's — rides Claude's
-        // system prompt, or opens a Codex / Cursor cold spawn as its first
-        // prompt (see `pr_scope`). Rebuilt from the row's *current*
-        // worktree on every spawn, so a relocated session is told where it
-        // now works.
-        let (pr_url, issue_url) = (
-            self.store.agent_pr_url(&agent.id)?,
-            self.store.agent_issue_url(&agent.id)?,
-        );
+        // A PR SESSION's rule rides Claude's system prompt, or opens a
+        // Codex / Cursor cold spawn as its first prompt (see `pr_scope`).
+        // Rebuilt from the row's *current* worktree on every spawn, so a
+        // relocated session is told where it now works.
+        let pr_url = self.store.agent_pr_url(&agent.id)?;
         let root = match &pr_url {
             Some(_) if !worktree.is_main => self
                 .store
@@ -2756,12 +2710,7 @@ impl Daemon {
             branch: &worktree.branch,
             root: root.as_deref(),
         });
-        let issue_scope = issue_url.as_deref().map(|url| crate::pr_scope::IssueScope {
-            url,
-            worktree: &worktree.path,
-            branch: &worktree.branch,
-        });
-        let rule = crate::pr_scope::combined_rule(scope.as_ref(), issue_scope.as_ref());
+        let rule = scope.as_ref().map(crate::pr_scope::rule);
         let prompts = crate::pr_scope::launch_prompts(
             harness.system.append_flag.is_some(),
             agent.session_id.is_some(),
@@ -3729,7 +3678,7 @@ fn login_shell_wrap(
 }
 
 /// [`login_shell_wrap`] for a line that is already shell syntax — a RUN
-/// TERMINAL's `.orion.json` `run`, pipes and `&&` and all — behind the
+/// TERMINAL's run command, pipes and `&&` and all — behind the
 /// same prelude.
 fn login_shell_line(shell: &str, line: &str) -> (String, Vec<String>) {
     let mut cmdline = String::from("unset");
@@ -4856,7 +4805,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -4887,7 +4835,7 @@ mod tests {
     }
 
     /// A project whose main checkout is a fresh directory, registered with
-    /// `daemon`, for the RUN TERMINAL tests to write `.orion.json` into.
+    /// `daemon`, for the RUN TERMINAL tests.
     fn run_worktree(daemon: &Daemon) -> (tempfile::TempDir, Worktree) {
         let dir = tempfile::tempdir().unwrap();
         let project = Project {
@@ -4907,6 +4855,14 @@ mod tests {
         };
         daemon.store.insert_worktree(&worktree).unwrap();
         (dir, worktree)
+    }
+
+    /// A config whose project at `repo` has `run` for its RUN COMMAND.
+    fn run_config(repo: &Path, run: &str) -> crate::config::Config {
+        let json = serde_json::json!({
+            "projects": { repo.display().to_string(): { "run_command": run } }
+        });
+        serde_json::from_value(json).unwrap()
     }
 
     /// A daemon restart (an upgrade, `orion kill`) takes every PTY: the
@@ -4935,7 +4891,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -5030,15 +4985,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_needs_a_project_file_starts_once_and_stops() {
+    async fn run_needs_a_run_command_starts_once_and_stops() {
         let daemon = test_daemon();
         let (dir, worktree) = run_worktree(&daemon);
 
-        let missing = daemon.start_run(&worktree.id).unwrap_err();
+        let missing = daemon
+            .start_run_with(&worktree.id, &crate::config::Config::default())
+            .unwrap_err();
         assert!(
-            missing.to_string().contains("Settings (s) → Project")
-                && missing.to_string().contains(".orion.json"),
-            "names both places: {missing}"
+            missing.to_string().contains("Settings → Projects"),
+            "names where to set one: {missing}"
         );
         assert!(daemon
             .store
@@ -5046,8 +5002,8 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        std::fs::write(dir.path().join(".orion.json"), r#"{"run": "sleep 30"}"#).unwrap();
-        let EntityId::Terminal(id) = daemon.start_run(&worktree.id).unwrap() else {
+        let cfg = run_config(dir.path(), "sleep 30");
+        let EntityId::Terminal(id) = daemon.start_run_with(&worktree.id, &cfg).unwrap() else {
             panic!("a run lives in a terminal");
         };
         let sref = SessionRef::Terminal(id.clone());
@@ -5057,7 +5013,7 @@ mod tests {
 
         // A second press while it runs starts nothing new.
         assert_eq!(
-            daemon.start_run(&worktree.id).unwrap(),
+            daemon.start_run_with(&worktree.id, &cfg).unwrap(),
             EntityId::Terminal(id.clone())
         );
         assert_eq!(
@@ -5085,12 +5041,11 @@ mod tests {
     async fn a_stop_interrupts_the_run_and_keeps_how_it_ended() {
         let daemon = test_daemon();
         let (dir, worktree) = run_worktree(&daemon);
-        std::fs::write(
-            dir.path().join(".orion.json"),
-            r#"{"run": "trap 'echo winding-down; exit 0' INT; echo started; while :; do sleep 0.1; done"}"#,
-        )
-        .unwrap();
-        let EntityId::Terminal(id) = daemon.start_run(&worktree.id).unwrap() else {
+        let cfg = run_config(
+            dir.path(),
+            "trap 'echo winding-down; exit 0' INT; echo started; while :; do sleep 0.1; done",
+        );
+        let EntityId::Terminal(id) = daemon.start_run_with(&worktree.id, &cfg).unwrap() else {
             panic!("a run lives in a terminal");
         };
         let sref = SessionRef::Terminal(id.clone());
@@ -5125,61 +5080,31 @@ mod tests {
             .is_empty());
     }
 
-    /// The project's `run_command` setting (Settings → Project) is what
-    /// `r` runs when it is set, over whatever `.orion.json` says; blank,
-    /// the file decides as before; a project's setting is its own; and a
-    /// file that won't parse is still that file's error, not "no command".
+    /// The project's `run_command` setting (Settings → Projects) is what
+    /// `r` runs; blank, or another project's, is no run command at all.
     #[tokio::test]
-    async fn the_project_setting_wins_over_the_project_file() {
+    async fn the_project_setting_is_the_run_command() {
         let daemon = test_daemon();
         let (dir, worktree) = run_worktree(&daemon);
-        let config =
-            |json: String| -> crate::config::Config { serde_json::from_str(&json).unwrap() };
-        let entry = |path: &Path, run: &str| {
-            config(format!(
-                r#"{{"projects": {{"{}": {{"run_command": "{run}"}}}}}}"#,
-                path.display()
-            ))
+        let EntityId::Terminal(id) = daemon
+            .start_run_with(&worktree.id, &run_config(dir.path(), "sleep 31"))
+            .unwrap()
+        else {
+            panic!("a run lives in a terminal");
         };
-        let run_with = |cfg: &crate::config::Config| -> String {
-            let EntityId::Terminal(id) = daemon.start_run_with(&worktree.id, cfg).unwrap() else {
-                panic!("a run lives in a terminal");
-            };
-            let command = daemon.store.get_terminal(&id).unwrap().unwrap().run_command;
-            // The ^C, then the kill: gone before the next start.
-            daemon.stop_run(&worktree.id).unwrap();
-            daemon.stop_run(&worktree.id).unwrap();
-            command.unwrap()
-        };
+        let command = daemon.store.get_terminal(&id).unwrap().unwrap().run_command;
+        assert_eq!(command.as_deref(), Some("sleep 31"));
+        // The ^C, then the kill: gone before the next start.
+        daemon.stop_run(&worktree.id).unwrap();
+        daemon.stop_run(&worktree.id).unwrap();
 
-        // No file: the setting is the whole answer.
-        assert_eq!(run_with(&entry(dir.path(), "sleep 31")), "sleep 31");
-        // Both: the setting wins.
-        std::fs::write(dir.path().join(".orion.json"), r#"{"run": "sleep 30"}"#).unwrap();
-        assert_eq!(run_with(&entry(dir.path(), "sleep 31")), "sleep 31");
-        // Blank, or another project's: the file.
-        assert_eq!(run_with(&entry(dir.path(), "   ")), "sleep 30");
-        assert_eq!(
-            run_with(&entry(Path::new("/tmp/other"), "sleep 31")),
-            "sleep 30"
-        );
-        // Neither: the message names both.
-        std::fs::remove_file(dir.path().join(".orion.json")).unwrap();
-        let err = daemon
-            .start_run_with(&worktree.id, &entry(dir.path(), ""))
-            .unwrap_err();
-        assert!(err.to_string().contains("Settings (s) → Project"), "{err}");
-        // A broken file is its own complaint, whatever the setting isn't.
-        std::fs::write(dir.path().join(".orion.json"), "{").unwrap();
-        let err = daemon
-            .start_run_with(&worktree.id, &crate::config::Config::default())
-            .unwrap_err();
-        assert!(err.to_string().contains(".orion.json:"), "{err}");
-        assert_eq!(
-            run_with(&entry(dir.path(), "sleep 31")),
-            "sleep 31",
-            "and the setting never opens the file"
-        );
+        for cfg in [
+            run_config(dir.path(), "   "),
+            run_config(Path::new("/tmp/other"), "sleep 31"),
+        ] {
+            let err = daemon.start_run_with(&worktree.id, &cfg).unwrap_err();
+            assert!(err.to_string().contains("Settings → Projects"), "{err}");
+        }
     }
 
     /// A run that ends on its own keeps its output for the attach that
@@ -5189,12 +5114,8 @@ mod tests {
     async fn an_exited_run_replays_instead_of_running_again() {
         let daemon = test_daemon();
         let (dir, worktree) = run_worktree(&daemon);
-        std::fs::write(
-            dir.path().join(".orion.json"),
-            r#"{"run": "echo run-finished"}"#,
-        )
-        .unwrap();
-        let EntityId::Terminal(id) = daemon.start_run(&worktree.id).unwrap() else {
+        let cfg = run_config(dir.path(), "echo run-finished");
+        let EntityId::Terminal(id) = daemon.start_run_with(&worktree.id, &cfg).unwrap() else {
             panic!("a run lives in a terminal");
         };
         let sref = SessionRef::Terminal(id.clone());
@@ -5215,7 +5136,7 @@ mod tests {
 
         // `r` again reuses the row.
         assert_eq!(
-            daemon.start_run(&worktree.id).unwrap(),
+            daemon.start_run_with(&worktree.id, &cfg).unwrap(),
             EntityId::Terminal(id)
         );
         assert_eq!(
@@ -5239,7 +5160,6 @@ mod tests {
             auto_title: false,
             starting_prompt: None,
             pr_url: Some("https://github.com/o/r/pull/7".into()),
-            issue_url: None,
         };
         for kind in AgentKind::ALL {
             if kind == AgentKind::Custom {
@@ -5401,45 +5321,6 @@ mod tests {
         assert!(err.to_string().contains("NUL"), "{err}");
     }
 
-    /// The ISSUE SESSION's URL is checked at the boundary like the PR
-    /// SESSION's: every harness may carry one, and a PR URL is not an issue.
-    #[tokio::test]
-    async fn issue_launch_context_is_accepted_for_every_kind() {
-        let daemon = test_daemon();
-        let spec = |kind: AgentKind| CreateAgentSpec {
-            mode: Default::default(),
-            worktree: WorktreeId("unused".into()),
-            name: "issue".into(),
-            kind,
-            custom_harness: None,
-            model: None,
-            effort: None,
-            auto_title: true,
-            starting_prompt: Some("Fix it".into()),
-            pr_url: None,
-            issue_url: Some("https://github.com/o/r/issues/15".into()),
-        };
-        for kind in AgentKind::ALL {
-            if kind == AgentKind::Custom {
-                let err = daemon.create_agent(spec(kind)).await.unwrap_err();
-                assert!(err.to_string().contains("registry id"), "{err}");
-                continue;
-            }
-            let err = daemon.create_agent(spec(kind)).await.unwrap_err();
-            assert!(
-                err.to_string().contains("worktree not found"),
-                "{kind:?}: {err}"
-            );
-        }
-        let not_an_issue = CreateAgentSpec {
-            mode: Default::default(),
-            issue_url: Some("https://github.com/o/r/pull/7".into()),
-            ..spec(AgentKind::Codex)
-        };
-        let err = daemon.create_agent(not_an_issue).await.unwrap_err();
-        assert!(err.to_string().contains("not an issue URL"), "{err}");
-    }
-
     #[tokio::test]
     async fn starting_prompt_is_validated_and_never_adopts_a_warm_cli() {
         let daemon = test_daemon();
@@ -5454,7 +5335,6 @@ mod tests {
             auto_title: true,
             starting_prompt: starting.map(String::from),
             pr_url: None,
-            issue_url: None,
         };
         // Validation runs before the worktree lookup, so an unknown
         // worktree is fine here and every failure is the prompt's own.
@@ -5550,7 +5430,6 @@ mod tests {
             auto_title: false,
             starting_prompt: task.map(String::from),
             pr_url: None,
-            issue_url: None,
         };
 
         let created = |mut events: broadcast::Receiver<ServerEvent>| {
@@ -5679,7 +5558,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: false,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             })
@@ -5813,7 +5691,6 @@ mod tests {
                 auto_title: false,
                 starting_prompt: None,
                 pr_url: None,
-                issue_url: None,
             })
             .await
             .unwrap()
@@ -6015,7 +5892,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: false,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 },

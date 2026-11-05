@@ -99,7 +99,6 @@ impl Daemon {
             auto_title: true,
             starting_prompt: Some(starting_prompt.to_string()),
             pr_url: None,
-            issue_url: None,
         })
     }
 
@@ -193,7 +192,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         }
@@ -239,7 +237,7 @@ mod tests {
             spec.starting_prompt.as_deref(),
             Some("Fix the login redirect")
         );
-        assert!(spec.pr_url.is_none() && spec.issue_url.is_none());
+        assert!(spec.pr_url.is_none());
     }
 
     #[test]

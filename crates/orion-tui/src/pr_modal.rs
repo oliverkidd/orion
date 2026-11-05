@@ -39,9 +39,9 @@
 //! browser, `⌘R` asks GitHub again, `⌘N` opens a new pull request,
 //! `⌘X` merges this one and `⌘W` closes it (`pr_actions`, each
 //! form in the reading pane's place), and `⌘D` marks a draft ready for
-//! review or a ready one a draft again, and `⌘⇧R` reviews it — approve,
-//! request changes or comment (Enter on the Reviews tab opens the same
-//! form). Each verb is one ⌘ chord — the
+//! review or a ready one a draft again, and `⌘⇧R` opens its Files tab
+//! on GitHub to review it there (as Enter on the Reviews tab does). Each
+//! verb is one ⌘ chord — the
 //! grid's letter where the grid does the same thing (`⌘E` changes, `⌘R`
 //! refresh, `⌘O` open outside, `⌘N` new, `⌘W` close) — with its `^` twin
 //! for a terminal that sends no ⌘.
@@ -100,16 +100,14 @@ use crate::ui::{
 };
 
 /// A list younger than this is what opening the modal shows, with no
-/// second ask — the ISSUES MODAL's window, for the same reason: the list
-/// the OPEN PRS beat landed moments ago *is* the answer. `r` asks
-/// regardless.
-pub(crate) const FRESH: std::time::Duration = crate::issues::FRESH;
+/// second ask: the list the OPEN PRS beat landed moments ago *is* the
+/// answer. `r` asks regardless.
+pub(crate) const FRESH: std::time::Duration = std::time::Duration::from_secs(30);
 /// How long the cursor rests on a row before its body and conversation
 /// are fetched — the pane's own debounce, so walking the list with `j`
 /// fetches only the rows actually paused on.
 pub(crate) const DETAIL_DEBOUNCE: std::time::Duration = crate::event_loop::PR_DETAIL_DEBOUNCE;
-/// The list column's share of the modal, and its floor. The ISSUES MODAL
-/// is laid out the same.
+/// The list column's share of the modal, and its floor.
 pub(crate) const LIST_PCT: u16 = 38;
 pub(crate) const MIN_LIST_W: u16 = 24;
 /// Lines one wheel notch scrolls the reading pane.
@@ -1015,14 +1013,23 @@ fn open_comment_for_selected(app: &mut App) {
 
 /// `⌘O`, and a click on the reading pane's `↗ open in browser` button
 /// (`HitTarget::ModalBrowser`): the pull request under the cursor in the
-/// browser, through the very `event_loop::open_link` a card's `⇧V` and
-/// `⇧I` run — the footer says when it could not — and the pull request is
+/// browser, through the very `event_loop::open_link` a card's `⇧V` runs
+/// — the footer says when it could not — and the pull request is
 /// marked read on the way out, its conversation about to be on screen.
 /// Nothing under the cursor opens nothing. INPUT PARITY: the key and the
 /// click end in the same state.
 pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
     if let Some(url) = selected_url(app) {
         crate::event_loop::open_link(app, &url, out);
+    }
+}
+
+/// `⌘⇧R`, and Enter on the Reviews tab: the pull request under the cursor
+/// on GitHub's Files tab, where a review is written and sent.
+fn review_on_github(app: &mut App, out: &mut Vec<ClientRequest>) {
+    if let Some(url) = selected_url(app) {
+        let files = format!("{}/files", url.trim_end_matches('/'));
+        crate::event_loop::open_link(app, &files, out);
     }
 }
 
@@ -1087,9 +1094,9 @@ fn switch_tab(view: &mut PullRequestsView, tab: PrTab) {
 }
 
 /// Enter on the page: the row under its cursor acted on — the DIFF
-/// VIEWER at a file or a commit, a check's page — on Reviews the review
-/// form (`⌘⇧R`), and on the Description the pull request in the
-/// browser, as Enter on the pane's page does.
+/// VIEWER at a file or a commit, a check's page — on Reviews the pull
+/// request's Files tab on GitHub (`⌘⇧R`), and on the Description the pull
+/// request in the browser, as Enter on the pane's page does.
 fn act(app: &mut App, out: &mut Vec<ClientRequest>) {
     let tab = match &app.overlay {
         Some(Overlay::PullRequests(view)) => view.tabs.tab,
@@ -1098,7 +1105,7 @@ fn act(app: &mut App, out: &mut Vec<ClientRequest>) {
     if tab.lists() {
         act_on_row(app, out, true);
     } else if tab == PrTab::Reviews {
-        crate::pr_actions::open_review(app);
+        review_on_github(app, out);
     } else {
         open_in_browser(app, out);
     }
@@ -1176,7 +1183,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::COMMENT.matches(&key) => open_comment_for_selected(app),
         _ if keys::DIFF.matches(&key) => diff(app, out),
         _ if keys::BROWSER.matches(&key) => browser(app, out),
-        _ if keys::REVIEW.matches(&key) => crate::pr_actions::open_review(app),
+        _ if keys::REVIEW.matches(&key) => review_on_github(app, out),
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::NEW.matches(&key) => crate::pr_actions::open_create(app),
         // ⌘X cuts a SELECTION in the filter before it merges.
@@ -1388,14 +1395,14 @@ pub(crate) fn handle_mouse(
 /// The PULL REQUESTS MODAL's own keys: one table [`handle_key`] matches
 /// and [`hints`] spells — the reading side's tabs and rows from the PULL
 /// REQUEST PAGE's (`pr_preview::keys`). The letters are the filter's, so
-/// the verbs are chords — the ISSUES MODAL's, where the two do the same
-/// thing.
+/// the verbs are chords (`hints::BROWSER` and `hints::REFRESH` shared with
+/// the other modals over a list).
 pub(crate) mod keys {
     use crate::hints::Key;
 
     /// Enter on the list: the QUICK PROMPT for an agent on the pull
     /// request.
-    pub const PROMPT: Key = crate::issues::keys::PROMPT;
+    pub const PROMPT: Key = Key::new(&["enter"], "prompt an agent");
     /// The keys to the other panel: the page from the list, the list from
     /// the page.
     pub const PANEL: Key = Key::new(&["tab", "shift+tab"], "page");
@@ -1405,13 +1412,15 @@ pub(crate) mod keys {
     pub const PAGE_TABS: Key = Key::new(&["left", "right"], "tabs").show(2);
     pub const PAGE_ROWS: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const ACT: Key = Key::new(&["enter"], "open");
-    pub const COMMENT: Key = crate::issues::keys::COMMENT;
+    /// The grid's `y` (reply) as a chord.
+    pub const COMMENT: Key = Key::new(&["cmd+y", "ctrl+y"], "comment");
     /// The grid's changes chord (`Action::GitDiff`), for the pull
     /// request's.
     pub const DIFF: Key = Key::new(&["cmd+e", "ctrl+e"], "diff");
-    pub const BROWSER: Key = crate::issues::keys::BROWSER;
-    pub const REFRESH: Key = crate::issues::keys::REFRESH;
-    pub const READ: Key = crate::issues::keys::READ;
+    pub const BROWSER: Key = crate::hints::BROWSER;
+    pub const REFRESH: Key = crate::hints::REFRESH;
+    /// The reading pane, a page at a time.
+    pub const READ: Key = Key::new(&["pgup", "pgdn"], "read").show(2);
     /// A new pull request, from a branch of the project's.
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new PR");
     /// Merge the pull request under the cursor.
@@ -1419,9 +1428,9 @@ pub(crate) mod keys {
     /// Close the pull request under the cursor without merging it.
     /// ⌘W, the close every modal's remove verb shares — it asks first.
     pub const CLOSE: Key = Key::new(&["cmd+w", "ctrl+w"], "close PR");
-    /// Review the pull request under the cursor: approve it, ask for
-    /// changes, or comment (`pr_actions::open_review`). ⌘R's letter, held
-    /// with ⇧ — ⌘R itself is refresh everywhere.
+    /// Review the pull request under the cursor, on GitHub's Files tab
+    /// ([`review_on_github`]). ⌘R's letter, held with ⇧ — ⌘R itself is
+    /// refresh everywhere.
     pub const REVIEW: Key = Key::new(&["cmd+shift+r", "ctrl+shift+r"], "review");
     /// Mark it ready for review, or a draft again.
     pub const READY: Key = Key::new(&["cmd+d", "ctrl+d"], "ready/draft");
@@ -1883,20 +1892,10 @@ pub(crate) fn draw(
     for (entry, rect) in drawn {
         match entry {
             ListEntry::Header { first, count } => {
-                // A merged tail GitHub cut short says there are more: the
-                // count is never passed off as the week's.
-                let short = keys[first] == PrSection::Merged
-                    && !parsed.is_active()
-                    && app.merged_short.contains(&view.project);
-                let count = if short {
-                    format!("{count}+")
-                } else {
-                    count.to_string()
-                };
                 let rule = crate::ui::section_rule(
                     keys[first].name(),
                     th.muted,
-                    vec![Span::styled(count, Style::default().fg(th.dim))],
+                    vec![Span::styled(count.to_string(), Style::default().fg(th.dim))],
                     width,
                     th,
                 );
@@ -2745,136 +2744,40 @@ mod tests {
         });
     }
 
-    /// Enter on the Reviews tab — and `⌘⇧R` from anywhere — opens the
-    /// review form: ←/→ pick the verdict, one that needs a word asks for
-    /// it, and a review sent closes onto the Reviews tab, the pull request
-    /// read again.
+    /// `⌘⇧R` from the list — and Enter on the Reviews tab — opens the pull
+    /// request's Files tab on GitHub, where the review is written; the
+    /// modal stays up on its row, with no form in the reading pane.
     #[test]
-    fn the_reviews_tab_reviews_through_its_form() {
-        use crate::pr_actions::{Answer, PrForm, ReviewRow, ReviewVerdict};
+    fn a_review_is_written_on_githubs_files_tab() {
         pinned(|| {
-            let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
+            let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
             open(&mut app);
             let mut out = Vec::new();
+            crate::event_loop::take_opened();
+            handle_key(
+                &mut app,
+                KeyEvent::new(
+                    KeyCode::Char('r'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                ),
+                &mut out,
+            );
+            assert_eq!(
+                crate::event_loop::take_opened(),
+                ["https://github.com/o/r/pull/42/files"]
+            );
+            assert!(view(&app).form.is_none());
+
             handle_key(&mut app, key(KeyCode::Tab), &mut out);
             if let Some(Overlay::PullRequests(v)) = &mut app.overlay {
                 v.tabs.switch(PrTab::Reviews);
             }
-            assert!(hints(view(&app)).iter().any(|h| h.does == "review"));
             handle_key(&mut app, key(KeyCode::Enter), &mut out);
-            let Some(PrForm::Review(form)) = view(&app).form.as_deref() else {
-                panic!("no review form");
-            };
-            assert_eq!(form.number, 42);
-            assert_eq!(form.verdict, ReviewVerdict::Approve);
-            assert_eq!(form.row, ReviewRow::Verdict);
-            let shot = screen(&mut app, 140, 34);
-            assert!(shot.contains("Review #42"), "{shot}");
-            assert!(shot.contains("Enter approve"), "{shot}");
-
-            // → asks for changes, which needs a word: Enter says so and
-            // puts the caret in the box.
-            handle_key(&mut app, key(KeyCode::Right), &mut out);
-            handle_key(&mut app, key(KeyCode::Enter), &mut out);
-            let Some(PrForm::Review(form)) = view(&app).form.as_deref() else {
-                panic!("the form stays");
-            };
-            assert_eq!(form.verdict, ReviewVerdict::RequestChanges);
-            assert_eq!(form.row, ReviewRow::Body);
             assert_eq!(
-                form.notice.as_deref(),
-                Some("Request changes needs a comment")
-            );
-            for c in "nit".chars() {
-                handle_key(&mut app, key(KeyCode::Char(c)), &mut out);
-            }
-            let Some(PrForm::Review(form)) = view(&app).form.as_deref() else {
-                panic!("the form stays");
-            };
-            assert_eq!(form.body.as_str(), "nit");
-            assert!(form.notice.is_none(), "typing clears the notice");
-            assert!(view(&app).query.is_empty(), "the form took the letters");
-            let ticket = form.ticket;
-
-            crate::pr_actions::land_answer(
-                &mut app,
-                Answer::Reviewed {
-                    project: project.clone(),
-                    url: "https://github.com/o/r/pull/42".into(),
-                    ticket,
-                    result: Err("not allowed".into()),
-                },
-            );
-            let Some(PrForm::Review(form)) = view(&app).form.as_deref() else {
-                panic!("a refused review keeps the form");
-            };
-            assert_eq!(form.notice.as_deref(), Some("not allowed"));
-            assert_eq!(form.body.as_str(), "nit", "nothing typed is lost");
-
-            crate::pr_actions::land_answer(
-                &mut app,
-                Answer::Reviewed {
-                    project,
-                    url: "https://github.com/o/r/pull/42".into(),
-                    ticket,
-                    result: Ok("requested changes on #42".into()),
-                },
+                crate::event_loop::take_opened(),
+                ["https://github.com/o/r/pull/42/files"]
             );
             assert!(view(&app).form.is_none());
-            assert_eq!(view(&app).tabs.tab, PrTab::Reviews);
-            assert!(app.pr_refresh_requested, "the list is asked for again");
-            assert!(app
-                .pr_detail_stale
-                .contains("https://github.com/o/r/pull/42"));
-            let flash = format!("{:?}", app.flash);
-            assert!(flash.contains("requested changes on #42"), "{flash}");
-
-            // ⌘⇧R from the list opens it too.
-            handle_key(&mut app, key(KeyCode::Esc), &mut out);
-            handle_key(
-                &mut app,
-                KeyEvent::new(
-                    KeyCode::Char('r'),
-                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
-                ),
-                &mut out,
-            );
-            assert!(matches!(
-                view(&app).form.as_deref(),
-                Some(PrForm::Review(_))
-            ));
-        });
-    }
-
-    /// On the user's own pull request GitHub takes only a comment: that is
-    /// the one verdict, and the caret starts in the box.
-    #[test]
-    fn your_own_pull_request_is_only_commented_on() {
-        use crate::pr_actions::{PrForm, ReviewRow, ReviewVerdict};
-        pinned(|| {
-            let mut mine = pr(7, "Mine", false);
-            mine.mine = true;
-            let (mut app, _) = app_with(vec![mine], true);
-            open(&mut app);
-            let mut out = Vec::new();
-            handle_key(
-                &mut app,
-                KeyEvent::new(
-                    KeyCode::Char('r'),
-                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
-                ),
-                &mut out,
-            );
-            handle_key(&mut app, key(KeyCode::Tab), &mut out);
-            handle_key(&mut app, key(KeyCode::Right), &mut out);
-            let Some(PrForm::Review(form)) = view(&app).form.as_deref() else {
-                panic!("no review form");
-            };
-            assert_eq!(form.verdict, ReviewVerdict::Comment);
-            assert_eq!(form.row, ReviewRow::Verdict);
-            let shot = screen(&mut app, 140, 34);
-            assert!(shot.contains("only a comment"), "{shot}");
-            crate::hints::assert_hints_from(&hints(view(&app)), crate::pr_actions::keys::ALL);
         });
     }
 

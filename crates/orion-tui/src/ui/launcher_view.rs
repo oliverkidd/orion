@@ -227,9 +227,9 @@ fn draw_head(f: &mut Frame, app: &mut App, body: Rect, count: HeadCount, hidden:
         let room = (r.width as usize).saturating_sub(taken + HEAD_GAP);
         let right = head_count(app, count, hidden, room, th);
         let used: usize = right.iter().map(|(s, _)| s.width()).sum();
-        // The PR & ISSUE COUNTS are buttons, laid down where the
-        // right-aligned row puts each word: a click opens that list for
-        // the project in front of you, as `v` and `i` do.
+        // The PR COUNT is a button, laid down where the right-aligned row
+        // puts the word: a click opens that list for the project in front
+        // of you, as `v` does.
         let mut x = r.x + (r.width as usize).saturating_sub(used) as u16;
         let mut spans = Vec::with_capacity(right.len());
         for (span, hit) in right {
@@ -674,8 +674,8 @@ fn tab_ramp(tally: Tally, th: Theme) -> Option<[Color; 3]> {
 ///
 /// It gets what the tabs leave of the row ([`draw_head`]), and what does
 /// not fit in `width` gives way whole, least needed first: the count of
-/// the cards (each band's rule says its own), then the PR & ISSUE COUNTS
-/// (`v` and `i` say them again), and the HIDDEN MARKER last — a
+/// the cards (each band's rule says its own), then the PR COUNT (`v`
+/// says it again), and the HIDDEN MARKER last — a
 /// screenful of cards with more behind it looks exactly like a project
 /// with that many sessions in it, and the PANE dragged up over the grid
 /// is the usual way of getting there. The row never runs past `width`.
@@ -694,15 +694,13 @@ fn head_count(
         Span::styled(count_words(app, count), Style::default().fg(th.dim)),
         None,
     )];
-    // The PR & ISSUE COUNTS the PROJECTS PANEL's rows used to carry: how
-    // many open pull requests and issues the project in front of you has,
-    // so the number is read without opening `v` or `i` to find it — and a
-    // click on either count opens that list, the pointer's way to the
-    // same modal. A second column of air sets them off from the count.
-    let badge: Part = app
-        .selected_project()
-        .and_then(|project| crate::ui::open_counts_badge(app.project_open_counts(&project.id), th))
-        .map(|(parts, _)| {
+    // The PR COUNT the PROJECTS PANEL's rows used to carry: how many open
+    // pull requests the project in front of you has, so the number is
+    // read without opening `v` to find it — and a click on it opens that
+    // list, the pointer's way to the same modal. A second column of air
+    // sets it off from the count.
+    let badge: Part = crate::ui::open_prs_badge(app.listed_open_prs().len(), th)
+        .map(|parts| {
             let parts = parts.into_iter().map(|(text, mut style, hit)| {
                 // Nothing about a word says it is a button, so the one
                 // under the pointer is underlined, as the header's tabs
@@ -1783,7 +1781,7 @@ fn draw_band_rule(
             ));
         }
     }
-    hits.extend(paint_stack_mark(buf, r, app, &band.worktree));
+    paint_stack_mark(buf, r, app, &band.worktree);
     hits.push((r, HitTarget::LauncherBand(rule.index)));
     hits
 }
@@ -1794,19 +1792,18 @@ fn draw_band_rule(
 /// without one. A running stack's STACK TRAIL runs into it down the
 /// rule's dashes, one column a frame, and it flashes as the light lands;
 /// the light skips text but keeps time across it, so its pace is even.
-/// The click on the mark opens the Stacks modal.
-fn paint_stack_mark(
-    buf: &mut Buffer,
-    r: Rect,
-    app: &App,
-    worktree: &orion_core::WorktreeId,
-) -> Option<(Rect, HitTarget)> {
-    let stack = app.stack_of(worktree)?;
+fn paint_stack_mark(buf: &mut Buffer, r: Rect, app: &App, worktree: &orion_core::WorktreeId) {
+    let Some(stack) = app.stack_of(worktree) else {
+        return;
+    };
     let th = app.theme;
     // The rightmost dash: the rule's own last cell unless it was cut.
-    let h = (r.x..r.right())
+    let Some(h) = (r.x..r.right())
         .rev()
-        .find(|&x| buf[(x, r.y)].symbol() == "─")?;
+        .find(|&x| buf[(x, r.y)].symbol() == "─")
+    else {
+        return;
+    };
     let running = stack.state() == orion_core::compose::StackState::Running;
     let mut mark = if running { th.ok } else { th.faint };
     if running && app.animations {
@@ -1827,15 +1824,6 @@ fn paint_stack_mark(
         }
     }
     buf[(h, r.y)].set_symbol(crate::stacks::MARK).set_fg(mark);
-    Some((
-        Rect {
-            x: h,
-            width: 1,
-            height: 1,
-            ..r
-        },
-        HitTarget::LauncherBandStack(worktree.clone()),
-    ))
 }
 
 /// A terminal's mark, the counterpart of a session's STATUS MARK: `▶` for a
@@ -2929,13 +2917,10 @@ fn launch_project(app: &App, launch: &QuickLaunch) -> String {
 /// The view's box title: what Enter starts — always a new AGENT (a
 /// TERMINAL is `t`, never this box). The harness, the model, the
 /// effort and an AGENT PRESET are in [`box_header`] under it, beside the
-/// keys that change them; what is left here is what the box is *for* — an
-/// issue, a pull request, a Linear batch.
+/// keys that change them; what is left here is what the box is *for* — a
+/// pull request, a Linear batch.
 pub(super) fn box_title(launch: &QuickLaunch) -> String {
     let mut head = vec!["New agent".to_string()];
-    if let Some(issue) = &launch.issue {
-        head.push(format!("issue #{}", issue.number));
-    }
     if let Some(pr) = &launch.pr {
         head.push(format!("PR #{}", pr.number));
     }
@@ -3462,7 +3447,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             })
@@ -4026,27 +4010,32 @@ mod tests {
     }
 
     /// The counts get what the tabs leave them and give way whole, least
-    /// needed first — the count of the cards, then the PR & ISSUE COUNTS
-    /// — with the HIDDEN MARKER last, and never run past their room.
+    /// needed first — the count of the cards, then the PR COUNT — with the
+    /// HIDDEN MARKER last, and never run past their room.
     #[test]
     fn the_counts_give_way_a_piece_at_a_time() {
         let mut app = a_tree();
         select(&mut app, "api");
         let id = app.selected_project().expect("api").id.clone();
-        app.issues.insert(
+        let now = std::time::Instant::now();
+        app.open_prs.insert(
             id,
-            crate::issues::IssueList {
-                list: vec![crate::issues::Issue {
+            crate::app::OpenPrs {
+                list: vec![crate::pull_request::OpenPr {
                     number: 7,
-                    url: "https://github.com/o/r/issues/7".into(),
                     title: "Tabs vanish on a narrow window".into(),
-                    author: "webdevcody".into(),
-                    created_at: "2026-09-10T12:00:00Z".into(),
-                    updated_at: "2026-09-11T12:00:00Z".into(),
-                    labels: Vec::new(),
-                    body: String::new(),
+                    url: "https://github.com/o/r/pull/7".into(),
+                    answered_draft: false,
+                    answered: Default::default(),
+                    head: "tabs".into(),
+                    mine: false,
+                    head_sha: String::new(),
+                    meta: Default::default(),
                 }],
-                at: std::time::Instant::now(),
+                merged: Vec::new(),
+                at: now,
+                due: now,
+                step: std::time::Duration::ZERO,
             },
         );
         let th = app.theme;
@@ -4058,7 +4047,7 @@ mod tests {
             let used: usize = spans.iter().map(|s| s.width()).sum();
             assert!(used <= width, "{width}: {text:?} overruns");
             let words = text.contains("9 sessions");
-            let badge = text.contains("1 issue");
+            let badge = text.contains("1 pr");
             let mark = text.contains("5 hidden");
             assert_eq!(mark, width >= mark_w, "{width}: {text:?}");
             assert!(!badge || mark, "{width}: the marker went first: {text:?}");
@@ -4066,7 +4055,7 @@ mod tests {
         }
         assert_eq!(
             row_text(&count_spans(&app, 9, hidden, 120, th)),
-            "9 sessions  1 issue  ↓ 5 hidden",
+            "9 sessions  1 pr  ↓ 5 hidden",
             "a column of air more between the count and the badge"
         );
     }
@@ -4601,7 +4590,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 },
@@ -4864,41 +4852,6 @@ mod tests {
         assert_eq!(painted(&buf, 0, app.theme.stack_sweep[0]), "");
     }
 
-    /// The `⬡` is its own click: registered ahead of the band's rule.
-    #[test]
-    fn the_stack_mark_is_a_hit_ahead_of_the_rule() {
-        let app = with_stack(5, 0);
-        let band = a_band(false, "feat-x");
-        let facts = rule_facts(&app, &band, app.theme);
-        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 40, 1));
-        let hits = draw_band_rule(
-            &mut buf,
-            &app,
-            Rect::new(0, 0, 40, 1),
-            &band,
-            &facts,
-            BandRule {
-                index: 0,
-                on: false,
-                lit: false,
-                cols: RuleColumns::of([&facts]),
-            },
-        );
-        let stack_at = hits
-            .iter()
-            .position(|(r, h)| {
-                *h == HitTarget::LauncherBandStack(orion_core::WorktreeId("w1".into()))
-                    && r.x == 39
-                    && r.width == 1
-            })
-            .expect("the mark's hit");
-        let band_at = hits
-            .iter()
-            .position(|(_, h)| *h == HitTarget::LauncherBand(0))
-            .unwrap();
-        assert!(stack_at < band_at);
-    }
-
     /// Every rule on the grid gives its pull request and its counts the
     /// same columns ([`RuleColumns`]): a band with no pull request, or a
     /// count the others have and it lacks, leaves those cells blank — so
@@ -5063,7 +5016,6 @@ mod tests {
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -5130,7 +5082,6 @@ mod tests {
                 sort_order: 0,
                 status_changed_at: 0,
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             },
@@ -5221,7 +5172,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: crate::app::now_ms() - 60_000,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 },

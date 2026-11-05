@@ -50,9 +50,7 @@ pub(crate) mod diff_keys {
     pub const TICK: Key = Key::new(&["space"], "tick");
     /// The COMMIT LIST: every commit ticked, or none.
     pub const ALL: Key = Key::new(&["cmd+a", "ctrl+a"], "all");
-    /// The ticked commits TOGETHER or ONE AT A TIME.
-    pub const MODE: Key = Key::new(&["cmd+g", "ctrl+g"], "one at a time");
-    /// Older / newer: the cursor's commit, or the step through the ticked.
+    /// Older / newer: the cursor's commit, with nothing ticked.
     pub const STEP: Key = Key::new(&["shift+left", "shift+right"], "commit").show(2);
     /// The next panel, or the one before.
     pub const PANEL: Key = Key::new(&["tab", "shift+tab"], "files");
@@ -75,7 +73,6 @@ pub(crate) mod diff_keys {
     pub const ALL_KEYS: &[Key] = &[
         TICK,
         ALL,
-        MODE,
         STEP,
         PANEL,
         OPEN,
@@ -91,25 +88,11 @@ pub(crate) mod diff_keys {
 }
 
 /// The DIFF VIEWER's keys for the panel that has them, the verbs worded for
-/// what the COMMIT LIST holds: `⇧←/⇧→ commit` with nothing ticked, `step`
-/// through what is, `^G` between reading the ticked together and one at a
-/// time once there are two.
+/// what the COMMIT LIST holds: `⇧←/⇧→ commit` while nothing is ticked.
 pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
     use diff_keys::*;
     let list = view.commits.as_ref();
-    let ticked = list.map_or(0, |l| l.ticked.len());
-    let step = match list {
-        Some(_) if ticked == 0 => Some(STEP.hint()),
-        Some(_) if ticked > 1 => Some(STEP.hint_as("step")),
-        _ => None,
-    };
-    let mode = list.filter(|_| ticked > 1).map(|l| {
-        MODE.hint_as(if l.one_at_a_time {
-            "together"
-        } else {
-            "one at a time"
-        })
-    });
+    let step = list.filter(|l| l.ticked.is_empty()).map(|_| STEP.hint());
     let next = PANEL.hint_as(match view.next_focus(true) {
         DiffFocus::Commits => "commits",
         DiffFocus::Files => "files",
@@ -121,7 +104,6 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             hints.push(TICK.hint().kept());
             let all = list.is_some_and(|l| l.all_ticked());
             hints.push(ALL.hint_as(if all { "none" } else { "all" }));
-            hints.extend(mode);
             hints.extend(step);
             hints.push(next);
         }
@@ -132,7 +114,6 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
                 hints.push(OPEN.hint_as("read").kept());
             }
             hints.extend(step);
-            hints.extend(mode);
             if list.is_some() && view.filter.is_empty() {
                 let all = list.is_some_and(|l| l.all_ticked());
                 hints.push(ALL.hint_as(if all { "untick all" } else { "tick all" }));
@@ -148,21 +129,16 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             } else {
                 "tree"
             }));
-            if view.prefetched.is_none() {
-                hints.push(crate::hints::in_app_hint());
-            }
+            hints.push(crate::hints::in_app_hint());
         }
         DiffFocus::Diff => {
             hints.push(LINES.hint().kept());
             hints.push(PAGE.hint());
             hints.extend(step);
-            hints.extend(mode);
             hints.push(BACK.hint());
             hints.push(next);
             hints.push(REVIEWED.hint());
-            if view.prefetched.is_none() {
-                hints.push(crate::hints::in_app_hint());
-            }
+            hints.push(crate::hints::in_app_hint());
         }
     }
     hints.push(match view.back {
@@ -177,9 +153,7 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
 /// the viewer reads as a level inside the modal.
 fn crumb(view: &DiffView) -> Option<String> {
     view.back.as_ref()?;
-    let url = view.pr_url.as_deref()?;
-    let (_, rest) = url.split_once("/pull/")?;
-    let number = rest.split('/').next()?;
+    let number = view.pr_review.as_ref()?.number;
     Some(format!("#{number} › "))
 }
 
@@ -188,15 +162,7 @@ fn crumb(view: &DiffView) -> Option<String> {
 pub(crate) fn diff_explanation(view: &DiffView) -> String {
     use diff_keys::*;
     let Some(list) = &view.commits else {
-        return if view.prefetched.is_some() {
-            format!(
-                "The pull request's whole diff. {} reads the file under the cursor; {} walks the panels.",
-                OPEN.label(),
-                PANEL.label()
-            )
-        } else {
-            String::new()
-        };
+        return String::new();
     };
     if !list.loaded {
         return "Reading the branch's commits…".to_string();
@@ -210,27 +176,18 @@ pub(crate) fn diff_explanation(view: &DiffView) -> String {
             "The uncommitted changes. {tick} on a commit ticks it, to read several at once."
         ),
         Some(Showing::Row(_)) if ticked == 0 => format!(
-            "The commit under the cursor. {tick} ticks commits to read several — together or one at a time."
+            "The commit under the cursor. {tick} ticks commits to read several together."
         ),
-        Some(Showing::Row(_)) if ticked == 1 => {
-            format!("The one ticked row. {tick} on another reads them together.")
-        }
         Some(Showing::Row(_)) => {
-            let (k, n) = list.step_place().unwrap_or((1, ticked));
-            format!(
-                "Commit {k} of the {n} ticked, oldest first. {} steps; {} reads them together.",
-                STEP.label(),
-                MODE.label()
-            )
+            format!("The one ticked row. {tick} on another reads them together.")
         }
         Some(Showing::Together(_)) if list.all_ticked() => format!(
             "Every commit made on the branch since {base} — none that merging {base} in brought. {} unticks them.",
             ALL.label()
         ),
         Some(Showing::Together(rows)) => format!(
-            "The {} ticked as one diff. {} reads them one at a time.",
-            rows.len(),
-            STEP.label()
+            "The {} ticked as one diff. {tick} on one leaves it out.",
+            rows.len()
         ),
     }
 }
@@ -362,11 +319,10 @@ fn draw_commits(
     let mut block = panel_block(&title, focused, th);
     let ticked = list.ticked.len();
     if ticked > 0 {
-        let how = match (ticked, list.one_at_a_time) {
-            (1, _) => "1 ticked".to_string(),
-            _ if list.all_ticked() && !list.one_at_a_time => "all ticked · together".to_string(),
-            (n, false) => format!("{n} ticked · together"),
-            (n, true) => format!("{n} ticked · one at a time"),
+        let how = match ticked {
+            1 => "1 ticked".to_string(),
+            _ if list.all_ticked() => "all ticked · together".to_string(),
+            n => format!("{n} ticked · together"),
         };
         block = block.title_bottom(
             Line::from(Span::styled(
@@ -660,23 +616,18 @@ fn draw_files(
 }
 
 /// What the reading pane reads, as its border names it — the commit on
-/// screen, what was ticked, the uncommitted changes, a pull request — and,
-/// stepping through the ticked one at a time, its place among them.
-fn reading(view: &DiffView) -> (String, Option<(usize, usize)>) {
-    if let Some(list) = &view.commits {
-        let title = list
+/// screen, what was ticked, the uncommitted changes, a pull request.
+fn reading(view: &DiffView) -> String {
+    let title = match &view.commits {
+        Some(list) => list
             .showing()
-            .and_then(|showing| list.reading_title(&showing));
-        return (
-            title.unwrap_or_else(|| view.branch.clone()),
-            list.step_place(),
-        );
-    }
-    let title = view.head.iter().find_map(|line| match line {
-        crate::diff_doc::Head::Title(title) => Some(title.clone()),
-        _ => None,
-    });
-    (title.unwrap_or_else(|| view.branch.clone()), None)
+            .and_then(|showing| list.reading_title(&showing)),
+        None => view.head.iter().find_map(|line| match line {
+            crate::diff_doc::Head::Title(title) => Some(title.clone()),
+            _ => None,
+        }),
+    };
+    title.unwrap_or_else(|| view.branch.clone())
 }
 
 /// The reading pane: the selected file's diff — or, on a tree directory's
@@ -686,16 +637,12 @@ fn reading(view: &DiffView) -> (String, Option<(usize, usize)>) {
 /// Returns the diff's own rect and the scroll it was drawn at, clamped.
 fn draw_diff(f: &mut Frame, view: &DiffView, area: Rect, th: Theme) -> (Rect, usize) {
     let focused = view.focus == DiffFocus::Diff;
-    let (title, place) = reading(view);
+    let title = reading(view);
     let facts = &view.doc.facts;
     let facts_style = Style::default().fg(if focused { th.accent } else { th.muted });
-    let mut right: Vec<Span> = Vec::new();
-    if let Some((k, n)) = place {
-        right.push(Span::styled(format!("{k} of {n}"), facts_style));
-    }
     // A change with no lines to count — a binary file, a mode change, a
     // pure rename — says what it is instead.
-    let what = if facts.added + facts.removed > 0 {
+    let right = if facts.added + facts.removed > 0 {
         vec![
             Span::styled(
                 format!("+{}", facts.added),
@@ -712,10 +659,6 @@ fn draw_diff(f: &mut Frame, view: &DiffView, area: Rect, th: Theme) -> (Rect, us
             .map(|status| vec![Span::styled(status, facts_style)])
             .unwrap_or_default()
     };
-    if !right.is_empty() && !what.is_empty() {
-        right.push(Span::styled(" · ", Style::default().fg(th.dim)));
-    }
-    right.extend(what);
     let right_w = spans_width(&right);
     // The border's corners and the spaces around each title.
     let room =
@@ -817,7 +760,7 @@ mod tests {
         let diff = format!(
             "diff --git a/src/retry.rs b/src/retry.rs\n--- a/src/retry.rs\n+++ b/src/retry.rs\n@@ -1,2 +1,3 @@ pub fn retry()\n fn a() {{}}\n+    let wait = \"{long}\";\n-old\n context"
         );
-        view.head = view.commits.as_ref().unwrap().commits[2].head(0, Some("commit 1 of 2"));
+        view.head = view.commits.as_ref().unwrap().commits[2].head(0);
         view.show_diff(Some("src/retry.rs"), diff, false);
         view
     }
@@ -890,10 +833,7 @@ mod tests {
         let list = v.commits.as_mut().unwrap();
         list.ticked.extend([Row::Commit(0), Row::Commit(2)]);
         let text = crate::hints::text(&diff_hints(&v), 200);
-        assert!(text.contains("⌘G one at a time · ⇧←/⇧→ step"), "{text}");
-        v.commits.as_mut().unwrap().toggle_mode();
-        let text = crate::hints::text(&diff_hints(&v), 200);
-        assert!(text.contains("⌘G together"), "{text}");
+        assert!(!text.contains("⇧←/⇧→"), "ticked: nothing to step: {text}");
         v.focus = DiffFocus::Diff;
         let text = crate::hints::text(&diff_hints(&v), 200);
         assert!(text.starts_with("↑↓ scroll · PgUp/PgDn page"), "{text}");
@@ -903,7 +843,7 @@ mod tests {
         pr.commits = None;
         let text = crate::hints::text(&diff_hints(&pr), 200);
         assert!(!text.contains('⇧') || text.contains("⇧↑"), "{text}");
-        assert!(!text.contains("⌘G") && !text.contains("Space"), "{text}");
+        assert!(!text.contains("Space"), "{text}");
     }
 
     /// The explanation says what is on screen in each state, and the keys
@@ -923,13 +863,6 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("⌘A unticks"), "{text}");
-        let list = v.commits.as_mut().unwrap();
-        list.toggle_mode();
-        assert!(
-            diff_explanation(&v).starts_with("Commit 2 of the 3 ticked"),
-            "stepping starts on the cursor's commit: {}",
-            diff_explanation(&v)
-        );
     }
 
     /// `⌘O` opens the file at the line at the top of the diff: the first
@@ -1039,12 +972,5 @@ mod tests {
             !text.contains("The webhook dispatcher drops events"),
             "no body over the diff\n{text}"
         );
-        // Stepping through the ticked, the place joins the counts.
-        let mut v = view();
-        let list = v.commits.as_mut().unwrap();
-        list.ticked.extend([Row::Commit(0), Row::Commit(2)]);
-        list.toggle_mode();
-        let (text, _) = screen(v, 150, 42);
-        assert!(text.contains("of 2 · +1 −1 ╮"), "{text}");
     }
 }

@@ -84,11 +84,9 @@ Linear option in one place ([Linear](#linear)).
 | `show_workspaces` | bool | `true` | — (retired) | Through 0.33, **Workspaces bar** (Settings → Appearance): whether the bar of WORKSPACE tabs was drawn across the top. Workspaces are gone — every project is in the one list the PROJECT TABS open from — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `black_background` | bool | `true` | Appearance | BLACK BACKGROUND: paint the whole window pure black — grid, cards, session pane, overlays — instead of leaving it on the terminal's own background (a dark gray in a stock Ghostty). Only cells nothing else colored change: selection fills, the FOCUSED PANEL TINT and the colors a session draws itself sit on top as before. Off keeps the terminal's background, transparency or image included. |
 | `hide_card_prompt` | bool | `false` | — (retired) | Through 0.40, **Card prompt** (Settings → Appearance, `shown` / `hidden`): `hidden` left the last prompt off every session card on the GRID. Every card shows it now, so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
-| `card_issue_number` | bool | `true` | Appearance | Show the `#15` of the GitHub issue a session was started from (an issue session, launched out of the issues modal) at the right end of its card on the GRID (**Card issue number**, `on` / `off`). The number is a link: a click lands the cursor on the card and opens the issue in the browser, as `⇧I` does. Cards not started from an issue are unchanged. |
-| `hide_draft_prs` | bool | `false` | Appearance | Leave draft pull requests out of the grid's PR & ISSUE COUNTS and the jump list's (`⌘K`) pull-request rows, so browsing what's open shows only the rows asking for a reviewer; the PULL REQUESTS MODAL lists drafts either way. A view filter, not a fetch filter: the open-list lookup still fetches the drafts and the PR CACHE still holds them, so `shown` brings them back at once and a draft marked ready joins the rows on the refresh that says so. Sessions and the pull request under their cards are never hidden. |
+| `hide_draft_prs` | bool | `false` | Appearance | Leave draft pull requests out of the grid's PR COUNT and the jump list's (`⌘K`) pull-request rows, so browsing what's open shows only the rows asking for a reviewer; the PULL REQUESTS MODAL lists drafts either way. A view filter, not a fetch filter: the open-list lookup still fetches the drafts and the PR CACHE still holds them, so `shown` brings them back at once and a draft marked ready joins the rows on the refresh that says so. Sessions and the pull request under their cards are never hidden. |
 | `diff_tree_view` | bool | `true` | Review | **Files as a tree**: the DIFF VIEWER (`⌘E`, and a pull request's diff) lists its files as a directory tree rather than flat paths. `⌘B` flips one open viewer; this is how the next one opens. Replaces the tree state the UI-state blob carried through 0.42, which no longer decides it. |
 | `diff_start` | string | `"commits"` | Review | **Start on**: which DIFF VIEWER panel has the keys as it opens — `commits` (the COMMIT LIST, so the ticks come first; a viewer with no commit list starts on its files), `files` or `diff`. `Tab` moves on from there. Anything off the list reads as `commits`. |
-| `diff_ticked` | string | `"together"` | Review | **Ticked commits**: how two or more ticked commits read as the viewer opens — `together` as one diff, or `one at a time` from the oldest (`⌘G` flips it). |
 | `pr_merge_method` | string | `"squash"` | Review | **Merge method**: how the PULL REQUESTS MODAL's merge (`⌘X`) opens — `squash`, `merge` (a merge commit) or `rebase`. A repo that refuses the method opens on the first one it allows. Anything off the list reads as `squash`. |
 | `pr_delete_branch` | bool | `true` | Review | **Delete merged branch**: the merge opens with the pull request's branch to be deleted from GitHub once it lands — never a fork's, never the local branch or its worktree, and not after an auto-merge. orion never deletes a long-lived branch or moves the pull requests based on it: the repo's default branch, one protected on GitHub, or the one `worktree_base_branch` names, so merging `dev` into `main` leaves `dev` alone. The form says so and its box stays off. A repo that deletes merged branches itself says so instead. |
 | `pr_draft` | bool | `false` | Review | **New PRs as drafts**: the new pull request form (`⌘N` in the PULL REQUESTS MODAL) opens with its Draft box ticked. |
@@ -100,7 +98,7 @@ Linear option in one place ([Linear](#linear)).
 | `review_model` | string | `""` | Review | **Review model**: the model that writes My week in review (`⌘⇧Y`) — `sonnet`, `opus` or `haiku`, the names the `claude` command takes. Empty is `sonnet`: measured on a week of 162 pull requests it wrote the best review in 40 to 50 seconds, where Opus took longer for no better and Haiku was slower and less accurate. Anything off the list reads as `sonnet`. |
 | `review_effort` | string | `""` | Review | **Review effort**: `medium`, `low` or `high`. Empty is `medium`; `low` is about a third quicker and drops some of the **Say** lines. |
 | `card_line_changes` | bool | `false` | — (retired) | Through 0.37, **Card line counts** (Settings → Appearance): on, each GRID card followed its checkout's changed-file count with the lines behind it. Every card does now — `↳ feat +3 files +120 -45`, the added in the DIFF VIEWER's green and the removed in its red, counted as the DIFF VIEWER shows them (tracked files against HEAD, staged or not, and every line of an untracked file as added; a binary file, or an untracked one over 1 MiB, adds nothing) by one `git diff --numstat` beside each `git status` the file count already runs; on a narrow card the word `files` goes first, then the lines, before the branch gives up a letter — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
-| `projects` | object | `{}` | Project | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Project** tab — `{"projects": {"/Users/me/src/app": {"run_command": "npm run dev", "open_command": "open http://localhost:3000"}}}`. Two rows: **Run command** (`run_command`, string, default `""`) is the RUN COMMAND `⌘⇧S` (**Start stack** in a card's or the project tab's right-click menu) starts in *that project's* worktrees — the same shell line a `.orion.json` `run` would carry, and the way to set one without committing a file; while it is set, **Start stack** runs it and never opens the file, and empty (shown as `.orion.json`) hands the decision back to the checkout's PROJECT FILE, so a project that has one needs nothing here. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer puts `.orion.json` back. The DAEMON reads it fresh at each start. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same precedence over the file's `open` and the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. The tab edits the selected project and names it on its first line; with no project in the tree its rows read `n/a`. A project with no entry reads as the defaults (an empty command in each row), and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty `run_command` or `open_command` is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
+| `projects` | object | `{}` | Project | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Project** tab — `{"projects": {"/Users/me/src/app": {"run_command": "npm run dev", "open_command": "open http://localhost:3000"}}}`. Two rows: **Run command** (`run_command`, string, default `""`) is the RUN COMMAND `⌘⇧S` (**Start stack** in a card's or the project tab's right-click menu) starts in *that project's* worktrees; empty (shown as `not set`) is none, and **Start stack** says where to set one. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer unsets it. The DAEMON reads it fresh at each start. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. The tab edits the selected project and names it on its first line; with no project in the tree its rows read `n/a`. A project with no entry reads as the defaults (an empty command in each row), and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty `run_command` or `open_command` is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
 | `hide_root_worktree` | bool | `false` | — (retired) | Through 0.27 one switch for every project (**Hide root worktree**, Settings → Experimental), then through 0.35 the fallback for a project whose `projects` entry had no **Hide root worktree** row of its own: on, that project's ROOT WORKTREE was left out of everything the grid launched into. The root is always listed now — a launch that must not land in the shared checkout cuts a fresh worktree instead (**+ new worktree** in the QUICK PROMPT's WORKTREE PICKER, `⌘.`) — so this build never reads the key, here or inside an entry, and no tab edits it; both are still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `hide_projects` | bool | `false` | — (retired) | Through 0.37, **Projects panel** (Settings → Appearance): on, the Projects panel of the old three-panel layout started collapsed to its rail. The GRID has no panels, so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `hide_worktrees` | bool | `false` | — (retired) | Through 0.37, **Worktrees panel**: the same switch for the Worktrees panel. Never read, no row, loaded and written back as stored. |
@@ -108,10 +106,10 @@ Linear option in one place ([Linear](#linear)).
 | `recent_prompts` | bool | `false` | — (retired) | Through 0.37, **Recent prompts** (Settings → Experimental): on, a session's last prompts were listed under its row. Every card carries its session's newest prompt now, whatever the key says, so this build never reads it and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `recent_prompts_count` | integer | `3` | — (retired) | Through 0.37, **Recent prompts shown**: how many of those prompts that build listed, `1` to `5`. Never read, no row, loaded and written back as stored. |
 | `show_key_combos` | bool | `false` | — (retired) | Through 0.37, **Key combo display** (Settings → Experimental): on, each key pressed on the grid was spelled at the bottom left of the screen with what it did. The KEY COMBO DISPLAY is always on now, whatever the key says — every press shows, `j - Move down`, and clears itself three seconds on ([Keys](keys.md#chips-and-readouts)) — so this build never reads it and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
-| `pr_issue_counts` | bool | `true` | — (retired) | Through 0.37, **PR & issue counts** (Settings → Experimental): off, the GRID's header dropped the `3 prs · 2 issues` beside the session count and the other projects' issues were never swept. The header always counts now — what is waiting on a repo is read off it without opening `v` or `i`, a click on either count opens that list, a count is left out until its list has landed, and a list cut off at the fetch cap counts `100+` — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
-| `quick_prompt_kind` | string | `"claude"` | Agents | Which AGENT KIND the QUICK PROMPT (`⌘N`) launches: `claude`, `codex`, `cursor`, `grok` or `opencode` — or another CLAUDE ACCOUNT's id (`claude-2`), which the **Agent** row steps through right after `claude` and shows by name, `Claude (you@example.com)`. Its model and effort come from that harness's own defaults below, so this is one name, not a third pair. A kind or an account switched off here is stepped around, and an older orion reading an account's id falls back to Claude. The NEW AGENT PICKER opens on it too, and with **Remember harness** on (Experimental) every picker-walked launch rewrites it. |
+| `pr_issue_counts` | bool | `true` | — (retired) | Through 0.37, **PR & issue counts** (Settings → Experimental): off, the GRID's header dropped the `3 prs · 2 issues` beside the session count and the other projects' issues were never swept. The header always counts its open pull requests now — what is waiting on a repo is read off it without opening `v`, a click on the count opens that list, a count is left out until its list has landed, and a list cut off at the fetch cap counts `100+` — so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
+| `quick_prompt_kind` | string | `"claude"` | Agents | Which AGENT KIND the QUICK PROMPT (`⌘N`) launches: `claude`, `codex`, `cursor`, `grok` or `opencode` — or another CLAUDE ACCOUNT's id (`claude-2`), which the **Agent** row steps through right after `claude` and shows by name, `Claude (you@example.com)`. Its model and effort come from that harness's own defaults below, so this is one name, not a third pair. A kind or an account switched off here is stepped around, and an older orion reading an account's id falls back to Claude. The NEW AGENT PICKER opens on it too. |
 | `quick_prompt_focus` | bool | `false` | Agents | QUICK PROMPT FOCUS: whether a QUICK PROMPT launch enters and locks the new session's TERMINAL PANE. Off, the keys stay on the grid, and where the cursor goes is `follow_new_session`'s. On, it outranks that key: a launch that enters the new session's pane has to go there. Only the QUICK PROMPT reads it — every other launch takes the pane. |
-| `follow_new_session` | bool | `true` | Agents | FOLLOW NEW SESSION (**Follow new**): a QUICK PROMPT launch lands the cursor on the new session's card — the grid scrolls to keep it on screen and the pane shows it, the keys still on the grid — so a run of launches can be watched going up. It selects the card and no more: entering its terminal is `quick_prompt_focus`'s. It covers every QUICK PROMPT: `⌘N`, **New agent — choose harness**'s box, **Duplicate session** on a card, and the boxes the ISSUES MODAL and the PULL REQUESTS MODAL open. Off, the cursor, the pane and the keys stay on the card you were on while the new session's card goes up in its band — first in it, stand-in rows first for a launch that cuts a fresh worktree — and the footer names the branch it went to (`started a session in feat`): the BACKGROUND LAUNCH's stillness, in the project on screen. A launch with no card under the cursor — the aim let go with `Esc`, an empty band, an empty grid — has nothing to keep and lands on its new card either way; so does every launch while `quick_prompt_focus` is on. Terminals (`t`) always come up in the pane. |
+| `follow_new_session` | bool | `true` | Agents | FOLLOW NEW SESSION (**Follow new**): a QUICK PROMPT launch lands the cursor on the new session's card — the grid scrolls to keep it on screen and the pane shows it, the keys still on the grid — so a run of launches can be watched going up. It selects the card and no more: entering its terminal is `quick_prompt_focus`'s. It covers every QUICK PROMPT: `⌘N`, **New agent — choose harness**'s box, **Duplicate session** on a card, and the box the PULL REQUESTS MODAL opens. Off, the cursor, the pane and the keys stay on the card you were on while the new session's card goes up in its band — first in it, stand-in rows first for a launch that cuts a fresh worktree — and the footer names the branch it went to (`started a session in feat`): the BACKGROUND LAUNCH's stillness, in the project on screen. A launch with no card under the cursor — the aim let go with `Esc`, an empty band, an empty grid — has nothing to keep and lands on its new card either way; so does every launch while `quick_prompt_focus` is on. Terminals (`t`) always come up in the pane. |
 | `quick_prompt_new_worktree` | bool | `false` | — (retired) | Through 0.42, **New worktree** under **Quick prompt** (Settings → Agents, and the onboarding wizard's Worktrees page): on, every QUICK PROMPT started aimed at a fresh worktree, and the box's `[ ] new worktree` toggle (`^N`) flipped one launch. Every box starts in the checkout under the grid's cursor now — the project's root branch with nothing selected — and a fresh worktree is the first row of the box's WORKTREE PICKER (`⌘.` / `^T`, **+ new worktree**), so this build never reads the key and no tab edits it; it is still loaded and written back as stored for an older orion sharing the file ([Compatibility rules](#compatibility-rules)). |
 | `claude_enabled` | bool | `false` | Agents | HARNESS TOGGLE. Off leaves Claude — the default CLAUDE ACCOUNT — out of the NEW AGENT PICKER, and skips the standing PREWARM POOL slot; existing sessions keep attaching and resuming. Every harness starts off — a file that never names the key reads as off too — until the ONBOARDING wizard or this tab turns it on, so the picker only offers what you use. Its other accounts keep switches of their own (see [Claude accounts](#claude-accounts)). |
 | `codex_enabled` | bool | `false` | Agents | HARNESS TOGGLE for Codex, same rules. |
@@ -168,7 +166,7 @@ orion runs programs it does not ship: the editor behind the BUILT-IN EDITOR, and
 `install.sh` makes sure of three after orion itself: git, which it stops without; fresh, the editor
 with VS Code's keys every file opens in (`brew install fresh-editor`; without Homebrew, a pointer to
 its install page); and gh, which pull
-requests and issues are read with (`brew install gh`, else a pointer to its install page); and on a
+requests are read with (`brew install gh`, else a pointer to its install page); and on a
 Mac, Ghostty, which Orion.app is made from (`brew install --cask ghostty`; without Homebrew, the
 newest disk image Ghostty's own update feed lists, copied into `/Applications` — or `~/Applications`
 when that can't be written — once the app inside is seen to be signed by Ghostty's team). It says nothing about what is already there, and `--no-deps` (`curl … | sh -s
@@ -522,59 +520,36 @@ version breaks the other:
 `config.json` carries no version number. An older build could only refuse a newer file or ignore the
 number, and the keys a file holds already tell a newer build everything it needs.
 
-## The project file (`.orion.json`)
+## Run and open commands
 
-The PROJECT FILE tells orion how a repository is run. Commit it at the repo root, beside
-`package.json` or `Cargo.toml`, and every checkout of the project carries it:
+Each project can carry two shell command lines, **Run command** and **Open command** on the SETTINGS
+OVERLAY's Project tab (`s`), kept in `config.json` under the project's `projects` entry. Both run in the
+selected worktree's checkout:
 
-```json
-{
-  "run": "npm run dev",
-  "open": "open http://localhost:3000"
-}
-```
-
-Both keys are optional shell command lines, and both run in the selected worktree's checkout:
-
-- **`run`** — the RUN COMMAND: how a worktree's stack starts. `⌘⇧S` on the grid, or **Start stack** in
-  a card's right-click menu (or the project tab's), starts it and moves the pane onto it; the same key,
-  or the row now **Stop stack**, stops it. The DAEMON runs it in a RUN TERMINAL: your login shell
-  (`$SHELL -l -i -c`, the wrapper an agent launch uses, so `npm`, `bun` or `mise` resolve the way they
-  do typed) running that line and nothing else. Its process is the worktree's RUNNING state — it is a
-  terminal in the worktree's band, its `▶` lit while the process lives. Like every session it outlives
+- **Run command** — the RUN COMMAND: how a worktree's stack starts, `npm run dev` say. `⌘⇧S` on the
+  grid, or **Start stack** in a card's right-click menu (or the project tab's), starts it and moves the
+  pane onto it; the same key, or the row now **Stop stack**, stops it. The DAEMON runs it in a RUN
+  TERMINAL: your login shell (`$SHELL -l -i -c`, the wrapper an agent launch uses, so `npm`, `bun` or
+  `mise` resolve the way they do typed) running that line and nothing else. Its process is the
+  worktree's RUNNING state — it is a terminal in the worktree's band, its `▶` lit while the process
+  lives. Like every session it outlives
   the TUI and every client sees it, and the idle reaper never takes it. Stopping sends the run a `^C`,
   as you would at a terminal, so its own trap winds down what it started — a compose stack, a dev
   server — in the pane; a second stop, or two minutes without it exiting, kills the whole process tree
   and removes the row. A command that exits on its own, or on its `^C`, leaves its row behind, dimmed;
   attaching it replays how the run ended, and nothing but **Start stack** runs it again — not an
   attach, not the prewarm sweep. There is one run per worktree: a second client's start on a worktree
-  already running never starts another. With no run command anywhere, a worktree whose checkout has a
-  compose stack runs `docker compose start` on it in the same terminal instead.
-- **`open`** — the OPEN COMMAND. `⌘O` → **Open command** on a worktree fires it once, from the TUI
-  rather than the DAEMON, since what it opens — a browser tab, an editor — belongs on the machine you
-  are sitting at. It runs through `$SHELL -c` with its output discarded, and orion does not wait for
-  it. It answers from any card: the worktree is the one whose band the cursor is on. A card's
-  right-click menu has **Open** too, and **Open checkout in editor** can be given a key of its own in
-  Settings → Hotkeys.
+  already running never starts another.
+- **Open command** — the OPEN COMMAND, `open http://localhost:3000` say. `⌘O` → **Open command** on a
+  worktree fires it once, from the TUI rather than the DAEMON, since what it opens — a browser tab, an
+  editor — belongs on the machine you are sitting at. It runs through `$SHELL -c` with its output
+  discarded, and orion does not wait for it. It answers from any card: the worktree is the one whose
+  band the cursor is on. A card's right-click menu has **Open** too, and **Open checkout in editor**
+  can be given a key of its own in Settings → Hotkeys.
 
-The file is read fresh at every press, so an edit applies on the next **Start stack** or **Open command**. Orion looks
-in the worktree's own checkout first, so a branch can carry commands of its own, and falls back to the
-project's main checkout, so a worktree cut before the file was committed still runs. The first file found
-is the whole answer: a worktree's file with no `open` does not borrow the main checkout's. A missing
-file, a missing key, or JSON that doesn't parse is a one-line footer message saying what to fix; unknown
-keys are ignored.
-
-Both commands have a second home: **Run command** and **Open command** on the SETTINGS OVERLAY's
-Project tab (`s`), which keep them in `config.json` under the project's `projects` entry instead of in
-the repository — for a project you would rather not commit a file to, or one whose commands are yours
-alone. Set, the row is what **Start stack** runs, or `Shift+Enter` opens, in every worktree of that project, and the
-file is not consulted for that command; empty, the file decides as above. They are one project's
-settings, so each project can run and open its own way, and the footer names both places when neither
-has the command. See `projects` in [Every setting](#every-setting).
-
-Unlike the WORKTREE HOOKS below, which orion runs on its own and so never takes from a checkout,
-nothing in the PROJECT FILE runs until you press its key on that worktree — the same trust as typing the
-command into a shell there.
+Both are read fresh at every press, so an edit applies on the next **Start stack** or **Open command**.
+They are one project's settings, so each project can run and open its own way; with none set, the
+footer says so and names Settings → Projects. See `projects` in [Every setting](#every-setting).
 
 ## Worktree containers
 
@@ -613,8 +588,8 @@ How a project is matched, and when it is left alone:
 While a checkout is still there, its stack's state is on the grid: the DAEMON asks `docker ps` every
 5 seconds (`ORION_STACK_POLL_MS` changes that; it waits 30 seconds after docker stops answering) and
 every client draws a `⬡` at the right end of the band of a worktree with a stack — green while the
-stack runs, faint while it is stopped. `⇧S` opens STACKS, every compose stack on the machine with the
-worktree it belongs to, to start, stop or take one down ([Keys](keys.md)).
+stack runs, faint while it is stopped. The DAEMON asks only while a client is connected: with none,
+docker is left alone.
 
 `orion doctor` lists the compose projects whose every container was started in a directory that is
 gone — a checkout deleted while this was `off`, or deleted outside orion — with the
@@ -709,10 +684,9 @@ screen, so a year of use reads and writes what a week does:
 | What | Kept |
 |---|---|
 | Open pull requests | the 100 newest per project |
-| Merged pull requests | every one merged in the last 7 days, read a page of 100 at a time until the week is covered |
+| Merged pull requests | the ones merged in the last 7 days among the 100 most recently touched |
 | Linear issues | open ones — 100 of yours, 250 of your teams' — and the ones done in the last 7 days, 50 of each |
-| GitHub issues | the 100 newest open per project |
-| Pull request pages and diffs (`pr-cache/details/`, `pr-cache/diffs/`) | one file each, while the pull request is on a row; written only when read again |
+| Pull request pages (`pr-cache/details/`) | one file each, while the pull request is on a row; written only when read again |
 | Linear branch links (`linear-links.json`) | until 90 days after they were last linked, once no checkout is on the branch and no open pull request is from it |
 | Ticked todos (`todos/`) | 120 days after they were ticked, pruned when the list loads; a group left with nothing in it goes with them. Open todos stay until you tick or delete them |
 | Week in review (`reviews/`) | the last 12 per project, each with what it was written from; a second one for the same week and scope takes the first's place |

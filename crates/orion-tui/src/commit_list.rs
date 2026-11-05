@@ -23,8 +23,7 @@
 //!
 //! **What is on screen** ([`CommitList::showing`]): with nothing ticked,
 //! the row under the cursor — `⇧←`/`⇧→` walk it from the files. Ticked
-//! rows are read TOGETHER, as one diff, or ONE AT A TIME, stepped through
-//! oldest first (`commit 2 of 3`). A clean checkout opens with every
+//! rows are read TOGETHER, as one diff. A clean checkout opens with every
 //! commit ticked: the whole branch, what its pull request shows; a dirty
 //! one opens on its uncommitted changes, nothing ticked. Nothing is
 //! remembered from one opening to the next.
@@ -138,14 +137,12 @@ impl Commit {
     }
 
     /// The commit's message as the REVIEW HEAD over each of its files: its
-    /// subject — after `lead`, `commit 2 of 3` stepping one at a time — who
-    /// and when, and the body.
-    pub fn head(&self, now_ms: i64, lead: Option<&str>) -> Vec<Head> {
-        let title = match lead {
-            Some(lead) => format!("{lead} · {}", self.subject),
-            None => self.subject.clone(),
-        };
-        let mut head = vec![Head::Title(title), Head::Meta(self.meta(now_ms))];
+    /// subject, who and when, and the body.
+    pub fn head(&self, now_ms: i64) -> Vec<Head> {
+        let mut head = vec![
+            Head::Title(self.subject.clone()),
+            Head::Meta(self.meta(now_ms)),
+        ];
         if !self.body.is_empty() {
             head.push(Head::Blank);
             head.extend(self.body.lines().map(|l| Head::Prose(l.to_string())));
@@ -236,7 +233,7 @@ pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> Commit
 /// commits, newest first, and no uncommitted row, since nothing checked
 /// out is being read. None when the repo has no such commit, no such
 /// base — never another branch standing in for it — or nothing in common
-/// with it: the pull request is read from GitHub instead.
+/// with it: the head and base are then fetched and it is read again.
 pub fn read_tip(root: &Path, base: &str, tip: &str) -> Option<CommitListing> {
     if !has_commit(root, tip) {
         return None;
@@ -548,8 +545,7 @@ pub enum Row {
 /// What the COMMIT LIST puts on screen ([`CommitList::showing`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Showing {
-    /// One row: the cursor's with nothing ticked, the only ticked one, or
-    /// the step ONE AT A TIME is on.
+    /// One row: the cursor's with nothing ticked, or the only ticked one.
     Row(Row),
     /// Two or more ticked rows read TOGETHER, top to bottom.
     Together(Vec<Row>),
@@ -571,12 +567,8 @@ pub struct CommitList {
     pub uncommitted: Option<Stat>,
     /// Index into the rows ([`CommitList::row`]).
     pub selected: usize,
-    /// The ticked rows: never the `older` row.
+    /// The ticked rows, read TOGETHER: never the `older` row.
     pub ticked: BTreeSet<Row>,
-    /// Ticked rows read ONE AT A TIME rather than TOGETHER.
-    pub one_at_a_time: bool,
-    /// The ticked row ONE AT A TIME is on.
-    pub step: Option<Row>,
     /// The next page in flight, by ticket.
     pub paging: Option<u64>,
     /// The first row on screen, as last drawn, and the cursor it was
@@ -652,23 +644,12 @@ impl CommitList {
         self.row(self.selected)
     }
 
-    /// Clamped absolute cursor; true when it moved. ONE AT A TIME, landing
-    /// on a ticked row steps onto it.
+    /// Clamped absolute cursor; true when it moved.
     pub fn select(&mut self, index: i64) -> bool {
         let clamped = clamp_selection(index, self.row_count());
         let changed = clamped != self.selected;
         self.selected = clamped;
-        if self.one_at_a_time {
-            if let Some(row) = self.selected_row().filter(|r| self.ticked.contains(r)) {
-                self.step = Some(row);
-            }
-        }
         changed
-    }
-
-    /// The ticked rows, oldest first: the order ONE AT A TIME steps in.
-    pub fn steps(&self) -> Vec<Row> {
-        self.ticked.iter().rev().copied().collect()
     }
 
     /// Whether every commit read so far is ticked — the list's "all".
@@ -677,25 +658,13 @@ impl CommitList {
             && (0..self.commits.len()).all(|i| self.ticked.contains(&Row::Commit(i)))
     }
 
-    /// Tick the row under the cursor, or untick it. ONE AT A TIME, a step
-    /// unticked from under the reader hands the steps to its older
-    /// neighbour (the newer one when it was the oldest).
+    /// Tick the row under the cursor, or untick it.
     pub fn toggle_tick(&mut self) {
         let Some(row) = self.selected_row().filter(|r| *r != Row::Older) else {
             return;
         };
         if !self.ticked.remove(&row) {
             self.ticked.insert(row);
-            return;
-        }
-        if self.step == Some(row) {
-            let steps = self.steps();
-            self.step = steps
-                .iter()
-                .rev()
-                .find(|r| **r > row)
-                .or_else(|| steps.iter().find(|r| **r < row))
-                .copied();
         }
     }
 
@@ -705,7 +674,6 @@ impl CommitList {
     pub fn tick_all(&mut self) {
         if self.all_ticked() {
             self.ticked.clear();
-            self.step = None;
         } else {
             self.ticked.extend((0..self.commits.len()).map(Row::Commit));
         }
@@ -718,105 +686,31 @@ impl CommitList {
             return;
         };
         self.ticked.clear();
-        self.step = None;
-        self.one_at_a_time = false;
         self.select(index as i64);
     }
 
-    /// Read the ticked ONE AT A TIME from the oldest — the **Ticked
-    /// commits** SETTING's `one at a time`, as a viewer opens. Nothing
-    /// changes with fewer than two ticked.
-    pub fn start_one_at_a_time(&mut self) {
-        if self.ticked.len() < 2 {
-            return;
-        }
-        self.one_at_a_time = true;
-        self.step = self.steps().first().copied();
-        self.follow_step();
-    }
-
-    /// `^G`: TOGETHER and ONE AT A TIME, the other way round. Stepping
-    /// starts on the cursor's row when it is ticked, else on the oldest.
-    pub fn toggle_mode(&mut self) {
-        self.one_at_a_time = !self.one_at_a_time;
-        if self.one_at_a_time {
-            let here = self.selected_row().filter(|r| self.ticked.contains(r));
-            self.step = here.or_else(|| self.steps().first().copied());
-            self.follow_step();
-        }
-    }
-
     /// `⇧←` / `⇧→`: older or newer. With nothing ticked the cursor walks
-    /// the list. ONE AT A TIME, the step walks the ticked rows. TOGETHER,
-    /// it starts stepping: `⇧→` on the oldest — commit 1 — `⇧←` on the
-    /// newest. True when what is on screen changed.
+    /// the list, commit by commit; what is ticked reads together, so with
+    /// anything ticked there is nothing to step. True when what is on
+    /// screen changed.
     pub fn step_by(&mut self, older: bool) -> bool {
-        let steps = self.steps();
-        if steps.is_empty() {
-            let delta = if older { 1 } else { -1 };
-            return self.select(self.selected as i64 + delta);
-        }
-        if steps.len() == 1 {
+        if !self.ticked.is_empty() {
             return false;
         }
-        if !self.one_at_a_time {
-            self.one_at_a_time = true;
-            self.step = if older { steps.last() } else { steps.first() }.copied();
-            self.follow_step();
-            return true;
-        }
-        let at = self
-            .step
-            .and_then(|s| steps.iter().position(|r| *r == s))
-            .unwrap_or(0);
-        let next = if older {
-            at.checked_sub(1)
-        } else {
-            (at + 1 < steps.len()).then_some(at + 1)
-        };
-        match next {
-            Some(next) => {
-                self.step = Some(steps[next]);
-                self.follow_step();
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// The cursor onto the step, so the list's highlight is the commit on
-    /// screen.
-    fn follow_step(&mut self) {
-        if let Some(index) = self.step.and_then(|s| self.index_of(s)) {
-            self.selected = index;
-        }
-    }
-
-    /// ONE AT A TIME's place: `(k, n)`, commit `k` of the `n` ticked.
-    pub fn step_place(&self) -> Option<(usize, usize)> {
-        if !self.one_at_a_time {
-            return None;
-        }
-        let steps = self.steps();
-        let at = steps.iter().position(|r| Some(*r) == self.step)?;
-        (steps.len() > 1).then_some((at + 1, steps.len()))
+        let delta = if older { 1 } else { -1 };
+        self.select(self.selected as i64 + delta)
     }
 
     /// What goes on screen: with nothing ticked, the cursor's row (none on
     /// the `older` row, which is a page to read); one ticked row, that
-    /// row; more, all of them TOGETHER or the step ONE AT A TIME is on.
+    /// row; more, all of them TOGETHER.
     pub fn showing(&self) -> Option<Showing> {
-        let steps = self.steps();
-        match steps.len() {
+        match self.ticked.len() {
             0 => self
                 .selected_row()
                 .filter(|r| *r != Row::Older)
                 .map(Showing::Row),
-            1 => Some(Showing::Row(steps[0])),
-            _ if self.one_at_a_time => {
-                let step = self.step.filter(|s| steps.contains(s)).unwrap_or(steps[0]);
-                Some(Showing::Row(step))
-            }
+            1 => self.ticked.first().copied().map(Showing::Row),
             _ => Some(Showing::Together(self.ticked.iter().copied().collect())),
         }
     }
@@ -934,23 +828,15 @@ impl CommitList {
     }
 
     /// The REVIEW HEAD over each file of what `showing` puts on screen: a
-    /// commit's message — `commit 2 of 3 · …` stepping one at a time — or,
-    /// read together, what was ticked.
+    /// commit's message, or, read together, what was ticked.
     pub fn head(&self, showing: &Showing, now_ms: i64) -> Vec<Head> {
-        let lead = self.step_place().map(|(k, n)| format!("commit {k} of {n}"));
         match showing {
             Showing::Row(Row::Commit(i)) => self
                 .commits
                 .get(*i)
-                .map(|c| c.head(now_ms, lead.as_deref()))
+                .map(|c| c.head(now_ms))
                 .unwrap_or_default(),
-            Showing::Row(Row::Uncommitted) => match lead {
-                Some(lead) => vec![
-                    Head::Title(format!("{lead} · the uncommitted changes")),
-                    Head::Meta("the working tree against HEAD, untracked files included".into()),
-                ],
-                None => Vec::new(),
-            },
+            Showing::Row(Row::Uncommitted) => Vec::new(),
             Showing::Row(Row::Older) => Vec::new(),
             Showing::Together(rows) => self.together_head(rows, now_ms),
         }
@@ -1069,11 +955,7 @@ impl CommitList {
 /// Put the COMMIT LIST read with the viewer's opening into `view` and put
 /// up what it opens on: a clean checkout's whole branch, ticked.
 pub fn install(view: &mut DiffView, listing: CommitListing) {
-    let mut list = CommitList::from_listing(listing);
-    if view.open_one_at_a_time {
-        list.start_one_at_a_time();
-    }
-    view.commits = Some(Box::new(list));
+    view.commits = Some(Box::new(CommitList::from_listing(listing)));
     show_selected(view);
 }
 
@@ -1462,7 +1344,7 @@ mod tests {
             stat: None,
         };
         assert_eq!(
-            commit.head(1_000_000 + 3 * 3_600_000, None),
+            commit.head(1_000_000 + 3 * 3_600_000),
             vec![
                 Head::Title("Add retry".into()),
                 Head::Meta("abc · Tess · 3h ago".into()),
@@ -1476,9 +1358,9 @@ mod tests {
             ..commit
         };
         assert_eq!(
-            bare.head(1_000_000, Some("commit 2 of 3")),
+            bare.head(1_000_000),
             vec![
-                Head::Title("commit 2 of 3 · Add retry".into()),
+                Head::Title("Add retry".into()),
                 Head::Meta("abc · Tess · just now".into()),
             ]
         );
@@ -1777,11 +1659,11 @@ mod tests {
         assert_eq!(clean.selected_row(), Some(Row::Commit(0)));
     }
 
-    /// Ticking and the two ways to read what is ticked: nothing ticked is
-    /// the cursor's row; ticked rows read together, or one at a time,
-    /// oldest first, the cursor riding along; `^A` all and none.
+    /// Ticking: nothing ticked is the cursor's row, which `⇧←`/`⇧→` walk
+    /// commit by commit; ticked rows read together, and there is nothing to
+    /// step through; `^A` all and none.
     #[test]
-    fn ticks_read_together_or_one_at_a_time() {
+    fn ticked_commits_read_together() {
         let mut list = list_of(4, true, 4);
         list.select(2);
         assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(1))));
@@ -1814,43 +1696,10 @@ mod tests {
             "the cursor only aims the ticks now"
         );
 
-        // ⇧→ from together starts stepping at the oldest.
-        assert!(list.step_by(false));
-        assert!(list.one_at_a_time);
-        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(2))));
-        assert_eq!(list.step_place(), Some((1, 3)));
-        assert_eq!(
-            list.selected_row(),
-            Some(Row::Commit(2)),
-            "the cursor rides along"
-        );
-        assert!(list.step_by(false));
-        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(0))));
-        assert!(list.step_by(false));
-        assert_eq!(list.step_place(), Some((3, 3)));
-        assert_eq!(list.showing(), Some(Showing::Row(Row::Uncommitted)));
-        assert!(!list.step_by(false), "the newest ends it");
-        assert!(list.step_by(true));
-        assert_eq!(list.step_place(), Some((2, 3)));
-        assert_eq!(
-            list.head(&list.showing().unwrap(), 0)[0],
-            Head::Title("commit 2 of 3 · commit 0".into())
-        );
+        assert!(!list.step_by(false), "nothing to step through");
+        assert!(!list.step_by(true));
 
-        // Unticking the step hands it to its older neighbour.
-        list.toggle_tick();
-        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(2))));
-        assert_eq!(list.step_place(), Some((1, 2)));
-        // Landing the cursor on a ticked row steps onto it; an unticked one
-        // leaves the step where it is.
-        list.select(2);
-        assert_eq!(list.showing(), Some(Showing::Row(Row::Commit(2))));
-        list.select(0);
-        assert_eq!(list.showing(), Some(Showing::Row(Row::Uncommitted)));
-
-        // ^G: back to together; ^A ticks every commit, then none at all.
-        list.toggle_mode();
-        assert!(!list.one_at_a_time);
+        // ^A ticks every commit, then none at all.
         list.tick_all();
         assert!(list.all_ticked());
         assert!(
@@ -1859,7 +1708,11 @@ mod tests {
         );
         list.tick_all();
         assert!(list.ticked.is_empty());
-        assert_eq!(list.showing(), Some(Showing::Row(Row::Uncommitted)));
+        assert_eq!(
+            list.showing(),
+            Some(Showing::Row(Row::Commit(2))),
+            "the cursor's row again"
+        );
     }
 
     /// Where a TOGETHER diff's ranges begin and end: side by side is one
@@ -2058,34 +1911,6 @@ mod tests {
         assert_eq!(paths(&view), ["a.txt"]);
         assert!(view.diff.contains("+alpha"));
         assert_eq!(view.scroll, 0, "a new commit opens at the top");
-    }
-
-    /// ONE AT A TIME through a real branch: each step's own files under
-    /// `commit k of n`.
-    #[test]
-    fn stepping_one_at_a_time_reads_each_ticked_commit() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = branch_repo(&dir);
-        commit(&repo, "a.txt", "a\n", "add a");
-        commit(&repo, "b.txt", "b\n", "add b");
-        commit(&repo, "c.txt", "c\n", "add c");
-        let mut view = opened(&repo);
-        assert_eq!(paths(&view), ["a.txt", "b.txt", "c.txt"]);
-        // Untick the middle one: a and c, together, in two ranges.
-        select(&mut view, Row::Commit(1));
-        view.commits.as_mut().unwrap().toggle_tick();
-        show_selected(&mut view);
-        assert_eq!(paths(&view), ["a.txt", "c.txt"]);
-        assert!(matches!(&view.scope, DiffScope::Ranges(r) if r.len() == 2));
-
-        view.commits.as_mut().unwrap().toggle_mode();
-        show_selected(&mut view);
-        assert_eq!(paths(&view), ["a.txt"], "commit 1 of 2 is the oldest");
-        assert_eq!(view.head[0], Head::Title("commit 1 of 2 · add a".into()));
-        view.commits.as_mut().unwrap().step_by(false);
-        show_selected(&mut view);
-        assert_eq!(paths(&view), ["c.txt"]);
-        assert_eq!(view.head[0], Head::Title("commit 2 of 2 · add c".into()));
     }
 
     /// ✓ marks taken on a commit last while the modal is up: put away

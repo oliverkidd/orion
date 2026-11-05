@@ -8,7 +8,7 @@ use crate::app::{
     PromptDialog, PromptKind, SessionRow, SettingsView, SubmenuKind, TermSelection,
     WorktreeRollback,
 };
-use crate::app::{AlertKind, PrCommentAnswer, PrDiffAnswer};
+use crate::app::{AlertKind, PrCommentAnswer};
 use crate::editor_term::{EditorEvent, EditorTerm};
 use crate::pull_request::Lookup;
 use crate::text_input::TextInput;
@@ -332,10 +332,6 @@ async fn main_loop(
     let (prs_tx, mut prs_rx) = tokio::sync::mpsc::unbounded_channel::<ListLanded>();
     // One pull request's body and conversation, for the preview pane.
     let (detail_tx, mut detail_rx) = tokio::sync::mpsc::unbounded_channel::<DetailLanded>();
-    // A whole `gh pr diff`, which opens the diff modal when it lands — or
-    // refreshes the one already open on the cached copy.
-    let (prdiff_tx, mut prdiff_rx) = tokio::sync::mpsc::unbounded_channel::<PrDiffAnswer>();
-    app.pr_diff_tx = Some(prdiff_tx);
     // A finished `gh pr comment`, which flashes its outcome when it lands
     // — and re-reads the pull request so the pane shows what was said.
     let (prcomment_tx, mut prcomment_rx) =
@@ -352,22 +348,16 @@ async fn main_loop(
         tokio::sync::mpsc::unbounded_channel::<crate::week_review::Answer>();
     app.week_review.tx = Some(week_review_tx);
     app.week_review.root = Some(orion_core::paths::data_dir().join("reviews"));
-    // The ISSUES MODAL's `gh issue list` / `gh issue view` answers, on the
-    // same footing: the modal's own handlers start the fetch, the loop
-    // lands it.
-    let (issues_tx, mut issues_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::issues::IssuesAnswer>();
-    app.issues_tx = Some(issues_tx);
     let (linear_tx, mut linear_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::linear::LinearAnswer>();
     app.linear_tx = Some(linear_tx);
     app.linear_links =
         crate::linear::LinkStore::load(orion_core::paths::data_dir().join("linear-links.json"));
-    // The BRANCH SWITCHER's git — the listing, the changed-file count,
-    // the background fetch and the switch itself — lands here too.
+    // The WORKTREE PICKER's branch listings and their background fetch
+    // land here too.
     let (branch_tx, mut branch_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::branch_switch::Answer>();
-    app.branch_switch.tx = Some(branch_tx);
+        tokio::sync::mpsc::unbounded_channel::<crate::branch_list::Answer>();
+    app.branch_list.tx = Some(branch_tx);
     // A PULL's or a PUSH's git lands here.
     let (sync_tx, mut sync_rx) = tokio::sync::mpsc::unbounded_channel::<crate::git_sync::Answer>();
     app.git_sync.tx = Some(sync_tx);
@@ -497,12 +487,6 @@ async fn main_loop(
                 // BASE SYNC: the most overdue project's root fetched, and
                 // fast-forwarded when it sits on the base branch.
                 crate::base_sync::tick(&mut app);
-                // The selected project's open issues, on the same beat, so
-                // `i` paints rows that are at most a couple of minutes old.
-                crate::issues::refresh_selected(&mut app);
-                // And one other project's — the pass that keeps every
-                // row's count warm, `sweep_open_prs` for issues.
-                crate::issues::sweep_others(&mut app);
                 // Who each CLAUDE ACCOUNT is signed in as, on a slower
                 // beat of its own: a `/login` typed in a session's pane
                 // renames its account here.
@@ -625,14 +609,6 @@ async fn main_loop(
                 if app.pending_prewarm.is_some() =>
             {
                 fire_pending_prewarm(&mut app, &mut out);
-            }
-            // The project selection rested past the debounce: ask GitHub
-            // for its open issues in the background, so `i` paints the
-            // rows at once instead of an empty modal.
-            _ = tokio::time::sleep(app.issues_prefetch_delay().unwrap_or_default()),
-                if app.pending_issues_prefetch.is_some() =>
-            {
-                crate::issues::fire_prefetch(&mut app);
             }
             // Standing keep-warm: periodically re-assert the selected
             // worktree's warm default-spec Claude session so the daemon's
@@ -771,11 +747,6 @@ async fn main_loop(
                     land_detail(&mut app, &detail_tx, answer, &mut out);
                 }
             }
-            answer = prdiff_rx.recv() => {
-                if let Some(answer) = answer {
-                    land_pr_diff(&mut app, answer);
-                }
-            }
             answer = prcomment_rx.recv() => {
                 if let Some(answer) = answer {
                     land_pr_comment(&mut app, answer);
@@ -791,17 +762,6 @@ async fn main_loop(
                     crate::week_review::land_answer(&mut app, answer);
                 }
             }
-            // The ISSUES MODAL's hover debounce: the cursor has rested on
-            // an issue long enough to fetch its comments.
-            _ = tokio::time::sleep(app.issue_detail_delay().unwrap_or(Duration::MAX)),
-                if app.issue_detail_delay().is_some() => {
-                crate::issues::lookup_detail(&mut app);
-            }
-            answer = issues_rx.recv() => {
-                if let Some(answer) = answer {
-                    crate::issues::land_answer(&mut app, answer);
-                }
-            }
             answer = linear_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::linear::land_answer(&mut app, answer);
@@ -809,8 +769,8 @@ async fn main_loop(
             }
             answer = branch_rx.recv() => {
                 if let Some(answer) = answer {
-                    let listed = matches!(answer, crate::branch_switch::Answer::Listed { .. });
-                    crate::branch_switch::land_answer(&mut app, answer);
+                    let listed = matches!(answer, crate::branch_list::Answer::Listed { .. });
+                    crate::branch_list::land_answer(&mut app, answer);
                     if listed {
                         launcher::refresh_worktree_picker(&mut app);
                     }
@@ -1507,7 +1467,7 @@ fn note_pr_answer(app: &mut App, worktree: &WorktreeId, found: bool) {
 }
 
 /// A branch lookup landed. One whose flight was cancelled — the checkout
-/// was switched to another branch, `branch_switch` or a daemon upsert
+/// was switched to another branch, or a daemon upsert
 /// cleared its row — is dropped, and so is one asked while the checkout
 /// was on a branch it has left since (a switch made outside orion): its
 /// pull request is the old branch's, and the row would bring it back. An
@@ -1646,18 +1606,12 @@ fn spawn_open_prs(
     id: ProjectId,
     dir: std::path::PathBuf,
 ) {
-    // The merged tail is walked to its end only now and then; in between
-    // its first page says everything new.
-    let whole_week = app
-        .merged_walked
-        .get(&id)
-        .is_none_or(|at| at.elapsed() >= crate::pull_request::MERGED_WALK_EVERY);
     let Some(ticket) = app.open_prs_inflight.begin(id, crate::fetch::now()) else {
         return;
     };
     let prs_tx = prs_tx.clone();
     tokio::spawn(async move {
-        let answer = crate::pull_request::list(&dir, whole_week).await;
+        let answer = crate::pull_request::list(&dir).await;
         let _ = prs_tx.send(ListLanded {
             ticket,
             dir,
@@ -1764,10 +1718,8 @@ fn note_open_prs_answer(
 /// state, draft flag, conflicts and checks go to `prs` under that stamp
 /// first, and the list then drops any row `prs` says has merged or closed
 /// since — a page asked after this list was asked said so, and a list
-/// already on its way must not bring the row back. A slim answer carries
-/// each row's meta line over from the last list (`carry_meta`), and an
-/// answer with no merged tail — the slim one's, a failed one's — keeps
-/// the last tail there was.
+/// already on its way must not bring the row back. An answer with no
+/// merged tail — a failed one's — keeps the last tail there was.
 fn note_open_prs_answer_at(
     app: &mut App,
     project: orion_core::ProjectId,
@@ -1780,21 +1732,6 @@ fn note_open_prs_answer_at(
     let was_on = app.selected_worktree_pr().cloned();
     let mut status_changed = false;
     let mut merged = None;
-    // Whether the merged tail is the whole week is for an answer that
-    // walked it to say; one that brought the first page alone says
-    // nothing either way.
-    if let Some(answer) = answer
-        .as_ref()
-        .filter(|a| a.merged.is_some() && !a.merged_head)
-    {
-        if answer.merged_short {
-            app.merged_short.insert(project.clone());
-        } else {
-            app.merged_short.remove(&project);
-        }
-        app.merged_walked
-            .insert(project.clone(), std::time::Instant::now());
-    }
     let list = answer.map(|answer| {
         let mut rows = answer.rows;
         for row in &rows {
@@ -1808,13 +1745,7 @@ fn note_open_prs_answer_at(
             let seen = crate::pr_store::PrObservation::of_merged_row(row);
             status_changed |= app.prs.observe(&row.url, seen, asked);
         }
-        merged = answer.merged.map(|rows| (rows, answer.merged_head));
-        if answer.slim {
-            carry_meta(
-                &mut rows,
-                app.open_prs.get(&project).map(|o| o.list.as_slice()),
-            );
-        }
+        merged = answer.merged;
         rows.retain(|row| app.prs.status_or_open(&row.url).is_open());
         rows
     });
@@ -1858,14 +1789,7 @@ fn note_open_prs_answer_at(
     // answer lands through; the cursor reconcile below follows its PR by
     // URL, so the reorder never moves the selection off it.
     crate::pull_request::drafts_last(&mut list, &app.prs);
-    let held = previous.map(|o| o.merged.as_slice()).unwrap_or_default();
-    let merged = match merged {
-        Some((head, true)) => {
-            crate::pull_request::fold_merged(head, held, orion_core::clock::now_secs() as i64)
-        }
-        Some((whole, false)) => whole,
-        None => held.to_vec(),
-    };
+    let merged = merged.unwrap_or_else(|| previous.map(|o| o.merged.clone()).unwrap_or_default());
     let changed =
         previous.map(|o| (&o.list, &o.merged)) != Some((&list, &merged)) || status_changed;
     app.dirty |= changed;
@@ -1922,29 +1846,6 @@ fn note_open_prs_answer_at(
 /// it has not caught up to.
 fn row_status(row: &crate::pull_request::OpenPr) -> crate::pr_store::PrObservation {
     crate::pr_store::PrObservation::of_list_row(row)
-}
-
-/// A slim list's rows ([`crate::pull_request::ListAnswer::slim`]) take
-/// the meta line — author, age, review, labels, the tally, and whether you
-/// are asked to review, which is the row's section — from the same pull
-/// request's row in the last list, by URL. The slim query never asked for
-/// any of it, so an empty meta there is "not asked", and taking it at its
-/// word would move the row between sections, and its meta line in and out,
-/// on every beat GitHub balks at the full query. Carried after the rows
-/// were observed, so a carried tally is the meta line's alone and never
-/// the checks' verdict.
-fn carry_meta(
-    rows: &mut [crate::pull_request::OpenPr],
-    previous: Option<&[crate::pull_request::OpenPr]>,
-) {
-    let Some(previous) = previous else {
-        return;
-    };
-    for row in rows {
-        if let Some(was) = previous.iter().find(|was| was.url == row.url) {
-            row.meta = was.meta.clone();
-        }
-    }
 }
 
 /// The list answer moved a pull request's row on — its draft, title or
@@ -2203,18 +2104,16 @@ fn schedule_pr_detail(app: &mut App) {
 }
 
 /// The one place "the pane is reading something else now" is noticed: the
-/// loop takes `reading_url()` — the pull request's or the issue's — before
-/// handling an event and hands it back here after. A different URL — the
-/// Sessions cursor stepped onto or off the PR ROW, focus left the Sessions
-/// panel for the pane, a refresh retired the row, the Worktrees cursor
-/// landed on an issue — re-arms the detail fetch (the pull request's, and
-/// the issue's comments) and rewinds the scroll; the same URL leaves a
-/// reader exactly where they were. Keyed on URL, not the whole row, so a
+/// loop takes `reading_url()` — the pull request's — before handling an
+/// event and hands it back here after. A different URL — the Sessions
+/// cursor stepped onto or off the PR ROW, focus left the Sessions panel
+/// for the pane, a refresh retired the row — re-arms the detail fetch and
+/// rewinds the scroll; the same URL leaves a reader exactly where they
+/// were. Keyed on URL, not the whole row, so a
 /// re-titled PR arriving on the GIT POLL is not a change.
 fn note_preview_change(app: &mut App, before: Option<String>) {
     if app.reading_url() != before {
         schedule_pr_detail(app);
-        crate::issues::schedule_detail(app);
     }
 }
 
@@ -2519,15 +2418,8 @@ fn land_pr_comment(app: &mut App, answer: PrCommentAnswer) {
     app.dirty = true;
 }
 
-/// `g` on an open-PR row: fetch the whole pull request diff off the loop and
-/// open the ordinary diff modal on it when it lands. One `gh pr diff` gets
-/// every file at once, which is why this view carries its diffs with it
-/// instead of shelling out per file the way the worktree view does.
-///
-/// A diff read before — this run or a previous one (`pr_cache`) — opens
-/// the modal at once instead, and the fetch runs underneath it: what lands
-/// replaces the modal's contents in place when it differs, and only goes to
-/// the cache if the modal has since been closed (`land_pr_diff`).
+/// `g` on an open-PR row: the DIFF VIEWER on the pull request the pane
+/// previews ([`open_pr_review`]).
 fn request_pr_diff(app: &mut App) {
     let Some(pr) = app.previewed_pr() else {
         return;
@@ -2549,16 +2441,14 @@ pub enum PrReviewAt {
     Top,
     /// One of its files, by path — the top when the diff has no such file.
     File(String),
-    /// One of its commits, by sha: read from the project's own repo, which
-    /// has it once the branch is fetched; the whole diff, saying so, when
-    /// it does not.
+    /// One of its commits, by sha.
     Commit(String),
 }
 
 /// A pull request the DIFF VIEWER is reading from this repo's git, and
 /// where it was asked to open: kept on the view (`DiffView::pr_review`)
-/// so that, should the commits turn out not to be here, the same request
-/// is read from GitHub instead ([`land_diff_listing`]).
+/// for the listing to land on ([`land_pr_review_at`]) and the title to
+/// name (`#42 ›`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrReview {
     pub number: u64,
@@ -2567,28 +2457,23 @@ pub struct PrReview {
     pub at: PrReviewAt,
 }
 
-/// What a pull request read from git says when this repo does not have
-/// its head commit — never shown: the view falls back to GitHub on it.
-const PR_NOT_LOCAL: &str = "the pull request's commits aren't in this repo";
-
 /// THE way into the DIFF VIEWER for a pull request of the selected
 /// project, titled `title` — the pane's `⌘E`, the PULL REQUESTS MODAL's
 /// `^G`, a PR tab's file or commit. The viewer is the same one `⌘E` opens
 /// on a checkout: wrapped, numbered, syntax-coloured, the same keys.
 ///
-/// When the repo has the pull request's head commit — a branch of yours,
-/// or one fetched since — the viewer reads it from git, the COMMIT LIST
+/// It reads the pull request from the project's own git, the COMMIT LIST
 /// over its files with every commit ticked: the whole pull request, its
-/// commits there to read one at a time or a few together, as a
-/// checkout's are ([`open_local_pr_review`]). Otherwise its whole diff
-/// comes from one `gh pr diff` (cached, and refreshed under the open
-/// modal), and one commit of it from the repo's git or from GitHub.
+/// commits there to read a commit or a few together, as a
+/// checkout's are. A head the repo lacks — someone else's branch, a
+/// fork's — is fetched by its pull ref first, the way the conflict check
+/// fetches it ([`read_pr_opening`]).
 ///
 /// Opened from the PULL REQUESTS MODAL, the viewer is a level inside it:
 /// Esc puts the modal back as it was (`DiffView::back`).
 pub fn open_pr_review(app: &mut App, number: u64, url: String, title: String, at: PrReviewAt) {
     // A file the PULL REQUEST PAGE's Changes tab asked for, for this pull
-    // request (`pr_preview::run_act`).
+    // request (`pr_preview::run_act`), spent once a viewer is up.
     let at = match (at, app.pr_diff_at.as_ref()) {
         (PrReviewAt::Top, Some((asked, path))) if *asked == url => PrReviewAt::File(path.clone()),
         (at, _) => at,
@@ -2599,43 +2484,9 @@ pub fn open_pr_review(app: &mut App, number: u64, url: String, title: String, at
         title,
         at,
     };
-    if open_local_pr_review(app, &review) {
-        app.pr_diff_at = None;
-        return;
-    }
-    open_github_pr_review(app, review);
-}
-
-/// [`open_pr_review`] from GitHub: the whole diff `gh pr diff` gives, or
-/// one commit's.
-fn open_github_pr_review(app: &mut App, review: PrReview) {
-    let PrReview {
-        number,
-        url,
-        title,
-        at,
-    } = review;
-    match at {
-        PrReviewAt::Top => fetch_pr_diff(app, number, url, title, None),
-        PrReviewAt::File(path) => fetch_pr_diff(app, number, url, title, Some(path)),
-        PrReviewAt::Commit(sha) => {
-            if !open_pr_commit(app, &title, &sha) {
-                request_pr_commit_diff(app, number, &url, &sha, "");
-                // Only a fetch still out says why it is fetching: a cached
-                // diff opened at once, and a refusal said its own.
-                let opened = matches!(app.overlay, Some(Overlay::Diff(_)));
-                let refused = app
-                    .flash
-                    .as_ref()
-                    .is_some_and(|f| f.kind == crate::flash::FlashKind::Failed);
-                if !opened && !refused {
-                    let short: String = sha.chars().take(7).collect();
-                    app.flash = Some(crate::flash::Flash::working(format!(
-                        "{short} isn't in this repo yet — fetching it from GitHub…"
-                    )));
-                }
-            }
-        }
+    match open_local_pr_review(app, &review) {
+        Ok(()) => app.pr_diff_at = None,
+        Err(why) => app.flash = Some(why),
     }
 }
 
@@ -2651,8 +2502,8 @@ fn pr_modal_under(app: &App) -> Option<Box<crate::pr_modal::PullRequestsView>> {
 /// Dress a DIFF VIEWER about to go up the way every one opens: its column
 /// at the width it was last dragged to; the **Review** SETTINGS — the
 /// files as a tree, the panel with the keys (the commits only where there
-/// are any to tick: `commits`), how ticked commits read; and, opened from
-/// the PULL REQUESTS MODAL, the modal to go back to. Before its files are
+/// are any to tick: `commits`); and, opened from the PULL REQUESTS MODAL,
+/// the modal to go back to. Before its files are
 /// selected or filled in: a tree toggled after would land elsewhere.
 fn dress_viewer(app: &App, view: &mut DiffView, commits: bool) {
     use crate::app::DiffFocus;
@@ -2664,36 +2515,39 @@ fn dress_viewer(app: &App, view: &mut DiffView, commits: bool) {
         DiffFocus::Commits if !commits => DiffFocus::Files,
         focus => focus,
     };
-    view.open_one_at_a_time = app.diff_one_at_a_time;
     view.back = pr_modal_under(app);
 }
 
-/// [`open_pr_review`] from this repo's git, when the pull request's body
+/// [`open_pr_review`] from this repo's git, once the pull request's body
 /// is in (`App::pr_detail`, for its head commit and base): the viewer
 /// goes up at once, its commits and files read underneath as a BACKGROUND
 /// READ ([`read_pr_opening`]) — inline in a view built without a handle.
-/// Whether the repo has the commit is that read's to say; when it does
-/// not, the view falls back to GitHub (`land_diff_listing`). False when
-/// there is nothing to read from git with, and GitHub is asked straight
-/// away.
-fn open_local_pr_review(app: &mut App, review: &PrReview) -> bool {
-    let Some(detail) = app.pr_detail.get(&review.url) else {
-        return false;
-    };
-    let (tip, base) = (detail.head_sha.clone(), detail.base.clone());
-    if tip.is_empty() || base.is_empty() {
-        return false;
-    }
+/// The footer's line when it can't go up: no repo on disk, or nothing to
+/// read with yet.
+fn open_local_pr_review(app: &mut App, review: &PrReview) -> Result<(), crate::flash::Flash> {
+    let number = review.number;
     let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
-        return false;
+        return Err(crate::flash::Flash::note("no project selected"));
     };
     if !dir.is_dir() {
-        return false;
+        return Err(crate::flash::Flash::failed(format!(
+            "repo path missing on disk: {}",
+            dir.display()
+        )));
     }
+    let (tip, base) = app
+        .pr_detail
+        .get(&review.url)
+        .map(|detail| (detail.head_sha.clone(), detail.base.clone()))
+        .filter(|(tip, base)| !tip.is_empty() && !base.is_empty())
+        .ok_or_else(|| {
+            crate::flash::Flash::note(format!(
+                "#{number} is still loading — try again in a moment"
+            ))
+        })?;
     let ticket = crate::view_jobs::ticket();
     let jobs = app.view_jobs.clone();
     let mut view = DiffView::opening(dir.clone(), review.title.clone(), jobs.clone(), ticket);
-    view.pr_url = Some(review.url.clone());
     if let PrReviewAt::File(path) = &review.at {
         view.want_path = Some(path.clone());
     }
@@ -2701,27 +2555,46 @@ fn open_local_pr_review(app: &mut App, review: &PrReview) -> bool {
     dress_viewer(app, &mut view, true);
     app.overlay = Some(Overlay::Diff(view));
     app.dirty = true;
+    let quit = std::sync::Arc::clone(&app.git_sync.quit);
     match jobs {
         Some(jobs) => jobs.run(move || {
             Some(crate::view_jobs::Answer::DiffListing {
                 ticket,
-                result: read_pr_opening(&dir, &base, &tip),
+                result: read_pr_opening(&dir, number, &base, &tip, &quit),
             })
         }),
-        None => land_diff_listing(app, ticket, read_pr_opening(&dir, &base, &tip)),
+        None => land_diff_listing(
+            app,
+            ticket,
+            read_pr_opening(&dir, number, &base, &tip, &quit),
+        ),
     }
-    true
+    Ok(())
 }
 
 /// What a pull request read from git opens on: its COMMIT LIST to `tip`
-/// against `base` (`commit_list::read_tip`) and nothing uncommitted — or
-/// [`PR_NOT_LOCAL`].
+/// against `base` (`commit_list::read_tip`) and nothing uncommitted. When
+/// that misses, a head the repo lacks comes by its pull ref
+/// (`conflicts::fetch_pull_head`), a base it has no copy of from origin,
+/// and the list is read again.
 fn read_pr_opening(
     dir: &std::path::Path,
+    number: u64,
     base: &str,
     tip: &str,
+    quit: &std::sync::atomic::AtomicBool,
 ) -> Result<crate::view_jobs::DiffListing, String> {
-    let listing = crate::commit_list::read_tip(dir, base, tip).ok_or(PR_NOT_LOCAL)?;
+    let listing = match crate::commit_list::read_tip(dir, base, tip) {
+        Some(listing) => listing,
+        None => {
+            crate::conflicts::fetch_pull_head(dir, number, tip, quit)?;
+            if crate::commit_list::branch_ref(dir, base).is_none() {
+                crate::conflicts::fetch_base(dir, base, quit)?;
+            }
+            crate::commit_list::read_tip(dir, base, tip)
+                .ok_or_else(|| format!("couldn't read #{number} against {base} here"))?
+        }
+    };
     Ok(crate::view_jobs::DiffListing {
         files: Vec::new(),
         head: Some(tip.to_string()),
@@ -2750,315 +2623,6 @@ fn land_pr_review_at(view: &mut DiffView) {
     };
     list.show_only(crate::commit_list::Row::Commit(i));
     crate::commit_list::show_selected(view);
-}
-
-/// [`PrReviewAt::Commit`]: the DIFF VIEWER on one commit of the selected
-/// project's repo, under its message. False when the repo has no such
-/// commit.
-fn open_pr_commit(app: &mut App, title: &str, sha: &str) -> bool {
-    let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
-        return false;
-    };
-    let Some(commit) = crate::commit_list::read_commit(&dir, sha) else {
-        return false;
-    };
-    let mut view = DiffView::new(dir, title.to_string(), Vec::new(), true);
-    view.jobs = app.view_jobs.clone();
-    let mut head = vec![crate::diff_doc::Head::Meta(title.to_string())];
-    head.extend(commit.head(crate::app::now_ms(), None));
-    view.head = head;
-    dress_viewer(app, &mut view, false);
-    crate::commit_list::show_scope(&mut view, commit.scope());
-    app.overlay = Some(Overlay::Diff(view));
-    app.dirty = true;
-    true
-}
-
-/// Fetch pull request `number`'s whole diff and open the viewer on it —
-/// at `file`, when one is asked for.
-fn fetch_pr_diff(app: &mut App, number: u64, url: String, title: String, file: Option<String>) {
-    if app.pr_diff_inflight == Some(number) {
-        return;
-    }
-    let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
-        return;
-    };
-    if !dir.is_dir() {
-        app.flash = Some(crate::flash::Flash::failed(format!(
-            "repo path missing on disk: {}",
-            dir.display()
-        )));
-        return;
-    }
-    let Some(prdiff_tx) = app.pr_diff_tx.clone() else {
-        return; // never: the loop installs it at startup
-    };
-    if open_cached_pr_diff(app, number, &url, &title, file.as_deref()) {
-        app.pr_diff_refreshing.insert(url.clone());
-    } else {
-        // Nothing else on screen marks the `gh pr diff` under way, and it
-        // takes seconds: the footer is the only sign Enter was heard.
-        app.flash = Some(crate::flash::Flash::working(format!(
-            "fetching the diff for #{number}…"
-        )));
-    }
-    app.pr_diff_inflight = Some(number);
-    app.dirty = true;
-    tokio::spawn(async move {
-        let diff = crate::pull_request::diff(&dir, number).await;
-        let _ = prdiff_tx.send(PrDiffAnswer {
-            number,
-            url,
-            title,
-            diff,
-            file,
-        });
-    });
-}
-
-/// The diff of one commit of pull request `number` (`pr_url`), fetched
-/// from GitHub (`pull_request::commit_diff`) and opened in the DIFF VIEWER
-/// the way a pull request's own is — the same answer, the same cache and
-/// the same modal, under the commit's page inside the pull request
-/// (`pull_request::commit_url`), titled with its sha and subject. The
-/// Commits tab's row acted on (`pr_preview::run_act`).
-pub(crate) fn request_pr_commit_diff(
-    app: &mut App,
-    number: u64,
-    pr_url: &str,
-    sha: &str,
-    subject: &str,
-) {
-    if app.pr_diff_inflight == Some(number) {
-        return;
-    }
-    let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
-        return;
-    };
-    if !dir.is_dir() {
-        app.flash = Some(crate::flash::Flash::failed(format!(
-            "repo path missing on disk: {}",
-            dir.display()
-        )));
-        return;
-    }
-    let Some(prdiff_tx) = app.pr_diff_tx.clone() else {
-        return; // never: the loop installs it at startup
-    };
-    let url = crate::pull_request::commit_url(pr_url, sha);
-    let short = sha.get(..7).unwrap_or(sha);
-    let title = format!("#{number} {short} {subject}")
-        .trim_end()
-        .to_string();
-    if open_cached_pr_diff(app, number, &url, &title, None) {
-        app.pr_diff_refreshing.insert(url.clone());
-    } else {
-        app.flash = Some(crate::flash::Flash::working(format!(
-            "fetching the diff of {short}…"
-        )));
-    }
-    app.pr_diff_inflight = Some(number);
-    app.dirty = true;
-    let sha = sha.to_string();
-    tokio::spawn(async move {
-        let diff = crate::pull_request::commit_diff(&dir, &sha).await;
-        let _ = prdiff_tx.send(PrDiffAnswer {
-            number,
-            url,
-            title,
-            diff,
-            file: None,
-        });
-    });
-}
-
-/// Open the modal on the diff last read for `url`, when the cache kept one
-/// with files in it. Whether it did.
-fn open_cached_pr_diff(
-    app: &mut App,
-    number: u64,
-    url: &str,
-    title: &str,
-    file: Option<&str>,
-) -> bool {
-    let Some(cached) = crate::pr_cache::recall_diff(app, url) else {
-        return false;
-    };
-    open_pr_diff_view(app, number, url, title.to_string(), Some(cached), file);
-    matches!(&app.overlay, Some(Overlay::Diff(view)) if view.pr_url.as_deref() == Some(url))
-}
-
-/// A `gh pr diff` landed. It goes to the cache for next time, and then: a
-/// modal opened on this pull request's cached copy is refreshed in place
-/// (`refresh_pr_diff_view`), the reader keeping their file and their place
-/// in it; one closed since stays closed; and a request that had nothing
-/// cached opens the modal now, as it always did.
-fn land_pr_diff(app: &mut App, answer: PrDiffAnswer) {
-    let PrDiffAnswer {
-        number,
-        url,
-        title,
-        diff,
-        file,
-    } = answer;
-    if let Some(diff) = &diff {
-        crate::pr_cache::remember_diff(app, &url, diff);
-    }
-    // The wait is over, whichever way it went: the spinner that said so
-    // goes, and anything worth saying about the answer is said below.
-    if app
-        .flash
-        .as_ref()
-        .is_some_and(|f| f.kind == crate::flash::FlashKind::Working)
-    {
-        app.flash = None;
-    }
-    if !app.pr_diff_refreshing.remove(&url) {
-        open_pr_diff_view(app, number, &url, title, diff, file.as_deref());
-        return;
-    }
-    if app.pr_diff_inflight == Some(number) {
-        app.pr_diff_inflight = None;
-    }
-    // A fetch that failed leaves the cached copy on screen: it was the best
-    // answer there was when `g` was pressed, and still is.
-    let Some(diff) = diff else {
-        return;
-    };
-    let Some(Overlay::Diff(view)) = &mut app.overlay else {
-        return;
-    };
-    if view.pr_url.as_deref() != Some(url.as_str()) {
-        return;
-    }
-    if refresh_pr_diff_view(view, &diff) {
-        app.dirty = true;
-    }
-}
-
-/// Swap a fresh diff into an open pull-request modal: the file list and the
-/// per-file chunks are rebuilt, the selection follows the file the reader
-/// was on by path — keeping their scroll in it — and falls back to the
-/// first row when that file is no longer in the diff. Whether anything
-/// changed; an identical diff leaves the view untouched.
-fn refresh_pr_diff_view(view: &mut DiffView, diff: &str) -> bool {
-    let chunks = crate::pull_request::split_unified_diff(diff);
-    let fresh: std::collections::HashMap<String, String> = chunks.iter().cloned().collect();
-    if view.prefetched.as_ref() == Some(&fresh) {
-        return false;
-    }
-    let was_on = view.selected_path().map(str::to_string);
-    let scroll = view.scroll;
-    view.prefetched = Some(fresh);
-    view.replace_files(pr_diff_files(&chunks));
-    let same = was_on.is_some_and(|path| view.select_path(&path));
-    crate::git_diff::load_selected_diff(view);
-    if same {
-        view.scroll = scroll.min(view.max_scroll());
-    }
-    true
-}
-
-/// The file rows of a pull-request diff: one per chunk, in git's order,
-/// each marked as its own header says — `A` for a new file, `D` for a
-/// deleted one, `R` (from its old path) for a rename, `M` for the rest —
-/// the letters `git diff --name-status` gives a commit's files — and its
-/// lines added and removed, counted from its hunks.
-fn pr_diff_files(chunks: &[(String, String)]) -> Vec<crate::git_diff::DiffFile> {
-    chunks
-        .iter()
-        .map(|(path, text)| {
-            let mut file = crate::git_diff::DiffFile {
-                path: path.clone(),
-                orig_path: None,
-                xy: ['M', ' '],
-                lines: None,
-            };
-            for line in text.lines().take_while(|l| !l.starts_with("@@")) {
-                if line.starts_with("new file mode") {
-                    file.xy[0] = 'A';
-                } else if line.starts_with("deleted file mode") {
-                    file.xy[0] = 'D';
-                } else if let Some(from) = line.strip_prefix("rename from ") {
-                    file.xy[0] = 'R';
-                    file.orig_path = Some(from.to_string());
-                }
-            }
-            let mut lines = crate::git_diff::LineChanges::default();
-            for line in text.lines().skip_while(|l| !l.starts_with("@@")) {
-                match line.as_bytes().first() {
-                    Some(b'+') => lines.added += 1,
-                    Some(b'-') => lines.removed += 1,
-                    _ => {}
-                }
-            }
-            // A binary file's diff has no hunk to count.
-            file.lines = text.lines().any(|l| l.starts_with("@@")).then_some(lines);
-            file
-        })
-        .collect()
-}
-
-/// Land a fetched pull-request diff in the diff modal, on `file` when it
-/// is one of the diff's. The files come from splitting the unified diff
-/// rather than from `git status` (`pr_diff_files`), the pull request's
-/// title heads every file, and the view is tagged with the pull request's
-/// URL so a later fetch can tell it is still the one on screen.
-fn open_pr_diff_view(
-    app: &mut App,
-    number: u64,
-    url: &str,
-    title: String,
-    diff: Option<String>,
-    file: Option<&str>,
-) {
-    if app.pr_diff_inflight == Some(number) {
-        app.pr_diff_inflight = None;
-    }
-    let Some(diff) = diff else {
-        app.flash = Some(crate::flash::Flash::failed(format!(
-            "couldn't read the diff for #{number} — is `gh` set up?"
-        )));
-        return;
-    };
-    let chunks = crate::pull_request::split_unified_diff(&diff);
-    if chunks.is_empty() {
-        app.flash = Some(crate::flash::Flash::note(format!(
-            "#{number} changes no files"
-        )));
-        return;
-    }
-    let files = pr_diff_files(&chunks);
-    // `root` is only ever used to shell out at git, which a prefetched view
-    // never does — but the reviewed-mark store keys on it, so it stays the
-    // repo path rather than something invented.
-    let root = app
-        .selected_project()
-        .map(|p| p.repo_path.clone())
-        .unwrap_or_default();
-    let mut view = DiffView::new(root, title.clone(), files, true);
-    view.prefetched = Some(chunks.into_iter().collect());
-    view.pr_url = Some(url.to_string());
-    view.head = vec![
-        crate::diff_doc::Head::Title(title),
-        crate::diff_doc::Head::Meta("the pull request's whole diff, as GitHub has it".into()),
-    ];
-    dress_viewer(app, &mut view, false);
-    // On a file: the one asked for here (`open_pr_review`), else the one
-    // the PULL REQUEST PAGE's Changes tab left for this pull request. The
-    // page's request is spent either way.
-    let asked = app
-        .pr_diff_at
-        .take()
-        .filter(|(at_url, _)| at_url == url)
-        .map(|(_, path)| path);
-    if let Some(path) = file.map(str::to_string).or(asked) {
-        view.select_path(&path);
-    }
-    crate::git_diff::load_selected_diff(&mut view);
-    app.overlay = Some(Overlay::Diff(view));
-    app.flash = None;
-    app.dirty = true;
 }
 
 /// Arm the selected project for a prompt open-pull-request lookup: arriving
@@ -3112,8 +2676,7 @@ fn schedule_pull_request_refresh(app: &mut App) {
 }
 
 /// `Shift+R`, from any panel: reload from GitHub *now* — the selected
-/// project's open list and its open issues (`issues::reload_selected`),
-/// every one of its checkouts' own PR, and the body
+/// project's open list, every one of its checkouts' own PR, and the body
 /// and conversation of the pull request the pane is reading — past
 /// every timer and floor the beats keep. `schedule_pull_request_refresh`
 /// is what a focus event may do; this is what a deliberate keypress may
@@ -3135,7 +2698,6 @@ fn refresh_pull_requests(app: &mut App) {
     schedule_pr_sweep(app);
     refetch_pr_detail(app);
     app.pr_refresh_requested = true;
-    crate::issues::reload_selected(app);
     app.dirty = true;
 }
 
@@ -3250,7 +2812,6 @@ fn ui_state_json(app: &App) -> String {
         show_archived: app.show_archived,
         collapsed: app.collapsed,
         open_prs_collapsed: app.open_prs_collapsed,
-        issues_collapsed: app.issues_collapsed,
         diff_files_width: Some(app.diff_files_width),
         diff_tree: app.diff_tree,
         launcher_pane_h: app.launcher_pane_h,
@@ -3279,7 +2840,6 @@ fn restore_ui_state(app: &mut App, json: &str) -> bool {
     app.show_archived = state.show_archived;
     app.archived_open = state.archived_open.into_iter().map(WorktreeId).collect();
     app.open_prs_collapsed = state.open_prs_collapsed;
-    app.issues_collapsed = state.issues_collapsed;
     if let Some(w) = state
         .diff_files_width
         .filter(|&w| w != crate::app::OLD_DEFAULT_DIFF_FILES_W)
@@ -3738,12 +3298,9 @@ pub(crate) fn paste_unsent(
 /// live. Returns false when nothing is typing, so the paste falls through to
 /// the terminal pane.
 fn paste_into_overlay(app: &mut App, text: &str) -> bool {
-    // The ISSUE EDITOR's field under the caret, or either modal's `/`
-    // FILTER ROW while it has the caret — resolved against the rows, so
-    // the cursor lands on the best match as a typed letter's would.
-    if matches!(&app.overlay, Some(Overlay::Issues(_))) {
-        return crate::issues::paste(app, text);
-    }
+    // A modal's `/` FILTER ROW while it has the caret — resolved against
+    // the rows, so the cursor lands on the best match as a typed letter's
+    // would.
     if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
         return crate::pr_modal::paste(app, text);
     }
@@ -3802,12 +3359,6 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
             view.filter.insert_str(text);
             view.focus = crate::app::DiffFocus::Files;
             activate::diff_filter_changed(view);
-        }
-        // The query, or the commit message while that is being typed.
-        Overlay::BranchSwitch(view) => {
-            if !crate::branch_switch::paste(view, text) {
-                return false;
-            }
         }
         // Only types while its add/edit input is open.
         Overlay::Hosts(view) => match &mut view.input {
@@ -4108,12 +3659,11 @@ const ESC: crate::keymap::KeyChord = crate::keymap::KeyChord {
 
 /// The overlays Esc closes outright rather than one stage at a time:
 /// lists and viewers, where nothing typed is lost with them. A list that
-/// has a form open on it — the hosts picker's new-host row, a branch
-/// switch past its list — backs that out first, through its own Esc.
+/// has a form open on it — the hosts picker's new-host row — backs that
+/// out first, through its own Esc.
 fn closes_on_esc(overlay: &Overlay) -> bool {
     match overlay {
         Overlay::Hosts(view) => view.input.is_none(),
-        Overlay::BranchSwitch(view) => matches!(view.stage, crate::branch_switch::Stage::Pick),
         Overlay::Menu(_)
         | Overlay::Help(_)
         | Overlay::Diff(_)
@@ -4125,8 +3675,6 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::Usage(_)
         | Overlay::CleanWorktrees(_)
         | Overlay::ProjectPicker(_) => true,
-        // A take-down waiting on its answer: Esc cancels that first.
-        Overlay::Stacks(view) => view.confirm.is_none(),
         Overlay::Onboard(view) => !view.asking(),
         _ => false,
     }
@@ -4499,7 +4047,6 @@ fn dispatch_action(
         Action::Settings => open_settings(app),
         Action::ClaudeAccounts => open_claude_accounts(app, None),
         Action::Usage => crate::usage::open(app),
-        Action::Stacks => crate::stacks::open(app),
         Action::StopAllStacks => crate::stacks::stop_all(app, out),
         Action::CleanUnusedWorktrees => crate::clean_worktrees::start(app),
         Action::ToggleStack => {
@@ -4531,13 +4078,11 @@ fn dispatch_action(
         Action::SelectModel => select_model(app),
         Action::CycleEffort => cycle_effort(app),
         Action::SelectLaunchWorktree => select_launch_worktree(app),
-        Action::Issues => crate::issues::open_issues(app),
         Action::PullRequests => crate::pr_modal::open(app),
         Action::Linear => crate::linear::open(app),
         Action::CopyLinearIssues => crate::linear::copy_worktree_issues(app),
         Action::Todos => crate::todos::open(app),
         Action::WeekReview => crate::week_review::open(app),
-        Action::SwitchBranch => crate::branch_switch::open_branch_switch(app),
         Action::PullWorktree => {
             if let Some(id) = crate::git_sync::target(app) {
                 crate::git_sync::request(app, id, crate::git_sync::Op::Pull);
@@ -4752,8 +4297,8 @@ fn dispatch_action(
             }
         }
         // On an open-PR row (either list) `g` reads that pull request's
-        // diff off GitHub instead of the checkout's — same modal, different
-        // source.
+        // diff instead of the checkout's — same modal, the pull request's
+        // commits.
         // The pull request's own diff only where there is no checkout to
         // read — its Worktrees row — or from inside its page (the pane
         // holding the keys; the page's Changes tab is the same diff). Any
@@ -4772,7 +4317,6 @@ fn dispatch_action(
         // reaches here over a full-screen session the keys got past, which
         // is still the selected session's card.
         Action::OpenPullRequest => launcher::open_pull_request(app, out),
-        Action::OpenIssue => launcher::open_issue(app, out),
         Action::DuplicateSession => launcher::duplicate_session(app),
         Action::ContinueOn => launcher::continue_on(app),
         Action::OpenOutsideTerminal => open_outside_terminal(app),
@@ -5125,10 +4669,10 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                     "email of the Linear user whose issues ⌘L lists (empty = the LINEAR_API_KEY's owner)"
                 }
                 crate::config::SettingKind::RunCommand => {
-                    "shell line Start stack runs in a worktree's run terminal, e.g. just start (empty = the checkout's .orion.json \"run\", else docker compose start)"
+                    "shell line Start stack runs in a worktree's run terminal, e.g. just start (empty = none)"
                 }
                 crate::config::SettingKind::OpenCommand => {
-                    "shell line ⌘O → Open command runs to open a worktree of this project (empty = the checkout's .orion.json \"open\")"
+                    "shell line ⌘O → Open command runs to open a worktree of this project (empty = none)"
                 }
                 _ => "value (empty = default)",
             };
@@ -5137,27 +4681,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 None => cfg.text_value(*kind),
             };
             (title.into(), hint.into(), value)
-        }
-
-        PromptKind::IssueComment { issue, .. } => {
-            let title = if issue.title.trim().is_empty() {
-                format!("Comment on issue #{}", issue.number)
-            } else {
-                format!(
-                    "Comment on issue #{} · {}",
-                    issue.number,
-                    crate::ui::truncate(issue.title.trim(), 40)
-                )
-            };
-            (
-                title.into(),
-                format!(
-                    "what do you want to say on #{}? (posted as you, with gh issue comment)",
-                    issue.number
-                )
-                .into(),
-                String::new(),
-            )
         }
         PromptKind::EditLink { id } => {
             let current = app
@@ -5366,7 +4889,6 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::Settings
             | Action::ClaudeAccounts
             | Action::Usage
-            | Action::Stacks
             | Action::Hosts
             | Action::AgentPresets
             | Action::OpenSkillsFolder
@@ -5611,9 +5133,9 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
                 1,
             )
         }),
-        // The DIFF VIEWER's file, at the line at the top of its diff — on
-        // a checkout, and while the file is still there to open.
-        Some(Overlay::Diff(view)) if view.prefetched.is_none() => view
+        // The DIFF VIEWER's file, at the line at the top of its diff, while
+        // the file is still there to open.
+        Some(Overlay::Diff(view)) => view
             .selected_file()
             .filter(|f| !f.xy.contains(&'D'))
             .map(|f| (view.root.clone(), f.path.clone(), view.line_on_screen())),
@@ -5675,15 +5197,13 @@ fn toggle_run(app: &mut App, out: &mut Vec<ClientRequest>) {
     toggle_stack_in(app, &id, out);
 }
 
-/// `⌘⇧S`, a menu's **Start stack** / **Stop stack**, `Enter` in STACKS:
-/// start `worktree`'s stack, or stop it.
+/// `⌘⇧S`, a menu's **Start stack** / **Stop stack**: start `worktree`'s
+/// stack, or stop it.
 ///
-/// Starting runs its RUN COMMAND in its RUN TERMINAL (the DAEMON falls
-/// back to `docker compose start` on the checkout's stack when none is
-/// set), and the pane follows it there to watch it boot. Stopping sends
-/// that run a `^C`, so its own trap winds the stack down in view — a
-/// second press kills it — and a stack started outside orion, with no
-/// run to interrupt, gets `docker compose stop`.
+/// Starting runs its RUN COMMAND in its RUN TERMINAL, and the pane follows
+/// it there to watch it boot; with none set, the DAEMON's refusal says so
+/// in the footer. Stopping sends that run a `^C`, so its own trap winds the
+/// stack down in view — a second press kills it.
 pub(crate) fn toggle_stack_in(
     app: &mut App,
     worktree: &orion_core::WorktreeId,
@@ -5724,14 +5244,6 @@ pub(crate) fn toggle_stack_in(
         });
         return;
     }
-    let up = app
-        .stack_of(&id)
-        .filter(|s| s.state() == orion_core::compose::StackState::Running)
-        .map(|s| s.project.clone());
-    if let Some(project) = up {
-        crate::stacks::send(app, out, &project, orion_core::compose::StackVerb::Stop);
-        return;
-    }
     send_with(
         app,
         out,
@@ -5758,16 +5270,15 @@ fn open_selected_worktree(app: &mut App) {
     open_worktree(app, &w);
 }
 
-/// Why `Shift+Enter` has nothing to run, naming both places to put one —
-/// the twin of the DAEMON's line for `r`.
+/// Why `Shift+Enter` has nothing to run, naming where to set one — the
+/// twin of the DAEMON's line for `r`.
 const NO_OPEN_COMMAND: &str =
-    "no open command for this worktree — set one in Settings (s) → Project, \
-                               or add .orion.json with {\"open\": \"open http://localhost:3000\"}";
+    "no open command for this project — set one in Settings → Projects (Open command)";
 
 /// Run `worktree`'s OPEN COMMAND once — saying why when there is none or
-/// it won't start: the project's **Open command** setting (Settings → Project) when it is set, else the
-/// checkout's `.orion.json` `open`. The TUI runs it, not the DAEMON: it
-/// opens a browser or an editor on the machine the user is sitting at.
+/// it won't start: the project's **Open command** setting (Settings →
+/// Projects). The TUI runs it, not the DAEMON: it opens a browser or an
+/// editor on the machine the user is sitting at.
 fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
     let main = app
         .tree
@@ -5775,12 +5286,9 @@ fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
         .iter()
         .find(|p| p.id == worktree.project_id)
         .map_or_else(|| worktree.path.clone(), |p| p.repo_path.clone());
-    let command = match open_command_for(&worktree.path, &main) {
-        Ok(command) => command,
-        Err(msg) => {
-            app.flash = Some(crate::flash::Flash::failed(msg));
-            return;
-        }
+    let Some(command) = open_command_for(&main) else {
+        app.flash = Some(crate::flash::Flash::failed(NO_OPEN_COMMAND));
+        return;
     };
     if let Err(e) = spawn_open_command(&command, &worktree.path) {
         app.flash = Some(crate::flash::Flash::failed(format!(
@@ -5789,24 +5297,13 @@ fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
     }
 }
 
-/// The OPEN COMMAND for a checkout, resolved the way the DAEMON resolves
-/// `r`'s: the project's `open_command` setting, read fresh so an edit
-/// applies on the next press, else the PROJECT FILE's `open` — the
-/// worktree's own checkout, then the project's main one. Err is the footer
-/// line: nothing set in either place, or a file that is there and won't
-/// parse.
-fn open_command_for(worktree: &std::path::Path, main: &std::path::Path) -> Result<String, String> {
+/// The OPEN COMMAND for the project whose main checkout is `main`,
+/// resolved the way the DAEMON resolves `r`'s: its `open_command` setting,
+/// read fresh so an edit applies on the next press. None when it is unset.
+fn open_command_for(main: &std::path::Path) -> Option<String> {
     let setting = crate::config::Config::load().project(main).open_command;
     let setting = setting.trim();
-    if !setting.is_empty() {
-        return Ok(setting.to_string());
-    }
-    orion_core::project_file::lookup(
-        worktree,
-        main,
-        orion_core::project_file::ProjectCommand::Open,
-    )?
-    .ok_or_else(|| NO_OPEN_COMMAND.to_string())
+    (!setting.is_empty()).then(|| setting.to_string())
 }
 
 /// Start an OPEN COMMAND through `$SHELL -c` in `cwd`, kept off the TUI's
@@ -6169,9 +5666,6 @@ fn land_diff_listing(
     if !matches!(&app.overlay, Some(Overlay::Diff(view)) if view.listing == Some(ticket)) {
         return;
     }
-    if result.is_err() && fall_back_to_github(app) {
-        return;
-    }
     match result {
         Ok(listing) if !listing.is_empty() => {
             if let Some(Overlay::Diff(view)) = &mut app.overlay {
@@ -6181,29 +5675,19 @@ fn land_diff_listing(
         }
         Ok(_) => app.overlay = None,
         Err(msg) => {
-            app.overlay = None;
+            // A pull request the PULL REQUESTS MODAL opened puts the modal
+            // back on its row, as Esc would.
+            let back = match &mut app.overlay {
+                Some(Overlay::Diff(view)) => view.back.take(),
+                _ => None,
+            };
+            match back {
+                Some(back) => crate::pr_modal::reopen(app, *back),
+                None => app.overlay = None,
+            }
             app.flash = Some(crate::flash::Flash::failed(msg));
         }
     }
-}
-
-/// A pull request read from git whose commits are not here after all: the
-/// PULL REQUESTS MODAL it was opened from goes back up — on its row, as
-/// Esc would put it — and GitHub is asked instead. False for any other
-/// viewer, whose failed listing is its own to report.
-fn fall_back_to_github(app: &mut App) -> bool {
-    let Some(Overlay::Diff(view)) = &mut app.overlay else {
-        return false;
-    };
-    let Some(review) = view.pr_review.take() else {
-        return false;
-    };
-    match view.back.take() {
-        Some(back) => crate::pr_modal::reopen(app, *back),
-        None => app.overlay = None,
-    }
-    open_github_pr_review(app, review);
-    true
 }
 
 /// Enter on a grep hit: spawn the editor at `path:line` inside the modal
@@ -6864,25 +6348,6 @@ fn last_checkout_row(app: &App) -> usize {
         .unwrap_or(0)
 }
 
-/// Fold/unfold the Worktrees panel's ISSUES group (header click, context
-/// menu; ↓ off the row above it unfolds it too — see `move_selection`).
-/// Folding while the cursor sits on an issue re-lands it on the row above
-/// the header — the last pull request, whose preview the loop's
-/// `note_preview_change` brings up, or the last checkout, whose session
-/// comes back the way the OPEN PRS fold brings it back.
-fn toggle_issues(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let on_issue = app.selected_worktree_issue().is_some();
-    app.issues_collapsed = !app.issues_collapsed;
-    if on_issue {
-        app.set_sel_worktree(app.worktree_row_count().saturating_sub(1));
-        if app.selected_worktree().is_some() {
-            restore_session(app, out);
-            fire_pending_attach(app, out);
-        }
-    }
-    app.dirty = true;
-}
-
 /// Shift+T: create a shell terminal whose pwd is the selection's checkout —
 /// the selected worktree, or the project's main checkout (root) when the
 /// Projects panel has focus. The daemon names it (`term-N`) and the Ack
@@ -6991,12 +6456,7 @@ fn modal_takes_cmd_w(app: &App) -> bool {
         && app.page.is_none()
         && matches!(
             app.overlay,
-            Some(
-                Overlay::PullRequests(_)
-                    | Overlay::AgentPresets(_)
-                    | Overlay::Stacks(_)
-                    | Overlay::Conflicts(_)
-            )
+            Some(Overlay::PullRequests(_) | Overlay::AgentPresets(_) | Overlay::Conflicts(_))
         )
 }
 
@@ -7433,19 +6893,14 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         let targets = crate::config::Config::load().continue_targets(a);
         items.splice(at + 1..at + 1, launcher::continue_items(a, targets));
     }
-    // The card's pull request and the issue it was started from, what `⇧V`
-    // and `⇧I` open (`launcher::open_pull_request`, `launcher::open_issue`):
-    // ahead of the trailing Delete on an archived card, which keeps no
-    // checkout verbs, and after the checkout's Open on a live one.
+    // The card's pull request, what `⇧V` opens
+    // (`launcher::open_pull_request`): ahead of the trailing Delete on an
+    // archived card, which keeps no checkout verbs, and after the
+    // checkout's Open on a live one.
     let links: Vec<MenuItem> = crate::launcher::row(app, &a.id)
         .and_then(|row| row.pr)
         .map(|pr| MenuItem::new("Open pull request", MenuAction::OpenLink(pr.url)))
         .into_iter()
-        .chain(
-            a.issue_url
-                .clone()
-                .map(|url| MenuItem::new("Open issue", MenuAction::OpenLink(url))),
-        )
         .collect();
     if a.archived {
         let at = items.len().saturating_sub(1);
@@ -7478,12 +6933,7 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         MenuAction::PushWorktree(w.id.clone()),
     ));
     items.extend(links);
-    if w.is_main {
-        items.push(MenuItem::new(
-            "Switch branch…",
-            MenuAction::SwitchBranch(w.id.clone()),
-        ));
-    } else {
+    if !w.is_main {
         items.push(MenuItem::destructive(
             "Delete worktree",
             MenuAction::DeleteWorktree(w.id.clone()),
@@ -7535,15 +6985,6 @@ fn open_new_agent_picker(app: &mut App, worktree: WorktreeId) {
     // Only the AGENT KINDS still enabled in the SETTINGS OVERLAY's Agents
     // tab are offered; a disabled harness is absent, not greyed.
     agent_picker::open_kind_picker(app, KindPicker::new_session(worktree));
-}
-
-/// The CONTEXT MENU for a PROJECT ISSUES GROUP row: the browser. The
-/// launches are the row's keys (`p`, `e`), as the footer says.
-fn issue_row_menu_items(issue: &crate::issues::Issue) -> Vec<MenuItem> {
-    vec![MenuItem::new(
-        "Open in browser",
-        MenuAction::OpenLink(issue.url.clone()),
-    )]
 }
 
 /// The CONTEXT MENU for a PROJECT OPEN PRS GROUP row: **Check out**
@@ -7687,14 +7128,8 @@ fn worktree_menu_items(app: &App, w: &orion_core::Worktree) -> Vec<MenuItem> {
         MenuItem::new("Pull", MenuAction::PullWorktree(w.id.clone())),
         MenuItem::new("Push", MenuAction::PushWorktree(w.id.clone())),
     ];
-    // The ROOT WORKTREE moves between branches; a linked worktree, named
-    // for its branch, is deleted instead.
-    if w.is_main {
-        items.push(MenuItem::new(
-            "Switch branch…",
-            MenuAction::SwitchBranch(w.id.clone()),
-        ));
-    } else {
+    // A linked worktree can be deleted; the ROOT WORKTREE is the project.
+    if !w.is_main {
         items.push(MenuItem::destructive(
             "Delete worktree",
             MenuAction::DeleteWorktree(w.id.clone()),
@@ -7729,10 +7164,7 @@ fn context_menu_items(app: &App, focus: Focus) -> Option<Vec<MenuItem>> {
         }
         Focus::Worktrees => match app.selected_worktree_pr() {
             Some(pr) => Some(pr_row_menu_items(app, pr)),
-            None => match app.selected_worktree_issue() {
-                Some(issue) => Some(issue_row_menu_items(issue)),
-                None => app.selected_worktree().map(|w| worktree_menu_items(app, w)),
-            },
+            None => app.selected_worktree().map(|w| worktree_menu_items(app, w)),
         },
         // An EMPTY BAND on the grid: its checkout's own menu, the same
         // **Delete worktree** its `d` opens — its pull request's link row
@@ -7771,9 +7203,6 @@ fn panel_menu_items(app: &App, focus: Focus) -> Vec<MenuItem> {
                         "Show/hide open PRs",
                         MenuAction::ToggleOpenPrs,
                     ));
-                }
-                if !app.listed_issues().is_empty() {
-                    items.push(MenuItem::new("Show/hide issues", MenuAction::ToggleIssues));
                 }
                 // And drafts to hide — or, once hidden, a way back that
                 // doesn't need the list to still hold one.
@@ -7822,9 +7251,7 @@ fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientReq
         HitTarget::LauncherDrawerEntry(band, entry) => {
             launcher::select_drawer_entry(app, band, entry, out)
         }
-        HitTarget::LauncherBandPr(ref wid) | HitTarget::LauncherBandStack(ref wid) => {
-            launcher::select_band_of(app, wid, out)
-        }
+        HitTarget::LauncherBandPr(ref wid) => launcher::select_band_of(app, wid, out),
         _ => false,
     }
 }
@@ -7942,7 +7369,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         }
         Overlay::AgentPresets(_) => crate::preset_overlays::handle_list_key(app, key, out),
         Overlay::AgentPresetEditor(_) => crate::preset_overlays::handle_editor_key(app, key, out),
-        Overlay::Issues(_) => crate::issues::handle_key(app, key, out),
         Overlay::PullRequests(_) => crate::pr_modal::handle_key(app, key, out),
         Overlay::Linear(_) => crate::linear::handle_key(app, key, out),
         Overlay::Todos(_) => crate::todos::handle_key(app, key, out),
@@ -7951,9 +7377,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
-        Overlay::Stacks(_) => crate::stacks::handle_key(app, key, out),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
-        Overlay::BranchSwitch(_) => crate::branch_switch::handle_key(app, key),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
             // `?` (and `s` where no filter eats letters) on a row that
@@ -8021,13 +7445,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::AddClaudeAccount
                         | PromptKind::RenameClaudeAccount { .. }
                 );
-                // The comment box stood in for the ISSUES MODAL: Esc puts
-                // the modal back on its row, the comment unposted.
-                let back_to_issues = match &prompt.kind {
-                    PromptKind::IssueComment { view, .. } => Some(view.clone()),
-                    _ => None,
-                };
-                // And the PULL REQUESTS MODAL's, the same way.
+                // The comment box stood in for the PULL REQUESTS MODAL: Esc
+                // puts the modal back on its row, the comment unposted.
                 let back_to_prs = match &prompt.kind {
                     PromptKind::PrComment { back, .. } => back.clone(),
                     _ => None,
@@ -8048,8 +7467,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
                 if back_to_settings {
                     reopen_settings(app);
-                } else if let Some(view) = back_to_issues {
-                    crate::issues::reopen(app, view);
                 } else if let Some(view) = back_to_prs {
                     crate::pr_modal::reopen(app, *view);
                 } else if let Some(under) = back_to_modal {
@@ -8260,13 +7677,10 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // held ⌘R sweeps either way (see
                 // `DiffView::toggle_reviewed`). Only the uncommitted
                 // changes' marks are stored: anything else's live as long
-                // as the modal (`DiffView::scope_marks`), and a pull request
-                // has no checkout to store them under.
+                // as the modal (`DiffView::scope_marks`).
                 _ if REVIEWED.matches(&key) => {
                     if let Some(changed) = view.toggle_reviewed() {
-                        if view.scope == crate::git_diff::DiffScope::Uncommitted
-                            && view.prefetched.is_none()
-                        {
+                        if view.scope == crate::git_diff::DiffScope::Uncommitted {
                             crate::review::store_marks(&view.root, &view.head_key, &view.reviewed);
                         }
                         if changed {
@@ -8279,10 +7693,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // file — this viewer's alone: the **Files as a tree**
                 // SETTING is how the next one opens.
                 _ if TREE.matches(&key) => activate::diff_tree_toggled(view),
-                // The COMMIT LIST's own: tick, all or none, and how the
-                // ticked are read — ^G from anywhere, the rest where its
+                // The COMMIT LIST's own: tick, all or none, where its
                 // cursor is.
-                _ if MODE.matches(&key) && commits.is_some() => activate::diff_review_mode(view),
                 _ if TICK.matches(&key) && on(DiffFocus::Commits) => activate::diff_tick(view),
                 // ^A is the filter's line start while it holds text.
                 _ if ALL.matches(&key)
@@ -8294,9 +7706,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // Tab / ⇧Tab walk the panels: commits, files, diff.
                 KeyCode::Tab => activate::diff_focus_next(view, true),
                 KeyCode::BackTab => activate::diff_focus_next(view, false),
-                // ⇧←/⇧→ step older / newer from wherever the keys are —
-                // the cursor's commit, or the ticked ones one at a time —
-                // beside the ⇧↑/⇧↓ that scroll the diff.
+                // ⇧←/⇧→ step the cursor's commit older / newer from wherever
+                // the keys are, with nothing ticked — beside the ⇧↑/⇧↓ that
+                // scroll the diff.
                 KeyCode::Left if shift && commits.is_some() => {
                     activate::diff_commit_step(view, true)
                 }
@@ -8851,11 +8263,9 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.theme = cfg.theme();
     app.animations = cfg.animations;
     app.black_background = cfg.black_background;
-    app.card_issue_number = cfg.card_issue_number;
     app.show_all_worktrees = cfg.show_all_worktrees;
     app.diff_tree = cfg.diff_tree_view;
     app.diff_start = cfg.diff_start();
-    app.diff_one_at_a_time = cfg.diff_one_at_a_time();
     app.autofix_mode = cfg.autofix_mode();
     app.base_sync.every = crate::base_sync::interval(&cfg.base_fetch);
     // Turned off, the readout goes at once; the poll stops with it.
@@ -9266,13 +8676,6 @@ pub(crate) fn submit_prompt_now(app: &mut App, kind: PromptKind, out: &mut Vec<C
 
 fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientRequest>) {
     let value = prompt.input.trim().to_string();
-    // An ISSUE SESSION's box may be sent empty: the issue is the task.
-    let value = match &prompt.kind {
-        PromptKind::QuickPrompt(launch) if value.is_empty() => {
-            launch.default_task().unwrap_or(value)
-        }
-        _ => value,
-    };
     // A NUL in a multiline box's text would truncate the argv it crosses:
     // keep the dialog open so the user can correct it in place. No length
     // cap: the OS's ARG_MAX is the only one, and the daemon's spawn reports
@@ -9280,7 +8683,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
     if prompt.is_multiline() && value.contains('\0') {
         let what = match &prompt.kind {
             PromptKind::QuickPrompt(_) => "prompt",
-            PromptKind::PrComment { .. } | PromptKind::IssueComment { .. } => "comment",
+            PromptKind::PrComment { .. } => "comment",
             PromptKind::FollowUp { .. } => "follow-up",
             _ => "text",
         };
@@ -9312,7 +8715,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         // An empty comment box goes back to the modal it stood in for, and
         // an empty QUICK PROMPT to the one it stood on.
         match &prompt.kind {
-            PromptKind::IssueComment { view, .. } => crate::issues::reopen(app, view.clone()),
             PromptKind::PrComment {
                 back: Some(view), ..
             } => crate::pr_modal::reopen(app, (**view).clone()),
@@ -9373,12 +8775,12 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                 },
             );
         }
-        // A box opened over the ISSUES MODAL or the PULL REQUESTS MODAL
-        // takes the modal with it when it launches: the grid is where the
-        // new session's card goes up — and where the Ack puts the cursor on
-        // it (`attach_created`) with FOLLOW NEW SESSION on, or else leaves
-        // it on the card it was on. Only a box that goes without launching
-        // hands the modal back.
+        // A box opened over the PULL REQUESTS MODAL (or the LINEAR VIEW,
+        // the TODOS MODAL) takes the modal with it when it launches: the
+        // grid is where the new session's card goes up — and where the Ack
+        // puts the cursor on it (`attach_created`) with FOLLOW NEW SESSION
+        // on, or else leaves it on the card it was on. Only a box that goes
+        // without launching hands the modal back.
         PromptKind::QuickPrompt(launch) => quick_launch::submit(app, launch, value, out),
         PromptKind::PrComment {
             number,
@@ -9424,10 +8826,6 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                     view.info(format!("{label}: {shown}"));
                 }
             }
-        }
-
-        PromptKind::IssueComment { view, issue } => {
-            crate::issues::post_comment(app, view, issue, value);
         }
         PromptKind::EditLink { id } => {
             send(app, out, |req_id| ClientRequest::UpdateLink {
@@ -9806,7 +9204,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
                     launch.preset = back.launch.preset.clone();
                 }
                 let launch = launch
-                    .with_issue(back.launch.issue.clone())
                     .with_pr(back.launch.pr.clone())
                     .with_linear(back.launch.linear.clone())
                     .with_todo(back.launch.todo.clone())
@@ -9890,7 +9287,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             }
         }
         MenuAction::DeleteWorktree(id) => activate::delete_worktree(app, &id),
-        MenuAction::SwitchBranch(id) => crate::branch_switch::open_for(app, &id),
         MenuAction::PullWorktree(id) => {
             crate::git_sync::request(app, id, crate::git_sync::Op::Pull)
         }
@@ -9907,7 +9303,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         }
         MenuAction::ToggleArchived => toggle_archived(app, out),
         MenuAction::ToggleOpenPrs => toggle_open_prs(app, out),
-        MenuAction::ToggleIssues => toggle_issues(app, out),
         MenuAction::ToggleDraftPrs => toggle_hide_draft_prs(app, out),
         MenuAction::PickLaunchWorktree { target, back } => {
             launcher::pick_launch_worktree(app, target, *back)
@@ -10000,7 +9395,6 @@ fn restore_context(app: &mut App, out: &mut Vec<ClientRequest>) {
 fn restore_project_cursors(app: &mut App) {
     app.set_sel_worktree(0);
     schedule_open_prs_lookup(app);
-    crate::issues::schedule_prefetch(app);
     schedule_pr_detail(app);
     if let Some(pid) = app.selected_project().map(|p| p.id.clone()) {
         if let Some(wid) = app.last_worktree_for_project.get(&pid).cloned() {
@@ -10428,24 +9822,6 @@ fn move_selection(app: &mut App, delta: i64, out: &mut Vec<ClientRequest>) {
                 select_worktree_row(app, first, out);
                 return;
             }
-            // And off the last row above a folded ISSUES group — the last
-            // pull request, or the last checkout when there are none —
-            // into that group, the same way.
-            if delta > 0
-                && app.issues_collapsed
-                && sel + 1 >= checkouts
-                && !app.listed_issues().is_empty()
-            {
-                app.issues_collapsed = false;
-                app.dirty = true;
-                let first = app
-                    .worktree_rows()
-                    .iter()
-                    .position(|row| row.open_issue().is_some())
-                    .unwrap_or(checkouts);
-                select_worktree_row(app, first, out);
-                return;
-            }
             (checkouts, sel)
         }
         Focus::Sessions => {
@@ -10485,8 +9861,7 @@ fn select_project_row(app: &mut App, i: usize, out: &mut Vec<ClientRequest>) {
 }
 
 /// Move the Worktrees cursor to a *different* row `i` and bring up its
-/// session. Stepping onto an open-PR or issue row is not a worktree
-/// switch: it has no sessions to restore and nothing to attach, so the
+/// session. Stepping onto an open-PR row is not a worktree switch: it has no sessions to restore and nothing to attach, so the
 /// pane is left exactly as it was.
 pub(super) fn select_worktree_row(app: &mut App, i: usize, out: &mut Vec<ClientRequest>) {
     app.select_worktree_when_seen = None;
@@ -10496,7 +9871,6 @@ pub(super) fn select_worktree_row(app: &mut App, i: usize, out: &mut Vec<ClientR
         restore_session(app, out);
     }
     schedule_pr_detail(app);
-    crate::issues::schedule_detail(app);
 }
 
 /// Show the selected session in the terminal pane WITHOUT taking focus or
@@ -10883,7 +10257,6 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         starting_prompt,
         reopen_on_error,
         pr,
-        issue_url,
         focus_pane,
         placeholder,
         follow,
@@ -11009,7 +10382,6 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             effort,
             auto_title,
             starting_prompt,
-            issue_url,
             mode,
         },
     });
@@ -11638,9 +11010,9 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
     // under the pointer is marked while it is there (the draw reads this
     // in `ui::launcher_view`). Only those take it: every other target is
     // a card, which has its own highlight, or the background.
-    // The header's PR & ISSUE COUNTS are buttons of the same kind, and
-    // take the same underline; so are the pane's CLOSE BUTTON and the
-    // footer's buttons. A card's PULL REQUEST LINE is a
+    // The header's PR COUNT is a button of the same kind, and takes the
+    // same underline; so are the pane's CLOSE BUTTON and the footer's
+    // buttons. A card's PULL REQUEST LINE is a
     // link on a card whose own highlight marks the cursor, not the
     // pointer, so the line takes it for itself.
     let crumb = hit.filter(|h| {
@@ -11648,7 +11020,6 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
             h,
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
-                | HitTarget::LauncherBandStack(_)
                 | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
@@ -11657,7 +11028,6 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherTabMore
                 | HitTarget::LauncherCrumb
                 | HitTarget::LauncherPullRequests
-                | HitTarget::LauncherIssues
                 | HitTarget::LauncherWelcomePrompt
                 | HitTarget::FooterHome
                 | HitTarget::FooterUpgrade
@@ -12173,16 +11543,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         crate::preset_overlays::handle_list_mouse(app, mouse, mouse_pos, out);
         return;
     }
-    if matches!(&app.overlay, Some(Overlay::Issues(_))) {
-        crate::issues::handle_mouse(app, mouse, mouse_pos, out);
-        return;
-    }
     if matches!(&app.overlay, Some(Overlay::Usage(_))) {
         crate::usage::handle_mouse(app, mouse, mouse_pos);
-        return;
-    }
-    if matches!(&app.overlay, Some(Overlay::Stacks(_))) {
-        crate::stacks::handle_mouse(app, mouse, mouse_pos, out);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::CleanWorktrees(_))) {
@@ -12199,10 +11561,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::Todos(_))) {
         crate::todos::handle_mouse(app, mouse, mouse_pos, out);
-        return;
-    }
-    if matches!(&app.overlay, Some(Overlay::BranchSwitch(_))) {
-        crate::branch_switch::handle_mouse(app, mouse, mouse_pos);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::Autofix(_))) {
@@ -12384,10 +11742,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::LauncherBandPr(wid)) => {
                     launcher::click_pull_request(app, &wid, out)
                 }
-                // The STACK MARK `⬡`: the Stacks modal, on that stack.
-                Some(HitTarget::LauncherBandStack(wid)) => {
-                    crate::stacks::open_at(app, &wid);
-                }
                 // `‹ sessions` in a full-screen session's header: back
                 // down to the pane beside the grid, the same way `^q`
                 // goes back.
@@ -12414,11 +11768,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // The key cap in the empty grid's welcome: the QUICK
                 // PROMPT, through the `open_box` its key runs.
                 Some(HitTarget::LauncherWelcomePrompt) => launcher::open_box(app),
-                // The header's PR & ISSUE COUNTS: each opens its own list
-                // for the project in front of you, through the very
-                // function `v` / `i` run — the click is the key's twin.
+                // The header's PR COUNT: the list for the project in front
+                // of you, through the very function `v` runs — the click is
+                // the key's twin.
                 Some(HitTarget::LauncherPullRequests) => crate::pr_modal::open(app),
-                Some(HitTarget::LauncherIssues) => crate::issues::open_issues(app),
                 // The footer's nameplate: HOME, through the `toggle_home`
                 // its key runs — and from HOME, back down to the grid.
                 Some(HitTarget::FooterHome) => toggle_home(app),
@@ -12604,7 +11957,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                         HitTarget::LauncherCard(_)
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
-                            | HitTarget::LauncherBandStack(_)
                             | HitTarget::LauncherDrawer(_)
                             | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)
@@ -12786,9 +12138,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             // Boot the restored worktree's sessions right away — the first
             // thing the user does after launch is walk into one of them.
             schedule_prewarm(app);
-            // And ask for the restored project's open issues, so an `i`
-            // straight after launch has rows to paint.
-            crate::issues::schedule_prefetch(app);
             // The cursor came back on the session the user left on; bring
             // its terminal back with it, exactly as landing on the row would.
             // No debounce: a boot restores one remembered session once, so
@@ -12947,7 +12296,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             reconcile_selection_inner(app, before, out);
         }
         ServerEvent::Ack { req_id, created } => {
-            crate::stacks::settled(app, req_id);
             // False for a create the user has navigated away from since
             // firing it (`App::left_behind`): the rows still become the
             // real ones, and nothing below moves a cursor, the pane or
@@ -13122,8 +12470,8 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             refresh_palette(app);
             app.dirty = true;
         }
-        ServerEvent::StacksChanged { stacks, error } => {
-            crate::stacks::listed(app, stacks, error);
+        ServerEvent::StacksChanged { stacks, .. } => {
+            crate::stacks::listed(app, stacks);
         }
         // `orion open` in a session: the user asked to see these files.
         ServerEvent::FilesOpened { root, paths, .. } => {
@@ -13152,7 +12500,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             if let Some(id) = &req_id {
                 app.left_behind.remove(id);
                 app.todo_pending.remove(id);
-                crate::stacks::settled(app, *id);
             }
             match req_id.and_then(|id| app.pending.remove(&id)) {
                 Some(PendingIntent::DeleteWorktree(rollback)) => {
@@ -13532,11 +12879,10 @@ struct SelectionSnapshot {
     project: Option<orion_core::ProjectId>,
     worktree: Option<WorktreeId>,
     /// The OPEN PRS row under the Worktrees cursor, by URL, when it is on
-    /// one (`worktree` is None then), and the ISSUES row the same way: no
-    /// re-seat reads them — a row that left takes its cursor's neighbour —
-    /// but they make two snapshots on different rows differ.
+    /// one (`worktree` is None then): no re-seat reads it — a row that left
+    /// takes its cursor's neighbour — but it makes two snapshots on
+    /// different rows differ.
     pr: Option<String>,
-    issue: Option<String>,
     session: Option<SessionRef>,
     /// The Sessions panel row the cursor was on, and the group that row
     /// sat in. Following onto an archived row is only right when the
@@ -13574,7 +12920,6 @@ fn selection_snapshot(app: &App) -> SelectionSnapshot {
         project: app.selected_project().map(|p| p.id.clone()),
         worktree: app.selected_worktree().map(|w| w.id.clone()),
         pr: app.selected_worktree_pr().map(|pr| pr.url.clone()),
-        issue: app.selected_worktree_issue().map(|i| i.url.clone()),
         session_index,
         session_group: row.map(session_group),
         session: row.and_then(SessionRow::sref),
@@ -13707,7 +13052,6 @@ mod tests {
                     sort_order: 9,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -13736,7 +13080,6 @@ mod tests {
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -14630,7 +13973,6 @@ mod tests {
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -15302,31 +14644,6 @@ mod tests {
         );
     }
 
-    /// Open issues on the selected project, as `gh issue list` would have
-    /// answered — the PROJECT ISSUES GROUP's rows.
-    pub(super) fn seed_issues(app: &mut App, issues: &[(u64, &str)]) {
-        let id = app.selected_project().expect("a project").id.clone();
-        app.issues.insert(
-            id,
-            crate::issues::IssueList {
-                list: issues
-                    .iter()
-                    .map(|(number, title)| crate::issues::Issue {
-                        number: *number,
-                        url: format!("https://github.com/o/r/issues/{number}"),
-                        title: (*title).into(),
-                        author: "webdevcody".into(),
-                        created_at: "2026-09-10T12:00:00Z".into(),
-                        updated_at: "2026-09-11T12:00:00Z".into(),
-                        labels: Vec::new(),
-                        body: format!("Body of issue {number}"),
-                    })
-                    .collect(),
-                at: std::time::Instant::now(),
-            },
-        );
-    }
-
     /// A control chord pressed wherever the cursor is: `ctrl(app, 'd', out)`.
     fn ctrl(app: &mut App, c: char, out: &mut Vec<ClientRequest>) {
         press(app, KeyCode::Char(c), KeyModifiers::CONTROL, out);
@@ -15420,7 +14737,6 @@ mod tests {
                     WorktreeRow::Checkout(w) => w.branch.clone(),
                     WorktreeRow::Pr(pr) => format!("#{}", pr.number),
                     WorktreeRow::PrCheckout(worktree) => format!("└ {}", worktree.branch),
-                    WorktreeRow::Issue(issue) => format!("issue #{}", issue.number),
                 })
                 .collect()
         };
@@ -16541,7 +15857,7 @@ mod tests {
 
     /// `⌘E` on the Sessions PR ROW opens the checkout's own CHANGES — the
     /// branch's commits, read locally — and the row menu's **View diff**
-    /// still asks GitHub for the pull request's.
+    /// still opens the pull request's.
     #[test]
     fn changes_on_the_sessions_pr_row_opens_the_checkouts_own() {
         let mut app = App::new();
@@ -16549,16 +15865,12 @@ mod tests {
         seed_branch_pr(&mut app, 7, "Attach links");
         app.focus = Focus::Sessions;
         app.set_sel_session(sessions_pr_row(&app));
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.pr_diff_tx = Some(tx);
-        app.pr_diff_inflight = Some(7);
         let mut out = Vec::new();
 
         press(&mut app, KeyCode::Char('e'), KeyModifiers::SUPER, &mut out);
-        assert_ne!(
-            app.flash.as_deref(),
-            Some("still fetching the diff for #7…"),
-            "the checkout's changes, not GitHub's diff"
+        assert!(
+            !matches!(&app.overlay, Some(Overlay::Diff(v)) if v.pr_review.is_some()),
+            "the checkout's changes, not the pull request's"
         );
 
         let items = menu_items_for_link(&app.selected_link().expect("the PR ROW"));
@@ -16837,242 +16149,147 @@ mod tests {
         assert_eq!(app.pr_preview_scroll, 0);
     }
 
-    /// `g` on a pull-request row opens the ordinary diff modal on the
-    /// fetched diff — file list from the diff itself, and switching files
-    /// reads the text already in hand rather than shelling out at git.
+    /// At one of its commits — the Commits tab's row — the viewer opens on
+    /// that commit alone, out of the pull request's COMMIT LIST: nothing
+    /// ticked, the cursor on it. A head the repo lacks is fetched by its
+    /// pull ref first, and a fetch that fails says why in the footer.
     #[test]
-    fn the_fetched_pr_diff_opens_in_the_diff_modal() {
+    fn a_pr_review_opens_at_a_commit_and_says_why_a_fetch_failed() {
         let mut app = App::new();
-        seed_tree(&mut app);
-        seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.set_sel_worktree(1);
-        let diff = "\
-diff --git a/src/a.rs b/src/a.rs
---- a/src/a.rs
-+++ b/src/a.rs
-@@ -1 +1 @@
--old
-+new
-diff --git a/src/b.rs b/src/b.rs
---- a/src/b.rs
-+++ b/src/b.rs
-@@ -1 +1 @@
--x
-+y
-";
-        app.pr_diff_inflight = Some(7);
-        open_pr_diff_view(
-            &mut app,
-            7,
-            &pr_url(7),
-            "#7 Attach links".into(),
-            Some(diff.into()),
-            None,
-        );
-        assert!(app.pr_diff_inflight.is_none(), "the fetch is done");
-        let Some(Overlay::Diff(view)) = &app.overlay else {
-            panic!("expected the diff modal, got {:?}", app.overlay);
-        };
-        assert_eq!(view.branch, "#7 Attach links", "the PR titles the modal");
-        assert_eq!(
-            view.files
-                .iter()
-                .map(|f| f.path.as_str())
-                .collect::<Vec<_>>(),
-            ["src/a.rs", "src/b.rs"]
-        );
-        assert!(
-            view.diff.contains("+new"),
-            "first file's diff: {}",
-            view.diff
-        );
-
-        // Selecting the second file reads the prefetched chunk — no repo is
-        // touched (seed_tree's /tmp/demo isn't even a git checkout).
-        let Some(Overlay::Diff(view)) = &mut app.overlay else {
-            unreachable!()
-        };
-        view.select(1);
-        crate::git_diff::load_selected_diff(view);
-        assert!(
-            view.diff.contains("+y"),
-            "second file's diff: {}",
-            view.diff
-        );
-        assert!(!view.diff.contains("+new"), "chunks don't bleed");
-    }
-
-    /// THE way in for a pull request, at a file: the viewer opens on it,
-    /// under the pull request's title — and every file is marked as its
-    /// own header says, not all `M`.
-    #[test]
-    fn a_pr_review_opens_at_the_file_asked_for() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.set_sel_worktree(1);
-        let diff = "\
-diff --git a/src/a.rs b/src/a.rs
-new file mode 100644
---- /dev/null
-+++ b/src/a.rs
-@@ -0,0 +1 @@
-+new
-diff --git a/src/b.rs b/src/b.rs
---- a/src/b.rs
-+++ b/src/b.rs
-@@ -1 +1 @@
--x
-+y
-diff --git a/old.rs b/moved.rs
-similarity index 90%
-rename from old.rs
-rename to moved.rs
-diff --git a/gone.rs b/gone.rs
-deleted file mode 100644
---- a/gone.rs
-+++ /dev/null
-@@ -1 +0,0 @@
--bye
-";
-        open_pr_diff_view(
-            &mut app,
-            7,
-            &pr_url(7),
-            "#7 Attach links".into(),
-            Some(diff.into()),
-            Some("src/b.rs"),
-        );
-        let Some(Overlay::Diff(view)) = &app.overlay else {
-            panic!("expected the diff modal, got {:?}", app.overlay);
-        };
-        assert_eq!(
-            view.selected_file().map(|f| f.path.as_str()),
-            Some("src/b.rs")
-        );
-        assert!(view.diff.contains("+y"), "{}", view.diff);
-        assert_eq!(
-            view.head[0],
-            crate::diff_doc::Head::Title("#7 Attach links".into())
-        );
-        let marks: Vec<(&str, char, Option<&str>)> = view
-            .files
-            .iter()
-            .map(|f| (f.path.as_str(), f.xy[0], f.orig_path.as_deref()))
-            .collect();
-        assert_eq!(
-            marks,
-            [
-                ("src/a.rs", 'A', None),
-                ("src/b.rs", 'M', None),
-                ("moved.rs", 'R', Some("old.rs")),
-                ("gone.rs", 'D', None),
-            ]
-        );
-    }
-
-    /// At a commit the project's repo has, the viewer opens on that commit
-    /// alone, under the pull request's title and its message; at one it
-    /// lacks, the whole pull request is fetched instead, and the footer
-    /// says why.
-    #[test]
-    fn a_pr_review_opens_at_a_commit_the_repo_has() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(&dir);
-        std::fs::write(repo.join("b.txt"), "bee\n").unwrap();
-        run_git(&repo, &["add", "."]);
-        run_git(&repo, &["commit", "-m", "add b", "-m", "why b"]);
-        let sha = crate::git_diff::head_oid(&repo).unwrap();
-        let mut app = App::new();
-        seed_repo_tree(&mut app, &repo);
+        let _repo = pr_repo(&mut app);
+        let tip = app.pr_detail[&pr_url(7)].head_sha.clone();
         open_pr_review(
             &mut app,
             7,
             pr_url(7),
-            "#7 Add b".into(),
-            PrReviewAt::Commit(sha.clone()),
+            "#7 Attach links".into(),
+            PrReviewAt::Commit(tip.clone()),
         );
-        let Some(Overlay::Diff(view)) = &app.overlay else {
-            panic!("expected the diff modal, got {:?}", app.overlay);
-        };
+        let view = diff_view(&app);
+        let list = view.commits.as_ref().expect("its commits");
+        assert!(list.ticked.is_empty(), "the one commit, not the whole PR");
         assert!(
-            matches!(&view.scope, crate::git_diff::DiffScope::Commit { sha: on, .. } if *on == sha),
+            matches!(&view.scope, crate::git_diff::DiffScope::Commit { sha, .. } if *sha == tip),
             "{:?}",
             view.scope
         );
-        assert!(view.commits.is_none(), "no commit list for one commit");
-        assert_eq!(
-            view.files
-                .iter()
-                .map(|f| f.path.as_str())
-                .collect::<Vec<_>>(),
-            ["b.txt"]
-        );
-        assert!(view.diff.contains("+bee"), "{}", view.diff);
-        use crate::diff_doc::Head;
-        assert_eq!(view.head[0], Head::Meta("#7 Add b".into()));
-        assert_eq!(view.head[1], Head::Title("add b".into()));
-        assert!(view.head.contains(&Head::Prose("why b".into())));
 
+        // A head this repo has never seen, and no origin to fetch it from.
         app.overlay = None;
+        if let Some(detail) = app.pr_detail.get_mut(&pr_url(7)) {
+            detail.head_sha = "0123456789abcdef0123456789abcdef01234567".into();
+        }
         open_pr_review(
             &mut app,
             7,
             pr_url(7),
-            "#7 Add b".into(),
-            PrReviewAt::Commit("0123456789abcdef0123456789abcdef01234567".into()),
+            "#7 Attach links".into(),
+            PrReviewAt::Top,
         );
-        assert!(app.overlay.is_none());
+        assert!(app.overlay.is_none(), "{:?}", app.overlay);
         assert!(
             app.flash
-                .as_deref()
-                .unwrap_or("")
-                .contains("isn't in this repo"),
+                .as_ref()
+                .is_some_and(|f| f.kind == crate::flash::FlashKind::Failed),
             "{:?}",
             app.flash
         );
     }
 
-    /// A pull request's diff spread over two directories, one of them a
-    /// chain the tree folds into a single row.
-    const TREE_PR_DIFF: &str = "\
-diff --git a/crates/tui/src/a.rs b/crates/tui/src/a.rs
---- a/crates/tui/src/a.rs
-+++ b/crates/tui/src/a.rs
-@@ -1 +1 @@
--old
-+new-a
-diff --git a/crates/tui/src/b.rs b/crates/tui/src/b.rs
---- a/crates/tui/src/b.rs
-+++ b/crates/tui/src/b.rs
-@@ -1 +1 @@
--x
-+new-b
-diff --git a/docs/keys.md b/docs/keys.md
---- a/docs/keys.md
-+++ b/docs/keys.md
-@@ -1 +1 @@
--k
-+new-keys
-";
-
-    /// An app with the DIFF modal up on [`TREE_PR_DIFF`], flat or as the
-    /// tree per `app.diff_tree` — which `tree` sets before opening.
-    fn pr_diff_app(tree: bool) -> App {
+    /// A pull request whose body is not in yet has nothing to read with:
+    /// the footer says so, and no viewer goes up.
+    #[test]
+    fn a_pull_request_still_loading_says_so() {
         let mut app = App::new();
         seed_tree(&mut app);
+        let repo = tempfile::tempdir().unwrap();
+        app.tree.projects[0].repo_path = repo.path().into();
         seed_open_prs(&mut app, &[(7, "Attach links")]);
         app.set_sel_worktree(1);
-        app.diff_tree = tree;
-        open_pr_diff_view(
+        request_pr_diff(&mut app);
+        assert!(app.overlay.is_none());
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("#7 is still loading — try again in a moment")
+        );
+    }
+
+    /// A repo whose `feat` branch changes two files under `crates/tui/src`
+    /// and one under `docs` over `main` — pull request #7, its body in
+    /// with `feat`'s tip and `main` as its base, the project selected.
+    fn pr_repo(app: &mut App) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        let write = |path: &str, text: &str| {
+            let path = repo.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("crates/tui/src/a.rs", "old\n");
+        write("crates/tui/src/b.rs", "x\n");
+        write("docs/keys.md", "k\n");
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "the files"]);
+        run_git(&repo, &["checkout", "-q", "-b", "feat"]);
+        write("crates/tui/src/a.rs", "new-a\n");
+        write("crates/tui/src/b.rs", "new-b\n");
+        write("docs/keys.md", "new-keys\n");
+        run_git(&repo, &["commit", "-am", "attach links"]);
+        seed_repo_tree(app, &repo);
+        app.pr_detail.insert(
+            pr_url(7),
+            crate::pull_request::PrDetail {
+                head_sha: crate::git_diff::head_oid(&repo).unwrap(),
+                ..a_detail(7, "", Vec::new())
+            },
+        );
+        dir
+    }
+
+    /// `g` on a pull request reads it from the project's git: the COMMIT
+    /// LIST over its files, every commit ticked, under its title — the
+    /// viewer `⌘E` opens on a checkout.
+    #[test]
+    fn a_pull_request_is_read_through_git() {
+        let mut app = App::new();
+        let _repo = pr_repo(&mut app);
+        open_pr_review(
             &mut app,
             7,
-            &pr_url(7),
+            pr_url(7),
             "#7 Attach links".into(),
-            Some(TREE_PR_DIFF.into()),
-            None,
+            PrReviewAt::Top,
         );
-        app
+        let view = diff_view(&app);
+        assert_eq!(view.branch, "#7 Attach links", "the PR titles the modal");
+        let list = view.commits.as_ref().expect("its commits");
+        assert_eq!(list.commits.len(), 1);
+        assert!(list.all_ticked(), "the whole pull request");
+        assert_eq!(
+            view.files
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["crates/tui/src/a.rs", "crates/tui/src/b.rs", "docs/keys.md"]
+        );
+        assert!(view.diff.contains("+new-a"), "{}", view.diff);
+    }
+
+    /// An app with the DIFF modal up on [`pr_repo`]'s pull request, flat
+    /// or as the tree per `app.diff_tree` — which `tree` sets before
+    /// opening. The repo lives as long as the dir handed back.
+    fn pr_diff_app(tree: bool) -> (tempfile::TempDir, App) {
+        let mut app = App::new();
+        let repo = pr_repo(&mut app);
+        app.diff_tree = tree;
+        open_pr_review(
+            &mut app,
+            7,
+            pr_url(7),
+            "#7 Attach links".into(),
+            PrReviewAt::Top,
+        );
+        (repo, app)
     }
 
     /// The tree list's rows as the panel names them, the cursor's starred.
@@ -17094,7 +16311,7 @@ diff --git a/docs/keys.md b/docs/keys.md
     /// and leaving the tree from one lands on that directory's first file.
     #[test]
     fn ctrl_b_flips_the_pr_diff_file_list_between_flat_and_tree() {
-        let mut app = pr_diff_app(false);
+        let (_repo, mut app) = pr_diff_app(false);
         let mut out = Vec::new();
         press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         assert!(diff_view(&app).diff.contains("+new-b"));
@@ -17166,8 +16383,8 @@ diff --git a/docs/keys.md b/docs/keys.md
     /// click on a file's row is ↓ onto it.
     #[test]
     fn a_click_on_a_diff_tree_row_is_enter_on_it() {
-        let mut keyed = pr_diff_app(true);
-        let mut clicked = pr_diff_app(true);
+        let (_keyed_repo, mut keyed) = pr_diff_app(true);
+        let (_clicked_repo, mut clicked) = pr_diff_app(true);
         let mut out = Vec::new();
         assert_eq!(
             diff_tree_rows(&keyed),
@@ -17218,7 +16435,7 @@ diff --git a/docs/keys.md b/docs/keys.md
     /// `Ctrl+r` sweeps down the files without stopping on a directory.
     #[test]
     fn the_diff_tree_filters_and_sweeps_reviewed_marks() {
-        let mut app = pr_diff_app(true);
+        let (_repo, mut app) = pr_diff_app(true);
         let mut out = Vec::new();
         for c in "keys".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
@@ -17254,13 +16471,13 @@ diff --git a/docs/keys.md b/docs/keys.md
         assert!(!done[tree.rows[3].node]);
     }
 
-    /// A fresh `gh pr diff` landing under the tree keeps what the reader
-    /// folded and the file they were on. How the next launch opens is the
+    /// A fresh listing landing under the tree keeps what the reader folded
+    /// and the file they were on. How the next launch opens is the
     /// **Files as a tree** SETTING's to say, not the UI state blob's: a
     /// blob from before the setting no longer flips it either way.
     #[test]
     fn the_diff_tree_survives_a_refresh_and_a_relaunch() {
-        let mut app = pr_diff_app(true);
+        let (_repo, mut app) = pr_diff_app(true);
         let mut out = Vec::new();
         for _ in 0..3 {
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
@@ -17273,10 +16490,14 @@ diff --git a/docs/keys.md b/docs/keys.md
             unreachable!()
         };
         view.toggle_dir(0);
-        let fresh = format!(
-            "{TREE_PR_DIFF}diff --git a/docs/new.md b/docs/new.md\n--- /dev/null\n+++ b/docs/new.md\n@@ -0,0 +1 @@\n+n\n"
-        );
-        assert!(refresh_pr_diff_view(view, &fresh));
+        let mut files = view.files.clone();
+        files.push(crate::git_diff::DiffFile {
+            path: "docs/new.md".into(),
+            orig_path: None,
+            xy: ['A', ' '],
+            lines: None,
+        });
+        view.replace_files(files);
         assert_eq!(
             diff_tree_rows(&app),
             ["crates/tui/src", "docs", "*keys.md", "new.md"]
@@ -17296,133 +16517,30 @@ diff --git a/docs/keys.md b/docs/keys.md
         assert!(!next.diff_tree, "a blob saying tree doesn't overrule it");
     }
 
-    /// A diff `gh` couldn't fetch flashes and leaves the modal shut, and a
-    /// second `g` while one is already in flight doesn't stack a request.
-    #[test]
-    fn a_failed_pr_diff_flashes_instead_of_opening() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.set_sel_worktree(1);
-
-        app.pr_diff_inflight = Some(7);
-        open_pr_diff_view(
-            &mut app,
-            7,
-            &pr_url(7),
-            "#7 Attach links".into(),
-            None,
-            None,
-        );
-        assert!(app.overlay.is_none());
-        assert!(
-            app.flash
-                .as_deref()
-                .is_some_and(|f| f.contains("couldn't read the diff for #7")),
-            "got {:?}",
-            app.flash
-        );
-
-        // An empty diff is not a modal with no rows in it.
-        open_pr_diff_view(
-            &mut app,
-            7,
-            &pr_url(7),
-            "#7".into(),
-            Some(String::new()),
-            None,
-        );
-        assert!(app.overlay.is_none());
-        assert_eq!(app.flash.as_deref(), Some("#7 changes no files"));
-
-        // Mashing the key while one is in flight is a nudge, not a request.
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.pr_diff_tx = Some(tx);
-        app.pr_diff_inflight = Some(7);
-        app.flash = None;
-        request_pr_diff(&mut app);
-        assert_eq!(app.flash, None, "the first fetch already said so");
-        assert_eq!(app.pr_diff_inflight, Some(7));
-    }
-
     /// The PULL REQUEST PAGE's Changes tab opens the DIFF VIEWER through
     /// the pull request's own entry point, on the file acted on — and only
-    /// on that pull request's diff: another's leaves its cursor where it
-    /// opens. A commit's diff opens the same way, under the commit's page
-    /// inside the pull request, titled with its sha.
+    /// on that pull request's: another's leaves its cursor where it opens.
+    /// The page's request is spent either way.
     #[test]
     fn a_pull_request_diff_opens_at_the_file_the_page_asked_for() {
         let mut app = App::new();
-        seed_tree(&mut app);
-        seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.set_sel_worktree(1);
-        let diff = "\
-diff --git a/src/a.rs b/src/a.rs
---- a/src/a.rs
-+++ b/src/a.rs
-@@ -1 +1 @@
--old
-+new
-diff --git a/src/b.rs b/src/b.rs
---- a/src/b.rs
-+++ b/src/b.rs
-@@ -1 +1 @@
--x
-+y
-";
-        app.pr_diff_at = Some((pr_url(7), "src/b.rs".into()));
-        open_pr_diff_view(
-            &mut app,
-            7,
-            &pr_url(7),
-            "#7".into(),
-            Some(diff.into()),
-            None,
-        );
-        let Some(Overlay::Diff(view)) = &app.overlay else {
-            panic!("expected the diff modal, got {:?}", app.overlay);
-        };
-        assert_eq!(view.selected_path(), Some("src/b.rs"));
-        assert!(view.diff.contains("+y"), "{}", view.diff);
+        let _repo = pr_repo(&mut app);
+        app.pr_diff_at = Some((pr_url(7), "crates/tui/src/b.rs".into()));
+        request_pr_diff_for(&mut app, 7, pr_url(7), "#7".into());
+        let view = diff_view(&app);
+        assert_eq!(view.selected_path(), Some("crates/tui/src/b.rs"));
+        assert!(view.diff.contains("+new-b"), "{}", view.diff);
         assert!(app.pr_diff_at.is_none(), "taken");
 
         app.overlay = None;
-        app.pr_diff_at = Some((pr_url(8), "src/b.rs".into()));
-        open_pr_diff_view(
-            &mut app,
-            7,
-            &pr_url(7),
-            "#7".into(),
-            Some(diff.into()),
-            None,
+        app.pr_diff_at = Some((pr_url(8), "crates/tui/src/b.rs".into()));
+        request_pr_diff_for(&mut app, 7, pr_url(7), "#7".into());
+        assert_eq!(
+            diff_view(&app).selected_path(),
+            Some("crates/tui/src/a.rs"),
+            "another's file"
         );
-        let Some(Overlay::Diff(view)) = &app.overlay else {
-            panic!("expected the diff modal");
-        };
-        assert_eq!(view.selected_path(), Some("src/a.rs"), "another's file");
         assert!(app.pr_diff_at.is_none(), "and spent");
-
-        // A commit: fetched under its own URL, titled with its sha.
-        app.overlay = None;
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        app.pr_diff_tx = Some(tx);
-        let repo = tempfile::tempdir().unwrap();
-        app.tree.projects[0].repo_path = repo.path().into();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        rt.block_on(async {
-            request_pr_commit_diff(&mut app, 7, &pr_url(7), "not-a-sha", "Dedupe");
-            let answer = rx.recv().await.expect("an answer");
-            assert_eq!(answer.url, format!("{}/commits/not-a-sha", pr_url(7)));
-            assert_eq!(answer.title, "#7 not-a-s Dedupe");
-            assert!(
-                answer.diff.is_none(),
-                "a sha that is not one is never asked for"
-            );
-        });
-        assert_eq!(app.pr_diff_inflight, Some(7));
     }
 
     /// A pull request as the cache would hand it back, for the rows.
@@ -17756,54 +16874,12 @@ diff --git a/src/b.rs b/src/b.rs
         assert_eq!(app.prs.status_or_open(&pr_url(7)).word(), "merged");
     }
 
-    /// A list from the slim query never asked for the meta line or who is
-    /// asked to review: each row keeps the last full answer's, stays in its
-    /// section, and the answer is no change to write.
-    #[test]
-    fn a_slim_list_keeps_the_meta_it_did_not_ask_for() {
-        use crate::pull_request::{ListAnswer, PrMeta, PrSection};
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let pid = app.selected_project().expect("a project").id.clone();
-        let full = || {
-            let mut row = a_pr(7, "Attach links", false);
-            row.meta = PrMeta {
-                author: "sam".into(),
-                review_requested: true,
-                comments: 3,
-                ..PrMeta::default()
-            };
-            row
-        };
-        note_open_prs_answer(&mut app, pid.clone(), Some(vec![full()]), &mut Vec::new());
-        assert_eq!(app.all_open_prs()[0].section(), PrSection::ReviewRequested);
-        app.pr_cache_dirty = false;
-
-        let slim = vec![a_pr(7, "Attach links", false)];
-        let asked = crate::fetch::Asked::At(crate::fetch::now());
-        note_open_prs_answer_at(
-            &mut app,
-            pid,
-            Some(ListAnswer {
-                rows: slim,
-                slim: true,
-                ..Default::default()
-            }),
-            asked,
-            &mut Vec::new(),
-        );
-        let row = &app.all_open_prs()[0];
-        assert_eq!(row.meta, full().meta, "the last full answer's meta");
-        assert_eq!(row.section(), PrSection::ReviewRequested, "same section");
-        assert!(!app.pr_cache_dirty, "nothing changed");
-    }
-
     /// The merged tail lands beside the open rows and is the PULL REQUESTS
     /// MODAL's alone — no open pull request to the group or the counts.
-    /// An answer that did not ask for it — the slim query's, a failed
-    /// call — keeps the last one; one that asked and found none empties it.
+    /// An answer that did not bring one — a failed call — keeps the last
+    /// one; one that asked and found none empties it.
     #[test]
-    fn the_merged_tail_lands_beside_the_open_rows_and_outlasts_a_slim_answer() {
+    fn the_merged_tail_lands_beside_the_open_rows_and_outlasts_a_failed_call() {
         use crate::pull_request::ListAnswer;
         let mut app = App::new();
         seed_tree(&mut app);
@@ -17813,52 +16889,31 @@ diff --git a/src/b.rs b/src/b.rs
             row.meta.merged_at = "2026-10-06T09:10:27Z".into();
             row
         };
-        let land = |app: &mut App, merged: Option<Vec<_>>, slim| {
+        let land = |app: &mut App, merged: Option<Vec<_>>| {
             let answer = ListAnswer {
                 rows: vec![a_pr(7, "Attach links", false)],
-                slim,
                 merged,
                 ..Default::default()
             };
             let asked = crate::fetch::Asked::At(crate::fetch::now());
             note_open_prs_answer_at(app, pid.clone(), Some(answer), asked, &mut Vec::new());
         };
-        land(&mut app, Some(vec![landed()]), false);
+        land(&mut app, Some(vec![landed()]));
         assert_eq!(open_pr_numbers(&app), vec![7]);
-        assert_eq!(app.project_open_counts(&pid).0, Some(1));
         assert_eq!(app.open_prs[&pid].merged, vec![landed()]);
         assert_eq!(app.prs.status_or_open(&pr_url(5)).word(), "merged");
         assert!(app.live_pr_urls().contains(&pr_url(5)), "its page is kept");
         app.pr_cache_dirty = false;
 
-        land(&mut app, None, true);
-        assert_eq!(app.open_prs[&pid].merged, vec![landed()], "never asked");
+        land(&mut app, None);
+        assert_eq!(app.open_prs[&pid].merged, vec![landed()], "never said");
         assert!(!app.pr_cache_dirty, "nothing changed");
         note_open_prs_answer(&mut app, pid.clone(), None, &mut Vec::new());
         assert_eq!(app.open_prs[&pid].merged, vec![landed()], "a failed call");
 
-        land(&mut app, Some(Vec::new()), false);
+        land(&mut app, Some(Vec::new()));
         assert!(app.open_prs[&pid].merged.is_empty(), "a week on, it leaves");
         assert!(app.pr_cache_dirty);
-
-        // A tail GitHub cut short is remembered as short until one that
-        // was read to the end lands; a slim answer says nothing either way.
-        let short = |app: &mut App, merged: Option<Vec<_>>, merged_short| {
-            let answer = ListAnswer {
-                slim: merged.is_none(),
-                merged,
-                merged_short,
-                ..Default::default()
-            };
-            let asked = crate::fetch::Asked::At(crate::fetch::now());
-            note_open_prs_answer_at(app, pid.clone(), Some(answer), asked, &mut Vec::new());
-        };
-        short(&mut app, Some(vec![landed()]), true);
-        assert!(app.merged_short.contains(&pid));
-        short(&mut app, None, false);
-        assert!(app.merged_short.contains(&pid), "never asked");
-        short(&mut app, Some(vec![landed()]), false);
-        assert!(!app.merged_short.contains(&pid), "read to the end");
     }
 
     /// A page asked to be read again while its fetch runs — the list says
@@ -18156,159 +17211,6 @@ diff --git a/src/b.rs b/src/b.rs
             .unwrap()
             .at = now;
         assert_eq!(target(&app), None);
-    }
-
-    /// `g` with a diff in the cache opens the modal on it at once; the
-    /// fresh fetch landing underneath replaces the contents in place when
-    /// they differ — the reader keeps the file they were on — and only
-    /// goes to the cache when the modal has been closed since. A failed
-    /// refresh leaves the cached copy up, and a request that had nothing
-    /// cached opens on landing, as it always did.
-    #[test]
-    fn a_cached_diff_opens_at_once_and_is_refreshed_in_place() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut app = App::new();
-        app.pr_cache = Some(crate::pr_cache::PrCache::at(dir.path().to_path_buf()));
-        seed_tree(&mut app);
-        seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.set_sel_worktree(1);
-        let url = pr_url(7);
-        let title = || "#7 Attach links".to_string();
-        let cached = "\
-diff --git a/src/a.rs b/src/a.rs
---- a/src/a.rs
-+++ b/src/a.rs
-@@ -1 +1 @@
--old
-+new
-diff --git a/src/b.rs b/src/b.rs
---- a/src/b.rs
-+++ b/src/b.rs
-@@ -1 +1 @@
--x
-+y
-";
-        let answer = |diff: Option<&str>| PrDiffAnswer {
-            number: 7,
-            url: pr_url(7),
-            title: title(),
-            diff: diff.map(str::to_string),
-            file: None,
-        };
-        assert!(
-            !open_cached_pr_diff(&mut app, 7, &url, &title(), None),
-            "nothing cached yet"
-        );
-        app.pr_cache
-            .as_ref()
-            .unwrap()
-            .store_diff(&url, cached)
-            .unwrap();
-
-        assert!(open_cached_pr_diff(&mut app, 7, &url, &title(), None));
-        let Some(Overlay::Diff(view)) = &mut app.overlay else {
-            panic!("expected the diff modal, got {:?}", app.overlay);
-        };
-        assert_eq!(view.pr_url.as_deref(), Some(url.as_str()));
-        assert!(view.diff.contains("+new"));
-        // The reader moves on to the second file.
-        view.select(1);
-        crate::git_diff::load_selected_diff(view);
-        assert!(view.diff.contains("+y"));
-
-        // The same diff lands: nothing moves, and the fetch is done.
-        app.pr_diff_refreshing.insert(url.clone());
-        app.pr_diff_inflight = Some(7);
-        land_pr_diff(&mut app, answer(Some(cached)));
-        assert!(app.pr_diff_inflight.is_none());
-        assert!(app.pr_diff_refreshing.is_empty());
-        assert!(!app.flash.as_deref().unwrap_or("").contains("changed"));
-        let Some(Overlay::Diff(view)) = &app.overlay else {
-            panic!("still open");
-        };
-        assert!(view.diff.contains("+y"), "still on b.rs");
-
-        // A changed diff: b.rs stays under the cursor with its new text,
-        // and a new file joins the list.
-        let fresh = "\
-diff --git a/src/a.rs b/src/a.rs
---- a/src/a.rs
-+++ b/src/a.rs
-@@ -1 +1 @@
--old
-+newer
-diff --git a/src/b.rs b/src/b.rs
---- a/src/b.rs
-+++ b/src/b.rs
-@@ -1 +1 @@
--x
-+z
-diff --git a/src/c.rs b/src/c.rs
---- /dev/null
-+++ b/src/c.rs
-@@ -0,0 +1 @@
-+c
-";
-        app.pr_diff_refreshing.insert(url.clone());
-        land_pr_diff(&mut app, answer(Some(fresh)));
-        let Some(Overlay::Diff(view)) = &app.overlay else {
-            panic!("still open");
-        };
-        assert_eq!(
-            view.files
-                .iter()
-                .map(|f| f.path.as_str())
-                .collect::<Vec<_>>(),
-            ["src/a.rs", "src/b.rs", "src/c.rs"]
-        );
-        assert!(
-            view.diff.contains("+z"),
-            "the reader's file, refreshed: {}",
-            view.diff
-        );
-        assert_eq!(app.flash, None, "the refreshed rows say it");
-        assert_eq!(
-            crate::pr_cache::recall_diff(&app, &url).as_deref(),
-            Some(fresh),
-            "the fresh diff is what the next launch reads"
-        );
-
-        // Closed before the answer landed: cached, not reopened.
-        app.overlay = None;
-        app.pr_diff_refreshing.insert(url.clone());
-        land_pr_diff(&mut app, answer(Some(cached)));
-        assert!(app.overlay.is_none());
-        assert_eq!(
-            crate::pr_cache::recall_diff(&app, &url).as_deref(),
-            Some(cached)
-        );
-
-        // A refresh `gh` couldn't do leaves the cached copy on screen.
-        assert!(open_cached_pr_diff(&mut app, 7, &url, &title(), None));
-        app.pr_diff_refreshing.insert(url.clone());
-        land_pr_diff(&mut app, answer(None));
-        assert!(matches!(&app.overlay, Some(Overlay::Diff(_))));
-
-        // Nothing cached for #9: its diff opens on landing, as always.
-        app.overlay = None;
-        land_pr_diff(
-            &mut app,
-            PrDiffAnswer {
-                number: 9,
-                url: pr_url(9),
-                title: "#9".into(),
-                diff: Some(cached.into()),
-                file: None,
-            },
-        );
-        assert!(
-            matches!(&app.overlay, Some(Overlay::Diff(v)) if v.pr_url.as_deref() == Some(pr_url(9).as_str()))
-        );
-        assert_eq!(
-            crate::pr_cache::recall_diff(&app, &pr_url(9)).as_deref(),
-            Some(cached),
-            "and is cached for next time"
-        );
     }
 
     /// `Shift+R` in the Worktrees panel asks GitHub again at once: the
@@ -19597,7 +18499,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: sort,
                     status_changed_at: changed_at,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -19652,7 +18553,6 @@ diff --git a/src/c.rs b/src/c.rs
                 sort_order: sort,
                 status_changed_at: at,
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             }),
@@ -19734,7 +18634,6 @@ diff --git a/src/c.rs b/src/c.rs
                 sort_order: sort,
                 status_changed_at: at,
                 alive: true,
-                issue_url: None,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
             }),
@@ -19794,7 +18693,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -19862,7 +18760,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -21130,8 +20027,8 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// **Open command** (⌘O's menu) on a worktree fires its OPEN COMMAND —
-    /// the project's **Open command** setting first, else `.orion.json`'s
-    /// `open` — and with neither says where to put one, without Enter's
+    /// the project's **Open command** setting — and without one says where
+    /// to set it, without Enter's
     /// drill-in. It answers from the Sessions panel too, where the
     /// cursor's worktree is just as much the context. ⇧Enter and ⌥Enter
     /// stay Enter's.
@@ -21148,31 +20045,22 @@ diff --git a/src/c.rs b/src/c.rs
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
             let flash = app.flash.as_deref().unwrap_or_default().to_string();
             assert!(
-                flash.contains("no open command")
-                    && flash.contains("Settings")
-                    && flash.contains(".orion.json"),
-                "names both places: {flash}"
+                flash.contains("no open command") && flash.contains("Settings → Projects"),
+                "names where to set one: {flash}"
             );
             assert_eq!(app.focus, Focus::Worktrees, "not Enter's drill-in");
 
-            std::fs::write(
-                dir.path().join(".orion.json"),
-                r#"{"open": "open http://localhost:3000"}"#,
-            )
-            .unwrap();
-            let fires = || open_command_for(dir.path(), dir.path());
-            assert_eq!(fires().as_deref(), Ok("open http://localhost:3000"));
-            app.flash = None;
-            out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash, None, "what it opens is the answer");
+            let fires = || open_command_for(dir.path());
+            assert_eq!(fires(), None);
 
-            // The setting wins over the file, and is read fresh per press.
+            // Set, it fires — read fresh per press.
             let mut cfg = crate::config::Config::load();
             assert!(cfg.set_project_text(dir.path(), OpenCommand, "open http://localhost:5173"));
             cfg.save_to(&config_path).unwrap();
-            assert_eq!(fires().as_deref(), Ok("open http://localhost:5173"));
+            assert_eq!(fires().as_deref(), Some("open http://localhost:5173"));
+            app.flash = None;
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash, None);
+            assert_eq!(app.flash, None, "what it opens is the answer");
 
             // Sessions panel: the same worktree is under the
             // cursor, so the same command fires, and focus stays put.
@@ -21655,7 +20543,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: false,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -22180,7 +21067,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: sort,
             status_changed_at: 0,
             alive: false,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         })
@@ -23692,27 +22578,6 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.mouse_held(), "…and the mode re-ask beat resumes");
     }
 
-    /// The ISSUES fold rides the UI-state blob like the OPEN PRS one, and
-    /// a blob from before it existed leaves the group open.
-    #[test]
-    fn ui_state_roundtrip_includes_the_issues_fold() {
-        let mut app = App::new();
-        app.issues_collapsed = true;
-        let json = ui_state_json(&app);
-        assert!(json.contains(r#""issues_collapsed":true"#), "{json}");
-
-        let mut restored = App::new();
-        restore_ui_state(&mut restored, &json);
-        assert!(restored.issues_collapsed);
-
-        let mut legacy = App::new();
-        restore_ui_state(
-            &mut legacy,
-            r#"{"project":null,"worktree":null,"session_agent":null,"show_archived":false,"collapsed":false}"#,
-        );
-        assert!(!legacy.issues_collapsed, "old blobs keep the group open");
-    }
-
     /// The fold is remembered like the ARCHIVED toggle: it rides the
     /// UI-state blob out and back, and a blob from before it existed leaves
     /// the group open.
@@ -23784,7 +22649,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: 0,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -23975,7 +22839,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: 0,
             status_changed_at: at,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         })
@@ -24637,7 +23500,7 @@ diff --git a/src/c.rs b/src/c.rs
         );
     }
 
-    // ---- branch switcher ----
+    // ---- the root and its linked worktrees ----
 
     /// A linked worktree beside `seed_tree`'s root, on its own branch.
     fn seed_linked_worktree(app: &mut App) {
@@ -24657,54 +23520,11 @@ diff --git a/src/c.rs b/src/c.rs
         );
     }
 
-    fn branch_switch_target(app: &App) -> Option<WorktreeId> {
-        match &app.overlay {
-            Some(Overlay::BranchSwitch(view)) => Some(view.worktree.clone()),
-            _ => None,
-        }
-    }
-
-    /// `c` moves the ROOT WORKTREE and nothing else: from its own row, from
-    /// the Projects panel whatever the Worktrees cursor is on, and never
-    /// from a linked worktree's row, which stays on the branch it was cut
-    /// for.
+    /// A linked worktree's row menu offers its Delete; the ROOT
+    /// WORKTREE's, the project itself, does not.
     #[test]
-    fn c_opens_the_branch_switcher_on_the_root_and_refuses_a_linked_worktree() {
+    fn a_worktree_rows_menu_offers_delete_and_the_roots_does_not() {
         let mut app = App::new();
-        let mut out = Vec::new();
-        seed_tree(&mut app);
-        seed_linked_worktree(&mut app);
-        let root = WorktreeId("w1".into());
-        let mains: Vec<bool> = app.visible_worktrees().iter().map(|w| w.is_main).collect();
-        assert_eq!(mains, [true, false], "the root row leads");
-
-        app.focus = Focus::Worktrees;
-        app.set_sel_worktree(1);
-        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "{:?}", app.overlay);
-        assert_eq!(app.flash, None);
-
-        app.focus = Focus::Projects;
-        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
-        assert_eq!(
-            branch_switch_target(&app),
-            Some(root.clone()),
-            "the Projects panel means the project's root"
-        );
-        app.overlay = None;
-
-        app.focus = Focus::Worktrees;
-        app.set_sel_worktree(0);
-        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
-        assert_eq!(branch_switch_target(&app), Some(root));
-    }
-
-    /// The root row's menu is where the mouse finds the switcher, in the
-    /// seat a linked worktree's Delete takes.
-    #[test]
-    fn the_root_rows_menu_offers_switch_branch_and_a_worktree_row_offers_delete() {
-        let mut app = App::new();
-        let mut out = Vec::new();
         seed_tree(&mut app);
         seed_linked_worktree(&mut app);
         app.focus = Focus::Worktrees;
@@ -24721,22 +23541,12 @@ diff --git a/src/c.rs b/src/c.rs
         open_row_menu(&mut app);
         let linked = labels(&app);
         assert!(linked.iter().any(|l| l == "Delete worktree"), "{linked:?}");
-        assert!(!linked.iter().any(|l| l == "Switch branch…"), "{linked:?}");
         app.overlay = None;
 
         app.set_sel_worktree(0);
         open_row_menu(&mut app);
         let root = labels(&app);
         assert!(!root.iter().any(|l| l == "Delete worktree"), "{root:?}");
-        let at = root
-            .iter()
-            .position(|l| l == "Switch branch…")
-            .expect("the root row offers it");
-        if let Some(Overlay::Menu(menu)) = &mut app.overlay {
-            menu.hover = at;
-        }
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert_eq!(branch_switch_target(&app), Some(WorktreeId("w1".into())));
     }
 
     /// `p` PULLs the checkout under the cursor — a linked worktree as well
@@ -24982,40 +23792,6 @@ diff --git a/src/c.rs b/src/c.rs
         );
         assert!(app.pr_refresh_requested);
     }
-
-    /// Through the real key path — the KEYMAP's `c`, a query typed into the
-    /// modal (so `f`, `e` and `a` feed the filter instead of firing their
-    /// panel hotkeys), `Enter` — a real root checkout moves and its row
-    /// follows before the DAEMON's sync has said a word.
-    #[test]
-    fn the_branch_switcher_moves_a_real_root_through_the_key_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(&dir);
-        run_git(&repo, &["branch", "feature"]);
-        let mut app = App::new();
-        let mut out = Vec::new();
-        seed_repo_tree(&mut app, &repo);
-        app.focus = Focus::Worktrees;
-        press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
-        for c in "feat".chars() {
-            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
-        }
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert!(app.overlay.is_none(), "{:?}", app.overlay);
-        let head = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&repo)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .unwrap();
-        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "feature");
-        assert_eq!(
-            app.selected_worktree().map(|w| w.branch.as_str()),
-            Some("feature")
-        );
-    }
-
-    // ---- git-diff modal ----
 
     /// The NEW AGENT PICKER for the selected checkout — what the card
     /// menu's **New agent** opens, and what the Sessions panel's `n` used
@@ -25927,7 +24703,6 @@ diff --git a/src/c.rs b/src/c.rs
                 "all ticked · together",
                 "The whole branch since origin/main",
                 "Every commit made on the branch since origin/main",
-                "⇧←/⇧→ step · ⌘G one at a time",
             ] {
                 assert!(screen.contains(needle), "{needle:?}\n{screen}");
             }
@@ -26030,8 +24805,9 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert_eq!(diff_paths(&app), ["a.txt"]);
 
-            // A head this repo has never seen: the whole diff from GitHub
-            // (`^E` on the Description tab), the modal still up meanwhile.
+            // A head this repo has never seen, and no origin to fetch it
+            // from (`^E` on the Description tab): the modal comes back up,
+            // the footer saying why.
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             if let Some(detail) = app.pr_detail.get_mut(&pr_url(7)) {
                 detail.head_sha = "0".repeat(40);
@@ -26054,11 +24830,12 @@ diff --git a/src/c.rs b/src/c.rs
 
     /// The COMMIT LIST's keys: `⇧Tab` gives it the keys, `^A` unticks
     /// everything so the cursor's commit is on screen, `↓` walks it, each
-    /// commit's own files up as the cursor lands; `Space` ticks, `^G` reads
-    /// the ticked one at a time and `⇧←`/`⇧→` step them; `Enter` hands the
-    /// keys on to the files; typing is the files' filter again.
+    /// commit's own files up as the cursor lands; `Space` ticks, and the
+    /// ticked read together with nothing for `⇧←`/`⇧→` to step; `Enter`
+    /// hands the keys on to the files, where `⇧←`/`⇧→` walk the cursor's
+    /// commit once nothing is ticked; typing is the files' filter again.
     #[test]
-    fn the_commit_list_ticks_and_steps_one_commit_at_a_time() {
+    fn the_commit_list_ticks_and_steps_commit_by_commit() {
         use crate::app::DiffFocus;
         use crate::commit_list::Row;
         use crate::diff_doc::Head;
@@ -26095,33 +24872,13 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             assert_eq!(commit_row(&app), Some(Row::Commit(1)), "the oldest ends it");
 
-            // Tick both, read them one at a time.
+            // Tick both: they read together, with nothing to step.
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             assert_eq!(diff_paths(&app), ["a.txt", "b.txt"], "together");
-            press(
-                &mut app,
-                KeyCode::Char('g'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert_eq!(diff_paths(&app), ["a.txt"], "commit 1 of 2 is the cursor's");
-            assert_eq!(
-                diff_view(&app).head[0],
-                Head::Title("commit 2 of 2 · edit a".into())
-            );
             press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
-            assert_eq!(diff_paths(&app), ["b.txt"], "⇧←: the older step");
-            assert_eq!(
-                commit_row(&app),
-                Some(Row::Commit(1)),
-                "the cursor rides along"
-            );
-            assert_eq!(
-                diff_view(&app).head[0],
-                Head::Title("commit 1 of 2 · add b".into())
-            );
+            assert_eq!(diff_paths(&app), ["a.txt", "b.txt"], "still together");
 
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert_eq!(
@@ -26129,12 +24886,23 @@ diff --git a/src/c.rs b/src/c.rs
                 DiffFocus::Files,
                 "Enter: the files' keys"
             );
-            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
+            // ^A unticks them both: the cursor's commit again, which ⇧←
+            // walks older from the files.
+            press(
+                &mut app,
+                KeyCode::Char('a'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert_eq!(diff_paths(&app), ["a.txt"]);
+            press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
             assert_eq!(
                 diff_paths(&app),
-                ["a.txt"],
-                "⇧→ from the files: the newer step"
+                ["b.txt"],
+                "⇧← from the files: the older commit"
             );
+            assert_eq!(commit_row(&app), Some(Row::Commit(1)));
+            assert_eq!(diff_view(&app).head[0], Head::Title("add b".into()));
             assert_eq!(diff_view(&app).focus, DiffFocus::Files, "the keys stay put");
 
             press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
@@ -26547,7 +25315,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -26572,7 +25339,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 1,
                     status_changed_at: 0,
                     alive: false,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -26890,7 +25656,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: 5,
             status_changed_at: 500,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
@@ -27353,7 +26118,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -28597,7 +27361,7 @@ diff --git a/src/c.rs b/src/c.rs
         assert_eq!(settings_view(&app).tab, 2, "clicked the third tab");
     }
 
-    // ---- `⇧S` stacks ----
+    // ---- stacks ----
 
     fn a_stack(project: &str, dir: &str, running: u16, total: u16) -> orion_core::compose::Stack {
         orion_core::compose::Stack {
@@ -28616,19 +27380,6 @@ diff --git a/src/c.rs b/src/c.rs
                 error: None,
             },
         );
-    }
-
-    fn stack_actions(out: &[ClientRequest]) -> Vec<(u64, String, orion_core::compose::StackVerb)> {
-        out.iter()
-            .filter_map(|r| match r {
-                ClientRequest::StackAction {
-                    req_id,
-                    project,
-                    verb,
-                } => Some((*req_id, project.clone(), *verb)),
-                _ => None,
-            })
-            .collect()
     }
 
     /// A running stack on a worktree on screen keeps the sweep clock
@@ -28658,93 +27409,12 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(!app.status_anim_active());
     }
 
-    /// `⇧S` has a tab per project — the selected one's first, on the
-    /// selected worktree — listing every checkout in its bands' order,
-    /// with a stack or without; then a tab for the stacks orion can't
-    /// place. Enter on a checkout starts it as `⌘⇧S` does, its run; on a
-    /// stack alone, by compose, its row saying so until the Ack.
-    #[test]
-    fn stacks_modal_has_a_tab_per_project_and_one_for_the_rest() {
-        use crate::stacks::TabId;
-        use orion_core::compose::StackVerb;
-        let mut app = App::new();
-        seed_tree(&mut app);
-        seed_feat_worktree(&mut app, "w2", "feat");
-        seed_other_project(&mut app);
-        let mut out = Vec::new();
-        list_stacks(
-            &mut app,
-            vec![
-                a_stack("aaa-elsewhere", "/opt/elsewhere", 4, 4),
-                a_stack("demo", "/tmp/demo", 0, 3),
-                a_stack("secret", "/tmp/secret", 2, 2),
-            ],
-        );
-        let chord = crate::keymap::KeyChord::parse("shift+s").unwrap();
-        assert_eq!(
-            app.keymap.lookup(crate::keymap::Scope::Global, &chord),
-            Some(crate::keymap::Action::Stacks)
-        );
-        out.extend(run_action(&mut app, crate::keymap::Action::Stacks));
-        let tabs = crate::stacks::tabs(&app);
-        let labels: Vec<&str> = tabs.iter().map(|t| t.label.as_str()).collect();
-        assert_eq!(labels, ["demo", "secret 1", "Outside orion 1"]);
-        let places: Vec<&str> = tabs[0].rows.iter().map(|r| r.place.as_str()).collect();
-        assert_eq!(places, ["⌂ main", "⎇ feat"], "every checkout, root first");
-        assert!(tabs[0].rows[1].stack.is_none());
-        assert_eq!(tabs[2].id, TabId::Outside);
-        assert_eq!(tabs[2].rows[0].place, "/opt/elsewhere");
-
-        let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains("Stacks · 2 running"), "{text}");
-        assert!(text.contains("Outside orion"), "{text}");
-        assert!(text.contains("0/3"), "{text}");
-
-        // A checkout: its run, the pane to follow it.
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        let run = out.iter().find_map(|r| match r {
-            ClientRequest::StartRun { req_id, worktree } if worktree.0 == "w1" => Some(*req_id),
-            _ => None,
-        });
-        let run = run.unwrap_or_else(|| panic!("Enter starts the checkout's run: {out:?}"));
-        assert!(matches!(
-            app.pending.get(&run),
-            Some(PendingIntent::AttachCreated { focus: false, .. })
-        ));
-        assert!(stack_actions(&out).is_empty());
-
-        // A stack alone, on the last tab: by compose.
-        press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        let sent = stack_actions(&out);
-        assert_eq!(sent.len(), 1);
-        let (req_id, project, verb) = sent[0].clone();
-        assert_eq!((project.as_str(), verb), ("aaa-elsewhere", StackVerb::Stop));
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("stopping…"));
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert_eq!(stack_actions(&out).len(), 1, "not twice while it runs");
-        hse(
-            &mut app,
-            ServerEvent::Ack {
-                req_id,
-                created: None,
-            },
-        );
-        assert!(app.stack_pending.is_empty());
-        press(&mut app, KeyCode::Char('S'), KeyModifiers::SHIFT, &mut out);
-        assert!(app.overlay.is_none(), "⇧S closes it again");
-    }
-
     /// `⌘⇧S` on the grid starts the cursor's checkout's stack — its run,
     /// the pane following — and stops it: a ^C to the run (the flash says
-    /// a second press kills it), or compose for a stack orion didn't start.
+    /// a second press kills it). A stack orion didn't start is only its
+    /// `⬡`: the key starts the run as it would on a checkout with none.
     #[test]
     fn cmd_shift_s_starts_and_stops_the_checkouts_stack() {
-        use orion_core::compose::StackVerb;
         use orion_core::{Entity, TerminalId, TerminalTab};
         let mut app = App::new();
         seed_tree(&mut app);
@@ -28790,7 +27460,7 @@ diff --git a/src/c.rs b/src/c.rs
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(app.flash.as_deref().unwrap_or_default().contains("killing"));
 
-        // The run gone, a stack still up that orion didn't start: compose.
+        // The run gone, a stack still up that orion didn't start: the run.
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
@@ -28800,161 +27470,47 @@ diff --git a/src/c.rs b/src/c.rs
         list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 3)]);
         assert_eq!(
             crate::stacks::menu_label(&app, &orion_core::WorktreeId("w1".into())),
-            "Stop stack"
+            "Start stack"
         );
         out.clear();
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
-        let sent: Vec<_> = stack_actions(&out)
-            .into_iter()
-            .map(|(_, p, v)| (p, v))
-            .collect();
-        assert_eq!(sent, [("demo".to_string(), StackVerb::Stop)]);
+        assert!(
+            matches!(out.as_slice(), [ClientRequest::StartRun { .. }]),
+            "{out:?}"
+        );
     }
 
-    /// ⌘W asks first: Esc changes its mind, Enter takes the stack down
-    /// with its volumes kept, ⌘W again takes the volumes too. A refused
-    /// verb's row goes back to what it said.
+    /// **Stop all stacks** stops every checkout's run, and nothing when
+    /// none runs: a stack orion didn't start is left as it is.
     #[test]
-    fn stacks_modal_takes_a_stack_down_only_once_confirmed() {
-        use orion_core::compose::StackVerb;
+    fn stop_all_stops_every_running_run() {
+        use orion_core::{Entity, TerminalId, TerminalTab};
         let mut app = App::new();
         seed_tree(&mut app);
-        let mut out = Vec::new();
-        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 3, 3)]);
-        crate::stacks::open(&mut app);
-        press(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER, &mut out);
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert!(stack_actions(&out).is_empty());
+        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 2)]);
+        let none = run_action(&mut app, crate::keymap::Action::StopAllStacks);
+        assert!(none.is_empty(), "{none:?}");
+        assert_eq!(app.flash.as_deref(), Some("no stack is running"));
+
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(TerminalTab {
+                    id: TerminalId("run1".into()),
+                    worktree_id: orion_core::WorktreeId("w1".into()),
+                    name: "run".into(),
+                    sort_order: 0,
+                    alive: true,
+                    run_command: Some("just start".into()),
+                }),
+            },
+        );
+        let sent = run_action(&mut app, crate::keymap::Action::StopAllStacks);
         assert!(
-            matches!(app.overlay, Some(Overlay::Stacks(_))),
-            "esc only cancels"
+            matches!(sent.as_slice(), [ClientRequest::StopRun { worktree, .. }] if worktree.0 == "w1"),
+            "{sent:?}"
         );
-        press(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER, &mut out);
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        let down = stack_actions(&out)[0].0;
-        hse(
-            &mut app,
-            ServerEvent::Ack {
-                req_id: down,
-                created: None,
-            },
-        );
-        press(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER, &mut out);
-        press(&mut app, KeyCode::Char('w'), KeyModifiers::SUPER, &mut out);
-        let sent = stack_actions(&out);
-        let verbs: Vec<StackVerb> = sent.iter().map(|s| s.2).collect();
-        assert_eq!(verbs, [StackVerb::Down, StackVerb::DownVolumes]);
-        assert!(app.stack_pending.contains_key("demo"));
-        hse(
-            &mut app,
-            ServerEvent::Error {
-                req_id: Some(sent[1].0),
-                message: "couldn't take down demo: no such project".into(),
-            },
-        );
-        assert!(
-            app.stack_pending.is_empty(),
-            "a refusal settles the row too"
-        );
-    }
-
-    /// `s` in the modal, and **Stop all stacks** in the palette, stop
-    /// every running stack and nothing else.
-    #[test]
-    fn stop_all_stops_only_the_running_stacks() {
-        use orion_core::compose::StackVerb;
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let mut out = Vec::new();
-        list_stacks(
-            &mut app,
-            vec![
-                a_stack("a", "/opt/a", 2, 2),
-                a_stack("b", "/opt/b", 0, 2),
-                a_stack("c", "/opt/c", 1, 2),
-            ],
-        );
-        crate::stacks::open(&mut app);
-        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, &mut out);
-        let sent: Vec<(String, StackVerb)> = stack_actions(&out)
-            .into_iter()
-            .map(|(_, p, v)| (p, v))
-            .collect();
-        assert_eq!(
-            sent,
-            [
-                ("a".to_string(), StackVerb::Stop),
-                ("c".to_string(), StackVerb::Stop)
-            ]
-        );
-        press(&mut app, KeyCode::Char('s'), KeyModifiers::NONE, &mut out);
-        assert_eq!(stack_actions(&out).len(), 2, "not again while they run");
-        app.overlay = None;
-        app.stack_pending.clear();
-        let more = run_action(&mut app, crate::keymap::Action::StopAllStacks);
-        assert_eq!(stack_actions(&more).len(), 2);
-    }
-
-    /// More stacks than fit: the list scrolls to keep the cursor in view,
-    /// and a click lands on the row drawn there.
-    #[test]
-    fn stacks_modal_scrolls_to_the_cursor() {
-        let mut app = App::new();
-        let mut out = Vec::new();
-        let stacks: Vec<_> = (0..30)
-            .map(|i| a_stack(&format!("stack-{i:02}"), &format!("/opt/s{i:02}"), 0, 1))
-            .collect();
-        list_stacks(&mut app, stacks);
-        crate::stacks::open(&mut app);
-        let mut terminal = Terminal::new(TestBackend::new(110, 16)).unwrap();
-        for _ in 0..29 {
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        }
-        let text = buffer_text(&terminal);
-        assert!(text.contains("stack-29"), "{text}");
-        assert!(!text.contains("stack-00"), "{text}");
-        let Some(Overlay::Stacks(view)) = &app.overlay else {
-            panic!("the modal");
-        };
-        let (list, first) = (view.list_area, view.first);
-        assert!(first > 0);
-        let click = |row: u16| crossterm::event::MouseEvent {
-            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-            column: list.x + 10,
-            row,
-            modifiers: KeyModifiers::NONE,
-        };
-        crate::stacks::handle_mouse(
-            &mut app,
-            click(list.y),
-            ratatui::layout::Position::new(list.x + 10, list.y),
-            &mut out,
-        );
-        let Some(Overlay::Stacks(view)) = &app.overlay else {
-            panic!("the modal");
-        };
-        assert_eq!(
-            view.selected.as_deref(),
-            Some(format!("\tstack-{first:02}").as_str())
-        );
-    }
-
-    /// Docker out of reach says so in the modal, instead of an empty list.
-    #[test]
-    fn stacks_modal_says_when_docker_is_missing() {
-        let mut app = App::new();
-        hse(
-            &mut app,
-            ServerEvent::StacksChanged {
-                stacks: None,
-                error: Some("no docker CLI found".into()),
-            },
-        );
-        crate::stacks::open(&mut app);
-        let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        assert!(buffer_text(&terminal).contains("No docker CLI found"));
+        assert_eq!(app.flash.as_deref(), Some("stopping 1 stack"));
     }
 
     // ---- `⇧U` account usage modal ----
@@ -31003,7 +29559,6 @@ diff --git a/src/c.rs b/src/c.rs
                         sort_order: 1,
                         status_changed_at: 0,
                         alive: true,
-                        issue_url: None,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
                     }),
@@ -31079,7 +29634,6 @@ diff --git a/src/c.rs b/src/c.rs
             sort_order: 1,
             status_changed_at: 0,
             alive: true,
-            issue_url: None,
             recent_prompts: Vec::new(),
             usage_limit: None,
         })
@@ -31721,7 +30275,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -31788,7 +30341,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 0,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -32373,378 +30925,6 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    /// The ISSUES MODAL's comment box round-trips: Esc puts the modal back
-    /// on its row with nothing posted, an empty Enter does the same, and
-    /// Enter with text hands it to `gh` — here a checkout that isn't on
-    /// disk, so the box comes back with the text instead.
-    #[test]
-    fn the_issue_comment_box_comes_back_to_the_modal_on_its_row() {
-        let mut app = App::new();
-        let mut out = Vec::new();
-        let project = orion_core::ProjectId("p1".into());
-        app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-            project.clone(),
-            "demo".into(),
-            "/nonexistent/orion-issue-comment-box".into(),
-        )));
-        let issue = |number: u64| crate::issues::Issue {
-            number,
-            url: format!("https://github.com/o/r/issues/{number}"),
-            title: format!("issue {number}"),
-            author: "webdevcody".into(),
-            created_at: "2026-09-10T12:00:00Z".into(),
-            updated_at: "2026-09-11T12:00:00Z".into(),
-            labels: vec![],
-            body: String::new(),
-        };
-        crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
-        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-        let on_row =
-            |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
-        assert!(on_row(&app));
-
-        // Esc: back, nothing posted.
-        press(
-            &mut app,
-            KeyCode::Char('y'),
-            KeyModifiers::CONTROL,
-            &mut out,
-        );
-        assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.title.contains("#14")));
-        type_text(&mut app, "never mind", &mut out);
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        assert!(on_row(&app), "Esc puts the modal back: {:?}", app.overlay);
-
-        // An empty Enter: the same.
-        press(
-            &mut app,
-            KeyCode::Char('y'),
-            KeyModifiers::CONTROL,
-            &mut out,
-        );
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        assert!(on_row(&app), "an empty box is a cancel: {:?}", app.overlay);
-        assert_eq!(app.flash, None);
-
-        // Enter with text: posted — or, off a checkout that isn't on disk,
-        // the box comes back with the text, newline and all.
-        press(
-            &mut app,
-            KeyCode::Char('y'),
-            KeyModifiers::CONTROL,
-            &mut out,
-        );
-        type_text(&mut app, "on it", &mut out);
-        press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
-        type_text(&mut app, "today", &mut out);
-        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-        let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-            panic!(
-                "the box should come back with the text, got {:?}",
-                app.overlay
-            );
-        };
-        assert_eq!(prompt.input.as_str(), "on it\ntoday");
-        assert!(
-            app.flash.as_deref().unwrap().contains("isn't on disk"),
-            "{:?}",
-            app.flash
-        );
-        assert!(out.is_empty(), "nothing goes to the daemon: {out:?}");
-    }
-
-    /// The ISSUES MODAL's box lands on the project's ROOT BRANCH, whatever
-    /// card the cursor was on — the QUICK PROMPT NEW WORKTREE SETTING
-    /// changes nothing, an issue's box keeps its own aim — and the WORKTREE
-    /// PICKER's fresh worktree is named after the issue.
-    #[test]
-    fn the_issue_quick_prompt_starts_on_the_root_branch_or_a_fresh_worktree() {
-        use crate::quick_prompt::QuickTarget;
-        let target = |json: &str, fresh: bool| {
-            with_config_json(json, || {
-                let mut app = App::new();
-                seed_tree(&mut app);
-                seed_feat_worktree(&mut app, "w2", "feat");
-                app.set_sel_worktree(1);
-                assert_eq!(
-                    app.selected_worktree().map(|w| w.branch.as_str()),
-                    Some("feat")
-                );
-                let mut out = Vec::new();
-                let project = orion_core::ProjectId("p1".into());
-                app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-                    project.clone(),
-                    "demo".into(),
-                    "/tmp/demo".into(),
-                )));
-                crate::issues::land_list(
-                    &mut app,
-                    project,
-                    Some(vec![crate::issues::Issue {
-                        number: 15,
-                        url: "https://github.com/o/r/issues/15".into(),
-                        title: "Login fails".into(),
-                        author: "webdevcody".into(),
-                        created_at: "2026-09-10T12:00:00Z".into(),
-                        updated_at: "2026-09-11T12:00:00Z".into(),
-                        labels: vec![],
-                        body: String::new(),
-                    }]),
-                );
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                if fresh {
-                    pick_fresh_worktree(&mut app, &mut out);
-                }
-                match &app.overlay {
-                    Some(Overlay::Prompt(prompt)) => match &prompt.kind {
-                        PromptKind::QuickPrompt(launch) => launch.target.clone(),
-                        other => panic!("{other:?}"),
-                    },
-                    other => panic!("Enter: expected the box, got {other:?}"),
-                }
-            })
-        };
-        for json in ["{}", r#"{"quick_prompt_new_worktree": true}"#] {
-            assert_eq!(
-                target(json, false),
-                QuickTarget::Worktree(WorktreeId("w1".into())),
-                "{json}: not the selected card's checkout"
-            );
-        }
-        match target("{}", true) {
-            QuickTarget::NewWorktree { branch, .. } => {
-                assert!(branch.starts_with("issue-15"), "{branch}")
-            }
-            other => panic!("the picker cuts a fresh worktree: {other:?}"),
-        }
-    }
-
-    /// `Enter` in the ISSUES MODAL puts the QUICK PROMPT up over the modal
-    /// rather than in its place — both on screen, the box on top. A box
-    /// that goes without launching (Esc, a click outside it) leaves the
-    /// modal on its row; the launch closes the modal too, and its Ack puts
-    /// the grid's cursor on the new session's card, the keys still there.
-    #[test]
-    fn the_issue_quick_prompt_stands_on_the_modal() {
-        with_config_json(r#"{"follow_new_session": true}"#, || {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            let focus = app.focus;
-            let mut out = Vec::new();
-            let project = orion_core::ProjectId("p1".into());
-            app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-                project.clone(),
-                "demo".into(),
-                "/tmp/demo".into(),
-            )));
-            let issue = |number: u64| crate::issues::Issue {
-                number,
-                url: format!("https://github.com/o/r/issues/{number}"),
-                title: format!("issue {number}"),
-                author: "webdevcody".into(),
-                created_at: "2026-09-10T12:00:00Z".into(),
-                updated_at: "2026-09-11T12:00:00Z".into(),
-                labels: vec![],
-                body: String::new(),
-            };
-            crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            let on_row =
-                |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
-            let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
-
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("Enter: expected the box, got {:?}", app.overlay);
-            };
-            let PromptKind::QuickPrompt(launch) = &prompt.kind else {
-                panic!("{:?}", prompt.kind);
-            };
-            assert!(
-                matches!(&launch.under, Some(crate::quick_prompt::ModalUnder::Issues(v)) if v.selected == 1),
-                "the box carries the modal it stands on: {:?}",
-                launch.under
-            );
-            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-            let screen = buffer_text(&terminal);
-            assert!(
-                screen.contains("Issues — demo"),
-                "the modal under:\n{screen}"
-            );
-            assert!(screen.contains("issue #14"), "the box over it:\n{screen}");
-            assert!(screen.contains("Esc back to issues"), "{screen}");
-
-            // Esc: the box goes, the modal stays.
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(on_row(&app), "Esc leaves the modal: {:?}", app.overlay);
-
-            // A click outside the box: the same.
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            crate::overlay_close::click_outside(&mut app, &mut out);
-            assert!(on_row(&app), "a click outside: {:?}", app.overlay);
-
-            // The launch, through the loop's own entry point (so a follow
-            // it may not take is caught): the create goes out, and the
-            // modal goes with the box.
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            type_text(&mut app, "look into it", &mut out);
-            out.clear();
-            let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-            handle_terminal_event(&mut app, enter, &mut out);
-            let (req_id, worktree) = match out.as_slice() {
-                [ClientRequest::CreateAgent {
-                    req_id,
-                    worktree,
-                    issue_url: Some(url),
-                    ..
-                }] if url == "https://github.com/o/r/issues/14" => (*req_id, worktree.clone()),
-                other => panic!("one create, for the issue: {other:?}"),
-            };
-            assert!(
-                app.overlay.is_none(),
-                "the launch closes the modal: {:?}",
-                app.overlay
-            );
-
-            // The DAEMON's side: the row, then the Ack — and the cursor is
-            // on the new card, the keys on the grid.
-            let fresh = AgentId("a9".into());
-            hse(
-                &mut app,
-                ServerEvent::EntityUpserted {
-                    entity: orion_core::Entity::Agent(orion_core::Agent {
-                        id: fresh.clone(),
-                        worktree_id: worktree,
-                        name: "agent-2".into(),
-                        status: orion_core::AgentStatus::Fresh,
-                        archived: false,
-                        archived_at: 0,
-                        unseen: false,
-                        kind: orion_core::AgentKind::Claude,
-                        custom_harness: None,
-                        model: None,
-                        effort: None,
-                        session_id: None,
-                        sort_order: 0,
-                        status_changed_at: crate::app::now_ms(),
-                        alive: true,
-                        issue_url: None,
-                        recent_prompts: Vec::new(),
-                        usage_limit: None,
-                    }),
-                },
-            );
-            handle_server_event(
-                &mut app,
-                ServerEvent::Ack {
-                    req_id,
-                    created: Some(orion_core::EntityId::Agent(fresh.clone())),
-                },
-                &mut out,
-            );
-            assert!(app.overlay.is_none(), "nothing comes back up");
-            assert_eq!(
-                app.selected_session().map(|a| a.id),
-                Some(fresh),
-                "the cursor is on the new card"
-            );
-            assert_eq!(app.focus, focus, "the keys stay on the grid");
-            assert!(!app.term_locked);
-        });
-    }
-
-    /// `Shift+Tab` in the ISSUES MODAL puts the AGENT PRESETS picker up over
-    /// the modal rather than in its place. Esc and a click outside leave the
-    /// modal on its row; a pick hands the box over, still on the modal, and
-    /// the box's own Esc goes back to it too.
-    #[test]
-    fn the_issue_preset_picker_stands_on_the_modal() {
-        with_seeded_presets(|| {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            let mut out = Vec::new();
-            let project = orion_core::ProjectId("p1".into());
-            app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-                project.clone(),
-                "demo".into(),
-                "/tmp/demo".into(),
-            )));
-            let issue = |number: u64| crate::issues::Issue {
-                number,
-                url: format!("https://github.com/o/r/issues/{number}"),
-                title: format!("issue {number}"),
-                author: "webdevcody".into(),
-                created_at: "2026-09-10T12:00:00Z".into(),
-                updated_at: "2026-09-11T12:00:00Z".into(),
-                labels: vec![],
-                body: String::new(),
-            };
-            crate::issues::land_list(&mut app, project, Some(vec![issue(15), issue(14)]));
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            let on_row =
-                |app: &App| matches!(&app.overlay, Some(Overlay::Issues(v)) if v.selected == 1);
-            let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
-
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            let Some(Overlay::AgentPresets(view)) = &app.overlay else {
-                panic!(
-                    "Shift+Tab: expected the preset picker, got {:?}",
-                    app.overlay
-                );
-            };
-            let back = view.quick.as_ref().expect("a picker for a launch");
-            assert!(
-                matches!(&back.launch.under, Some(crate::quick_prompt::ModalUnder::Issues(v)) if v.selected == 1),
-                "the picker carries the modal it stands on: {:?}",
-                back.launch.under
-            );
-            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-            let screen = buffer_text(&terminal);
-            assert!(
-                screen.contains("Issues — demo"),
-                "the modal under:\n{screen}"
-            );
-            assert!(screen.contains("reviewer"), "the picker over it:\n{screen}");
-
-            // Esc: the picker goes, the modal stays on its row.
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(on_row(&app), "Esc leaves the modal: {:?}", app.overlay);
-
-            // A click outside the picker: the same.
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-            crate::overlay_close::click_outside(&mut app, &mut out);
-            assert!(on_row(&app), "a click outside: {:?}", app.overlay);
-
-            // A pick: the box, preset applied, still standing on the modal.
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the pick: expected the box, got {:?}", app.overlay);
-            };
-            let PromptKind::QuickPrompt(launch) = &prompt.kind else {
-                panic!("{:?}", prompt.kind);
-            };
-            assert_eq!(
-                launch.preset.as_ref().map(|p| p.name.as_str()),
-                Some("reviewer")
-            );
-            assert!(
-                matches!(&launch.under, Some(crate::quick_prompt::ModalUnder::Issues(v)) if v.selected == 1),
-                "{:?}",
-                launch.under
-            );
-            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-            let screen = buffer_text(&terminal);
-            assert!(
-                screen.contains("Issues — demo"),
-                "the modal under:\n{screen}"
-            );
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(on_row(&app), "the box's Esc: {:?}", app.overlay);
-        });
-    }
-
     /// `Tab` on the AGENT PRESETS list `e` opens flips the launch onto a
     /// fresh worktree of the project, and back; a click on the list's
     /// `[ ] new worktree` row is the same flip (INPUT PARITY). Enter on a
@@ -32817,71 +30997,6 @@ diff --git a/src/c.rs b/src/c.rs
                 ),
                 "the worktree is cut first: {out:?}"
             );
-        });
-    }
-
-    /// `Shift+Tab` in the ISSUES MODAL, then `Tab`: the picker flips the
-    /// launch onto a fresh worktree named after the issue, and the box its
-    /// Enter hands over is aimed there — still standing on the modal. Esc
-    /// before a pick drops the flip with the picker.
-    #[test]
-    fn the_issue_preset_picker_tab_flips_a_new_worktree() {
-        with_seeded_presets(|| {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            let mut out = Vec::new();
-            let project = orion_core::ProjectId("p1".into());
-            app.overlay = Some(Overlay::Issues(crate::issues::IssuesView::new(
-                project.clone(),
-                "demo".into(),
-                "/tmp/demo".into(),
-            )));
-            crate::issues::land_list(
-                &mut app,
-                project,
-                Some(vec![crate::issues::Issue {
-                    number: 15,
-                    url: "https://github.com/o/r/issues/15".into(),
-                    title: "Fix login redirect".into(),
-                    author: "webdevcody".into(),
-                    created_at: "2026-09-10T12:00:00Z".into(),
-                    updated_at: "2026-09-11T12:00:00Z".into(),
-                    labels: vec![],
-                    body: String::new(),
-                }]),
-            );
-            let fresh = |app: &App| match &app.overlay {
-                Some(Overlay::AgentPresets(v)) => v.is_new_worktree(),
-                other => panic!("expected the preset picker, got {other:?}"),
-            };
-
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            assert!(!fresh(&app), "the root worktree, as Enter's box");
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert!(fresh(&app));
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(matches!(&app.overlay, Some(Overlay::Issues(_))));
-            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
-            assert!(!fresh(&app), "Esc dropped the flip");
-
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the pick: expected the box, got {:?}", app.overlay);
-            };
-            let PromptKind::QuickPrompt(launch) = &prompt.kind else {
-                panic!("{:?}", prompt.kind);
-            };
-            assert!(
-                matches!(&launch.target, crate::quick_prompt::QuickTarget::NewWorktree { branch, .. } if branch.starts_with("issue-15")),
-                "{:?}",
-                launch.target
-            );
-            assert_eq!(launch.issue.as_ref().map(|i| i.number), Some(15));
-            assert!(matches!(
-                &launch.under,
-                Some(crate::quick_prompt::ModalUnder::Issues(_))
-            ));
         });
     }
 
@@ -33676,9 +31791,9 @@ diff --git a/src/c.rs b/src/c.rs
     /// whichever is selected: Enter opens a prompt titled with the row's
     /// project, pre-filled with its stored command; Enter there writes
     /// `run_command` into that project's entry (and nothing else), the
-    /// row reads it back, the next project's row still reads
-    /// `.orion.json`; ←/→ only explain themselves; Esc keeps the old
-    /// value; an empty Enter puts the file back and drops the key. With
+    /// row reads it back, the next project's row still reads `not set`;
+    /// ←/→ only explain themselves; Esc keeps the old value; an empty
+    /// Enter unsets it and drops the key. With
     /// no project in the tree the tab says so, and Enter opens nothing
     /// and says why.
     #[test]
@@ -33738,10 +31853,7 @@ diff --git a/src/c.rs b/src/c.rs
                 screen.contains("demo") && screen.contains("/tmp/other"),
                 "every project has its block: {screen}"
             );
-            assert!(
-                screen.contains("[.orion.json]"),
-                "unset reads as the file: {screen}"
-            );
+            assert!(screen.contains("[not set]"), "unset: {screen}");
 
             // ←/→: nothing to cycle, the overlay stays and explains.
             press(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, &mut out);
@@ -33807,7 +31919,7 @@ diff --git a/src/c.rs b/src/c.rs
             let other = row + crate::config::tab_settings(tab).len();
             open_at(&mut app, &mut out, other);
             let screen = draw_to_string(&mut app, 100, 40);
-            assert!(screen.contains("[.orion.json]"), "{screen}");
+            assert!(screen.contains("[not set]"), "{screen}");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("expected the run command prompt, got {:?}", app.overlay);
@@ -33816,7 +31928,7 @@ diff --git a/src/c.rs b/src/c.rs
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 
-            // An empty Enter is the way back to the file — the entry goes.
+            // An empty Enter unsets it — the entry goes.
             open_on_row(&mut app, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             for _ in 0.."npm run dev".len() {
@@ -33826,8 +31938,8 @@ diff --git a/src/c.rs b/src/c.rs
             assert_eq!(saved(&path)["projects"], serde_json::json!({}));
             let view = settings_view(&app);
             assert!(
-                matches!(&view.notice, Some((t, _)) if t.contains(".orion.json")),
-                "back to the file: {:?}",
+                matches!(&view.notice, Some((t, _)) if t.contains("not set")),
+                "unset: {:?}",
                 view.notice
             );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
@@ -34050,7 +32162,6 @@ diff --git a/src/c.rs b/src/c.rs
                         sort_order: 1,
                         status_changed_at: 0,
                         alive: true,
-                        issue_url: None,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
                     }),
@@ -34931,7 +33042,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// name.
     #[test]
     fn the_worktree_picker_checks_out_an_existing_branch() {
-        use crate::branch_switch::Branch;
+        use crate::branch_list::Branch;
         use crate::quick_prompt::QuickTarget;
         use orion_core::ProjectId;
         with_config_json(r#"{"follow_new_session": true}"#, || {
@@ -34949,7 +33060,7 @@ diff --git a/src/c.rs b/src/c.rs
                 committed: 0,
                 subject: String::new(),
             };
-            app.branch_switch.lists.insert(
+            app.branch_list.lists.insert(
                 root,
                 vec![
                     branch("main", false),
@@ -34996,7 +33107,7 @@ diff --git a/src/c.rs b/src/c.rs
             // A fresh listing landing (the background fetch) rebuilds the
             // rows under what is typed, the highlighted row kept.
             let root = app.root_worktree(&ProjectId("p1".into())).unwrap();
-            if let Some(list) = app.branch_switch.lists.get_mut(&root) {
+            if let Some(list) = app.branch_list.lists.get_mut(&root) {
                 list.push(branch("origin/bob/billing-fix", true));
             }
             launcher::refresh_worktree_picker(&mut app);
@@ -35221,7 +33332,6 @@ diff --git a/src/c.rs b/src/c.rs
                             worktree: w,
                             kind: AgentKind::Claude,
                             starting_prompt: None,
-                            issue_url: None,
                             ..
                         },
                         ClientRequest::PrewarmAgent { .. }
@@ -36567,7 +34677,6 @@ diff --git a/src/c.rs b/src/c.rs
                     sort_order: 0,
                     status_changed_at: 1,
                     alive: true,
-                    issue_url: None,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
                 }),
@@ -37198,14 +35307,6 @@ diff --git a/src/c.rs b/src/c.rs
                 None,
             ),
             (
-                "Issues",
-                |app| {
-                    seed_tree(app);
-                    press(app, KeyCode::Char('i'), KeyModifiers::NONE, &mut Vec::new());
-                },
-                None,
-            ),
-            (
                 "PullRequests",
                 |app| {
                     seed_tree(app);
@@ -37254,14 +35355,6 @@ diff --git a/src/c.rs b/src/c.rs
                             Vec::new(),
                         ),
                     )));
-                },
-                None,
-            ),
-            (
-                "BranchSwitch",
-                |app| {
-                    seed_tree(app);
-                    press(app, KeyCode::Char('c'), KeyModifiers::NONE, &mut Vec::new());
                 },
                 None,
             ),
@@ -37468,15 +35561,12 @@ diff --git a/src/c.rs b/src/c.rs
             Overlay::Tree(_) => "Tree",
             Overlay::FileTabs(_) => "FileTabs",
             Overlay::Usage(_) => "Usage",
-            Overlay::Stacks(_) => "Stacks",
             Overlay::CleanWorktrees(_) => "CleanWorktrees",
             Overlay::Hosts(_) => "Hosts",
             Overlay::AgentPresets(_) => "AgentPresets",
             Overlay::AgentPresetEditor(_) => "AgentPresetEditor",
-            Overlay::Issues(_) => "Issues",
             Overlay::PullRequests(_) => "PullRequests",
             Overlay::Linear(_) => "Linear",
-            Overlay::BranchSwitch(_) => "BranchSwitch",
             Overlay::ProjectPicker(_) => "ProjectPicker",
             Overlay::Onboard(_) => "Onboard",
             Overlay::Autofix(_) => "Autofix",
@@ -37511,7 +35601,7 @@ diff --git a/src/c.rs b/src/c.rs
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 24, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 22, "a variant came or went: {seen:?}");
         });
     }
 
@@ -37929,9 +36019,6 @@ diff --git a/src/c.rs b/src/c.rs
         assert!(app.key_combo.is_some(), "a config apply leaves it standing");
     }
 
-    /// PR & ISSUE COUNTS is live the same way: the switch reaches the
-    /// running app on apply, on and off, so the rows change on the next
-    /// paint and the issues sweep starts (or stops) on the next tick.
     /// CARD LINE COUNTS are always read: a config that still says
     /// `card_line_changes: false` (an older build's) turns nothing off,
     /// and a read that finds nothing changed by the line drops its

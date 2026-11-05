@@ -387,28 +387,48 @@ fn conflicted(
     head_sha: &str,
     quit: &AtomicBool,
 ) -> Result<Vec<String>, String> {
-    let fetched = remote_git(
-        dir,
-        &["fetch", "--quiet", "--no-tags", "origin", base],
-        FETCH_TIMEOUT,
-        quit,
-    );
+    let fetched = fetch_base(dir, base, quit);
     let base_ref = format!("origin/{base}");
     if !has_commit(dir, &base_ref) {
         return Err(fetched
             .err()
             .unwrap_or_else(|| format!("no {base_ref} here")));
     }
-    if !has_commit(dir, head_sha) {
-        let pull = format!("refs/pull/{number}/head");
-        remote_git(
-            dir,
-            &["fetch", "--quiet", "--no-tags", "origin", &pull],
-            FETCH_TIMEOUT,
-            quit,
-        )?;
-    }
+    fetch_pull_head(dir, number, head_sha, quit)?;
     merge_tree(dir, &base_ref, head_sha)
+}
+
+/// `origin/<base>` fetched into `dir`'s repo: a pull request's base, for
+/// the conflict check and the DIFF VIEWER (`event_loop::open_pr_review`).
+pub(crate) fn fetch_base(dir: &Path, base: &str, quit: &AtomicBool) -> Result<(), String> {
+    remote_git(
+        dir,
+        &["fetch", "--quiet", "--no-tags", "origin", base],
+        FETCH_TIMEOUT,
+        quit,
+    )
+}
+
+/// Pull request `number`'s head commit `head_sha` into `dir`'s repo when it
+/// is not there yet: fetched by its pull ref, which GitHub keeps for every
+/// pull request — a fork's too. The conflict check and the DIFF VIEWER on a
+/// pull request (`event_loop::open_pr_review`) both read it from here.
+pub(crate) fn fetch_pull_head(
+    dir: &Path,
+    number: u64,
+    head_sha: &str,
+    quit: &AtomicBool,
+) -> Result<(), String> {
+    if has_commit(dir, head_sha) {
+        return Ok(());
+    }
+    let pull = format!("refs/pull/{number}/head");
+    remote_git(
+        dir,
+        &["fetch", "--quiet", "--no-tags", "origin", &pull],
+        FETCH_TIMEOUT,
+        quit,
+    )
 }
 
 /// `git merge-tree --write-tree --name-only -z`: exit 0 is a clean merge,

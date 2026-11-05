@@ -16,7 +16,7 @@
 //! modal, sends a request, spawns a process or moves a cursor as the result
 //! of choosing a row belongs in this file (or, for a modal that lives in a
 //! module of its own, in that module's single `activate_selected` / `Cmd`
-//! executor — `preset_overlays`, `file_tabs`, `issues`, `branch_switch`),
+//! executor — `preset_overlays`, `file_tabs`),
 //! never inline in an input handler. `handle_mouse` holding an action of
 //! its own is the smell to look for in review.
 
@@ -172,19 +172,6 @@ pub(super) fn diff_tick_all(view: &mut DiffView) {
     crate::commit_list::show_selected(view);
 }
 
-/// `^G`: the ticked commits TOGETHER, or ONE AT A TIME. Nothing to choose
-/// between with fewer than two ticked.
-pub(super) fn diff_review_mode(view: &mut DiffView) {
-    let Some(list) = &mut view.commits else {
-        return;
-    };
-    if list.ticked.len() < 2 {
-        return;
-    }
-    list.toggle_mode();
-    crate::commit_list::show_selected(view);
-}
-
 /// `Enter` on the focused COMMIT LIST, or a second click on its row: the
 /// `older` row reads the next page; any other is up already, so the keys
 /// go on to its files.
@@ -237,14 +224,11 @@ pub(super) fn settings_row_cmd(hotkeys: bool, selected: usize) -> SettingsCmd {
 }
 
 /// Enter on the WORKTREES PANEL's row — and a double-click on it: a pull
-/// request or an issue leads out of orion, so it is handed to the browser
-/// and the cursor stays put; a checkout hands FOCUS one column right, to
-/// its sessions.
+/// request leads out of orion, so it is handed to the browser and the
+/// cursor stays put; a checkout hands FOCUS one column right, to its
+/// sessions.
 pub(super) fn worktrees_row(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let link = app
-        .selected_worktree_pr()
-        .map(|pr| pr.url.clone())
-        .or_else(|| app.selected_worktree_issue().map(|i| i.url.clone()));
+    let link = app.selected_worktree_pr().map(|pr| pr.url.clone());
     match link {
         Some(url) => open_link(app, &url, out),
         None => app.focus = Focus::Sessions,

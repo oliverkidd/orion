@@ -101,7 +101,6 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             HitTarget::LauncherCard(_)
             | HitTarget::LauncherBand(_)
             | HitTarget::LauncherBandPr(_)
-            | HitTarget::LauncherBandStack(_)
             | HitTarget::LauncherDrawer(_)
             | HitTarget::LauncherDrawerEntry(..),
         ) => app.focus = Focus::Sessions,
@@ -127,7 +126,6 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             | HitTarget::LauncherPaneClose
             | HitTarget::LauncherPaneZoom
             | HitTarget::LauncherPullRequests
-            | HitTarget::LauncherIssues
             | HitTarget::LauncherWelcomePrompt
             | HitTarget::FooterHome
             | HitTarget::FooterUpgrade

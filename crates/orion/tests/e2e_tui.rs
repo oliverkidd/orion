@@ -30,11 +30,9 @@ const SHIFT_LEFT: &[u8] = b"\x1b[1;2D";
 const SHIFT_RIGHT: &[u8] = b"\x1b[1;2C";
 const CTRL_Q: &[u8] = &[0x11];
 const CTRL_R: &[u8] = &[0x12];
-const CTRL_E: &[u8] = &[0x05];
 const CTRL_U: &[u8] = &[0x15];
 const CTRL_S: &[u8] = &[0x13];
 const CTRL_A: &[u8] = &[0x01];
-const CTRL_G: &[u8] = &[0x07];
 /// `⌘U`, `⌘N`, `⌘E`, `⌘S` and `⌘F` as Ghostty's kitty protocol spells
 /// them.
 const CMD_U: &[u8] = b"\x1b[117;9u";
@@ -612,154 +610,6 @@ fn tui_manual_link_add_is_unavailable() {
     tui.wait_for_gone("attach a link");
 }
 
-/// The ISSUES MODAL opens on rows fetched before `i` is ever pressed. A stub
-/// `gh` on PATH answers `issue list` with one issue and records each call:
-/// the record appears with no key sent — selecting the project is what
-/// asks — and the modal then opens on that answer without a second ask.
-#[test]
-fn tui_issues_are_prefetched_before_the_modal_opens() {
-    let stub_bin = tempfile::tempdir().unwrap();
-    let calls = stub_bin.path().join("issue-list-calls");
-    let gh = stub_bin.path().join("gh");
-    std::fs::write(
-        &gh,
-        format!(
-            concat!(
-                "#!/bin/sh\n",
-                "case \"$1 $2\" in\n",
-                "  'issue list') echo x >> '{calls}'; printf '%s' '[{{\"number\":15,",
-                "\"title\":\"Fix login redirect\",\"url\":\"https://github.com/o/r/issues/15\",",
-                "\"author\":{{\"login\":\"webdevcody\"}},\"createdAt\":\"2026-09-10T12:00:00Z\",",
-                "\"updatedAt\":\"2026-09-11T12:00:00Z\",\"labels\":[],\"body\":\"Login bounces.\"}}]' ;;\n",
-                "  'issue view') printf '%s' '{{\"url\":\"https://github.com/o/r/issues/15\",\"comments\":[]}}' ;;\n",
-                "  *) exit 1 ;;\n",
-                "esac\n",
-            ),
-            calls = calls.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let path = format!(
-        "{}:{}",
-        stub_bin.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-
-    let mut tui = TuiHarness::spawn_with_env(&[("PATH", path)]);
-    let repo = tui.make_repo("issues-proj");
-    tui.wait_for_text("to begin");
-    add_project(&mut tui, &repo, "issues-proj");
-
-    // No `i` yet: the list is asked for because the project is selected.
-    let deadline = Instant::now() + WAIT;
-    while !calls.exists() {
-        assert!(
-            Instant::now() < deadline,
-            "gh issue list never ran in the background\n--- screen ---\n{}",
-            tui.screen_text()
-        );
-        std::thread::sleep(POLL_STEP);
-    }
-
-    // The modal opens on the prefetched row — and spends no second process
-    // on a list that just landed (or is still landing).
-    tui.send(b"i");
-    tui.wait_for_text("Issues — issues-proj (1)");
-    tui.wait_for_text("#15 Fix login redirect");
-    let asks = std::fs::read_to_string(&calls).unwrap().lines().count();
-    assert_eq!(asks, 1, "opening on a fresh list asks GitHub again");
-    tui.send(ESC);
-    tui.wait_for_gone("Issues — issues-proj");
-}
-
-/// `Ctrl+e` in the ISSUES MODAL edits the issue in place: the reading pane
-/// becomes a form on the row's title and description, and Enter sends both
-/// as one `gh issue edit` — the title on argv, the description on stdin —
-/// then puts the reading pane back on the new text. A stub `gh` on PATH
-/// answers the list and records the edit it is sent.
-#[test]
-fn tui_issues_modal_edits_the_issue_in_place() {
-    // A stub `gh` that answers the list — and the issue itself, which a
-    // save reads first to be sure it isn't writing over newer text — from
-    // what the last edit sent it, as GitHub would, and records each edit
-    // it is sent.
-    let stub_bin = tempfile::tempdir().unwrap();
-    let edits = stub_bin.path().join("calls");
-    let gh = stub_bin.path().join("gh");
-    std::fs::write(
-        &gh,
-        format!(
-            concat!(
-                "#!/bin/sh\n",
-                "dir='{dir}'\n",
-                "title='Fix login redirect'; body='Login bounces.'\n",
-                "[ -f \"$dir/title\" ] && title=$(cat \"$dir/title\")\n",
-                "[ -f \"$dir/body\" ] && body=$(cat \"$dir/body\")\n",
-                "case \"$1 $2\" in\n",
-                "  'issue list')\n",
-                "    printf '[{{\"number\":15,\"title\":\"%s\",\"url\":\"https://github.com/o/r/issues/15\",",
-                "\"author\":{{\"login\":\"webdevcody\"}},\"createdAt\":\"2026-09-10T12:00:00Z\",",
-                "\"updatedAt\":\"2026-09-11T12:00:00Z\",\"labels\":[],\"body\":\"%s\"}}]' \"$title\" \"$body\" ;;\n",
-                "  'issue view') printf '{{\"url\":\"https://github.com/o/r/issues/15\",\"comments\":[],",
-                "\"title\":\"%s\",\"body\":\"%s\"}}' \"$title\" \"$body\" ;;\n",
-                "  'issue edit')\n",
-                "    echo \"argv: $*\" >> \"$dir/calls\"\n",
-                "    printf '%s' \"${{4#--title=}}\" > \"$dir/title\"\n",
-                "    cat > \"$dir/body\"\n",
-                "    printf 'stdin: ' >> \"$dir/calls\"; cat \"$dir/body\" >> \"$dir/calls\"; echo >> \"$dir/calls\" ;;\n",
-                "  *) exit 1 ;;\n",
-                "esac\n",
-            ),
-            dir = stub_bin.path().display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let path = format!(
-        "{}:{}",
-        stub_bin.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-
-    let mut tui = TuiHarness::spawn_with_env(&[("PATH", path)]);
-    let repo = tui.make_repo("issues-proj");
-    tui.wait_for_text("to begin");
-    add_project(&mut tui, &repo, "issues-proj");
-    tui.send(b"i");
-    tui.wait_for_text("#15 Fix login redirect");
-
-    // The form opens on the row's text, caret at the end of the title.
-    tui.send(CTRL_E);
-    tui.wait_for_text("Edit issue #15");
-    tui.wait_for_text("Title  Fix login redirect");
-    tui.send(b"!");
-    tui.wait_for_text("Fix login redirect!");
-    tui.send(TAB);
-    tui.send(b" Again.");
-    tui.wait_for_text("Login bounces. Again.");
-
-    // Enter sends the edit and the pane comes back on the new text.
-    tui.send(ENTER);
-    tui.wait_for_gone("Edit issue #15");
-    tui.wait_for_text("#15 Fix login redirect!");
-    let sent = std::fs::read_to_string(&edits).unwrap();
-    assert!(
-        sent.contains("argv: issue edit 15 --title=Fix login redirect! --body-file -"),
-        "{sent}"
-    );
-    assert!(sent.contains("stdin: Login bounces. Again."), "{sent}");
-
-    // Esc from the form drops the draft and keeps the modal.
-    tui.send(CTRL_E);
-    tui.wait_for_text("Edit issue #15");
-    tui.send(ESC);
-    tui.wait_for_gone("Edit issue #15");
-    tui.wait_for_text("Issues — issues-proj");
-    tui.send(ESC);
-    tui.wait_for_gone("Issues — issues-proj");
-}
-
 /// The DIFF VIEWER's flat file list: opened with the keys on the files
 /// and the list flat (Settings → Review), the way this walk reads it.
 #[test]
@@ -848,10 +698,10 @@ fn tui_git_diff_modal() {
 /// of its own opens on the whole branch, every commit ticked, instead of
 /// saying "no changes"; `^A` unticks them and the cursor's commit shows
 /// exactly its files under its message; `⇧←`/`⇧→` step older and newer
-/// from the files; ticked commits read one at a time with `^G`; and a
-/// dirty checkout opens on its uncommitted changes, as it always did.
+/// from the files; ticked commits read together; and a dirty checkout
+/// opens on its uncommitted changes, as it always did.
 #[test]
-fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
+fn tui_diff_steps_through_a_branch_commit_by_commit() {
     let mut tui = TuiHarness::spawn();
     let repo = tui.make_repo("commits-proj");
     // `origin/HEAD` on the first commit: what a worktree the DAEMON cut
@@ -903,16 +753,14 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
     tui.wait_for_text("+ beta line");
     tui.wait_for_gone("the alpha body");
 
-    // ---- tick both, read them one at a time, oldest first ----
+    // ---- tick both: read together ----
     tui.send(SHIFT_TAB);
     tui.send(SPACE);
     tui.send(DOWN);
     tui.send(SPACE);
     tui.wait_for_text("all ticked · together");
-    tui.send(CTRL_G);
-    tui.wait_for_text("commit 1 of 2 · add alpha");
-    tui.send(SHIFT_RIGHT);
-    tui.wait_for_text("commit 2 of 2 · add beta");
+    tui.wait_for_text("+ alpha line");
+    tui.wait_for_text("+ beta line");
     tui.send(ESC);
     tui.wait_for_gone("Commits ·");
 
@@ -923,72 +771,6 @@ fn tui_diff_steps_through_a_branch_one_commit_at_a_time() {
     tui.wait_for_text("+ wip line");
     tui.send(ESC);
     tui.wait_for_gone("Commits ·");
-}
-
-/// The BRANCH SWITCHER end to end: `c` lists the repo's branches, typing
-/// narrows them, `Enter` moves the root checkout on disk and the modal
-/// closes on it; a dirty checkout stops on the prompt instead, where `s`
-/// stashes the changes under a named entry and switches, the footer
-/// naming the entry.
-#[test]
-fn tui_branch_switcher_moves_the_root_checkout() {
-    let head = |repo: &Path| {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    };
-    let mut tui = TuiHarness::spawn();
-    let repo = tui.make_repo("switch-proj");
-    repo_git(&repo, &["branch", "feature-login"]);
-    repo_git(&repo, &["branch", "release-2"]);
-
-    tui.wait_for_text("to begin");
-    add_project(&mut tui, &repo, "switch-proj");
-
-    // ---- a clean checkout switches on Enter ----
-    tui.send(b"c");
-    tui.wait_for_text("Switch branch — switch-proj");
-    tui.wait_for_text("release-2");
-    tui.type_str("login");
-    tui.wait_for_gone("release-2");
-    tui.send(ENTER);
-    tui.wait_for_gone("Switch branch —");
-    assert_eq!(head(&repo), "feature-login");
-
-    // ---- a dirty one asks first; s stashes and switches ----
-    std::fs::write(repo.join(".keep"), "edited\n").unwrap();
-    tui.send(b"c");
-    tui.wait_for_text("Switch branch — switch-proj");
-    tui.wait_for_text("on feature-login");
-    // The switch dropped the cached listing: Enter needs the fresh one.
-    tui.wait_for_text("release-2");
-    tui.type_str("main");
-    tui.send(ENTER);
-    tui.wait_for_text("how should they travel to main?");
-    assert_eq!(
-        head(&repo),
-        "feature-login",
-        "nothing moves before the answer"
-    );
-    tui.send(b"s");
-    tui.wait_for_text("⌂ root is on main");
-    assert_eq!(head(&repo), "main");
-    let stashes = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .args(["stash", "list"])
-        .output()
-        .unwrap();
-    assert!(
-        String::from_utf8_lossy(&stashes.stdout)
-            .contains("orion: feature-login before switching to main"),
-        "{}",
-        String::from_utf8_lossy(&stashes.stdout)
-    );
 }
 
 /// An SGR mouse report as the terminal would send it: `button` (0 = left,

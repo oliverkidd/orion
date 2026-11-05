@@ -733,11 +733,6 @@ pub(crate) fn open_agent_presets(app: &mut App) {
         crate::quick_prompt::open_preset_picker_for_pr(app);
         return;
     }
-    // An issue row the same way: the preset launches on the issue.
-    if app.selected_worktree_issue().is_some() {
-        crate::issues::open_preset_for_row(app);
-        return;
-    }
     let worktree = match (app.focus, app.selected_worktree()) {
         (Focus::Sessions | Focus::Worktrees, Some(w)) => w.id.clone(),
         _ => return,
@@ -995,15 +990,14 @@ fn reopen_box_with_preset(
 }
 
 /// The box `back` with `preset` adopted — its harness, MODEL / EFFORT and
-/// prefix/postfix — keeping where it lands, its issue, pull request,
-/// Linear batch, todo, mode and the modal it stands on.
+/// prefix/postfix — keeping where it lands, its pull request, Linear
+/// batch, todo, mode and the modal it stands on.
 fn preset_on_box(
     back: crate::quick_prompt::QuickReturn,
     preset: AgentPreset,
     cfg: &crate::config::Config,
 ) -> crate::quick_prompt::QuickLaunch {
     crate::quick_prompt::QuickLaunch::of_preset(back.launch.target, preset, cfg)
-        .with_issue(back.launch.issue)
         .with_pr(back.launch.pr)
         .with_linear(back.launch.linear)
         .with_todo(back.launch.todo)
@@ -1024,10 +1018,10 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
         KeyCode::Esc if !view.filter.is_empty() => view.filter.clear(),
         // Backing out of the box's own picker is a return trip, not a
         // close: the box comes back exactly as it left, text and all. A
-        // picker reached with no box up (`e` on a pull request or an
-        // issue) closes as the manager does — it used to put up an empty
-        // box nobody asked for — unless it stands on the ISSUES or PULL
-        // REQUESTS MODAL (their `Shift+Tab`), which it leaves on its row.
+        // picker reached with no box up (`e` on a pull request) closes as
+        // the manager does — it used to put up an empty box nobody asked
+        // for — unless it stands on a modal the box would have, which it
+        // leaves on its row.
         KeyCode::Esc => match view.box_behind().cloned() {
             Some(back) => crate::quick_prompt::reopen(app, back.launch, &back.text),
             None => match view.quick.clone().and_then(|back| back.launch.under) {
@@ -1079,8 +1073,8 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
 
 /// The selected row is chosen — Enter, or a click on it. In a QUICK PROMPT
 /// picker the row is handed to the box waiting behind the list
-/// (`view.quick`), which keeps that box's target, its text, its issue and
-/// its pull request; in the manager it launches into the list's worktree,
+/// (`view.quick`), which keeps that box's target, its text and its pull
+/// request; in the manager it launches into the list's worktree,
 /// through the preset's task box or past it; over an agent's pane it is
 /// pasted at that agent's caret. The one function both input
 /// handlers call: when the click ran a copy of the manager half whatever
@@ -1242,7 +1236,7 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent, out: &mut Vec<Clie
 /// is `Ctrl+e`), a click outside the modal closes; everything else is swallowed.
 /// A click is Enter on that row, in both modes: in a QUICK PROMPT picker it
 /// hands the row to the box waiting behind the list (`view.quick`), which
-/// keeps that box's target, text, issue and pull request. It used to launch
+/// keeps that box's target, text and pull request. It used to launch
 /// the row into `view.worktree` whatever the mode — for a PR SESSION picker
 /// that is the ROOT WORKTREE, which only names the project — so a click on
 /// a `skip`-task preset started a plain session in the main checkout, with
@@ -1294,7 +1288,9 @@ pub(crate) mod keys {
 
     pub const LAUNCH: Key = Key::new(&["enter"], "launch");
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new");
-    pub const EDIT: Key = crate::issues::keys::EDIT;
+    /// `⌘I`, since `⌘E` is the changes chord everywhere; `^E` is the twin
+    /// for a terminal with no ⌘ (`^I` is Tab there).
+    pub const EDIT: Key = Key::new(&["cmd+i", "ctrl+e"], "edit");
     /// Every modal's remove verb: it asks first.
     pub const DELETE: Key = Key::new(&["cmd+w", "ctrl+w"], "delete");
     /// The NEW WORKTREE toggle under the rows.
@@ -1309,7 +1305,7 @@ pub(crate) mod keys {
 
 /// The keys on the list's frame, by mode: Enter's verb, the manage
 /// chords, and where Esc goes — the one thing that differs between the
-/// box's picker and one opened on a pull request or an issue, until
+/// box's picker and one opened on a pull request, until
 /// letters are typed, when Esc clears them.
 pub(crate) fn list_hints(view: &AgentPresetsView) -> Vec<crate::hints::Hint> {
     let enter = if view.pane_target().is_some() {
@@ -1366,8 +1362,8 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
     let area = centered_rect(f.area(), AGENT_PRESETS_W, height);
     f.render_widget(Clear, area);
     // In QUICK PROMPT picker mode Enter applies the row to the launch
-    // behind it — the box, which Esc gives back, or the pull request or
-    // issue the list was opened on, where Esc just closes; the manage
+    // behind it — the box, which Esc gives back, or the pull request the
+    // list was opened on, where Esc just closes; the manage
     // verbs are the manager's.
     // The type-ahead shows in the title, as a submenu's does: `Agent
     // presets ⌕ rev`, the bare ⌕ while nothing is typed yet.
