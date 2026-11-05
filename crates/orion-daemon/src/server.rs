@@ -469,22 +469,6 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         reply(&out_tx, req_id, result.map(Some)).await;
                     });
                 }
-                ClientRequest::PrewarmAgent {
-                    worktree,
-                    kind,
-                    model,
-                    effort,
-                } => {
-                    // Fire-and-forget: boot the CLI while the user is still
-                    // typing the session name; CreateAgent adopts it. Runs
-                    // off the request loop (the CLI probe can take a bit).
-                    let daemon = daemon.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = daemon.prewarm_agent(&worktree, kind, model, effort).await {
-                            tracing::debug!(error = %e, "prewarm failed");
-                        }
-                    });
-                }
                 ClientRequest::PrewarmWorktreeSessions {
                     worktree,
                     cols,

@@ -179,10 +179,7 @@ async fn serve() -> Result<()> {
             loop {
                 tokio::select! {
                     _ = daemon.shutdown.cancelled() => break,
-                    _ = interval.tick() => {
-                        daemon.tick_status_machines();
-                        daemon.reap_prewarmed();
-                    }
+                    _ = interval.tick() => daemon.tick_status_machines(),
                 }
             }
         });

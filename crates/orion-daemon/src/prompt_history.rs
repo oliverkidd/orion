@@ -84,7 +84,8 @@ pub fn condense(raw: &str) -> Option<String> {
 impl Daemon {
     /// Append a condensed prompt to the session's history and push the
     /// row to every subscriber. A row that is gone (or was never there —
-    /// a prewarm spare's id) is silently nothing to record.
+    /// a SPARE WORKTREE's CLI, before a launch takes it) is silently
+    /// nothing to record.
     pub fn record_prompt(self: &Arc<Self>, id: &AgentId, text: String) {
         let entry = PromptEntry {
             text,

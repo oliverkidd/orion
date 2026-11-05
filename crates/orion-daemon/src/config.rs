@@ -13,13 +13,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Pre-spawn agent CLIs while the user is still naming the session so
-    /// creation feels instant. Costs one idle CLI process per warm slot.
-    pub prewarm_agents: bool,
     /// Kill idle session PTYs in worktrees no client is looking at once
     /// they've gone unwatched this long: "1m" | "5m" | "15m" | "30m" | "1h"
     /// ("off" disables reaping entirely; any `<n>s`/`<n>m`/`<n>h` works).
-    /// Bounds what prewarming and walked-away-from sessions cost. Running
+    /// Bounds what prewarmed and walked-away-from sessions cost. Running
     /// or feedback-waiting agents, agents with a backgrounded tool call
     /// still running, and terminals with a command running are spared; a
     /// reaped session revives on the next attach or prewarm (agents resume
@@ -79,7 +76,6 @@ pub struct ProjectConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            prewarm_agents: true,
             session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             harnesses: BTreeMap::new(),
             claude_accounts: Vec::new(),
@@ -187,12 +183,15 @@ mod tests {
     #[test]
     fn an_unreadable_key_costs_only_that_key() {
         let obj = serde_json::json!({
-            "prewarm_agents": "nope",
+            "projects": "nope",
             "session_idle_timeout": "1h",
         });
         let (cfg, skipped) =
             orion_core::settings::parse_lenient::<Config>(obj.as_object().unwrap());
-        assert!(cfg.prewarm_agents, "the unreadable key takes its default");
+        assert!(
+            cfg.projects.is_empty(),
+            "the unreadable key takes its default"
+        );
         assert_eq!(cfg.session_idle_timeout, "1h");
         assert_eq!(skipped.len(), 1);
     }
@@ -205,7 +204,6 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw).unwrap();
         let (cfg, skipped) = orion_core::settings::parse_lenient::<Config>(&obj);
         assert!(skipped.is_empty(), "{skipped:?}");
-        assert!(!cfg.prewarm_agents);
         assert_eq!(cfg.session_idle_timeout, "30m");
         assert_eq!(
             cfg.harnesses.get("claude").and_then(|h| h.enabled),
@@ -237,15 +235,6 @@ mod tests {
         assert!(cfg.claude_accounts[0].enabled);
         assert!(!cfg.claude_accounts[1].enabled);
         assert!(Config::default().claude_accounts.is_empty());
-    }
-
-    #[test]
-    fn defaults_enable_prewarm_and_allow_opt_out() {
-        assert!(Config::default().prewarm_agents);
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(cfg.prewarm_agents);
-        let cfg: Config = serde_json::from_str(r#"{"prewarm_agents": false}"#).unwrap();
-        assert!(!cfg.prewarm_agents);
     }
 
     #[test]

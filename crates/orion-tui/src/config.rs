@@ -1056,8 +1056,7 @@ pub struct Config {
     #[serde(skip_serializing)]
     pub opencode_model: Option<String>,
     /// Which AGENT KINDS the NEW AGENT PICKER offers. Off leaves that
-    /// harness out of the picker and the PR SESSION picker (and, for
-    /// Claude, out of the standing PREWARM POOL slot); sessions that already
+    /// harness out of the picker and the PR SESSION picker; sessions that already
     /// exist keep attaching, resuming and restarting as before. Off until
     /// first-run onboarding or Settings → Accounts turns one on. Tests keep
     /// them on so an empty `{}` fixture still offers every built-in.
