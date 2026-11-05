@@ -1780,7 +1780,7 @@ fn note_open_prs_answer_at(
         // listed under both in the moment it merged reads as merged, and
         // leaves the open rows below.
         for row in answer.merged.iter().flatten() {
-            let seen = crate::pr_store::PrObservation::of_merged_row(row);
+            let seen = crate::pr_store::PrObservation::of_tail_row(row);
             status_changed |= app.prs.observe(&row.url, seen, asked);
         }
         merged = answer.merged;

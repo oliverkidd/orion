@@ -624,6 +624,16 @@ pub const MERGED_DAYS: i64 = 7;
 /// [`MERGED_DAYS`] of it.
 pub const MERGED_PAGE: usize = 100;
 
+/// How far back the PULL REQUESTS MODAL's `Closed` section reaches: the
+/// pull requests closed without merging in the last month — one GitHub
+/// closed when its base branch was deleted among them, to be found and
+/// pointed at a live branch.
+pub const CLOSED_DAYS: i64 = 30;
+
+/// How many closed pull requests the list asks for, most recently touched
+/// first: the `Closed` section is that first page, cut to [`CLOSED_DAYS`].
+pub const CLOSED_PAGE: usize = 50;
+
 /// The one GraphQL query [`list`] runs — `gh pr list`'s own fields, in its
 /// own newest-first order, save the checks, and what the PULL REQUESTS
 /// MODAL's rows say under their titles ([`PrMeta`]). `gh pr list --json
@@ -638,8 +648,12 @@ pub const MERGED_PAGE: usize = 100;
 ///
 /// `merged` rides along: the pull requests that landed lately, for the
 /// modal's `Merged` section ([`parse_merged`]) — a row's name, author and
-/// `mergedAt`, never its checks, so it adds next to nothing to the ask.
-const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!, $merged: Int!) { \
+/// `mergedAt`, never its checks, so it adds next to nothing to the ask —
+/// and `closed`, the ones closed without merging, for its `Closed`
+/// section ([`parse_closed`]): the same, with `closedAt`, the base it was
+/// on and whether that base still exists, and the timeline's word on why
+/// it closed (a base deleted, or who closed it).
+const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!, $merged: Int!, $closed: Int!) { \
     viewer { login } \
     repository(owner: $owner, name: $repo) { \
     pullRequests(states: OPEN, first: $limit, orderBy: {field: CREATED_AT, direction: DESC}) { \
@@ -655,7 +669,14 @@ const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!, $
     nodes { number url title headRefName isCrossRepository \
     headRepositoryOwner { login } viewerDidAuthor headRefOid \
     createdAt updatedAt mergedAt author { login } comments { totalCount } \
-    labels(first: 10) { nodes { name color } } } } } }";
+    labels(first: 10) { nodes { name color } } } } \
+    closed: pullRequests(states: CLOSED, first: $closed, orderBy: {field: UPDATED_AT, direction: DESC}) { \
+    nodes { number url title headRefName isCrossRepository \
+    headRepositoryOwner { login } viewerDidAuthor headRefOid \
+    createdAt updatedAt closedAt baseRefName baseRef { name } author { login } comments { totalCount } \
+    labels(first: 10) { nodes { name color } } \
+    timelineItems(last: 5, itemTypes: [BASE_REF_DELETED_EVENT, CLOSED_EVENT]) { nodes { __typename \
+    ... on BaseRefDeletedEvent { baseRefName } ... on ClosedEvent { actor { login } } } } } } } }";
 
 /// GitHub's verdict on a pull request's reviews (`reviewDecision`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -731,6 +752,14 @@ pub struct PrMeta {
     /// `mergedAt`, RFC 3339: set on the `Merged` section's rows
     /// ([`parse_merged`]), empty on every open one.
     pub merged_at: String,
+    /// `closedAt`, RFC 3339: set on the `Closed` section's rows
+    /// ([`parse_closed`]) alone.
+    pub closed_at: String,
+    /// The branch it merges into (`baseRefName`): asked of a closed row.
+    pub base: String,
+    /// Why a closed row closed, where GitHub says: `its base dev was
+    /// deleted`, `closed by sam`.
+    pub closed_why: String,
 }
 
 /// Which part of the PULL REQUESTS MODAL a row lists under.
@@ -743,6 +772,8 @@ pub enum PrSection {
     Others,
     /// It landed within [`MERGED_DAYS`]: read, never acted on.
     Merged,
+    /// Closed without merging within [`CLOSED_DAYS`]: `Enter` reopens it.
+    Closed,
 }
 
 impl PrSection {
@@ -752,6 +783,7 @@ impl PrSection {
             PrSection::ReviewRequested => "Review requested",
             PrSection::Others => "Others",
             PrSection::Merged => "Merged",
+            PrSection::Closed => "Closed",
         }
     }
 }
@@ -842,12 +874,24 @@ impl OpenPr {
         !self.meta.merged_at.is_empty()
     }
 
+    /// One of the closed tail's rows: closed without merging.
+    pub fn is_closed(&self) -> bool {
+        !self.is_merged() && !self.meta.closed_at.is_empty()
+    }
+
+    /// Merged or closed: a row of the tail under the open ones.
+    pub fn is_settled(&self) -> bool {
+        self.is_merged() || self.is_closed()
+    }
+
     /// The PULL REQUESTS MODAL's section for it: yours first, then the
     /// ones waiting on your review, then the rest — and what has merged
     /// under them all, whoever opened it.
     pub fn section(&self) -> PrSection {
         if self.is_merged() {
             PrSection::Merged
+        } else if self.is_closed() {
+            PrSection::Closed
         } else if self.mine {
             PrSection::Yours
         } else if self.meta.review_requested {
@@ -913,10 +957,15 @@ impl PrLaunch {
 pub async fn list(dir: &Path) -> Option<ListAnswer> {
     let limit = format!("limit={LIST_LIMIT}");
     let merged = format!("merged={MERGED_PAGE}");
-    let out = repo_graphql(dir, LIST_QUERY, &[&limit, &merged], TIMEOUT).await?;
+    let closed = format!("closed={CLOSED_PAGE}");
+    let out = repo_graphql(dir, LIST_QUERY, &[&limit, &merged, &closed], TIMEOUT).await?;
     let mut rows = parse_list(&out)?;
     let cut = recheck_failing(dir, &mut rows).await;
-    let merged = parse_merged(&out, orion_core::clock::now_secs() as i64);
+    let now = orion_core::clock::now_secs() as i64;
+    let merged = match (parse_merged(&out, now), parse_closed(&out, now)) {
+        (None, None) => None,
+        (merged, closed) => Some(merged.into_iter().chain(closed).flatten().collect()),
+    };
     Some(ListAnswer { rows, cut, merged })
 }
 
@@ -931,8 +980,10 @@ pub struct ListAnswer {
     pub rows: Vec<OpenPr>,
     pub cut: std::collections::HashSet<String>,
     /// The pull requests merged within [`MERGED_DAYS`], the latest merge
-    /// first — the first page of them ([`MERGED_PAGE`]). `None` where the
-    /// answer did not say, and the caller keeps the last ones it had.
+    /// first — the first page of them ([`MERGED_PAGE`]) — then the ones
+    /// closed without merging within [`CLOSED_DAYS`], the latest close
+    /// first: the tail under the open rows. `None` where the answer did
+    /// not say, and the caller keeps the last ones it had.
     pub merged: Option<Vec<OpenPr>>,
 }
 
@@ -1167,6 +1218,60 @@ pub(crate) fn parse_merged(json: &str, now: i64) -> Option<Vec<OpenPr>> {
     Some(latest_first(rows))
 }
 
+/// The closed tail of a [`LIST_QUERY`] answer — the rows under
+/// `data.repository.closed.nodes` — cut to the ones closed without merging
+/// within [`CLOSED_DAYS`] of `now`, the latest close first, each saying why
+/// it closed where the timeline does ([`closed_why`]). `None` for an answer
+/// with no closed tail.
+pub(crate) fn parse_closed(json: &str, now: i64) -> Option<Vec<OpenPr>> {
+    let answer = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let nodes = answer
+        .pointer("/data/repository/closed/nodes")?
+        .as_array()?;
+    let since = now - CLOSED_DAYS * 24 * 60 * 60;
+    let rows = nodes
+        .iter()
+        .filter_map(|v| {
+            let at = rfc3339_secs(&str_at(v, "closedAt")).filter(|at| *at >= since)?;
+            let mut pr = row(v, "")?;
+            pr.meta.closed_why = closed_why(v);
+            Some((at, pr))
+        })
+        .collect();
+    Some(latest_first(rows))
+}
+
+/// Why a [`LIST_QUERY`] closed node closed, as its timeline has it: its
+/// base deleted (GitHub closes a pull request whose base branch goes) —
+/// or, the timeline silent, a base GitHub no longer has — else who closed
+/// it. Empty when nothing says.
+fn closed_why(v: &serde_json::Value) -> String {
+    let events = v
+        .pointer("/timelineItems/nodes")
+        .and_then(|n| n.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let last = |kind: &str| {
+        events
+            .iter()
+            .rev()
+            .find(|e| str_at(e, "__typename") == kind)
+    };
+    let base = str_at(v, "baseRefName");
+    let gone = v.get("baseRef").is_some_and(|b| b.is_null());
+    if let Some(deleted) = last("BaseRefDeletedEvent") {
+        let name = Some(str_at(deleted, "baseRefName")).filter(|n| !n.is_empty());
+        return format!("its base {} was deleted", name.unwrap_or(base));
+    }
+    if gone && !base.is_empty() {
+        return format!("its base {base} is gone");
+    }
+    last("ClosedEvent")
+        .and_then(|e| e.pointer("/actor/login").and_then(|l| l.as_str()))
+        .map(|login| format!("closed by {login}"))
+        .unwrap_or_default()
+}
+
 /// The merged rows as the list keeps them: the latest merge first, each
 /// pull request once.
 fn latest_first(mut rows: Vec<(i64, OpenPr)>) -> Vec<OpenPr> {
@@ -1218,6 +1323,9 @@ fn meta(v: &serde_json::Value, viewer: &str) -> PrMeta {
             .pointer("/commits/nodes/0/commit/statusCheckRollup/contexts")
             .and_then(check_tally),
         merged_at: str_at(v, "mergedAt"),
+        closed_at: str_at(v, "closedAt"),
+        base: str_at(v, "baseRefName"),
+        closed_why: String::new(),
     }
 }
 
@@ -2381,7 +2489,7 @@ mod tests {
         assert_eq!(merged[1].section(), PrSection::Merged, "even yours");
         assert_eq!(merged[1].head, "mon");
         assert_eq!(merged[0].meta.author, "sam");
-        let badge = |pr: &OpenPr| status_of(PrObservation::of_merged_row(pr)).word();
+        let badge = |pr: &OpenPr| status_of(PrObservation::of_tail_row(pr)).word();
         assert_eq!(badge(&merged[0]), "merged");
         assert_eq!(
             parse_list(answer),
@@ -2389,6 +2497,64 @@ mod tests {
             "the open rows are their own"
         );
         assert_eq!(parse_merged(&list_answer("[]"), now), None, "never asked");
+    }
+
+    /// The closed tail is the month's closes without a merge, the latest
+    /// first, each saying why where GitHub does: its base deleted — by the
+    /// timeline, or by a base GitHub no longer has — else who closed it.
+    #[test]
+    fn the_closed_tail_is_the_months_closes_and_why() {
+        let answer = r#"{"data":{"viewer":{"login":"me"},"repository":{
+          "pullRequests":{"nodes":[]},
+          "closed":{"nodes":[
+            {"number":40,"url":"https://github.com/o/r/pull/40","title":"Stacked on feat",
+             "closedAt":"2026-10-09T10:00:00Z","baseRefName":"feat","baseRef":null,
+             "timelineItems":{"nodes":[{"__typename":"BaseRefDeletedEvent","baseRefName":"feat"},
+               {"__typename":"ClosedEvent","actor":{"login":"ghost"}}]}},
+            {"number":41,"url":"https://github.com/o/r/pull/41","title":"Abandoned",
+             "closedAt":"2026-10-08T10:00:00Z","baseRefName":"main","baseRef":{"name":"main"},
+             "timelineItems":{"nodes":[{"__typename":"ClosedEvent","actor":{"login":"sam"}}]}},
+            {"number":42,"url":"https://github.com/o/r/pull/42","title":"Base gone, timeline cut",
+             "closedAt":"2026-10-10T09:00:00Z","baseRefName":"old","baseRef":null,
+             "timelineItems":{"nodes":[]}},
+            {"number":43,"url":"https://github.com/o/r/pull/43","title":"Long ago",
+             "closedAt":"2026-08-01T10:00:00Z","baseRefName":"main"}
+          ]}}}}"#;
+        let now = rfc3339_secs("2026-10-10T10:00:00Z").expect("a stamp");
+        let closed = parse_closed(answer, now).expect("a tail");
+        let numbers: Vec<u64> = closed.iter().map(|pr| pr.number).collect();
+        assert_eq!(
+            numbers,
+            [42, 40, 41],
+            "inside the month, latest close first"
+        );
+        let why: Vec<&str> = closed
+            .iter()
+            .map(|pr| pr.meta.closed_why.as_str())
+            .collect();
+        assert_eq!(
+            why,
+            [
+                "its base old is gone",
+                "its base feat was deleted",
+                "closed by sam"
+            ]
+        );
+        assert!(closed.iter().all(|pr| pr.is_closed() && !pr.is_merged()));
+        assert_eq!(closed[1].section(), PrSection::Closed);
+        assert!(PrSection::Merged < PrSection::Closed, "under the merged");
+        assert_eq!(closed[1].meta.base, "feat");
+        let badge = |pr: &OpenPr| status_of(PrObservation::of_tail_row(pr)).word();
+        assert_eq!(badge(&closed[0]), "closed");
+        assert_eq!(parse_closed(&list_answer("[]"), now), None, "never asked");
+        // The query asks for the closed tail beside the merged one, no
+        // checks on it.
+        let (_, closed_q) = LIST_QUERY
+            .split_once("closed: pullRequests(states: CLOSED, first: $closed")
+            .expect("the closed tail");
+        assert!(closed_q.contains("closedAt baseRefName baseRef { name }"));
+        assert!(closed_q.contains("BASE_REF_DELETED_EVENT"));
+        assert!(!closed_q.contains("statusCheckRollup"));
     }
 
     /// The meta line's fields come off the node; the sections off who

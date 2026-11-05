@@ -716,11 +716,13 @@ pub(crate) fn open(app: &mut App, at: EditStart) {
         return;
     }
     let closed = status.standing == crate::pull_request::Standing::Closed;
+    // The page's base, else the row's — a closed row says it.
     let base = app
         .pr_detail
         .get(&pr.url)
         .map(|d| d.base.clone())
-        .unwrap_or_default();
+        .filter(|base| !base.is_empty())
+        .unwrap_or_else(|| pr.meta.base.clone());
     let facts = Facts {
         title: status.title_or(&pr.title).to_string(),
         state: if closed { STATE_CLOSED } else { STATE_OPEN }.to_string(),

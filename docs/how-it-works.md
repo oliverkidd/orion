@@ -406,7 +406,8 @@ sweeps, and a merged checkout left lying around costs an idle orion no repaints.
 `⌘K` and the pane reads the pull request as its [page](keys.md#the-pull-request-page) — description and
 conversation, changes, commits, checks and reviews in tabs, one `gh pr view` for all of them — exactly
 as the PULL REQUESTS MODAL does (whose list moves a pull request to its **Merged** section on merge — the last 7 days'
-merges, under the open rows — and which `hide_draft_prs` never thins — the
+merges, under the open rows — and one closed without merging to its **Closed** section, the last 30
+days' — and which `hide_draft_prs` never thins — the
 modal lists drafts too); `⌘E` shows its diff. The page's review threads — comments on lines — come
 from one GraphQL query asked beside `gh pr view`, and the Reviews tab lists them by file; `Enter` there
 (or `⌘⇧R` in the modal) opens the [PR review](keys.md#the-pr-review), where you comment on lines, reply,
@@ -443,7 +444,12 @@ lookup that fails keeps the last list that worked on screen, and the PULL REQUES
 `couldn't refresh` under its filter until an answer lands. The same query brings the modal's
 **Merged** section: the merged pull requests most recently touched — name, author and merge
 time, no checks — cut to the ones merged in the last 7 days (`pull_request::MERGED_DAYS`). It is
-the first page of them, the 100 most recently touched, which is where every new merge lands.
+the first page of them, the 100 most recently touched, which is where every new merge lands. Its
+**Closed** section rides along the same way: the 50 closed-unmerged pull requests most recently
+touched, cut to the last 30 days (`pull_request::CLOSED_DAYS`), each with the base it was on, whether
+that base still exists, and the last few `BaseRefDeletedEvent` / `ClosedEvent` items of its timeline
+— which is how a row says `its base feat was deleted` (GitHub closes a pull request whose base
+branch goes) or `closed by sam`.
 
 The new pull request form's **Promote** mode works out what a `dev → main` promotion carries from
 two answers: GitHub's merged pull requests into `dev` (the 100 most recently touched, each with its

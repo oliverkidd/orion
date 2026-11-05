@@ -6,10 +6,15 @@
 //! the one under the cursor read on the right, as the PULL REQUEST PAGE.
 //! Under them, `Merged`: what landed in the last week
 //! (`pull_request::MERGED_DAYS`), the latest merge first, so the list
-//! reads as a lineage. A merged row is read, diffed, commented on and
-//! opened like any other; the verbs that need an open pull request — an
-//! agent, merge, close, ready/draft, autofix — say it has merged
-//! ([`selected_open_pr`]).
+//! reads as a lineage; then `Closed`: what was closed without merging in
+//! the last month (`pull_request::CLOSED_DAYS`), each saying why where
+//! GitHub does — a base branch deleted, which GitHub closes a pull request
+//! for. A merged or closed row is read, diffed, commented on and opened
+//! like any other; the verbs that need an open pull request — an agent,
+//! merge, ready/draft, autofix — say it has merged, or is closed
+//! ([`selected_open_pr`]), and `Enter` on a closed one opens the EDIT form
+//! at its reopen, the caret in its base, so one GitHub closed with its base
+//! is reopened onto a live branch in one go.
 //! `⌘F` and `key:value` tokens in the filter narrow by facet
 //! (`list_filter`). Two panels, and
 //! `Tab` / `⇧Tab` hand the keys from one to the other as they do in the
@@ -389,7 +394,7 @@ fn queue_prefetch(app: &mut App, opening: bool) {
     let mut later = Vec::new();
     for (i, _) in visible_rows("", list, &app.prs) {
         let pr = &list[i];
-        if pr.is_merged() || view.prefetch.holds(&pr.url) {
+        if pr.is_settled() || view.prefetch.holds(&pr.url) {
             continue;
         }
         let pending = PendingPrDetail {
@@ -645,6 +650,7 @@ fn facet_values(pr: &OpenPr, key: &str, prs: &PrStore) -> Vec<String> {
         "review" => vec![pr.meta.review.word().to_string()],
         "checks" => vec![checks_word(prs.status_or_open(&pr.url).health.checks).to_string()],
         "is" if pr.is_merged() => vec!["merged".to_string()],
+        "is" if pr.is_closed() => vec!["closed".to_string()],
         "is" => {
             let status = prs.status_or_open(&pr.url);
             let mut is = vec![if status.is_draft() { "draft" } else { "ready" }.to_string()];
@@ -724,18 +730,19 @@ pub(crate) fn selected_pr(app: &App) -> Option<OpenPr> {
 }
 
 /// [`selected_pr`] for a verb that needs the pull request still open — an
-/// agent on it, merge, close, ready/draft, autofix. A merged row has none
-/// of them left: the footer says it has merged, and nothing opens.
+/// agent on it, merge, ready/draft, autofix. A merged or closed row has
+/// none of them left: the footer says so, and nothing opens.
 pub(crate) fn selected_open_pr(app: &mut App) -> Option<OpenPr> {
     let pr = selected_pr(app)?;
-    if pr.is_merged() {
-        app.flash = Some(crate::flash::Flash::note(format!(
-            "#{} has merged",
-            pr.number
-        )));
-        return None;
-    }
-    Some(pr)
+    let why = if pr.is_merged() {
+        format!("#{} has merged", pr.number)
+    } else if pr.is_closed() {
+        format!("#{} is closed — Enter reopens it", pr.number)
+    } else {
+        return Some(pr);
+    };
+    app.flash = Some(crate::flash::Flash::note(why));
+    None
 }
 
 /// `⌘G`: the AUTOFIX form for the pull request under the cursor — at
@@ -1165,6 +1172,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         crate::pr_actions::handle_key(app, key);
         return;
     }
+    // Asked only of an Enter: the rows are cloned to answer it.
+    let reopen = keys::REOPEN.matches(&key) && selected_pr(app).is_some_and(|pr| pr.is_closed());
     if matches!(&app.overlay, Some(Overlay::PullRequests(v)) if v.filter_pick.is_some()) {
         filter_pick_key(app, &key);
         return;
@@ -1222,6 +1231,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if on_page && keys::ACT.matches(&key) => act(app, out),
         // The PR PICK's Enter attaches the issues it carries instead.
         _ if view.pick.is_some() && keys::ATTACH.matches(&key) => attach_to_selected(app),
+        // A closed row's Enter reopens it, through the EDIT form.
+        _ if reopen => crate::pr_actions::edit::open(app, EditStart::Reopen),
         _ if keys::PROMPT.matches(&key) => open_prompt_for_selected(app),
         _ if keys::COMMENT.matches(&key) => open_comment_for_selected(app),
         _ if keys::DIFF.matches(&key) => diff(app, out),
@@ -1315,7 +1326,7 @@ fn pick_facets(list: &[OpenPr], prs: &PrStore, th: Theme) -> Vec<PickFacet> {
                     })
                 }
                 "is" => fixed_values(
-                    &["ready", "draft", "conflicts", "merged"],
+                    &["ready", "draft", "conflicts", "merged", "closed"],
                     &count("is"),
                     |_| None,
                 ),
@@ -1496,6 +1507,8 @@ pub(crate) mod keys {
     /// Enter on the PR PICK's list: the pull request attached to the
     /// issues the LINEAR VIEW marked.
     pub const ATTACH: Key = Key::new(&["enter"], "attach to this PR");
+    /// Enter on a closed row: the EDIT form at its reopen.
+    pub const REOPEN: Key = Key::new(&["enter"], "reopen");
     pub const TABS: Key = crate::pr_preview::keys::MODAL_TABS;
     pub const ROWS: Key = crate::pr_preview::keys::MODAL_ROWS;
     /// The FILTER PICK — the LINEAR VIEW's too.
@@ -1505,8 +1518,8 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, EDIT, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, TABS, ROWS, FILTER,
-        JUMP,
+        MERGE, EDIT, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, REOPEN, TABS, ROWS,
+        FILTER, JUMP,
     ];
 }
 
@@ -1517,6 +1530,12 @@ pub(crate) mod keys {
 /// then clears a typed filter, then closes — or, in a PR PICK, goes back
 /// to the LINEAR VIEW, whose issues `Enter` attaches the row to.
 pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
+    hints_on(view, false)
+}
+
+/// [`hints`] with the cursor on a closed row (`on_closed`), whose Enter
+/// reopens it.
+fn hints_on(view: &PullRequestsView, on_closed: bool) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     if let Some(form) = &view.form {
         return crate::pr_actions::hints(form);
@@ -1560,6 +1579,8 @@ pub(crate) fn hints(view: &PullRequestsView) -> Vec<crate::hints::Hint> {
     let picking = view.pick.is_some();
     let enter = if picking {
         keys::ATTACH.hint()
+    } else if on_closed {
+        keys::REOPEN.hint()
     } else {
         keys::PROMPT.hint()
     };
@@ -1611,12 +1632,14 @@ const WORD_W: usize = 9;
 /// …then two cells, then how long ago it was opened, at least this wide.
 const AGE_W: usize = 3;
 
-/// How long ago `pr` was opened — merged, for a merged row — as its
-/// row's last column says it: `3d`, `21m`, `now` — empty for a row the
-/// list said nothing about.
+/// How long ago `pr` was opened — merged or closed, for a merged or
+/// closed row — as its row's last column says it: `3d`, `21m`, `now` —
+/// empty for a row the list said nothing about.
 fn age_of(pr: &OpenPr, now: i64) -> String {
     let stamp = if pr.is_merged() {
         &pr.meta.merged_at
+    } else if pr.is_closed() {
+        &pr.meta.closed_at
     } else {
         &pr.meta.created_at
     };
@@ -1707,7 +1730,14 @@ fn row_line(
         fits(WORD_W).then_some(false)
     };
     let status_w = status.map_or(0, |marks| WORD_W + 2 + if marks { MARKS_W } else { 0 });
-    let room = width.saturating_sub(lead + 1 + status_w + cols.age + 1);
+    let mut room = width.saturating_sub(lead + 1 + status_w + cols.age + 1);
+    let why = format!("  {}", pr.meta.closed_why);
+    let why_w = why.chars().count();
+    let why = (!pr.meta.closed_why.is_empty() && room >= crate::pr_preview::MIN_TEXT_W + why_w)
+        .then(|| {
+            room -= why_w;
+            why
+        });
     let title = truncate(stands.title_or(&pr.title), room);
     let shown = title.chars().count();
     let lit: Vec<usize> = title_positions.into_iter().filter(|&p| p < shown).collect();
@@ -1722,7 +1752,11 @@ fn row_line(
         Style::default().fg(title_color),
         th,
     ));
-    let used = lead + shown;
+    let mut used = lead + shown;
+    if let Some(why) = why {
+        used += why_w;
+        spans.push(Span::styled(why, Style::default().fg(th.dim)));
+    }
     let age = age_of(pr, now);
     let mut right: Vec<Span<'static>> = Vec::new();
     if let Some(marks) = status {
@@ -1836,11 +1870,11 @@ pub(crate) fn draw(
         .unwrap_or(0);
 
     // ---- left: the list ----
-    // The count is the open ones' — the merged section's is on its own
-    // rule — and reads `matches/all` while a filter is on.
-    let open = rows.iter().filter(|pr| !pr.is_merged()).count();
+    // The count is the open ones' — the merged and closed sections' are on
+    // their own rules — and reads `matches/all` while a filter is on.
+    let open = rows.iter().filter(|pr| !pr.is_settled()).count();
     let count = if parsed.is_active() {
-        let matched = visible.iter().filter(|(i, _)| !rows[*i].is_merged());
+        let matched = visible.iter().filter(|(i, _)| !rows[*i].is_settled());
         format!("{}/{open}", matched.count())
     } else {
         open.to_string()
@@ -2098,7 +2132,8 @@ pub(crate) fn draw(
     // has the keys: its own border says them.
     if !backdrop {
         let reserve = if max_scroll > 0 { 12 } else { 0 };
-        crate::hints::draw_on_border(f, area, &hints(view), reserve, th);
+        let on_closed = current.is_some_and(OpenPr::is_closed);
+        crate::hints::draw_on_border(f, area, &hints_on(view, on_closed), reserve, th);
     }
 
     // Write-back (draw works on a clone): the rects the mouse hit-tests,
@@ -3778,7 +3813,7 @@ mod tests {
                     failed: 0,
                     pending: 2,
                 }),
-                merged_at: String::new(),
+                ..PrMeta::default()
             },
             answered: crate::pull_request::Answered {
                 conflicts: Some(false),
@@ -3915,7 +3950,7 @@ mod tests {
             let url = landed.url.clone();
             app.prs.observe(
                 &url,
-                crate::pr_store::PrObservation::of_merged_row(&landed),
+                crate::pr_store::PrObservation::of_tail_row(&landed),
                 crate::fetch::Asked::Cached,
             );
             app.open_prs.get_mut(&project).unwrap().merged = vec![landed];
@@ -3964,6 +3999,119 @@ mod tests {
                 assert!(view(&app).form.is_none(), "{verb:?}");
                 assert_eq!(app.flash.as_deref(), Some("#39 has merged"), "{verb:?}");
             }
+        });
+    }
+
+    /// The pull requests closed without merging list last, under the
+    /// merged ones, each saying why GitHub closed it; `is:closed` finds
+    /// them alone. One takes no agent, merge, draft or autofix — and
+    /// `Enter` opens the EDIT form at its reopen, the caret in its base,
+    /// so one GitHub closed with its base reopens onto a live branch.
+    #[test]
+    fn closed_rows_list_last_and_enter_reopens_one_onto_a_new_base() {
+        use crate::pr_actions::edit::{EditRow, StateChange};
+        pinned(|| {
+            let (mut app, project) = app_with(vec![rich(43, "Others' work", "sam", false)], true);
+            let ago = |days: u64| {
+                orion_core::crashlog::format_timestamp(
+                    orion_core::clock::now_secs() - days * 24 * 60 * 60,
+                )
+            };
+            let mut landed = rich(39, "Speed up the grid", "me", true);
+            landed.meta.merged_at = ago(2);
+            let mut shut = rich(40, "Stacked on feat", "me", true);
+            shut.meta.checks = None;
+            shut.meta.review = Review::None;
+            shut.meta.closed_at = ago(3);
+            shut.meta.base = "feat".into();
+            shut.meta.closed_why = "its base feat was deleted".into();
+            for pr in [&landed, &shut] {
+                app.prs.observe(
+                    &pr.url,
+                    crate::pr_store::PrObservation::of_tail_row(pr),
+                    crate::fetch::Asked::Cached,
+                );
+            }
+            app.open_prs.get_mut(&project).unwrap().merged = vec![landed, shut];
+            open(&mut app);
+            let shot = screen(&mut app, 240, 40);
+            let at = |needle: &str| {
+                shot.find(needle)
+                    .unwrap_or_else(|| panic!("{needle} missing from\n{shot}"))
+            };
+            assert!(shot.contains("Pull requests — demo (1)"), "{shot}");
+            assert!(at(" ── Merged ─") < at(" ── Closed ─"), "{shot}");
+            assert!(at(" ── Closed ─") < at("#40  Stacked on feat"), "{shot}");
+            let row = shot
+                .lines()
+                .find(|l| l.contains("#40  Stacked on feat"))
+                .unwrap_or_default();
+            assert!(row.contains("its base feat was deleted"), "{row:?}");
+            assert!(row.contains("closed      3d │"), "word, age: {row:?}");
+
+            let list = rows(&app, &project);
+            let shown: Vec<u64> = visible_rows("is:closed", &list, &app.prs)
+                .iter()
+                .map(|(i, _)| list[*i].number)
+                .collect();
+            assert_eq!(shown, vec![40]);
+
+            let mut out = Vec::new();
+            handle_key(&mut app, key(KeyCode::Down), &mut out);
+            handle_key(&mut app, key(KeyCode::Down), &mut out);
+            assert_eq!(selected_pr(&app).unwrap().number, 40);
+            let shot = screen(&mut app, 240, 40);
+            assert!(shot.contains("Enter reopen"), "{shot}");
+            for verb in [cmd('x'), cmd('d'), cmd('g')] {
+                app.flash = None;
+                handle_key(&mut app, verb, &mut out);
+                assert!(view(&app).form.is_none(), "{verb:?}");
+                assert_eq!(
+                    app.flash.as_deref(),
+                    Some("#40 is closed — Enter reopens it"),
+                    "{verb:?}"
+                );
+            }
+            handle_key(&mut app, key(KeyCode::Enter), &mut out);
+            let form = edit_form(&app);
+            assert_eq!(form.state, StateChange::Reopen);
+            assert_eq!(form.row, EditRow::Base, "the caret in the base");
+            assert_eq!(form.base.as_str(), "feat");
+            // GitHub's answer: the base is gone. A new one, and the plan
+            // puts the old back to reopen on, then moves the PR off it.
+            let ticket = form.ticket;
+            let answer = match read_answer(ticket, "stacked") {
+                crate::pr_actions::Answer::EditRead {
+                    ticket,
+                    result: Ok(read),
+                } => {
+                    let (mut facts, offers) = *read;
+                    facts.state = crate::pull_request::STATE_CLOSED.into();
+                    facts.base = "feat".into();
+                    facts.base_gone = true;
+                    crate::pr_actions::Answer::EditRead {
+                        ticket,
+                        result: Ok(Box::new((facts, offers))),
+                    }
+                }
+                other => other,
+            };
+            crate::pr_actions::land_answer(&mut app, answer);
+            for c in "main".chars() {
+                handle_key(&mut app, key(KeyCode::Char(c)), &mut out);
+            }
+            let plan = edit_form(&app).plan().expect("a plan");
+            assert_eq!(
+                plan.restore_base,
+                Some(("feat".to_string(), "abc1234".to_string()))
+            );
+            assert_eq!(plan.base.as_deref(), Some("main"));
+            let shot = screen(&mut app, 240, 40);
+            assert!(
+                shot.contains("feat was deleted: orion puts it back at abc1234 to reopen on, moves #40 onto main, then deletes it again"),
+                "{shot}"
+            );
+            assert!(shot.contains("base → main · reopen"), "{shot}");
         });
     }
 
