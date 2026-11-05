@@ -87,10 +87,14 @@ request — and it only picks: making, changing and deleting presets is Settings
 offers it. From the palette the launch lands in that card's checkout — its last row says which, and
 `Tab` flips it to a fresh worktree. Over the quick prompt the box's header says where instead, and its `⌘.` picks, so that row and its `Tab` are not drawn there. Type to find one by name: letters
 narrow the list to the fuzzy matches, `↑`/`↓` move, `Backspace` widens and `Esc` clears — as in the
-model and effort submenus. The editor is a small form — name, harness, model, effort, **Task**
+model and effort submenus. The editor is a small form — name, **Runs on**, model, effort, **Task**
 (`ask` or `skip`) and one **Text** box: what the preset sends, with `{task}` where your task goes.
 Text with no `{task}` has the task after it, a blank line between, so a preset that only frames the
-task needs no marker at all. `Enter` on a preset opens the QUICK PROMPT on it, its text written
+task needs no marker at all. Beside the box (under it on a narrow screen) a **Preview** shows what
+the agent will get as you type: your text with a sample task in its place — in the accent colour,
+so you see where the task lands — or the text alone for a `skip` preset; Linear Ticket with two
+sample issues where they go; PR autofix with what broke on a sample pull request. It scrolls to the
+first sample, so a long text with the task at its end still shows it. `Enter` on a preset opens the QUICK PROMPT on it, its text written
 round the caret — the caret where `{task}` is — and `Enter` there launches the CLI with that text,
 your task in its place, as its very first prompt. The task is optional: send the box with nothing
 typed and the text goes on its own, the marker and the blank lines round it gone (a preset with no
@@ -137,8 +141,8 @@ itself:
   request titled `"{ids}: …"` whose description starts `Fixes {ids}`.
 - **Week review** holds the rules a WEEK IN REVIEW (`⌘⇧Y`) is written by — what earns a line, Show
   and Say, how a point is written — and the Claude account, model and effort that write it: sonnet ·
-  medium unless you change them. Following the box, it is written through your default agent's
-  account; an account it pins that is off falls back to that.
+  medium unless you change them. Its **Runs on** row starts on **your default agent**: it is
+  written through that agent's account; an account it pins that is off falls back to that.
 
 A system preset always holds text. While it holds none of yours its editor's box is empty, orion's
 text greyed in it — what the agent is sent — and `^R` puts that text in the box to edit from, or

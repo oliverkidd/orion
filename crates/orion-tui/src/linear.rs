@@ -76,7 +76,7 @@ const ENV_FILES: &[&str] = &[".env.local", ".env"];
 /// One Linear issue the view lists — open, or done within [`DONE_DAYS`]:
 /// assigned to the configured user (`mine`), or someone else's or
 /// nobody's in one of their teams.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LinearIssue {
     pub id: String,
     pub identifier: String,
@@ -569,12 +569,44 @@ pub fn ticket_template(preset: &crate::agent_presets::AgentPreset) -> String {
 
 /// `template` with `{issues}`, `{ids}` and `{first_id}` filled in.
 pub fn expand_template(template: &str, issues: &[LinearIssue]) -> String {
-    let ids = ids_of(issues);
-    let first = issues.first().map(|i| i.identifier.as_str()).unwrap_or("");
-    template
-        .replace("{issues}", &issue_sections(issues))
-        .replace("{ids}", &ids)
-        .replace("{first_id}", first)
+    template_fills(issues)
+        .iter()
+        .fold(template.to_string(), |text, (token, fill)| {
+            text.replace(token, fill)
+        })
+}
+
+/// Each placeholder a Linear Ticket text can name, and what `issues` fill
+/// it with: the issues in full, their IDs, the first one's.
+pub(crate) fn template_fills(issues: &[LinearIssue]) -> [(&'static str, String); 3] {
+    let first = issues
+        .first()
+        .map(|i| i.identifier.clone())
+        .unwrap_or_default();
+    [
+        ("{issues}", issue_sections(issues)),
+        ("{ids}", ids_of(issues)),
+        ("{first_id}", first),
+    ]
+}
+
+/// Two made-up issues for the PRESET EDITOR's preview of the **Linear
+/// Ticket** preset: what a launch on them would fill its text with.
+pub(crate) fn sample_issues() -> Vec<LinearIssue> {
+    [
+        ("ENG-12", "Login redirect loops after sign-in"),
+        ("ENG-15", "Logout leaves the session cookie"),
+    ]
+    .into_iter()
+    .map(|(identifier, title)| LinearIssue {
+        id: identifier.into(),
+        identifier: identifier.into(),
+        title: title.into(),
+        url: format!("https://linear.app/team/issue/{identifier}"),
+        status: "Todo".into(),
+        ..LinearIssue::default()
+    })
+    .collect()
 }
 
 /// Browse assigned issues, or attach the current pull request to them.

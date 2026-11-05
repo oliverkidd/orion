@@ -30,15 +30,29 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 const AGENT_PRESETS_W: u16 = 72;
-/// The PRESET EDITOR's width and the tallest it draws (five single rows, a
-/// blank and the text box under them) — one row more while a refused
-/// save's banner is up.
+/// The PRESET EDITOR's width on a narrow screen (narrower still on one
+/// under 80 columns), and the widest it grows to on a roomy one, where
+/// the PREVIEW sits beside the text box.
 const PRESET_EDITOR_W: u16 = 76;
-const PRESET_EDITOR_H: u16 = 21;
-/// The rows above the text box: the five single rows and a blank.
-const EDITOR_ROWS: u16 = 6;
+const PRESET_EDITOR_WIDE: u16 = 118;
+/// The inner width from which the text box and the PREVIEW sit side by
+/// side; narrower, the preview goes under the box.
+const SIDE_BY_SIDE: u16 = 96;
+/// The tallest the editor draws — its rows, then the boxes, room for a
+/// screenful of text — and the shortest.
+const PRESET_EDITOR_H: u16 = 34;
+const PRESET_EDITOR_MIN_H: u16 = 12;
+/// The fewest rows a box is drawn in, its borders included.
+const BOX_MIN_H: u16 = 3;
+/// The text box's share of the rows when the PREVIEW goes under it.
+const TEXT_SHARE: (u16, u16) = (3, 5);
+/// The screen's rows and columns the editor leaves round it.
+const SCREEN_MARGIN: (u16, u16) = (2, 4);
 /// What the text box's border says of its marker.
 const TEXT_TITLE: &str = " Text — {task} is where your task goes ";
+const PREVIEW_TITLE: &str = " Preview — what the agent gets ";
+/// Rows of the PREVIEW kept in sight above its first sample.
+const PREVIEW_CONTEXT: usize = 3;
 /// The Task row's two choices: ask for an (optional) task on launch, or
 /// launch at once (`AgentPreset::skip_task`).
 const TASK_ASK: &str = "ask";
@@ -1431,17 +1445,22 @@ fn worktree_line(app: &App, view: &AgentPresetsView, width: u16, th: Theme) -> L
 /// nothing, while that still applies, with the field it names in the error
 /// color.
 pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEditor, th: Theme) {
-    // Five single rows and a blank, then the text box — all one row down
-    // while the banner is up; the box gives up rows first on a short
-    // screen, down to three.
+    // The single rows and a blank, then the text box and the PREVIEW —
+    // all one row down while the banner is up. As tall as the screen
+    // allows, within PRESET_EDITOR_H, and as wide: side by side the boxes
+    // want the room.
     let banner = u16::from(editor.error.is_some());
-    let frame_h = f.area().height.max(10);
-    let box_h = frame_h
+    let screen = f.area();
+    let height = screen
+        .height
+        .saturating_sub(SCREEN_MARGIN.0)
         .min(PRESET_EDITOR_H + banner)
-        .saturating_sub(EDITOR_ROWS + 3 + banner)
-        .clamp(3, 12);
-    let height = EDITOR_ROWS + 3 + banner + box_h;
-    let area = centered_rect(f.area(), PRESET_EDITOR_W, height);
+        .max(PRESET_EDITOR_MIN_H);
+    let width = screen
+        .width
+        .saturating_sub(SCREEN_MARGIN.1)
+        .clamp(PRESET_EDITOR_W, PRESET_EDITOR_WIDE);
+    let area = centered_rect(screen, width, height);
     f.render_widget(Clear, area);
     let title = if editor.is_edit() {
         format!(" Edit preset — {} ", editor.name.trim())
@@ -1601,45 +1620,18 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
         render_row(f, row_area, spans, focused, true, th);
     }
 
-    // The text box under a blank row, to the frame's foot.
-    let mut focused_view = None;
+    // Under a blank row, to the frame's foot: the text box, and the
+    // PREVIEW beside it — or under it, on a narrow screen.
     let above = banner + single.len() as u16 + 1;
-    let box_area = Rect {
+    let boxes = Rect {
         y: inner.y.saturating_add(above),
         height: inner.height.saturating_sub(above),
         ..inner
     };
-    if box_area.height >= 3 {
-        let focused = editor.field == PresetField::Text;
-        let border = if focused { th.accent } else { th.dim };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(border))
-            .title(Span::styled(
-                text_title(editor.system),
-                Style::default().fg(border),
-            ));
-        let box_inner = block.inner(box_area);
-        f.render_widget(block, box_area);
-        // An empty SYSTEM PRESET says orion's text, greyed: what it sends.
-        if let Some(builtin) = editor
-            .builtin_text()
-            .filter(|_| editor.text.trim().is_empty())
-        {
-            draw_greyed(f, builtin, box_inner, th);
-        }
-        if focused {
-            let (view, rows) = draw_multiline_input(f, &editor.text, box_inner, th);
-            draw_scroll_marks(f, box_area, view, rows, th.dim);
-            focused_view = Some(view);
-        } else {
-            let empty = match editor.system {
-                Some(_) => "",
-                None => "sent with your task, or alone (optional)",
-            };
-            crate::ui::draw_multiline_idle(f, &editor.text, box_inner, empty, th);
-        }
+    let (text_area, preview_area) = split_boxes(boxes);
+    let focused_view = draw_text_box(f, editor, text_area, th);
+    if let Some(area) = preview_area {
+        draw_preview_box(f, editor, area, th);
     }
 
     // Write-back (draw works on a clone): the rect a click outside
@@ -1652,6 +1644,284 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
     }
 }
 
+/// The text box's rect and the PREVIEW's in `boxes`: halves side by side
+/// from [`SIDE_BY_SIDE`] cells wide, else the box over the preview, the
+/// box the larger ([`TEXT_SHARE`]) — it is where the typing is; no preview
+/// when either would have under [`BOX_MIN_H`] rows.
+fn split_boxes(boxes: Rect) -> (Rect, Option<Rect>) {
+    if boxes.height < BOX_MIN_H {
+        return (boxes, None);
+    }
+    if boxes.width >= SIDE_BY_SIDE {
+        let left = boxes.width / 2;
+        let text = Rect {
+            width: left,
+            ..boxes
+        };
+        let preview = Rect {
+            x: boxes.x + left,
+            width: boxes.width - left,
+            ..boxes
+        };
+        return (text, Some(preview));
+    }
+    let (num, den) = TEXT_SHARE;
+    let text_h = (boxes.height * num / den).max(BOX_MIN_H);
+    if boxes.height.saturating_sub(text_h) < BOX_MIN_H {
+        return (boxes, None);
+    }
+    let text = Rect {
+        height: text_h,
+        ..boxes
+    };
+    let preview = Rect {
+        y: boxes.y + text_h,
+        height: boxes.height - text_h,
+        ..boxes
+    };
+    (text, Some(preview))
+}
+
+/// A rounded box titled `title`, border and title in `color`: the text
+/// box's and the PREVIEW's.
+fn titled_box(title: &'static str, color: ratatui::style::Color) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(title, Style::default().fg(color)))
+}
+
+/// The text box in `area`, focused or idle — orion's text greyed in an
+/// empty SYSTEM PRESET's. The view its rows walk by, when it has the caret.
+fn draw_text_box(
+    f: &mut Frame,
+    editor: &AgentPresetEditor,
+    area: Rect,
+    th: Theme,
+) -> Option<crate::text_input::TextView> {
+    if area.height < BOX_MIN_H {
+        return None;
+    }
+    let focused = editor.field == PresetField::Text;
+    let block = titled_box(
+        text_title(editor.system),
+        if focused { th.accent } else { th.dim },
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    // An empty SYSTEM PRESET says orion's text, greyed: what it sends.
+    if let Some(builtin) = editor
+        .builtin_text()
+        .filter(|_| editor.text.trim().is_empty())
+    {
+        let greyed = [PreviewPart::own(builtin)];
+        let lines: Vec<Line> = styled_rows(&greyed, inner.width, |_| Style::default().fg(th.dim))
+            .into_iter()
+            .take(inner.height.into())
+            .map(|row| row.line)
+            .collect();
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+    if focused {
+        let (view, rows) = draw_multiline_input(f, &editor.text, inner, th);
+        draw_scroll_marks(f, area, view, rows, th.dim);
+        return Some(view);
+    }
+    let empty = match editor.system {
+        Some(_) => "",
+        None => "sent with your task, or alone (optional)",
+    };
+    crate::ui::draw_multiline_idle(f, &editor.text, inner, empty, th);
+    None
+}
+
+/// The PREVIEW's box in `area`: what the agent gets ([`preview`]).
+fn draw_preview_box(f: &mut Frame, editor: &AgentPresetEditor, area: Rect, th: Theme) {
+    let block = titled_box(PREVIEW_TITLE, th.dim);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    draw_preview(f, &preview(editor), inner, th);
+}
+
+/// The task the PREVIEW fills a preset of the user's in with.
+const SAMPLE_TASK: &str = "fix the login redirect loop";
+
+/// One run of the PREVIEW: text the preset sends as it stands, or what
+/// orion puts in its place — a sample task, sample issues, what broke, a
+/// note of what goes there — drawn apart so the eye finds where the task
+/// lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreviewPart {
+    text: String,
+    sample: bool,
+}
+
+impl PreviewPart {
+    fn own(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            sample: false,
+        }
+    }
+
+    fn sample(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            sample: true,
+        }
+    }
+}
+
+/// What the agent will get from the preset `editor` describes, as it
+/// stands — the box's text unsaved, orion's for an empty SYSTEM PRESET:
+/// a preset of the user's with [`SAMPLE_TASK`] at its `{task}` (none
+/// for one that never asks); Linear Ticket with two sample issues where
+/// they go; PR autofix with what broke on a sample pull request; the week
+/// review's rules between what orion writes round them.
+fn preview(editor: &AgentPresetEditor) -> Vec<PreviewPart> {
+    let mut preset = editor.to_preset();
+    preset.system = editor.system;
+    let preset = preset.with_builtin_text();
+    match editor.system {
+        Some(SystemPreset::LinearTicket) => linear_preview(&preset),
+        Some(SystemPreset::WeekReview) => vec![
+            PreviewPart::sample("… the period, the project and whose work …"),
+            PreviewPart::own(format!("\n\n{}\n\n", preset.compose(""))),
+            PreviewPart::sample(
+                "… the shape to write in, then the period's pull requests, issues and todos …",
+            ),
+        ],
+        Some(SystemPreset::PrAutofix) => with_sample(&preset, &crate::autofix::sample_task()),
+        None if preset.skip_task && !preset.has_text() => {
+            vec![PreviewPart::sample(
+                "nothing: the CLI starts with no first prompt",
+            )]
+        }
+        None if preset.skip_task => vec![PreviewPart::own(preset.compose(""))],
+        None => with_sample(&preset, SAMPLE_TASK),
+    }
+}
+
+/// `preset` with `sample` where its task goes, the sample marked: what
+/// `compose(sample)` sends, in its parts.
+fn with_sample(preset: &AgentPreset, sample: &str) -> Vec<PreviewPart> {
+    let (before, after) = preset.halves();
+    [
+        PreviewPart::own(before.trim_start()),
+        PreviewPart::sample(sample.trim()),
+        PreviewPart::own(after.trim_end()),
+    ]
+    .into_iter()
+    .filter(|part| !part.text.is_empty())
+    .collect()
+}
+
+/// The Linear Ticket text as a launch on two sample issues fills it in
+/// (`linear::ticket_template`), each placeholder's fill marked.
+fn linear_preview(preset: &AgentPreset) -> Vec<PreviewPart> {
+    let fills = crate::linear::template_fills(&crate::linear::sample_issues());
+    let template = crate::linear::ticket_template(preset);
+    let mut rest = template.as_str();
+    let mut parts = Vec::new();
+    while let Some((at, token, fill)) = fills
+        .iter()
+        .filter_map(|(token, fill)| rest.find(token).map(|at| (at, *token, fill)))
+        .min_by_key(|(at, ..)| *at)
+    {
+        if at > 0 {
+            parts.push(PreviewPart::own(&rest[..at]));
+        }
+        parts.push(PreviewPart::sample(fill.clone()));
+        rest = &rest[at + token.len()..];
+    }
+    if !rest.is_empty() {
+        parts.push(PreviewPart::own(rest));
+    }
+    parts
+}
+
+/// The PREVIEW drawn into `area`, wrapped as the text box wraps
+/// ([`styled_rows`]): the samples in the accent, the rest as the agent
+/// will read it, scrolled so the first sample's row is in sight with
+/// [`PREVIEW_CONTEXT`] rows above it — a long text the user wrote round a
+/// task near its end still shows where the task lands.
+fn draw_preview(f: &mut Frame, parts: &[PreviewPart], area: Rect, th: Theme) {
+    let text = Style::default().fg(th.text);
+    let accent = Style::default().fg(th.accent);
+    let mut lines = styled_rows(parts, area.width, |part| match part.sample {
+        true => accent,
+        false => text,
+    });
+    let first_sample: usize = parts
+        .iter()
+        .take_while(|part| !part.sample)
+        .map(|part| part.text.chars().count())
+        .sum();
+    let lead = match parts.iter().any(|part| part.sample) {
+        true => lines
+            .iter()
+            .rposition(|line| line.start <= first_sample)
+            .unwrap_or(0),
+        false => 0,
+    };
+    let height = usize::from(area.height);
+    let top = lead
+        .saturating_sub(PREVIEW_CONTEXT)
+        .min(lines.len().saturating_sub(height));
+    let shown: Vec<Line> = lines
+        .drain(..)
+        .skip(top)
+        .take(height)
+        .map(|row| row.line)
+        .collect();
+    f.render_widget(Paragraph::new(shown), area);
+}
+
+/// One row of [`styled_rows`]: the line, and the char offset into the
+/// whole text it starts at.
+struct StyledRow {
+    start: usize,
+    line: Line<'static>,
+}
+
+/// `parts` wrapped `width` cells wide as a text box wraps its text
+/// (`TextInput::rows`), each row cut into spans where a part ends and
+/// each span in `style_of` its part.
+fn styled_rows(
+    parts: &[PreviewPart],
+    width: u16,
+    style_of: impl Fn(&PreviewPart) -> Style,
+) -> Vec<StyledRow> {
+    let text: String = parts.iter().map(|part| part.text.as_str()).collect();
+    let chars: Vec<char> = text.chars().collect();
+    let mut bounds = Vec::with_capacity(parts.len());
+    let mut at = 0;
+    for part in parts {
+        let end = at + part.text.chars().count();
+        bounds.push((at, end, style_of(part)));
+        at = end;
+    }
+    TextInput::multiline_with_text(text)
+        .rows(width.max(1).into())
+        .into_iter()
+        .map(|(start, end)| {
+            let spans = bounds
+                .iter()
+                .filter(|(from, to, _)| *from < end && *to > start)
+                .map(|(from, to, style)| {
+                    let piece: String = chars[start.max(*from)..end.min(*to)].iter().collect();
+                    Span::styled(piece, *style)
+                })
+                .collect::<Vec<_>>();
+            StyledRow {
+                start,
+                line: Line::from(spans),
+            }
+        })
+        .collect()
+}
+
 /// What the text box's border says of its marker: where a task goes —
 /// for orion's own presets, what orion puts there.
 fn text_title(system: Option<SystemPreset>) -> &'static str {
@@ -1661,25 +1931,6 @@ fn text_title(system: Option<SystemPreset>) -> &'static str {
         Some(SystemPreset::LinearTicket) => " Text — {issues} is where the issues go ",
         Some(SystemPreset::WeekReview) => " Text — the rules your review is written by ",
     }
-}
-
-/// orion's own `text`, wrapped as the box wraps its own and greyed: what
-/// an empty SYSTEM PRESET sends.
-fn draw_greyed(f: &mut Frame, text: &str, area: Rect, th: Theme) {
-    let input = TextInput::multiline_with_text(text);
-    let chars: Vec<char> = input.chars().collect();
-    let lines: Vec<Line> = input
-        .rows(area.width.max(1).into())
-        .into_iter()
-        .take(area.height.into())
-        .map(|(start, end)| {
-            Line::from(Span::styled(
-                chars[start..end].iter().collect::<String>(),
-                Style::default().fg(th.dim),
-            ))
-        })
-        .collect();
-    f.render_widget(Paragraph::new(lines), area);
 }
 
 #[cfg(test)]
@@ -1906,6 +2157,143 @@ mod tests {
                 "a preset of the user's has none:\n{text}"
             );
             assert!(text.contains("Task "), "{text}");
+        });
+    }
+
+    /// The PREVIEW's text, the samples in brackets.
+    fn previewed(editor: &AgentPresetEditor) -> String {
+        preview(editor)
+            .into_iter()
+            .map(|part| match part.sample {
+                true => format!("[{}]", part.text),
+                false => part.text,
+            })
+            .collect()
+    }
+
+    /// What the PREVIEW shows: a preset of the user's with the sample task
+    /// at its marker — after its text with none, nothing for a `skip` one;
+    /// Linear Ticket with sample issues where they go, after the user's
+    /// text when it names no `{issues}` (as the user's own does), ids
+    /// filled; PR autofix with what broke at its `{task}`; the week
+    /// review's rules between what orion writes round them. Unsaved text
+    /// counts, and an empty system preset previews orion's.
+    #[test]
+    fn the_preview_fills_each_preset_with_samples() {
+        use crate::agent_presets::SystemPreset;
+        let mut mine = AgentPresetEditor::new(0);
+        mine.text = TextInput::multiline_with_text("Be strict.\n\n{task}\n\nRun the tests.");
+        assert_eq!(
+            previewed(&mine),
+            format!("Be strict.\n\n[{SAMPLE_TASK}]\n\nRun the tests.")
+        );
+        mine.text = TextInput::multiline_with_text("Plan first.");
+        assert_eq!(previewed(&mine), format!("Plan first.\n\n[{SAMPLE_TASK}]"));
+        mine.skip_task = true;
+        assert_eq!(previewed(&mine), "Plan first.", "no task asked, none shown");
+
+        let ticket = SystemPreset::LinearTicket.default_preset();
+        let mut editor = AgentPresetEditor::from_preset(0, 0, &ticket);
+        let orions = previewed(&editor);
+        assert!(
+            orions.starts_with("Fix these Linear issues together"),
+            "{orions}"
+        );
+        assert!(
+            orions.contains("[### ENG-12: Login redirect loops"),
+            "{orions}"
+        );
+        assert!(
+            orions.contains("\"[ENG-12, ENG-15]: <short summary>\""),
+            "{orions}"
+        );
+        // The user's own text: a prefix that names no `{issues}`, migrated.
+        editor.text = TextInput::multiline_with_text("Investigate each upfront.\n\n{task}");
+        let theirs = previewed(&editor);
+        assert!(
+            theirs.starts_with("Investigate each upfront.\n\n[### ENG-12"),
+            "{theirs}"
+        );
+        assert!(
+            !theirs.contains("{task}") && !theirs.contains("{issues}"),
+            "{theirs}"
+        );
+
+        let autofix =
+            AgentPresetEditor::from_preset(0, 0, &SystemPreset::PrAutofix.default_preset());
+        let text = previewed(&autofix);
+        assert!(text.starts_with("You are orion's PR autofixer."), "{text}");
+        assert!(
+            text.contains("[Pull request: https://github.com/you/app/pull/42"),
+            "{text}"
+        );
+        assert!(text.contains("unit-tests"), "{text}");
+        assert!(
+            text.ends_with("anything you could not fix and why."),
+            "{text}"
+        );
+
+        let review =
+            AgentPresetEditor::from_preset(0, 0, &SystemPreset::WeekReview.default_preset());
+        let text = previewed(&review);
+        assert!(text.starts_with("[… the period"), "{text}");
+        assert!(text.contains(crate::week_review::brief_rules()), "{text}");
+    }
+
+    /// The editor at a roomy width puts the PREVIEW beside the text box,
+    /// at a narrow one under it; either way the preview of a long text
+    /// whose task sits at its end scrolls to the sample, the sample in
+    /// the accent.
+    #[test]
+    fn the_preview_sits_beside_the_box_or_under_it_and_shows_where_the_task_lands() {
+        use crate::agent_presets::SystemPreset;
+        pinned("{}", || {
+            let long = format!("{}\n\n{{task}}", "Read every ticket first. ".repeat(40));
+            let ticket = AgentPreset {
+                text: long,
+                ..SystemPreset::LinearTicket.default_preset()
+            };
+            for (width, beside) in [(130, true), (84, false)] {
+                let mut app = App::new();
+                app.overlay = Some(Overlay::AgentPresetEditor(AgentPresetEditor::from_preset(
+                    0, 0, &ticket,
+                )));
+                let mut terminal =
+                    ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 40)).unwrap();
+                terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+                let buffer = terminal.backend().buffer().clone();
+                let rows: Vec<String> = (0..buffer.area.height)
+                    .map(|y| {
+                        (0..buffer.area.width)
+                            .map(|x| buffer[(x, y)].symbol())
+                            .collect()
+                    })
+                    .collect();
+                let find = |needle: &str| {
+                    rows.iter().enumerate().find_map(|(y, row)| {
+                        row.find(needle)
+                            .map(|byte| (row[..byte].chars().count(), y))
+                    })
+                };
+                let text = rows.join("\n");
+                let (tx, ty) = find("Text — {issues}").unwrap_or_else(|| panic!("{text}"));
+                let (px, py) =
+                    find("Preview — what the agent gets").unwrap_or_else(|| panic!("{text}"));
+                if beside {
+                    assert_eq!(ty, py, "side by side:\n{text}");
+                    assert!(px > tx, "{text}");
+                } else {
+                    assert!(py > ty, "under the box:\n{text}");
+                }
+                let (sx, sy) =
+                    find("### ENG-12").unwrap_or_else(|| panic!("the sample in sight:\n{text}"));
+                assert!(sy > py, "{text}");
+                assert_eq!(
+                    buffer[(sx as u16, sy as u16)].fg,
+                    app.theme.accent,
+                    "{text}"
+                );
+            }
         });
     }
 

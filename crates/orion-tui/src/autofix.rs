@@ -949,6 +949,41 @@ fn context(
     lines.join("\n")
 }
 
+/// What the PR autofix preset's `{task}` is filled with in the PRESET
+/// EDITOR's preview: [`context`]'s own words for a made-up pull request
+/// with one failing check.
+pub(crate) fn sample_task() -> String {
+    let pr = OpenPr {
+        number: 42,
+        title: "Fix the login redirect".into(),
+        url: "https://github.com/you/app/pull/42".into(),
+        answered_draft: false,
+        answered: Default::default(),
+        head: "fix-login".into(),
+        mine: true,
+        head_sha: String::new(),
+        meta: Default::default(),
+    };
+    let refs = PrRefs {
+        base: "main".into(),
+        head: "fix-login".into(),
+        head_sha: String::new(),
+    };
+    let diagnosis = Diagnosis {
+        failing: vec![PrCheck {
+            name: "unit-tests".into(),
+            workflow: "CI".into(),
+            state: CheckState::Failed,
+            word: String::new(),
+            started: String::new(),
+            completed: String::new(),
+            url: String::new(),
+        }],
+        ..Diagnosis::default()
+    };
+    context(&pr, &refs, &diagnosis, &[Issue::Checks], "`main`", "")
+}
+
 /// `name url` — its workflow is the line over it — leaving out a page
 /// GitHub did not give.
 fn check_line(check: &PrCheck) -> String {
