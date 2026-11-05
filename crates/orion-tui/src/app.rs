@@ -1186,6 +1186,9 @@ pub struct DiffView {
     /// open_pr_review`): where it was asked to open, and which pull request
     /// the title names (`#42 ›`).
     pub pr_review: Option<crate::event_loop::PrReview>,
+    /// The files its branch conflicts in with its base, worked out locally
+    /// (`diff_actions::ask`): the `U` marks and the top line's count.
+    pub conflicts: crate::diff_actions::Conflicts,
 }
 
 /// The most diff text a DIFF VIEWER keeps beyond the one on screen. Two
@@ -1308,6 +1311,7 @@ impl DiffView {
             back: None,
             want_path: None,
             pr_review: None,
+            conflicts: Default::default(),
         };
         view.apply_filter();
         view
@@ -1373,6 +1377,14 @@ impl DiffView {
                 _ => None,
             })
             .unwrap_or(1)
+    }
+
+    /// The file under the cursor and the line at the top of its diff
+    /// ([`Self::line_on_screen`]): where `⌘O` and `Enter` on the diff open
+    /// it. None on a directory's row, and for a file the change deletes.
+    pub fn file_at_line(&self) -> Option<(String, u64)> {
+        let file = self.selected_file().filter(|f| !f.xy.contains(&'D'))?;
+        Some((file.path.clone(), self.line_on_screen()))
     }
 
     /// A page of the diff pane: its height, less a row of overlap.

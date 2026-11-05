@@ -996,6 +996,11 @@ pub fn show_scope(view: &mut DiffView, scope: DiffScope) {
     request_scope(view, scope);
 }
 
+/// The scope on screen, its file list read again (`git_diff::reload`).
+pub fn reread_scope(view: &mut DiffView) {
+    request_scope(view, view.scope.clone());
+}
+
 /// Ask for a scope's file list. The files and the diff on screen stay up
 /// meanwhile — `view_jobs::STALE_GRACE`, then [`listing_slow`] — and the
 /// answer lands in [`land_scope`].
@@ -1091,11 +1096,12 @@ pub fn land_scope(
     view.waiting = None;
     view.replace_files(files);
     // A file asked for before this scope's files were read — a pull
-    // request's, from its Changes tab.
-    if let Some(path) = view.want_path.take() {
-        view.select_path(&path);
+    // request's, from its Changes tab — or the one a reload stays on, whose
+    // diff stays up, and the reader's place in it, while it is read again.
+    let kept = view.want_path.take().filter(|path| view.select_path(path));
+    if kept.is_none() || view.shown != kept {
+        view.show_diff(None, String::new(), false);
     }
-    view.show_diff(None, String::new(), false);
     match error {
         Some(msg) => view.show_diff(None, msg, false),
         None => crate::git_diff::load_selected_diff(view),

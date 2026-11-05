@@ -16,6 +16,7 @@ pub mod confetti;
 pub mod config;
 pub mod conflicts;
 pub mod cursor_catalogue;
+pub mod diff_actions;
 pub mod diff_doc;
 pub mod diff_tree;
 pub mod doc_select;

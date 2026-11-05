@@ -721,20 +721,7 @@ fn tab_label(
             (name, Some(d.changed_files.to_string()), verdict)
         }
         PrTab::Commits => (name, Some(d.commits.len().to_string()), None),
-        PrTab::Checks => {
-            let n = CheckCounts::of(&d.checks);
-            let verdict = (n.total > 0).then(|| {
-                let (mark, color) = if n.failed > 0 {
-                    ("✗", th.err)
-                } else if n.running > 0 {
-                    ("◐", th.warn)
-                } else {
-                    ("✓", th.ok)
-                };
-                (format!("{mark} {}/{}", n.ok, n.total), color)
-            });
-            (name, None, verdict)
-        }
+        PrTab::Checks => (name, None, check_tally(CheckCounts::of(&d.checks), th)),
         PrTab::Reviews => {
             let reviewed = d.comments.iter().any(|c| !c.review_state.is_empty());
             let verdict = match d.review_decision.as_str() {
@@ -747,6 +734,24 @@ fn tab_label(
             (name, None, verdict.map(|(t, c)| (t.to_string(), c)))
         }
     }
+}
+
+/// The checks' tally in its colour — `✗ 1/3` crimson while one failed,
+/// `◐ 1/2` gold while one runs, `✓ 3/3` green — or None with no checks:
+/// the Checks tab's verdict, and the DIFF VIEWER's top line
+/// (`diff_actions::top_line`).
+pub(crate) fn check_tally(n: CheckCounts, th: Theme) -> Option<(String, Color)> {
+    if n.total == 0 {
+        return None;
+    }
+    let (mark, color) = if n.failed > 0 {
+        ("✗", th.err)
+    } else if n.running > 0 {
+        ("◐", th.warn)
+    } else {
+        ("✓", th.ok)
+    };
+    Some((format!("{mark} {}/{}", n.ok, n.total), color))
 }
 
 /// The tab labels, as plain text — the row the tests and the docs read.
@@ -1157,6 +1162,17 @@ fn count_text(sign: char, n: u64) -> String {
     }
 }
 
+/// A file's two-letter status as a list draws it, and its colour — git's
+/// own red `U` for a file the base conflicts with: the Changes tab's rows
+/// and the DIFF VIEWER's.
+pub(crate) fn status_mark(xy: [char; 2], conflicted: bool, th: Theme) -> ([char; 2], Color) {
+    if conflicted {
+        (['U', ' '], th.err)
+    } else {
+        (xy, crate::ui::change_color(xy, th))
+    }
+}
+
 /// A Changes row as the DIFF VIEWER lists a committed file: its
 /// two-letter status code (`M `) in the diff's colour, the path — its
 /// folders dim, its file name bright, cut from the left so the name
@@ -1168,17 +1184,7 @@ fn file_row(
     width: usize,
     th: Theme,
 ) -> Vec<Span<'static>> {
-    // A file the base conflicts with wears git's own `U`, in red.
-    let xy = if conflicted {
-        ['U', ' ']
-    } else {
-        [file.status(), ' ']
-    };
-    let color = if conflicted {
-        th.err
-    } else {
-        crate::ui::change_color(xy, th)
-    };
+    let (xy, color) = status_mark([file.status(), ' '], conflicted, th);
     let lead = BODY.len() + 3;
     // The counts go before the path shortens past [`MIN_TEXT_W`]; the path
     // keeps clear of them and of the cell of air `columns` leaves.

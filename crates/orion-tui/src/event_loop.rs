@@ -2976,10 +2976,11 @@ fn handle_editor_event(app: &mut App, ev: EditorEvent) {
 /// just-edited) file reloaded, whether the editor was embedded in it or
 /// floating over a page on it. The FILE TABS re-read the file whether the
 /// editor was theirs or floating over them, and land the cursor on the
-/// strip — the level Ctrl+Q steps back to. A `claude auth` run reads the
+/// strip — the level Ctrl+Q steps back to. The DIFF VIEWER reads what it
+/// shows again (`diff_actions::reread`). A `claude auth` run reads the
 /// CLAUDE ACCOUNTS again, and an installer says how it went
 /// (`install::closed`).
-fn close_editor(app: &mut App) {
+pub(crate) fn close_editor(app: &mut App) {
     let account_auth = app.editor.as_ref().is_some_and(|v| v.account_auth);
     let install = app.editor.as_ref().and_then(|v| v.install.clone());
     app.editor = None;
@@ -2996,6 +2997,7 @@ fn close_editor(app: &mut App) {
         Some(Overlay::Tree(view)) => view.load_preview(),
         Some(Overlay::FileTabs(view)) => view.editor_closed(),
         Some(Overlay::Conflicts(view)) => view.reload(),
+        Some(Overlay::Diff(_)) => crate::diff_actions::reread(app),
         _ => {}
     }
 }
@@ -5131,9 +5133,8 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
         // The DIFF VIEWER's file, at the line at the top of its diff, while
         // the file is still there to open.
         Some(Overlay::Diff(view)) => view
-            .selected_file()
-            .filter(|f| !f.xy.contains(&'D'))
-            .map(|f| (view.root.clone(), f.path.clone(), view.line_on_screen())),
+            .file_at_line()
+            .map(|(path, line)| (view.root.clone(), path, line)),
         _ => None,
     }
 }
@@ -5423,6 +5424,7 @@ fn open_diff_view(app: &mut App) {
             crate::git_diff::load_selected_diff(&mut view);
         }
         app.overlay = Some(Overlay::Diff(view));
+        crate::diff_actions::ask(app);
     }
     jobs.run(move || {
         Some(crate::view_jobs::Answer::DiffListing {
@@ -5450,6 +5452,7 @@ fn show_diff_listing(
     // unreviewed file as the flat list is (`fill_view`).
     crate::git_diff::fill_view(&mut view, listing);
     app.overlay = Some(Overlay::Diff(view));
+    crate::diff_actions::ask(app);
 }
 
 /// Fuzzy file finder over every tracked + untracked file of the selected
@@ -5666,6 +5669,10 @@ fn land_diff_listing(
             if let Some(Overlay::Diff(view)) = &mut app.overlay {
                 crate::git_diff::fill_view(view, listing);
                 land_pr_review_at(view);
+            }
+            // A pull request's head is in the repo now, fetched if it had to be.
+            if matches!(&app.overlay, Some(Overlay::Diff(view)) if view.pr_review.is_some()) {
+                crate::diff_actions::ask(app);
             }
         }
         Ok(_) => app.overlay = None,
@@ -7293,6 +7300,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
     {
         app.overlay = None;
         app.dirty = true;
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Diff(_)))
+        && crate::diff_actions::handle_key(app, &key, out)
+    {
         return;
     }
     let Some(overlay) = &mut app.overlay else {

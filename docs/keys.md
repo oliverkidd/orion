@@ -394,6 +394,18 @@ drag or double-click, and `⌘C` copies the selection.
 the left, the selected file's diff on the right at the modal's full height. The panel with the keys
 wears the accent, and `Tab` walks them in reading order — commits, files, diff.
 
+- **The pull request heads it.** When the branch has a pull request, a row over the panels names
+  it and where it stands: `#1342 Fix PDF header · ✗ 44/45 checks · 3 files conflict with
+  origin/dev` — the checks' tally once its page has been read (`◐` while one runs, `✓` all passed),
+  the one word GitHub's list gave before that, and `merged` or `closed` once it is past taking work.
+  A branch with no pull request has no row unless something conflicts, when the row says only that.
+- **Conflicts are worked out here.** As the viewer opens, git merges the branch with its base in
+  memory (`git merge-tree`, nothing touched, nothing fetched — base sync keeps the base fresh), so
+  it works before there is a pull request. The files that would conflict wear git's red `U` in the
+  file list, and `Enter` on one opens the CONFLICT RESOLVER on the checkout, at that file — or, with
+  an `autofix-<n>` already on the pull request, the footer says `autofix-<n> is on it` and leaves it
+  to that agent. `Esc` in the resolver comes back here.
+
 - **The commits are what the branch added.** Its own commits since the base it was cut from, newest
   first — `git log --first-parent --no-merges <merge-base>..HEAD` — so a merge of `main` into it,
   and every commit that came in with that merge, never show. **Uncommitted changes** sits on top
@@ -426,13 +438,15 @@ wears the accent, and `Tab` walks them in reading order — commits, files, diff
 | `Space` | the commits | tick the row under the cursor, or untick it |
 | `⌘A` | the commits, or the files with nothing typed | tick every commit — or, when they all are, none |
 | `⇧←` / `⇧→` | anywhere | older / newer: the cursor's commit, with nothing ticked |
-| `Enter` | the commits / a file / a tree directory | on to the files / the diff takes the keys / fold it |
+| `Enter` | the commits / a file / a `U` file / a tree directory | on to the files / the diff takes the keys / the CONFLICT RESOLVER at that file / fold it |
 | `↑` / `↓`, `Space`, `←` | the diff | a row, a page, back to the files |
+| `Enter` | the diff | edit the file in the built-in editor (fresh) at the line at the top of the diff — a pull request's in the project's checkout of its branch, when there is one. When the editor closes the diff is read again, your place in it kept |
 | `⇧↑` / `⇧↓`, `PgUp` / `PgDn`, `Home` / `End` | anywhere | scroll the diff |
 | typing | anywhere | the files' fuzzy filter, which takes the keys; `^U` kills it |
 | `⌘R` | the files, the diff | mark the file reviewed ✓, which sinks it to the bottom — orion-side bookkeeping only: on the uncommitted changes it is stored until HEAD moves or the file changes again, on anything else it lasts while the modal is open |
 | `⌘B` | the files | fold the file list into a directory tree and back (`←`/`→` fold) — this viewer's alone; **Files as a tree** says how the next opens |
 | `⌘O` (`^O`) | the files, the diff | the file in the **Open in app** editor, at the line at the top of the diff |
+| `⌘U` | anywhere | the PULL REQUESTS MODAL on this branch's pull request page (as the hotkey opens it, when there is none); its last `Esc` comes back here. On a pull request's viewer the modal opened, back up to the modal |
 | the wheel | over any panel | scrolls that panel; no cursor moves |
 | a click | | a commit's row aims the cursor there and its box ticks it, a file is selected, the diff takes the keys; a second click on the cursor's row is `Enter` |
 | `Esc` | | close — or, opened from the PULL REQUESTS MODAL, back to the pull request |
