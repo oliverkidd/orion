@@ -12318,7 +12318,20 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             // background has no row and no cursor, so its menu is the
             // mouse's alone.
             let at = (mouse.column, mouse.row);
-            match app.hit_at(mouse.column, mouse.row) {
+            // An ACCOUNT CHIP is a link on its row, not a row: the right
+            // button is the row's under it.
+            let hit = match app.hit_at(mouse.column, mouse.row) {
+                Some(HitTarget::AccountTag(_)) => app
+                    .hits
+                    .iter()
+                    .find(|(rect, hit)| {
+                        rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                            && !matches!(hit, HitTarget::AccountTag(_))
+                    })
+                    .map(|(_, hit)| hit.clone()),
+                hit => hit,
+            };
+            match hit {
                 // A PROJECT TAB has no cursor to move, but it is the
                 // project's own handle: the right button opens it, with
                 // the project's menu hung under the tab.
@@ -27168,6 +27181,19 @@ mod tests {
                 !footer(&draw(&mut app)).contains("41% left"),
                 "it goes with the pointer"
             );
+
+            // The right button on it is the row's.
+            handle_mouse(
+                &mut app,
+                mev(MouseEventKind::Down(MouseButton::Right), chip.x + 1, chip.y),
+                &mut out,
+            );
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Menu(_))),
+                "the row's menu: {:?}",
+                app.overlay
+            );
+            app.overlay = None;
 
             click(&mut app, chip.x + 1, chip.y, &mut out);
             let Some(Overlay::Usage(view)) = &app.overlay else {
