@@ -4161,9 +4161,6 @@ pub struct App {
     /// DAEMON last saw it — `None` while docker is out of reach (or before
     /// the first answer).
     pub stacks: Option<Vec<orion_core::compose::Stack>>,
-    /// Checkouts whose run was sent a `^C` by `⌘⇧S`: the next press kills
-    /// it, and says so.
-    pub runs_stopping: std::collections::HashSet<WorktreeId>,
     /// What `gh pr view` last said about each worktree's branch: `Some(pr)`
     /// when one exists, `None` when the lookup came back empty (no PR, no
     /// `gh`, no remote). A missing key means "not looked up yet" — briefly,
@@ -4554,7 +4551,6 @@ impl App {
             worktree_lines: HashMap::new(),
             worktree_ahead: HashMap::new(),
             stacks: None,
-            runs_stopping: Default::default(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
             attention_walk: None,
@@ -4920,6 +4916,15 @@ impl App {
         // or no spinner.
         if self.editor.is_none()
             && matches!(&self.overlay, Some(Overlay::Conflicts(v)) if v.running())
+        {
+            return true;
+        }
+        // A stop's countdown ticks, animations or none.
+        if self
+            .tree
+            .terminals
+            .iter()
+            .any(|t| t.run.stopping_until.is_some())
         {
             return true;
         }
@@ -6282,6 +6287,13 @@ impl App {
         self.run_terminal(worktree_id).is_some_and(|t| t.alive)
     }
 
+    /// When the worktree's run, sent its `^C` by a stop and still going,
+    /// is killed (epoch ms) — the DAEMON's word, so every client agrees.
+    /// None for a run nobody is stopping, and for no run at all.
+    pub fn run_stopping(&self, worktree_id: &WorktreeId) -> Option<i64> {
+        self.run_terminal(worktree_id)?.run.stopping_until
+    }
+
     /// Sessions under a worktree that went green with nobody looking.
     /// Test-only: the grid reads the free functions through the palette.
     #[cfg(test)]
@@ -6734,6 +6746,7 @@ mod tests {
             sort_order: 0,
             alive: true,
             run_command: None,
+            run: Default::default(),
         });
         app.tree
             .links

@@ -155,8 +155,9 @@
   project tab's right-click menu, has the DAEMON start `run` in a RUN TERMINAL — a terminal row
   that carries its command and spawns `$SHELL -l -i -c '<run>'` instead of an interactive shell — so the
   PTY's life is the worktree's RUNNING state, broadcast as that terminal's `alive` and drawn as its
-  card's `▶`; **Stop stack** writes a `^C` into that PTY so the run's own trap winds down in view, and
-  kills the process tree and drops the row only on a second stop or after two minutes. The idle reaper and the prewarm
+  card's `▶`; **Stop stack** writes a `^C` into that PTY so the run's own trap winds down, broadcasts
+  the row as stopping (`stopping_until`, the moment of the kill, which every client counts down to),
+  and kills the process tree and drops the row only on a second stop or after two minutes. The idle reaper and the prewarm
   sweep leave that terminal alone, and a run that exits on its own keeps its PTY, so an attach replays
   the ending instead of respawning — a command starts only when you pick **Start stack**. `⌘O` → **Open command** runs `open`
   once, from the TUI. See [Configuration](configuration.md#run-and-open-commands).

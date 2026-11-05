@@ -604,6 +604,7 @@ mod tests {
                         sort_order: 0,
                         alive: true,
                         run_command: None,
+                        run: Default::default(),
                     }),
                 },
             );

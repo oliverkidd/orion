@@ -5211,29 +5211,12 @@ pub(crate) fn toggle_stack_in(
         return;
     }
     let id = worktree.clone();
-    // A run that has since ended, here or from another client, is no
-    // longer being stopped.
-    let ended: Vec<_> = app
-        .runs_stopping
-        .iter()
-        .filter(|w| !app.worktree_running(w))
-        .cloned()
-        .collect();
-    for w in ended {
-        app.runs_stopping.remove(&w);
-    }
     if app.worktree_running(&id) {
-        let again = !app.runs_stopping.insert(id.clone());
-        let key = crate::hints::key_or(
-            &app.keymap,
-            crate::keymap::Action::ToggleStack,
-            "Stop stack",
-        );
-        app.flash = Some(crate::flash::Flash::note(if again {
-            "killing the run".to_string()
-        } else {
-            format!("stopping — it winds down in its terminal; {key} again kills it")
-        }));
+        // The first stop is said by the run line and the footer for as
+        // long as it lasts (`ui::footer::stopping_line`); the second kills.
+        app.flash = app
+            .run_stopping(&id)
+            .map(|_| crate::flash::Flash::note("killing the run"));
         send(app, out, |req_id| ClientRequest::StopRun {
             req_id,
             worktree: id,
@@ -19906,6 +19889,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: None,
+                    run: Default::default(),
                 }),
             },
         );
@@ -19941,6 +19925,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("npm run dev".into()),
+                    run: Default::default(),
                 }),
             },
         );
@@ -20002,6 +19987,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("bun dev".into()),
+                    run: Default::default(),
                 }),
             },
         );
@@ -20044,6 +20030,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("npm run dev".into()),
+                    run: Default::default(),
                 }),
             };
             out.clear();
@@ -27450,9 +27437,10 @@ mod tests {
     }
 
     /// `⌘⇧S` on the grid starts the cursor's checkout's stack — its run —
-    /// and stops it: a ^C to the run (the flash says
-    /// a second press kills it). A stack orion didn't start is only its
-    /// `⬡`: the key starts the run as it would on a checkout with none.
+    /// and stops it: a ^C to the run, and while the DAEMON says it is
+    /// stopping the footer holds that a second press kills it. A stack
+    /// orion didn't start is only its `⬡`: the key starts the run as it
+    /// would on a checkout with none.
     #[test]
     fn cmd_shift_s_starts_and_stops_the_checkouts_stack() {
         use orion_core::{Entity, TerminalId, TerminalTab};
@@ -27474,29 +27462,53 @@ mod tests {
             "{out:?}"
         );
 
-        let run = |alive| TerminalTab {
+        let run = |alive, stopping_until| TerminalTab {
             id: TerminalId("run1".into()),
             worktree_id: orion_core::WorktreeId("w1".into()),
             name: "run".into(),
             sort_order: 0,
             alive,
             run_command: Some("just start".into()),
+            run: orion_core::RunState { stopping_until },
         };
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
-                entity: Entity::Terminal(run(true)),
+                entity: Entity::Terminal(run(true, None)),
             },
         );
         assert!(footer(&app).contains(" stop stack"), "{}", footer(&app));
+        assert_eq!(crate::ui::footer::stopping_line(&app), None);
         out.clear();
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(
             matches!(out.as_slice(), [ClientRequest::StopRun { .. }]),
             "{out:?}"
         );
-        let flash = app.flash.as_deref().unwrap_or_default().to_string();
-        assert!(flash.contains("again kills it"), "{flash}");
+        assert_eq!(app.flash, None, "the run line and the footer say it");
+        // The DAEMON's word that it is stopping: the footer holds the
+        // line through any number of keys, until the run is gone.
+        let kill_at = crate::app::now_ms() + 112_000;
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(run(true, Some(kill_at))),
+            },
+        );
+        let held = crate::ui::footer::stopping_line(&app).expect("held while it stops");
+        assert_eq!(&*held, "stopping run · ⌘⇧S again kills it now");
+        assert!(app.status_anim_active(), "the countdown ticks");
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("stopping run · ⌘⇧S again kills it now"),
+            "{text}"
+        );
+        assert!(
+            text.contains("stopping… 1:5"),
+            "the run line counts down:\n{text}"
+        );
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(app.flash.as_deref().unwrap_or_default().contains("killing"));
 
@@ -27504,9 +27516,10 @@ mod tests {
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
-                entity: Entity::Terminal(run(false)),
+                entity: Entity::Terminal(run(false, None)),
             },
         );
+        assert_eq!(crate::ui::footer::stopping_line(&app), None);
         list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 3)]);
         assert_eq!(
             crate::stacks::menu_label(&app, &orion_core::WorktreeId("w1".into())),
@@ -27542,6 +27555,7 @@ mod tests {
                     sort_order: 0,
                     alive: true,
                     run_command: Some("just start".into()),
+                    run: Default::default(),
                 }),
             },
         );
@@ -36136,6 +36150,7 @@ mod tests {
             sort_order: 0,
             alive: true,
             run_command: None,
+            run: Default::default(),
         })
     }
 

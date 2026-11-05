@@ -35,7 +35,7 @@ pub(crate) fn stop_all(app: &mut App, out: &mut Vec<ClientRequest>) {
         .tree
         .worktrees
         .iter()
-        .filter(|w| app.worktree_running(&w.id) && !app.runs_stopping.contains(&w.id))
+        .filter(|w| app.worktree_running(&w.id) && app.run_stopping(&w.id).is_none())
         .map(|w| w.id.clone())
         .collect();
     if runs.is_empty() {

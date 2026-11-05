@@ -12,7 +12,8 @@
 //! hints are about what the grid or the pane has under its cursor — and
 //! wherever that is not the grid, the first of them is the way back to it.
 //! A FLASH takes the hints' place until the next key, in its kind's mark
-//! and color ([`flash_spans`]).
+//! and color ([`flash_spans`]); a stop of the cursor's run holds that
+//! place while it lasts ([`stopping_line`]).
 
 use super::{truncate, App, ConnState, Focus, HitTarget};
 use crate::app::{CrumbPart, SessionRow};
@@ -514,6 +515,18 @@ fn pane_hints(app: &App) -> Vec<Option<Hint>> {
     list
 }
 
+/// While the run `⌘⇧S` acts on is winding down from its stop, the line
+/// the footer holds in the hints' place — a FLASH that lasts until the
+/// run is gone rather than until the next key.
+pub(crate) fn stopping_line(app: &App) -> Option<Flash> {
+    let worktree = crate::git_sync::target(app)?;
+    app.run_stopping(&worktree)?;
+    let key = crate::hints::key_or(&app.keymap, Action::ToggleStack, "Stop stack");
+    Some(Flash::working(format!(
+        "stopping run · {key} again kills it now"
+    )))
+}
+
 /// Draw the bar.
 fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     // `area` includes the blank padding row; the bar itself is its last row.
@@ -586,10 +599,11 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             .map(|s| s.width())
             .sum::<usize>();
     // The flash, behind the four cells the crumb leaves before it.
-    let flash_w = app.flash.as_ref().map_or(0, |f| {
+    let flash = app.flash.clone().or_else(|| stopping_line(app));
+    let flash_w = flash.as_ref().map_or(0, |f| {
         flash_spans(app, f).iter().map(|s| s.width()).sum::<usize>() + 4
     });
-    let show_plate = app.flash.is_none() || status_w + flash_w + plate_w <= left.width as usize;
+    let show_plate = flash.is_none() || status_w + flash_w + plate_w <= left.width as usize;
     let mut spans = status;
     if show_plate {
         let x = left.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
@@ -635,7 +649,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     }
     let used: usize = spans.iter().map(|s| s.width()).sum();
     let room = usize::from(left.width).saturating_sub(used + 1);
-    match &app.flash {
+    match &flash {
         Some(flash) => spans.extend(flash_spans(app, flash)),
         None => spans.extend(crate::hints::spans(&hints(app), room, th)),
     }

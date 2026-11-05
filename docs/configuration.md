@@ -536,8 +536,9 @@ selected worktree's checkout:
   lives. Like every session it outlives
   the TUI and every client sees it, and the idle reaper never takes it. Stopping sends the run a `^C`,
   as you would at a terminal, so its own trap winds down what it started — a compose stack, a dev
-  server — in the pane; a second stop, or two minutes without it exiting, kills the whole process tree
-  and removes the row. A command that exits on its own, or on its `^C`, leaves its row behind, dimmed;
+  server. Meanwhile its run line counts down, `stopping… 1:52`, and the footer says the key again kills
+  it; a second stop, or two minutes without it exiting, kills the whole process tree and removes the
+  row. A command that exits on its own, or on its `^C`, leaves its row behind, dimmed;
   attaching it replays how the run ended, and nothing but **Start stack** runs it again — not an
   attach, not the prewarm sweep. There is one run per worktree: a second client's start on a worktree
   already running never starts another.

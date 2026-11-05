@@ -15,7 +15,7 @@ use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, EnterOutcome, Entity, EntityId, LinkId, PrewarmInfo,
     Project, ProjectId, ServerEvent, SessionRef, TerminalId, TerminalTab, Worktree, WorktreeId,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -188,9 +188,10 @@ pub struct Daemon {
     /// — so an attach replays how the run ended instead of running it
     /// again. Dropped when the run starts again, is stopped, or its row goes.
     finished_runs: Mutex<HashMap<TerminalId, FinishedRun>>,
-    /// RUN TERMINALS sent a `^C` by a stop and not yet gone: a second stop
-    /// kills them outright.
-    stopping_runs: Mutex<HashSet<TerminalId>>,
+    /// RUN TERMINALS sent a `^C` by a stop and not yet gone, with the
+    /// epoch ms their kill lands at (`RunState::stopping_until`): a second
+    /// stop kills them outright.
+    stopping_runs: Mutex<HashMap<TerminalId, i64>>,
     /// STACK STATUS: the last docker compose listing, and the poke that
     /// asks for a fresh one now.
     pub stacks: crate::stacks::StackWatch,
@@ -220,7 +221,7 @@ impl Daemon {
             prewarm_sweep: Mutex::new(None),
             resumes: Mutex::new(HashMap::new()),
             finished_runs: Mutex::new(HashMap::new()),
-            stopping_runs: Mutex::new(HashSet::new()),
+            stopping_runs: Mutex::new(HashMap::new()),
             stacks: crate::stacks::StackWatch::default(),
         })
     }
@@ -597,6 +598,9 @@ impl Daemon {
                 t.alive = sessions.contains_key(&SessionRef::Terminal(t.id.clone()));
             }
         }
+        for t in &mut terminals {
+            t.run = self.run_state(&t.id);
+        }
         Ok(ServerEvent::Snapshot {
             projects,
             worktrees,
@@ -635,7 +639,25 @@ impl Daemon {
     fn terminal_entity(&self, id: &TerminalId) -> Result<TerminalTab> {
         let mut term = self.store.get_terminal(id)?.context("terminal not found")?;
         term.alive = self.is_alive(&SessionRef::Terminal(id.clone()));
+        term.run = self.run_state(id);
         Ok(term)
+    }
+
+    /// [`TerminalTab::run`] for terminal `id`, from what the DAEMON holds
+    /// of its run. Takes no lock a caller of it may hold.
+    fn run_state(&self, id: &TerminalId) -> orion_core::RunState {
+        orion_core::RunState {
+            stopping_until: self.stopping_runs.lock().unwrap().get(id).copied(),
+        }
+    }
+
+    /// Push terminal `id`'s current row to every subscriber.
+    fn broadcast_terminal(&self, id: &TerminalId) -> Result<()> {
+        let term = self.terminal_entity(id)?;
+        self.broadcast(ServerEvent::EntityUpserted {
+            entity: Entity::Terminal(term),
+        });
+        Ok(())
     }
 
     // ---- projects ----
@@ -2034,6 +2056,7 @@ impl Daemon {
             sort_order: 0,
             alive: false,
             run_command: None,
+            run: Default::default(),
         };
         self.store.insert_terminal(&terminal)?;
         self.spawn_terminal_session(&terminal, &worktree, DEFAULT_COLS, DEFAULT_ROWS)?;
@@ -2050,11 +2073,7 @@ impl Daemon {
             bail!("name is empty");
         }
         self.store.rename_terminal(id, name.trim())?;
-        let term = self.terminal_entity(id)?;
-        self.broadcast(ServerEvent::EntityUpserted {
-            entity: Entity::Terminal(term),
-        });
-        Ok(())
+        self.broadcast_terminal(id)
     }
 
     pub fn close_terminal(self: &Arc<Self>, id: &TerminalId) -> Result<()> {
@@ -2120,6 +2139,7 @@ impl Daemon {
                     sort_order: 0,
                     alive: false,
                     run_command: Some(command.clone()),
+                    run: Default::default(),
                 };
                 self.store.insert_terminal(&term)?;
                 term
@@ -2147,20 +2167,33 @@ impl Daemon {
 
     /// Stop a worktree's run: a `^C` into its RUN TERMINAL, as a person at
     /// the terminal would, so the run's own trap tears down what it
-    /// started (a compose stack, a dev server) in view, and ends as a run
-    /// that exited on its own. One that ignores it is killed after
-    /// [`RUN_STOP_GRACE`]; a second stop kills it at once. A run that
-    /// already ended is dropped, row and all. Nothing to stop is not an
-    /// error — two clients may both have pressed it.
+    /// started (a compose stack, a dev server), and ends as a run that
+    /// exited on its own. Meanwhile its row says it is stopping, counting
+    /// down to the kill ([`RunState::stopping_until`]): one that ignores
+    /// the `^C` is killed after [`RUN_STOP_GRACE`]; a second stop kills it
+    /// at once. A run that already ended is dropped, row and all. Nothing
+    /// to stop is not an error — two clients may both have pressed it.
+    ///
+    /// [`RunState::stopping_until`]: orion_core::RunState::stopping_until
     pub fn stop_run(self: &Arc<Self>, worktree_id: &WorktreeId) -> Result<()> {
+        let kill_at = orion_core::clock::now_ms() + RUN_STOP_GRACE.as_millis() as i64;
         for term in self.store.run_terminals_in(worktree_id)? {
             let sref = SessionRef::Terminal(term.id.clone());
-            let again = !self.stopping_runs.lock().unwrap().insert(term.id.clone());
+            let again = self
+                .stopping_runs
+                .lock()
+                .unwrap()
+                .insert(term.id.clone(), kill_at)
+                .is_some();
             match self.session(&sref) {
                 Some(session) if !again => {
                     tracing::info!(worktree = %worktree_id, "run interrupted");
+                    // Said before the `^C` goes in: a run that dies of it
+                    // at once must be heard ending after it was heard
+                    // stopping, never the other way round.
+                    self.kill_run_after(term.id.clone(), session.clone(), RUN_STOP_GRACE);
+                    self.broadcast_terminal(&term.id)?;
                     session.write_input(b"\x03")?;
-                    self.kill_run_after(term.id.clone(), session, RUN_STOP_GRACE);
                 }
                 _ => {
                     tracing::info!(worktree = %worktree_id, "run stopped");
@@ -3064,8 +3097,10 @@ impl Daemon {
                         }
                         tracing::info!(session = ?sref, exit_code, "session exited");
                         // A run that ended on its own keeps its PTY for the
-                        // attach that wants to read how it ended.
+                        // attach that wants to read how it ended; a stop
+                        // under way is over.
                         if let SessionRef::Terminal(id) = &sref {
+                            daemon.stopping_runs.lock().unwrap().remove(id);
                             if daemon.is_run_terminal(id) {
                                 daemon
                                     .finished_runs
@@ -5032,6 +5067,87 @@ mod tests {
             .is_empty());
         // Nothing left to stop is not an error.
         daemon.stop_run(&worktree.id).unwrap();
+    }
+
+    /// Start `run` as `worktree`'s RUN COMMAND and wait for it to print
+    /// `ready`: its terminal's id.
+    async fn start_run_until(
+        daemon: &Arc<Daemon>,
+        worktree: &WorktreeId,
+        cfg: &crate::config::Config,
+        ready: &str,
+    ) -> TerminalId {
+        let EntityId::Terminal(id) = daemon.start_run_with(worktree, cfg).unwrap() else {
+            panic!("a run lives in a terminal");
+        };
+        let session = daemon.session(&SessionRef::Terminal(id.clone())).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !String::from_utf8_lossy(&session.snapshot(None).1).contains(ready) {
+            assert!(Instant::now() < deadline, "the run never printed {ready:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        id
+    }
+
+    /// The next broadcast about terminal `id`: its upserted row, or None
+    /// for its removal.
+    async fn next_terminal_event(
+        events: &mut broadcast::Receiver<ServerEvent>,
+        id: &TerminalId,
+    ) -> Option<TerminalTab> {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match events.recv().await.unwrap() {
+                    ServerEvent::EntityUpserted {
+                        entity: Entity::Terminal(t),
+                    } if &t.id == id => return Some(t),
+                    ServerEvent::EntityRemoved {
+                        id: EntityId::Terminal(gone),
+                    } if &gone == id => return None,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("no word about the run terminal")
+    }
+
+    /// A stop's `^C` is news to every client: the run's row carries the
+    /// moment its kill lands, in the snapshot too, until the run is gone.
+    #[tokio::test]
+    async fn a_stopping_run_says_so_until_it_is_gone() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        let cfg = run_config(
+            dir.path(),
+            "trap 'sleep 0.3; exit 0' INT; echo started; while :; do sleep 0.1; done",
+        );
+        let id = start_run_until(&daemon, &worktree.id, &cfg, "started").await;
+        let mut events = daemon.events.subscribe();
+        let before = orion_core::clock::now_ms();
+        daemon.stop_run(&worktree.id).unwrap();
+
+        let row = next_terminal_event(&mut events, &id).await.unwrap();
+        assert!(row.alive, "still winding down");
+        let until = row.run.stopping_until.expect("the stop is broadcast");
+        let grace = RUN_STOP_GRACE.as_millis() as i64;
+        assert!(
+            (before + grace..=orion_core::clock::now_ms() + grace).contains(&until),
+            "the kill is two minutes out: {until}"
+        );
+        let ServerEvent::Snapshot { terminals, .. } = daemon.snapshot().unwrap() else {
+            panic!("a snapshot");
+        };
+        let listed = terminals.iter().find(|t| t.id == id).unwrap();
+        assert_eq!(listed.run.stopping_until, Some(until));
+
+        let ended = next_terminal_event(&mut events, &id).await.unwrap();
+        assert!(!ended.alive);
+        assert_eq!(ended.run.stopping_until, None, "the stop is over");
+        assert_eq!(
+            daemon.terminal_entity(&id).unwrap().run.stopping_until,
+            None
+        );
     }
 
     /// A stop sends the run a ^C, so its own trap winds down what it

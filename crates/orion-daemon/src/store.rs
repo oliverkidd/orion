@@ -1198,6 +1198,7 @@ fn row_to_terminal(r: &rusqlite::Row) -> rusqlite::Result<TerminalTab> {
         sort_order: r.get(3)?,
         alive: false,
         run_command: r.get(4)?,
+        run: Default::default(),
     })
 }
 
@@ -2127,6 +2128,7 @@ mod tests {
                 sort_order: 0,
                 alive: false,
                 run_command: None,
+                run: Default::default(),
             })
             .unwrap();
 

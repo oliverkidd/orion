@@ -1331,25 +1331,24 @@ fn draw_list_row(
                 ),
             }
         }
-        crate::launcher::Card::Terminal(t) => Entry {
-            lead: terminal_mark(t, th),
-            tag: None,
-            name: t.name.clone(),
-            name_style: Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-            ramp: None,
-            runs: t.run_command.clone().unwrap_or_else(|| "shell".into()),
-            runs_style: Style::default().fg(th.dim),
-            text_mark: "",
-            text: String::new(),
-            text_style: Style::default().fg(th.muted),
-            badge: if t.alive {
-                String::new()
-            } else {
-                EXITED_BADGE.into()
-            },
-            badge_style: Style::default().fg(th.exited),
-            status: None,
-        },
+        crate::launcher::Card::Terminal(t) => {
+            let (badge, badge_style) = terminal_badge(t, crate::app::now_ms(), th);
+            Entry {
+                lead: terminal_mark(t, th),
+                tag: None,
+                name: t.name.clone(),
+                name_style: Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+                ramp: None,
+                runs: t.run_command.clone().unwrap_or_else(|| "shell".into()),
+                runs_style: Style::default().fg(th.dim),
+                text_mark: "",
+                text: String::new(),
+                text_style: Style::default().fg(th.muted),
+                badge,
+                badge_style,
+                status: None,
+            }
+        }
     };
     let mut spans = vec![mark, e.lead];
     let mut room = width.saturating_sub(usize::from(LIST_LEAD));
@@ -1843,6 +1842,27 @@ pub(super) fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'sta
 
 /// What a dead terminal's entry says at its right.
 const EXITED_BADGE: &str = " exited";
+
+/// What a terminal's entry says at its right end, where a session's age
+/// goes, at `now` (epoch ms): a run winding down from its stop counts
+/// down to its kill, `stopping… 1:52`, in the working gold; a dead
+/// terminal says `exited`.
+fn terminal_badge(t: &orion_core::TerminalTab, now: i64, th: Theme) -> (String, Style) {
+    match t.run.stopping_until {
+        Some(kill_at) => (
+            format!("stopping… {}", countdown(kill_at - now)),
+            Style::default().fg(th.warn),
+        ),
+        None if t.alive => (String::new(), Style::default()),
+        None => (EXITED_BADGE.into(), Style::default().fg(th.exited)),
+    }
+}
+
+/// `ms` to go as `m:ss`, rounded up to the second and never below `0:00`.
+fn countdown(ms: i64) -> String {
+    let secs = (ms.max(0) + 999) / 1000;
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
 
 /// The color an entry's cursor wash takes when its status wants you:
 /// crimson for a turn waiting on you or a crash, the done color for a
@@ -3542,6 +3562,7 @@ mod tests {
                 sort_order: i,
                 alive: true,
                 run_command: None,
+                run: Default::default(),
             });
         }
         app.set_sel_session(
@@ -3609,6 +3630,7 @@ mod tests {
                 sort_order: 0,
                 alive: true,
                 run_command: run.map(Into::into),
+                run: Default::default(),
             });
         }
         let body = Rect::new(0, 0, 100, 30);
@@ -3632,6 +3654,41 @@ mod tests {
         app.tree.terminals[0].alive = false;
         let lines = drawn_lines(&mut app, body);
         assert!(row_of(&lines, "shell-1").contains("exited"), "{lines:#?}");
+    }
+
+    /// A run winding down from its stop says so at the right end of its
+    /// line, counting down to the kill in the working gold.
+    #[test]
+    fn a_stopping_run_counts_down_to_its_kill() {
+        let th = Theme::default();
+        let mut run = orion_core::TerminalTab {
+            id: orion_core::TerminalId("t1".into()),
+            worktree_id: orion_core::WorktreeId("w0".into()),
+            name: "run".into(),
+            sort_order: 0,
+            alive: true,
+            run_command: Some("npm run dev".into()),
+            run: Default::default(),
+        };
+        assert_eq!(terminal_badge(&run, 0, th).0, "", "running: nothing yet");
+        run.run.stopping_until = Some(112_000);
+        let (badge, style) = terminal_badge(&run, 0, th);
+        assert_eq!(badge, "stopping… 1:52");
+        assert_eq!(style.fg, Some(th.warn));
+        assert_eq!(terminal_badge(&run, 111_500, th).0, "stopping… 0:01");
+        assert_eq!(terminal_badge(&run, 200_000, th).0, "stopping… 0:00");
+
+        let mut app = a_tree();
+        select(&mut app, "api");
+        run.run.stopping_until = Some(crate::app::now_ms() + 60_000);
+        app.tree.terminals.push(run);
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
+        assert!(
+            line.trim_end().ends_with("stopping… 1:00")
+                || line.trim_end().ends_with("stopping… 0:59"),
+            "{line:?}"
+        );
     }
 
     /// A session's line says what it runs on — the model and the

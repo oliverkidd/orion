@@ -342,6 +342,21 @@ pub struct TerminalTab {
     /// the worktree is RUNNING. None for a plain shell tab.
     #[serde(default)]
     pub run_command: Option<String>,
+    /// Where a RUN TERMINAL's run is at, as the DAEMON knows it right now.
+    /// Stamped on every send, never stored; the default on a plain shell.
+    #[serde(default)]
+    pub run: RunState,
+}
+
+/// What a RUN LINE says about its run beyond whether its PTY lives
+/// ([`TerminalTab::alive`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunState {
+    /// Sent its `^C` by a stop and not yet gone: the epoch ms its
+    /// two-minute kill lands at, so every client counts down to the same
+    /// moment (`stopping… 1:52`). None for a run nobody is stopping, and
+    /// always None once the PTY is gone.
+    pub stopping_until: Option<i64>,
 }
 
 /// A URL pinned to a worktree — the pull request, the ticket, the design
