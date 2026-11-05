@@ -1,20 +1,32 @@
 //! The PULL REQUESTS MODAL's forms, each drawn in the reading pane's
 //! place while the list stays up on the left:
 //!
-//! * **New pull request** (`⌘N`): the branch it comes from — the one
-//!   the Worktrees cursor's checkout is on, else the ROOT WORKTREE's — the
-//!   branch it merges into — the project's base, in the order the COMMIT
-//!   LIST measures a branch against (`commit_list::resolve_base`) — a
-//!   title, a draft box and a description. A branch field lists the
-//!   project's branches in the description's place while it has the caret
-//!   (local ones for From, origin's for Into), narrowed as it is typed in.
-//!   The title and description are filled from the commits between the
-//!   two the way `gh pr create --fill` fills them — one commit's subject
-//!   and body, or the branch's name and a list of subjects — and follow a
-//!   new pair of branches until they are typed over. Enter pushes the
-//!   branch to `origin` (setting its upstream when it has none) and runs
-//!   `gh pr create`; the list is asked again, and the modal's cursor
-//!   follows the new pull request onto its row.
+//! * **New pull request** (`⌘N`), in one of two modes along its top
+//!   (`←`/`→` there):
+//!   - **Feature branch**: the branch it comes from — the one the
+//!     Worktrees cursor's checkout is on, else the ROOT WORKTREE's — the
+//!     branch it merges into — the project's base, in the order the
+//!     COMMIT LIST measures a branch against (`commit_list::resolve_base`)
+//!     — a title, a draft box, the branch's commits and a description. A
+//!     branch field lists the project's branches in the list's place while
+//!     it has the caret (local ones for From, origin's for Into), narrowed
+//!     as it is typed in. The title and description are filled from the
+//!     commits between the two the way `gh pr create --fill` fills them —
+//!     one commit's subject and body, or the branch's name and a list of
+//!     subjects — and follow a new pair of branches until they are typed
+//!     over. Enter pushes the branch to `origin` (setting its upstream when
+//!     it has none) and runs `gh pr create`.
+//!   - **Promote** ([`promote`]): the project's base into the repo's
+//!     default branch (`dev` → `main`), as origin has them — nothing is
+//!     pushed. It lists every pull request merged into the base that the
+//!     default lacks, with its Linear issues and author, and fills the
+//!     title (`Release 5 Nov: …`) and a `## Going out` description from
+//!     them. A promotion already open is said, and Enter updates its title
+//!     and description (`gh pr edit`) rather than open a second. A form
+//!     opened from the base branch itself starts in this mode.
+//!
+//!   Either way the list is asked again, and the modal's cursor follows
+//!   the pull request onto its row.
 //! * **Merge** (`⌘X`): the pull request under the cursor, how — squash,
 //!   a merge commit or a rebase, only those the repo allows (`gh repo
 //!   view`) — whether its branch goes with it, and whether GitHub should
@@ -26,8 +38,7 @@
 //!   and go back if it won't go. A long-lived branch — the repo's default,
 //!   a protected one, the base new worktrees start from — is never deleted,
 //!   so a `dev` merged into `main` leaves what is based on it alone
-//!   ([`long_lived`]). The **Review** SETTINGS tab holds the defaults both
-//!   open on.
+//!   ([`long_lived`]). It opens on the method the project last merged by.
 //! * **Close** (`⌘W`): the pull request under the cursor closed
 //!   without merging — a comment left on it first if one is written, and
 //!   its branch deleted on GitHub if that is ticked (only a branch of this
@@ -42,6 +53,8 @@
 //! — and the answers land in [`land_answer`] through `App::pr_actions_tx`,
 //! matched to the form by ticket, so an answer for a form since closed is
 //! only flashed.
+
+pub mod promote;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -70,9 +83,9 @@ use crate::ui::{
 /// Everything else the forms send is one request — `gh pr create`, `gh pr
 /// merge`, the branch's delete — or one question git answers locally.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-/// The rows the create form's one-line fields take, over the box under
-/// them — From, Into, Title, Draft.
-const FIELD_ROWS: u16 = 4;
+/// The rows the create form's top takes, over the list and the box under
+/// it — the modes, what the mode says, From and Into, Title, Draft.
+const FIELD_ROWS: u16 = 5;
 /// How many commits a fill lists by subject: a pair of branches far
 /// apart reads a page of them, not megabytes.
 const FILL_SUBJECTS: usize = 50;
@@ -135,9 +148,22 @@ impl PrForm {
 
 // ---- the new pull request ----
 
-/// The create form's fields, in Tab order.
+/// The create form's two modes, along its top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateMode {
+    /// A branch of yours into the base: From and Into are yours to pick,
+    /// the branch's commits listed.
+    Feature,
+    /// The project's base branch into the repo's default one (`dev` →
+    /// `main`), what goes out listed ([`promote`]).
+    Promote,
+}
+
+/// The create form's fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateField {
+    /// The mode row along the top: `←`/`→` switch.
+    Mode,
     From,
     Into,
     Title,
@@ -146,24 +172,22 @@ pub enum CreateField {
 }
 
 impl CreateField {
-    const ORDER: [CreateField; 5] = [
+    /// Tab order, Feature mode.
+    const FEATURE: [CreateField; 6] = [
+        CreateField::Mode,
         CreateField::From,
         CreateField::Into,
         CreateField::Title,
         CreateField::Draft,
         CreateField::Body,
     ];
-
-    /// The next field (or the one before), round either end.
-    pub fn step(self, forward: bool) -> Self {
-        let n = Self::ORDER.len();
-        let at = Self::ORDER.iter().position(|f| *f == self).unwrap_or(0);
-        Self::ORDER[if forward {
-            (at + 1) % n
-        } else {
-            (at + n - 1) % n
-        }]
-    }
+    /// Tab order, Promote mode: its branches are the mode's.
+    const PROMOTE: [CreateField; 4] = [
+        CreateField::Mode,
+        CreateField::Title,
+        CreateField::Draft,
+        CreateField::Body,
+    ];
 
     /// A branch field: it lists branches to pick from while it has the
     /// caret.
@@ -178,6 +202,17 @@ pub struct CreateForm {
     pub project: ProjectId,
     /// Where git and `gh` run: the project's main checkout.
     pub dir: PathBuf,
+    pub mode: CreateMode,
+    /// The mode was picked by hand: the branches landing never switch it.
+    pub mode_chosen: bool,
+    /// The project's base branch and the repo's default, once read: the
+    /// Promote mode's From and Into.
+    pub base: Option<String>,
+    pub default: Option<String>,
+    /// What the Promote mode read for that pair, once it is in — `Err`,
+    /// why GitHub could not say — and the pair it was asked for.
+    pub promotion: Option<Result<promote::Promotion, String>>,
+    pub promotion_for: Option<(String, String)>,
     /// The branch it comes from (`--head`) and the one it merges into
     /// (`--base`).
     pub from: TextInput,
@@ -203,6 +238,9 @@ pub struct CreateForm {
     pub filled_for: Option<(String, String)>,
     /// How many commits From has that Into does not, as of the last fill.
     pub ahead: Option<usize>,
+    /// The newest of those commits, oldest first as the fill read them —
+    /// the Feature mode's list, drawn newest first.
+    pub commits: Vec<FillCommit>,
     /// Origin is being fetched: the branches and the count are as of the
     /// last fetch until it lands, and read again then.
     pub fetching: bool,
@@ -214,10 +252,11 @@ pub struct CreateForm {
     /// Why the last Enter went nowhere, shown on the frame until the next
     /// edit.
     pub notice: Option<String>,
-    /// As of the last draw, for the mouse: each field's row, and the
-    /// branch list's rows by index into what it shows.
+    /// As of the last draw, for the mouse: each field's row, the branch
+    /// list's rows by index into what it shows, and each mode's chip.
     pub rows: Vec<(Rect, CreateField)>,
     pub picks: Vec<(Rect, usize)>,
+    pub mode_hits: Vec<(Rect, CreateMode)>,
 }
 
 impl CreateForm {
@@ -226,6 +265,12 @@ impl CreateForm {
         Self {
             project,
             dir,
+            mode: CreateMode::Feature,
+            mode_chosen: false,
+            base: None,
+            default: None,
+            promotion: None,
+            promotion_for: None,
             from: TextInput::with_text(from),
             into: TextInput::new(),
             title: TextInput::new(),
@@ -239,23 +284,61 @@ impl CreateForm {
             filled: (String::new(), String::new()),
             filled_for: None,
             ahead: None,
+            commits: Vec::new(),
             fetching: false,
             ticket: crate::view_jobs::ticket(),
             saving: None,
             notice: None,
             rows: Vec::new(),
             picks: Vec::new(),
+            mode_hits: Vec::new(),
         }
     }
 
-    /// The text field under the caret; None on the draft box.
+    /// The fields Tab walks in this mode.
+    fn fields(&self) -> &'static [CreateField] {
+        match self.mode {
+            CreateMode::Feature => &CreateField::FEATURE,
+            CreateMode::Promote => &CreateField::PROMOTE,
+        }
+    }
+
+    /// The field after `field` (or the one before), round either end.
+    pub fn step(&self, field: CreateField, forward: bool) -> CreateField {
+        let order = self.fields();
+        let n = order.len();
+        let at = order.iter().position(|f| *f == field).unwrap_or(0);
+        order[if forward {
+            (at + 1) % n
+        } else {
+            (at + n - 1) % n
+        }]
+    }
+
+    /// The Promote mode's pair — the base into the default — once both are
+    /// known and are two branches.
+    pub fn promote_pair(&self) -> Option<(String, String)> {
+        let (base, default) = (self.base.as_ref()?, self.default.as_ref()?);
+        (base != default).then(|| (base.clone(), default.clone()))
+    }
+
+    /// The promotion already open for the pair, once GitHub has said.
+    pub fn open_promotion(&self) -> Option<&promote::OpenPromotion> {
+        match &self.promotion {
+            Some(Ok(p)) => p.open.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The text field under the caret; None on the mode row and the draft
+    /// box.
     fn input_mut(&mut self) -> Option<&mut TextInput> {
         match self.field {
             CreateField::From => Some(&mut self.from),
             CreateField::Into => Some(&mut self.into),
             CreateField::Title => Some(&mut self.title),
             CreateField::Body => Some(&mut self.body),
-            CreateField::Draft => None,
+            CreateField::Mode | CreateField::Draft => None,
         }
     }
 
@@ -349,7 +432,21 @@ impl CreateForm {
     /// to the next one.
     fn choose_pick(&mut self) {
         self.take_pick();
-        self.focus(self.field.step(true));
+        self.focus(self.step(self.field, true));
+    }
+
+    /// The form in `mode`. What the title and description still hold of
+    /// the last fill follows the new mode's ([`refill`]).
+    fn set_mode(&mut self, mode: CreateMode) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        self.notice = None;
+        self.filled_for = None;
+        if !self.fields().contains(&self.field) {
+            self.field = CreateField::Mode;
+        }
     }
 
     /// The pair of branches as typed, when both are there.
@@ -413,6 +510,7 @@ pub(crate) fn open_create(app: &mut App) {
                     heads,
                     bases,
                     base,
+                    default: default_branch(&dir),
                     fetched,
                 });
             };
@@ -459,6 +557,50 @@ fn read_branches(dir: &Path, base_setting: &str) -> (Vec<String>, Vec<String>, O
     (heads, bases, base)
 }
 
+/// The repo's default branch, by name: what `origin/HEAD` points at here,
+/// else what GitHub says. None when neither can.
+fn default_branch(dir: &Path) -> Option<String> {
+    let local = crate::git_diff::run_git(
+        dir,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .ok()
+    .filter(|out| out.status.success())
+    .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    .and_then(|name| name.strip_prefix("origin/").map(str::to_string))
+    .filter(|name| !name.is_empty());
+    local.or_else(|| {
+        let args = [
+            "repo",
+            "view",
+            "--json",
+            "defaultBranchRef",
+            "--jq",
+            ".defaultBranchRef.name",
+        ];
+        let out = std::process::Command::new(gh_program())
+            .args(args)
+            .current_dir(dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())?;
+        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!name.is_empty()).then_some(name)
+    })
+}
+
+/// Fill the title and description for the form's mode: the Feature
+/// mode's commits between its pair of branches, the Promote mode's list
+/// of what goes out — each asked for once per pair.
+fn refill(app: &mut App) {
+    match create_form(app).map(|form| form.mode) {
+        Some(CreateMode::Feature) => request_fill(app),
+        Some(CreateMode::Promote) => request_promotion(app),
+        None => {}
+    }
+}
+
 /// Ask for the fill of the form's pair of branches, once per pair.
 fn request_fill(app: &mut App) {
     let tx = app.pr_actions_tx.clone();
@@ -482,12 +624,70 @@ fn request_fill(app: &mut App) {
     });
 }
 
+/// The Promote mode's list for its pair, asked for once per pair — and,
+/// already in, written into the title and description at once.
+fn request_promotion(app: &mut App) {
+    let tx = app.pr_actions_tx.clone();
+    let Some((form, linear)) = create_form_and_linear(app) else {
+        return;
+    };
+    let Some(pair) = form.promote_pair() else {
+        return;
+    };
+    if form.promotion_for.as_ref() == Some(&pair) {
+        fill_promotion(form, linear);
+        return;
+    }
+    form.promotion_for = Some(pair.clone());
+    form.promotion = None;
+    let (dir, ticket) = (form.dir.clone(), form.ticket);
+    let Some(tx) = tx else {
+        return;
+    };
+    tokio::spawn(async move {
+        let result = promote::read(&dir, &pair.0, &pair.1).await;
+        let _ = tx.send(Answer::Promotion {
+            ticket,
+            pair,
+            result,
+        });
+    });
+}
+
+/// The Promote mode's title and description, written from its list where
+/// they still hold the last fill — never over what was typed — each pull
+/// request's Linear issues read off `linear` on the way.
+fn fill_promotion(form: &mut CreateForm, linear: Option<&crate::linear::LinearList>) {
+    let Some(Ok(promotion)) = &mut form.promotion else {
+        return;
+    };
+    for pr in &mut promotion.prs {
+        if pr.linear.is_empty() {
+            pr.linear = promote::linear_ids(linear, pr);
+        }
+    }
+    let (title, body) = promote::fill(&promotion.prs, &promote::today());
+    put_fill(form, title, body);
+}
+
+/// `title` and `body` into the form where it still holds what the last
+/// fill wrote.
+fn put_fill(form: &mut CreateForm, title: String, body: String) {
+    if form.title.as_str() == form.filled.0 {
+        form.title.set_text(title.clone());
+    }
+    if form.body.as_str() == form.filled.1 {
+        form.body.set_text(body.clone());
+    }
+    form.filled = (title, body);
+}
+
 /// What `from` has that `into` does not: how many commits, merges and
 /// all — what the pull request would carry — and the newest
-/// [`FILL_SUBJECTS`] that are not merges, oldest first, for the fill: each
-/// its subject, and its body only when it is the one commit, whose whole
-/// message is the description. `into` is origin's when origin has it;
-/// `from` is whichever of the two copies the pull request would carry
+/// [`FILL_SUBJECTS`] that are not merges, newest first: each its short
+/// sha and subject, and its body only when it is the one commit, whose
+/// whole message is the description. `into` is origin's when origin has
+/// it; `from` is whichever of the two copies the pull request would carry
 /// ([`head_ref`]). None when git cannot say — a branch it does not know.
 fn read_commits(dir: &Path, from: &str, into: &str) -> Option<Fill> {
     let base = crate::commit_list::branch_ref(dir, into).unwrap_or_else(|| into.to_string());
@@ -499,9 +699,9 @@ fn read_commits(dir: &Path, from: &str, into: &str) -> Option<Fill> {
     }
     let ahead = String::from_utf8_lossy(&count.stdout).trim().parse().ok()?;
     let format = if ahead == 1 {
-        "--format=%s%x1f%b%x1e"
+        "--format=%h%x1f%s%x1f%b%x1e"
     } else {
-        "--format=%s%x1f%x1e"
+        "--format=%h%x1f%s%x1f%x1e"
     };
     let max = format!("--max-count={FILL_SUBJECTS}");
     let args = [
@@ -550,18 +750,28 @@ fn contained(dir: &Path, tip: &str, into: &str) -> bool {
 pub struct Fill {
     /// Commits From has that Into does not, merges and all.
     pub ahead: usize,
-    /// The newest of them that are not merges, oldest first: subject and
-    /// body.
-    pub commits: Vec<(String, String)>,
+    /// The newest of them that are not merges, oldest first.
+    pub commits: Vec<FillCommit>,
 }
 
-/// `%s%x1f%b%x1e` records: subject, then body.
-fn parse_commits(text: &str) -> Vec<(String, String)> {
+/// One commit of a [`Fill`]: its short sha, subject and body (the body
+/// read only for a lone commit).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FillCommit {
+    pub sha: String,
+    pub subject: String,
+    pub body: String,
+}
+
+/// `%h%x1f%s%x1f%b%x1e` records: short sha, subject, then body.
+fn parse_commits(text: &str) -> Vec<FillCommit> {
     text.split('\x1e')
         .filter_map(|record| {
-            let (subject, body) = record.split_once('\x1f')?;
-            let subject = subject.trim().to_string();
-            (!subject.is_empty()).then(|| (subject, body.trim().to_string()))
+            let mut parts = record.splitn(3, '\x1f');
+            let sha = parts.next()?.trim().to_string();
+            let subject = parts.next()?.trim().to_string();
+            let body = parts.next().unwrap_or_default().trim().to_string();
+            (!subject.is_empty()).then_some(FillCommit { sha, subject, body })
         })
         .collect()
 }
@@ -570,12 +780,12 @@ fn parse_commits(text: &str) -> Vec<(String, String)> {
 /// commit's subject and body; for several, the branch's name made words
 /// and a list of their subjects — ending `- …` when there were more than
 /// [`FILL_SUBJECTS`] to list.
-pub fn fill_text(from: &str, commits: &[(String, String)]) -> (String, String) {
+pub fn fill_text(from: &str, commits: &[FillCommit]) -> (String, String) {
     match commits {
         [] => (words_of(from), String::new()),
-        [(subject, body)] => (subject.clone(), body.clone()),
+        [one] => (one.subject.clone(), one.body.clone()),
         many => {
-            let mut lines: Vec<String> = many.iter().map(|(s, _)| format!("- {s}")).collect();
+            let mut lines: Vec<String> = many.iter().map(|c| format!("- {}", c.subject)).collect();
             if many.len() >= FILL_SUBJECTS {
                 lines.push("- …".into());
             }
@@ -600,6 +810,10 @@ fn words_of(branch: &str) -> String {
 /// whole form goes to git and `gh` off the loop, the form held until the
 /// answer lands.
 fn submit_create(app: &mut App) {
+    if create_form(app).is_some_and(|form| form.mode == CreateMode::Promote) {
+        submit_promotion(app);
+        return;
+    }
     let tx = app.pr_actions_tx.clone();
     let open = |app: &App, from: &str| -> Option<u64> {
         let Some(Overlay::PullRequests(view)) = &app.overlay else {
@@ -693,6 +907,88 @@ async fn create(
     if !carried.is_some_and(|head| head.starts_with("refs/remotes/")) {
         push_branch(dir, from).await?;
     }
+    gh_create(dir, from, into, title, body, draft).await
+}
+
+/// Enter in the Promote mode: the base into the default, as origin has
+/// them — nothing pushed — or, a promotion already open, its title and
+/// description put to what the form holds.
+fn submit_promotion(app: &mut App) {
+    let tx = app.pr_actions_tx.clone();
+    let Some(form) = create_form(app) else {
+        return;
+    };
+    if form.saving.is_some() {
+        return;
+    }
+    let pair = form.promote_pair();
+    let title = form.title.trim().to_string();
+    let ahead = match &form.promotion {
+        Some(Ok(p)) => p.ahead,
+        _ => None,
+    };
+    form.notice = match &pair {
+        None if form.base.is_none() || form.default.is_none() => {
+            Some("reading the branches — try again in a moment".into())
+        }
+        None => Some(
+            "the project's base is the default branch — set another in Settings → Projects".into(),
+        ),
+        Some(_) if form.promotion.is_none() => {
+            Some("reading what goes out — try again in a moment".into())
+        }
+        Some((base, default)) if ahead == Some(0) => {
+            Some(format!("{base} has nothing {default} doesn't"))
+        }
+        Some(_) if title.is_empty() => Some("the pull request needs a title".into()),
+        Some(_) => None,
+    };
+    let (Some((base, default)), None, Some(tx)) = (pair, &form.notice, tx) else {
+        return;
+    };
+    let (project, dir, ticket) = (form.project.clone(), form.dir.clone(), form.ticket);
+    let (body, draft) = (form.body.as_str().to_string(), form.draft);
+    let open = form.open_promotion().cloned();
+    form.saving = Some(match &open {
+        Some(open) => format!("updating #{}…", open.number),
+        None => format!("opening {base} → {default}…"),
+    });
+    tokio::spawn(async move {
+        let answer = match open {
+            Some(open) => {
+                let n = open.number.to_string();
+                let edit = gh(
+                    &dir,
+                    &["pr", "edit", &n, "--title", &title, "--body-file", "-"],
+                );
+                Answer::Updated {
+                    project,
+                    ticket,
+                    number: open.number,
+                    url: open.url,
+                    result: run_piped(edit, &body, REQUEST_TIMEOUT).await.map(|_| ()),
+                }
+            }
+            None => Answer::Created {
+                project,
+                ticket,
+                result: gh_create(&dir, &base, &default, &title, &body, draft).await,
+            },
+        };
+        let _ = tx.send(answer);
+    });
+}
+
+/// `gh pr create` from `from` into `into`, as origin has them: the new
+/// pull request's URL, or why not.
+async fn gh_create(
+    dir: &Path,
+    from: &str,
+    into: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<String, String> {
     let mut args = vec![
         "pr",
         "create",
@@ -1621,13 +1917,18 @@ pub(crate) fn toggle_draft(app: &mut App) {
 
 /// `gh <args>` in `dir`, for [`run_piped`].
 fn gh(dir: &Path, args: &[&str]) -> tokio::process::Command {
-    #[cfg(not(test))]
-    let program = "gh";
-    #[cfg(test)]
-    let program = tests::GH.with_borrow(|stub| stub.clone());
-    let mut cmd = tokio::process::Command::new(program);
+    let mut cmd = tokio::process::Command::new(gh_program());
     cmd.args(args).current_dir(dir);
     cmd
+}
+
+/// The `gh` the forms run: a stub under test, so nothing reaches GitHub.
+fn gh_program() -> PathBuf {
+    #[cfg(not(test))]
+    let program = PathBuf::from("gh");
+    #[cfg(test)]
+    let program = tests::GH.with_borrow(|stub| stub.clone());
+    program
 }
 
 /// `git <args>` in `dir`, DETACHED (`git_proc::detached`), for
@@ -1642,12 +1943,14 @@ fn git(dir: &Path, args: &[&str]) -> tokio::process::Command {
 /// What the forms' git and `gh` came back with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Answer {
-    /// The create form's branches, and the default to merge into.
+    /// The create form's branches, the project's base to merge into, and
+    /// the repo's default branch.
     Branches {
         ticket: u64,
         heads: Vec<String>,
         bases: Vec<String>,
         base: Option<String>,
+        default: Option<String>,
         /// Read after origin was fetched (or the fetch gave up).
         fetched: bool,
     },
@@ -1657,11 +1960,25 @@ pub enum Answer {
         pair: (String, String),
         fill: Option<Fill>,
     },
+    /// What promoting the pair — base into default — carries.
+    Promotion {
+        ticket: u64,
+        pair: (String, String),
+        result: Result<promote::Promotion, String>,
+    },
     /// `gh pr create`: the new pull request's URL, or why not.
     Created {
         project: ProjectId,
         ticket: u64,
         result: Result<String, String>,
+    },
+    /// `gh pr edit` of a promotion already open: done, or why not.
+    Updated {
+        project: ProjectId,
+        ticket: u64,
+        number: u64,
+        url: String,
+        result: Result<(), String>,
     },
     /// The repo's merge methods, and whether it deletes merged branches.
     MergeOptions {
@@ -1737,6 +2054,21 @@ fn create_form(app: &mut App) -> Option<&mut CreateForm> {
     }
 }
 
+/// The create form, and Linear's list for its project — what the Promote
+/// mode's Linear issues are read from — borrowed together.
+fn create_form_and_linear(
+    app: &mut App,
+) -> Option<(&mut CreateForm, Option<&crate::linear::LinearList>)> {
+    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+        return None;
+    };
+    let PrForm::Create(form) = view.form.as_deref_mut()? else {
+        return None;
+    };
+    let linear = app.linear.get(&form.project);
+    Some((form, linear))
+}
+
 fn merge_form(app: &mut App) -> Option<&mut MergeForm> {
     match form(app)? {
         PrForm::Merge(f) => Some(f),
@@ -1769,9 +2101,31 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
             heads,
             bases,
             base,
+            default,
             fetched,
-        } => land_branches(app, ticket, heads, bases, base, fetched),
+        } => land_branches(app, ticket, (heads, bases), (base, default), fetched),
         Answer::Fill { ticket, pair, fill } => land_fill(app, ticket, pair, fill),
+        Answer::Promotion {
+            ticket,
+            pair,
+            result,
+        } => land_promotion(app, ticket, pair, result),
+        Answer::Updated {
+            project,
+            ticket,
+            number,
+            url,
+            result,
+        } => match result {
+            Ok(()) => {
+                land_created(app, &project, ticket, url.clone());
+                read_again(app, &project, url);
+                app.flash = Some(crate::flash::Flash::done(format!(
+                    "updated #{number}'s title and description"
+                )));
+            }
+            Err(why) => refused(app, ticket, why, &format!("update #{number}")),
+        },
         Answer::Created {
             project,
             ticket,
@@ -1844,13 +2198,14 @@ pub(crate) fn land_answer(app: &mut App, answer: Answer) {
 /// The create form's branches are read: Into takes the project's base when
 /// nothing is typed there (and it is not From itself), the list under the
 /// caret opens on its field's branch, and the fill is asked for — again
-/// once origin is `fetched`, the pair's commits maybe moved.
+/// once origin is `fetched`, the pair's commits maybe moved. A form from
+/// the base branch itself, its mode not picked by hand, is a promotion:
+/// it goes over to the Promote mode.
 fn land_branches(
     app: &mut App,
     ticket: u64,
-    heads: Vec<String>,
-    bases: Vec<String>,
-    base: Option<String>,
+    (heads, bases): (Vec<String>, Vec<String>),
+    (base, default): (Option<String>, Option<String>),
     fetched: bool,
 ) {
     let Some(PrForm::Create(form)) = form_for(app, ticket) else {
@@ -1859,7 +2214,10 @@ fn land_branches(
     if fetched {
         form.fetching = false;
         form.filled_for = None;
+        form.promotion_for = None;
     }
+    form.base = base.clone().or(form.base.take());
+    form.default = default.or(form.default.take());
     if form.into.trim().is_empty() {
         if let Some(base) = base.filter(|b| *b != form.from.trim()) {
             form.into.set_text(base);
@@ -1867,34 +2225,52 @@ fn land_branches(
     }
     form.heads = Some(heads.into());
     form.bases = Some(bases.into());
+    let from_base = form.base.as_deref() == Some(form.from.trim());
+    if !form.mode_chosen && from_base && form.promote_pair().is_some() {
+        form.set_mode(CreateMode::Promote);
+        form.field = CreateField::Title;
+    }
     if !form.typed {
         form.focus(form.field);
     }
-    request_fill(app);
+    refill(app);
 }
 
-/// A fill is in for the pair it was asked for: the count goes beside From,
-/// and the title and description take it wherever they still hold the
-/// last fill — never over what was typed.
+/// A fill is in for the pair it was asked for: the count and the commits
+/// go over the description, and the title and description take it
+/// wherever they still hold the last fill — never over what was typed.
 fn land_fill(app: &mut App, ticket: u64, pair: (String, String), fill: Option<Fill>) {
     let Some(PrForm::Create(form)) = form_for(app, ticket) else {
         return;
     };
-    if form.filled_for.as_ref() != Some(&pair) {
+    if form.filled_for.as_ref() != Some(&pair) || form.mode != CreateMode::Feature {
         return;
     }
     form.ahead = fill.as_ref().map(|fill| fill.ahead);
-    let listed = fill
-        .as_ref()
-        .map_or(&[][..], |fill| fill.commits.as_slice());
-    let (title, body) = fill_text(&pair.0, listed);
-    if form.title.as_str() == form.filled.0 {
-        form.title.set_text(title.clone());
+    form.commits = fill.map(|fill| fill.commits).unwrap_or_default();
+    let (title, body) = fill_text(&pair.0, &form.commits);
+    put_fill(form, title, body);
+}
+
+/// The Promote mode's list is in for the pair it was asked for: it goes
+/// over the description, and fills the title and description where they
+/// still hold the last fill.
+fn land_promotion(
+    app: &mut App,
+    ticket: u64,
+    pair: (String, String),
+    result: Result<promote::Promotion, String>,
+) {
+    let Some((form, linear)) = create_form_and_linear(app) else {
+        return;
+    };
+    if form.ticket != ticket || form.promotion_for.as_ref() != Some(&pair) {
+        return;
     }
-    if form.body.as_str() == form.filled.1 {
-        form.body.set_text(body.clone());
+    form.promotion = Some(result);
+    if form.mode == CreateMode::Promote {
+        fill_promotion(form, linear);
     }
-    form.filled = (title, body);
 }
 
 /// A merge or a close answered: done, the form closes onto the list —
@@ -2012,6 +2388,8 @@ pub(crate) mod keys {
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const CHOOSE: Key = Key::new(&["enter"], "choose");
     pub const CREATE: Key = Key::new(&["enter"], "create PR");
+    /// The create form's mode row: Feature branch or Promote.
+    pub const MODE: Key = Key::new(&["left", "right", "space"], "mode").show(2);
     pub const DRAFT: Key = Key::new(&["space"], "draft");
     /// The merge form's rows.
     pub const OPTION: Key = Key::new(&["up", "down"], "option").show(2);
@@ -2026,6 +2404,7 @@ pub(crate) mod keys {
         PICK,
         CHOOSE,
         CREATE,
+        MODE,
         DRAFT,
         OPTION,
         CHANGE,
@@ -2044,20 +2423,30 @@ pub(crate) fn hints(form: &PrForm) -> Vec<Hint> {
     match form {
         PrForm::Create(form) => {
             let mut hints = Vec::new();
+            let create = match form.open_promotion() {
+                Some(open) if form.mode == CreateMode::Promote => {
+                    keys::CREATE.hint_as(format!("update #{}", open.number))
+                }
+                _ => keys::CREATE.hint(),
+            };
             match form.field {
                 field if field.is_branch() => {
                     hints.push(keys::CHOOSE.hint().kept());
                     hints.push(keys::PICK.hint());
                 }
+                CreateField::Mode => {
+                    hints.push(create.kept());
+                    hints.push(keys::MODE.hint());
+                }
                 CreateField::Draft => {
-                    hints.push(keys::CREATE.hint().kept());
+                    hints.push(create.kept());
                     hints.push(keys::DRAFT.hint());
                 }
                 CreateField::Body => {
-                    hints.push(keys::CREATE.hint().kept());
+                    hints.push(create.kept());
                     hints.push(crate::ui::task_keys::NEWLINE.hint());
                 }
-                _ => hints.push(keys::CREATE.hint().kept()),
+                _ => hints.push(create.kept()),
             }
             hints.push(keys::FIELD.hint());
             hints.push(Hint::new("Esc", "cancel"));
@@ -2123,7 +2512,20 @@ fn create_key(app: &mut App, key: KeyEvent) {
                 form.take_pick();
             }
             fill = field.is_branch();
-            form.focus(field.step(forward));
+            form.focus(form.step(field, forward));
+        }
+        // ←/→ and Space on the mode row: the other mode.
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if field == CreateField::Mode => {
+            let mode = match form.mode {
+                CreateMode::Feature => CreateMode::Promote,
+                CreateMode::Promote => CreateMode::Feature,
+            };
+            form.mode_chosen = true;
+            form.set_mode(mode);
+            fill = true;
+        }
+        KeyCode::Down | KeyCode::Up if field == CreateField::Mode => {
+            form.focus(form.step(field, key.code == KeyCode::Down));
         }
         KeyCode::Down | KeyCode::Up if field.is_branch() => {
             form.move_pick(if key.code == KeyCode::Down { 1 } else { -1 })
@@ -2140,7 +2542,7 @@ fn create_key(app: &mut App, key: KeyEvent) {
                 .input_mut()
                 .is_some_and(|input| input.handle_key(&key).consumed());
             if !consumed && !(down && field == CreateField::Body) {
-                form.focus(field.step(down));
+                form.focus(form.step(field, down));
             }
         }
         KeyCode::Char(' ') if field == CreateField::Draft => form.draft = !form.draft,
@@ -2168,7 +2570,7 @@ fn create_key(app: &mut App, key: KeyEvent) {
         }
     }
     if fill {
-        request_fill(app);
+        refill(app);
     }
     if submit {
         submit_create(app);
@@ -2323,7 +2725,12 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, at: Position) {
                     -1
                 }),
             _ if clicked => {
-                if let Some(&(_, pick)) = form.picks.iter().find(|(r, _)| r.contains(at)) {
+                if let Some(&(_, mode)) = form.mode_hits.iter().find(|(r, _)| r.contains(at)) {
+                    form.mode_chosen = true;
+                    form.set_mode(mode);
+                    form.focus(CreateField::Mode);
+                    fill = true;
+                } else if let Some(&(_, pick)) = form.picks.iter().find(|(r, _)| r.contains(at)) {
                     form.pick = pick;
                     form.choose_pick();
                     fill = true;
@@ -2339,7 +2746,7 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, at: Position) {
             _ => {}
         }
         if fill {
-            request_fill(app);
+            refill(app);
         }
     } else if let Some(form) = merge_form(app) {
         if !clicked {
@@ -2372,6 +2779,7 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, at: Position) {
 pub struct Drawn {
     pub foot_w: u16,
     create_rows: Vec<(Rect, CreateField)>,
+    mode_hits: Vec<(Rect, CreateMode)>,
     merge_rows: Vec<(Rect, MergeRow)>,
     close_rows: Vec<(Rect, CloseRow)>,
     picks: Vec<(Rect, usize)>,
@@ -2386,6 +2794,7 @@ pub(crate) fn write_back(form: &mut PrForm, drawn: Drawn) {
     match form {
         PrForm::Create(form) => {
             form.rows = drawn.create_rows;
+            form.mode_hits = drawn.mode_hits;
             form.picks = drawn.picks;
             if let Some(view) = drawn.body_view {
                 form.body.set_view(view);
@@ -2439,71 +2848,203 @@ fn draw_create(f: &mut Frame, area: Rect, form: &CreateForm, focused: bool, th: 
         ..Drawn::default()
     };
     let dim = Style::default().fg(th.dim);
+    let text = Style::default().fg(th.text);
     let caret = |field: CreateField| focused && form.field == field && form.saving.is_none();
     let width = usize::from(inner.width);
-    // Each field on its row of the four below.
-    let line_of = |field: CreateField, label: &str, input: &TextInput, placeholder: &str| {
-        let row = CreateField::ORDER.iter().position(|f| *f == field);
-        let row = row.and_then(|i| row_rect(inner, i)).unwrap_or_default();
-        form_field(label, input, placeholder, caret(field), row, th)
-    };
-    // From, with how far ahead it is once the fill has counted.
-    let mut from = line_of(CreateField::From, "From", &form.from, "a branch of yours");
-    if let Some(ahead) = form.ahead {
-        let into = form.into.trim();
-        let noun = if ahead == 1 { "commit" } else { "commits" };
-        let note = if into.is_empty() {
-            format!("  {ahead} {noun}")
-        } else if ahead == 0 && form.draft {
-            format!("  0 commits not on {into} — opens on an empty one")
-        } else {
-            format!("  {ahead} {noun} not on {into}")
-        };
-        from.push(Span::styled(note, dim));
-    }
-    if form.fetching {
-        from.push(Span::styled("  fetching origin…", dim));
-    }
-    let into = line_of(
-        CreateField::Into,
-        "Into",
-        &form.into,
-        "the branch it merges into",
-    );
-    let title = line_of(CreateField::Title, "Title", &form.title, "(required)");
-    let draft = vec![
-        form_label("Draft", caret(CreateField::Draft), th),
-        Span::styled(check(form.draft), Style::default().fg(th.text)),
-        Span::styled(
-            if form.draft {
-                "  opened as a draft"
-            } else {
-                "  ready for review"
-            },
-            dim,
-        ),
-    ];
-    let rows = [
-        (CreateField::From, from),
-        (CreateField::Into, into),
-        (CreateField::Title, title),
-        (CreateField::Draft, draft),
-    ];
-    for (i, (field, spans)) in rows.into_iter().enumerate() {
-        if let Some(row) = row_rect(inner, i) {
-            f.render_widget(Paragraph::new(crate::pr_preview::fit(spans, width)), row);
-            drawn.create_rows.push((row, field));
+    let promote = form.mode == CreateMode::Promote;
+    let pair = form.promote_pair();
+    /// One line of the form into `rect`, kept in `rows` as `field`'s.
+    fn put(
+        f: &mut Frame,
+        rows: &mut Vec<(Rect, CreateField)>,
+        rect: Rect,
+        spans: Vec<Span<'static>>,
+        field: Option<CreateField>,
+    ) {
+        let line = crate::pr_preview::fit(spans, usize::from(rect.width));
+        f.render_widget(Paragraph::new(line), rect);
+        if let Some(field) = field {
+            rows.push((rect, field));
         }
     }
 
+    // The modes along the top, the one the form is in lit.
+    if let Some(row) = row_rect(inner, 0) {
+        let promote_label = match &pair {
+            Some((base, default)) => format!(" Promote {base} → {default} "),
+            None => " Promote ".to_string(),
+        };
+        let mut spans = vec![Span::raw(INDENT)];
+        let mut x = row.x + INDENT.chars().count() as u16;
+        let mut hits = Vec::new();
+        for (mode, label) in [
+            (CreateMode::Feature, " Feature branch ".to_string()),
+            (CreateMode::Promote, promote_label),
+        ] {
+            if mode == CreateMode::Promote {
+                spans.push(Span::raw("  "));
+                x += 2;
+            }
+            let style = match (form.mode == mode, caret(CreateField::Mode)) {
+                (true, true) => Style::default()
+                    .fg(th.on_accent)
+                    .bg(th.accent)
+                    .add_modifier(Modifier::BOLD),
+                (true, false) => text.bg(th.sel_bg).add_modifier(Modifier::BOLD),
+                (false, _) => Style::default().fg(th.muted),
+            };
+            let w = (label.chars().count() as u16).min(row.right().saturating_sub(x));
+            hits.push((Rect { x, width: w, ..row }, mode));
+            x += w;
+            spans.push(Span::styled(label, style));
+        }
+        put(
+            f,
+            &mut drawn.create_rows,
+            row,
+            spans,
+            Some(CreateField::Mode),
+        );
+        drawn.mode_hits = hits;
+    }
+    // Under them, what the Promote mode has to say before anything else.
+    if let (true, Some(row)) = (promote, row_rect(inner, 1)) {
+        let line = match (&pair, form.open_promotion()) {
+            (Some((base, default)), Some(open)) => vec![
+                Span::raw(INDENT),
+                Span::styled("● ", Style::default().fg(th.warn)),
+                Span::styled(
+                    format!("#{} {base} → {default} is already open · ", open.number),
+                    dim,
+                ),
+                Span::styled(
+                    "Enter updates its title and description",
+                    Style::default().fg(th.accent),
+                ),
+            ],
+            (Some(_), None) => Vec::new(),
+            (None, _) => {
+                let why = match (&form.base, &form.default) {
+                    (Some(base), Some(_)) => format!(
+                        "the project's base is {base}, the default branch — set another in Settings → Projects"
+                    ),
+                    _ => "reading the branches…".to_string(),
+                };
+                vec![Span::raw(INDENT), Span::styled(why, dim)]
+            }
+        };
+        put(f, &mut drawn.create_rows, row, line, None);
+    }
+
+    // From and Into on one row: the mode's own in Promote, fields in
+    // Feature.
+    if let Some(row) = row_rect(inner, 2) {
+        let half = row.width / 2;
+        let left = Rect { width: half, ..row };
+        let right = Rect {
+            x: row.x + half,
+            width: row.width - half,
+            ..row
+        };
+        if promote {
+            let side = |label: &str, name: Option<&String>| {
+                vec![
+                    form_label(label, false, th),
+                    Span::styled(
+                        name.cloned().unwrap_or_else(|| "…".into()),
+                        text.add_modifier(Modifier::BOLD),
+                    ),
+                ]
+            };
+            put(
+                f,
+                &mut drawn.create_rows,
+                left,
+                side("From", form.base.as_ref()),
+                None,
+            );
+            put(
+                f,
+                &mut drawn.create_rows,
+                right,
+                side("Into", form.default.as_ref()),
+                None,
+            );
+        } else {
+            let from = form_field(
+                "From",
+                &form.from,
+                "a branch of yours",
+                caret(CreateField::From),
+                left,
+                th,
+            );
+            put(
+                f,
+                &mut drawn.create_rows,
+                left,
+                from,
+                Some(CreateField::From),
+            );
+            let into = form_field(
+                "Into",
+                &form.into,
+                "the branch it merges into",
+                caret(CreateField::Into),
+                right,
+                th,
+            );
+            put(
+                f,
+                &mut drawn.create_rows,
+                right,
+                into,
+                Some(CreateField::Into),
+            );
+        }
+    }
+    if let Some(row) = row_rect(inner, 3) {
+        let on = caret(CreateField::Title);
+        let title = form_field("Title", &form.title, "(required)", on, row, th);
+        put(
+            f,
+            &mut drawn.create_rows,
+            row,
+            title,
+            Some(CreateField::Title),
+        );
+    }
+    if let Some(row) = row_rect(inner, 4) {
+        let draft = vec![
+            form_label("Draft", caret(CreateField::Draft), th),
+            Span::styled(check(form.draft), text),
+            Span::styled(
+                if form.draft {
+                    "  opened as a draft"
+                } else {
+                    "  ready for review"
+                },
+                dim,
+            ),
+        ];
+        put(
+            f,
+            &mut drawn.create_rows,
+            row,
+            draft,
+            Some(CreateField::Draft),
+        );
+    }
+
     // Under the fields: the branch list while a branch field has the
-    // caret, the description otherwise.
-    let box_area = Rect {
+    // caret; otherwise the commits — or what goes out — over the
+    // description.
+    let lower = Rect {
         y: inner.y.saturating_add(FIELD_ROWS),
         height: inner.height.saturating_sub(FIELD_ROWS),
         ..inner
     };
-    if box_area.height < 3 || box_area.width < 4 {
+    if lower.height < 3 || lower.width < 4 {
         return drawn;
     }
     let listing = form.field.is_branch() && focused && form.saving.is_none();
@@ -2512,22 +3053,171 @@ fn draw_create(f: &mut Frame, area: Rect, form: &CreateForm, focused: bool, th: 
             CreateField::From => "Your branches",
             _ => "Branches on origin",
         };
-        let inner = form_box(f, box_area, title, true, th);
+        let inner = form_box(f, lower, title, true, th);
         draw_picks(f, form, inner, &mut drawn, th);
         return drawn;
     }
+    let (head, items, total) = if promote {
+        going_out_lines(form, width, th)
+    } else {
+        commit_lines(form, th)
+    };
+    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+    if !head.is_empty() && lower.height >= DESC_MIN + 3 {
+        let room = usize::from(lower.height - DESC_MIN - 3).min(LIST_MAX);
+        lines.push(head);
+        if items.len() <= room {
+            lines.extend(items);
+        } else if room > 0 {
+            let shown = room - 1;
+            lines.extend(items.into_iter().take(shown));
+            lines.push(vec![Span::styled(
+                format!("{INDENT}  … {} more", total.saturating_sub(shown)),
+                dim,
+            )]);
+        }
+    }
+    let list_h = if lines.is_empty() {
+        0
+    } else {
+        lines.len() as u16 + 2
+    };
+    for (i, spans) in lines.into_iter().enumerate() {
+        if let Some(row) = row_rect(lower, i + 1) {
+            put(f, &mut drawn.create_rows, row, spans, None);
+        }
+    }
+    let box_area = Rect {
+        y: lower.y + list_h,
+        height: lower.height - list_h,
+        ..lower
+    };
     drawn.create_rows.push((box_area, CreateField::Body));
-    let on_body = caret(CreateField::Body);
     drawn.body_view = form_text_box(
         f,
         box_area,
         "Description",
         &form.body,
-        on_body,
+        caret(CreateField::Body),
         "(no description)",
         th,
     );
     drawn
+}
+
+/// The rows a description box keeps at least, under the list.
+const DESC_MIN: u16 = 5;
+/// The most rows the list over the description takes past its header.
+const LIST_MAX: usize = 8;
+
+/// A list's header: its name in capitals, then what it says of itself.
+fn list_head(name: &str, note: String, th: Theme) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(
+            format!("{INDENT}{name}"),
+            Style::default().fg(th.muted).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  {note}"), Style::default().fg(th.dim)),
+    ]
+}
+
+/// A list over the create form's description: its header, its rows, and
+/// how many there are in all, for its `… N more`.
+type ListLines = (Vec<Span<'static>>, Vec<Vec<Span<'static>>>, usize);
+
+/// The Feature mode's list: the branch's commits, newest first, under how
+/// many From has that Into lacks.
+fn commit_lines(form: &CreateForm, th: Theme) -> ListLines {
+    let into = form.into.trim();
+    let mut note = match form.ahead {
+        _ if form.pair().is_none() => "pick the branches".to_string(),
+        None if form.filled_for.is_some() => "reading…".to_string(),
+        None => String::new(),
+        Some(0) if form.draft => format!("none not on {into} — opens on an empty one"),
+        Some(n) => format!("{n} not on {into}"),
+    };
+    if form.fetching {
+        note.push_str(" · fetching origin…");
+    }
+    let items: Vec<Vec<Span<'static>>> = form
+        .commits
+        .iter()
+        .rev()
+        .map(|c| {
+            vec![
+                Span::styled(format!("{INDENT}  {} ", c.sha), Style::default().fg(th.dim)),
+                Span::styled(c.subject.clone(), Style::default().fg(th.text)),
+            ]
+        })
+        .collect();
+    let total = form.ahead.unwrap_or(0).max(items.len());
+    (list_head("COMMITS", note, th), items, total)
+}
+
+/// The Promote mode's list: what goes out, latest merge first — each
+/// pull request's number, title, Linear issues and author — under how
+/// many, and since when.
+fn going_out_lines(form: &CreateForm, width: usize, th: Theme) -> ListLines {
+    let Some((base, default)) = form.promote_pair() else {
+        return (Vec::new(), Vec::new(), 0);
+    };
+    let promotion = match &form.promotion {
+        None => {
+            let note = format!("reading what merged into {base}…");
+            return (list_head("GOING OUT", note, th), Vec::new(), 0);
+        }
+        Some(Err(why)) => {
+            let note = format!("couldn't ask GitHub: {why}");
+            return (list_head("GOING OUT", note, th), Vec::new(), 0);
+        }
+        Some(Ok(p)) => p,
+    };
+    let n = promotion.prs.len();
+    let count = match (n, promotion.capped) {
+        (n, true) => format!("{n}+ PRs"),
+        (1, false) => "1 PR".to_string(),
+        (n, false) => format!("{n} PRs"),
+    };
+    let since = promotion
+        .moved_at
+        .map(|at| format!(" ({})", promote::day_of(at)))
+        .unwrap_or_default();
+    let note = format!("{count} merged into {base} since {default} last moved{since}");
+    let number_w = promotion
+        .prs
+        .iter()
+        .map(|pr| pr.number.to_string().len() + 1)
+        .max()
+        .unwrap_or(0);
+    let lead = INDENT.chars().count() + 2 + number_w + 1;
+    let items = promotion
+        .prs
+        .iter()
+        .map(|pr| {
+            let author = format!("  {}", pr.author);
+            let mut ids = pr.linear.join(" ");
+            let mut room =
+                width.saturating_sub(lead + 1 + ids.chars().count() + author.chars().count() + 1);
+            if room < crate::pr_preview::MIN_TEXT_W {
+                ids.clear();
+                room = width.saturating_sub(lead + 1 + author.chars().count() + 1);
+            }
+            let title = truncate(pr.title.trim(), room);
+            let pad = room.saturating_sub(title.chars().count());
+            vec![
+                Span::styled(format!("{INDENT}⇡ "), Style::default().fg(th.merged)),
+                Span::styled(
+                    format!("{:<number_w$} ", format!("#{}", pr.number)),
+                    Style::default().fg(th.dim),
+                ),
+                Span::styled(title, Style::default().fg(th.text)),
+                Span::raw(" ".repeat(pad + 1)),
+                Span::styled(ids, Style::default().fg(th.accent)),
+                Span::styled(author, Style::default().fg(th.dim)),
+            ]
+        })
+        .collect();
+    (list_head("GOING OUT", note, th), items, n)
 }
 
 /// The branch list under a branch field: the rows [`CreateForm::choices`]
@@ -2830,28 +3520,47 @@ mod tests {
     /// Run `retire` against `repo`, on this thread; what it returned and
     /// every `gh` call it made, one line each.
     fn with_stub<T>(repo: Repo, retire: impl AsyncFnOnce(&Path) -> T) -> (T, Vec<String>) {
-        let dir = tempfile::tempdir().unwrap();
-        let log = dir.path().join("calls");
-        let stub = dir.path().join("gh");
-        let script = format!(
-            r#"#!/bin/sh
-echo "$*" >> '{log}'
-case "$*" in
-  "repo view"*) echo {default} ;;
+        let cases = format!(
+            r#"  "repo view"*) echo {default} ;;
   "api repos/{{owner}}/{{repo}}/branches/"*) echo {protected} ;;
   "pr list"*) echo '{stacked}' ;;
   "pr edit {fails}"*) exit 1 ;;
   "pr edit "*) ;;
-  "api -X DELETE"*) {delete} ;;
-  *) exit 2 ;;
-esac
-"#,
-            log = log.display(),
+  "api -X DELETE"*) {delete} ;;"#,
             default = repo.default_branch,
             protected = repo.protected,
             stacked = repo.stacked,
             fails = repo.edit_fails,
             delete = if repo.delete_ok { ":" } else { "exit 1" },
+        );
+        let dir = tempfile::tempdir().unwrap();
+        with_gh(&cases, dir.path(), retire)
+    }
+
+    /// Run `run` on this thread against a stub `gh` answering `cases` (a
+    /// shell `case "$*"` body; anything else fails), in `dir`: what it
+    /// returned and every `gh` call it made, one line each — and, for a
+    /// call that pipes text in, `stdin: <text>` on the lines after it.
+    pub(super) fn with_gh<T>(
+        cases: &str,
+        dir: &Path,
+        run: impl AsyncFnOnce(&Path) -> T,
+    ) -> (T, Vec<String>) {
+        let bin = tempfile::tempdir().unwrap();
+        let log = bin.path().join("calls");
+        let stub = bin.path().join("gh");
+        let script = format!(
+            r#"#!/bin/sh
+echo "$*" >> '{log}'
+case "$*" in
+  *"--body-file -"*|*"--input -"*) sed 's/^/stdin: /' >> '{log}' ;;
+esac
+case "$*" in
+{cases}
+  *) exit 2 ;;
+esac
+"#,
+            log = log.display(),
         );
         std::fs::write(&stub, script).unwrap();
         std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -2860,9 +3569,264 @@ esac
             .enable_all()
             .build()
             .unwrap()
-            .block_on(retire(dir.path()));
+            .block_on(run(dir));
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         (out, calls.lines().map(str::to_string).collect())
+    }
+
+    /// `git <args>` in `repo`, which must work: its output, trimmed.
+    pub(super) fn git_ok(repo: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A repo whose origin — as its remote refs say — has `main` and a
+    /// `dev` two commits past it: the shas of `main`'s tip and of `dev`'s
+    /// two, oldest first.
+    pub(super) fn dev_ahead_of_main(repo: &Path) -> (String, String, String) {
+        let git = |args: &[&str]| git_ok(repo, args);
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "Tess"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        let init = git(&["rev-parse", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/main", "main"]);
+        git(&["checkout", "-q", "-b", "dev"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "Fix login (#1)"]);
+        let one = git(&["rev-parse", "HEAD"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "Fix PDF header (#2)"]);
+        let two = git(&["rev-parse", "HEAD"]);
+        git(&["update-ref", "refs/remotes/origin/dev", "dev"]);
+        git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+        (init, one, two)
+    }
+
+    /// GitHub's merged list into `dev`: #2 and #1 on `dev`'s two commits,
+    /// #0 on the one `main` already has.
+    pub(super) fn merged_into_dev(init: &str, one: &str, two: &str) -> String {
+        let node = |n: u64, title: &str, sha: &str, at: &str| {
+            format!(
+                r#"{{"number":{n},"title":"{title}","url":"https://github.com/o/r/pull/{n}","mergedAt":"{at}","headRefName":"rip-4{n}-x","author":{{"login":"sam"}},"mergeCommit":{{"oid":"{sha}"}}}}"#
+            )
+        };
+        format!(
+            r#"{{"data":{{"repository":{{"pullRequests":{{"nodes":[{},{},{}]}}}}}}}}"#,
+            node(2, "Fix PDF header", two, "2026-11-04T10:00:00Z"),
+            node(0, "Old", init, "2026-10-01T10:00:00Z"),
+            node(1, "Fix login", one, "2026-11-03T10:00:00Z"),
+        )
+    }
+
+    /// What goes out of `dev` is what `main` lacks, read from GitHub's list
+    /// and git's range — and asking is all it does: nothing is written.
+    #[test]
+    fn a_promotion_reads_what_main_lacks_and_the_promotion_already_open() {
+        let repo = tempfile::tempdir().unwrap();
+        let (init, one, two) = dev_ahead_of_main(repo.path());
+        let cases = format!(
+            r#"  "pr list --head dev --base main"*) echo '[{{"number":9,"url":"https://github.com/o/r/pull/9"}}]' ;;
+  "api graphql"*) echo '{}' ;;"#,
+            merged_into_dev(&init, &one, &two)
+        );
+        let (read, calls) = with_gh(&cases, repo.path(), async |dir| {
+            promote::read(dir, "dev", "main").await
+        });
+        let read = read.expect("read");
+        assert_eq!(
+            read.prs.iter().map(|p| p.number).collect::<Vec<_>>(),
+            [2, 1]
+        );
+        assert_eq!(read.ahead, Some(2));
+        assert_eq!(read.open.map(|o| o.number), Some(9));
+        assert!(read.moved_at.is_some());
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(only_read(&calls), "{calls:?}");
+        assert_eq!(default_branch(repo.path()).as_deref(), Some("main"));
+    }
+
+    /// The PULL REQUESTS MODAL as a 140×40 screen.
+    pub(super) fn modal_screen(app: &mut App) -> String {
+        use ratatui::backend::TestBackend;
+        let mut term = ratatui::Terminal::new(TestBackend::new(140, 40)).unwrap();
+        term.draw(|f| {
+            let Some(Overlay::PullRequests(v)) = app.overlay.clone() else {
+                panic!("no pull requests modal");
+            };
+            crate::pr_modal::draw(f, app, &v, app.theme, false);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..40)
+            .map(|y| (0..140).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `⌘N` from `dev`, the project's base, opens on the Promote mode: dev
+    /// into main, what goes out listed with its Linear issue, the title and
+    /// description written from it. The promotion already open is said,
+    /// and Enter updates it — `gh pr edit`, nothing pushed or created.
+    #[test]
+    fn a_form_from_the_base_promotes_it_and_enter_updates_the_open_one() {
+        let repo = tempfile::tempdir().unwrap();
+        let (init, one, two) = dev_ahead_of_main(repo.path());
+        let cases = format!(
+            r#"  "pr list --head dev --base main"*) echo '[{{"number":9,"url":"https://github.com/o/r/pull/9"}}]' ;;
+  "api graphql"*) echo '{}' ;;
+  "pr edit 9 "*) ;;"#,
+            merged_into_dev(&init, &one, &two)
+        );
+        let today = promote::today();
+        let (shot, calls) = with_gh(&cases, repo.path(), async |dir| {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let project = ProjectId("p".into());
+            let mut app = App::new();
+            app.pr_actions_tx = Some(tx);
+            app.linear.insert(
+                project.clone(),
+                crate::linear::LinearList {
+                    teams: vec![crate::linear::LinearTeam {
+                        id: "t".into(),
+                        key: "RIP".into(),
+                        name: "Riplo".into(),
+                        triage_state: None,
+                    }],
+                    ..Default::default()
+                },
+            );
+            let mut view = PullRequestsView::new(project.clone(), "demo".into(), dir.into());
+            let form = CreateForm::new(project, dir.into(), "dev".into());
+            let ticket = form.ticket;
+            view.form = Some(Box::new(PrForm::Create(form)));
+            app.overlay = Some(Overlay::PullRequests(view));
+            land_answer(
+                &mut app,
+                Answer::Branches {
+                    ticket,
+                    heads: vec!["dev".into(), "main".into()],
+                    bases: vec!["dev".into(), "main".into()],
+                    base: Some("dev".into()),
+                    default: Some("main".into()),
+                    fetched: true,
+                },
+            );
+            let form = create_form(&mut app).cloned().expect("the form");
+            assert_eq!(form.mode, CreateMode::Promote, "from the base: a promotion");
+            assert_eq!(form.field, CreateField::Title);
+            let answer = rx.recv().await.expect("the promotion");
+            land_answer(&mut app, answer);
+            let form = create_form(&mut app).cloned().expect("the form");
+            assert_eq!(
+                form.title.as_str(),
+                format!("Release {today}: Fix PDF header, Fix login")
+            );
+            assert_eq!(
+                form.body.as_str(),
+                "## Going out\n- Fix PDF header (#2) · RIP-42\n- Fix login (#1) · RIP-41"
+            );
+            let shot = modal_screen(&mut app);
+            let hints = hints(view_form(&app));
+            assert!(hints.iter().any(|h| h.does == "update #9"), "{hints:?}");
+            handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
+            let answer = rx.recv().await.expect("the update");
+            land_answer(&mut app, answer);
+            assert!(!form_up(&app), "updated: the form closes");
+            let flash = format!("{:?}", app.flash);
+            assert!(
+                flash.contains("updated #9's title and description"),
+                "{flash}"
+            );
+            shot
+        });
+        for want in [
+            "Promote dev → main",
+            "#9 dev → main is already open",
+            "From   dev",
+            "Into   main",
+            "GOING OUT  2 PRs merged into dev since main last moved",
+            "#2 Fix PDF header",
+            "RIP-42  sam",
+        ] {
+            assert!(shot.contains(want), "{want}:\n{shot}");
+        }
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("pr edit 9 --title Release")),
+            "{calls:?}"
+        );
+        assert!(
+            calls.contains(&"stdin: ## Going out".to_string()),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.starts_with("pr create")),
+            "{calls:?}"
+        );
+    }
+
+    /// The form up in the modal.
+    fn view_form(app: &App) -> &PrForm {
+        match &app.overlay {
+            Some(Overlay::PullRequests(view)) => view.form.as_deref().expect("a form"),
+            _ => panic!("no modal"),
+        }
+    }
+
+    /// Promote with nothing open yet opens one — `gh pr create` from the
+    /// base into the default as origin has them — and never pushes.
+    #[test]
+    fn a_promotion_with_none_open_creates_one_without_pushing() {
+        let repo = tempfile::tempdir().unwrap();
+        let (init, one, two) = dev_ahead_of_main(repo.path());
+        let cases = format!(
+            r#"  "pr list --head dev --base main"*) echo '[]' ;;
+  "api graphql"*) echo '{}' ;;
+  "pr create "*) cat >/dev/null; echo https://github.com/o/r/pull/12 ;;"#,
+            merged_into_dev(&init, &one, &two)
+        );
+        let (created, calls) = with_gh(&cases, repo.path(), async |dir| {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let project = ProjectId("p".into());
+            let mut app = App::new();
+            app.pr_actions_tx = Some(tx);
+            let mut view = PullRequestsView::new(project.clone(), "demo".into(), dir.into());
+            let mut form = CreateForm::new(project, dir.into(), "feature".into());
+            form.base = Some("dev".into());
+            form.default = Some("main".into());
+            form.field = CreateField::Mode;
+            view.form = Some(Box::new(PrForm::Create(form)));
+            app.overlay = Some(Overlay::PullRequests(view));
+            // The mode row's → picks Promote by hand.
+            handle_key(&mut app, KeyEvent::from(KeyCode::Right));
+            let answer = rx.recv().await.expect("the promotion");
+            land_answer(&mut app, answer);
+            let form = create_form(&mut app).cloned().expect("the form");
+            assert_eq!(form.mode, CreateMode::Promote);
+            assert!(form.open_promotion().is_none());
+            handle_key(&mut app, KeyEvent::from(KeyCode::Enter));
+            let answer = rx.recv().await.expect("the create");
+            matches!(answer, Answer::Created { result: Ok(_), .. })
+        });
+        // The repo has no origin to push to: a push tried would have
+        // failed the create.
+        assert!(created, "{calls:?}");
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("pr create --head dev --base main --title Release")),
+            "{calls:?}"
+        );
     }
 
     fn merged_into_main(repo: Repo, branch: &'static str) -> (BranchFate, Vec<String>) {
@@ -3141,19 +4105,24 @@ esac
         );
     }
 
+    fn commit(subject: &str, body: &str) -> FillCommit {
+        FillCommit {
+            sha: "abc1234".into(),
+            subject: subject.into(),
+            body: body.into(),
+        }
+    }
+
     #[test]
     fn the_fill_is_ghs() {
         assert_eq!(
-            fill_text(
-                "fix/login-redirect",
-                &[("Stop the bounce".into(), "Why.".into())]
-            ),
+            fill_text("fix/login-redirect", &[commit("Stop the bounce", "Why.")]),
             ("Stop the bounce".to_string(), "Why.".to_string())
         );
         assert_eq!(
             fill_text(
                 "fix/login-redirect",
-                &[("One".into(), String::new()), ("Two".into(), "b".into())]
+                &[commit("One", ""), commit("Two", "b")]
             ),
             ("Login redirect".to_string(), "- One\n- Two".to_string())
         );
@@ -3161,8 +4130,8 @@ esac
             fill_text("eager_sparrow", &[]),
             ("Eager sparrow".to_string(), String::new())
         );
-        let many: Vec<(String, String)> = (0..FILL_SUBJECTS)
-            .map(|i| (format!("c{i}"), String::new()))
+        let many: Vec<FillCommit> = (0..FILL_SUBJECTS)
+            .map(|i| commit(&format!("c{i}"), ""))
             .collect();
         let (_, body) = fill_text("x", &many);
         assert!(
@@ -3259,13 +4228,20 @@ esac
     }
 
     #[test]
-    fn commits_parse_subject_then_body() {
-        let text = "One\x1f\x1e\nTwo\x1fline 1\nline 2\n\x1e\n";
+    fn commits_parse_sha_subject_then_body() {
+        let text = "aaa1111\x1fOne\x1f\x1e\nbbb2222\x1fTwo\x1fline 1\nline 2\n\x1e\n";
+        let parsed = parse_commits(text);
         assert_eq!(
-            parse_commits(text),
+            parsed,
             vec![
-                ("One".to_string(), String::new()),
-                ("Two".to_string(), "line 1\nline 2".to_string())
+                FillCommit {
+                    sha: "aaa1111".into(),
+                    ..commit("One", "")
+                },
+                FillCommit {
+                    sha: "bbb2222".into(),
+                    ..commit("Two", "line 1\nline 2")
+                },
             ]
         );
     }
@@ -3324,26 +4300,33 @@ esac
         assert!(form.auto && !form.bypass, "auto clears bypass");
     }
 
+    /// Tab walks the Feature mode's fields round from the mode row, and
+    /// the Promote mode's skip the branches it fixes.
     #[test]
     fn tab_walks_the_create_form_round() {
-        let mut field = CreateField::From;
+        let mut form = CreateForm::new(ProjectId("p".into()), PathBuf::from("/x"), "f".into());
+        let mut field = CreateField::Mode;
         for expected in [
+            CreateField::From,
             CreateField::Into,
             CreateField::Title,
             CreateField::Draft,
             CreateField::Body,
-            CreateField::From,
+            CreateField::Mode,
         ] {
-            field = field.step(true);
+            field = form.step(field, true);
             assert_eq!(field, expected);
         }
-        assert_eq!(CreateField::From.step(false), CreateField::Body);
+        assert_eq!(form.step(CreateField::Mode, false), CreateField::Body);
+        form.mode = CreateMode::Promote;
+        assert_eq!(form.step(CreateField::Mode, true), CreateField::Title);
+        assert_eq!(form.step(CreateField::Title, false), CreateField::Mode);
     }
 
     #[test]
     fn the_hints_come_from_the_table() {
         let form = CreateForm::new(ProjectId("p".into()), PathBuf::from("/x"), "feature".into());
-        for field in CreateField::ORDER {
+        for field in CreateField::FEATURE {
             let mut form = form.clone();
             form.field = field;
             crate::hints::assert_hints_from(&hints(&PrForm::Create(form)), keys::ALL);

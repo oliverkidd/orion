@@ -445,6 +445,15 @@ lookup that fails keeps the last list that worked on screen, and the PULL REQUES
 time, no checks — cut to the ones merged in the last 7 days (`pull_request::MERGED_DAYS`). It is
 the first page of them, the 100 most recently touched, which is where every new merge lands.
 
+The new pull request form's **Promote** mode works out what a `dev → main` promotion carries from
+two answers: GitHub's merged pull requests into `dev` (the 100 most recently touched, each with its
+merge commit) and git's `origin/main..origin/dev`, read locally after the form's fetch. A pull request
+goes out when its merge commit is in that range — exactly what the promotion's diff will hold,
+however `main` last moved (a promotion merged, a fast-forward, a hotfix straight onto `main`); git
+unable to say, it falls back to the ones merged after `main`'s tip was committed. Its Linear issues
+are the ones Linear has it attached to, then any its title or head branch names (`rip-412-…`) of a
+team orion's Linear list knows. A promotion already open is one `gh pr list --head dev --base main`.
+
 The open list, the failing-checks recheck, a checkout's own lookup and the page the cursor rests on
 all say where the same pull request stands, on their own beats, and land in whatever order the
 network gives. So none of them is drawn directly: each answer goes into one store of what is known
