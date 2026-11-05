@@ -444,11 +444,9 @@ pub(crate) mod keys {
     ];
 }
 
-/// `⌘1-9 project` — none where the terminal sends no ⌘, as then the
-/// keys cannot be pressed.
-fn project_hint() -> Option<crate::hints::Hint> {
-    crate::keymap::cmd_shown()
-        .then(|| crate::hints::Hint::new(format!("{}-9", keys::PROJECT.label()), "project"))
+/// `⌘1-9 project`.
+fn project_hint() -> crate::hints::Hint {
+    crate::hints::Hint::new(format!("{}-9", keys::PROJECT.label()), "project")
 }
 
 /// The keys along the modal's bottom edge. Esc lets a selection go
@@ -522,7 +520,7 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
         keys::JUMP.hint(),
         keys::LINEAR.hint(),
     ];
-    hints.extend(project_hint());
+    hints.push(project_hint());
     hints.extend([
         keys::NEW_GROUP.hint(),
         keys::PRESET.hint(),

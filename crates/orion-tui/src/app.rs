@@ -2279,21 +2279,6 @@ impl HostsView {
     }
 }
 
-/// A live rebind in the Hotkeys tab: the overlay is holding still, waiting
-/// for the user to press the key they want.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HotkeyCapture {
-    /// Index into [`crate::keymap::ACTIONS`].
-    pub action: usize,
-    /// Add the chord as an alternate instead of replacing the row's list.
-    pub add: bool,
-    /// A chord captured but held back because another action in the same
-    /// scope already answers to it: Enter takes it anyway (and the other
-    /// action loses it), Esc backs out. The `Vec` is the losers, for the
-    /// warning text.
-    pub pending: Option<(crate::keymap::KeyChord, Vec<usize>)>,
-}
-
 /// How loudly the line under the settings body is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoticeLevel {
@@ -2322,10 +2307,7 @@ pub struct SettingsView {
     /// so click hit-testing agrees with what's actually on screen.
     pub body_area: Rect,
     pub first_row: usize,
-    /// Set while the Hotkeys tab is waiting for a key press.
-    pub capture: Option<HotkeyCapture>,
-    /// Transient line under the body: duplicate warnings, host-terminal
-    /// warnings, "reset to default".
+    /// Transient line under the body: a failed write, a note on the row.
     pub notice: Option<(String, NoticeLevel)>,
     /// The install `i` asked about on a row whose program isn't on PATH
     /// (`install`): Enter runs it in the editor modal, anything else
@@ -2347,12 +2329,6 @@ impl SettingsView {
             on_tabs,
             ..Self::default()
         }
-    }
-
-    /// True while a key press should be captured as a binding rather than
-    /// steering the overlay.
-    pub fn capturing(&self) -> bool {
-        self.capture.as_ref().is_some_and(|c| c.pending.is_none())
     }
 
     pub fn is_hotkeys(&self) -> bool {

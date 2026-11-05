@@ -1325,10 +1325,10 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             // giant list, and at ~24 rows it fits a stock terminal window
             // (the old single list clipped its tail on short screens).
             // Key columns come from the live keymap, not hardcoded text:
-            // every one of these is rebindable in Settings → Hotkeys, and
-            // help that lies about that is worse than no help. Literals
-            // are for keys that belong to an overlay rather than the
-            // grid, which is why they aren't rebindable.
+            // every one of these can be rebound in config.json's
+            // `keybindings`, and help that lies about that is worse than
+            // no help. Literals are for keys that belong to an overlay
+            // rather than the grid, which is why they can't be.
             use crate::keymap::Action::*;
             enum HelpKeys {
                 Lit(&'static str),
@@ -1467,7 +1467,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         (Act(&[Home]), "home: orion's animation"),
                         (Act(&[ToggleLauncherPane]), "fold / unfold the pane"),
                         (Act(&[ToggleFullScreen]), "full-screen / normal size"),
-                        (Act(&[Settings]), "settings; Hotkeys tab rebinds"),
+                        (Act(&[Settings]), "settings; Hotkeys tab lists keys"),
                         (Act(&[Quit]), "quit"),
                     ],
                 ),
@@ -1630,7 +1630,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             f.render_widget(block, area);
 
             let dim = Style::default().fg(th.dim);
-            let capturing = view.capturing();
 
             // ---- tab strip ----
             let (strip, hits) = tab_strip(
@@ -1767,36 +1766,18 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         let spec = crate::keymap::spec_at(*i)
                             .expect("settings_rows indexes the action table");
                         let selected = *i == view.selected && !view.on_tabs;
-                        let value = if selected && capturing {
-                            "press a key…".to_string()
-                        } else {
-                            app.keymap.display_at(*i)
-                        };
-                        let reach = app.keymap.reach_at(*i);
-                        let ambiguous = app.keymap.is_ambiguous(*i);
+                        let value = app.keymap.display_at(*i);
                         let mut label_style = Style::default();
-                        let mut value_style = if reach.is_fine() && !ambiguous {
-                            crate::hints::key_style(th)
-                        } else {
-                            Style::default().fg(th.warn)
-                        };
+                        let mut value_style = crate::hints::key_style(th);
                         if selected {
                             label_style = label_style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
                             value_style = value_style.bg(th.sel_bg).add_modifier(Modifier::BOLD);
                         }
-                        // A row the host terminal probably can't deliver
-                        // says so on the row, not only when you bind it.
-                        let flag = match (ambiguous, reach) {
-                            (true, _) | (_, crate::keymap::Reach::Blocked) => "✗",
-                            (_, crate::keymap::Reach::Risky) => "⚠",
-                            _ => " ",
-                        };
                         // No brackets here, unlike the value tabs: `^]` is
-                        // a bindable chord and `[^q ^]]` is unreadable.
+                        // a chord and `[^q ^]]` is unreadable.
                         lines.push(Line::from(vec![
                             Span::styled(format!("   {:<28}", spec.label), label_style),
                             Span::styled(format!("{value:<18}"), value_style),
-                            Span::styled(flag.to_string(), Style::default().fg(th.warn)),
                         ]));
                     }
                 }
@@ -1806,14 +1787,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             }
 
             // ---- the EXPLANATION: a notice, or what the row does ----
-            // A row the config file has double-booked explains itself in
-            // place of its usual hint — that's the more urgent thing to
-            // say about it.
-            let shadowed = view
-                .is_hotkeys()
-                .then(|| app.keymap.shadowed_by(view.selected))
-                .filter(|names| !names.is_empty());
-            let (explanation, explain_style) = match (&view.notice, shadowed) {
+            let (explanation, explain_style) = match &view.notice {
                 // `i` asked whether to run an installer: the question
                 // stands in the explanation's place until it is answered.
                 _ if view.install.is_some() => (
@@ -1823,21 +1797,14 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         .unwrap_or_default(),
                     Style::default().fg(th.accent),
                 ),
-                (Some((text, level)), _) => (
+                Some((text, level)) => (
                     text.clone(),
                     match level {
                         crate::app::NoticeLevel::Warn => Style::default().fg(th.warn),
                         crate::app::NoticeLevel::Info => Style::default().fg(th.muted),
                     },
                 ),
-                (None, Some(names)) => (
-                    format!(
-                        "✗ this key also belongs to {} — whichever is listed first wins",
-                        names.join(", ")
-                    ),
-                    Style::default().fg(th.warn),
-                ),
-                (None, None) => (
+                None => (
                     crate::hints::expand(&crate::config::hint_at(tab, view.selected), &app.keymap),
                     dim,
                 ),
@@ -3168,16 +3135,11 @@ pub(crate) mod settings_keys {
     pub const CLOSE: Key = Key::new(&["esc", "q", "s"], "close");
     pub const NEXT_TAB: Key = Key::new(&["tab", "]"], "next tab");
     pub const PREV_TAB: Key = Key::new(&["shift+tab", "["], "previous tab");
-    /// Enter on a row: toggle it, cycle it, type it, rebind it.
+    /// Enter on a row: toggle it, cycle it, type it.
     pub const CHOOSE: Key = Key::new(&["enter", "space"], "toggle");
     /// A value row's value, either way.
     pub const CYCLE: Key = Key::new(&["left", "right", "h", "l"], "cycle").show(2);
     pub const RESET_ALL: Key = Key::new(&["shift+r"], "reset all");
-    /// A HOTKEYS row: a second chord beside the first, the default back,
-    /// none at all.
-    pub const ADD: Key = Key::new(&["a", "+"], "add");
-    pub const DEFAULT: Key = Key::new(&["backspace", "delete"], "default");
-    pub const UNBIND: Key = Key::new(&["x"], "unbind");
     /// A CLAUDE ACCOUNTS row. `⌫` on a dir SAVED ON THIS MACHINE is its
     /// trash.
     pub const RENAME: Key = Key::new(&["r"], "rename");
@@ -3192,8 +3154,8 @@ pub(crate) mod settings_keys {
     #[test]
     fn every_settings_key_parses() {
         for key in [
-            CLOSE, NEXT_TAB, PREV_TAB, CHOOSE, CYCLE, RESET_ALL, ADD, DEFAULT, UNBIND, RENAME,
-            SIGN_OUT, REMOVE, INSTALL, RUN,
+            CLOSE, NEXT_TAB, PREV_TAB, CHOOSE, CYCLE, RESET_ALL, RENAME, SIGN_OUT, REMOVE, INSTALL,
+            RUN,
         ] {
             assert!(key.parses(), "{:?}", key.chords);
         }
@@ -3205,18 +3167,6 @@ pub(crate) mod settings_keys {
 pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     use settings_keys::*;
-    if view.capturing() {
-        return vec![
-            Hint::new("any key", "binds it").kept(),
-            Hint::new("Esc", "cancel"),
-        ];
-    }
-    if view.capture.is_some() {
-        return vec![
-            Hint::new("Enter", "reassign it here").kept(),
-            Hint::new("Esc", "leave it where it is"),
-        ];
-    }
     if let Some(plan) = &view.install {
         let mut hints = Vec::new();
         if plan.runnable() {
@@ -3233,12 +3183,7 @@ pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hint
             .unwrap_or_default();
         vec![CYCLE.hint_as("tab"), Hint::new(digits, "jump")]
     } else if view.is_hotkeys() {
-        vec![
-            CHOOSE.hint_as("rebind").kept(),
-            ADD.hint(),
-            DEFAULT.hint(),
-            UNBIND.hint(),
-        ]
+        Vec::new()
     } else if crate::config::setting_at(view.tab, view.selected).is_some_and(|s| s.kind.is_text()) {
         vec![CHOOSE.hint_as("type a value (empty = default)").kept()]
     } else if let Some(
@@ -5938,10 +5883,10 @@ mod tests {
         }
         let full = text(&quick, launcher_view::BOX_SIZE.0 as usize);
         assert_eq!(
-            full, "Enter launch · ^J newline · ^X preset · ^V paste image · Esc cancel",
-            "no ⌘ from this terminal, so no kitty ⇧Enter either: ^J"
+            full,
+            "Enter launch · ⇧Enter newline · ⌘U preset · ^V paste image · Esc cancel"
         );
-        for chord in ["^P", "^T", "^/", "^Y", "^N", "Tab agent"] {
+        for chord in ["⌘P", "⌘.", "⌘/", "⌘Y", "⌘N", "Tab agent"] {
             assert!(!full.contains(chord), "{full} repeats {chord}");
         }
         assert!(!text(&cloud, 80).contains("Tab"));

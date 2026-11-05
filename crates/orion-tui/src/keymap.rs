@@ -1,30 +1,21 @@
-//! Rebindable application hotkeys.
+//! Application hotkeys.
 //!
 //! Every key the grid reacts to is an [`Action`] here, with a default
-//! chord list. The Hotkeys tab of the settings overlay writes overrides
-//! into the shared config JSON (`keybindings: { "<action id>": "j, down" }`),
-//! and the event loop dispatches through [`Keymap::lookup`] instead of
-//! matching raw `KeyCode`s.
+//! chord list. A hand-edited `keybindings` object in the config JSON
+//! (`keybindings: { "<action id>": "j, down" }`) overrides them, the
+//! Hotkeys tab of the settings overlay lists them, and the event loop
+//! dispatches through [`Keymap::lookup`] instead of matching raw
+//! `KeyCode`s.
 //!
-//! Two things this module knows that a naive keymap wouldn't:
-//!
-//! * **Normalization.** Terminals disagree about how a key arrives —
-//!   `Shift+j` may come through as `Char('J')` with or without the shift
-//!   bit, `Ctrl+]` is spelled `Ctrl+5` in the legacy encoding, `BackTab`
-//!   is really `Shift+Tab`. [`KeyChord::from_event`] folds all of that into
-//!   one canonical form so a binding matches whatever the emulator sends.
-//!
-//! * **Host reachability.** orion runs *inside* Terminal.app / Ghostty /
-//!   tmux, which eat chords before we ever see them — Terminal.app every
-//!   `⌘` combo, Ghostty the `⌘` ones it binds, most `^⇧` ones, `^←`.
-//!   [`host_warning`] flags those at bind time so the user
-//!   finds out at the moment of choosing, not the next time the key does
-//!   nothing.
+//! **Normalization.** Terminals disagree about how a key arrives —
+//! `Shift+j` may come through as `Char('J')` with or without the shift
+//! bit, `Ctrl+]` is spelled `Ctrl+5` in the legacy encoding, `BackTab` is
+//! really `Shift+Tab`. [`KeyChord::from_event`] folds all of that into one
+//! canonical form so a binding matches whatever the emulator sends.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Which mode a binding is live in. The same chord may mean different
 /// things in each, so conflicts are only conflicts within one scope.
@@ -196,7 +187,7 @@ pub enum Action {
     /// whole body, or bring it back. Folding it also unselects the card
     /// under the cursor, so nothing is selected and nothing is read.
     ToggleLauncherPane,
-    /// `^F`: FULL-SCREEN the session in the PANE — the grid and its header
+    /// `⌘F`: FULL-SCREEN the session in the PANE — the grid and its header
     /// give way to the PTY — or bring it back down to the pane beside the
     /// cards. From the cards it full-screens the one under the cursor.
     ToggleFullScreen,
@@ -349,7 +340,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Search every project, worktree, session and open pull request at once; Enter jumps there, and the last row adds a project",
         group: "NAVIGATE",
         scope: Scope::Global,
-        defaults: &["cmd+k", "ctrl+k"],
+        defaults: &["cmd+k"],
     },
     ActionSpec {
         action: Action::NextAttention,
@@ -444,7 +435,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Open the diff viewer for the checkout under the cursor — or, with the pane reading a pull request, that pull request's diff",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["cmd+e", "ctrl+e"],
+        defaults: &["cmd+e"],
     },
     ActionSpec {
         action: Action::OpenRepo,
@@ -480,7 +471,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Ask GitHub again now for the project's open pull requests and issues, the selected worktree's PR and the one the pane is reading",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["cmd+r", "ctrl+r"],
+        defaults: &["cmd+r"],
     },
     ActionSpec {
         action: Action::CommentPullRequest,
@@ -508,8 +499,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         // ⌘U: every window orion opens is a ⌘ chord, and ⌘P is Go to
-        // file, as in Cursor. `^V`, the old `v`, is its twin.
-        defaults: &["cmd+u", "ctrl+v"],
+        // file, as in Cursor.
+        defaults: &["cmd+u"],
     },
     ActionSpec {
         action: Action::Linear,
@@ -518,7 +509,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "List Linear issues assigned to you; type to search, ↓ to the list where Space marks, Enter starts one agent on the marked set in one worktree",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        defaults: &["cmd+l", "ctrl+l"],
+        defaults: &["cmd+l"],
     },
     ActionSpec {
         action: Action::CopyLinearIssues,
@@ -538,10 +529,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Your todo lists, a tab per project: tick off, prioritise, send an agent or a Linear issue from any item",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        // ⌘I is the one ⌘ letter neither macOS nor Ghostty keeps; `^I` is
-        // Tab, so its twin is `^Q` — free on the grid, where only a
-        // locked pane reads it (its hatch).
-        defaults: &["cmd+i", "ctrl+q"],
+        // ⌘I is the one ⌘ letter neither macOS nor Ghostty keeps.
+        defaults: &["cmd+i"],
     },
     ActionSpec {
         action: Action::WeekReview,
@@ -629,7 +618,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         scope: Scope::Global,
         // Never a bare letter: a stray `a` aimed at a prompt that lands on
         // the grid must not file a session away.
-        defaults: &["cmd+shift+a", "ctrl+a"],
+        defaults: &["cmd+shift+a"],
     },
     ActionSpec {
         action: Action::Unarchive,
@@ -638,7 +627,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Bring the archived agent under the cursor back into the list",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["cmd+shift+u", "ctrl+u"],
+        defaults: &["cmd+shift+u"],
     },
     ActionSpec {
         action: Action::ToggleArchived,
@@ -722,10 +711,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "SESSIONS",
         scope: Scope::Global,
         // ⌘W, as every Mac app closes what is in front, and ⌘ reaches
-        // orion from inside a locked pane. `^W` is its twin for a
-        // terminal that never sends ⌘ — from the cards and the pane
-        // unlocked only: in a locked pane it is the agent's delete-word.
-        defaults: &["cmd+w", "ctrl+w"],
+        // orion from inside a locked pane.
+        defaults: &["cmd+w"],
     },
     ActionSpec {
         action: Action::DeleteAll,
@@ -752,7 +739,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "An agent is an AI coding CLI on a task ({new_terminal} starts a terminal, a plain shell; both are sessions). Type the task; Enter starts it (Tab picks the harness; {select_model} the model; {cycle_effort} the effort; {select_launch_worktree} the worktree)",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["cmd+n", "ctrl+n"],
+        defaults: &["cmd+n"],
     },
     ActionSpec {
         action: Action::SelectModel,
@@ -761,7 +748,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Searchable model list for the new-agent box (opens the box first if it is not up); type to narrow, Enter picks",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["cmd+/", "ctrl+/"],
+        defaults: &["cmd+/"],
     },
     ActionSpec {
         action: Action::CycleEffort,
@@ -770,13 +757,12 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Step the new-agent box's effort / reasoning variant (default, low, high, …), shown in its header; with no box up, the Agents default",
         group: "SESSIONS",
         scope: Scope::Global,
-        // `⌘Y` first, with `^Y` its twin as every entry point has one:
-        // macOS keeps ⌘⇧/ for every app's Help menu, so in Ghostty that
-        // press opens Help and never reaches orion. ⌘⇧/ stays bound behind
-        // them — `cmd+?`, the one spelling every way a terminal sends it
+        // `⌘Y` first: macOS keeps ⌘⇧/ for every app's Help menu, so in
+        // Ghostty that press opens Help and never reaches orion. ⌘⇧/ stays
+        // bound behind it — `cmd+?`, the one spelling every way a terminal sends it
         // folds to ([`KeyChord::from_event`]) — for a terminal or a Mac
         // that lets it through.
-        defaults: &["cmd+y", "ctrl+y", "cmd+?"],
+        defaults: &["cmd+y", "cmd+?"],
     },
     ActionSpec {
         action: Action::SelectLaunchWorktree,
@@ -785,7 +771,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Pick which worktree a new agent runs in (opens the box first if it is not up); type to narrow, or choose + new worktree. Cursor's workspace picker",
         group: "SESSIONS",
         scope: Scope::Global,
-        defaults: &["cmd+.", "ctrl+t"],
+        defaults: &["cmd+."],
     },
     ActionSpec {
         action: Action::FollowUp,
@@ -822,7 +808,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Fuzzy file finder for the selected worktree",
         group: "FILES",
         scope: Scope::Global,
-        defaults: &["cmd+p", "ctrl+p"],
+        defaults: &["cmd+p"],
     },
     ActionSpec {
         action: Action::Grep,
@@ -833,7 +819,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         scope: Scope::Global,
         // ⌘⇧F as in Cursor; `^⇧F` needs the kitty protocol, so `⇧F` is
         // the twin a stock terminal delivers.
-        defaults: &["cmd+shift+f", "ctrl+shift+f", "shift+f"],
+        defaults: &["cmd+shift+f", "shift+f"],
     },
     ActionSpec {
         action: Action::TreeBrowser,
@@ -842,7 +828,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Browse the worktree's files with a preview pane",
         group: "FILES",
         scope: Scope::Global,
-        defaults: &["cmd+b", "ctrl+b"],
+        defaults: &["cmd+b"],
     },
     ActionSpec {
         action: Action::Skills,
@@ -851,7 +837,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Browse every agent skill on the machine — yours, the checkout's, other harnesses' and plugins'; Enter edits one, ^W moves it to the Trash",
         group: "FILES",
         scope: Scope::Global,
-        defaults: &["cmd+s", "ctrl+s"],
+        defaults: &["cmd+s"],
     },
     // ---- TERMINAL ----
     ActionSpec {
@@ -881,10 +867,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "GENERAL",
         scope: Scope::Global,
         // ⌘J, as in Cursor, reaches orion from inside the pane as well —
-        // no one types a ⌘ chord as text. `^J` is its twin for terminals
-        // that never send ⌘, from the cards only: in the pane it is the
-        // agent's newline.
-        defaults: &["cmd+j", "ctrl+j"],
+        // no one types a ⌘ chord as text.
+        defaults: &["cmd+j"],
     },
     ActionSpec {
         action: Action::ToggleFullScreen,
@@ -893,7 +877,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Give the session in the pane the whole screen, or bring it back down beside the cards — from inside the pane too, where it is never forwarded to the agent. From the cards it full-screens the one under the cursor. Esc and ^Q also bring a full-screen session back down",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["cmd+f", "ctrl+f"],
+        defaults: &["cmd+f"],
     },
     ActionSpec {
         action: Action::PaneTabs,
@@ -911,7 +895,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "The home screen: orion's animation and the ways into a project. Esc or Enter goes back to the grid where you were; a click on the footer's orion version does the same as this key",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["cmd+g", "ctrl+g"],
+        defaults: &["cmd+g"],
     },
     ActionSpec {
         action: Action::Hosts,
@@ -974,9 +958,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Start the selected checkout's stack — its run command (Settings → Project, or .orion.json \"run\"), else its compose stack — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        // ^Z rather than ^⇧S, which only the kitty protocol can send;
-        // raw mode keeps it from suspending anything.
-        defaults: &["cmd+shift+s", "ctrl+z"],
+        defaults: &["cmd+shift+s"],
     },
     ActionSpec {
         action: Action::StopAllStacks,
@@ -1021,9 +1003,9 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Stop the daemon and every agent and terminal in it, then start orion again from scratch, behind a confirmation. Agents resume, and any cut off mid-turn carry on; terminals start a new shell",
         group: "GENERAL",
         scope: Scope::Global,
-        // ⌘⇧R, HOME's key; `^X` the twin a terminal without ⌘ delivers.
-        // Both behind the confirm: nothing here is one stray letter.
-        defaults: &["cmd+shift+r", "ctrl+x"],
+        // ⌘⇧R, HOME's key, behind the confirm: nothing here is one stray
+        // letter.
+        defaults: &["cmd+shift+r"],
     },
     ActionSpec {
         action: Action::Upgrade,
@@ -1032,8 +1014,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Install the newer release the footer offers, then restart orion and its daemon on it, behind a confirmation. Agents resume, and any cut off mid-turn carry on; terminals start a new shell",
         group: "GENERAL",
         scope: Scope::Global,
-        // `^D` the twin a terminal without ⌘ delivers, behind the confirm.
-        defaults: &["cmd+shift+g", "ctrl+d"],
+        defaults: &["cmd+shift+g"],
     },
     ActionSpec {
         action: Action::CommandPalette,
@@ -1044,7 +1025,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         scope: Scope::Global,
         // `:` — vim's command line — is the key a stock terminal
         // delivers: it sends neither ⌘ nor `^⇧`.
-        defaults: &["cmd+shift+p", "ctrl+shift+p", ":"],
+        defaults: &["cmd+shift+p", ":"],
     },
     ActionSpec {
         action: Action::OpenOutside,
@@ -1053,7 +1034,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "A menu of what the cursor is on, outside orion: the repo, pull request or issue on GitHub, the checkout's open command, your editor app, a terminal",
         group: "GENERAL",
         scope: Scope::Global,
-        defaults: &["cmd+o", "ctrl+o"],
+        defaults: &["cmd+o"],
     },
     ActionSpec {
         action: Action::OpenInCursor,
@@ -1403,272 +1384,20 @@ fn key_display(code: KeyCode) -> String {
     }
 }
 
-// ---- host-terminal reachability ----
-
-/// How likely a chord is to actually reach orion from inside the user's
-/// terminal emulator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reach {
-    /// Every emulator delivers it.
-    Fine,
-    /// Arrives in some setups only — worth saying so, still bindable.
-    Risky,
-    /// Effectively never arrives: the emulator or the OS takes it first.
-    Blocked,
-}
-
-impl Reach {
-    pub fn is_fine(self) -> bool {
-        self == Reach::Fine
-    }
-}
-
-/// Ctrl+letter chords whose legacy control byte is another key's, with the
-/// warning each earns — a table so adding one can't drift the wording.
-/// The message returns as `&'static str`, hence full strings per entry.
-const CTRL_COLLISIONS: &[(char, &str)] = &[
-    (
-        'm',
-        "^m is the same byte as Enter in terminals without the kitty protocol",
-    ),
-    (
-        'i',
-        "^i is the same byte as Tab in terminals without the kitty protocol",
-    ),
-    (
-        '[',
-        "^[ is the same byte as Esc in terminals without the kitty protocol",
-    ),
-    (
-        'h',
-        "^h is the same byte as ⌫ in terminals without the kitty protocol",
-    ),
-];
-
-static CMD_SHOWN: AtomicBool = AtomicBool::new(false);
-static IN_ORION_APP: AtomicBool = AtomicBool::new(false);
-
-/// orion is running in Orion.app, whose Ghostty hands it every ⌘ chord but
-/// the few it keeps, so those chords are no longer painted ⚠.
-pub fn set_in_orion_app(unbound: bool) {
-    IN_ORION_APP.store(unbound, Ordering::Relaxed);
-}
-
-pub fn in_orion_app() -> bool {
-    IN_ORION_APP.load(Ordering::Relaxed)
-}
-
-/// Whether Help, the footers and the palettes print the ⌘ chords: set
-/// once at startup, when orion runs in Orion.app, which hands them over.
-pub fn set_cmd_shown(shown: bool) {
-    CMD_SHOWN.store(shown, Ordering::Relaxed);
-}
-
-/// Whether the hints print ⌘ chords ([`set_cmd_shown`]).
-pub fn cmd_shown() -> bool {
-    CMD_SHOWN.load(Ordering::Relaxed)
-}
-
-/// The chords of `all` this terminal can press ([`shown_side`] under
-/// [`cmd_shown`]) — a modal's own key table spelled the way the keymap's
+/// The chords of `all` the hints print: the ⌘ ones, or all of them when
+/// there are none — a modal's own key table spelled the way the keymap's
 /// actions are.
-pub fn shown_side_of(all: &[KeyChord]) -> Vec<KeyChord> {
-    shown_side(all, cmd_shown())
-}
-
-/// [`Keymap::shown_chords`]'s pick: the ⌘ chords of `all` when `cmd`,
-/// the rest otherwise — or all of them, when that side has none.
-fn shown_side(all: &[KeyChord], cmd: bool) -> Vec<KeyChord> {
-    let side: Vec<KeyChord> = all
+pub fn shown(all: &[KeyChord]) -> Vec<KeyChord> {
+    let cmd: Vec<KeyChord> = all
         .iter()
-        .filter(|c| c.mods.contains(KeyModifiers::SUPER) == cmd)
+        .filter(|c| c.mods.contains(KeyModifiers::SUPER))
         .copied()
         .collect();
-    if side.is_empty() {
+    if cmd.is_empty() {
         all.to_vec()
     } else {
-        side
+        cmd
     }
-}
-
-/// The ⌘ chords Ghostty binds by default (`ghostty +list-keybinds
-/// --default`, Ghostty 1.3.1), in orion's spelling: none of them reaches a
-/// program running inside it. Orion.app clears them all but a few
-/// ([`crate::ghostty_config::KEPT`]); a Ghostty window of the user's own
-/// keeps every one.
-const GHOSTTY_BINDS: &[&str] = &[
-    "cmd+<",
-    "cmd+,",
-    "cmd+c",
-    "cmd+v",
-    "cmd+=",
-    "cmd++",
-    "cmd+-",
-    "cmd+0",
-    "ctrl+shift+cmd+j",
-    "shift+cmd+j",
-    "alt+shift+cmd+j",
-    "cmd+1",
-    "cmd+2",
-    "cmd+3",
-    "cmd+4",
-    "cmd+5",
-    "cmd+6",
-    "cmd+7",
-    "cmd+8",
-    "cmd+9",
-    "cmd+enter",
-    "shift+cmd+enter",
-    "shift+cmd+p",
-    "cmd+q",
-    "cmd+k",
-    "cmd+a",
-    "shift+cmd+t",
-    "cmd+z",
-    "shift+cmd+z",
-    "cmd+home",
-    "cmd+end",
-    "cmd+pgup",
-    "cmd+pgdn",
-    "cmd+j",
-    "shift+cmd+up",
-    "shift+cmd+down",
-    "cmd+n",
-    "cmd+w",
-    "alt+cmd+w",
-    "shift+cmd+w",
-    "alt+shift+cmd+w",
-    "cmd+t",
-    "cmd+{",
-    "cmd+}",
-    "cmd+d",
-    "shift+cmd+d",
-    "cmd+[",
-    "cmd+]",
-    "alt+cmd+up",
-    "alt+cmd+down",
-    "alt+cmd+left",
-    "alt+cmd+right",
-    "ctrl+cmd+up",
-    "ctrl+cmd+down",
-    "ctrl+cmd+left",
-    "ctrl+cmd+right",
-    "ctrl+cmd+=",
-    "cmd+up",
-    "cmd+down",
-    "cmd+f",
-    "cmd+e",
-    "shift+cmd+f",
-    "cmd+g",
-    "shift+cmd+g",
-    "alt+cmd+i",
-    "ctrl+cmd+f",
-    "shift+cmd+v",
-    "cmd+right",
-    "cmd+left",
-    "cmd+backspace",
-];
-
-/// Whether the host terminal is likely to swallow `chord` before orion
-/// sees it, and why. orion is always a guest inside Terminal.app, Ghostty,
-/// iTerm, tmux or an ssh session, and each of those claims keys for itself
-/// — so the honest answer here is a probability, not a fact. Nothing is
-/// rejected on the strength of it; the settings overlay just says so.
-pub fn host_warning(chord: &KeyChord) -> (Reach, Option<&'static str>) {
-    let m = chord.mods;
-    let ctrl = m.contains(KeyModifiers::CONTROL);
-    let shift = m.contains(KeyModifiers::SHIFT);
-    let alt = m.contains(KeyModifiers::ALT);
-
-    if m.contains(KeyModifiers::SUPER) {
-        let ghostty_binds = GHOSTTY_BINDS
-            .iter()
-            .filter_map(|spec| KeyChord::parse(spec))
-            .any(|listed| listed == *chord);
-        let released = crate::ghostty_config::releases(chord);
-        if ghostty_binds && !released {
-            return (
-                Reach::Blocked,
-                Some("Orion.app keeps this ⌘ chord — copy, paste, quit, close window, full screen and the text size stay the app's, and ⌘← and ⌘→ are typed as the line's ends"),
-            );
-        }
-        if released && in_orion_app() {
-            return (Reach::Fine, None);
-        }
-        if ghostty_binds {
-            return (
-                Reach::Risky,
-                Some("⌘ reaches orion in Orion.app (orion app) — a Ghostty window of your own keeps this chord for itself, and Terminal.app never sends ⌘"),
-            );
-        }
-        return (
-            Reach::Risky,
-            Some("⌘ reaches orion in Orion.app (orion app) and kitty only — Terminal.app and orion browser never send it; the ^ twin works everywhere"),
-        );
-    }
-    // Mission Control owns these on stock macOS (they switch Spaces).
-    if ctrl && matches!(chord.code, KeyCode::Left | KeyCode::Right) && !shift && !alt {
-        return (
-            Reach::Risky,
-            Some("macOS Mission Control takes ^← / ^→ unless you turn its Spaces shortcuts off"),
-        );
-    }
-    // Legacy encoding has no shifted Enter: without the kitty protocol the
-    // terminal sends the same \r a bare Enter does.
-    if shift && !ctrl && !alt && chord.code == KeyCode::Enter {
-        return (
-            Reach::Risky,
-            Some("⇧Enter needs the kitty keyboard protocol — Ghostty/kitty send it, Terminal.app sends a plain Enter and tmux flattens it to one; ⇧O and ⌥Enter arrive everywhere"),
-        );
-    }
-    if ctrl && shift {
-        return (
-            Reach::Risky,
-            Some(
-                "^⇧ needs the kitty keyboard protocol — Ghostty/kitty send it, Terminal.app won't",
-            ),
-        );
-    }
-    if ctrl {
-        // Legacy control bytes that collide with a key of their own.
-        if let Some((_, why)) = CTRL_COLLISIONS
-            .iter()
-            .find(|(c, _)| chord.code == KeyCode::Char(*c))
-        {
-            return (Reach::Risky, Some(why));
-        }
-        match chord.code {
-            KeyCode::Enter | KeyCode::Tab | KeyCode::Backspace | KeyCode::Esc => {
-                return (
-                    Reach::Risky,
-                    Some("ctrl + this key needs the kitty keyboard protocol to be distinguishable"),
-                )
-            }
-            // Only a handful of punctuation has a control byte at all.
-            KeyCode::Char(c)
-                if !c.is_ascii_alphabetic()
-                    && !matches!(c, ' ' | '@' | '[' | '\\' | ']' | '^' | '_' | '/') =>
-            {
-                return (
-                    Reach::Risky,
-                    Some("most terminals have no encoding for ctrl + this key"),
-                )
-            }
-            _ => {}
-        }
-    }
-    if alt {
-        return (
-            Reach::Risky,
-            Some("⌥ only arrives if your terminal sends Option as Meta (Terminal.app: off by default)"),
-        );
-    }
-    if let KeyCode::F(n) = chord.code {
-        if n >= 13 {
-            return (Reach::Risky, Some("few terminals emit F13 and above"));
-        }
-    }
-    (Reach::Fine, None)
 }
 
 // ---- the map ----
@@ -1721,17 +1450,6 @@ impl Keymap {
         map
     }
 
-    /// Only what differs from the defaults, for writing back to the config.
-    pub fn overrides(&self) -> BTreeMap<String, String> {
-        let mut out = BTreeMap::new();
-        for (index, spec) in ACTIONS.iter().enumerate() {
-            if self.binds[index] != parse_list(spec.defaults) {
-                out.insert(spec.id.to_string(), self.spec_list(index));
-            }
-        }
-        out
-    }
-
     /// The action `chord` triggers in `scope`, if any.
     pub fn lookup(&self, scope: Scope, chord: &KeyChord) -> Option<Action> {
         ACTIONS
@@ -1772,17 +1490,15 @@ impl Keymap {
         index_of(action).map_or_else(|| UNBOUND.into(), |i| self.display_at(i))
     }
 
-    /// The chords Help and the footer print for an action: the ⌘ ones in
-    /// a terminal that sends ⌘ ([`set_cmd_shown`]), the rest elsewhere.
-    /// ⌘ never reaches orion in Terminal.app or `orion browser`, and every
-    /// ⌘ default has a `^` twin beside it, so whichever side the host
-    /// cannot use stays bound as a silent alias that only Settings →
-    /// Hotkeys lists. An action bound on one side alone shows that side.
+    /// The chords Help and the footer print for an action: its ⌘ ones,
+    /// or every chord when it has none ([`shown`]). A bare-letter
+    /// fallback beside a ⌘ chord (`s` for `⌘,`) stays bound, and only
+    /// Settings → Hotkeys lists it.
     pub fn shown_chords(&self, action: Action) -> Vec<KeyChord> {
-        shown_side(self.chords(action), cmd_shown())
+        shown(self.chords(action))
     }
 
-    /// [`Self::label`] without the ⌘ aliases ([`Self::shown_chords`]).
+    /// [`Self::label`] without the fallbacks ([`Self::shown_chords`]).
     pub fn shown_label(&self, action: Action) -> String {
         let chords = self.shown_chords(action);
         if chords.is_empty() {
@@ -1798,104 +1514,6 @@ impl Keymap {
     /// The first of [`Self::shown_chords`], for a footer hint.
     pub fn shown_first(&self, action: Action) -> Option<KeyChord> {
         self.shown_chords(action).first().copied()
-    }
-
-    fn spec_list(&self, index: usize) -> String {
-        self.binds[index]
-            .iter()
-            .map(|c| c.spec())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-
-    /// Other rows that already answer to `chord` in the same scope as
-    /// `index`. Cross-scope reuse is fine — the panels and a locked
-    /// terminal never read the same keystroke.
-    pub fn conflicts(&self, index: usize, chord: &KeyChord) -> Vec<usize> {
-        let Some(spec) = ACTIONS.get(index) else {
-            return Vec::new();
-        };
-        ACTIONS
-            .iter()
-            .enumerate()
-            .filter(|(i, s)| *i != index && s.scope == spec.scope && self.binds[*i].contains(chord))
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    /// Bind `chord` to `index`, replacing its chords (or appending when
-    /// `add`). Any conflicting row loses the chord — one keystroke can
-    /// only mean one thing, and silently shadowing the loser would be
-    /// worse than taking it away visibly.
-    pub fn bind(&mut self, index: usize, chord: KeyChord, add: bool) {
-        for other in self.conflicts(index, &chord) {
-            self.binds[other].retain(|c| *c != chord);
-        }
-        let slot = &mut self.binds[index];
-        if add {
-            if !slot.contains(&chord) {
-                slot.push(chord);
-            }
-        } else {
-            slot.clear();
-            slot.push(chord);
-        }
-    }
-
-    pub fn reset(&mut self, index: usize) {
-        if let Some(spec) = ACTIONS.get(index) {
-            self.binds[index] = parse_list(spec.defaults);
-        }
-    }
-
-    pub fn clear(&mut self, index: usize) {
-        if let Some(slot) = self.binds.get_mut(index) {
-            slot.clear();
-        }
-    }
-
-    /// A row sharing a chord with another action in the same scope. The
-    /// overlay warns before it lets you make one, so this only comes from a
-    /// hand-edited config — but when it does, [`Keymap::lookup`] silently
-    /// gives the key to whichever action is declared first, and a row that
-    /// looks bound while doing nothing is exactly the confusing state the
-    /// duplicate warning exists to prevent.
-    pub fn is_ambiguous(&self, index: usize) -> bool {
-        self.chords_at(index)
-            .iter()
-            .any(|c| !self.conflicts(index, c).is_empty())
-    }
-
-    /// Who else claims this row's chords, as a readable list.
-    pub fn shadowed_by(&self, index: usize) -> Vec<&'static str> {
-        let mut out: Vec<&'static str> = self
-            .chords_at(index)
-            .iter()
-            .flat_map(|c| self.conflicts(index, c))
-            .filter_map(|i| ACTIONS.get(i).map(|s| s.label))
-            .collect();
-        out.dedup();
-        out
-    }
-
-    /// Rows whose chords the host terminal probably eats, with the worst
-    /// verdict across the row's chords. A ⌘ chord the host might not send
-    /// is no worry on a row that also has a chord without ⌘: that twin is
-    /// the one such a host uses.
-    pub fn reach_at(&self, index: usize) -> Reach {
-        let chords = self.chords_at(index);
-        let has_twin = chords.iter().any(|c| !c.mods.contains(KeyModifiers::SUPER));
-        chords
-            .iter()
-            .map(|c| match host_warning(c).0 {
-                Reach::Risky if has_twin && c.mods.contains(KeyModifiers::SUPER) => Reach::Fine,
-                reach => reach,
-            })
-            .fold(Reach::Fine, |worst, r| match (worst, r) {
-                (Reach::Blocked, _) | (_, Reach::Blocked) => Reach::Blocked,
-                (Reach::Risky, _) | (_, Reach::Risky) => Reach::Risky,
-                _ => Reach::Fine,
-            })
     }
 }
 
@@ -1917,8 +1535,8 @@ mod tests {
         KeyChord::from_event(&KeyEvent::new(code, mods))
     }
 
-    /// `⌘⌫` deletes the worktree, and `⇧D` — what a terminal without ⌘
-    /// sends — is its twin; plain `⌫` stays the delete of one row.
+    /// `⌘⌫` deletes the worktree, and so does `⇧D`; plain `⌫` stays the
+    /// delete of one row.
     #[test]
     fn cmd_backspace_and_shift_d_delete_the_worktree() {
         let map = Keymap::default();
@@ -1950,13 +1568,11 @@ mod tests {
         let map = Keymap::default();
         let at = |spec: &str| map.lookup(Scope::Global, &KeyChord::parse(spec).unwrap());
         assert_eq!(at("cmd+/"), Some(Action::SelectModel));
-        assert_eq!(at("ctrl+/"), Some(Action::SelectModel));
+        assert_eq!(at("ctrl+/"), None, "no ^ twin");
         assert_eq!(at("shift+cmd+/"), Some(Action::CycleEffort));
         assert_eq!(at("cmd+?"), Some(Action::CycleEffort));
         assert_eq!(at("cmd+y"), Some(Action::CycleEffort));
-        assert_eq!(at("ctrl+y"), Some(Action::CycleEffort));
         assert_eq!(at("cmd+."), Some(Action::SelectLaunchWorktree));
-        assert_eq!(at("ctrl+t"), Some(Action::SelectLaunchWorktree));
         // Terminals deliver ⌘⇧/ as SUPER+SHIFT+/ (keep SHIFT) or as ⌘?.
         let from_slash = ev(
             KeyCode::Char('/'),
@@ -1976,25 +1592,15 @@ mod tests {
 
     /// macOS keeps ⌘⇧/ for every app's Help menu, so in Ghostty it opens
     /// Help and never reaches orion: Cycle effort leads with a chord
-    /// neither macOS nor Ghostty takes — `⌘Y`, its `^Y` twin beside it, as
-    /// every entry point has — and keeps ⌘⇧/ bound behind them.
+    /// neither macOS nor Ghostty takes — `⌘Y` — and keeps ⌘⇧/ bound
+    /// behind it.
     #[test]
     fn cycle_effort_leads_with_a_chord_the_mac_lets_through() {
         let map = Keymap::default();
         let chords = map.chords(Action::CycleEffort);
-        let cmd = shown_side(chords, true);
-        let twin = shown_side(chords, false);
+        let cmd = shown(chords);
         assert_eq!(cmd.first().map(KeyChord::display).as_deref(), Some("⌘Y"));
-        assert_eq!(twin.first().map(KeyChord::display).as_deref(), Some("^Y"));
-        let first = cmd[0];
-        assert!(
-            !GHOSTTY_BINDS
-                .iter()
-                .filter_map(|spec| KeyChord::parse(spec))
-                .any(|bound| bound == first),
-            "Ghostty binds nothing on ⌘Y"
-        );
-        assert!(crate::ghostty_config::releases(&first));
+        assert!(crate::ghostty_config::releases(&cmd[0]));
         assert!(chords.contains(&KeyChord::parse("shift+cmd+/").unwrap()));
     }
 
@@ -2021,9 +1627,9 @@ mod tests {
             assert_eq!(chord.spec(), "cmd+?");
             assert_eq!(chord.display(), "⌘?");
             assert_eq!(map.lookup(Scope::Global, &chord), Some(Action::CycleEffort));
-            // A rebind captured from any one spelling answers the others.
-            let mut rebound = Keymap::default();
-            rebound.bind(index_of(Action::CycleEffort).unwrap(), chord, false);
+            // A rebind written in any one spelling answers the others.
+            let rebound =
+                Keymap::from_overrides(&BTreeMap::from([("cycle_effort".into(), chord.spec())]));
             for other in spellings {
                 assert_eq!(
                     rebound.lookup(Scope::Global, &other),
@@ -2119,17 +1725,16 @@ mod tests {
     #[test]
     fn defaults_do_not_collide_within_a_scope() {
         let map = Keymap::default();
-        for (i, _) in ACTIONS.iter().enumerate() {
+        let mut owners: Vec<(Scope, KeyChord, &str)> = Vec::new();
+        for (i, spec) in ACTIONS.iter().enumerate() {
             for chord in map.chords_at(i) {
-                assert!(
-                    map.conflicts(i, chord).is_empty(),
-                    "{} default {chord} collides with {:?}",
-                    ACTIONS[i].id,
-                    map.conflicts(i, chord)
-                        .iter()
-                        .map(|j| ACTIONS[*j].id)
-                        .collect::<Vec<_>>()
-                );
+                if let Some((_, _, owner)) = owners
+                    .iter()
+                    .find(|(scope, bound, _)| *scope == spec.scope && bound == chord)
+                {
+                    panic!("{} default {chord} collides with {owner}", spec.id);
+                }
+                owners.push((spec.scope, *chord, spec.id));
             }
         }
     }
@@ -2157,7 +1762,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_enter_is_its_own_chord_and_flagged_as_kitty_only() {
+    fn shift_enter_is_its_own_chord() {
         let map = Keymap::default();
         let shift_enter = ev(KeyCode::Enter, KeyModifiers::SHIFT);
         assert_eq!(map.lookup(Scope::Global, &shift_enter), None);
@@ -2166,7 +1771,6 @@ mod tests {
             Some(Action::Activate)
         );
         assert_eq!(shift_enter.spec(), "shift+enter");
-        assert_eq!(host_warning(&shift_enter).0, Reach::Risky);
     }
 
     #[test]
@@ -2185,18 +1789,14 @@ mod tests {
         );
     }
 
-    /// `^/` in Terminal.app or tmux is byte 0x1F, which crossterm names
-    /// `ctrl+7`: it is still Select model's twin, as the box's header
-    /// says it is.
+    /// `^/` in a legacy terminal is byte 0x1F, which crossterm names
+    /// `ctrl+7`: it is the chord `ctrl+/`, as a hand-edited binding
+    /// spells it.
     #[test]
     fn legacy_ctrl_7_is_ctrl_slash() {
         let legacy = ev(KeyCode::Char('7'), KeyModifiers::CONTROL);
         assert_eq!(legacy, KeyChord::parse("ctrl+/").unwrap());
         assert_eq!(legacy.display(), "^/");
-        assert_eq!(
-            Keymap::default().lookup(Scope::Global, &legacy),
-            Some(Action::SelectModel)
-        );
     }
 
     #[test]
@@ -2214,9 +1814,9 @@ mod tests {
             map.lookup(Scope::Terminal, &ctrl_q),
             Some(Action::UnlockTerminal)
         );
-        // ^q in the panels is another action's — the scopes never read
-        // the same press: there it is the TODOS MODAL's twin.
-        assert_eq!(map.lookup(Scope::Global, &ctrl_q), Some(Action::Todos));
+        // ^q in the panels is nobody's: the scopes never read the same
+        // press.
+        assert_eq!(map.lookup(Scope::Global, &ctrl_q), None);
         assert_eq!(
             map.lookup(Scope::Global, &KeyChord::parse("ctrl+c").unwrap()),
             Some(Action::Quit)
@@ -2257,18 +1857,16 @@ mod tests {
         assert_eq!(at("t"), Some(Action::NewTerminal));
         assert_eq!(at("shift+t"), None);
         assert_eq!(at("cmd+o"), Some(Action::OpenOutside));
-        assert_eq!(at("ctrl+o"), Some(Action::OpenOutside));
+        assert_eq!(at("ctrl+o"), None);
         assert!(map.chords(Action::OpenOutsideTerminal).is_empty());
         assert_eq!(map.label(Action::NewTerminal), "t");
     }
 
-    /// Help and the footer print one side of each ⌘ / `^` pair: the ⌘
-    /// chords where the terminal sends ⌘, the `^` twins elsewhere. A
-    /// binding on one side alone shows on both.
+    /// Help and the footer print an action's ⌘ chords, and every chord of
+    /// one that has none.
     #[test]
-    fn shown_chords_pick_the_side_the_terminal_sends() {
+    fn shown_chords_are_the_cmd_ones() {
         let map = Keymap::default();
-        let finder = map.chords(Action::FindFile);
         let spell = |chords: Vec<KeyChord>| {
             chords
                 .iter()
@@ -2276,48 +1874,33 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        assert_eq!(spell(shown_side(finder, false)), "^P");
-        assert_eq!(spell(shown_side(finder, true)), "⌘P");
-        let help = [KeyChord::parse("cmd+k").unwrap()];
-        assert_eq!(spell(shown_side(&help, false)), "⌘K", "⌘ alone still shows");
+        assert_eq!(spell(map.shown_chords(Action::FindFile)), "⌘P");
+        assert_eq!(spell(map.shown_chords(Action::Settings)), "⌘,", "not `s`");
+        assert_eq!(spell(map.shown_chords(Action::NewTerminal)), "t");
         for n in 1..=9u8 {
             let action = Action::SelectProjectTab(n);
-            assert_eq!(spell(shown_side(map.chords(action), true)), format!("⌘{n}"));
+            assert_eq!(spell(map.shown_chords(action)), format!("⌘{n}"));
         }
     }
 
+    /// The `^` twin of every ⌘ chord is gone: the ⌘ chord is the one key,
+    /// and only `:` (palette) and `s` (settings) stay beside theirs.
     #[test]
-    fn binding_steals_the_chord_from_its_previous_owner() {
-        let mut map = Keymap::default();
-        let g = KeyChord::parse("ctrl+e").unwrap();
-        let open_repo = index_of(Action::OpenRepo).unwrap();
-        assert_eq!(
-            map.conflicts(open_repo, &g),
-            vec![index_of(Action::GitDiff).unwrap()]
-        );
-        map.bind(open_repo, g, false);
-        assert_eq!(map.lookup(Scope::Global, &g), Some(Action::OpenRepo));
-        assert!(!map.chords(Action::GitDiff).contains(&g));
-    }
-
-    #[test]
-    fn overrides_round_trip_through_the_config_shape() {
-        let mut map = Keymap::default();
-        let quit = index_of(Action::Quit).unwrap();
-        map.bind(quit, KeyChord::parse("ctrl+x").unwrap(), false);
-        let saved = map.overrides();
-        assert_eq!(saved.get("quit").map(String::as_str), Some("ctrl+x"));
-        // Untouched actions stay out of the file.
-        assert!(!saved.contains_key("help"));
-        let loaded = Keymap::from_overrides(&saved);
-        assert_eq!(
-            loaded.lookup(Scope::Global, &KeyChord::parse("ctrl+x").unwrap()),
-            Some(Action::Quit)
-        );
-        assert_eq!(
-            loaded.lookup(Scope::Global, &KeyChord::parse("q").unwrap()),
-            None
-        );
+    fn no_cmd_chord_has_a_ctrl_twin() {
+        for spec in ACTIONS {
+            let chords = parse_list(spec.defaults);
+            if chords.iter().any(|c| c.mods.contains(KeyModifiers::SUPER)) {
+                assert!(
+                    chords
+                        .iter()
+                        .all(|c| !c.mods.contains(KeyModifiers::CONTROL)
+                            || c.mods.contains(KeyModifiers::SUPER)),
+                    "{} keeps a ^ twin: {:?}",
+                    spec.id,
+                    spec.defaults
+                );
+            }
+        }
     }
 
     #[test]
@@ -2341,61 +1924,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_hand_edited_duplicate_is_flagged_on_both_rows() {
-        // Nothing in the overlay can produce this; a text editor can.
-        let map = Keymap::from_overrides(&BTreeMap::from([("open_repo".into(), "ctrl+e".into())]));
-        let open_repo = index_of(Action::OpenRepo).unwrap();
-        let diff = index_of(Action::GitDiff).unwrap();
-        assert!(map.is_ambiguous(open_repo));
-        assert!(map.is_ambiguous(diff));
-        assert_eq!(map.shadowed_by(open_repo), vec!["Changes"]);
-        // The defaults themselves are always unambiguous.
-        assert!(Keymap::default()
-            .binds
-            .iter()
-            .enumerate()
-            .all(|(i, _)| !Keymap::default().is_ambiguous(i)));
-    }
-
-    #[test]
-    fn cmd_chords_are_reported_by_who_keeps_them() {
-        for kept in ["cmd+c", "cmd+shift+w", "cmd+q", "cmd+0"] {
-            let (reach, why) = host_warning(&KeyChord::parse(kept).unwrap());
-            assert_eq!(reach, Reach::Blocked, "{kept} is the app's for good");
-            assert!(why.unwrap().contains('⌘'));
-        }
-        // Every other chord Ghostty binds reaches orion in Orion.app and
-        // nowhere else — its tab key and a rebind onto ⌘] included.
-        for freed in [
-            "cmd+shift+p",
-            "cmd+n",
-            "cmd+,",
-            "cmd+k",
-            "cmd+]",
-            "cmd+1",
-            "cmd+w",
-            "cmd+t",
-        ] {
-            let (reach, why) = host_warning(&KeyChord::parse(freed).unwrap());
-            assert_eq!(reach, Reach::Risky, "{freed}");
-            assert!(why.unwrap().contains("Orion.app"), "{freed}");
-        }
-        set_in_orion_app(true);
-        let (reach, why) = host_warning(&KeyChord::parse("cmd+shift+p").unwrap());
-        let (rebound, _) = host_warning(&KeyChord::parse("cmd+]").unwrap());
-        let (copy, _) = host_warning(&KeyChord::parse("cmd+c").unwrap());
-        set_in_orion_app(false);
-        assert_eq!(reach, Reach::Fine, "in the app: no ⚠");
-        assert!(why.is_none());
-        assert_eq!(rebound, Reach::Fine);
-        assert_eq!(copy, Reach::Blocked);
-        for passes in ["cmd+p", "cmd+u"] {
-            let (reach, _) = host_warning(&KeyChord::parse(passes).unwrap());
-            assert_eq!(reach, Reach::Risky, "{passes}");
-        }
-    }
-
     /// No default chord is one Orion.app keeps for itself: every ⌘ default
     /// reaches orion there.
     #[test]
@@ -2403,59 +1931,15 @@ mod tests {
         let map = Keymap::default();
         for (i, spec) in ACTIONS.iter().enumerate() {
             for chord in map.chords_at(i) {
-                assert_ne!(
-                    host_warning(chord).0,
-                    Reach::Blocked,
-                    "{}: {}",
-                    spec.id,
-                    chord.spec()
-                );
+                if chord.mods.contains(KeyModifiers::SUPER) {
+                    assert!(
+                        crate::ghostty_config::releases(chord),
+                        "{}: {}",
+                        spec.id,
+                        chord.spec()
+                    );
+                }
             }
-        }
-    }
-
-    #[test]
-    fn risky_chords_are_flagged_but_allowed() {
-        for spec in ["ctrl+shift+f", "ctrl+left", "alt+p", "ctrl+m", "f13"] {
-            let chord = KeyChord::parse(spec).unwrap();
-            let (reach, why) = host_warning(&chord);
-            assert_eq!(reach, Reach::Risky, "{spec}");
-            assert!(why.is_some(), "{spec}");
-        }
-    }
-
-    #[test]
-    fn ordinary_chords_are_clean() {
-        for spec in ["q", "shift+j", "/", "ctrl+q", "down", "enter", "f5"] {
-            let chord = KeyChord::parse(spec).unwrap();
-            assert!(host_warning(&chord).0.is_fine(), "{spec} should be fine");
-        }
-    }
-
-    #[test]
-    fn every_bound_action_ships_with_a_reachable_chord() {
-        // Some defaults are deliberately iffy (^] is a fallback hatch, the
-        // ⌘ chords Ghostty-only), but no bound action may be *only*
-        // reachable through a chord the host terminal is likely to eat.
-        // An action shipped with no key at all is a COMMAND PALETTE row.
-        let map = Keymap::default();
-        for (i, spec) in ACTIONS.iter().enumerate() {
-            let chords = map.chords_at(i);
-            // The tab slots are ⌘N alone by choice: digits stay free for
-            // typing, and `[` / `]` walk the tabs in any terminal.
-            // Insert preset is ⌘U alone too: in a locked pane every `^` chord
-            // is the agent's, so a twin would take one away from it.
-            if matches!(
-                spec.action,
-                Action::SelectProjectTab(_) | Action::InsertPreset
-            ) {
-                continue;
-            }
-            assert!(
-                chords.is_empty() || chords.iter().any(|c| host_warning(c).0.is_fine()),
-                "{} has no chord a stock terminal delivers",
-                spec.id
-            );
         }
     }
 

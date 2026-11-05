@@ -3299,7 +3299,7 @@ mod tests {
 
         app.open_prs_failed.insert(project.clone());
         let stale = screen(&mut app, 100, 20);
-        assert!(stale.contains("couldn't refresh (^R retries)"), "{stale}");
+        assert!(stale.contains("couldn't refresh (⌘R retries)"), "{stale}");
         assert!(stale.contains("#42 Fix login"), "{stale}");
         assert_eq!(
             view(&app).list_area.y,

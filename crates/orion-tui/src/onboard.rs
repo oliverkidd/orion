@@ -1011,8 +1011,7 @@ fn app_page(body: &mut Body, th: Theme, width: u16) {
     body.prose(
         &format!(
             "⌘N starts an agent, ⌘K jumps anywhere, ⌘P finds a file — in Orion.app. {} keeps ⌘ \
-             for itself or never passes it on, so here each answers to its ^ twin instead: ^N, \
-             ^K, ^P.",
+             for itself or never passes it on, so here they don't reach orion.",
             terminal.unwrap_or("A terminal")
         ),
         width,
@@ -1032,7 +1031,7 @@ fn app_page(body: &mut Body, th: Theme, width: u16) {
     body.blank();
     body.prose(
         &format!(
-            "{} stays in {} with the ^ twins. `orion app` makes the move any time.",
+            "{} stays in {}, without them. `orion app` makes the move any time.",
             keys::NEXT_PAGE.label(),
             terminal.unwrap_or("this terminal")
         ),
@@ -2803,7 +2802,7 @@ mod tests {
                         said.contains("Orion's ⌘ shortcuts need its own app"),
                         "{shot}"
                     );
-                    assert!(said.contains("its ^ twin instead"), "{shot}");
+                    assert!(said.contains("here they don't reach orion"), "{shot}");
                     assert!(
                         said.contains("`orion app` makes the move any time"),
                         "{shot}"

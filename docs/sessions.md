@@ -328,7 +328,7 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   always there — `default` until one is picked — for every harness that has one; an AGENT PRESET on
   the box adds its own `preset … ⇧Tab` field; and a fresh worktree reads `new worktree <branch>` in
   green, the frame turning green with it. The keys are the ones the box answers to, the worktree,
-  model and effort ones spelled from your keymap (`^T`, `^/`, `^Y` where the terminal never sends ⌘);
+  model and effort ones spelled from your keymap (`⌘.`, `⌘/`, `⌘Y`);
   on a narrow screen the fields wrap onto more rows rather than lose a key. What `Enter` sends is
   the dim line along the bottom of the frame, right above its keys.
   `⌘P` puts the PROJECT PICKER over it — literally over it: the list floats inside the box, which
@@ -560,8 +560,8 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   into the pane beside the cards, where that session is already running, with its input locked and
   the grid still up over it — the same place a click into the pane lands. `` ^` `` hands the keys
   back to the cards, and a second `` ^` `` folds the pane away.
-- **Full-screen** is `^F` in the pane (or on a card), or the `⤢` in the pane's header: the grid and
-  its header give way to the session, the keys still in it. `^F` again, `^q`, `` ^` `` or the `⤡` at
+- **Full-screen** is `⌘F` in the pane (or on a card), or the `⤢` in the pane's header: the grid and
+  its header give way to the session, the keys still in it. `⌘F` again, `^q`, `` ^` `` or the `⤡` at
   the right end of the full-screen header brings it back down into the pane beside the cards, the
   keys still in it.
 - **On a terminal too short to draw the pane**, stepping into a session gives it the whole screen

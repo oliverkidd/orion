@@ -429,13 +429,13 @@ fn into_pane(app: &App, bands: &[crate::launcher::Band]) -> Option<Hint> {
 }
 
 /// [`act`] for a key pressed from inside a LOCKED PANE, where only a ⌘
-/// chord reaches orion — the `^` twins are the agent's there. None in a
-/// terminal that never sends ⌘ ([`crate::keymap::cmd_shown`]), or for an
-/// action with no ⌘ chord, so the footer never names a key the agent
-/// would get instead.
+/// chord reaches orion. None for an action with no ⌘ chord, so the
+/// footer never names a key the agent would get instead.
 fn from_lock(km: &crate::keymap::Keymap, action: Action, does: &str) -> Option<Hint> {
     let shown = km.shown_first(action)?;
-    (crate::keymap::cmd_shown() && shown.mods.contains(crossterm::event::KeyModifiers::SUPER))
+    shown
+        .mods
+        .contains(crossterm::event::KeyModifiers::SUPER)
         .then(|| act(km, action, does))
         .flatten()
 }

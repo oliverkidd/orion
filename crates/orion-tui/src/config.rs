@@ -7056,10 +7056,7 @@ mod tests {
     fn keybindings_round_trip_through_the_config_file() {
         let mut cfg = Config::default();
         assert!(cfg.keybindings.is_empty(), "no overrides out of the box");
-        let mut keymap = cfg.keymap();
-        let quit = crate::keymap::index_of(crate::keymap::Action::Quit).unwrap();
-        keymap.bind(quit, crate::keymap::KeyChord::parse("f9").unwrap(), false);
-        cfg.keybindings = keymap.overrides();
+        cfg.keybindings = BTreeMap::from([("quit".into(), "f9".into())]);
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");

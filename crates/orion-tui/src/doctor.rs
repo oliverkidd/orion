@@ -328,8 +328,8 @@ fn orion_app(m: &Machine) -> Check {
         return Check::new(
             NAME,
             Status::Missing,
-            "Ghostty isn't installed, and the app is made from it — ⌘ shortcuts answer to \
-             their ^ twins, and the outside terminal opens in Terminal.app",
+            "Ghostty isn't installed, and the app is made from it — orion's ⌘ shortcuts \
+             reach it only there, and the outside terminal opens in Terminal.app",
         )
         .fix(plan_fix(m.tools().ghostty_plan()));
     }
@@ -347,8 +347,7 @@ fn orion_app(m: &Machine) -> Check {
         None => Check::new(
             NAME,
             Status::Missing,
-            "not made yet — orion's ⌘ shortcuts work in it, and answer to their ^ twins in a \
-             terminal",
+            "not made yet — orion's ⌘ shortcuts work in it",
         )
         .fix("orion app"),
     }
