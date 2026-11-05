@@ -2082,12 +2082,6 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
             cfg.claude_accounts[0].enabled = false;
             assert_eq!(cfg.quick_prompt_harness(), (AgentKind::Claude, None));
-            // REMEMBER HARNESS writes an account's id like a built-in's.
-            cfg.claude_accounts[0].enabled = true;
-            cfg.quick_prompt_kind = "codex".into();
-            cfg.remember_harness = true;
-            assert!(cfg.remember_launch(AgentKind::Custom, Some("claude-2"), None, None));
-            assert_eq!(cfg.quick_prompt_kind, "claude-2");
         });
     }
 

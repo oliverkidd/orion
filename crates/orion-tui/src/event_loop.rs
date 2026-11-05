@@ -9151,24 +9151,6 @@ fn edit_keymap(app: &mut App, edit: impl FnOnce(&mut crate::keymap::Keymap)) -> 
     save_keymap(app, keymap)
 }
 
-/// REMEMBER HARNESS (Settings → Experimental): make a launch's harness —
-/// and a model or effort picked for it — the defaults the next NEW
-/// AGENT PICKER and QUICK PROMPT start from
-/// (`Config::remember_launch`). Nothing is written while the switch is
-/// off or the pick already is the default; a failed write flashes.
-fn remember_launch(
-    app: &mut App,
-    kind: AgentKind,
-    custom: Option<&str>,
-    model: Option<&str>,
-    effort: Option<&str>,
-) {
-    let mut cfg = crate::config::Config::load();
-    if cfg.remember_launch(kind, custom, model, effort) {
-        save_config(app, &cfg);
-    }
-}
-
 /// Write the config file, flashing the failure. False when it didn't land.
 fn save_config(app: &mut App, cfg: &crate::config::Config) -> bool {
     match cfg.save() {
@@ -10430,10 +10412,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             // an unexpanded submenu (None) and the explicit "default" row
             // both take the setting; the setting's own "default" means
             // "no flag" and reaches the daemon as None.
-            let mut cfg = crate::config::Config::load();
-            // What the submenus chose, before the defaults fill in the
-            // rest: REMEMBER HARNESS below records a pick, never a fallback.
-            let picked = (model.clone(), effort.clone());
+            let cfg = crate::config::Config::load();
             let resolve = |choice: Option<String>, configured: Option<String>| match choice {
                 None => configured,
                 Some(c) if c == crate::config::DEFAULT_CHOICE => configured,
@@ -10472,19 +10451,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             // matches (never for a PR SESSION: an unscoped warm CLI cannot
             // be adopted for one), and the refill behind the create
             // re-warms it either way.
-            //
-            // REMEMBER HARNESS (Settings → Experimental): the pick is the
-            // next launch's default — this harness, and a model or effort
-            // only where a submenu chose one. A failed write flashes; the
-            // launch goes ahead regardless.
-            if cfg.remember_launch(
-                kind,
-                custom.as_deref(),
-                picked.0.as_deref(),
-                picked.1.as_deref(),
-            ) {
-                save_config(app, &cfg);
-            }
             create_agent(
                 app,
                 AgentLaunchDraft {
@@ -22423,7 +22389,7 @@ diff --git a/src/c.rs b/src/c.rs
         });
     }
 
-    // ---- REMEMBER HARNESS (Settings → Experimental) ----
+    // ---- a pick is one session's ----
 
     /// A row the hovered menu shows, without the `✓` a default row wears.
     fn hovered_choice(app: &App) -> String {
@@ -22436,124 +22402,10 @@ diff --git a/src/c.rs b/src/c.rs
             .to_string()
     }
 
-    /// The model id the hovered row of a model submenu launches with — not
-    /// its label, which may dress the id up (`opus · latest`).
-    fn hovered_model(app: &App) -> String {
-        let Some(Overlay::Menu(menu)) = &app.overlay else {
-            panic!("expected a menu, got {:?}", app.overlay);
-        };
-        match &menu.items[menu.hover].action {
-            MenuAction::NewAgentOfKind {
-                model: Some(model), ..
-            } => model.clone(),
-            other => panic!("expected a model row, got {other:?}"),
-        }
-    }
-
-    /// With the switch on, the harness picked on `n` — and a model drilled
-    /// into through `→` — become the AGENTS TAB defaults: the next picker
-    /// opens on that harness with its `✓` on that model, and the QUICK
-    /// PROMPT's harness follows.
+    /// A picker launch writes nothing, and the next picker opens on its
+    /// first row as it always has: the AGENTS TAB is where defaults are set.
     #[test]
-    fn a_picker_launch_is_remembered_as_the_next_default_while_the_switch_is_on() {
-        with_config_json(r#"{"remember_harness": true}"#, || {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let mut out = Vec::new();
-
-            // The harness alone: Codex, second row.
-            open_picker(&mut app);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    out.first(),
-                    Some(ClientRequest::CreateAgent {
-                        kind: AgentKind::Codex,
-                        model: None,
-                        ..
-                    })
-                ),
-                "{out:?}"
-            );
-            let cfg = crate::config::Config::load();
-            assert_eq!(
-                cfg.quick_prompt_kind(),
-                AgentKind::Codex,
-                "written to the Agents tab"
-            );
-            assert_eq!(
-                cfg.codex_model, "default",
-                "no model was picked, so none was written"
-            );
-            assert!(app.flash.is_none(), "{:?}", app.flash);
-
-            // The next picker opens on it.
-            out.clear();
-            open_picker(&mut app);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(menu.items[menu.hover].label, "Codex");
-
-            // A model drilled into on the Claude row lands on Claude's
-            // Model row — the pick, not the fallback.
-            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(menu.title.as_deref(), Some("Claude model"));
-            assert!(menu.items.len() >= 2, "{:?}", menu.items);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            let picked = hovered_model(&app);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    out.first(),
-                    Some(ClientRequest::CreateAgent {
-                        kind: AgentKind::Claude,
-                        model: Some(model),
-                        ..
-                    }) if *model == picked
-                ),
-                "{out:?}"
-            );
-            let cfg = crate::config::Config::load();
-            assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude);
-            assert_eq!(cfg.claude_model, picked, "the Agents tab's Claude model");
-            assert_eq!(
-                cfg.codex_model, "default",
-                "another harness's row is its own"
-            );
-
-            // The next picker: Claude, with the ✓ (and the cursor) on it.
-            out.clear();
-            open_picker(&mut app);
-            assert_eq!(hovered_choice(&app), "Claude");
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Menu(menu)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(
-                menu.items[menu.hover].label,
-                format!(
-                    "{} ✓",
-                    crate::config::model_row_label(
-                        &picked,
-                        Some(orion_core::harness::HarnessCatalog::Claude)
-                    )
-                )
-            );
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        });
-    }
-
-    /// Off — the default — a pick is one session's: nothing is written,
-    /// and the next picker opens on its first row as it always has.
-    #[test]
-    fn a_picker_launch_is_not_remembered_while_the_switch_is_off() {
+    fn a_picker_launch_is_not_remembered() {
         with_default_config(|| {
             let mut app = App::new();
             seed_tree(&mut app);
@@ -22575,131 +22427,10 @@ diff --git a/src/c.rs b/src/c.rs
             );
             let cfg = crate::config::Config::load();
             assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude, "untouched");
-            assert!(!cfg.remember_harness);
 
             open_picker(&mut app);
             assert_eq!(hovered_choice(&app), "Claude", "the first row, as ever");
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        });
-    }
-
-    /// A QUICK PROMPT fired on a harness picked through `Tab` is a change
-    /// of default too — recorded when the box fires, not when the picker
-    /// hands it back — so the next `p` opens on that harness.
-    #[test]
-    fn a_quick_prompt_fired_on_a_tab_picked_harness_is_remembered() {
-        with_config_json(r#"{"remember_harness": true}"#, || {
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let mut out = Vec::new();
-
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(paste_into_overlay(&mut app, "Fix auth"));
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                hovered_choice(&app),
-                "Claude",
-                "opens on the box's own harness"
-            );
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the pick should hand the box back, got {:?}", app.overlay);
-            };
-            assert_eq!(prompt.title, "Quick prompt (codex)");
-            assert_eq!(
-                crate::config::Config::load().quick_prompt_kind(),
-                AgentKind::Claude,
-                "handing the box back is not a launch: nothing written yet"
-            );
-
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    out.first(),
-                    Some(ClientRequest::CreateAgent {
-                        kind: AgentKind::Codex,
-                        starting_prompt: Some(text),
-                        ..
-                    }) if text == "Fix auth"
-                ),
-                "{out:?}"
-            );
-            assert_eq!(
-                crate::config::Config::load().quick_prompt_kind(),
-                AgentKind::Codex,
-                "the fire is the change of default"
-            );
-
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("{:?}", app.overlay);
-            };
-            assert_eq!(prompt.title, "Quick prompt (codex)", "the next box follows");
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-        });
-    }
-
-    /// An AGENT PRESET launch is the preset's harness and model, not a
-    /// change of mind: with the switch on, the AGENTS TAB rows stay put.
-    #[test]
-    fn a_preset_launch_is_not_remembered_as_the_default() {
-        with_seeded_presets(|| {
-            let mut cfg = crate::config::Config::load();
-            cfg.remember_harness = true;
-            cfg.save().unwrap();
-
-            let mut app = App::new();
-            seed_tree(&mut app);
-            app.focus = Focus::Sessions;
-            let mut out = Vec::new();
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            assert!(paste_into_overlay(&mut app, "Fix auth"));
-            // "reviewer": claude · opus · high, the first preset.
-            press(
-                &mut app,
-                KeyCode::Char('x'),
-                KeyModifiers::CONTROL,
-                &mut out,
-            );
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(
-                matches!(
-                    out.first(),
-                    Some(ClientRequest::CreateAgent {
-                        kind: AgentKind::Claude,
-                        model: Some(model),
-                        effort: Some(effort),
-                        ..
-                    }) if model == "opus" && effort == "high"
-                ),
-                "{out:?}"
-            );
-            let cfg = crate::config::Config::load();
-            assert!(cfg.remember_harness);
-            assert_eq!(
-                cfg.claude_model, "default",
-                "the preset's model stays the preset's"
-            );
-            assert_eq!(cfg.claude_effort, "default");
-            assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude);
         });
     }
 
@@ -30006,7 +29737,6 @@ diff --git a/src/c.rs b/src/c.rs
                 "Agent",
                 "Focus",
                 "Follow new",
-                "Hide missing CLIs",
                 "Claude accounts",
                 "Claude",
                 "Add account",
@@ -30033,10 +29763,10 @@ diff --git a/src/c.rs b/src/c.rs
                 "the old flat labels are gone:\n{text}"
             );
 
-            // Headers and blanks are not rows the cursor can land on: seven
-            // ↓ from the first row — the head's five, the CLAUDE ACCOUNTS
+            // Headers and blanks are not rows the cursor can land on: six
+            // ↓ from the first row — the head's four, the CLAUDE ACCOUNTS
             // section's two — reach Claude's Enabled row, not a header.
-            for _ in 0..7 {
+            for _ in 0..6 {
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
             let (_, claude_enabled) = locate_agent("claude", HarnessField::Enabled).unwrap();

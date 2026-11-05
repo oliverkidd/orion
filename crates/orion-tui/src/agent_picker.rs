@@ -33,9 +33,8 @@ pub(crate) struct KindPicker {
     /// The QUICK PROMPT box owed back (its `Tab` picker).
     pub quick: Option<Box<QuickReturn>>,
     /// The row to start on: the surface's own ask (a QUICK PROMPT picker
-    /// opens on its box's harness); None leaves it to REMEMBER HARNESS
-    /// (Settings → Experimental — the last launch's), else the first
-    /// row, which one not offered any more falls to as well.
+    /// opens on its box's harness); None is the first row, which one not
+    /// offered any more falls to as well.
     pub hover: Option<HarnessRow>,
 }
 
@@ -65,8 +64,8 @@ impl KindPicker {
     /// harness is asked first, and Enter on a row OPENS the QUICK PROMPT
     /// set to it (`back.from_box` is false: Esc closes the picker and
     /// opens nothing). The cursor starts on the harness the box would
-    /// have opened on — the Settings → Agents one, which REMEMBER
-    /// HARNESS writes the last launch into — so `Enter` at once is `p`.
+    /// have opened on — the Settings → Agents one — so `Enter` at once
+    /// is `p`.
     pub fn new_session_box(worktree: WorktreeId, back: QuickReturn) -> Self {
         Self {
             title: NEW_AGENT_PICKER_TITLE.into(),
@@ -179,10 +178,6 @@ pub(crate) fn open_kind_picker(app: &mut App, picker: KindPicker) {
         hover,
     } = picker;
     let hover = hover
-        .or_else(|| {
-            cfg.remembered_harness()
-                .map(|(kind, custom)| HarnessRow { kind, custom })
-        })
         .and_then(|wanted| {
             rows.iter().position(|row| {
                 row.kind == wanted.kind && row.custom.as_deref() == wanted.custom.as_deref()
@@ -532,13 +527,11 @@ mod tests {
         });
     }
 
-    /// REMEMBER HARNESS on: the NEW AGENT picker opens on
-    /// the last launch's harness — the `quick_prompt_kind` it wrote; off,
-    /// on the first row whatever that setting says. A remembered harness
-    /// switched off since steps to the first enabled one, and the QUICK
-    /// PROMPT's picker still opens on its own box's harness.
+    /// The NEW AGENT picker opens on its first row whatever
+    /// `quick_prompt_kind` says — a pick is one session's — and the QUICK
+    /// PROMPT's picker on its own box's harness.
     #[test]
-    fn pickers_open_on_the_remembered_harness_only_while_the_switch_is_on() {
+    fn pickers_open_on_the_first_row_or_the_boxs_own_harness() {
         let worktree = WorktreeId("w1".into());
         fn hover_of(app: &App) -> usize {
             match &app.overlay {
@@ -550,67 +543,31 @@ mod tests {
         pinned(r#"{"quick_prompt_kind": "cursor"}"#, || {
             let mut app = App::new();
             open_kind_picker(&mut app, KindPicker::new_session(worktree.clone()));
-            assert_eq!(
-                hover_of(&app),
-                0,
-                "off: the quick prompt's harness is its own"
-            );
+            assert_eq!(hover_of(&app), 0, "the quick prompt's harness is its own");
+
+            let back = QuickReturn {
+                launch: QuickLaunch {
+                    target: crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
+                    kind: AgentKind::Codex,
+                    custom: None,
+                    model: None,
+                    effort: None,
+                    preset: None,
+                    issue: None,
+                    pr: None,
+                    linear: None,
+                    todo: None,
+                    under: None,
+                    cloud: false,
+                    mode: orion_core::AgentMode::Edit,
+                },
+                text: String::new(),
+                from_box: true,
+                into_pane: None,
+            };
+            open_kind_picker(&mut app, KindPicker::quick_prompt(worktree.clone(), back));
+            assert_eq!(hover_of(&app), 1, "the box's own harness");
         });
-
-        pinned(
-            r#"{"remember_harness": true, "quick_prompt_kind": "cursor"}"#,
-            || {
-                let mut app = App::new();
-                open_kind_picker(&mut app, KindPicker::new_session(worktree.clone()));
-                assert_eq!(hover_of(&app), 2, "on: Cursor, the last launch's");
-
-                let back = QuickReturn {
-                    launch: QuickLaunch {
-                        target: crate::quick_prompt::QuickTarget::Worktree(worktree.clone()),
-                        kind: AgentKind::Codex,
-                        custom: None,
-                        model: None,
-                        effort: None,
-                        preset: None,
-                        issue: None,
-                        pr: None,
-                        linear: None,
-                        todo: None,
-                        under: None,
-                        cloud: false,
-                        mode: orion_core::AgentMode::Edit,
-                    },
-                    text: String::new(),
-                    from_box: true,
-                    into_pane: None,
-                };
-                open_kind_picker(&mut app, KindPicker::quick_prompt(worktree.clone(), back));
-                assert_eq!(
-                    hover_of(&app),
-                    1,
-                    "the box's own harness outranks the remembered one"
-                );
-            },
-        );
-
-        pinned(
-            r#"{"remember_harness": true, "quick_prompt_kind": "cursor", "cursor_enabled": false}"#,
-            || {
-                let mut app = App::new();
-                open_kind_picker(&mut app, KindPicker::new_session(worktree.clone()));
-                let Some(Overlay::Menu(menu)) = &app.overlay else {
-                    panic!("{:?}", app.overlay);
-                };
-                assert_eq!(
-                    labels(menu),
-                    ["Claude", "Codex", "Pi", "Muse", "Grok Build", "OpenCode"]
-                );
-                assert_eq!(
-                    menu.hover, 0,
-                    "a remembered harness switched off steps to the first enabled"
-                );
-            },
-        );
     }
 
     /// Only a hand-edited config reaches an empty list: the picker flashes

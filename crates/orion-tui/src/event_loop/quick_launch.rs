@@ -17,8 +17,8 @@
 //! whose checkout of the PR's head branch the DAEMON finds or cuts.
 
 use super::{
-    create_agent, placeholder, remember_launch, schedule_prewarm, select_worktree_by_id,
-    send_with_follow, AgentLaunchDraft,
+    create_agent, placeholder, schedule_prewarm, select_worktree_by_id, send_with_follow,
+    AgentLaunchDraft,
 };
 use crate::app::{App, PendingIntent, PlaceholderRows, PromptKind};
 use crate::quick_prompt::{QuickLaunch, QuickTarget};
@@ -34,19 +34,6 @@ pub(super) fn submit(
     text: String,
     out: &mut Vec<ClientRequest>,
 ) {
-    // REMEMBER HARNESS (Settings → Experimental): a box fired on a harness
-    // — or a MODEL / EFFORT — picked through `Tab` makes that the next
-    // launch's default. A preset's harness is the preset's own, not a
-    // change of default, so a preset launch leaves the rows alone.
-    if launch.preset.is_none() {
-        remember_launch(
-            app,
-            launch.kind,
-            launch.custom.as_deref(),
-            launch.model.as_deref(),
-            launch.effort.as_deref(),
-        );
-    }
     crate::linear::remember_submit(app, &launch);
     // A box re-aimed with `^P` fires into a project the screen is not
     // showing: the session starts there and the user keeps working here,

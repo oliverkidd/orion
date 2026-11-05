@@ -495,12 +495,6 @@ pub const AGENTS_HEAD: &[SettingSpec] = &[
         hint: "A new agent's box starts on a fresh worktree (off = the checkout under the cursor); {select_launch_worktree} picks another for one box",
         group: "Quick prompt",
     },
-    SettingSpec {
-        kind: SettingKind::HideUninstalledHarnesses,
-        label: "Hide missing CLIs",
-        hint: "List only harnesses found on PATH when you start an agent (daemon still checks at launch)",
-        group: "Quick prompt",
-    },
 ];
 
 /// One tab of the settings overlay. Selection indices are per-tab: within
@@ -564,8 +558,6 @@ pub enum SettingKind {
     QuickPromptNewWorktree,
     RunCommand,
     OpenCommand,
-    RememberHarness,
-    HideUninstalledHarnesses,
     DiffTreeView,
     DiffStart,
     DiffTicked,
@@ -1002,20 +994,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 kind: SettingKind::OpenCommand,
                 label: "Open command",
                 hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000 (empty = its .orion.json \"open\")",
-                group: "",
-            },
-        ]),
-    },
-    // Behaviors that change how the tree is worked, off by default until
-    // they have earned a tab of their own. Before Hotkeys, which stays last
-    // for the reason above.
-    SettingsTab {
-        title: "Experimental",
-        body: TabBody::Values(&[
-            SettingSpec {
-                kind: SettingKind::RememberHarness,
-                label: "Remember harness",
-                hint: "A harness (and model) picked for a session becomes the Agents tab default the next launch starts on",
                 group: "",
             },
         ]),
@@ -1724,14 +1702,6 @@ pub struct Config {
     /// rules: a value in here this build can't read costs the whole map,
     /// not one project.
     pub projects: BTreeMap<PathBuf, ProjectSettings>,
-    /// Experimental: REMEMBER HARNESS — a launch walked through the NEW
-    /// AGENT PICKER, the PR SESSION picker or the QUICK PROMPT's `Tab`
-    /// picker writes its harness into `quick_prompt_kind`, and a model or
-    /// effort a submenu chose into that harness's own rows, so the next
-    /// picker starts on it and the next `p` launches it
-    /// ([`Config::remember_launch`]). Off by default: a pick is one
-    /// session's, and the AGENTS TAB is where the defaults are set.
-    pub remember_harness: bool,
     /// RETIRED with the counts always drawn. Through 0.37 the **PR & issue
     /// counts** SETTING (Settings → Experimental, on by default) switched
     /// the GRID header's `3 prs · 2 issues` off, and with it the issue
@@ -1784,11 +1754,6 @@ pub struct Config {
     pub pi_enabled: bool,
     pub muse_enabled: bool,
     pub opencode_enabled: bool,
-    /// When on, the NEW AGENT PICKER lists only enabled harnesses whose
-    /// CLI is found on this machine's PATH. Off by default: a login shell
-    /// (mise, brew shims) can see CLIs a plain PATH lookup misses, and the
-    /// daemon re-checks through the login shell at launch anyway.
-    pub hide_uninstalled_harnesses: bool,
     /// User-defined harnesses (`custom_harnesses` in config.json): offered
     /// in the NEW AGENT PICKER after the built-ins when enabled, launched
     /// with the entry's program and model flag, with process-based status
@@ -2021,7 +1986,6 @@ impl Default for Config {
             recent_prompts_count: 3,
             projects: BTreeMap::new(),
             show_key_combos: false,
-            remember_harness: false,
             pr_issue_counts: true,
             claude_model: DEFAULT_CHOICE.into(),
             claude_models: Vec::new(),
@@ -2041,7 +2005,6 @@ impl Default for Config {
             pi_enabled: cfg!(test),
             muse_enabled: cfg!(test),
             opencode_enabled: cfg!(test),
-            hide_uninstalled_harnesses: false,
             custom_harnesses: Vec::new(),
             harnesses: default_harnesses(),
             claude_accounts: Vec::new(),
@@ -2533,10 +2496,18 @@ impl Config {
     /// Every harness the picker and presets offer, in registry order:
     /// `(kind, None)` for built-ins, `(Custom, Some(id))` for customs.
     /// Disabled and broken entries are out (broken ones surface in the
-    /// Agents tab with their reason); under `hide_uninstalled_harnesses`
-    /// so is anything whose program is missing from PATH. The daemon
-    /// stays authoritative at launch.
+    /// Agents tab with their reason), and so is anything whose program is
+    /// missing from PATH. The daemon stays authoritative at launch: it
+    /// re-checks through the login shell, which can see shims PATH misses.
+    ///
+    /// A test that names no PATH ([`with_search_path`]) finds every program
+    /// installed, so what a fixture's pickers offer never depends on the
+    /// CLIs the machine running it happens to have.
     pub fn offered_harnesses(&self) -> Vec<(AgentKind, Option<String>)> {
+        #[cfg(test)]
+        if SEARCH_PATH.with(|p| p.borrow().is_none()) {
+            return self.offered_harnesses_where(|_| true);
+        }
         self.offered_harnesses_where(program_installed)
     }
 
@@ -2550,7 +2521,7 @@ impl Config {
         let all = self.harness_registry();
         orion_core::harness::usable(&all)
             .into_iter()
-            .filter(|entry| !self.hide_uninstalled_harnesses || installed(&entry.program))
+            .filter(|entry| installed(&entry.program))
             .map(|entry| match AgentKind::parse(&entry.id) {
                 Some(kind) => (kind, None),
                 None => (AgentKind::Custom, Some(entry.id.clone())),
@@ -3250,77 +3221,6 @@ impl Config {
         )
     }
 
-    /// The harness the NEW AGENT PICKER (and the PR SESSION picker)
-    /// starts on: the last launch's while REMEMBER HARNESS is on — read
-    /// through [`Config::quick_prompt_harness`], so one switched off since
-    /// steps aside — and None, the first row, while it is off.
-    pub fn remembered_harness(&self) -> Option<(AgentKind, Option<String>)> {
-        self.remember_harness.then(|| self.quick_prompt_harness())
-    }
-
-    /// REMEMBER HARNESS (Settings → Experimental): make `kind` — and a
-    /// model or effort a picker chose for it, `None` for one it did not —
-    /// the defaults the next launch starts from, by writing the AGENTS
-    /// TAB's own rows: `quick_prompt_kind`, and that harness's Model /
-    /// Effort (the registry entry's, keyed by the kind name or the
-    /// custom id). An explicit `"default"` pick lands as the row's own
-    /// `default`. The QUICK PROMPT names built-in kinds and CLAUDE
-    /// ACCOUNTS, so any other custom entry is remembered by its Model /
-    /// Effort rows alone. Returns whether anything changed, so the caller
-    /// saves only then; nothing moves while the switch is off.
-    pub fn remember_launch(
-        &mut self,
-        kind: AgentKind,
-        custom: Option<&str>,
-        model: Option<&str>,
-        effort: Option<&str>,
-    ) -> bool {
-        if !self.remember_harness {
-            return false;
-        }
-        let id = match (kind, custom) {
-            (AgentKind::Custom, Some(id)) => id.to_string(),
-            (AgentKind::Custom, None) => return false,
-            (kind, _) => kind.as_str().to_string(),
-        };
-        let mut changed = false;
-        let before = self.effective_harness_by_id(&id);
-        let quick = kind != AgentKind::Custom || before.is_claude_account();
-        if quick && self.quick_prompt_kind != id {
-            self.quick_prompt_kind = id.clone();
-            changed = true;
-        }
-        if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
-            if before.model.default != model {
-                self.set_harness_model(&id, model.into());
-                changed = true;
-            }
-        }
-        if let Some(effort) = effort.map(str::trim).filter(|e| !e.is_empty()) {
-            if before.effort.default != effort {
-                self.set_harness_effort(&id, effort.into());
-                changed = true;
-            }
-        }
-        // A composing harness (Cursor's family-suffix shape) keeps the
-        // stored effort only if the family it now names ships it, as the
-        // AGENTS TAB's own Model cycle does — never an id the CLI would
-        // refuse.
-        if changed {
-            let descriptor = self.effective_harness_by_id(&id);
-            if descriptor.compose_model_effort {
-                let family = descriptor.default_model().map(str::to_string);
-                let choices = effort_choices_in(&descriptor, family.as_deref());
-                if !fits(&descriptor.effort.default, &choices) {
-                    let fitted = fit_effort_in(&descriptor, family.as_deref(), None)
-                        .unwrap_or_else(|| DEFAULT_CHOICE.into());
-                    self.set_harness_effort(&id, fitted);
-                }
-            }
-        }
-        changed
-    }
-
     /// Hotkeys as the event loop dispatches them: defaults with this
     /// config's overrides applied.
     pub fn keymap(&self) -> crate::keymap::Keymap {
@@ -3464,8 +3364,6 @@ impl Config {
             SettingKind::RunCommand | SettingKind::OpenCommand => {
                 ProjectSettings::default().value_label(kind)
             }
-            SettingKind::RememberHarness => on_off(self.remember_harness).into(),
-            SettingKind::HideUninstalledHarnesses => on_off(self.hide_uninstalled_harnesses).into(),
             // A CLAUDE ACCOUNT — the default one too — reads as the name
             // it goes by, with its email.
             SettingKind::QuickPromptKind => match self.quick_prompt_harness() {
@@ -3689,12 +3587,6 @@ impl Config {
             }
             // One project's, not the file's, and typed: see `set_project_text`.
             SettingKind::RunCommand | SettingKind::OpenCommand => {}
-            SettingKind::RememberHarness => {
-                self.remember_harness = !self.remember_harness;
-            }
-            SettingKind::HideUninstalledHarnesses => {
-                self.hide_uninstalled_harnesses = !self.hide_uninstalled_harnesses;
-            }
             SettingKind::QuickPromptKind => {
                 self.quick_prompt_kind =
                     cycle_owned(&self.quick_prompt_kind, &self.quick_prompt_choices(), step);
@@ -3834,7 +3726,7 @@ fn editor_label(stored: &str, resolved: &crate::editor::Resolved) -> String {
 /// synchronous check for picker filtering only; the daemon re-probes
 /// through the login shell at launch, which can see shims PATH misses.
 /// Whether `program` resolves on this process's PATH right now — the
-/// fast check behind `hide_uninstalled_harnesses`, for built-ins and
+/// fast check behind [`Config::offered_harnesses`], for built-ins and
 /// customs alike.
 pub fn program_installed(program: &str) -> bool {
     program_on(&search_path(), program)
@@ -4223,9 +4115,13 @@ mod tests {
             let known = serde_json::to_value(&loaded).unwrap();
             let fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
             for (key, value) in fixture.as_object().unwrap() {
+                // A retired key loads as nothing; the save below, which
+                // leaves a key it doesn't know where it found it, keeps it.
+                let Some(loaded) = known.get(current(key)) else {
+                    continue;
+                };
                 assert_eq!(
-                    known.get(current(key)),
-                    Some(value),
+                    loaded, value,
                     "{release}: `{key}` no longer loads as that release wrote it"
                 );
             }
@@ -5880,7 +5776,7 @@ mod tests {
         assert!(cfg.skipped.is_empty(), "{:?}", cfg.skipped);
         assert!(cfg.show_key_combos);
 
-        cfg.remember_harness = true;
+        cfg.follow_new_session = !cfg.follow_new_session;
         cfg.save_to(&path).unwrap();
         assert_eq!(read_json_file(&path)["show_key_combos"], true);
 
@@ -5889,45 +5785,6 @@ mod tests {
             !cfg.show_key_combos,
             "unknown to a config written before it"
         );
-    }
-
-    /// REMEMBER HARNESS: an Experimental switch, off by default, a plain
-    /// toggle persisted under `remember_harness`, unknown to a config
-    /// written before it (which reads as off).
-    #[test]
-    fn remember_harness_is_off_by_default_on_the_experimental_tab_and_persists() {
-        let mut cfg = Config::default();
-        assert!(!cfg.remember_harness, "a pick is one session's by default");
-        assert_eq!(cfg.value_label(SettingKind::RememberHarness), "off");
-        assert_eq!(
-            cfg.remembered_harness(),
-            None,
-            "off: the picker starts on its first row"
-        );
-
-        let (tab, row) = locate(SettingKind::RememberHarness).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Experimental");
-        assert_eq!(tab + 1, hotkeys_tab(), "Hotkeys stays last");
-        assert_eq!(
-            row, 0,
-            "the tab's first row, the KEY COMBO DISPLAY being always on"
-        );
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.remember_harness);
-        assert_eq!(cfg.value_label(SettingKind::RememberHarness), "on");
-        assert_eq!(cfg.remembered_harness(), Some((AgentKind::Claude, None)));
-        cfg.cycle(tab, row, 1);
-        assert!(!cfg.remember_harness, "either arrow toggles it back");
-        cfg.cycle(tab, row, -1);
-        assert!(cfg.remember_harness);
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(load_from(&path).remember_harness);
-
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert!(!cfg.remember_harness);
     }
 
     /// PRESET TEXT: a Sessions row after the sounds, `prefix` by default,
@@ -6046,103 +5903,12 @@ mod tests {
         cfg.save_to(&path).unwrap();
         assert!(!load_from(&path).pr_issue_counts, "written back as stored");
 
-        let experimental = SETTINGS_TABS
-            .iter()
-            .position(|t| t.title == "Experimental")
-            .unwrap();
-        let TabBody::Values(rows) = SETTINGS_TABS[experimental].body else {
-            panic!("Experimental lists switches");
-        };
-        assert!(
-            rows.iter().all(|r| r.label != "PR & issue counts"),
-            "no row edits it"
-        );
-        assert_eq!(
-            rows.last().map(|r| r.kind),
-            Some(SettingKind::RememberHarness),
-            "Experimental ends on REMEMBER HARNESS again"
-        );
-    }
-
-    /// What a remembered launch writes: the harness into the QUICK
-    /// PROMPT's `quick_prompt_kind`, a picked model or effort into that
-    /// harness's own rows — and nothing at all while the switch is off,
-    /// or when the pick already is the default.
-    #[test]
-    fn remember_launch_writes_the_agents_tab_rows_only_while_on() {
-        let mut cfg = Config::default();
-        assert!(
-            !cfg.remember_launch(AgentKind::Codex, None, Some("gpt-5.5"), Some("high")),
-            "off: nothing moves"
-        );
-        assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude);
-        assert_eq!(cfg.codex_model, DEFAULT_CHOICE);
-        assert_eq!(cfg.codex_effort, DEFAULT_CHOICE);
-
-        cfg.remember_harness = true;
-        // The harness alone: the rows it did not drill into stay put.
-        assert!(cfg.remember_launch(AgentKind::Codex, None, None, None));
-        assert_eq!(cfg.quick_prompt_kind(), AgentKind::Codex);
-        assert_eq!(cfg.remembered_harness(), Some((AgentKind::Codex, None)));
-        assert_eq!(cfg.codex_model, DEFAULT_CHOICE, "no model was picked");
-        assert_eq!(cfg.codex_effort, DEFAULT_CHOICE);
-        assert!(
-            !cfg.remember_launch(AgentKind::Codex, None, None, None),
-            "the same pick again changes nothing, so nothing is saved"
-        );
-
-        // A model and effort drilled into land on that harness's rows.
-        assert!(cfg.remember_launch(AgentKind::Claude, None, Some("opus"), Some("high")));
-        assert_eq!(cfg.quick_prompt_kind(), AgentKind::Claude);
-        assert_eq!(
-            cfg.default_model(AgentKind::Claude).as_deref(),
-            Some("opus")
-        );
-        assert_eq!(
-            cfg.default_effort(AgentKind::Claude).as_deref(),
-            Some("high")
-        );
-        assert_eq!(
-            cfg.codex_model, DEFAULT_CHOICE,
-            "another harness's rows are its own"
-        );
-        // The explicit "default" row is a pick too: back to no flag.
-        assert!(cfg.remember_launch(AgentKind::Claude, None, Some("default"), None));
-        assert_eq!(cfg.claude_model, DEFAULT_CHOICE);
-        assert_eq!(
-            cfg.default_effort(AgentKind::Claude).as_deref(),
-            Some("high")
-        );
-        // A blank pick is no pick.
-        assert!(!cfg.remember_launch(AgentKind::Claude, None, Some("  "), Some("")));
-
-        // Cursor: a family picked without an effort refits the stored one
-        // to what the family ships, as the AGENTS TAB's own cycle does.
-        cfg.cursor_effort = "high".into();
-        let family_without_efforts = crate::cursor_catalogue::models()
-            .iter()
-            .find(|m| {
-                !m.eq_ignore_ascii_case(DEFAULT_CHOICE)
-                    && effort_choices(AgentKind::Cursor, Some(m), None).is_empty()
-            })
-            .copied()
-            .expect("the seed catalogue ships a family with no effort variants");
-        assert!(cfg.remember_launch(AgentKind::Cursor, None, Some(family_without_efforts), None));
-        assert_eq!(cfg.cursor_model, family_without_efforts);
-        assert_eq!(
-            cfg.default_effort(AgentKind::Cursor),
-            None,
-            "refitted, never refused"
-        );
-
-        // Round trip: what was remembered is what loads.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let loaded = load_from(&path);
-        assert_eq!(loaded.quick_prompt_kind(), AgentKind::Cursor);
-        assert_eq!(loaded.claude_effort, "high");
-        assert_eq!(loaded.cursor_model, family_without_efforts);
+        assert!(SETTINGS_TABS.iter().all(|tab| match &tab.body {
+            TabBody::Values(rows) | TabBody::Project(rows) => {
+                rows.iter().all(|r| r.label != "PR & issue counts")
+            }
+            TabBody::Hotkeys | TabBody::Agents => true,
+        }));
     }
 
     /// The QUICK PROMPT's harness: one name, cycled over every AGENT KIND,
@@ -6377,20 +6143,17 @@ mod tests {
             "the tab names the reason"
         );
 
-        // Under the hide switch an entry survives only when its program
-        // is on PATH, built-ins and customs alike.
+        // An entry is offered only when its program is on PATH, built-ins
+        // and customs alike.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("agy"), "").unwrap();
-        let hiding = Config {
-            hide_uninstalled_harnesses: true,
-            ..serde_json::from_str::<Config>(
-                r#"{"custom_harnesses": [
-                    {"id": "agy", "program": "agy"},
-                    {"id": "missing", "program": "definitely-not-on-path"}
-                ]}"#,
-            )
-            .unwrap()
-        };
+        let hiding = serde_json::from_str::<Config>(
+            r#"{"custom_harnesses": [
+                {"id": "agy", "program": "agy"},
+                {"id": "missing", "program": "definitely-not-on-path"}
+            ]}"#,
+        )
+        .unwrap();
         let offered =
             hiding.offered_harnesses_where(|program| program_on(dir.path().as_os_str(), program));
         assert_eq!(offered.len(), 1);
@@ -6820,8 +6583,7 @@ mod tests {
                             "Agent".to_string(),
                             "Focus".to_string(),
                             "Follow new".to_string(),
-                            "New worktree".to_string(),
-                            "Hide missing CLIs".to_string()
+                            "New worktree".to_string()
                         ]
                     ),
                     (

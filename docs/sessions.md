@@ -16,8 +16,8 @@ Run **New agent — choose harness** from the command palette (`⌘⇧P`, or `:`
 run — **Claude**, **Codex**, **Cursor**, **Pi**, **Muse**, **Grok Build**, or **OpenCode** (a plain shell is `t` — see [Keys](keys.md)); a CLI you never use can be
 switched off on the settings overlay's Agents tab and drops out of the menu entirely. Claude is
 listed by the account it is signed in as, `Claude (you@example.com)`, and every other CLAUDE
-ACCOUNT you have added has a row of its own right after it ([below](#usage-limits-and-a-second-account)). Turn on `Hide missing CLIs`
-on the Agents tab and the menu lists only enabled harnesses whose CLI is found on PATH (the daemon still
+ACCOUNT you have added has a row of its own right after it ([below](#usage-limits-and-a-second-account)). The menu
+lists only enabled harnesses whose CLI is found on PATH (the daemon still
 checks through the login shell at launch). Your own CLIs join the menu too: add them to config.json
 `custom_harnesses` (see [Configuration](configuration.md)) and they appear after the built-ins under their
 own labels, each toggled in its own section on the Agents tab, with the session card wearing the
@@ -59,14 +59,8 @@ session titles itself from that first prompt (AUTO-TITLE); `r` renames it whenev
 opens the same box straight away, on the Agents tab's harness (see [Keys](keys.md)).
 
 The picker opens on the Agents tab's **Quick prompt › Agent** harness — the one `⌘N` launches — so
-`Enter` at once is `⌘N`, whatever you picked last, unless **Remember harness**
-is on (Settings → Experimental, `remember_harness` in CONFIG.JSON). Then every launch you walk
-through this picker, the PR SESSION picker or the QUICK PROMPT's `Tab` picker writes its harness into
-that row, and a model or effort you drilled into through the
-submenus into that harness's own **Model** / **Effort** rows: the next **New agent — choose harness** opens on that harness with
-its ✓ on that model, the box `Enter` opens is set to it, and `⌘N` launches it too. The rows are the ordinary settings,
-so the Agents tab always shows what the next launch will be, and you can still change them there. An
-AGENT PRESET launch leaves them alone — its harness is the preset's, not a change of mind.
+`Enter` at once is `⌘N`, whatever you picked last: a pick is one session's, and the Agents tab is
+where the defaults are set.
 
 The rows do not run under the same permissions, and the picker is where you decide that. Claude
 is spawned with no permission flag at all and keeps its normal prompts — it stops and asks before the
