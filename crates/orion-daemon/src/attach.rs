@@ -205,9 +205,9 @@ async fn step(
         }
         // Daemon-side only: the progress edge drives the status machine
         // and reaches clients as a StatusChanged, not as session output;
-        // a title change reaches them as the row's own upsert (the title
-        // bytes themselves are in Output).
-        Ok(PtyEvent::Progress { .. } | PtyEvent::Title { .. }) => Step::Continue,
+        // a title change, or a run's new port, reaches them as the row's
+        // own upsert (the bytes themselves are in Output).
+        Ok(PtyEvent::Progress { .. } | PtyEvent::Title { .. } | PtyEvent::Ports) => Step::Continue,
         Err(RecvError::Lagged(_)) => {
             // Catch up from the ring. If the missed bytes are still
             // retained, send them as a plain Output continuation so the

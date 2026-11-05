@@ -363,6 +363,12 @@ pub struct RunState {
     /// this DAEMON did not see (a run from before it restarted). A run a
     /// stop ended has no row left to carry one.
     pub exit_code: Option<i32>,
+    /// The localhost ports the live run has printed —
+    /// `http://localhost:3000` is 3000 — first seen first, kept after the
+    /// lines scroll away: the run line's `:3000 :5173`, the first of them
+    /// what ⌘O's **Open app** opens. Empty once the run has ended, and
+    /// again from a start.
+    pub ports: Vec<u16>,
 }
 
 /// A URL pinned to a worktree — the pull request, the ticket, the design

@@ -1,6 +1,7 @@
 pub mod cursor;
 pub use orion_core::kitty;
 mod osc;
+pub mod ports;
 pub mod progress;
 pub mod ring;
 pub mod title;
@@ -187,6 +188,9 @@ pub enum PtyEvent {
     Title {
         title: String,
     },
+    /// A RUN COMMAND printed a localhost address it had not before
+    /// ([`PtySession::ports`] has it now; see `pty::ports`).
+    Ports,
 }
 
 enum ReaderMsg {
@@ -214,6 +218,9 @@ pub struct PtySession {
     progress: Mutex<ProgressScanner>,
     /// OSC 0/2 window-title tracking, likewise fed from live output.
     title: Mutex<title::TitleScanner>,
+    /// The localhost ports a RUN COMMAND has printed, likewise fed from
+    /// live output — `None` for every other session, which reads none.
+    ports: Option<Mutex<ports::PortScanner>>,
     /// Screen for answering cursor position reports; `None` until the child
     /// first asks, so sessions that never do parse nothing.
     cursor: Mutex<Option<CursorTracker>>,
@@ -230,6 +237,9 @@ pub struct SpawnSpec {
     pub scrub_env: &'static [&'static str],
     pub cols: u16,
     pub rows: u16,
+    /// Read the localhost ports the child prints (`PtySession::ports`):
+    /// a RUN COMMAND's, for its run line.
+    pub scan_ports: bool,
 }
 
 /// What a launch says when its command line is over the OS's `ARG_MAX`
@@ -314,6 +324,7 @@ impl PtySession {
             kitty: Mutex::new(kitty::KittyScanner::new()),
             progress: Mutex::new(ProgressScanner::new()),
             title: Mutex::new(title::TitleScanner::new()),
+            ports: spec.scan_ports.then(Mutex::default),
             cursor: Mutex::new(None),
         });
 
@@ -321,6 +332,21 @@ impl PtySession {
         spawn_reader_thread(reader, child, tx);
         tokio::spawn(pump(session.clone(), rx));
         Ok(session)
+    }
+
+    /// The localhost ports the child has printed, first seen first: none
+    /// for a session that is not scanned for them.
+    pub fn ports(&self) -> Vec<u16> {
+        self.ports
+            .as_ref()
+            .map(|p| p.lock().unwrap().ports().to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Whether this session's output is read for ports at all.
+    #[cfg(test)]
+    pub fn scans_ports(&self) -> bool {
+        self.ports.is_some()
     }
 
     pub fn write_input(&self, data: &[u8]) -> Result<()> {
@@ -601,6 +627,10 @@ async fn pump(session: Arc<PtySession>, mut rx: mpsc::Receiver<ReaderMsg>) {
         }
         let busy_edge = session.progress.lock().unwrap().feed(pending);
         let title_change = session.title.lock().unwrap().feed(pending);
+        let new_port = session
+            .ports
+            .as_ref()
+            .is_some_and(|p| p.lock().unwrap().feed(pending));
         let seq = session.ring.lock().unwrap().append(pending);
         let _ = session.events.send(PtyEvent::Output {
             seq,
@@ -617,6 +647,9 @@ async fn pump(session: Arc<PtySession>, mut rx: mpsc::Receiver<ReaderMsg>) {
         if let Some(title) = title_change {
             tracing::debug!(session = ?session.sref, %title, "child window title changed");
             let _ = session.events.send(PtyEvent::Title { title });
+        }
+        if new_port {
+            let _ = session.events.send(PtyEvent::Ports);
         }
     };
 
@@ -737,6 +770,7 @@ mod tests {
             scrub_env: &[],
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
+            scan_ports: false,
         };
         let err = PtySession::spawn(
             SessionRef::Agent(AgentId::generate()),
@@ -773,6 +807,7 @@ mod tests {
                 scrub_env: &[],
                 cols: DEFAULT_COLS,
                 rows: DEFAULT_ROWS,
+                scan_ports: false,
             },
         )
         .unwrap();
@@ -817,6 +852,7 @@ mod tests {
                 scrub_env: &[],
                 cols: DEFAULT_COLS,
                 rows: DEFAULT_ROWS,
+                scan_ports: false,
             },
         )
         .unwrap();
@@ -868,6 +904,7 @@ mod tests {
                 scrub_env: &[],
                 cols: DEFAULT_COLS,
                 rows: DEFAULT_ROWS,
+                scan_ports: false,
             },
         )
         .unwrap();
@@ -919,6 +956,7 @@ mod tests {
                 scrub_env: &[],
                 cols: DEFAULT_COLS,
                 rows: DEFAULT_ROWS,
+                scan_ports: false,
             },
         )
         .unwrap();

@@ -541,7 +541,10 @@ selected worktree's checkout:
   row. A stop you asked for takes the run line with it once the run has wound down. A command that
   exits on its own, with nobody stopping it, leaves its line behind saying how it ended — a faint
   `done` for a clean exit, a red `exited 1` for any other; attaching it replays how the run ended,
-  and nothing but **Start stack** runs it again — not an attach, not the prewarm sweep. There is one run per worktree: a second client's start on a worktree
+  and nothing but **Start stack** runs it again — not an attach, not the prewarm sweep. The DAEMON
+  reads the run's output for the localhost addresses it prints (`http://localhost:3000`,
+  `http://127.0.0.1:…`, `http://0.0.0.0:…`) and every client shows their ports after the command,
+  `:3000 :5173`, each a link to it on localhost; the first is what `⌘O` → **Open app** opens. There is one run per worktree: a second client's start on a worktree
   already running never starts another.
 - **Open command** — the OPEN COMMAND, `open http://localhost:3000` say. `⌘O` → **Open command** on a
   worktree fires it once, from the TUI rather than the DAEMON, since what it opens — a browser tab, an

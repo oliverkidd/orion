@@ -101,6 +101,7 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             HitTarget::LauncherCard(_)
             | HitTarget::LauncherBand(_)
             | HitTarget::LauncherBandPr(_)
+            | HitTarget::RunPort(..)
             | HitTarget::LauncherDrawer(_)
             | HitTarget::LauncherDrawerEntry(..),
         ) => app.focus = Focus::Sessions,

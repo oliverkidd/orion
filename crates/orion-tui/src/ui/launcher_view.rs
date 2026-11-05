@@ -1233,7 +1233,7 @@ fn draw_list_band(
         else {
             continue;
         };
-        draw_list_row(
+        let ports = draw_list_row(
             f.buffer_mut(),
             app,
             placed.rect,
@@ -1242,6 +1242,13 @@ fn draw_list_band(
             cols,
             cfg,
         );
+        // A run line's ports are links, ahead of the line so they win.
+        if let crate::launcher::Card::Terminal(t) = &band.cards[i] {
+            for (rect, port) in ports {
+                app.hits
+                    .push((rect, HitTarget::RunPort(t.id.clone(), port)));
+            }
+        }
         app.hits.push((
             placed.rect,
             HitTarget::LauncherCard(crate::launcher::CardRef {
@@ -1259,7 +1266,9 @@ fn draw_list_band(
 /// its status where the ages go ([`terminal_badge`]). `cols` are the
 /// band's name and runs-on column widths, so the entries line up. The
 /// cursor's entry (`selected`) wears the mark ([`LIST_MARK`]) and a wash
-/// of its status color across the line ([`card_tint`]).
+/// of its status color across the line ([`card_tint`]). A run line's
+/// ports follow its command, underlined — the cells of each come back,
+/// for the clicks that open them.
 fn draw_list_row(
     buf: &mut Buffer,
     app: &App,
@@ -1268,7 +1277,7 @@ fn draw_list_row(
     selected: bool,
     (name_col, runs_col): (usize, usize),
     cfg: &mut Option<crate::config::Config>,
-) {
+) -> Vec<(Rect, u16)> {
     let th = app.theme;
     let width = usize::from(r.width);
     // A bar rather than the rule's `❯`: a shell's own glyph is `❯`, one
@@ -1278,7 +1287,7 @@ fn draw_list_row(
     } else {
         Span::raw("  ")
     };
-    struct Entry {
+    struct Entry<'a> {
         lead: Span<'static>,
         tag: Option<Span<'static>>,
         name: String,
@@ -1289,6 +1298,8 @@ fn draw_list_row(
         text_mark: &'static str,
         text: String,
         text_style: Style,
+        /// A run line's ports, drawn after its command (`text`).
+        ports: &'a [u16],
         badge: String,
         badge_style: Style,
         /// The color the cursor's wash takes: the status's while it
@@ -1322,6 +1333,7 @@ fn draw_list_row(
                 text_mark,
                 text,
                 text_style: Style::default().fg(look.prompt),
+                ports: &[],
                 badge: look.ago,
                 badge_style: look.ago_style,
                 status: card_edge(
@@ -1348,6 +1360,7 @@ fn draw_list_row(
                 },
                 text: t.run_command.clone().unwrap_or_default(),
                 text_style: Style::default().fg(th.muted),
+                ports: &t.run.ports,
                 badge,
                 badge_style,
                 status: None,
@@ -1367,6 +1380,9 @@ fn draw_list_row(
         );
         room -= ACCOUNT_TAG_W;
     }
+    // Where the name starts: every offset below (`used`) counts from it.
+    let x0 = r.x + (width - room) as u16;
+    let mut port_cells = Vec::new();
     // The badge at the right end, while the name keeps a few letters.
     let badge = e.badge.trim().to_string();
     let badge_w = badge.chars().count();
@@ -1398,11 +1414,42 @@ fn draw_list_row(
         let text_at = runs_at + runs_w + LIST_GAP;
         let text_mark_w = e.text_mark.chars().count();
         if !e.text.is_empty() && room >= text_at + text_mark_w + 6 {
-            let text = truncate(&e.text, room - text_at - text_mark_w);
+            // The ports keep their room — `  :3000 :5173`, two cells
+            // before the first and one between — and the command gives way.
+            let labels: Vec<String> = e.ports.iter().map(|p| format!(":{p}")).collect();
+            let ports_w: usize = labels.iter().map(|l| l.chars().count() + 1).sum::<usize>() + 1;
+            let ports_fit = !labels.is_empty() && room >= text_at + text_mark_w + 6 + ports_w;
+            let text_room = room - text_at - text_mark_w - if ports_fit { ports_w } else { 0 };
+            let text = truncate(&e.text, text_room);
             spans.push(Span::raw(" ".repeat(text_at - used)));
             spans.push(Span::styled(e.text_mark, Style::default().fg(th.dim)));
             used = text_at + text_mark_w + text.chars().count();
             spans.push(Span::styled(text, e.text_style));
+            // Underlined links, the one under the pointer lit.
+            let hovered = match (&app.hover_crumb, card) {
+                (Some(HitTarget::RunPort(id, port)), crate::launcher::Card::Terminal(t))
+                    if *id == t.id =>
+                {
+                    Some(*port)
+                }
+                _ => None,
+            };
+            let shown: &[u16] = if ports_fit { e.ports } else { &[] };
+            for (i, (&port, label)) in shown.iter().zip(labels).enumerate() {
+                let gap = if i == 0 { 2 } else { 1 };
+                spans.push(Span::raw(" ".repeat(gap)));
+                used += gap;
+                let w = label.chars().count();
+                port_cells.push((Rect::new(x0 + used as u16, r.y, w as u16, 1), port));
+                let fg = if hovered == Some(port) {
+                    th.accent
+                } else {
+                    th.text
+                };
+                let style = Style::default().fg(fg).add_modifier(Modifier::UNDERLINED);
+                spans.push(Span::styled(label, style));
+                used += w;
+            }
         }
     }
     if keep_badge {
@@ -1414,6 +1461,7 @@ fn draw_list_row(
         line = line.style(Style::default().bg(card_tint(app, e.status, th)));
     }
     line.render(r, buf);
+    port_cells
 }
 
 /// One session as a single line for a picker that lists checkouts with
@@ -3767,6 +3815,22 @@ mod tests {
             session.trim_end().chars().count(),
             "the status ends where the age does:\n{session}\n{run}"
         );
+    }
+
+    /// A run line's ports keep their room on a narrow line: the command
+    /// is what gives way.
+    #[test]
+    fn a_long_command_gives_way_to_the_ports() {
+        let mut app = a_tree();
+        select(&mut app, "api");
+        let mut run = a_run(true);
+        run.run_command = Some("docker compose up --build --remove-orphans api web worker".into());
+        run.run.ports = vec![3000, 5173];
+        app.tree.terminals.push(run);
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 60, 30));
+        let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
+        assert!(line.contains("…  :3000 :5173"), "{line:?}");
+        assert!(line.trim_end().ends_with("running"), "{line:?}");
     }
 
     /// A run that ended with nobody stopping it says how at the right

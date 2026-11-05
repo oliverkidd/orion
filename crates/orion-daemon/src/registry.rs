@@ -647,7 +647,9 @@ impl Daemon {
     /// [`TerminalTab::run`] for terminal `id`, from what the DAEMON holds
     /// of its run. Takes no lock a caller of it may hold.
     fn run_state(&self, id: &TerminalId) -> orion_core::RunState {
+        let sref = SessionRef::Terminal(id.clone());
         orion_core::RunState {
+            ports: self.session(&sref).map(|s| s.ports()).unwrap_or_default(),
             stopping_until: self.stopping_runs.lock().unwrap().get(id).copied(),
             exit_code: self
                 .finished_run_exit(&SessionRef::Terminal(id.clone()))
@@ -2243,6 +2245,20 @@ impl Daemon {
             .insert(id.clone(), (session.clone(), exit_code));
     }
 
+    /// Resend RUN TERMINAL `session`'s row when its run has printed ports
+    /// since the row last went out with `sent` of them — and only while
+    /// it is still that terminal's live PTY.
+    fn send_new_ports(&self, session: &Arc<PtySession>, sent: &mut usize) {
+        let SessionRef::Terminal(id) = &session.sref else {
+            return;
+        };
+        let seen = session.ports().len();
+        if seen != *sent && self.owns_session(&session.sref, session) {
+            *sent = seen;
+            let _ = self.broadcast_terminal(id);
+        }
+    }
+
     /// Whether `id` is a RUN TERMINAL's row.
     fn is_run_terminal(&self, id: &TerminalId) -> bool {
         self.store
@@ -2844,6 +2860,7 @@ impl Daemon {
             scrub_env: env::AGENT_SESSION_VARS,
             cols,
             rows,
+            scan_ports: false,
         };
         let sref = SessionRef::Agent(agent.id.clone());
         let session = PtySession::spawn(sref, spec)?;
@@ -3067,6 +3084,9 @@ impl Daemon {
             scrub_env: env::AGENT_SESSION_VARS,
             cols,
             rows,
+            // A run's dev server says where it listens; a shell's output
+            // is the user's own.
+            scan_ports: terminal.run_command.is_some(),
         };
         let sref = SessionRef::Terminal(terminal.id.clone());
         let session = PtySession::spawn(sref, spec)?;
@@ -3092,6 +3112,9 @@ impl Daemon {
         let mut rx = session.events.subscribe();
         let sref = session.sref.clone();
         tokio::spawn(async move {
+            // How many of a run's ports its row was last sent with: the
+            // set only grows, so a count says whether the row is behind.
+            let mut ports_sent = 0;
             loop {
                 match rx.recv().await {
                     Ok(PtyEvent::Exited { exit_code }) => {
@@ -3179,6 +3202,10 @@ impl Daemon {
                             daemon.on_pty_title(id, &title);
                         }
                     }
+                    // A run printed where it listens: its line shows it.
+                    Ok(PtyEvent::Ports) => {
+                        daemon.send_new_ports(&session, &mut ports_sent);
+                    }
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // A fire-hosing child can push progress edges off the
@@ -3193,6 +3220,9 @@ impl Daemon {
                                 daemon.complete_pending_move(id, &HookEvent::Progress { busy });
                             }
                         }
+                        // A dropped Ports with them: the scanner never
+                        // lags either.
+                        daemon.send_new_ports(&session, &mut ports_sent);
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -5198,6 +5228,65 @@ mod tests {
         daemon.stop_run(&worktree.id).unwrap();
     }
 
+    /// The next row about terminal `id` that `pred` takes.
+    async fn terminal_row_until(
+        events: &mut broadcast::Receiver<ServerEvent>,
+        id: &TerminalId,
+        pred: impl Fn(&TerminalTab) -> bool,
+    ) -> TerminalTab {
+        loop {
+            let row = next_terminal_event(events, id)
+                .await
+                .expect("the line stays");
+            if pred(&row) {
+                return row;
+            }
+        }
+    }
+
+    /// The localhost ports a run prints ride its row — every client's run
+    /// line — kept as the output scrolls on, only while it runs; a start
+    /// of the run begins again from none. A plain shell is never read.
+    #[tokio::test]
+    async fn a_runs_ports_ride_its_row_until_it_starts_again() {
+        let daemon = test_daemon();
+        let (dir, worktree) = run_worktree(&daemon);
+        let mut events = daemon.events.subscribe();
+        let first = run_config(
+            dir.path(),
+            "echo '- Local: http://localhost:3000'; echo 'api http://127.0.0.1:4000/'; \
+             seq 1 300; sleep 1",
+        );
+        let EntityId::Terminal(id) = daemon.start_run_with(&worktree.id, &first).unwrap() else {
+            panic!("a run lives in a terminal");
+        };
+        let row = terminal_row_until(&mut events, &id, |t| t.run.ports.len() == 2).await;
+        assert!(row.alive);
+        assert_eq!(row.run.ports, vec![3000, 4000], "first seen first");
+        let ended = terminal_row_until(&mut events, &id, |t| !t.alive).await;
+        assert!(ended.run.ports.is_empty(), "nothing listens once it ended");
+
+        let again = run_config(
+            dir.path(),
+            "echo 'http://localhost:5173/'; echo started; while :; do sleep 0.1; done",
+        );
+        assert_eq!(
+            daemon.start_run_with(&worktree.id, &again).unwrap(),
+            EntityId::Terminal(id.clone()),
+            "the same line"
+        );
+        let row = terminal_row_until(&mut events, &id, |t| !t.run.ports.is_empty()).await;
+        assert_eq!(row.run.ports, vec![5173], "the last run's ports are gone");
+        daemon.stop_run(&worktree.id).unwrap();
+        daemon.stop_run(&worktree.id).unwrap();
+
+        let EntityId::Terminal(shell) = daemon.create_terminal(&worktree.id, None).unwrap() else {
+            panic!("a terminal");
+        };
+        let session = daemon.session(&SessionRef::Terminal(shell)).unwrap();
+        assert!(!session.scans_ports());
+    }
+
     /// A run that ends with nobody stopping it keeps its line, and the
     /// line carries the code it exited with: 0 for `done`, anything else
     /// for `exited N`. Its next start clears it.
@@ -7029,6 +7118,7 @@ mod tests {
                 scrub_env: &[],
                 cols: 80,
                 rows: 24,
+                scan_ports: false,
             },
         )
         .unwrap();

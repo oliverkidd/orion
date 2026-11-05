@@ -81,7 +81,7 @@ Ghostty config.
 | My week in review | `⌘⇧Y`, `⇧W` | the WEEK IN REVIEW: what was merged and done in the last 7 days, written up by product area with what to show and what to say (below). `⌘⇧W` would read better, and Ghostty keeps it |
 | Changes | `⌘E` | the DIFF VIEWER for the selected worktree — its uncommitted changes, the whole branch, or the commits you tick, read together — or the diff of the pull request the pane is reading ([below](#the-diff-viewer)) |
 | Command palette | `⌘⇧P`, `:` | every action by name, with its key; `:` is vim's command line |
-| Open outside orion | `⌘O` | the OPEN MENU: the repo or pull request on GitHub, the checkout in your editor app (**Open in app**: Cursor, VS Code, …), a terminal in the checkout, the checkout's open command |
+| Open outside orion | `⌘O` | the OPEN MENU: the repo or pull request on GitHub, the checkout in your editor app (**Open in app**: Cursor, VS Code, …), a terminal in the checkout, the checkout's open command, and **Open app** — the first localhost port the checkout's run printed (`localhost:3000` on its row), in the browser |
 | Reload from GitHub | `⌘R` | ask `gh` again now for the project's open pull requests, the selected worktree's pull request and the one the pane is reading |
 | Toggle pane | `⌘J` | fold the pane beside the cards away or bring it back, from the cards or from inside the pane |
 | Full-screen session | `⌘F` | give the session in the pane the whole screen, or bring it back down |

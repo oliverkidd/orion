@@ -3730,6 +3730,124 @@ mod tests {
         );
     }
 
+    /// `seed_tree`'s root checkout running `npm run dev`, its run having
+    /// printed `ports`.
+    fn seed_run(app: &mut App, ports: Vec<u16>) {
+        hse(
+            app,
+            ServerEvent::EntityUpserted {
+                entity: Entity::Terminal(TerminalTab {
+                    id: TerminalId("run1".into()),
+                    worktree_id: WorktreeId("w1".into()),
+                    name: "run".into(),
+                    sort_order: 0,
+                    alive: true,
+                    run_command: Some("npm run dev".into()),
+                    run: orion_core::RunState {
+                        ports,
+                        ..Default::default()
+                    },
+                }),
+            },
+        );
+    }
+
+    /// A run line shows the localhost ports its run printed after its
+    /// command, underlined links ahead of the line: a click on the first
+    /// opens that app in the browser, the cursor staying where it was.
+    #[test]
+    fn a_click_on_a_run_lines_first_port_opens_the_app() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_run(&mut app, vec![3000, 5173]);
+        let terminal = draw_tall(&mut app);
+        let text = screen_text(&terminal);
+        assert!(text.contains("$ npm run dev  :3000 :5173"), "{text}");
+        let first = HitTarget::RunPort(TerminalId("run1".into()), 3000);
+        let at = tab_at(&app, first.clone());
+        assert_eq!(at.width, 5, ":3000");
+        let cell = terminal.backend().buffer().cell((at.x, at.y)).unwrap();
+        assert_eq!(cell.symbol(), ":");
+        assert!(cell.modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(
+            app.hit_at(at.x, at.y),
+            Some(first),
+            "the port wins over its line"
+        );
+
+        let before = app.selected_session_row().and_then(|r| r.sref());
+        crate::event_loop::take_opened();
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            at.x,
+            at.y,
+        );
+        assert_eq!(
+            crate::event_loop::take_opened(),
+            vec!["http://localhost:3000"]
+        );
+        assert_eq!(app.selected_session_row().and_then(|r| r.sref()), before);
+
+        let second = tab_at(&app, HitTarget::RunPort(TerminalId("run1".into()), 5173));
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            second.x,
+            second.y,
+        );
+        assert_eq!(
+            crate::event_loop::take_opened(),
+            vec!["http://localhost:5173"]
+        );
+    }
+
+    /// ⌘O's **Open app** is the run's first port, named on its row once
+    /// the run has printed one; before that, and with no run, it says
+    /// why instead of opening anything.
+    #[test]
+    fn open_app_in_the_open_menu_opens_the_first_port() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        crate::event_loop::take_opened();
+        let act = crate::keymap::Action::OpenApp;
+
+        super::super::run_action(&mut app, act);
+        assert!(crate::event_loop::take_opened().is_empty());
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("no stack running here — ⌘⇧S starts it")
+        );
+        seed_run(&mut app, vec![]);
+        super::super::run_action(&mut app, act);
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("the run hasn't printed a localhost address yet")
+        );
+
+        seed_run(&mut app, vec![5173, 3000]);
+        super::super::run_action(&mut app, crate::keymap::Action::OpenOutside);
+        let Some(Overlay::Menu(menu)) = &app.overlay else {
+            panic!("⌘O opens the Open menu: {:?}", app.overlay);
+        };
+        let row = menu
+            .items
+            .iter()
+            .find(|i| i.label == "Open app")
+            .expect("an Open app row");
+        assert_eq!(row.hint.as_deref(), Some("localhost:5173"));
+        assert_eq!(
+            row.action,
+            crate::app::MenuAction::RunAction(crate::keymap::Action::OpenApp)
+        );
+        app.overlay = None;
+        super::super::run_action(&mut app, act);
+        assert_eq!(
+            crate::event_loop::take_opened(),
+            vec!["http://localhost:5173"]
+        );
+    }
+
     /// What the PANE is reading, as its tab strip would have to agree.
     fn reading(app: &App) -> Option<SessionRef> {
         app.term.as_ref().map(|t| t.sref.clone())

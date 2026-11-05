@@ -2,7 +2,8 @@
 //! stack on the machine (`ServerEvent::StacksChanged`), which the band's
 //! `⬡` reads through [`App::stack_of`]. Starting and stopping a checkout's
 //! stack is `⌘⇧S`'s (`event_loop::toggle_stack_in`): its RUN COMMAND, in
-//! the background, on a run line in its band.
+//! the background, on a run line in its band. The ports that run prints
+//! are its app: a click on one, or ⌘O's **Open app**, opens it.
 
 use crate::app::App;
 use orion_core::compose::Stack;
@@ -50,4 +51,45 @@ pub(crate) fn stop_all(app: &mut App, out: &mut Vec<ClientRequest>) {
         "stopping {}",
         crate::flash::plural(runs.len(), "stack")
     )));
+}
+
+/// Where a run's port is served, as the browser is handed it.
+pub(crate) fn port_url(port: u16) -> String {
+    format!("http://localhost:{port}")
+}
+
+/// `worktree`'s app: the first localhost port its live run printed.
+pub(crate) fn app_port(app: &App, worktree: &WorktreeId) -> Option<u16> {
+    app.run_terminal(worktree)?.run.ports.first().copied()
+}
+
+/// A click on a run line's `:3000`: that port, in the browser.
+pub(crate) fn open_port(app: &mut App, port: u16) {
+    let url = port_url(port);
+    if !crate::event_loop::open_url(&url) {
+        app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
+    }
+}
+
+/// ⌘O's **Open app**: the app the cursor's checkout's stack serves — the
+/// first port its run printed — in the browser; with none yet, why.
+pub(crate) fn open_app(app: &mut App) {
+    let Some(worktree) = crate::git_sync::target(app) else {
+        return;
+    };
+    if let Some(port) = app_port(app, &worktree) {
+        open_port(app, port);
+        return;
+    }
+    let note = if app.worktree_running(&worktree) {
+        "the run hasn't printed a localhost address yet".to_string()
+    } else {
+        let key = crate::hints::key_or(
+            &app.keymap,
+            crate::keymap::Action::ToggleStack,
+            "Start stack",
+        );
+        format!("no stack running here — {key} starts it")
+    };
+    app.flash = Some(crate::flash::Flash::note(note));
 }

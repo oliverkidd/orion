@@ -4323,6 +4323,7 @@ fn dispatch_action(
         // cursor stands, as it is for `g`, `f` and `b`, so the key is never
         // quietly dropped on Sessions.
         Action::OpenWorktree => open_selected_worktree(app),
+        Action::OpenApp => crate::stacks::open_app(app),
         // AddProject adds a project from ANY panel — unlike New it never
         // changes meaning with focus, matching the "open a repo" instinct.
         Action::AddProject => open_prompt(app, PromptKind::AddProject),
@@ -7224,6 +7225,10 @@ fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientReq
             launcher::select_drawer_entry(app, band, entry, out)
         }
         HitTarget::LauncherBandPr(ref wid) => launcher::select_band_of(app, wid, out),
+        HitTarget::RunPort(ref id, _) => {
+            launcher::select_card(app, SessionRef::Terminal(id.clone()), out);
+            true
+        }
         _ => false,
     }
 }
@@ -10990,6 +10995,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
             h,
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
+                | HitTarget::RunPort(..)
                 | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
@@ -11709,6 +11715,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::LauncherBandPr(wid)) => {
                     launcher::click_pull_request(app, &wid, out)
                 }
+                // A port on a run line: its app, in the browser.
+                Some(HitTarget::RunPort(_, port)) => crate::stacks::open_port(app, port),
                 // `‹ sessions` in a full-screen session's header: back
                 // down to the pane beside the grid, the same way `^q`
                 // goes back.
@@ -11925,6 +11933,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                         HitTarget::LauncherCard(_)
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
+                            | HitTarget::RunPort(..)
                             | HitTarget::LauncherDrawer(_)
                             | HitTarget::LauncherDrawerEntry(..)
                             | HitTarget::PanelBg(Focus::Sessions)

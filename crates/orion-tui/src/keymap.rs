@@ -115,6 +115,9 @@ pub enum Action {
     /// Option+Enter on a Mac with Option as Meta — gets through both and
     /// parses as Alt+Enter. Its RUN COMMAND is the project menu's **Run**.
     OpenWorktree,
+    /// ⌘O's **Open app**: the first localhost port the cursor's
+    /// checkout's run printed, in the browser (`crate::stacks::open_app`).
+    OpenApp,
     // sessions
     NewTerminal,
     Rename,
@@ -532,6 +535,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         id: "open_worktree",
         label: "Open checkout in editor",
         hint: "Open the selected checkout outside orion, usually in your editor: its project's Open command (Settings → Projects) — e.g. open http://localhost:3000",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        defaults: &[],
+    },
+    ActionSpec {
+        action: Action::OpenApp,
+        id: "open_app",
+        label: "Open app",
+        hint: "Open the app the selected checkout's stack serves, in the browser: the first localhost port its run printed — the first :3000 on its run line",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],

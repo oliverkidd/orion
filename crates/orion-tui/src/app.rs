@@ -113,6 +113,11 @@ pub enum HitTarget {
     /// by the band's place in `launcher::bands`: a click puts the cursor
     /// on the band, as `j`/`k` walking onto it do.
     LauncherBand(usize),
+    /// A port on a RUN LINE — `:3000`, after its command — registered
+    /// ahead of the line, so it wins: a click opens that port on
+    /// localhost in the browser (`stacks::open_port`). The line's terminal
+    /// and the port.
+    RunPort(TerminalId, u16),
     /// The PULL REQUEST on a band's rule — its `↗ #42 title` — registered
     /// ahead of the rule, so it wins: a click opens the pull request in
     /// the browser, through the very `launcher::open_pull_request` `⇧V`
