@@ -346,13 +346,15 @@ pub struct SettingSpec {
 /// Keys tab is generated from [`crate::keymap::ACTIONS`] instead, so a
 /// new action shows up there without being declared twice — and the Accounts
 /// tab is generated from the harness registry, so a new CLI shows up
-/// there without being declared twice.
+/// there without being declared twice. The Presets tab is the AGENT
+/// PRESETS themselves, read from their file (`presets_tab`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBody {
     Values(&'static [SettingSpec]),
     Project(&'static [SettingSpec]),
     Keys,
     Accounts,
+    Presets,
 }
 
 /// The Accounts tab's section listing every CLAUDE ACCOUNT, between the
@@ -409,8 +411,6 @@ pub enum SettingKind {
     /// found, if anywhere, and what the last test said
     /// (`linear::key_status`); Enter asks Linear whose key it is.
     LinearKey,
-    /// The Presets tab's one row: Enter opens the AGENT PRESETS list.
-    AgentPresets,
 }
 
 /// One harness field row in the Accounts tab. The tab renders one section
@@ -521,14 +521,10 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
         title: "Projects",
         body: TabBody::Project(PROJECT_SETTINGS),
     },
+    // orion's own presets, then the user's: the presets screen.
     SettingsTab {
         title: "Presets",
-        body: TabBody::Values(&[SettingSpec {
-            kind: SettingKind::AgentPresets,
-            label: "Agent presets",
-            hint: "Enter opens the presets: orion's own — PR autofix, Linear Ticket, Week review — and yours",
-            group: "",
-        }]),
+        body: TabBody::Presets,
     },
     SettingsTab {
         title: "Keys",
@@ -645,6 +641,14 @@ pub fn keys_tab() -> usize {
         .expect("SETTINGS_TABS declares a Keys tab")
 }
 
+/// Index of the Presets tab, the AGENT PRESETS screen.
+pub fn presets_tab() -> usize {
+    SETTINGS_TABS
+        .iter()
+        .position(|t| t.body == TabBody::Presets)
+        .expect("SETTINGS_TABS declares a Presets tab")
+}
+
 /// Index of the Accounts tab, generated from the harness registry.
 pub fn accounts_tab() -> usize {
     SETTINGS_TABS
@@ -680,6 +684,7 @@ pub fn tab_len(tab: usize, projects: usize) -> usize {
             let cfg = Config::load();
             ACCOUNTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
         }
+        Some(TabBody::Presets) => crate::presets_tab::Screen::load().rows.len(),
         None => 0,
     }
 }
@@ -755,6 +760,7 @@ pub fn hint_at(tab: usize, index: usize) -> String {
             .unwrap_or("")
             .to_string(),
         Some(TabBody::Accounts) => Config::load().agent_hint_by_index(index),
+        Some(TabBody::Presets) => crate::presets_tab::Screen::load().explain(index),
         None => String::new(),
     }
 }
@@ -853,6 +859,7 @@ pub fn settings_rows(tab: usize, projects: usize) -> Vec<SettingsRow> {
             }
             out
         }
+        Some(TabBody::Presets) => crate::presets_tab::Screen::load().settings_rows(),
         None => Vec::new(),
     }
 }
@@ -2443,7 +2450,6 @@ impl Config {
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
             | SettingKind::LinearKey => ProjectSettings::default().value_label(kind),
-            SettingKind::AgentPresets => "orion's and yours".into(),
         }
     }
 
@@ -2517,14 +2523,13 @@ impl Config {
                     cycle_owned(&self.quick_prompt_kind, &self.quick_prompt_choices(), step);
             }
             // One project's, not the file's: see `set_project_text` and
-            // `cycle_project`. The presets row opens a list.
+            // `cycle_project`.
             SettingKind::BaseBranch
             | SettingKind::SetupCommand
             | SettingKind::RunCommand
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
-            | SettingKind::LinearKey
-            | SettingKind::AgentPresets => {}
+            | SettingKind::LinearKey => {}
         }
     }
 }
@@ -2899,7 +2904,7 @@ pub fn locate(kind: SettingKind) -> Option<(usize, usize)> {
                 settings.iter().position(|s| s.kind == kind)
             }
             TabBody::Accounts => ACCOUNTS_HEAD.iter().position(|s| s.kind == kind),
-            TabBody::Keys => None,
+            TabBody::Keys | TabBody::Presets => None,
         }
         .map(|i| (t, i))
     })
@@ -4798,6 +4803,7 @@ mod tests {
                     }
                     TabBody::Keys => assert!(headers > 0, "the Keys tab groups its rows"),
                     TabBody::Accounts => assert!(headers > 0, "the Accounts tab groups its rows"),
+                    TabBody::Presets => assert_eq!(headers, 2, "orion's presets, then yours"),
                 }
             }
         });

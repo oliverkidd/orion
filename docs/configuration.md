@@ -56,8 +56,10 @@ accounts** (see [Claude accounts](#claude-accounts)), then one header per harnes
 one tab whose rows are not orion's but each project's: every project in turn, named with its path,
 and each row under it reads and writes that project's own entry under `projects` — so the same row
 shows a different value on the next project over; its **Linear key** row is where that project's
-key was found ([Linear](#linear)). **Presets**' one row opens the AGENT PRESETS list, and **Keys**
-lists every action and its chords, read-only (rebinding is `keybindings`, below).
+key was found ([Linear](#linear)). **Presets** is the AGENT PRESETS themselves: orion's own under
+**Used by orion** (PR autofix, Linear Ticket, Week review, each tagged `orion`), then yours under
+**Yours**, then **+ New preset**; its keys follow the row ([Sessions](sessions.md#agent-presets)).
+**Keys** lists every action and its chords, read-only (rebinding is `keybindings`, below).
 
 Some things are no longer settings at all, because they are how orion works: `.env` files are
 linked into every new worktree, a file opened from Go to file or find in files closes the finder,
@@ -457,8 +459,8 @@ next ATTACH or prewarm, and an agent RESUMES its conversation there.
   least one stays on) with their default model and reasoning effort. **Projects**: each project's
   own settings (`projects`, keyed by repo path — the branch its new worktrees start from, `auto`
   for origin's default or a name such as `dev`; its run and open commands; what deleting one of its
-  worktrees does to its docker compose projects; and its Linear key). **Presets** opens the AGENT
-  PRESETS, and **Keys** lists the keys. `R` inside the overlay puts every setting — hotkeys
+  worktrees does to its docker compose projects; and its Linear key). **Presets** lists the AGENT
+  PRESETS, orion's then yours, and edits, makes and deletes them, and **Keys** lists the keys. `R` inside the overlay puts every setting — hotkeys
   included — back to its default, after a confirmation, and removes `config.local.json`.
 - **Every grid key is rebindable by hand.** The overlay's Keys tab lists every action and what it
   answers to, and nothing on it edits: overrides go into the same file by hand

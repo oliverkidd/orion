@@ -8254,6 +8254,14 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('k') | KeyCode::Up if selected == 0 => SettingsCmd::FocusTabs,
         KeyCode::Char('k') | KeyCode::Up => SettingsCmd::Move(selected - 1),
         _ if keys::CHOOSE.matches(&key) => activate::settings_row_cmd(hotkeys, selected),
+        // Settings → Presets: the keys its selected row has a use for,
+        // and nothing else — not the value rows' cycle or install.
+        _ if !on_tabs && tab == crate::config::presets_tab() => {
+            match crate::presets_tab::Screen::load().key_cmd(selected, &key) {
+                Some(cmd) => SettingsCmd::Preset(cmd),
+                None => return,
+            }
+        }
         _ if keys::INSTALL.matches(&key) && !hotkeys => SettingsCmd::Install(selected),
         _ if keys::RENAME.matches(&key) && account() => SettingsCmd::RenameAccount(selected),
         _ if keys::SIGN_OUT.matches(&key) && account() => SettingsCmd::SignOut(selected),
@@ -8322,6 +8330,7 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
         }
         SettingsCmd::SignOut(i) => confirm_sign_out(app, i),
         SettingsCmd::RemoveAccount(i) => confirm_remove_account(app, i),
+        SettingsCmd::Preset(cmd) => crate::presets_tab::run(app, cmd),
         SettingsCmd::Nudge => {
             if let Some(view) = settings_mut(app) {
                 view.info(HOTKEYS_ARE_HAND_EDITED);
@@ -8393,6 +8402,8 @@ enum SettingsCmd {
     SignOut(usize),
     /// `⌫` on a CLAUDE ACCOUNTS row.
     RemoveAccount(usize),
+    /// A key on a Settings → Presets row.
+    Preset(crate::presets_tab::Cmd),
     /// A HOTKEYS row: nothing to change here, so say where it changes.
     Nudge,
     ResetAll,
@@ -8437,28 +8448,15 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
             _ => {}
         }
     }
-    if let Some(spec) = crate::config::setting_at(tab, index) {
-        // The Presets tab's row opens the AGENT PRESETS list in the
-        // overlay's place, there being nothing to cycle.
-        if spec.kind == crate::config::SettingKind::AgentPresets {
-            match (delta, app.selected_worktree().map(|w| w.id.clone())) {
-                (0, Some(worktree)) => {
-                    close_settings(app);
-                    crate::preset_overlays::reopen_agent_presets(app, worktree, 0);
-                }
-                (0, None) => {
-                    if let Some(view) = settings_mut(app) {
-                        view.warn("open a project first: presets launch into its checkout");
-                    }
-                }
-                _ => {
-                    if let Some(view) = settings_mut(app) {
-                        view.info("Enter: open the presets");
-                    }
-                }
-            }
-            return;
+    // A Settings → Presets row: Enter (or a second click) edits its
+    // preset, or makes one on **+ New preset**; there is nothing to cycle.
+    if tab == crate::config::presets_tab() {
+        if delta == 0 {
+            crate::presets_tab::run(app, crate::presets_tab::Cmd::Open(index));
         }
+        return;
+    }
+    if let Some(spec) = crate::config::setting_at(tab, index) {
         // A PROJECTS TAB row edits the entry of the project whose block
         // it is in. With no project to edit — an empty tree — say so
         // rather than open a prompt with nowhere to write.
@@ -8873,7 +8871,7 @@ fn open_harness_settings(app: &mut App, kind: AgentKind, custom: Option<String>)
 /// questions asked. `open_settings` is the from-the-panels entry that
 /// checks the memory's age first; this one is for mid-visit round trips
 /// (the reset confirmation) where the position can't have gone stale.
-fn reopen_settings(app: &mut App) {
+pub(crate) fn reopen_settings(app: &mut App) {
     let tab = app.settings_tab;
     app.overlay = Some(Overlay::Settings(SettingsView::new(
         tab,
@@ -9182,6 +9180,8 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
                 index,
             );
         }
+        PendingAction::DeletePreset { index } => crate::presets_tab::delete(app, index),
+        PendingAction::RestorePresetText { index } => crate::presets_tab::restore(app, index),
         PendingAction::ResetSettings => reset_settings(app),
         PendingAction::AddClaudeAccount(new) => add_claude_account(app, new, true),
         PendingAction::SignOutClaude { id } => {
@@ -27504,39 +27504,141 @@ mod tests {
         );
     }
 
-    /// The Presets tab's one row opens the AGENT PRESETS list in the
-    /// overlay's place — which needs a checkout to launch into, and says
-    /// so without one.
+    /// Settings → Presets is the presets themselves: orion's first, then
+    /// the user's, then + New preset. Enter on a row edits it and Esc
+    /// lands back on that row; `^N` on one of the user's and Enter on +
+    /// New preset both make one, and the save lands on its row; `^D`
+    /// deletes behind a confirm whose either answer comes back to the
+    /// tab; and on a system row `^N` does nothing and `^D` only says why.
     #[test]
-    fn the_presets_tab_opens_the_presets_list() {
-        let dir = tempfile::tempdir().unwrap();
-        crate::agent_presets::with_presets_path(dir.path().join("presets.json"), || {
-            with_default_config(|| {
-                let (presets, _) =
-                    crate::config::locate(crate::config::SettingKind::AgentPresets).unwrap();
-                let mut out = Vec::new();
-                let mut bare = App::new();
-                open_settings_on(&mut bare, presets, &mut out);
-                press(&mut bare, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                assert!(
-                    settings_view(&bare)
-                        .notice
-                        .as_ref()
-                        .is_some_and(|(t, _)| t.contains("open a project first")),
-                    "{:?}",
-                    settings_view(&bare).notice
-                );
+    fn the_presets_tab_edits_makes_and_deletes_presets_and_comes_back() {
+        with_seeded_presets(|| {
+            let tab = crate::config::presets_tab();
+            let mut out = Vec::new();
+            let mut app = App::new();
+            open_settings_on(&mut app, tab, &mut out);
+            let screen = crate::presets_tab::Screen::load();
+            let names: Vec<&str> = (0..screen.rows.len())
+                .map(|at| screen.preset(at).map_or("+ New", |(_, p)| p.name.as_str()))
+                .collect();
+            assert_eq!(
+                names,
+                [
+                    "PR autofix",
+                    "Linear Ticket",
+                    "Week review",
+                    "reviewer",
+                    "scratch",
+                    "+ New"
+                ]
+            );
 
-                let mut app = App::new();
-                seed_tree(&mut app);
-                open_settings_on(&mut app, presets, &mut out);
-                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-                assert!(
-                    matches!(app.overlay, Some(Overlay::AgentPresets(_))),
-                    "{:?}",
-                    app.overlay.as_ref().map(overlay_label)
-                );
-            });
+            // On the tab strip the rows' keys are not the strip's.
+            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
+            assert!(settings_view(&app).on_tabs);
+            for c in ['n', 'd', 'r'] {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::CONTROL, &mut out);
+                assert!(matches!(app.overlay, Some(Overlay::Settings(_))), "^{c}");
+                assert!(settings_view(&app).notice.is_none(), "^{c}");
+            }
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+
+            // Enter edits the row's preset; Esc is back on the row.
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
+                panic!("{:?}", app.overlay.as_ref().map(overlay_label));
+            };
+            assert_eq!(editor.name.as_str(), "Linear Ticket");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert_eq!(settings_view(&app).tab, tab);
+            assert_eq!(settings_view(&app).selected, 1);
+
+            // A system row: no new, no delete — only a word why.
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            press(
+                &mut app,
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
+            assert!(
+                settings_view(&app)
+                    .notice
+                    .as_ref()
+                    .is_some_and(|(t, _)| t.contains("can't be deleted")),
+                "{:?}",
+                settings_view(&app).notice
+            );
+
+            // One of the user's: ^N makes a preset, the save lands on it.
+            for _ in 0..2 {
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            }
+            press(
+                &mut app,
+                KeyCode::Char('n'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            let Some(Overlay::AgentPresetEditor(editor)) = &mut app.overlay else {
+                panic!("^N opens the editor");
+            };
+            assert!(editor.editing.is_none());
+            editor.name = crate::text_input::TextInput::with_text("tester");
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let screen = crate::presets_tab::Screen::load();
+            let at = settings_view(&app).selected;
+            assert_eq!(
+                screen.preset(at).map(|(_, p)| p.name.as_str()),
+                Some("tester")
+            );
+
+            // ^D asks; Esc keeps it and comes back, Enter deletes it.
+            press(
+                &mut app,
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            assert!(matches!(
+                &app.overlay,
+                Some(Overlay::Confirm(c)) if c.action == PendingAction::DeletePreset { index: 5 }
+            ));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert_eq!(settings_view(&app).selected, at, "back on the row");
+            assert_eq!(crate::agent_presets::load_seeded().len(), 6);
+            press(
+                &mut app,
+                KeyCode::Char('d'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(settings_view(&app).tab, tab);
+            let names: Vec<String> = crate::agent_presets::load()
+                .into_iter()
+                .map(|p| p.name)
+                .collect();
+            assert!(!names.contains(&"tester".to_string()), "{names:?}");
+
+            // + New preset: Enter makes one.
+            let last = crate::presets_tab::Screen::load().rows.len() - 1;
+            while settings_view(&app).selected < last {
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(
+                &app.overlay,
+                Some(Overlay::AgentPresetEditor(e)) if e.editing.is_none() && e.settings_row == Some(last)
+            ));
         });
     }
 

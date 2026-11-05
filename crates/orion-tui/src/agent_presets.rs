@@ -102,6 +102,17 @@ impl SystemPreset {
         }
     }
 
+    /// What orion uses the preset for, in the few words its row in
+    /// Settings → Presets says beside its name; `{linear}` is the Linear
+    /// key, as the live keymap spells it (`hints::expand`).
+    pub const fn purpose(self) -> &'static str {
+        match self {
+            SystemPreset::PrAutofix => "sent when one of your PRs breaks",
+            SystemPreset::LinearTicket => "wraps every {linear} launch",
+            SystemPreset::WeekReview => "writes your week review",
+        }
+    }
+
     /// orion's own text for the preset, as `(prefix, postfix)`: what it
     /// says while the list holds none of the user's.
     pub fn builtin_text(self) -> (&'static str, &'static str) {
@@ -188,12 +199,20 @@ pub fn seed_system() {
 /// [`ensure_system`] ran, for a list that has not been seeded yet. Its
 /// text as stored: blank while it is orion's ([`AgentPreset::with_builtin_text`]).
 pub fn system(which: SystemPreset) -> AgentPreset {
-    let mut presets = load();
-    ensure_system(&mut presets);
-    presets
+    load_seeded()
         .into_iter()
         .find(|p| p.system == Some(which))
         .unwrap_or_else(|| which.default_preset())
+}
+
+/// The list as stored with its SYSTEM PRESETS made sure of
+/// ([`ensure_system`]), as Settings → Presets shows it and its editor
+/// indexes it — the stored list itself once orion has started
+/// ([`seed_system`]).
+pub fn load_seeded() -> Vec<AgentPreset> {
+    let mut presets = load();
+    ensure_system(&mut presets);
+    presets
 }
 
 impl AgentPreset {

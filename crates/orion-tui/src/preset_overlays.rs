@@ -341,6 +341,10 @@ pub struct AgentPresetEditor {
     /// a picker (`AgentPresetsView::quick`): Esc and save reopen the list
     /// as that picker, so the box, its text and its pull request survive.
     pub quick: Option<crate::quick_prompt::QuickReturn>,
+    /// The Settings → Presets row the form was opened from
+    /// (`presets_tab`): Esc lands back on it and a save on the saved
+    /// preset's row, not on a list. None when a list opened the form.
+    pub settings_row: Option<usize>,
     /// Index into the stored list when editing; None when creating.
     pub editing: Option<usize>,
     pub name: TextInput,
@@ -387,6 +391,7 @@ impl AgentPresetEditor {
         Self {
             worktree,
             quick: None,
+            settings_row: None,
             editing: None,
             name: TextInput::new(),
             follow: true,
@@ -423,6 +428,7 @@ impl AgentPresetEditor {
         Self {
             worktree,
             quick: None,
+            settings_row: None,
             editing: Some(index),
             name: TextInput::with_text(preset.name.clone()),
             follow: preset.follows_box(),
@@ -819,6 +825,25 @@ pub(crate) fn open_agent_preset_editor(
     app.overlay = Some(Overlay::AgentPresetEditor(editor));
 }
 
+/// The PRESET EDITOR over Settings → Presets, opened on row `from`:
+/// pre-filled from `editing` — a preset and its index in
+/// `agent_presets::load_seeded`, as the tab reads it — or blank for a new
+/// one.
+pub(crate) fn open_editor_from_settings(
+    app: &mut App,
+    from: usize,
+    editing: Option<(usize, &AgentPreset)>,
+) {
+    let text = crate::config::Config::load().preset_text();
+    let nowhere = WorktreeId(String::new());
+    let mut editor = match editing {
+        Some((index, preset)) => AgentPresetEditor::from_preset(nowhere, index, preset, text),
+        None => AgentPresetEditor::new(nowhere, text),
+    };
+    editor.settings_row = Some(from);
+    app.overlay = Some(Overlay::AgentPresetEditor(editor));
+}
+
 /// Enter in the PRESET EDITOR: validate against the stored list, write the
 /// row (in place when editing, appended when new), and land back on it in
 /// the list — or, for a new preset made from a QUICK PROMPT's picker, on
@@ -831,7 +856,10 @@ pub(crate) fn save_agent_preset_editor(
     mut editor: AgentPresetEditor,
     out: &mut Vec<ClientRequest>,
 ) {
-    let mut presets = crate::agent_presets::load();
+    let mut presets = match editor.settings_row {
+        Some(_) => crate::agent_presets::load_seeded(),
+        None => crate::agent_presets::load(),
+    };
     let preset = match editor.validate(&presets) {
         Ok(preset) => preset,
         Err(error) => {
@@ -860,10 +888,11 @@ pub(crate) fn save_agent_preset_editor(
             presets.len() - 1
         }
     };
-    if let Err(err) = crate::agent_presets::save(&presets) {
-        app.flash = Some(crate::flash::Flash::failed(format!(
-            "could not save agent presets: {err}"
-        )));
+    crate::presets_tab::save(app, &presets);
+    if editor.settings_row.is_some() {
+        let at = crate::presets_tab::Screen::of(presets).row_of(index);
+        crate::presets_tab::reopen(app, at.unwrap_or(0));
+        return;
     }
     // A preset made from a QUICK PROMPT's picker was made to be used: it
     // goes straight onto that box, as Enter on its row would put it —
@@ -1214,6 +1243,11 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent, out: &mut Vec<Clie
     match key.code {
         // Esc first clears a choice row's type-ahead, then backs out.
         KeyCode::Esc if !editor.filter.is_empty() => editor.filter.clear(),
+        // Back to the Settings → Presets row it came from, unsaved.
+        KeyCode::Esc if editor.settings_row.is_some() => {
+            let at = editor.settings_row.unwrap_or(0);
+            crate::presets_tab::reopen(app, at);
+        }
         // Back to the list it came from — the manager or the picker —
         // unsaved.
         KeyCode::Esc => {

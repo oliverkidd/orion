@@ -649,6 +649,16 @@ pub enum PendingAction {
         worktree: WorktreeId,
         quick: Option<Box<crate::quick_prompt::QuickReturn>>,
     },
+    /// `^D` on one of the user's presets in Settings → Presets: drop the
+    /// preset at `index` of the list, then the tab again.
+    DeletePreset {
+        index: usize,
+    },
+    /// `^R` on a system preset in Settings → Presets: drop the user's
+    /// text from the preset at `index`, so it says orion's again.
+    RestorePresetText {
+        index: usize,
+    },
     /// `R` in the settings overlay: rewrite config.json from the defaults
     /// (every setting and every hotkey), then reopen the overlay on them.
     ResetSettings,
@@ -707,6 +717,8 @@ impl PendingAction {
                 | PendingAction::AddClaudeAccount(_)
                 | PendingAction::SignOutClaude { .. }
                 | PendingAction::RemoveClaudeAccount { .. }
+                | PendingAction::DeletePreset { .. }
+                | PendingAction::RestorePresetText { .. }
         )
     }
 }

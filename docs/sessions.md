@@ -110,6 +110,13 @@ by id — and the preset launches that, refusing with the reason when it is swit
 preset an older release saved on the default Claude account, which every preset started on, follows
 the box from now on; one saved on any other harness or account keeps it.
 
+**Settings → Presets** is where they are managed. orion's own come first, under **Used by orion**,
+each tagged `orion` with a few words on what it is for, and marked `your text` while it holds text
+of yours; yours follow under **Yours**, each with where it runs, then **+ New preset**. The keys
+follow the row, and the frame names only those that work on it: `Enter` edits any preset; on one of
+orion's, `^R` puts back orion's text (once you confirm); on one of yours, `^N` makes a new one and
+`^D` deletes it (once you confirm). The editor comes back to the row it was opened on.
+
 Three presets are **system presets**, on every list and marked `system` — the agents orion starts
 itself:
 

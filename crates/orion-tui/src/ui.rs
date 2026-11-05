@@ -1596,7 +1596,13 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             // terminal now that the Keys tab alone is forty rows.
             let cfg = crate::config::Config::load();
             let tab = view.tab;
-            let rows = app.settings_rows(tab);
+            // Settings → Presets reads its file once a frame, here.
+            let presets =
+                (tab == crate::config::presets_tab()).then(crate::presets_tab::Screen::load);
+            let rows = match &presets {
+                Some(screen) => screen.settings_rows(),
+                None => app.settings_rows(tab),
+            };
             // Rows the modal spends on anything but settings: the tab
             // strip and its rule above the body, and a blank and the
             // EXPLANATION's two rows below it. The keys are on the bottom
@@ -1627,7 +1633,12 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 ))
                 .right_aligned(),
             );
-            let block = crate::hints::modal_block(block, &settings_hints(&view), area.width, th);
+            let block = crate::hints::modal_block(
+                block,
+                &settings_hints(&view, presets.as_ref()),
+                area.width,
+                th,
+            );
             let inner = block.inner(area);
             f.render_widget(block, area);
 
@@ -1659,6 +1670,13 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 .fold(28, usize::max);
             for row in rows.iter().skip(first_row).take(body_h) {
                 match row {
+                    // Settings → Presets draws its own rows.
+                    crate::config::SettingsRow::Setting(i) if presets.is_some() => {
+                        let selected = *i == view.selected && !view.on_tabs;
+                        if let Some(screen) = &presets {
+                            lines.push(screen.line(*i, selected, inner.width, &app.keymap, th));
+                        }
+                    }
                     crate::config::SettingsRow::Blank => lines.push(Line::from("")),
                     crate::config::SettingsRow::Header(title) => {
                         lines.push(Line::from(Span::styled(
@@ -1802,7 +1820,13 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                     },
                 ),
                 None => (
-                    crate::hints::expand(&crate::config::hint_at(tab, view.selected), &app.keymap),
+                    crate::hints::expand(
+                        &match &presets {
+                            Some(screen) => screen.explain(view.selected),
+                            None => crate::config::hint_at(tab, view.selected),
+                        },
+                        &app.keymap,
+                    ),
                     dim,
                 ),
             };
@@ -2798,8 +2822,11 @@ pub(crate) mod settings_keys {
 }
 
 /// The keys on the SETTINGS OVERLAY's bottom border, for the row under
-/// its cursor.
-pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hints::Hint> {
+/// its cursor — on the Presets tab, `presets`' row.
+pub(crate) fn settings_hints(
+    view: &crate::app::SettingsView,
+    presets: Option<&crate::presets_tab::Screen>,
+) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     use settings_keys::*;
     if let Some(plan) = &view.install {
@@ -2822,8 +2849,12 @@ pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hint
         Vec::new()
     } else if kind.is_some_and(|k| k.is_text()) {
         vec![CHOOSE.hint_as("type a value (empty = default)").kept()]
-    } else if kind == Some(crate::config::SettingKind::AgentPresets) {
-        vec![CHOOSE.hint_as("open the presets").kept()]
+    } else if let Some(screen) = presets {
+        // Nothing on the tab is installed: its keys and the way out.
+        let mut hints = screen.hints(view.selected);
+        hints.push(NEXT_TAB.hint());
+        hints.extend(tail);
+        return hints;
     } else if kind.is_some_and(|k| k.is_status()) {
         vec![CHOOSE.hint_as("test the connection").kept()]
     } else {
