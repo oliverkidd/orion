@@ -269,6 +269,7 @@ also answers to the same letter's `^` chord; the border shows the ⌘ one. `↑`
 | `⌘R` | ask again; the query as a regex | pull requests, Linear; find in files |
 | `⌘O` | open outside orion | pull requests (the browser), Linear and the finders (**Open in app**) |
 | `⌘⇧B` | the file in the **File tree** | the editor, the diff viewer |
+| `⌘⇧I` | `path:line` into the checkout's agent's prompt | the editor |
 | `⌘Y` | comment | pull requests — the grid's `y` |
 | `⌘W` | close / remove, behind a confirm | pull requests (close without merging), agent presets (delete) |
 | `⌘X` | merge (a selection in the filter cuts first); cut | pull requests; todos (the item or selection) |
@@ -322,6 +323,10 @@ the wheel scrolls — with these exceptions:
 - `^q` — fresh's own quit, which asks to save first. With a command `ORION_EDITOR` names, `^q`
   force-closes the modal instead.
 - `⌘⇧B` — the file in the **File tree**, the editor moved into its preview pane.
+- `⌘⇧I` — where the cursor is, `src/app.rs:42`, typed into the prompt of the checkout's agent
+  (the one in the pane when it is this checkout's, else its running one the list puts first),
+  unsent, with a space either side; the editor stays up and the footer says where it went. Never
+  into a permission question or a dialog, where the digits would answer it.
 - `⌘O` — the same file in the **Open in app** editor, at the line fresh's cursor is on (read off
   its status bar's `Ln 42, Col 7`; line 1 if the bar can't be read — with a command `ORION_EDITOR`
   names, the line it opened on); the editor stays up.

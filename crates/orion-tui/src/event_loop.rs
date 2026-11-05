@@ -3719,7 +3719,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // The editor modal sits above every overlay: all keys forward to it —
     // except Ctrl+Q, the same hatch the terminal lock uses.
     if app.editor.is_some() {
-        handle_editor_key(app, key);
+        handle_editor_key(app, key, out);
         return;
     }
     // fresh missing, and the footer saying so: `i` installs it, over
@@ -5619,11 +5619,7 @@ fn reveal_editor_file(app: &mut App) {
     let Some(vim) = &app.editor else {
         return;
     };
-    let root = vim.cwd.clone();
-    let file = match std::path::Path::new(&vim.file).strip_prefix(&root) {
-        Ok(rel) => rel.to_string_lossy().into_owned(),
-        Err(_) => vim.file.clone(),
-    };
+    let (root, file) = (vim.cwd.clone(), vim.rel_file());
     let shown = match app.overlay.take() {
         Some(Overlay::Tree(mut view)) if view.root == root => {
             view.reveal(&file);
@@ -6256,7 +6252,7 @@ fn resolve_file_link(root: &std::path::Path, path: &str) -> Option<String> {
 ///
 /// Enter straight after a find in fresh is its next match, not a new line
 /// ([`find_step`]).
-fn handle_editor_key(app: &mut App, key: KeyEvent) {
+fn handle_editor_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let Some(vim) = &mut app.editor else {
         return;
@@ -6274,8 +6270,9 @@ fn handle_editor_key(app: &mut App, key: KeyEvent) {
         close_editor(app);
         return;
     }
-    // ⌘O hands an editor's file to the app, and ⌘⇧B shows it in the
-    // tree; a `claude auth` run or an installer has none.
+    // ⌘O hands an editor's file to the app, ⌘⇧B shows it in the tree and
+    // ⌘⇧I sends where it is to the agent; a `claude auth` run or an
+    // installer has none.
     let has_file = !vim.account_auth && vim.install.is_none() && !vim.file.is_empty();
     if is_cmd_o(&key) && has_file {
         open_editor_file_outside(app);
@@ -6283,6 +6280,10 @@ fn handle_editor_key(app: &mut App, key: KeyEvent) {
     }
     if has_file && crate::hints::IN_TREE.matches(&key) {
         reveal_editor_file(app);
+        return;
+    }
+    if has_file && ui::editor_keys::TO_AGENT.matches(&key) {
+        send_location_to_agent(app, out);
         return;
     }
     // A Mac editing chord as the key this editor binds its action to
@@ -6357,6 +6358,74 @@ fn cmd_as_ctrl(key: KeyEvent) -> KeyEvent {
     }
     let mods = key.modifiers.difference(KeyModifiers::SUPER) | KeyModifiers::CONTROL;
     KeyEvent::new(KeyCode::Char(c), mods)
+}
+
+/// `⌘⇧I` in the editor: where its cursor is — `src/app.rs:42`, the path
+/// from the checkout (`EditorTerm::rel_file`), the line off fresh's status
+/// bar (`EditorTerm::line_now`) — typed into the prompt of the checkout's
+/// agent, unsent, quoted as a pasted image's path is
+/// (`dropped_files::quoted`) and with a space either side, since the
+/// agent's caret can't be seen from here. The agent is the one in the
+/// pane when it is this checkout's, pasted into as `⌘U` pastes a preset;
+/// else the checkout's live one listed first, typed into. Never into a
+/// prompt that takes keys as answers: the `42` would pick one. The editor
+/// stays up, and the footer says where it went.
+fn send_location_to_agent(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let Some(vim) = &app.editor else {
+        return;
+    };
+    let location = format!("{}:{}", vim.rel_file(), vim.line_now());
+    let Some(agent) = location_agent(app, &vim.cwd) else {
+        app.flash = Some(crate::flash::Flash::note(format!(
+            "no running agent in this checkout to send {location} to"
+        )));
+        return;
+    };
+    if agent.status == orion_core::AgentStatus::NeedsFeedback {
+        app.flash = Some(crate::flash::Flash::note(format!(
+            "{} is asking you something — answer it first, then send {location}",
+            agent.name
+        )));
+        return;
+    }
+    let (session, name) = (SessionRef::Agent(agent.id.clone()), agent.name.clone());
+    let in_pane = app.pane_prompt_agent() == Some(&agent.id);
+    let text = format!(" {} ", crate::dropped_files::quoted(&location));
+    if in_pane {
+        // Bracketed paste off in the pane is a dialog up in it.
+        if !paste_unsent(app, &session, &text, out) {
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "{name} isn't taking pasted text right now — {location} not sent"
+            )));
+            return;
+        }
+    } else {
+        typed_into(app, &session);
+        out.push(ClientRequest::Input {
+            session,
+            data: text.into_bytes(),
+        });
+    }
+    app.flash = Some(crate::flash::Flash::done(format!(
+        "{location} → {name}'s prompt"
+    )));
+}
+
+/// The agent `⌘⇧I` sends a location to for the checkout at `root`: the
+/// one in the pane when it is that checkout's, else its live one the
+/// SESSIONS list puts first (`app::recency_key`). None when it has none
+/// running.
+fn location_agent<'a>(app: &'a App, root: &std::path::Path) -> Option<&'a orion_core::Agent> {
+    let worktree = app.tree.worktrees.iter().find(|w| w.path == root)?;
+    let live = app
+        .tree
+        .agents
+        .iter()
+        .filter(|a| a.worktree_id == worktree.id && !a.archived && a.alive);
+    let in_pane = app.pane_prompt_agent();
+    live.clone()
+        .find(|a| Some(&a.id) == in_pane)
+        .or_else(|| live.min_by_key(|a| crate::app::recency_key(a)))
 }
 
 /// ⌘O in the editor: the file in the OPEN IN APP editor too, at the line
@@ -29285,6 +29354,132 @@ mod tests {
         });
     }
 
+    /// An editor on `file` in `/tmp/demo` — `seed_tree`'s checkout — that
+    /// draws fresh's status bar with its cursor on `line`.
+    fn editor_at(app: &mut App, file: &str, line: u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut vim = EditorTerm::spawn_cmd(
+            "/bin/sh",
+            &["-c".into(), "sleep 30".into()],
+            dir.path(),
+            "test".into(),
+            60,
+            10,
+            1,
+            tx,
+        )
+        .unwrap();
+        vim.cwd = "/tmp/demo".into();
+        vim.file = file.into();
+        vim.kind = crate::editor::Kind::Fresh;
+        vim.process(format!("\x1b[10;1H Ln {line}, Col 4   Rust").as_bytes());
+        app.editor = Some(vim);
+    }
+
+    /// `⌘⇧I` in the editor types `path:line` — the cursor's line — into the
+    /// prompt of the checkout's agent, unsent and set apart by spaces: as
+    /// keystrokes to one not in the pane, as a bracketed paste to the one
+    /// that is. The editor stays up, the footer saying where it went. Into
+    /// a prompt that takes keys as answers — a permission question, a
+    /// dialog in the pane — nothing goes, and with no agent running there
+    /// neither; the footer says why.
+    #[test]
+    fn cmd_shift_i_in_the_editor_sends_the_location_to_the_agent() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        editor_at(&mut app, "/tmp/demo/src/app.rs", 42);
+        let cmd_shift_i = KeyEvent::new(
+            KeyCode::Char('I'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        );
+        let mut out = Vec::new();
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        let agent = SessionRef::Agent(AgentId("a1".into()));
+        match out.as_slice() {
+            [ClientRequest::Input { session, data }] => {
+                assert_eq!(session, &agent);
+                assert_eq!(data, b" src/app.rs:42 ");
+            }
+            other => panic!("expected one Input, got {other:?}"),
+        }
+        assert!(app.editor.is_some(), "the editor stays up");
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::done(
+                "src/app.rs:42 → agent-1's prompt"
+            ))
+        );
+
+        let mut term = AttachedTerm::new(agent.clone(), 80, 24);
+        term.apply_output(0, b"\x1b[?2004h");
+        app.term = Some(term);
+        out.clear();
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        match out.as_slice() {
+            [ClientRequest::Input { data, .. }] => {
+                assert_eq!(data, b"\x1b[200~ src/app.rs:42 \x1b[201~");
+            }
+            other => panic!("expected one Input, got {other:?}"),
+        }
+
+        // A dialog up in the pane: bracketed paste off, nothing typed.
+        app.term = Some(AttachedTerm::new(agent.clone(), 80, 24));
+        out.clear();
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(
+            app.flash.as_ref().map(|f| f.kind),
+            Some(crate::flash::FlashKind::Failed)
+        );
+
+        app.term = None;
+        app.tree.agents[0].status = orion_core::AgentStatus::NeedsFeedback;
+        out.clear();
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        assert!(
+            out.is_empty(),
+            "a permission prompt takes no location: {out:?}"
+        );
+        assert!(
+            app.flash
+                .as_ref()
+                .is_some_and(|f| f.text.contains("asking you something")),
+            "{:?}",
+            app.flash
+        );
+
+        app.tree.agents.iter_mut().for_each(|a| a.alive = false);
+        out.clear();
+        app.flash = None;
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(
+            app.flash
+                .as_ref()
+                .is_some_and(|f| f.text.contains("no running agent")),
+            "{:?}",
+            app.flash
+        );
+    }
+
+    /// The editor's own chords reach orion in Orion.app and are no chord of
+    /// the grid's, so in the editor they mean only what they mean there.
+    #[test]
+    fn the_editors_chords_reach_orion_and_clash_with_nothing() {
+        let app = App::new();
+        for key in [crate::hints::IN_TREE, ui::editor_keys::TO_AGENT] {
+            for chord in key.chords() {
+                assert!(crate::ghostty_config::releases(&chord), "{chord:?}");
+                assert_eq!(
+                    app.keymap.lookup(crate::keymap::Scope::Global, &chord),
+                    None,
+                    "{chord:?}"
+                );
+            }
+        }
+    }
+
     // ---- `b` tree browser ----
 
     fn tree_view(app: &App) -> &crate::tree_browser::TreeBrowser {
@@ -30022,9 +30217,13 @@ mod tests {
                 );
 
                 // Typing goes nowhere; Enter closes.
-                handle_editor_key(&mut app, KeyEvent::from(KeyCode::Char('x')));
+                handle_editor_key(
+                    &mut app,
+                    KeyEvent::from(KeyCode::Char('x')),
+                    &mut Vec::new(),
+                );
                 assert!(app.editor.is_some());
-                handle_editor_key(&mut app, KeyEvent::from(KeyCode::Enter));
+                handle_editor_key(&mut app, KeyEvent::from(KeyCode::Enter), &mut Vec::new());
                 assert!(app.editor.is_none());
                 match &app.overlay {
                     Some(Overlay::Onboard(view)) => {

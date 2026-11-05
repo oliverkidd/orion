@@ -329,6 +329,11 @@ pub(crate) mod editor_keys {
     /// fresh missing: the footer's offer of its install
     /// (`event_loop::offer_editor_install`).
     pub const INSTALL: Key = Key::new(&["i"], "install");
+    /// `path:line` of the cursor into the checkout's agent's prompt
+    /// (`event_loop::send_location_to_agent`) — `⌘I`'s neighbour, the key
+    /// VS Code opens its agent with; fresh binds nothing to `^⇧I`, and
+    /// Orion.app's Ghostty keeps nothing of it.
+    pub const TO_AGENT: Key = Key::new(&["cmd+shift+i"], "to the agent");
 }
 
 /// The editor modal's keys while it runs an installer (`install`): the
@@ -372,6 +377,7 @@ pub(crate) fn editor_hints(vim: &crate::editor_term::EditorTerm) -> Vec<crate::h
     });
     hints.push(crate::hints::in_app_hint());
     if !vim.file.is_empty() {
+        hints.push(TO_AGENT.hint());
         hints.push(crate::hints::IN_TREE.hint());
     }
     hints

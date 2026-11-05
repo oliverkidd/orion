@@ -293,10 +293,19 @@ impl EditorTerm {
             .find_map(|row| self.kind.cursor_line(&row))
     }
 
-    /// The line the file is at now, for `⌘O`: fresh's cursor line — line
-    /// 1 when its status bar can't be read, rather than a guess — and for
-    /// any other editor the line it was opened on, the one line orion
-    /// knows.
+    /// The file as the checkout names it: its path under [`Self::cwd`] —
+    /// the FILE TABS open absolute paths — else as it was opened.
+    pub fn rel_file(&self) -> String {
+        match Path::new(&self.file).strip_prefix(&self.cwd) {
+            Ok(rel) => rel.to_string_lossy().into_owned(),
+            Err(_) => self.file.clone(),
+        }
+    }
+
+    /// The line the file is at now, for `⌘O` and `⌘⇧I`'s `path:line`:
+    /// fresh's cursor line — line 1 when its status bar can't be read,
+    /// rather than a guess — and for any other editor the line it was
+    /// opened on, the one line orion knows.
     pub fn line_now(&self) -> u64 {
         match self.kind {
             crate::editor::Kind::Fresh => self.cursor_line().unwrap_or(1),
