@@ -2953,6 +2953,9 @@ struct HeaderField {
     /// A click on it opens its picker — every field but a PR SESSION's
     /// checkout, which is the DAEMON's to pick.
     button: bool,
+    /// Said after the value, the first thing to go short of room: the
+    /// agent's headroom, `41% · 2h`.
+    detail: Option<Span<'static>>,
 }
 
 /// The two rows of fields [`box_header`] lays out: where, then what.
@@ -2974,6 +2977,7 @@ fn header_fields(
         value_style,
         key,
         button: true,
+        detail: None,
     };
 
     let background = crate::launcher::project_of(app, &launch.target)
@@ -3028,9 +3032,18 @@ fn header_fields(
     }
 
     let harness = cfg.effective_harness(launch.kind, launch.custom.as_deref());
-    // Cut to a fixed width, so a CLAUDE ACCOUNT's long label leaves the
-    // row room for the mode, the model and the effort beside it.
-    let agent = super::truncate(harness.display_label(), AGENT_W);
+    // A CLAUDE ACCOUNT by its name, else its email, with more than one —
+    // cut to a fixed width, so a long one leaves the row room for the
+    // mode, the model and the effort beside it.
+    let agent = crate::claude_accounts::short_name(launch.kind, launch.custom.as_deref())
+        .unwrap_or_else(|| harness.display_label().to_string());
+    let agent = super::truncate(&agent, AGENT_W);
+    // What is left on it, as the usage readings have it: `41% · 2h`.
+    let now = orion_core::clock::now_secs() as i64;
+    let headroom = crate::usage::headroom(app, &harness.id)
+        .map(|room| (room.short(now), room.color(th)))
+        .filter(|(said, _)| !said.is_empty())
+        .map(|(said, fg)| Span::styled(said, Style::default().fg(fg)));
     let model = crate::config::model_row_label(
         launch
             .model
@@ -3039,13 +3052,16 @@ fn header_fields(
         harness.model.catalog,
     );
     let mut runs = vec![
-        field(
-            BoxField::Agent,
-            "agent",
-            agent,
-            bold(th.text),
-            Some(AGENT.label()),
-        ),
+        HeaderField {
+            detail: headroom,
+            ..field(
+                BoxField::Agent,
+                "agent",
+                agent,
+                bold(th.text),
+                Some(AGENT.label()),
+            )
+        },
         field(
             BoxField::Model,
             "model",
@@ -3115,6 +3131,7 @@ fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
                 .key
                 .as_ref()
                 .map_or(0, |k| 1 + Span::raw(k.as_str()).width());
+            let detail_w = field.detail.as_ref().map_or(0, |d| 1 + d.width());
             let value_w = Span::raw(field.value.as_str()).width();
             let label_at = |x: usize| {
                 let own = field.label.chars().count();
@@ -3125,11 +3142,16 @@ fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
                 }
             };
             // Whole on this row, or whole on a row of its own.
-            if x > 0 && x + FIELD_GAP + label_at(x) + 1 + value_w + key_w > width {
+            if x > 0 && x + FIELD_GAP + label_at(x) + 1 + value_w + detail_w + key_w > width {
                 flush(&mut out, &mut row, &mut x);
             }
             let gap = if x > 0 { FIELD_GAP } else { 0 };
             let room = width.saturating_sub(x + gap);
+            // The detail goes first, whole, before the value is cut.
+            let detail = field
+                .detail
+                .clone()
+                .filter(|_| label_at(x) + 1 + value_w + detail_w + key_w <= room);
             // The value is cut before the word goes, and the word before
             // the field does; the key is never cut.
             let labelled = label_at(x) + 1;
@@ -3158,6 +3180,10 @@ fn lay_out(groups: &[Vec<HeaderField>], width: usize, th: Theme) -> BoxHeader {
             let value_at = x;
             x += Span::raw(value.as_str()).width();
             row.push(Span::styled(value, field.value_style));
+            if let Some(detail) = detail {
+                x += 1 + detail.width();
+                row.extend([Span::raw(" "), detail]);
+            }
             if let Some(key) = &field.key {
                 let text = format!(" {key}");
                 x += Span::raw(text.as_str()).width();
@@ -3572,49 +3598,69 @@ mod tests {
         );
     }
 
-    /// A CLAUDE ACCOUNT is named as every picker names it — `Claude
-    /// (you@example.com)` — once its sign-in has been read.
+    /// A CLAUDE ACCOUNT is named in the box's `agent` field as its chip's
+    /// rows name it — its name, else the email it is signed in as — and,
+    /// once its usage has been read, what is left on it beside: the share
+    /// on its emptiest limit and the time to that limit's reset, in the
+    /// usage modal's colours — red once it is at its limit.
     #[test]
-    fn a_claude_account_is_named_with_its_email() {
-        let home = tempfile::tempdir().unwrap();
-        let two = home.path().join(".claude-2");
-        std::fs::create_dir_all(&two).unwrap();
-        std::fs::write(
-            two.join(".claude.json"),
-            serde_json::json!({"oauthAccount": {"emailAddress": "b@b.co", "accountUuid": "u"}})
-                .to_string(),
-        )
-        .unwrap();
-        let config = home.path().join("config.json");
-        std::fs::write(
-            &config,
-            serde_json::json!({"claude_accounts": [
-                {"id": "claude-2", "config_dir": two.display().to_string()}
-            ]})
-            .to_string(),
-        )
-        .unwrap();
-        let places = crate::paths_util::Places::in_home(home.path());
-        crate::paths_util::with_places(places, || {
-            crate::config::with_config_path(config, || {
-                crate::claude_accounts::refresh_now();
-                let cfg = crate::config::Config::load();
-                let target =
-                    crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
-                let launch = QuickLaunch::of_kind(
-                    target,
-                    orion_core::AgentKind::Claude,
-                    Some("claude-2".into()),
-                    None,
-                    None,
-                    &cfg,
-                );
-                let head = box_header(&App::new(), &launch, &cfg, 200, Theme::default());
-                let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
-                // Cut to ten columns, the row's room going to the mode,
-                // the model and the effort beside it.
-                assert_eq!(agent, "agent   Claude (b… Tab", "{:?}", rows_of(&head));
-            })
+    fn the_boxs_agent_field_names_the_account_and_its_headroom() {
+        with_two_accounts("b@b.co", || {
+            let cfg = crate::config::Config::load();
+            let target =
+                crate::quick_prompt::QuickTarget::Worktree(orion_core::WorktreeId("w".into()));
+            let launch = QuickLaunch::of_kind(
+                target,
+                orion_core::AgentKind::Claude,
+                Some("claude-2".into()),
+                None,
+                None,
+                &cfg,
+            );
+            let mut app = App::new();
+            let head = box_header(&app, &launch, &cfg, 200, Theme::default());
+            let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
+            assert_eq!(agent, "agent   b@b.co Tab", "{:?}", rows_of(&head));
+
+            let now = orion_core::clock::now_secs() as i64;
+            let reading = |used_pct: f64| crate::usage::Reading {
+                plan: None,
+                main: crate::usage::Row {
+                    label: String::new(),
+                    cells: [
+                        Some(crate::usage::Cell {
+                            used_pct,
+                            resets_at: Some(now + 2 * 3600 + 600),
+                        }),
+                        None,
+                        None,
+                        None,
+                    ],
+                },
+                sub: Vec::new(),
+                extra: None,
+                fetched_at: now,
+            };
+            app.usage.readings.insert("claude-2".into(), reading(59.0));
+            let head = box_header(&app, &launch, &cfg, 200, Theme::default());
+            let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
+            assert_eq!(agent, "agent   b@b.co 41% · 2h Tab", "{:?}", rows_of(&head));
+            let left = head.lines[1]
+                .spans
+                .iter()
+                .find(|span| span.content == "41% · 2h")
+                .expect("the headroom");
+            assert_eq!(left.style.fg, Some(Theme::default().ok));
+
+            app.usage.readings.insert("claude-2".into(), reading(100.0));
+            let head = box_header(&app, &launch, &cfg, 200, Theme::default());
+            let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
+            assert_eq!(agent, "agent   b@b.co at limit · 2h Tab");
+
+            // Short of room the headroom goes, whole, before the name is cut.
+            let head = box_header(&app, &launch, &cfg, 24, Theme::default());
+            let agent = cells_of(&head, BoxField::Agent).unwrap_or_default();
+            assert_eq!(agent, "agent   b@b.co Tab", "{:?}", rows_of(&head));
         });
     }
 

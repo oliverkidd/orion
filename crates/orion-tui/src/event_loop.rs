@@ -27221,6 +27221,141 @@ mod tests {
         });
     }
 
+    /// The `⌘N` box and the QUICK PROMPT up, as a `(kind, custom)` and the
+    /// line under its title.
+    fn box_on(app: &App) -> ((AgentKind, Option<String>), String) {
+        match &app.overlay {
+            Some(Overlay::Prompt(p)) => match &p.kind {
+                PromptKind::QuickPrompt(launch) => {
+                    ((launch.kind, launch.custom.clone()), p.label.clone())
+                }
+                other => panic!("expected the box, got {other:?}"),
+            },
+            other => panic!("expected the box, got {other:?}"),
+        }
+    }
+
+    /// USAGE-AWARE LAUNCHING: with the `⌘N` account at its limit — a
+    /// session on it stopped there, or nothing left at the last reading —
+    /// the box opens on the other account and says so under its title;
+    /// with the default account clear, it opens on the default as ever.
+    #[test]
+    fn a_box_opens_on_the_other_account_while_the_default_is_at_its_limit() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            let (on, label) = box_on(&app);
+            assert_eq!(on, (AgentKind::Claude, None));
+            assert!(!label.contains("at its limit"), "{label}");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+            app.tree.agents[0].usage_limit = Some(orion_core::UsageLimit {
+                reason: orion_core::LimitReason::RateLimit,
+                message: None,
+            });
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            let (on, label) = box_on(&app);
+            assert_eq!(on, (AgentKind::Claude, Some("claude-2".into())));
+            assert!(
+                label.starts_with("a@b.co is at its limit · on claude-2 · "),
+                "{label}"
+            );
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+            // A reading with nothing left says the same, with its reset.
+            app.tree.agents[0].usage_limit = None;
+            let now = orion_core::clock::now_secs() as i64;
+            app.usage.readings.insert(
+                "claude".into(),
+                crate::usage::Reading {
+                    plan: None,
+                    main: crate::usage::Row {
+                        label: String::new(),
+                        cells: [
+                            Some(crate::usage::Cell {
+                                used_pct: 100.0,
+                                resets_at: Some(now + 3 * 3600 + 60),
+                            }),
+                            None,
+                            None,
+                            None,
+                        ],
+                    },
+                    sub: Vec::new(),
+                    extra: None,
+                    fetched_at: now,
+                },
+            );
+            app.quick_draft.clear();
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            let (on, label) = box_on(&app);
+            assert_eq!(on, (AgentKind::Claude, Some("claude-2".into())));
+            assert!(
+                label.starts_with("a@b.co is at its limit, resets in 3h · on claude-2"),
+                "{label}"
+            );
+        });
+    }
+
+    /// The `Tab` picker's rows say what is left on each account, at the
+    /// right of the row, `41% · 2h`.
+    #[test]
+    fn the_agent_picker_rows_say_each_accounts_headroom() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            on_the_second_account(&mut app);
+            app.focus = Focus::Sessions;
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            let Some(Overlay::Menu(menu)) = &app.overlay else {
+                panic!("Tab opens the harness picker, got {:?}", app.overlay);
+            };
+            let row = menu
+                .items
+                .iter()
+                .find(|item| {
+                    matches!(
+                        &item.action,
+                        MenuAction::NewAgentOfKind { custom: Some(id), .. } if id == "claude-2"
+                    )
+                })
+                .expect("the second account's row");
+            assert_eq!(row.hint.as_deref(), Some("41% · 2h"));
+            assert!(row.note, "a note, not a key");
+        });
+    }
+
+    /// With nothing on but the two Claude accounts, `Tab` in the box steps
+    /// to the other account in place — the box, its text and all, never a
+    /// picker of nothing but accounts — and round again.
+    #[test]
+    fn tab_switches_account_in_place_with_only_claude_accounts_on() {
+        with_two_accounts(|_| {
+            crate::config::persist(|cfg| {
+                for id in ["codex", "cursor", "grok", "opencode"] {
+                    cfg.harnesses.entry(id.into()).or_default().enabled = Some(false);
+                }
+            });
+            let mut app = App::new();
+            let mut out = Vec::new();
+            seed_tree(&mut app);
+            app.focus = Focus::Sessions;
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            assert!(paste_into_overlay(&mut app, "Fix auth"));
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            assert_eq!(box_on(&app).0, (AgentKind::Claude, Some("claude-2".into())));
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Fix auth")
+            );
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            assert_eq!(box_on(&app).0, (AgentKind::Claude, None), "and round again");
+        });
+    }
+
     /// `Tab` in the `⌘N` box switches between two Claude accounts for the
     /// one launch: the box opens on the account `⌘N` is set to, the picker
     /// lists the default account right before it, and each pick launches

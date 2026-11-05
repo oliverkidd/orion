@@ -325,7 +325,7 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   launching the harness, model and effort the Accounts tab defaults name. Its header spells them out,
   each field beside the key that changes it, where the launch runs over what runs it:
   `project demo ⌘P   worktree main ⌘.` over
-  `agent Claude (you@example.com) Tab   model opus · latest ⌘/   effort high ⌘Y`. The effort is
+  `agent Claude Tab   model opus · latest ⌘/   effort high ⌘Y`. The effort is
   always there — `default` until one is picked — for every harness that has one; an AGENT PRESET on
   the box adds its own `preset … ⇧Tab` field; and a fresh worktree reads `new worktree <branch>` in
   green, the frame turning green with it. The keys are the ones the box answers to, the worktree,
@@ -348,7 +348,16 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   box's own toggle for it gone. `⌘/` opens the harness's model list straight away (`→` on a model
   reaches its efforts), `⌘Y` steps the effort in place — `default`, then the harness's list, round
   again — and `Tab` opens the harness picker — the lists over the box, as the project picker is,
-  so the task stays in front of you while you pick what will run it. The three keymap keys work
+  so the task stays in front of you while you pick what will run it; with nothing switched on but
+  your Claude accounts, `Tab` steps to the next account in place instead. With more than one account
+  the `agent` field names the account as its chip's rows do, by its name or else its email, and
+  beside it what is left on it at the last usage reading — `agent Riplo 41% · 2h Tab`, the share on
+  its emptiest limit and the time to that limit's reset, green, yellow or red as ACCOUNT USAGE
+  colours it, `at limit` once spent — and the picker's rows say the same at their right. When the
+  `⌘N` account is at its limit — a session on it stopped there, or nothing left at the last reading
+  — the box opens on your next Claude account that isn't, and says so first along its bottom
+  (`Riplo is at its limit, resets in 2h · on Personal`); a box whose AGENT PRESET pins an account
+  keeps it. The three keymap keys work
   with any of the box's pickers open over it, and none of them closes the box. `⇧Tab` takes a
   preset; a model or effort picked afterwards for the same harness keeps it. None of it needs the
   key: the header is a row of buttons, and a click on a field opens what the key printed beside it

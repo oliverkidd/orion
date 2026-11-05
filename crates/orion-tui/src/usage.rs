@@ -1041,6 +1041,40 @@ impl Headroom {
         self.limited || self.cell.is_some_and(|c| c.shown_left() <= 0.0)
     }
 
+    /// `41% · 2h`: the share left on the emptiest limit and the time to
+    /// its reset, by its biggest unit — `at limit · 2h` once spent.
+    pub fn short(&self, now: i64) -> String {
+        let left = match self.cell {
+            _ if self.spent() => "at limit".to_string(),
+            Some(cell) => format!("{:.0}%", cell.shown_left()),
+            None => return String::new(),
+        };
+        match self.resets_in(now) {
+            Some(resets) => format!("{left} · {resets}"),
+            None => left,
+        }
+    }
+
+    /// How long until the emptiest limit resets, by its biggest unit —
+    /// `38m`, `2h`, `3d`. None when the provider gave no time, or it is
+    /// due.
+    pub fn resets_in(&self, now: i64) -> Option<String> {
+        self.cell
+            .and_then(|c| c.resets_at)
+            .filter(|at| *at > now)
+            .map(|at| span_short(at - now))
+    }
+
+    /// The colour the share left is drawn in, the modal's: green, yellow
+    /// at a quarter left, red near none — and red once spent.
+    pub fn color(&self, th: Theme) -> Color {
+        match self.cell {
+            _ if self.spent() => th.err,
+            Some(cell) => left_color(&cell, th),
+            None => th.dim,
+        }
+    }
+
     /// `41% left · resets in 2h 14m`, `limit reached · resets in 38m`.
     pub fn long(&self, now: i64) -> String {
         let left = match self.cell {
@@ -1062,6 +1096,15 @@ impl Account {
     /// shares its login.
     fn heads(&self, id: &str) -> bool {
         self.id == id || self.also.iter().any(|also| also == id)
+    }
+}
+
+/// `38m`, `2h`, `3d`: [`span`]'s biggest unit alone.
+fn span_short(seconds: i64) -> String {
+    match (seconds / 86_400, seconds / 3600) {
+        (0, 0) => format!("{}m", (seconds / 60).max(1)),
+        (0, h) => format!("{h}h"),
+        (d, _) => format!("{d}d"),
     }
 }
 
@@ -1712,6 +1755,45 @@ mod tests {
     /// Usage reads each Claude account on its own: a row per account, the
     /// second one asked through its own config dir's keychain item, and a
     /// session stopped at its limit on the second account — a Claude
+    /// What is left on an account reads short where an account is picked
+    /// and long in the footer, the reset by its biggest unit in the one
+    /// and whole in the other; a limit nothing is left on, or a session
+    /// stopped at it, is spent, and a time already past says nothing.
+    #[test]
+    fn headroom_reads_short_and_long_and_knows_when_it_is_spent() {
+        let now = 1_000_000;
+        let room = |used_pct: f64, resets_in: i64, limited: bool| Headroom {
+            cell: Some(Cell {
+                used_pct,
+                resets_at: Some(now + resets_in),
+            }),
+            limited,
+        };
+        let open = room(59.0, 2 * 3600 + 14 * 60, false);
+        assert!(!open.spent());
+        assert_eq!(open.short(now), "41% · 2h");
+        assert_eq!(open.long(now), "41% left · resets in 2h 14m");
+        assert_eq!(room(10.0, 3 * 86_400, false).short(now), "90% · 3d");
+        assert_eq!(room(10.0, 90, false).short(now), "90% · 1m");
+        assert_eq!(room(10.0, -5, false).short(now), "90%", "due: no time");
+
+        let empty = room(100.0, 38 * 60, false);
+        assert!(empty.spent());
+        assert_eq!(empty.short(now), "at limit · 38m");
+        assert_eq!(empty.long(now), "limit reached · resets in 38m");
+        assert!(room(20.0, 60, true).spent(), "a session stopped at it");
+        let th = Theme::default();
+        assert_eq!(empty.color(th), th.err);
+        assert_eq!(open.color(th), th.ok);
+
+        let stopped = Headroom {
+            cell: None,
+            limited: true,
+        };
+        assert_eq!(stopped.short(now), "at limit");
+        assert_eq!(stopped.long(now), "limit reached");
+    }
+
     /// session with the account beside — marks that one, never the
     /// default.
     #[test]

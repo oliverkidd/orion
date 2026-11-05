@@ -583,7 +583,7 @@ sends is the dim line along the bottom of the frame.
 |---|---|
 | `⇧Enter`, `⌥Enter`, `^J` | insert a line |
 | `^V` | paste the image on the clipboard (a ⌃⇧⌘4 screenshot, a copied image): it is kept in the DATA DIR's `attachments/` and its path goes in at the caret — [Dropping a screenshot on a prompt box](sessions.md#dropping-a-screenshot-on-a-prompt-box). `⌘V` is still Ghostty's text paste |
-| `Tab` | pick a different harness for this one launch (`→` drills into its model and effort) |
+| `Tab` | pick a different harness for this one launch (`→` drills into its model and effort), each account's row saying what is left on it (`41% · 2h`); with nothing on but your Claude accounts, the next account, in place |
 | `⇧Tab` | step the mode — edit, plan, ask — among the ones the harness has, as in Claude Code and Cursor; for this box only |
 | `⌘U` (`^X`) | pick one of your saved AGENT PRESETS, adopting its harness, model, effort and prefix/postfix |
 | `⌘P` (`^P`) | the PROJECT PICKER, over the box: aim it at any project on the machine, the text kept. A launch into another project runs in the background, and the footer names where it went |

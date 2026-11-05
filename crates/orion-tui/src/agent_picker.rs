@@ -184,7 +184,18 @@ pub(crate) fn open_kind_picker(app: &mut App, picker: KindPicker) {
             })
         })
         .unwrap_or(0);
-    let items = kind_rows(&rows, &worktree, None, quick.as_deref(), harness_label);
+    let mut items = kind_rows(&rows, &worktree, None, quick.as_deref(), harness_label);
+    // Each account's headroom at the right, `41% · 2h`, where the row has
+    // no note of its own, so the pick can be made on what is left.
+    let now = orion_core::clock::now_secs() as i64;
+    for (item, row) in items.iter_mut().zip(&rows) {
+        let id = orion_core::harness::registry_id(row.kind, row.custom.as_deref());
+        let room = crate::usage::headroom(app, id).map(|room| room.short(now));
+        if let Some(room) = room.filter(|r| !r.is_empty() && item.hint.is_none()) {
+            item.hint = Some(room);
+            item.note = true;
+        }
+    }
     app.overlay = Some(Overlay::Menu(ContextMenu {
         title: Some(title),
         items,

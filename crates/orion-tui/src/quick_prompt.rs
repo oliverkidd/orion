@@ -325,8 +325,69 @@ pub(crate) fn open_box(app: &mut App, launch: QuickLaunch) {
             (launch, restored)
         }
     };
+    let (launch, moved) = off_a_spent_default(app, launch);
     crate::event_loop::open_prompt(app, PromptKind::QuickPrompt(launch));
     put_restored(app, restored);
+    if let (Some(moved), Some(Overlay::Prompt(prompt))) = (moved, &mut app.overlay) {
+        prompt.label = format!("{moved} · {}", prompt.label);
+    }
+}
+
+/// USAGE-AWARE LAUNCHING: a box opening on the `⌘N` account while that
+/// account is at its limit — a session on it stopped there, or nothing
+/// left at the last reading ([`crate::usage::Headroom::spent`]) — opens
+/// on the first other Claude account switched on that is not, and says
+/// so (`Riplo is at its limit, resets in 2h · on Personal`). A box with
+/// an AGENT PRESET of its own keeps what the preset pins; with no other
+/// account to go to, it stays where it was.
+fn off_a_spent_default(app: &App, launch: QuickLaunch) -> (QuickLaunch, Option<String>) {
+    let cfg = Config::load();
+    let default = cfg.quick_prompt_harness();
+    let id = |kind: AgentKind, custom: Option<&str>| {
+        orion_core::harness::registry_id(kind, custom).to_string()
+    };
+    let spent = |kind: AgentKind, custom: Option<&str>| {
+        crate::usage::headroom(app, &id(kind, custom)).filter(|room| room.spent())
+    };
+    let on_default = (launch.kind, launch.custom.clone()) == default;
+    let preset_pins = launch.preset.as_ref().is_some_and(|p| !p.follows_box());
+    let Some(room) =
+        spent(launch.kind, launch.custom.as_deref()).filter(|_| on_default && !preset_pins)
+    else {
+        return (launch, None);
+    };
+    let Some((kind, custom)) = claude_accounts_on(&cfg).into_iter().find(|(kind, custom)| {
+        (*kind, custom.clone()) != default && spent(*kind, custom.as_deref()).is_none()
+    }) else {
+        return (launch, None);
+    };
+    let from = harness_name(launch.kind, launch.custom.as_deref());
+    let to = harness_name(kind, custom.as_deref());
+    let resets = room
+        .resets_in(orion_core::clock::now_secs() as i64)
+        .map(|resets| format!(", resets in {resets}"))
+        .unwrap_or_default();
+    let note = format!("{from} is at its limit{resets} · on {to}");
+    (launch.on_harness(kind, custom, &cfg), Some(note))
+}
+
+/// The Claude accounts the box can launch on, in the pickers' order.
+fn claude_accounts_on(cfg: &Config) -> Vec<(AgentKind, Option<String>)> {
+    cfg.offered_harnesses()
+        .into_iter()
+        .filter(|(kind, custom)| {
+            cfg.effective_harness(*kind, custom.as_deref())
+                .is_claude_account()
+        })
+        .collect()
+}
+
+/// The harnesses the box can launch on, when every one is a Claude
+/// account and there is more than one: `Tab` then steps between them in
+/// place rather than opening the picker.
+fn claude_accounts_only(cfg: &Config) -> Option<Vec<(AgentKind, Option<String>)>> {
+    let accounts = claude_accounts_on(cfg);
+    (accounts.len() > 1 && accounts.len() == cfg.offered_harnesses().len()).then_some(accounts)
 }
 
 /// Put a restored draft's field into the box [`open_box`] or
@@ -463,6 +524,26 @@ impl QuickLaunch {
         cfg.effective_harness(self.kind, self.custom.as_deref())
             .mode
             .offered()
+    }
+
+    /// The same launch on harness `kind` / `custom` at that harness's own
+    /// model and effort — what picking a harness for it makes of it: an
+    /// AGENT PRESET that FOLLOWS THE BOX goes along with its pinned model
+    /// and effort, one that pins its own harness is dropped, and the pull
+    /// request, the Linear issues, the todo, the mode and the modal under
+    /// it stay.
+    pub fn on_harness(&self, kind: AgentKind, custom: Option<String>, cfg: &Config) -> Self {
+        let mut launch = Self::of_kind(self.target.clone(), kind, custom, None, None, cfg);
+        if let Some(preset) = self.preset.as_ref().filter(|p| p.follows_box()) {
+            launch = launch.pinned_to(preset.model.as_deref(), preset.effort.as_deref(), cfg);
+            launch.preset = self.preset.clone();
+        }
+        launch
+            .with_pr(self.pr.clone())
+            .with_linear(self.linear.clone())
+            .with_todo(self.todo.clone())
+            .with_mode(self.mode, cfg)
+            .with_under(self.under.clone())
     }
 
     /// The same launch, in `mode` where its harness has it and in edit
@@ -917,6 +998,9 @@ pub(crate) fn target_branch(app: &App, launch: &QuickLaunch) -> Option<String> {
 /// back here instead of creating a session, and it clears any AGENT PRESET
 /// (a launch spec has one source).
 pub(crate) fn open_launch_picker(app: &mut App, back: QuickReturn) {
+    if next_account_in_place(app, &back.launch) {
+        return;
+    }
     let Some(context) = picker_context(app, &back.launch) else {
         return;
     };
@@ -924,6 +1008,31 @@ pub(crate) fn open_launch_picker(app: &mut App, back: QuickReturn) {
         app,
         crate::agent_picker::KindPicker::quick_prompt(context, back),
     );
+}
+
+/// `Tab` in the box with nothing on but Claude accounts: the next account,
+/// in the box as it stands — the text, the caret and all — rather than a
+/// picker of nothing but accounts. False, with nothing changed, when any
+/// other harness is on: the picker opens as ever.
+fn next_account_in_place(app: &mut App, launch: &QuickLaunch) -> bool {
+    let cfg = Config::load();
+    let Some(accounts) = claude_accounts_only(&cfg) else {
+        return false;
+    };
+    let at = accounts
+        .iter()
+        .position(|(kind, custom)| *kind == launch.kind && *custom == launch.custom)
+        .map_or(0, |i| i + 1);
+    let (kind, custom) = accounts[at % accounts.len()].clone();
+    let next = launch.on_harness(kind, custom, &cfg);
+    let Some(Overlay::Prompt(prompt)) = &mut app.overlay else {
+        return false;
+    };
+    prompt.title = next.title();
+    prompt.label = next.label();
+    prompt.kind = PromptKind::QuickPrompt(next);
+    app.dirty = true;
+    true
 }
 
 /// `⌘U` / `^X` in the box: the saved AGENT PRESETS as a picker. The list is
