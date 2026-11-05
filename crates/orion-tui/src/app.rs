@@ -828,6 +828,13 @@ pub enum PromptKind {
     RenameClaudeAccount {
         id: String,
     },
+    /// `g` on a CLAUDE ACCOUNTS row: the letter or glyph account `id`'s
+    /// ACCOUNT CHIP shows, prefilled with the one it was given. Enter
+    /// saves its first character — empty puts orion's letter back — and
+    /// Esc keeps it; both put the overlay back on the row.
+    AccountChipMark {
+        id: String,
+    },
 }
 
 impl PromptKind {

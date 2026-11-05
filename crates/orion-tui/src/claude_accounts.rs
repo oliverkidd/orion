@@ -1072,6 +1072,66 @@ pub fn rename(id: &str, name: &str) -> Result<String, String> {
     })
 }
 
+/// `c` on an account's row: its ACCOUNT CHIP takes the next tint, written
+/// as its `account_tags.<id>.tint` and shown at once. The answer is the
+/// line the settings overlay shows.
+pub fn cycle_tint(id: &str) -> Result<String, String> {
+    let tag = tag_of(id).ok_or_else(no_chip)?;
+    let tints = crate::theme::ACCOUNT_TINTS.len();
+    let next = (tag.tint % tints + 1) % tints;
+    edit_chip(id, |custom| custom.tint = Some(next))?;
+    store::tags(|tags| tags.get_mut(id).map(|tag| tag.tint = next));
+    Ok(format!("{id}'s chip takes tint {} of {tints}", next + 1))
+}
+
+/// `g`'s character typed: account `id`'s ACCOUNT CHIP shows it in place of
+/// its letter, written as its `account_tags.<id>.icon` — empty puts the
+/// letter orion picks back. The answer is the line the settings overlay
+/// shows.
+pub fn set_chip_mark(id: &str, typed: &str) -> Result<String, String> {
+    tag_of(id).ok_or_else(no_chip)?;
+    let icon = match typed.trim() {
+        "" => None,
+        typed => Some(fit_mark(typed).ok_or("that character can't sit in a chip")?),
+    };
+    let note = match &icon {
+        Some(mark) => format!("{id}'s chip shows {mark}"),
+        None => format!("{id}'s chip shows its own letter again"),
+    };
+    edit_chip(id, |custom| custom.icon = icon)?;
+    Ok(note)
+}
+
+/// What [`cycle_tint`] and [`set_chip_mark`] say with only one account:
+/// there is no chip to change.
+fn no_chip() -> String {
+    "a chip shows once there are two Claude accounts".into()
+}
+
+/// Change account `id`'s `account_tags` entry and save it, an entry left
+/// saying nothing going with it. The chips follow at the next read.
+fn edit_chip(
+    id: &str,
+    change: impl FnOnce(&mut crate::config::AccountTagOverride),
+) -> Result<(), String> {
+    let mut cfg = Config::load();
+    let custom = cfg.account_tags.entry(id.to_string()).or_default();
+    change(custom);
+    if *custom == crate::config::AccountTagOverride::default() {
+        cfg.account_tags.remove(id);
+    }
+    cfg.save()
+        .map_err(|e| format!("couldn't save settings: {e}"))
+}
+
+/// The character account `id`'s chip was given (`g`), for its prompt.
+pub fn chip_icon(cfg: &Config, id: &str) -> String {
+    cfg.account_tags
+        .get(id)
+        .and_then(|custom| custom.icon.clone())
+        .unwrap_or_default()
+}
+
 /// Account `id`'s name as its `harnesses` label; empty takes it away, and
 /// an entry that said nothing but the name goes with it.
 fn set_name(cfg: &mut Config, id: &str, name: &str) {

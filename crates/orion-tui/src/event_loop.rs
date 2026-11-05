@@ -4782,6 +4782,17 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::claude_accounts::current_name(&cfg, id),
             )
         }
+        PromptKind::AccountChipMark { id } => {
+            let cfg = crate::config::Config::load();
+            let letter = crate::claude_accounts::tag_of(id).map_or_else(String::new, |tag| {
+                format!(" (empty = its letter, now {})", tag.mark)
+            });
+            (
+                format!("Chip · {}", cfg.effective_harness_by_id(id).display_label()).into(),
+                format!("the letter or glyph its chip shows, one character{letter}").into(),
+                crate::claude_accounts::chip_icon(&cfg, id),
+            )
+        }
     };
     let highlight = matches!(kind, PromptKind::AddProject)
         .then(|| app.launch_repo_name())
@@ -7721,6 +7732,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::ClaudeSignIn { .. }
                         | PromptKind::AddClaudeAccount
                         | PromptKind::RenameClaudeAccount { .. }
+                        | PromptKind::AccountChipMark { .. }
                 );
                 // The comment box stood in for the PULL REQUESTS MODAL: Esc
                 // puts the modal back on its row, the comment unposted.
@@ -8216,7 +8228,7 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
     let hotkeys = view.is_hotkeys();
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     // A CLAUDE ACCOUNTS row's own verbs: `r` renames it, `o` signs it
-    // out, `⌫` removes it.
+    // out, `⌫` removes it, `c` and `g` change its ACCOUNT CHIP.
     let account_row = || {
         (!on_tabs && tab == crate::config::accounts_tab())
             .then(|| crate::config::Config::load().account_row(selected))
@@ -8258,6 +8270,8 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         _ if keys::RENAME.matches(&key) && account() => SettingsCmd::RenameAccount(selected),
         _ if keys::SIGN_OUT.matches(&key) && account() => SettingsCmd::SignOut(selected),
         _ if keys::REMOVE.matches(&key) && account() => SettingsCmd::RemoveAccount(selected),
+        _ if keys::CHIP_TINT.matches(&key) && account() => SettingsCmd::ChipTint(selected),
+        _ if keys::CHIP_MARK.matches(&key) && account() => SettingsCmd::ChipMark(selected),
         // Nothing to cycle on a hotkey row — say so instead of no-op'ing.
         KeyCode::Char('h') | KeyCode::Left | KeyCode::Char('l') | KeyCode::Right if hotkeys => {
             SettingsCmd::Nudge
@@ -8313,15 +8327,26 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
         SettingsCmd::Apply(i, delta) => apply_setting_at(app, tab, i, delta),
         SettingsCmd::Install(i) => ask_install(app, tab, i),
         SettingsCmd::RenameAccount(i) => {
-            if let Some(crate::config::AccountRow::Account(id)) =
-                crate::config::Config::load().account_row(i)
-            {
+            if let Some(id) = account_at(i) {
                 app.remember_settings_row(tab, i);
                 open_prompt(app, PromptKind::RenameClaudeAccount { id });
             }
         }
         SettingsCmd::SignOut(i) => confirm_sign_out(app, i),
         SettingsCmd::RemoveAccount(i) => confirm_remove_account(app, i),
+        SettingsCmd::ChipTint(i) => {
+            if let Some(id) = account_at(i) {
+                let result = crate::claude_accounts::cycle_tint(&id);
+                crate::claude_accounts::request_refresh(app, true);
+                settings_note(app, result);
+            }
+        }
+        SettingsCmd::ChipMark(i) => {
+            if let Some(id) = account_at(i) {
+                app.remember_settings_row(tab, i);
+                open_prompt(app, PromptKind::AccountChipMark { id });
+            }
+        }
         SettingsCmd::Nudge => {
             if let Some(view) = settings_mut(app) {
                 view.info(HOTKEYS_ARE_HAND_EDITED);
@@ -8342,6 +8367,14 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
                 area: ratatui::layout::Rect::default(),
             }));
         }
+    }
+}
+
+/// The CLAUDE ACCOUNT on the Accounts tab's row `index`, by its id.
+fn account_at(index: usize) -> Option<String> {
+    match crate::config::Config::load().account_row(index)? {
+        crate::config::AccountRow::Account(id) => Some(id),
+        crate::config::AccountRow::Add => None,
     }
 }
 
@@ -8393,6 +8426,10 @@ enum SettingsCmd {
     SignOut(usize),
     /// `⌫` on a CLAUDE ACCOUNTS row.
     RemoveAccount(usize),
+    /// `c` on a CLAUDE ACCOUNTS row: its chip's next tint.
+    ChipTint(usize),
+    /// `g` on a CLAUDE ACCOUNTS row: its chip's letter or glyph.
+    ChipMark(usize),
     /// A HOTKEYS row: nothing to change here, so say where it changes.
     Nudge,
     ResetAll,
@@ -8843,6 +8880,12 @@ fn settings_note(app: &mut App, result: Result<String, String>) {
 /// stay — and land back on its row, the cards renamed at the next read.
 fn rename_claude_account(app: &mut App, id: &str, name: &str) {
     let result = crate::claude_accounts::rename(id, name);
+    back_on_the_account(app, id, result);
+}
+
+/// The overlay back on account `id`'s row after a change to it, the
+/// accounts read again so the grid shows it, and `result` said.
+fn back_on_the_account(app: &mut App, id: &str, result: Result<String, String>) {
     open_claude_accounts(app, Some(id));
     crate::claude_accounts::request_refresh(app, true);
     settings_note(app, result);
@@ -8980,6 +9023,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             | PromptKind::ClaudeSignIn { .. }
             | PromptKind::AddClaudeAccount
             | PromptKind::RenameClaudeAccount { .. }
+            | PromptKind::AccountChipMark { .. }
             | PromptKind::QuickPrompt(_)
     );
     if value.is_empty() && !empty_is_a_default {
@@ -9112,6 +9156,10 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         }
         PromptKind::AddClaudeAccount => ask_to_share(app, &value),
         PromptKind::RenameClaudeAccount { id } => rename_claude_account(app, &id, &value),
+        PromptKind::AccountChipMark { id } => {
+            let result = crate::claude_accounts::set_chip_mark(&id, &value);
+            back_on_the_account(app, &id, result);
+        }
     }
 }
 
@@ -27420,6 +27468,65 @@ mod tests {
             ] {
                 assert!(text.contains(needle), "{needle}:\n{text}");
             }
+        });
+    }
+
+    /// `c` on an account's row steps its chip to the next tint and `g`
+    /// gives it a letter or glyph of your own, each written as the
+    /// account's `account_tags` entry and on the row's chip once the
+    /// overlay is back; an empty `g` puts orion's letter back.
+    #[test]
+    fn c_and_g_change_an_accounts_chip() {
+        with_two_accounts(|_| {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            let custom = || {
+                crate::config::Config::load()
+                    .account_tags
+                    .get("claude-2")
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            let tag = || crate::claude_accounts::tag_of("claude-2").expect("a chip");
+            open_account_row(&mut app, 1, &mut out);
+            assert_eq!((tag().mark.as_str(), tag().tint), ("C", 1));
+
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            assert_eq!(custom().tint, Some(2));
+            assert_eq!(tag().tint, 2, "the chip takes it at once");
+            assert!(settings_view(&app)
+                .notice
+                .as_ref()
+                .is_some_and(|(n, _)| n.contains("tint 3 of 6")));
+
+            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p))
+                    if p.kind == PromptKind::AccountChipMark { id: "claude-2".into() }
+                        && p.input.as_str().is_empty()
+                        && p.label.contains("now C")),
+                "{:?}",
+                app.overlay
+            );
+            type_text(&mut app, "★", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(custom().icon.as_deref(), Some("★"));
+            assert_eq!(tag().mark, "★");
+            let (_, first) = crate::config::locate_accounts();
+            assert_eq!(settings_view(&app).selected, first + 1, "back on its row");
+            let mut terminal = Terminal::new(TestBackend::new(100, 50)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains(" ★  Claude (not signed in)"), "{text}");
+            assert!(text.contains("c colour · g letter"), "{text}");
+
+            press(&mut app, KeyCode::Char('g'), KeyModifiers::NONE, &mut out);
+            assert!(matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "★"));
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(custom().icon, None);
+            assert_eq!(custom().tint, Some(2), "the tint stays");
+            assert_eq!(tag().mark, "C");
         });
     }
 

@@ -625,7 +625,8 @@ the rows, and `←`/`→` cycle the selected row's value. The HOTKEYS TAB lists 
 chord, with nothing to edit: a key on one of its rows says that a binding changes in `config.json`'s
 `keybindings`. `R` resets every setting, the bindings included (with a confirmation). On the
 Accounts tab's **Claude accounts** rows, `Enter` signs the account in (asking for the email first),
-`r` renames it, `o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter`
+`r` renames it, `o` signs it out, `c` steps its ACCOUNT CHIP's colour, `g` gives the chip a letter
+or glyph of your own, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter`
 on **Add account** names a new one ([Configuration](configuration.md#claude-accounts)). On a row whose
 program isn't on PATH — a Claude account, a harness's **Enabled** row —
 `i` puts the command that installs it where the row's explanation was, `Enter` runs it in the editor

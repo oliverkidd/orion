@@ -2789,6 +2789,10 @@ pub(crate) mod settings_keys {
     pub const RENAME: Key = Key::new(&["r"], "rename");
     pub const SIGN_OUT: Key = Key::new(&["o"], "sign out");
     pub const REMOVE: Key = Key::new(&["backspace", "delete"], "remove");
+    /// A CLAUDE ACCOUNTS row's ACCOUNT CHIP: its next tint, and the letter
+    /// or glyph it shows.
+    pub const CHIP_TINT: Key = Key::new(&["c"], "colour");
+    pub const CHIP_MARK: Key = Key::new(&["g"], "letter");
     /// A row whose program isn't on PATH — an agent's CLI, git, gh — and
     /// the Enter that runs its installer once asked.
     pub const INSTALL: Key = Key::new(&["i"], "install");
@@ -2798,8 +2802,8 @@ pub(crate) mod settings_keys {
     #[test]
     fn every_settings_key_parses() {
         for key in [
-            CLOSE, NEXT_TAB, PREV_TAB, CHOOSE, CYCLE, RESET_ALL, RENAME, SIGN_OUT, REMOVE, INSTALL,
-            RUN,
+            CLOSE, NEXT_TAB, PREV_TAB, CHOOSE, CYCLE, RESET_ALL, RENAME, SIGN_OUT, REMOVE,
+            CHIP_TINT, CHIP_MARK, INSTALL, RUN,
         ] {
             assert!(key.parses(), "{:?}", key.chords);
         }
@@ -2853,6 +2857,10 @@ pub(crate) fn settings_hints(view: &crate::app::SettingsView) -> Vec<crate::hint
                 // Only an account orion added is orion's to remove.
                 if cfg.is_extra_account(&id) {
                     hints.push(REMOVE.hint());
+                }
+                // Its chip, once there is one to change.
+                if crate::claude_accounts::tag_of(&id).is_some() {
+                    hints.extend([CHIP_TINT.hint(), CHIP_MARK.hint()]);
                 }
                 if installable(view) {
                     hints.push(INSTALL.hint());
