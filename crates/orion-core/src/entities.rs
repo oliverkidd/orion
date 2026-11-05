@@ -375,7 +375,7 @@ pub struct TerminalTab {
     /// True when the daemon currently holds a live PTY for this terminal.
     pub alive: bool,
     /// Set on a RUN TERMINAL — the one `r` starts on a worktree: the
-    /// `.orion.json` `run` command it was launched with, run through the
+    /// project's run command it was launched with, run through the
     /// login shell in place of an interactive one. While its PTY is alive
     /// the worktree is RUNNING. None for a plain shell tab.
     #[serde(default)]

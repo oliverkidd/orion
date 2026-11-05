@@ -11,7 +11,6 @@ use crate::worktree_hooks::{self, HookContext, WorktreeHook};
 use anyhow::{bail, Context, Result};
 use orion_core::env;
 use orion_core::harness::HarnessDescriptor;
-use orion_core::project_file::{self, ProjectCommand};
 use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, EnterOutcome, Entity, EntityId, LinkId, PrewarmInfo,
     Project, ProjectId, ServerEvent, SessionRef, TerminalId, TerminalTab, Worktree, WorktreeId,
@@ -69,11 +68,10 @@ const CLI_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 type FinishedRun = (Arc<PtySession>, Option<i32>);
 /// What a RUN TERMINAL's row is called in the Sessions panel.
 const RUN_TERMINAL_NAME: &str = "run";
-/// `⌘⇧S` on a worktree with nothing to run: the footer line naming both
-/// places a RUN COMMAND can come from.
+/// `⌘⇧S` on a worktree with nothing to run: the footer line naming where
+/// a RUN COMMAND is set.
 const NO_RUN_COMMAND: &str =
-    "no run command for this worktree — set one in Settings (s) → Project, \
-                              or add .orion.json with {\"run\": \"npm run dev\"}";
+    "no run command for this project — set one in Settings → Projects (Run command)";
 /// Why a RUN TERMINAL with nothing left to replay will not attach — its
 /// run ended before a DAEMON restart, typically.
 const RUN_NOT_RUNNING: &str = "this run has stopped — ⌘⇧S on its worktree starts it again";
@@ -2191,10 +2189,8 @@ impl Daemon {
     // ---- run terminals ----
 
     /// `⌘⇧S` on a worktree: start its RUN COMMAND — the project's
-    /// `run_command` setting (Settings → Project), else `.orion.json`'s
-    /// `run`, read fresh from the worktree's checkout, else the main
-    /// checkout's — in the worktree's RUN TERMINAL; with none, the refusal
-    /// says so. A run that already
+    /// `run_command` setting (Settings → Projects), read fresh — in the
+    /// worktree's RUN TERMINAL; with none, the refusal says so. A run that already
     /// exited lends its row; one still going is the answer as it stands,
     /// so a second client's press never starts a second server.
     pub fn start_run(self: &Arc<Self>, worktree_id: &WorktreeId) -> Result<EntityId> {
@@ -2225,14 +2221,8 @@ impl Daemon {
             .store
             .get_project(&worktree.project_id)?
             .map_or_else(|| worktree.path.clone(), |p| p.repo_path);
-        let command = match config.run_command(&main) {
-            Some(command) => command.to_string(),
-            None => match project_file::lookup(&worktree.path, &main, ProjectCommand::Run)
-                .map_err(anyhow::Error::msg)?
-            {
-                Some(command) => command,
-                None => bail!(NO_RUN_COMMAND),
-            },
+        let Some(command) = config.run_command(&main).map(str::to_string) else {
+            bail!(NO_RUN_COMMAND);
         };
         let mut term = match existing {
             Some(mut term) => {
@@ -3956,7 +3946,7 @@ fn login_shell_wrap(
 }
 
 /// [`login_shell_wrap`] for a line that is already shell syntax — a RUN
-/// TERMINAL's `.orion.json` `run`, pipes and `&&` and all — behind the
+/// TERMINAL's run command, pipes and `&&` and all — behind the
 /// same prelude.
 fn login_shell_line(shell: &str, line: &str) -> (String, Vec<String>) {
     let mut cmdline = String::from("unset");
@@ -5299,7 +5289,7 @@ mod tests {
     }
 
     /// A project whose main checkout is a fresh directory, registered with
-    /// `daemon`, for the RUN TERMINAL tests to write `.orion.json` into.
+    /// `daemon`, for the RUN TERMINAL tests.
     fn run_worktree(daemon: &Daemon) -> (tempfile::TempDir, Worktree) {
         let dir = tempfile::tempdir().unwrap();
         let project = Project {
@@ -5319,6 +5309,14 @@ mod tests {
         };
         daemon.store.insert_worktree(&worktree).unwrap();
         (dir, worktree)
+    }
+
+    /// A config whose project at `repo` has `run` for its RUN COMMAND.
+    fn run_config(repo: &Path, run: &str) -> crate::config::Config {
+        let json = serde_json::json!({
+            "projects": { repo.display().to_string(): { "run_command": run } }
+        });
+        serde_json::from_value(json).unwrap()
     }
 
     /// A daemon restart (an upgrade, `orion kill`) takes every PTY: the
@@ -5442,15 +5440,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_needs_a_project_file_starts_once_and_stops() {
+    async fn run_needs_a_run_command_starts_once_and_stops() {
         let daemon = test_daemon();
         let (dir, worktree) = run_worktree(&daemon);
 
-        let missing = daemon.start_run(&worktree.id).unwrap_err();
+        let missing = daemon
+            .start_run_with(&worktree.id, &crate::config::Config::default())
+            .unwrap_err();
         assert!(
-            missing.to_string().contains("Settings (s) → Project")
-                && missing.to_string().contains(".orion.json"),
-            "names both places: {missing}"
+            missing.to_string().contains("Settings → Projects"),
+            "names where to set one: {missing}"
         );
         assert!(daemon
             .store
@@ -5458,8 +5457,8 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        std::fs::write(dir.path().join(".orion.json"), r#"{"run": "sleep 30"}"#).unwrap();
-        let EntityId::Terminal(id) = daemon.start_run(&worktree.id).unwrap() else {
+        let cfg = run_config(dir.path(), "sleep 30");
+        let EntityId::Terminal(id) = daemon.start_run_with(&worktree.id, &cfg).unwrap() else {
             panic!("a run lives in a terminal");
         };
         let sref = SessionRef::Terminal(id.clone());
@@ -5469,7 +5468,7 @@ mod tests {
 
         // A second press while it runs starts nothing new.
         assert_eq!(
-            daemon.start_run(&worktree.id).unwrap(),
+            daemon.start_run_with(&worktree.id, &cfg).unwrap(),
             EntityId::Terminal(id.clone())
         );
         assert_eq!(
@@ -5497,12 +5496,11 @@ mod tests {
     async fn a_stop_interrupts_the_run_and_keeps_how_it_ended() {
         let daemon = test_daemon();
         let (dir, worktree) = run_worktree(&daemon);
-        std::fs::write(
-            dir.path().join(".orion.json"),
-            r#"{"run": "trap 'echo winding-down; exit 0' INT; echo started; while :; do sleep 0.1; done"}"#,
-        )
-        .unwrap();
-        let EntityId::Terminal(id) = daemon.start_run(&worktree.id).unwrap() else {
+        let cfg = run_config(
+            dir.path(),
+            "trap 'echo winding-down; exit 0' INT; echo started; while :; do sleep 0.1; done",
+        );
+        let EntityId::Terminal(id) = daemon.start_run_with(&worktree.id, &cfg).unwrap() else {
             panic!("a run lives in a terminal");
         };
         let sref = SessionRef::Terminal(id.clone());
@@ -5537,61 +5535,31 @@ mod tests {
             .is_empty());
     }
 
-    /// The project's `run_command` setting (Settings → Project) is what
-    /// `r` runs when it is set, over whatever `.orion.json` says; blank,
-    /// the file decides as before; a project's setting is its own; and a
-    /// file that won't parse is still that file's error, not "no command".
+    /// The project's `run_command` setting (Settings → Projects) is what
+    /// `r` runs; blank, or another project's, is no run command at all.
     #[tokio::test]
-    async fn the_project_setting_wins_over_the_project_file() {
+    async fn the_project_setting_is_the_run_command() {
         let daemon = test_daemon();
         let (dir, worktree) = run_worktree(&daemon);
-        let config =
-            |json: String| -> crate::config::Config { serde_json::from_str(&json).unwrap() };
-        let entry = |path: &Path, run: &str| {
-            config(format!(
-                r#"{{"projects": {{"{}": {{"run_command": "{run}"}}}}}}"#,
-                path.display()
-            ))
+        let EntityId::Terminal(id) = daemon
+            .start_run_with(&worktree.id, &run_config(dir.path(), "sleep 31"))
+            .unwrap()
+        else {
+            panic!("a run lives in a terminal");
         };
-        let run_with = |cfg: &crate::config::Config| -> String {
-            let EntityId::Terminal(id) = daemon.start_run_with(&worktree.id, cfg).unwrap() else {
-                panic!("a run lives in a terminal");
-            };
-            let command = daemon.store.get_terminal(&id).unwrap().unwrap().run_command;
-            // The ^C, then the kill: gone before the next start.
-            daemon.stop_run(&worktree.id).unwrap();
-            daemon.stop_run(&worktree.id).unwrap();
-            command.unwrap()
-        };
+        let command = daemon.store.get_terminal(&id).unwrap().unwrap().run_command;
+        assert_eq!(command.as_deref(), Some("sleep 31"));
+        // The ^C, then the kill: gone before the next start.
+        daemon.stop_run(&worktree.id).unwrap();
+        daemon.stop_run(&worktree.id).unwrap();
 
-        // No file: the setting is the whole answer.
-        assert_eq!(run_with(&entry(dir.path(), "sleep 31")), "sleep 31");
-        // Both: the setting wins.
-        std::fs::write(dir.path().join(".orion.json"), r#"{"run": "sleep 30"}"#).unwrap();
-        assert_eq!(run_with(&entry(dir.path(), "sleep 31")), "sleep 31");
-        // Blank, or another project's: the file.
-        assert_eq!(run_with(&entry(dir.path(), "   ")), "sleep 30");
-        assert_eq!(
-            run_with(&entry(Path::new("/tmp/other"), "sleep 31")),
-            "sleep 30"
-        );
-        // Neither: the message names both.
-        std::fs::remove_file(dir.path().join(".orion.json")).unwrap();
-        let err = daemon
-            .start_run_with(&worktree.id, &entry(dir.path(), ""))
-            .unwrap_err();
-        assert!(err.to_string().contains("Settings (s) → Project"), "{err}");
-        // A broken file is its own complaint, whatever the setting isn't.
-        std::fs::write(dir.path().join(".orion.json"), "{").unwrap();
-        let err = daemon
-            .start_run_with(&worktree.id, &crate::config::Config::default())
-            .unwrap_err();
-        assert!(err.to_string().contains(".orion.json:"), "{err}");
-        assert_eq!(
-            run_with(&entry(dir.path(), "sleep 31")),
-            "sleep 31",
-            "and the setting never opens the file"
-        );
+        for cfg in [
+            run_config(dir.path(), "   "),
+            run_config(Path::new("/tmp/other"), "sleep 31"),
+        ] {
+            let err = daemon.start_run_with(&worktree.id, &cfg).unwrap_err();
+            assert!(err.to_string().contains("Settings → Projects"), "{err}");
+        }
     }
 
     /// A run that ends on its own keeps its output for the attach that
@@ -5601,12 +5569,8 @@ mod tests {
     async fn an_exited_run_replays_instead_of_running_again() {
         let daemon = test_daemon();
         let (dir, worktree) = run_worktree(&daemon);
-        std::fs::write(
-            dir.path().join(".orion.json"),
-            r#"{"run": "echo run-finished"}"#,
-        )
-        .unwrap();
-        let EntityId::Terminal(id) = daemon.start_run(&worktree.id).unwrap() else {
+        let cfg = run_config(dir.path(), "echo run-finished");
+        let EntityId::Terminal(id) = daemon.start_run_with(&worktree.id, &cfg).unwrap() else {
             panic!("a run lives in a terminal");
         };
         let sref = SessionRef::Terminal(id.clone());
@@ -5627,7 +5591,7 @@ mod tests {
 
         // `r` again reuses the row.
         assert_eq!(
-            daemon.start_run(&worktree.id).unwrap(),
+            daemon.start_run_with(&worktree.id, &cfg).unwrap(),
             EntityId::Terminal(id)
         );
         assert_eq!(

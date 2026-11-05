@@ -81,8 +81,8 @@ pub struct Config {
 #[serde(default)]
 pub struct ProjectConfig {
     /// The RUN COMMAND a menu's **Run** starts in this project's
-    /// worktrees, typed into Settings → Project. Empty means the checkout's `.orion.json`
-    /// `run`, as before the row existed.
+    /// worktrees, typed into Settings → Projects. Empty means there is
+    /// none.
     pub run_command: String,
 }
 
@@ -145,8 +145,8 @@ impl Config {
     }
 
     /// The RUN COMMAND set for the project checked out at `repo_path` in
-    /// Settings → Project, trimmed; None when the project has no entry or
-    /// the row is empty, which means the checkout's `.orion.json` decides.
+    /// Settings → Projects, trimmed; None when the project has no entry or
+    /// the row is empty.
     pub fn run_command(&self, repo_path: &Path) -> Option<&str> {
         self.projects
             .get(repo_path)

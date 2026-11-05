@@ -368,14 +368,13 @@ pub enum ClientRequest {
         req_id: u64,
         id: TerminalId,
     },
-    /// `r` on a worktree: start the project's RUN COMMAND — the `run` of
-    /// the `.orion.json` in that checkout, else the main checkout's, read
-    /// fresh — in the worktree's RUN TERMINAL, a login shell running that
+    /// `r` on a worktree: start the project's RUN COMMAND — its **Run
+    /// command** setting, read fresh — in the worktree's RUN TERMINAL, a login shell running that
     /// line and nothing else. An exited run's row is reused; a run still
     /// going is left alone and named in the reply, so a second client's
     /// press never starts a second one. Answered with
-    /// `Ack { created: Some(EntityId::Terminal(..)) }`; no file or no
-    /// command is an Error saying what to add.
+    /// `Ack { created: Some(EntityId::Terminal(..)) }`; no command is an
+    /// Error saying where to set one.
     StartRun {
         req_id: u64,
         worktree: WorktreeId,

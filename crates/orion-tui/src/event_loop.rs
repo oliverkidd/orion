@@ -4855,10 +4855,10 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                     "the task ⌘L fills in: {issues}, {ids}, {first_id} expand (empty = default)"
                 }
                 crate::config::SettingKind::RunCommand => {
-                    "shell line Start stack runs in a worktree's run terminal, e.g. just start (empty = the checkout's .orion.json \"run\", else docker compose start)"
+                    "shell line Start stack runs in a worktree's run terminal, e.g. just start (empty = none)"
                 }
                 crate::config::SettingKind::OpenCommand => {
-                    "shell line ⌘O → Open command runs to open a worktree of this project (empty = the checkout's .orion.json \"open\")"
+                    "shell line ⌘O → Open command runs to open a worktree of this project (empty = none)"
                 }
                 _ => "value (empty = default)",
             };
@@ -5502,16 +5502,15 @@ fn open_selected_worktree(app: &mut App) {
     open_worktree(app, &w);
 }
 
-/// Why `Shift+Enter` has nothing to run, naming both places to put one —
-/// the twin of the DAEMON's line for `r`.
+/// Why `Shift+Enter` has nothing to run, naming where to set one — the
+/// twin of the DAEMON's line for `r`.
 const NO_OPEN_COMMAND: &str =
-    "no open command for this worktree — set one in Settings (s) → Project, \
-                               or add .orion.json with {\"open\": \"open http://localhost:3000\"}";
+    "no open command for this project — set one in Settings → Projects (Open command)";
 
 /// Run `worktree`'s OPEN COMMAND once — saying why when there is none or
-/// it won't start: the project's **Open command** setting (Settings → Project) when it is set, else the
-/// checkout's `.orion.json` `open`. The TUI runs it, not the DAEMON: it
-/// opens a browser or an editor on the machine the user is sitting at.
+/// it won't start: the project's **Open command** setting (Settings →
+/// Projects). The TUI runs it, not the DAEMON: it opens a browser or an
+/// editor on the machine the user is sitting at.
 fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
     let main = app
         .tree
@@ -5519,12 +5518,9 @@ fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
         .iter()
         .find(|p| p.id == worktree.project_id)
         .map_or_else(|| worktree.path.clone(), |p| p.repo_path.clone());
-    let command = match open_command_for(&worktree.path, &main) {
-        Ok(command) => command,
-        Err(msg) => {
-            app.flash = Some(crate::flash::Flash::failed(msg));
-            return;
-        }
+    let Some(command) = open_command_for(&main) else {
+        app.flash = Some(crate::flash::Flash::failed(NO_OPEN_COMMAND));
+        return;
     };
     if let Err(e) = spawn_open_command(&command, &worktree.path) {
         app.flash = Some(crate::flash::Flash::failed(format!(
@@ -5533,24 +5529,13 @@ fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
     }
 }
 
-/// The OPEN COMMAND for a checkout, resolved the way the DAEMON resolves
-/// `r`'s: the project's `open_command` setting, read fresh so an edit
-/// applies on the next press, else the PROJECT FILE's `open` — the
-/// worktree's own checkout, then the project's main one. Err is the footer
-/// line: nothing set in either place, or a file that is there and won't
-/// parse.
-fn open_command_for(worktree: &std::path::Path, main: &std::path::Path) -> Result<String, String> {
+/// The OPEN COMMAND for the project whose main checkout is `main`,
+/// resolved the way the DAEMON resolves `r`'s: its `open_command` setting,
+/// read fresh so an edit applies on the next press. None when it is unset.
+fn open_command_for(main: &std::path::Path) -> Option<String> {
     let setting = crate::config::Config::load().project(main).open_command;
     let setting = setting.trim();
-    if !setting.is_empty() {
-        return Ok(setting.to_string());
-    }
-    orion_core::project_file::lookup(
-        worktree,
-        main,
-        orion_core::project_file::ProjectCommand::Open,
-    )?
-    .ok_or_else(|| NO_OPEN_COMMAND.to_string())
+    (!setting.is_empty()).then(|| setting.to_string())
 }
 
 /// Start an OPEN COMMAND through `$SHELL -c` in `cwd`, kept off the TUI's
@@ -21977,8 +21962,8 @@ mod tests {
     }
 
     /// **Open command** (⌘O's menu) on a worktree fires its OPEN COMMAND —
-    /// the project's **Open command** setting first, else `.orion.json`'s
-    /// `open` — and with neither says where to put one, without Enter's
+    /// the project's **Open command** setting — and without one says where
+    /// to set it, without Enter's
     /// drill-in. It answers from the Sessions panel too, where the
     /// cursor's worktree is just as much the context. ⇧Enter and ⌥Enter
     /// stay Enter's.
@@ -21995,31 +21980,22 @@ mod tests {
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
             let flash = app.flash.as_deref().unwrap_or_default().to_string();
             assert!(
-                flash.contains("no open command")
-                    && flash.contains("Settings")
-                    && flash.contains(".orion.json"),
-                "names both places: {flash}"
+                flash.contains("no open command") && flash.contains("Settings → Projects"),
+                "names where to set one: {flash}"
             );
             assert_eq!(app.focus, Focus::Worktrees, "not Enter's drill-in");
 
-            std::fs::write(
-                dir.path().join(".orion.json"),
-                r#"{"open": "open http://localhost:3000"}"#,
-            )
-            .unwrap();
-            let fires = || open_command_for(dir.path(), dir.path());
-            assert_eq!(fires().as_deref(), Ok("open http://localhost:3000"));
-            app.flash = None;
-            out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash, None, "what it opens is the answer");
+            let fires = || open_command_for(dir.path());
+            assert_eq!(fires(), None);
 
-            // The setting wins over the file, and is read fresh per press.
+            // Set, it fires — read fresh per press.
             let mut cfg = crate::config::Config::load();
             assert!(cfg.set_project_text(dir.path(), OpenCommand, "open http://localhost:5173"));
             cfg.save_to(&config_path).unwrap();
-            assert_eq!(fires().as_deref(), Ok("open http://localhost:5173"));
+            assert_eq!(fires().as_deref(), Some("open http://localhost:5173"));
+            app.flash = None;
             out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash, None);
+            assert_eq!(app.flash, None, "what it opens is the answer");
 
             // Sessions panel: the same worktree is under the
             // cursor, so the same command fires, and focus stays put.
@@ -34638,9 +34614,9 @@ mod tests {
     /// whichever is selected: Enter opens a prompt titled with the row's
     /// project, pre-filled with its stored command; Enter there writes
     /// `run_command` into that project's entry (and nothing else), the
-    /// row reads it back, the next project's row still reads
-    /// `.orion.json`; ←/→ only explain themselves; Esc keeps the old
-    /// value; an empty Enter puts the file back and drops the key. With
+    /// row reads it back, the next project's row still reads `not set`;
+    /// ←/→ only explain themselves; Esc keeps the old value; an empty
+    /// Enter unsets it and drops the key. With
     /// no project in the tree the tab says so, and Enter opens nothing
     /// and says why.
     #[test]
@@ -34700,10 +34676,7 @@ mod tests {
                 screen.contains("demo") && screen.contains("/tmp/other"),
                 "every project has its block: {screen}"
             );
-            assert!(
-                screen.contains("[.orion.json]"),
-                "unset reads as the file: {screen}"
-            );
+            assert!(screen.contains("[not set]"), "unset: {screen}");
 
             // ←/→: nothing to cycle, the overlay stays and explains.
             press(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, &mut out);
@@ -34769,7 +34742,7 @@ mod tests {
             let other = row + crate::config::tab_settings(tab).len();
             open_at(&mut app, &mut out, other);
             let screen = draw_to_string(&mut app, 100, 40);
-            assert!(screen.contains("[.orion.json]"), "{screen}");
+            assert!(screen.contains("[not set]"), "{screen}");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("expected the run command prompt, got {:?}", app.overlay);
@@ -34778,7 +34751,7 @@ mod tests {
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 
-            // An empty Enter is the way back to the file — the entry goes.
+            // An empty Enter unsets it — the entry goes.
             open_on_row(&mut app, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             for _ in 0.."npm run dev".len() {
@@ -34788,8 +34761,8 @@ mod tests {
             assert_eq!(saved(&path)["projects"], serde_json::json!({}));
             let view = settings_view(&app);
             assert!(
-                matches!(&view.notice, Some((t, _)) if t.contains(".orion.json")),
-                "back to the file: {:?}",
+                matches!(&view.notice, Some((t, _)) if t.contains("not set")),
+                "unset: {:?}",
                 view.notice
             );
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);

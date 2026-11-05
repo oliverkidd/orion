@@ -158,9 +158,9 @@ pub const LINEAR_TEMPLATE_DEFAULT: &str = "default";
 /// The Project tab with no project to list.
 pub const NO_PROJECTS: &str = "no projects yet — each one you add gets its rows here";
 
-/// What the Project tab's **Run command** row shows while it is empty:
-/// the checkout's `.orion.json` is what `r` reads then.
-pub const PROJECT_FILE_CHOICE: &str = orion_core::project_file::FILE_NAME;
+/// What the Project tab's **Run command** and **Open command** rows show
+/// while they are empty: there is nothing to run then.
+pub const NO_COMMAND: &str = "not set";
 
 // The static model/effort lists live in the core registry table now
 // ([`orion_core::harness::builtin`]); what the pickers show is built
@@ -1074,13 +1074,13 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
             SettingSpec {
                 kind: SettingKind::RunCommand,
                 label: "Run command",
-                hint: "Shell line {toggle_stack} (Start stack) runs in a worktree's run terminal, e.g. just start (empty = its .orion.json \"run\", else docker compose start)",
+                hint: "Shell line {toggle_stack} (Start stack) runs in a worktree's run terminal, e.g. just start",
                 group: "",
             },
             SettingSpec {
                 kind: SettingKind::OpenCommand,
                 label: "Open command",
-                hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000 (empty = its .orion.json \"open\")",
+                hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000",
                 group: "",
             },
         ]),
@@ -1954,9 +1954,8 @@ pub struct Config {
 #[serde(default)]
 pub struct ProjectSettings {
     /// The RUN COMMAND a menu's **Run** starts in this project's
-    /// worktrees, typed on the Project tab. Empty — the default, shown as `.orion.json` — is
-    /// the checkout's PROJECT FILE `run`, where the command lived before
-    /// the row existed; set, it wins over the file. The DAEMON reads it
+    /// worktrees, typed on the Project tab. Empty — the default, shown as
+    /// `not set` — is none. The DAEMON reads it
     /// (`orion-daemon/src/config.rs`); the TUI only edits it. Left out
     /// of the file while empty, so an entry written before the row reads
     /// the same after a save.
@@ -1964,8 +1963,7 @@ pub struct ProjectSettings {
     pub run_command: String,
     /// The OPEN COMMAND `Shift+Enter` / `Shift+O` fires on this project's
     /// worktrees, typed on the Project tab — `open http://localhost:3000`,
-    /// say. Empty (shown as `.orion.json`) is the checkout's PROJECT FILE
-    /// `open`; set, it wins over the file. The TUI both edits and runs it
+    /// say. Empty (shown as `not set`) is none. The TUI both edits and runs it
     /// (`event_loop::open_worktree`): what it opens belongs on the machine
     /// the user sits at, never the DAEMON's. Left out of the file while
     /// empty, like `run_command`.
@@ -1985,11 +1983,11 @@ impl ProjectSettings {
     pub fn value_label(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::RunCommand => match self.run_command.trim() {
-                "" => PROJECT_FILE_CHOICE.into(),
+                "" => NO_COMMAND.into(),
                 command => command.to_string(),
             },
             SettingKind::OpenCommand => match self.open_command.trim() {
-                "" => PROJECT_FILE_CHOICE.into(),
+                "" => NO_COMMAND.into(),
                 command => command.to_string(),
             },
             _ => String::new(),
@@ -1997,8 +1995,8 @@ impl ProjectSettings {
     }
 
     /// The stored text of a typed PROJECT TAB row as its prompt pre-fills
-    /// it — `""` for an unset row, never the `.orion.json` the overlay
-    /// shows in its place. Empty for a row that is not typed.
+    /// it — `""` for an unset row, never the `not set` the overlay shows
+    /// in its place. Empty for a row that is not typed.
     pub fn text_value(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::RunCommand => self.run_command.clone(),
@@ -5724,8 +5722,8 @@ mod tests {
 
     /// **Run command** on the Project tab: a typed row (Enter prompts,
     /// ←/→ and cycle change nothing) kept per repo path as `run_command`,
-    /// shown as `.orion.json` while empty — the file decides then — and
-    /// left out of the file while empty, so an entry with nothing else in
+    /// shown as `not set` while empty and left out of the file while
+    /// empty, so an entry with nothing else in
     /// it is dropped rather than written.
     #[test]
     fn run_command_is_a_typed_project_row_kept_per_repo_path() {
@@ -5740,9 +5738,9 @@ mod tests {
         assert_eq!(cfg.project(demo).run_command, "");
         assert_eq!(
             cfg.project(demo).value_label(SettingKind::RunCommand),
-            PROJECT_FILE_CHOICE
+            NO_COMMAND
         );
-        assert_eq!(cfg.value_label(SettingKind::RunCommand), ".orion.json");
+        assert_eq!(cfg.value_label(SettingKind::RunCommand), "not set");
         assert_eq!(cfg.project_text_value(demo, SettingKind::RunCommand), "");
 
         // The tab's cycle never touches a typed row.
@@ -5772,7 +5770,7 @@ mod tests {
         );
         assert_eq!(
             cfg.project(other).value_label(SettingKind::RunCommand),
-            PROJECT_FILE_CHOICE,
+            NO_COMMAND,
             "one project's, not every project's"
         );
         assert_eq!(
@@ -5798,7 +5796,7 @@ mod tests {
         assert_eq!(loaded.project(demo).run_command, "npm run dev");
         assert_eq!(loaded.project(other).run_command, "");
 
-        // Empty is the way back to the file — and drops the entry.
+        // Empty unsets it — and drops the entry.
         assert!(cfg.set_project_text(demo, SettingKind::RunCommand, "   "));
         assert_eq!(cfg.projects.keys().collect::<Vec<_>>(), [other]);
         cfg.save_to(&path).unwrap();
@@ -5810,7 +5808,7 @@ mod tests {
 
     /// **Open command** on the Project tab: the same typed per-project row
     /// as Run command, right under it, kept as `open_command` — what
-    /// `Shift+Enter` / `Shift+O` runs before looking at `.orion.json`.
+    /// `Shift+Enter` / `Shift+O` runs.
     /// Its own key, so setting it leaves `run_command` alone; empty drops
     /// it from the entry.
     #[test]
@@ -5829,9 +5827,9 @@ mod tests {
         assert_eq!(cfg.project(demo).open_command, "");
         assert_eq!(
             cfg.project(demo).value_label(SettingKind::OpenCommand),
-            PROJECT_FILE_CHOICE
+            NO_COMMAND
         );
-        assert_eq!(cfg.value_label(SettingKind::OpenCommand), ".orion.json");
+        assert_eq!(cfg.value_label(SettingKind::OpenCommand), "not set");
 
         // A typed row: cycling its tab row changes nothing, and the
         // top-level setter is not its.
@@ -5869,7 +5867,7 @@ mod tests {
             "open http://localhost:3000"
         );
 
-        // Empty is the way back to the file — and drops the entry.
+        // Empty unsets it — and drops the entry.
         assert!(cfg.set_project_text(demo, SettingKind::OpenCommand, " "));
         assert!(cfg.projects.is_empty());
     }

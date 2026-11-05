@@ -119,8 +119,7 @@ pub enum Action {
     PushWorktree,
     /// `Shift+Enter` / `Shift+O` / `Alt+Enter`, on the grid: fire the
     /// selected worktree's OPEN COMMAND — the project's **Open command**
-    /// setting, else its `.orion.json` `open` (`open http://localhost:3000`,
-    /// say). Three chords because only the kitty protocol carries a shifted
+    /// setting (`open http://localhost:3000`, say). Three chords because only the kitty protocol carries a shifted
     /// Enter: Terminal.app sends a plain one and tmux flattens it, while
     /// `ESC CR` — what `/terminal-setup` gives Shift+Enter in VS Code, and
     /// Option+Enter on a Mac with Option as Meta — gets through both and
@@ -546,7 +545,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::OpenWorktree,
         id: "open_worktree",
         label: "Open checkout in editor",
-        hint: "Open the selected checkout outside orion, usually in your editor: its project's Open command (Settings → Project), else .orion.json \"open\" — e.g. open http://localhost:3000",
+        hint: "Open the selected checkout outside orion, usually in your editor: its project's Open command (Settings → Projects) — e.g. open http://localhost:3000",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &[],
@@ -922,7 +921,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::ToggleStack,
         id: "toggle_stack",
         label: "Start/stop stack",
-        hint: "Start the selected checkout's stack — its run command (Settings → Project, or .orion.json \"run\") — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
+        hint: "Start the selected checkout's stack — its run command (Settings → Projects) — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         // ^Z rather than ^⇧S, which only the kitty protocol can send;

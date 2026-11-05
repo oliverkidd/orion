@@ -12,7 +12,6 @@ pub mod ids;
 pub mod kitty;
 pub mod mem;
 pub mod paths;
-pub mod project_file;
 pub mod protocol;
 pub mod settings;
 pub mod shell;
