@@ -60,6 +60,7 @@ pub mod pr_cache;
 pub mod pr_checkout;
 pub mod pr_modal;
 pub mod pr_preview;
+pub mod pr_review;
 pub mod pr_row;
 pub mod pr_store;
 pub mod preset_overlays;
