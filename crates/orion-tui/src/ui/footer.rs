@@ -206,7 +206,7 @@ fn place(app: &App) -> Option<&'static str> {
 /// The footer's KEY HINTS for the screen as it stands — none at all while
 /// a modal (or the editor) is up: those keys are on the modal's border.
 pub(crate) fn hints(app: &App) -> Vec<Hint> {
-    if app.overlay.is_some() || app.vim.is_some() || app.page.is_some() {
+    if app.overlay.is_some() || app.editor.is_some() || app.page.is_some() {
         return Vec::new();
     }
     let km = &app.keymap;

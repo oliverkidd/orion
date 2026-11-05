@@ -1133,7 +1133,7 @@ fn edit_selected(app: &mut App) {
         return;
     };
     let (dir, editor) = (skill.dir.clone(), view.editor.clone());
-    let size = crate::event_loop::vim_size_guess(app);
+    let size = crate::event_loop::editor_size_guess(app);
     crate::event_loop::spawn_editor_modal(app, &editor, &dir, SKILL_FILE, 1, size);
 }
 
@@ -1223,7 +1223,7 @@ pub(crate) fn create(app: &mut App, mut view: SkillsView, typed: &str) {
     view.focus = std::fs::canonicalize(&dir).ok();
     let editor = view.editor.clone();
     reopen(app, view);
-    let size = crate::event_loop::vim_size_guess(app);
+    let size = crate::event_loop::editor_size_guess(app);
     crate::event_loop::spawn_editor_modal(
         app,
         &editor,
@@ -2099,13 +2099,13 @@ license: MIT # the usual\n\
         write_skill(&skills, "beta", &front("beta", "Second"));
         at_home(places, |app| {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-            app.vim_tx = Some(tx);
+            app.editor_tx = Some(tx);
             // A shell stands in for the editor (`sh +1 SKILL.md` spawns fine).
             if let Some(Overlay::Skills(view)) = &mut app.overlay {
                 view.editor = "/bin/sh".into();
             }
             let edited = |app: &mut App| {
-                let mut vim = app.vim.take().expect("the editor is up");
+                let mut vim = app.editor.take().expect("the editor is up");
                 vim.kill();
                 (vim.cwd.clone(), vim.file.clone())
             };
@@ -2131,7 +2131,10 @@ license: MIT # the usual\n\
                 handle_mouse(app, mouse, pos);
             };
             click(app, 1);
-            assert!(app.vim.is_none(), "another row: the cursor moves, no more");
+            assert!(
+                app.editor.is_none(),
+                "another row: the cursor moves, no more"
+            );
             assert_eq!(
                 browser(app).selected_skill().map(|s| s.name.as_str()),
                 Some("beta")

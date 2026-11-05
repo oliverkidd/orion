@@ -22,7 +22,7 @@ use footer::draw_footer;
 
 /// Outer size of the editor modal, as (width, height) percent of the frame.
 /// Shared with the event loop's pre-draw PTY size guess.
-pub const VIM_MODAL_PCT: (u16, u16) = (94, 92);
+pub const EDITOR_MODAL_PCT: (u16, u16) = (94, 92);
 /// Outer size of the two split modals (diff, tree), percent of the frame.
 pub(crate) const SPLIT_MODAL_PCT: (u16, u16) = (92, 90);
 /// The rows along the bottom the FOOTER takes.
@@ -261,7 +261,7 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
 /// already drew).
 fn draw_vim(f: &mut Frame, app: &mut App) {
     let th = app.theme;
-    let Some(vim) = &app.vim else {
+    let Some(vim) = &app.editor else {
         return;
     };
     if vim.embedded {
@@ -282,7 +282,7 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
             // cursor follows it rather than the pane underneath.
             app.host_cursor = pty_cursor_cell(vim.parser.screen(), inner);
             // Write-back: the post-draw sync resizes the PTY to the pane.
-            if let Some(vim) = &mut app.vim {
+            if let Some(vim) = &mut app.editor {
                 vim.area = inner;
             }
             return;
@@ -291,7 +291,7 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
         // to the modal so the session is never invisible.
     }
     dim_backdrop(f);
-    let area = centered_rect_pct(f.area(), VIM_MODAL_PCT.0, VIM_MODAL_PCT.1);
+    let area = centered_rect_pct(f.area(), EDITOR_MODAL_PCT.0, EDITOR_MODAL_PCT.1);
     f.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -313,26 +313,27 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
     );
     app.host_cursor = pty_cursor_cell(vim.parser.screen(), inner);
     // Write-back: the post-draw sync resizes the PTY to the drawn rect.
-    if let Some(vim) = &mut app.vim {
+    if let Some(vim) = &mut app.editor {
         vim.area = inner;
     }
 }
 
 /// The editor modal's keys: the editor's own save and quit, which it
 /// reads itself, and the ones orion takes before the editor sees them
-/// (`event_loop::handle_vim_key`) — the force close and ⌘O.
+/// (`event_loop::handle_editor_key`) — the force close and ⌘O.
 pub(crate) mod editor_keys {
     use crate::hints::Key;
 
     pub const SAVE: Key = Key::new(&["ctrl+s"], "save");
     pub const QUIT: Key = Key::new(&["ctrl+q"], "quit");
-    pub const NEXT_MATCH: Key = Key::new(&["ctrl+d"], "next match");
-    pub const MENU: Key = Key::new(&["f10"], "menu");
     pub const PALETTE: Key = Key::new(&["ctrl+p"], "palette");
     /// `is_editor_hatch`: always the modal's, whatever the editor.
     pub const FORCE_CLOSE: Key = Key::new(&["ctrl+\\"], "force close");
     /// `^Q` force-closes too, for an editor that has no `^Q` of its own.
     pub const QUIT_FORCE: Key = Key::new(&["ctrl+q"], "force close");
+    /// fresh missing: the footer's offer of its install
+    /// (`event_loop::offer_editor_install`).
+    pub const INSTALL: Key = Key::new(&["i"], "install");
 }
 
 /// The editor modal's keys while it runs an installer (`install`): the
@@ -347,7 +348,7 @@ pub(crate) mod install_keys {
 
 /// The editor modal's bottom-border keys, for the editor it runs: its
 /// own save and quit, the force close, and ⌘O.
-pub(crate) fn editor_hints(vim: &crate::vim_term::VimTerm) -> Vec<crate::hints::Hint> {
+pub(crate) fn editor_hints(vim: &crate::editor_term::EditorTerm) -> Vec<crate::hints::Hint> {
     use crate::editor::Kind;
     use crate::hints::Hint;
     use editor_keys::*;
@@ -366,14 +367,7 @@ pub(crate) fn editor_hints(vim: &crate::vim_term::VimTerm) -> Vec<crate::hints::
         ];
     }
     let mut hints = match vim.kind {
-        Kind::Micro => vec![SAVE.hint(), QUIT.hint().kept(), NEXT_MATCH.hint()],
-        Kind::Edit => vec![SAVE.hint(), QUIT.hint().kept(), MENU.hint()],
         Kind::Fresh => vec![SAVE.hint(), QUIT.hint().kept(), PALETTE.hint()],
-        Kind::Vim | Kind::Helix => vec![Hint::new(":w", "save"), Hint::new(":q", "quit").kept()],
-        Kind::Emacs => vec![
-            Hint::new("^X ^S", "save"),
-            Hint::new("^X ^C", "quit").kept(),
-        ],
         Kind::Other => Vec::new(),
     };
     hints.push(if vim.quits_itself {
@@ -390,14 +384,14 @@ pub(crate) fn editor_hints(vim: &crate::vim_term::VimTerm) -> Vec<crate::hints::
 /// margin each side, scrolled where its keys left it.
 fn draw_page(f: &mut Frame, app: &mut App) {
     let th = app.theme;
-    if app.vim.as_ref().is_some_and(|v| !v.embedded) {
+    if app.editor.as_ref().is_some_and(|v| !v.embedded) {
         return; // the editor modal covers it exactly
     }
     let Some(page) = &mut app.page else {
         return;
     };
     dim_backdrop(f);
-    let area = centered_rect_pct(f.area(), VIM_MODAL_PCT.0, VIM_MODAL_PCT.1);
+    let area = centered_rect_pct(f.area(), EDITOR_MODAL_PCT.0, EDITOR_MODAL_PCT.1);
     f.render_widget(Clear, area);
     let mut block = Block::default()
         .borders(Borders::ALL)
@@ -2611,7 +2605,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             // room, and the preview is a whole file.
             let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
             let title = format!(" Open files ({}) ", view.tabs.len());
-            let editing = app.vim.as_ref().is_some_and(|v| v.embedded);
+            let editing = app.editor.as_ref().is_some_and(|v| v.embedded);
             f.render_widget(Clear, area);
             let block = crate::hints::modal_block(
                 modal_block(title, th),
@@ -2795,7 +2789,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             // Right: the selected node's preview, syntax-highlighted and
             // scrolled — or the embedded editor, which draw_vim paints into
             // this pane after us.
-            let editing = app.vim.as_ref().is_some_and(|v| v.embedded);
+            let editing = app.editor.as_ref().is_some_and(|v| v.embedded);
             let sel_path = view.selected_node().map(|n| n.path.as_str()).unwrap_or("");
             let title = if editing {
                 format!(
@@ -3145,8 +3139,8 @@ pub(crate) mod settings_keys {
     pub const RENAME: Key = Key::new(&["r"], "rename");
     pub const SIGN_OUT: Key = Key::new(&["o"], "sign out");
     pub const REMOVE: Key = Key::new(&["backspace", "delete"], "remove");
-    /// A row whose program isn't on PATH — the **File editor**'s editor,
-    /// an agent's CLI — and the Enter that runs its installer once asked.
+    /// A row whose program isn't on PATH — an agent's CLI, git, gh — and
+    /// the Enter that runs its installer once asked.
     pub const INSTALL: Key = Key::new(&["i"], "install");
     pub const RUN: Key = Key::new(&["enter"], "run it here");
 

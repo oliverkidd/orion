@@ -24,12 +24,6 @@ use std::path::{Path, PathBuf};
 /// is reaped).
 pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1h"];
 
-/// Editor commands the **File editor** row cycles through, the VS
-/// Code-style ones first (`editor::EDITORS`); each is told the file and
-/// line its own way (`editor::editor_args`). As with models, hand-edited
-/// configs can name any command the list doesn't.
-pub const EDITORS: &[&str] = crate::editor::EDITORS;
-
 /// The **Outside terminal** choices (Settings → Tools), in the order the
 /// row cycles them: the [`OutsideTerminal`] apps by name, the default first.
 pub const OUTSIDE_TERMINALS: &[&str] = &[
@@ -519,7 +513,6 @@ pub enum SettingKind {
     LinkEnvFiles,
     WorktreeContainers,
     OutsideTerminal,
-    Editor,
     OutsideEditor,
     CloseFinderOnOpen,
     /// The Tools tab's action row: Enter opens ORION SETUP, every step.
@@ -664,7 +657,6 @@ impl SettingKind {
         match self {
             // v0.1.0
             SettingKind::PaletteEnterAttaches
-            | SettingKind::Editor
             | SettingKind::SessionIdleTimeout
             | SettingKind::Theme
             | SettingKind::Animations => (2026, 8, 22),
@@ -813,12 +805,6 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 label: "Outside terminal",
                 hint: "What {open_outside} → Terminal in the checkout opens in the selected worktree: a Ghostty tab, or a Terminal.app window (Terminal.app when Ghostty isn't installed)",
                 group: "Terminal",
-            },
-            SettingSpec {
-                kind: SettingKind::Editor,
-                label: "File editor",
-                hint: "Editor every file opens in — {find_file}, {grep}, {tree_browser} and ⌥click (ORION_EDITOR overrides)",
-                group: "Editors",
             },
             SettingSpec {
                 kind: SettingKind::OutsideEditor,
@@ -1270,15 +1256,10 @@ pub fn hint_at(tab: usize, index: usize) -> String {
     }
 }
 
-/// A value row's hint — led, on the two rows that pick a program, by what
-/// is installed on this machine.
+/// A value row's hint — led, on the row that picks an app, by what is
+/// installed on this machine.
 fn setting_hint(spec: &SettingSpec) -> String {
     let installed = match spec.kind {
-        SettingKind::Editor => EDITORS
-            .iter()
-            .copied()
-            .filter(|editor| program_installed(editor))
-            .collect::<Vec<_>>(),
         SettingKind::OutsideEditor => {
             crate::outside_editor::installed_names(&crate::outside_editor::Places::here())
         }
@@ -1465,15 +1446,6 @@ pub struct Config {
     /// row and nothing reads it. Still loaded and written back as stored,
     /// so an older build sharing the file keeps the choice its user made.
     pub ghostty_keybinds: bool,
-    /// Editor command the file finder (`f`), tree browser (`b`),
-    /// find-in-files (`F`), ⌥click file links and a MARKDOWN PAGE's Enter
-    /// launch, each told the file and line its own way
-    /// (`editor::editor_args`). Any command passes through verbatim, so
-    /// hand-edited configs can name editors the picker doesn't list. The
-    /// `ORION_EDITOR` env var overrides it for the process, and one that
-    /// isn't installed falls back (`editor::resolve`); see
-    /// [`Config::editor_command`].
-    pub editor: String,
     /// OPEN IN APP: the GUI editor ⌘O hands a file or a checkout to —
     /// `auto` (the default: the first installed of Cursor, VS Code,
     /// Sublime Text and Zed, else the system default), `cursor`,
@@ -2043,7 +2015,6 @@ impl Default for Config {
             worktree_containers: WorktreeContainers::Off.as_str().into(),
             outside_terminal: OutsideTerminal::default().as_str().into(),
             ghostty_keybinds: true,
-            editor: crate::editor::DEFAULT_EDITOR.into(),
             outside_editor: crate::outside_editor::AUTO.into(),
             close_finder_on_open: true,
             linear_assignee_email: String::new(),
@@ -2382,21 +2353,9 @@ impl Config {
     }
 
     /// The editor the file overlays launch: `ORION_EDITOR` when set,
-    /// otherwise the `editor` setting, otherwise fresh — and one that isn't
-    /// installed swapped for the first installed of fresh, micro, edit and
-    /// vim ([`Config::editor_resolved`] says when).
+    /// otherwise fresh ([`crate::editor::command`]).
     pub fn editor_command(&self) -> String {
-        self.editor_resolved().command
-    }
-
-    /// [`Config::editor_command`], with the editor it stands in for when
-    /// the one asked for isn't installed.
-    pub fn editor_resolved(&self) -> crate::editor::Resolved {
-        crate::editor::resolve(
-            orion_core::env::non_empty(orion_core::env::EDITOR).as_deref(),
-            &self.editor,
-            program_installed,
-        )
+        crate::editor::command()
     }
 
     /// The effective registry this config reads, every Claude account
@@ -3468,7 +3427,6 @@ impl Config {
             SettingKind::RunSetup => "Enter opens it".into(),
             SettingKind::Git => installed_label("git"),
             SettingKind::Gh => installed_label("gh"),
-            SettingKind::Editor => editor_label(&self.editor, &self.editor_resolved()),
             SettingKind::OutsideEditor => crate::outside_editor::value_label(
                 &self.outside_editor,
                 &crate::outside_editor::Places::here(),
@@ -3627,9 +3585,6 @@ impl Config {
             SettingKind::OutsideTerminal => {
                 self.outside_terminal =
                     cycle_choice(self.outside_terminal().as_str(), OUTSIDE_TERMINALS, step).into();
-            }
-            SettingKind::Editor => {
-                self.editor = cycle_choice(&self.editor, EDITORS, step).into();
             }
             SettingKind::OutsideEditor => {
                 let current = crate::outside_editor::Choice::parse(&self.outside_editor);
@@ -3879,20 +3834,6 @@ fn resolve_sound(configured: &str, remote: bool) -> Option<Sound> {
         Some(Sound::File(path))
     } else {
         Some(Sound::Bell)
-    }
-}
-
-/// The **File editor** row's value: the setting as stored — the default
-/// when blank — and, when that editor isn't installed, the one that opens
-/// instead.
-fn editor_label(stored: &str, resolved: &crate::editor::Resolved) -> String {
-    let shown = match stored.trim() {
-        "" => crate::editor::DEFAULT_EDITOR,
-        typed => typed,
-    };
-    match &resolved.missing {
-        Some(_) => format!("{shown} — not installed, opens {}", resolved.command),
-        None => shown.to_string(),
     }
 }
 
@@ -4258,7 +4199,7 @@ mod tests {
 
     /// Keys a release wrote whose setting has since been removed: no field
     /// reads them any more.
-    const DROPPED_KEYS: &[&str] = &["ssh_sync_config"];
+    const DROPPED_KEYS: &[&str] = &["ssh_sync_config", "editor"];
 
     fn read_json_file(path: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
@@ -4548,26 +4489,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let local = dir.path().join("config.local.json");
-        std::fs::write(&path, r#"{"editor": "nvim", "theme": "ocean"}"#).unwrap();
-        std::fs::write(&local, r#"{"editor": "vim"}"#).unwrap();
+        std::fs::write(&path, r#"{"done_sound": "Ping", "theme": "ocean"}"#).unwrap();
+        std::fs::write(&local, r#"{"done_sound": "Pop"}"#).unwrap();
         let mut cfg = load_from(&path);
-        assert_eq!(cfg.editor, "vim");
+        assert_eq!(cfg.done_sound, "Pop");
         assert_eq!(cfg.theme, "ocean");
 
         cfg.theme = "forest".into();
         cfg.save_to(&path).unwrap();
         assert_eq!(read_json_file(&path)["theme"], "forest");
         assert_eq!(
-            read_json_file(&path)["editor"],
-            "nvim",
+            read_json_file(&path)["done_sound"],
+            "Ping",
             "the local value stays local"
         );
-        assert_eq!(read_json_file(&local), serde_json::json!({"editor": "vim"}));
+        assert_eq!(
+            read_json_file(&local),
+            serde_json::json!({"done_sound": "Pop"})
+        );
 
-        cfg.editor = "hx".into();
+        cfg.done_sound = "Hero".into();
         cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&local)["editor"], "hx");
-        assert_eq!(read_json_file(&path)["editor"], "nvim");
+        assert_eq!(read_json_file(&local)["done_sound"], "Hero");
+        assert_eq!(read_json_file(&path)["done_sound"], "Ping");
     }
 
     #[test]
@@ -4846,10 +4790,9 @@ mod tests {
             Some("Worktree base branch")
         );
         assert!(
-            !cfg.set_text(SettingKind::Editor, "nvim"),
+            !cfg.set_text(SettingKind::Theme, "ocean"),
             "a cycled row is not a typed one"
         );
-        assert_eq!(cfg.editor, "fresh");
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
@@ -5028,54 +4971,6 @@ mod tests {
         assert!(!cfg.show_all_worktrees);
     }
 
-    #[test]
-    fn editor_defaults_cycles_and_persists() {
-        let mut cfg = Config::default();
-        assert_eq!(cfg.editor, "fresh");
-        let (tab, row) = locate(SettingKind::Editor).unwrap();
-        // The VS Code-style editors come first.
-        for next in ["micro", "edit", "vim"] {
-            cfg.cycle(tab, row, 1);
-            assert_eq!(cfg.editor, next);
-        }
-        cfg.editor = "micro".into();
-        cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.editor, "fresh");
-        // Hand-edited commands the picker doesn't list cycle from the start.
-        cfg.editor = "kak".into();
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.editor, "micro");
-
-        cfg.editor = "nvim".into();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(load_from(&path).editor, "nvim");
-        // A config predating the key gets the default.
-        let cfg: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.editor, "fresh");
-    }
-
-    /// The row says when the editor it names isn't installed, and which
-    /// one opens instead.
-    #[test]
-    fn the_editor_row_names_a_missing_editor_and_its_stand_in() {
-        let fine = crate::editor::Resolved {
-            command: "nvim".into(),
-            missing: None,
-        };
-        assert_eq!(editor_label("nvim", &fine), "nvim");
-        let fell = crate::editor::Resolved {
-            command: "edit".into(),
-            missing: Some("fresh".into()),
-        };
-        assert_eq!(editor_label("", &fell), "fresh — not installed, opens edit");
-        assert_eq!(
-            editor_label("fresh", &fell),
-            "fresh — not installed, opens edit"
-        );
-    }
-
     /// A `config.json` without a `harnesses` key — `{}`, or a file from
     /// before orion first rewrote it — starts Grok Build off, as a fresh
     /// config does. A map that is there is read as written: grok on when
@@ -5095,7 +4990,7 @@ mod tests {
             assert!(!grok(&missing), "no key reads as a fresh config");
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.json");
-            std::fs::write(&path, r#"{"claude_enabled": true, "editor": "vim"}"#).unwrap();
+            std::fs::write(&path, r#"{"claude_enabled": true, "theme": "ocean"}"#).unwrap();
             assert!(!grok(&load_from(&path)), "nor through the layered load");
 
             let on: Config =
@@ -5114,7 +5009,6 @@ mod tests {
         let mut cfg = Config::default();
         assert_eq!(cfg.outside_editor, "auto");
         let (tab, row) = locate(SettingKind::OutsideEditor).unwrap();
-        assert_eq!(locate(SettingKind::Editor).map(|(t, _)| t), Some(tab));
         for next in ["cursor", "vscode", "sublime", "zed", "default", "auto"] {
             cfg.cycle(tab, row, 1);
             assert_eq!(cfg.outside_editor, next);

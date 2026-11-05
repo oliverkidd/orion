@@ -140,7 +140,7 @@ fn overlay_busy(app: &App) -> bool {
 }
 
 fn overlay_name(app: &App) -> &'static str {
-    if app.vim.is_some() {
+    if app.editor.is_some() {
         return "Editor";
     }
     if app.page.is_some() {

@@ -83,8 +83,8 @@ See [Configuration](configuration.md#backup-restore-and-other-machines).
 
 ```sh
 orion doctor             # one line for each thing orion leans on, with the fix for a missing one:
-                          # git, gh (installed and signed in: `gh auth status`), the File editor
-                          # and what really opens when it isn't installed, the Open in app editor,
+                          # git, gh (installed and signed in: `gh auth status`), fresh (or the
+                          # editor ORION_EDITOR names), the Open in app editor,
                           # Orion.app and the Ghostty it is made from, the CLI of every
                           # agent turned on, and the LINEAR_API_KEY of the project you are
                           # standing in — where it was found, never the key — and the docker
@@ -92,7 +92,7 @@ orion doctor             # one line for each thing orion leans on, with the fix 
                           # `docker compose -p <project> down --volumes` that removes it. It never installs
                           # anything; the fix is the command to run (the same ones `i` runs from
                           # Settings and first-run setup). Exits non-zero only when something
-                          # orion can't do without is missing: git, or any editor to open files in
+                          # orion can't do without is missing: git, or the editor files open in
 orion doctor --json      # the same report as {"ok": …, "checks": [{name, status, detail, fix,
                           # required}, …]}; status is ok, missing or skipped
 ```
@@ -100,8 +100,8 @@ orion doctor --json      # the same report as {"ok": …, "checks": [{name, stat
 ```
   ✓ git               git version 2.54.0
   ✓ gh                signed in to GitHub
-  ✗ File editor       hx isn't installed — files open in fresh instead
-                      fix: brew install helix
+  ✗ File editor       fresh isn't installed — no file can open
+                      fix: brew install fresh-editor
   ✓ Open in app       auto → Cursor
   ✗ Orion.app         not made yet — orion's ⌘ shortcuts work in it
                       fix: orion app

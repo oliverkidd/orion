@@ -22,6 +22,7 @@ pub mod doc_select;
 pub mod doctor;
 pub mod dropped_files;
 pub mod editor;
+pub mod editor_term;
 pub mod event_loop;
 pub mod fetch;
 pub mod field_mouse;
@@ -82,7 +83,6 @@ pub mod ui;
 pub mod update_check;
 pub mod usage;
 pub mod view_jobs;
-pub mod vim_term;
 pub mod week_review;
 pub mod whats_new;
 

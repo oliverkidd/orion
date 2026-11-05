@@ -6,10 +6,9 @@
 # orion runs on macOS. Grabs the prebuilt binary for this Mac from the latest
 # GitHub release, falling back to `cargo install --git` when no release (or no
 # matching asset) exists. Then makes sure of what orion leans on: git
-# (required), an editor it opens files in (fresh, unless fresh, micro or
-# Microsoft Edit is already here), gh for pull requests and issues, and
-# Ghostty, which orion's own app is made from. A first install then opens
-# orion as that app
+# (required), fresh, the editor it opens files in, gh for pull requests and
+# issues, and Ghostty, which orion's own app is made from. A first install
+# then opens orion as that app
 # — Orion.app in ~/Applications — so setup starts where its ⌘ shortcuts work
 # and orion is in the Dock from then on.
 # Running it again updates in place, and says nothing about dependencies that
@@ -87,26 +86,15 @@ need_git() {
     err "orion needs git — run 'xcode-select --install' (or 'brew install git'), then re-run this"
 }
 
-# An editor orion opens files in, with VS Code's keys: fresh, micro or
-# Microsoft Edit (`edit`). With none of them here, fresh — from Homebrew;
-# without it, micro instead, with the quick-install script micro's README
-# links (https://getmic.ro), which drops the binary into the folder it runs
-# in: the install dir.
+# fresh, the editor orion opens files in, with VS Code's keys: from
+# Homebrew; without it, a pointer to its install page.
 ensure_editor() {
-    for editor in fresh micro edit; do
-        have "$editor" && return 0
-    done
+    have fresh && return 0
     if have brew; then
         say "installing fresh, the editor orion opens files in (brew install fresh-editor)…"
         brew install fresh-editor && return 0
-    else
-        mkdir -p "$INSTALL_DIR"
-        say "installing micro, the editor orion opens files in, into $INSTALL_DIR…"
-        # A pipe's status is its last command's: ask the folder, not sh.
-        (cd "$INSTALL_DIR" && curl -fsSL https://getmic.ro | sh) || true
-        [ -x "$INSTALL_DIR/micro" ] && return 0
     fi
-    say "warning: couldn't install fresh — files open in vim until it is (https://github.com/sinelaw/fresh#installation)"
+    say "warning: couldn't install fresh — no file opens in orion until it is (https://github.com/sinelaw/fresh#installation)"
 }
 
 # gh, the GitHub CLI orion reads pull requests and issues with. Recommended,

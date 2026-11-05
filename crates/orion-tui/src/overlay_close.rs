@@ -138,7 +138,7 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// runs.
 ///
 /// The one exception is the FILE TABS: from their preview (and, one level
-/// up, from the editor over them — `handle_vim_key` gets that press first)
+/// up, from the editor over them — `handle_editor_key` gets that press first)
 /// Ctrl+Q steps back to the tab strip, and closes only from there — the set
 /// of files an agent put in front of the user is not lost to the press
 /// that leaves one of them. Nothing can trap the user in it: the strip's

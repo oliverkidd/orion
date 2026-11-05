@@ -1896,8 +1896,8 @@ pub struct FileFinder {
     pub root: PathBuf,
     /// Branch name for the modal title.
     pub branch: String,
-    /// Editor command Enter launches (ORION_EDITOR, then the `editor`
-    /// setting, default vim), captured at open time.
+    /// Editor command Enter launches (ORION_EDITOR, else fresh), captured
+    /// at open time.
     pub editor: String,
     /// Paths relative to `root`, in git listing order.
     pub files: Vec<String>,
@@ -2110,8 +2110,8 @@ pub struct GrepView {
     pub root: PathBuf,
     /// Branch name for the modal title.
     pub branch: String,
-    /// Editor command Enter launches (ORION_EDITOR, then the `editor`
-    /// setting, default vim), captured at open time.
+    /// Editor command Enter launches (ORION_EDITOR, else fresh), captured
+    /// at open time.
     pub editor: String,
     /// The search text; every edit re-runs the grep.
     pub query: TextInput,
@@ -4501,18 +4501,19 @@ pub struct App {
     /// it when the setting changes.
     pub theme: crate::theme::Theme,
     /// Embedded editor modal (find-in-files Enter), above every overlay.
-    pub vim: Option<crate::vim_term::VimTerm>,
+    pub editor: Option<crate::editor_term::EditorTerm>,
     /// MARKDOWN PAGE: a `.md` file opened to read, above every overlay
     /// and under the editor its Enter opens.
     pub page: Option<crate::markdown_view::MarkdownPage>,
-    /// The missing editor this run has already said it stood another in
-    /// for (`event_loop::note_editor_fallback`), so it says so once.
-    pub editor_fallback_noted: Option<String>,
+    /// fresh's install, while the FLASH that names it is up: a file was to
+    /// open and fresh isn't installed, and `i` runs this
+    /// (`event_loop::offer_editor_install`).
+    pub editor_install: Option<crate::install::Plan>,
     /// Where editor reader threads send output; the main loop installs it.
-    pub vim_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::vim_term::VimEvent>>,
+    pub editor_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::editor_term::EditorEvent>>,
     /// Stamp for the current editor spawn, so a closed editor's buffered
     /// events can't touch its successor.
-    pub vim_generation: u64,
+    pub editor_generation: u64,
     /// Where a CLAUDE ACCOUNTS read off the loop lands, with whether a
     /// name changed; the main loop installs it
     /// (`claude_accounts::request_refresh`). None in a unit test, which
@@ -4701,7 +4702,7 @@ pub struct App {
     /// whatever the user moved on to.
     pub pr_diff_refreshing: std::collections::HashSet<String>,
     /// Where a finished `gh pr diff` is sent back to the loop; the main loop
-    /// installs it at startup (the `vim_tx` precedent). Key handlers can
+    /// installs it at startup (the `editor_tx` precedent). Key handlers can
     /// therefore start a network fetch without the loop's channels in hand.
     pub pr_diff_tx: Option<tokio::sync::mpsc::UnboundedSender<PrDiffAnswer>>,
     /// Pull requests (by URL) with a `gh pr comment` still running. A
@@ -5053,11 +5054,11 @@ impl App {
             hostname: orion_core::host::hostname(),
             is_remote: orion_core::host::is_remote_session(),
             theme: crate::theme::Theme::default(),
-            vim: None,
+            editor: None,
             page: None,
-            editor_fallback_noted: None,
-            vim_tx: None,
-            vim_generation: 0,
+            editor_install: None,
+            editor_tx: None,
+            editor_generation: 0,
             accounts_tx: None,
             accounts_reads: Default::default(),
             accounts_polled: None,
@@ -5241,7 +5242,7 @@ impl App {
     /// The release the SPLASH's Enter installs rather than beginning: a
     /// newer one that is known and has not been offered yet this run.
     pub fn splash_upgrade(&self) -> Option<&str> {
-        if self.splash_upgrade_asked || !self.splash_showing() || self.vim.is_some() {
+        if self.splash_upgrade_asked || !self.splash_showing() || self.editor.is_some() {
             return None;
         }
         self.update_available.as_deref()
@@ -5434,14 +5435,14 @@ impl App {
     /// covering the body, animations enabled (off, the splash still draws
     /// — as a still frame).
     pub fn splash_active(&self) -> bool {
-        self.animations && self.splash_showing() && self.vim.is_none()
+        self.animations && self.splash_showing() && self.editor.is_none()
     }
 
     /// The empty GRID's welcome is on screen and its orion should be
     /// ticking — the same cadence and the same switch as the splash's.
     /// Off, the welcome still draws, as a still frame.
     pub fn welcome_active(&self) -> bool {
-        self.animations && self.welcome_on_screen && self.vim.is_none()
+        self.animations && self.welcome_on_screen && self.editor.is_none()
     }
 
     /// Something on screen moves, so the clock should be ticking: a
@@ -5460,14 +5461,15 @@ impl App {
     pub fn status_anim_active(&self) -> bool {
         // A CONFLICT RESOLVER at work has a log to show as it grows, spinner
         // or no spinner.
-        if self.vim.is_none() && matches!(&self.overlay, Some(Overlay::Conflicts(v)) if v.running())
+        if self.editor.is_none()
+            && matches!(&self.overlay, Some(Overlay::Conflicts(v)) if v.running())
         {
             return true;
         }
         let now = now_ms();
         self.animations
             && !self.collapsed
-            && self.vim.is_none()
+            && self.editor.is_none()
             && !self.splash_active()
             && (self.tree.agents.iter().any(|a| {
                 !a.archived && (self.spins(a) || self.shows_unread(a) || fresh_alarm(a, now))

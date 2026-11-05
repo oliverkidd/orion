@@ -231,13 +231,13 @@ pub(crate) enum Command {
     App,
     /// Check what orion needs on this machine.
     ///
-    /// One line each for git, gh and its sign-in, the File editor and what
-    /// really opens, the Open in app editor, Ghostty and orion's keybind
+    /// One line each for git, gh and its sign-in, fresh (or the editor
+    /// `ORION_EDITOR` names), the Open in app editor, Ghostty and orion's keybind
     /// block in its config, the CLI of every agent turned on, and this
     /// project's LINEAR_API_KEY (where it was found, never the key) — with
     /// the command that fixes whatever is missing. It never installs
     /// anything. Exits non-zero only when something orion can't do without
-    /// is missing: git, or an editor to open files in.
+    /// is missing: git, or the editor files open in.
     #[command(after_help = DOCTOR_EXAMPLES)]
     Doctor {
         /// Print the report as JSON.

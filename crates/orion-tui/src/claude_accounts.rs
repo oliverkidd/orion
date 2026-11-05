@@ -861,12 +861,12 @@ pub fn run(app: &mut App, command: AuthCommand) -> bool {
     }
     #[cfg(not(test))]
     {
-        let Some(tx) = app.vim_tx.clone() else {
+        let Some(tx) = app.editor_tx.clone() else {
             return false;
         };
-        let (cols, rows) = crate::event_loop::vim_size_guess(app);
-        app.vim_generation += 1;
-        match crate::vim_term::VimTerm::spawn_cmd_env(
+        let (cols, rows) = crate::event_loop::editor_size_guess(app);
+        app.editor_generation += 1;
+        match crate::editor_term::EditorTerm::spawn_cmd_env(
             &command.program,
             &command.args,
             &command.env,
@@ -874,12 +874,12 @@ pub fn run(app: &mut App, command: AuthCommand) -> bool {
             command.title,
             cols,
             rows,
-            app.vim_generation,
+            app.editor_generation,
             tx,
         ) {
             Ok(mut term) => {
                 term.account_auth = true;
-                app.vim = Some(term);
+                app.editor = Some(term);
                 app.dirty = true;
                 true
             }

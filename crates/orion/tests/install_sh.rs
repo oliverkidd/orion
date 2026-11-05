@@ -1,7 +1,6 @@
 //! `install.sh`'s dependency step, run for real against a PATH of stubs: a
 //! `brew` that writes down what it was asked and "installs" a formula by
-//! dropping a stub of its program beside itself, a `curl` that serves a
-//! stand-in for micro's quick-install script, a `git` that is just there.
+//! dropping a stub of its program beside itself, a `git` that is just there.
 //! The PATH holds nothing else, so no real installer is ever reached and
 //! nothing is downloaded. The script's functions run without its `main` —
 //! the last line, which would fetch orion itself.
@@ -93,16 +92,6 @@ fi"#,
         )
     }
 
-    /// curl: written down, and serving a script that does what micro's
-    /// does — leaves `micro` in the folder it runs in.
-    fn curl(&self) -> &Self {
-        self.stub(
-            "curl",
-            r##"echo "curl $*" >> "$LOG"
-echo 'printf "#!/bin/sh\n" > micro; chmod +x micro'"##,
-        )
-    }
-
     /// `uname` saying this is `system`, in place of the machine's.
     fn system(&self, system: &str) -> &Self {
         std::fs::remove_file(self.path("bin").join("uname")).unwrap();
@@ -157,24 +146,23 @@ fn the_script_is_posix_sh() {
 #[test]
 fn nothing_is_said_or_run_when_everything_is_here() {
     for shell in shells() {
-        for editor in ["fresh", "micro", "edit"] {
-            let sandbox = Sandbox::new();
-            sandbox.programs(&["git", "gh", editor]).brew().curl();
-            let out = sandbox.run(shell, "ensure_deps", &[]);
-            assert!(out.status.success(), "{shell}: {}", said(&out));
-            assert_eq!(said(&out), "", "{shell} with {editor}");
-            assert_eq!(sandbox.log(), "", "{shell} with {editor}");
-        }
+        let sandbox = Sandbox::new();
+        sandbox.programs(&["git", "gh", "fresh"]).brew();
+        let out = sandbox.run(shell, "ensure_deps", &[]);
+        assert!(out.status.success(), "{shell}: {}", said(&out));
+        assert_eq!(said(&out), "", "{shell}");
+        assert_eq!(sandbox.log(), "", "{shell}");
     }
 }
 
-/// No editor of the three: fresh from Homebrew, and gh with it.
+/// No fresh — whatever other editor is here: fresh from Homebrew, and gh
+/// with it.
 #[test]
 fn fresh_and_gh_come_from_homebrew() {
     const LOG: &str = "brew install fresh-editor\nbrew install gh\n";
     for shell in shells() {
         let sandbox = Sandbox::new();
-        sandbox.programs(&["git", "vim"]).brew().curl();
+        sandbox.programs(&["git", "vim", "micro"]).brew();
         let out = sandbox.run(shell, "ensure_deps", &[]);
         assert!(out.status.success(), "{shell}: {}", said(&out));
         assert_eq!(sandbox.log(), LOG);
@@ -211,17 +199,21 @@ fn only_a_mac_is_installed_on() {
     assert_eq!(said(&out), "carried-on\n");
 }
 
-/// No Homebrew: micro by its quick-install script, into the install dir;
-/// gh pointed at, not installed.
+/// No Homebrew: fresh's install page and gh's pointed at, nothing
+/// installed.
 #[test]
-fn without_homebrew_on_a_mac_micro_lands_in_the_install_dir() {
+fn without_homebrew_fresh_and_gh_are_pointed_at() {
     for shell in shells() {
         let sandbox = Sandbox::new();
-        sandbox.programs(&["git"]).curl().system("Darwin");
+        sandbox.programs(&["git"]).system("Darwin");
         let out = sandbox.run(shell, "ensure_deps", &[]);
         assert!(out.status.success(), "{shell}: {}", said(&out));
-        assert_eq!(sandbox.log(), "curl -fsSL https://getmic.ro\n");
-        assert!(sandbox.path("install/micro").exists(), "{}", said(&out));
+        assert_eq!(sandbox.log(), "");
+        assert!(
+            said(&out).contains("https://github.com/sinelaw/fresh#installation"),
+            "{}",
+            said(&out)
+        );
         assert!(
             said(&out).contains("https://github.com/cli/cli#installation"),
             "{}",
@@ -252,7 +244,7 @@ fn a_failed_editor_install_warns_and_carries_on() {
 fn git_is_required() {
     for shell in shells() {
         let sandbox = Sandbox::new();
-        sandbox.programs(&["micro", "gh"]).brew();
+        sandbox.programs(&["fresh", "gh"]).brew();
         let out = sandbox.run(shell, "ensure_deps", &[]);
         assert!(!out.status.success(), "{shell}");
         assert!(said(&out).contains("orion needs git"), "{}", said(&out));

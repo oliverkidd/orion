@@ -294,7 +294,7 @@ pub(crate) fn open(app: &mut App, root: PathBuf, paths: Vec<PathBuf>) {
     if paths.is_empty() {
         return;
     }
-    if let Some(vim) = &mut app.vim {
+    if let Some(vim) = &mut app.editor {
         vim.embedded = false;
     }
     let editor = crate::config::Config::load().editor_command();
@@ -463,7 +463,7 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, pos: Position) {
     };
     // The left button over the rendered page is the DOC SELECTION's (a
     // press there still takes the cursor into the preview, below).
-    let editing = app.vim.as_ref().is_some_and(|v| v.embedded);
+    let editing = app.editor.as_ref().is_some_and(|v| v.embedded);
     if let Some(doc) = view
         .rendered
         .as_ref()
@@ -532,7 +532,7 @@ fn open_in_editor(app: &mut App) {
     let size = if crate::event_loop::pane_usable(body) {
         (body.width, body.height)
     } else {
-        crate::event_loop::vim_size_guess(app)
+        crate::event_loop::editor_size_guess(app)
     };
     if crate::event_loop::spawn_editor_modal(app, &editor, &root, &path, 1, size) {
         crate::event_loop::embed_editor(app);

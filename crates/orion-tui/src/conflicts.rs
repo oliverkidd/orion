@@ -1330,7 +1330,7 @@ fn undo(view: &mut ConflictView) {
 }
 
 /// Enter: the file in the BUILT-IN EDITOR at the cursor's conflict; the
-/// resolver reads it again when the editor closes (`event_loop::close_vim`).
+/// resolver reads it again when the editor closes (`event_loop::close_editor`).
 fn edit(app: &mut App) {
     let Some(Overlay::Conflicts(view)) = &app.overlay else {
         return;
@@ -1343,7 +1343,7 @@ fn edit(app: &mut App) {
     };
     let (root, path, line) = (view.root.clone(), file.path.clone(), view.file_line());
     let editor = crate::config::Config::load().editor_command();
-    let size = crate::event_loop::vim_size_guess(app);
+    let size = crate::event_loop::editor_size_guess(app);
     crate::event_loop::spawn_editor_modal(app, &editor, &root, &path, line, size);
 }
 

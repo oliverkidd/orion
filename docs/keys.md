@@ -315,69 +315,63 @@ the grid's ⌘ chords. `⌘V` stays Ghostty's, which is what pastes the clipboar
 
 ### The built-in editor
 
-Every file opens to be edited, in a modal over everything else, in the editor Settings → General
-**File editor** names (`editor`, or `ORION_EDITOR`): **fresh** by default, micro or Microsoft Edit
-(`edit`) — the three whose keys are VS Code's: `^S` save, `^Z` undo, `^C`/`^V` copy and paste,
-`^F` find, `^Q` quit after asking to save — then vim, nvim, Helix and emacs. One that isn't
-installed opens the first installed of fresh, micro, Edit and vim instead, and the first time
-it does the footer says so ([Configuration](configuration.md)); `i` on the **File editor** row, or on
-the editor's row in first-run setup, installs it ([Installing editors and agent
-CLIs](configuration.md#installing-editors-and-agent-clis)). Long lines wrap: orion turns micro's
-and Edit's wrap on, and fresh, vim and emacs wrap on their own.
+Every file opens to be edited, in a modal over everything else, in **fresh**, whose keys are VS
+Code's: `^S` save, `^Z` undo, `^C`/`^V` copy and paste, `^F` find, `^Q` quit after asking to save.
+`ORION_EDITOR` names any other command instead, opened as `<command> +<line> <file>`. With fresh
+not installed the footer says so and names its install, and `i` runs it (`brew install
+fresh-editor`; [Installing editors and agent CLIs](configuration.md#installing-editors-and-agent-clis)).
+Long lines wrap.
 
 The modal hands the editor every key, and the mouse — a click places the cursor, a drag selects,
 the wheel scrolls — with three exceptions:
 
-- `^\` — force-closes the modal, from any editor in any state, without saving.
-- `^q` — fresh's, micro's and Edit's own quit, which asks to save first. With an editor that has no
-  quit there (vim, Helix), `^q` force-closes the modal instead.
+- `^\` — force-closes the modal, in any state, without saving.
+- `^q` — fresh's own quit, which asks to save first. With a command `ORION_EDITOR` names, `^q`
+  force-closes the modal instead.
 - `⌘O` — the same file in the **Open in app** editor, at the line it opened on; the editor stays
   up.
 
-In micro, Edit and fresh a `⌘` chord that reaches orion is the editor's `^` chord, as VS Code has
-it on a Mac: `⌘S` saves, `⌘Z` undoes, `⌘⇧Z` redoes, `⌘F` finds, `⌘A` selects all, `⌘D` adds the
-next match as another cursor. orion's own `⌘` keys — `⌘L`, `⌘/`, `⌘P`, `⌘K` — are the editor's
-while it is up. A Mac's text-editing chords mean what they mean in VS Code, each typed as the key
-the editor binds that action to:
+In fresh a `⌘` chord that reaches orion is fresh's `^` chord, as VS Code has it on a Mac: `⌘S`
+saves, `⌘Z` undoes, `⌘⇧Z` redoes, `⌘F` finds, `⌘A` selects all, `⌘D` adds the next match as another
+cursor. orion's own `⌘` keys — `⌘L`, `⌘/`, `⌘P`, `⌘K` — are fresh's while it is up. A Mac's
+text-editing chords mean what they mean in VS Code, each typed as the key fresh binds that action
+to:
 
-| Key | Action | fresh | micro | Edit |
-|---|---|---|---|---|
-| `⌘←` `⌘→` (and `^A` `^E`) | line start / end | ✓ | ✓ | ✓ |
-| `⇧⌘←` `⇧⌘→` | select to the line's start / end | ✓ | ✓ | ✓ |
-| `⌘↑` `⌘↓` | file start / end | ✓ | ✓ | ✓ |
-| `⇧⌘↑` `⇧⌘↓` | select to the file's start / end | ✓ | ✓ | ✓ |
-| `⌥←` `⌥→` | word left / right | ✓ | ✓ | ✓ |
-| `⇧⌥←` `⇧⌥→` | select a word left / right | ✓ | ✓ | ✓ |
-| `⌥⌘↑` `⌥⌘↓` | add a cursor above / below | ✓ | ✓ | — |
-| `⌘D` | add the next match as a cursor | ✓ | ✓ | — |
-| `⌘⇧L` | a cursor on every match | ✓ | ✓ | — |
-| `⌘L` | select the line | ✓ | ✓ | — |
-| `⌘/` | toggle comment | ✓ | ✓ | — |
-| `⌘⇧P` | command palette | ✓ | its command bar | — |
-| `⌥↑` `⌥↓` | move the line up / down | ✓ | ✓ | — |
-| `Esc` | back to one cursor | ✓ | ✓ | — |
+| Key | Action |
+|---|---|
+| `⌘←` `⌘→` (and `^A` `^E`) | line start / end |
+| `⇧⌘←` `⇧⌘→` | select to the line's start / end |
+| `⌘↑` `⌘↓` | file start / end |
+| `⇧⌘↑` `⇧⌘↓` | select to the file's start / end |
+| `⌥←` `⌥→` | word left / right |
+| `⇧⌥←` `⇧⌥→` | select a word left / right |
+| `⌥⌘↑` `⌥⌘↓` | add a cursor above / below |
+| `⌘D` | add the next match as a cursor |
+| `⌘⇧L` | a cursor on every match |
+| `⌘L` | select the line |
+| `⌘/` | toggle comment |
+| `⌘⇧P` | command palette |
+| `⌥↑` `⌥↓` | move the line up / down |
+| `Esc` | back to one cursor |
 
-- **`⌘⇧L` is `⌘D` pressed 500 times at once.** Neither editor has a select-all-matches of its own;
-  both stop adding cursors at the last match, so the presses past it do nothing. The first press
-  takes the word under the cursor when nothing is selected, as `⌘D` does.
-- **`Enter` after a find steps through the matches in fresh.** The `Enter` that runs the find puts
-  the cursor on the first match; each `Enter` straight after it moves to the next one and `⇧Enter`
-  to the one before (fresh's `F3` and `⇧F3`), nothing edited. Any other key, a click or a paste
-  ends that, and `Enter` is a new line again. It reads fresh's `Search:` prompt off the screen, so
-  under another fresh locale `Enter` stays fresh's own.
+- **`⌘⇧L` is `⌘D` pressed 500 times at once.** fresh has no select-all-matches of its own; it stops
+  adding cursors at the last match, so the presses past it do nothing. The first press takes the
+  word under the cursor when nothing is selected, as `⌘D` does.
+- **`Enter` after a find steps through the matches.** The `Enter` that runs the find puts the
+  cursor on the first match; each `Enter` straight after it moves to the next one and `⇧Enter` to
+  the one before (fresh's `F3` and `⇧F3`), nothing edited. Any other key, a click or a paste ends
+  that, and `Enter` is a new line again. It reads fresh's `Search:` prompt off the screen, so under
+  another fresh locale `Enter` stays fresh's own.
 - **Ghostty keeps `⌘←`/`⌘→` and `⌥←`/`⌥→`** and types the shell's keys for them — `^A`/`^E`, `⎋b`/`⎋f`
   — so in the editor a bare `^A` and `^E` are the line's start and end, as in any Mac text field.
-  micro's command bar, `^E` elsewhere, is `⌘⇧P` (`⌥:`) here.
 - **Not Ghostty's in Orion.app** ([Configuration](configuration.md#ghosttys-keys-in-orionapp)):
   `⌘↑`/`⌘↓` and `⇧⌘↑`/`⇧⌘↓` — Ghostty's jump to prompt — and `⌥⌘↑`/`⌥⌘↓`, `⌥⌘←`/`⌥⌘→` — its
   splits — all reach the editor there.
-- **Not there:** Edit has no multiple cursors, comment toggle or line select; vim, Helix and emacs
-  get every key as it is typed.
+- **Not there:** a command `ORION_EDITOR` names gets every key as it is typed.
 
-micro runs off orion's own config dir (`<data dir>/micro`), so its keys here and its wrap never
-touch your `~/.config/micro`; fresh off orion's own config file (`<data dir>/fresh/config.json`) —
-the one file, no menu, tabs, explorer or dock, a two-item status bar, VS Code's Dark+ colours on
-orion's background — never your `~/.config/fresh/config.json` ([Configuration](configuration.md)).
+fresh runs off orion's own config file (`<data dir>/fresh/config.json`) — the one file, no menu,
+tabs, explorer or dock, a two-item status bar, orion's own theme — never your
+`~/.config/fresh/config.json` ([Configuration](configuration.md)).
 
 ### The markdown page
 
@@ -547,7 +541,7 @@ Agents tab's **Claude accounts** rows, `Enter` signs the account in (asking for 
 `r` renames it, `o` signs it out, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter`
 on **Add account** names a new one; on a **Saved on this machine** row `Enter` adds the dir back
 under a name and `⌫` moves it to the Trash ([Configuration](configuration.md#claude-accounts)). On a row whose
-program isn't on PATH — General's **File editor**, a Claude account, a harness's **Enabled** row —
+program isn't on PATH — a Claude account, a harness's **Enabled** row —
 `i` puts the command that installs it where the row's explanation was, `Enter` runs it in the editor
 modal and anything else leaves it unrun ([Installing editors and agent
 CLIs](configuration.md#installing-editors-and-agent-clis)). The installer's own output is the
@@ -557,8 +551,8 @@ modal: `^Q` stops it, and when it exits the title says whether the program is on
 FIRST-RUN SETUP (**Orion setup**, while `onboarded` is unset) is the same kind of modal, a step at
 a time — the STEP STRIP across its top lights the one it is on. `→`/`Tab` go to the next step,
 `←`/`⇧Tab` back, `↑`/`↓` move down a step's rows; `Space` flips the row (an agent on or off, an
-editor chosen, a switch), `Enter` does its verb (an agent's default model, an account's sign-in, a
-typed row opened, the connection tested), `i` installs a missing agent CLI or editor, and `Esc`
+app chosen, a switch), `Enter` does its verb (an agent's default model, an account's sign-in, a
+typed row opened, the connection tested), `i` installs a missing agent CLI, and `Esc`
 skips the rest — or, while the step asks something, backs out of the question.
 
 ## Typed fields

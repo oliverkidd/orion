@@ -231,24 +231,10 @@ fn setting_rows(page: Page) -> Vec<&'static SettingSpec> {
         .collect()
 }
 
-/// A row of the Editor page: a **File editor** choice, then an **Open in
-/// app** one, by the word the setting stores.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditorRow {
-    Editor(&'static str),
-    App(&'static str),
-}
-
-fn editor_rows() -> Vec<EditorRow> {
-    crate::editor::EDITORS
-        .iter()
-        .map(|editor| EditorRow::Editor(editor))
-        .chain(
-            crate::outside_editor::CHOICES
-                .iter()
-                .map(|choice| EditorRow::App(choice)),
-        )
-        .collect()
+/// The Editor page's rows: the **Open in app** choices, by the word the
+/// setting stores. Files open in fresh, which has no choice to make.
+fn editor_rows() -> &'static [&'static str] {
+    crate::outside_editor::CHOICES
 }
 
 /// The first-run wizard's live state. `area` is written back on draw so a
@@ -524,7 +510,7 @@ fn is_switch(kind: SettingKind) -> bool {
 }
 
 /// The program the row under the cursor names that isn't on PATH, and how
-/// it gets there — an agent's CLI, a **File editor** choice. None on any
+/// it gets there — an agent's CLI. None on any
 /// other row, or when the program is there.
 fn row_install(cfg: &Config, page: Page, row: usize) -> Option<Plan> {
     let tools = Tools::here();
@@ -535,10 +521,6 @@ fn row_install(cfg: &Config, page: Page, row: usize) -> Option<Plan> {
                 .then(|| tools.agent_plan(&program))
                 .flatten()
         }
-        Page::Editor => match editor_rows().get(row)? {
-            EditorRow::Editor(editor) if !program_installed(editor) => tools.editor_plan(editor),
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -564,7 +546,7 @@ fn explanation(cfg: &Config, view: &OnboardView, keymap: &Keymap) -> String {
             .get(view.row)
             .map(|row| cfg.account_hint(row))
             .unwrap_or_default(),
-        Page::Editor => editor_explanation(cfg, view.row, keymap),
+        Page::Editor => editor_explanation(view.row, keymap),
         Page::Worktrees | Page::Linear | Page::Autofix => setting_rows(page)
             .get(view.row)
             .map(|spec| crate::hints::expand(spec.hint, keymap))
@@ -595,65 +577,24 @@ fn agent_explanation(cfg: &Config, row: usize) -> String {
     }
 }
 
-fn editor_explanation(cfg: &Config, row: usize, keymap: &Keymap) -> String {
-    match editor_rows().get(row) {
-        Some(EditorRow::Editor(editor)) => {
-            let mut text = editor_blurb(editor).to_string();
-            if !program_installed(editor) {
-                let chosen = cfg.editor_resolved();
-                if chosen.missing.as_deref() == Some(*editor) {
-                    text = format!(
-                        "{editor} is your choice but isn't installed, so files open in {} — {text}",
-                        chosen.command
-                    );
-                }
-                match Tools::here().editor_plan(editor) {
-                    Some(plan) if plan.runnable() => text.push_str(&format!(
-                        ". {} installs it: {}",
-                        keys::INSTALL.label(),
-                        plan.line
-                    )),
-                    Some(plan) => text.push_str(&format!(". Install it: {}", plan.link)),
-                    None => text.push_str(". Not installed"),
-                }
-            }
-            if let Some(over) = orion_core::env::non_empty(orion_core::env::EDITOR) {
-                text = format!("ORION_EDITOR={over} overrides this choice. {text}");
-            }
-            text
+fn editor_explanation(row: usize, keymap: &Keymap) -> String {
+    let Some(word) = editor_rows().get(row) else {
+        return String::new();
+    };
+    let places = crate::outside_editor::Places::here();
+    let choice = crate::outside_editor::Choice::parse(word);
+    let opens = crate::hints::key_or(keymap, Action::OpenOutside, "Open outside");
+    match (choice, crate::outside_editor::resolve(choice, &places)) {
+        (crate::outside_editor::Choice::Auto, Ok(target)) => format!(
+            "The first installed of Cursor, VS Code, Sublime Text and Zed — {opens} opens \
+             files and checkouts in {} here",
+            target.name
+        ),
+        (crate::outside_editor::Choice::System, _) => {
+            format!("{opens} hands a file to whatever the system opens that kind of file with")
         }
-        Some(EditorRow::App(word)) => {
-            let places = crate::outside_editor::Places::here();
-            let choice = crate::outside_editor::Choice::parse(word);
-            let opens = crate::hints::key_or(keymap, Action::OpenOutside, "Open outside");
-            match (choice, crate::outside_editor::resolve(choice, &places)) {
-                (crate::outside_editor::Choice::Auto, Ok(target)) => format!(
-                    "The first installed of Cursor, VS Code, Sublime Text and Zed — {opens} opens \
-                     files and checkouts in {} here",
-                    target.name
-                ),
-                (crate::outside_editor::Choice::System, _) => format!(
-                    "{opens} hands a file to whatever the system opens that kind of file with"
-                ),
-                (_, Ok(target)) => format!("{opens} opens files and checkouts in {}", target.name),
-                (_, Err(why)) => why,
-            }
-        }
-        None => String::new(),
-    }
-}
-
-/// What a **File editor** choice is, in a few words.
-fn editor_blurb(editor: &str) -> &'static str {
-    match editor {
-        "fresh" => "fresh: VS Code's keys, a command palette on ^P, wraps lines",
-        "micro" => "micro: VS Code's keys (^S save, ^Q quit, ^D next match), the mouse, soft wrap",
-        "edit" => "Microsoft Edit: VS Code's keys, menus on F10, word wrap",
-        "vim" => "vim: :w save, :q quit",
-        "nvim" => "Neovim: vim's keys — :w save, :q quit",
-        "hx" => "Helix: modal, selection first — :w save, :q quit",
-        "emacs" => "Emacs: ^X ^S save, ^X ^C quit",
-        _ => "",
+        (_, Ok(target)) => format!("{opens} opens files and checkouts in {}", target.name),
+        (_, Err(why)) => why,
     }
 }
 
@@ -1220,9 +1161,8 @@ fn accounts(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width:
     }
 }
 
-/// The Editor page: **File editor**'s choices, each saying whether it is
-/// installed (or `install…`), then **Open in app**'s, each saying what it
-/// opens on this machine. The chosen one of each wears the dot.
+/// The Editor page: **Open in app**'s choices, each saying what it opens
+/// on this machine. The chosen one wears the dot.
 fn editors(
     body: &mut Body,
     cfg: &Config,
@@ -1233,62 +1173,34 @@ fn editors(
 ) {
     let dim = Style::default().fg(th.dim);
     let text = Style::default().fg(th.text);
-    let tools = Tools::here();
     let rows = editor_rows();
-    let chosen_editor = match crate::editor::program_name(&cfg.editor) {
-        "" => crate::editor::DEFAULT_EDITOR,
-        program => program,
-    };
-    let fallback = cfg.editor_resolved();
     let chosen_app = crate::outside_editor::Choice::parse(&cfg.outside_editor);
     let places = crate::outside_editor::Places::here();
     let mut cells: Vec<Vec<String>> = Vec::new();
     let mut styles = Vec::new();
-    for row in &rows {
-        let (chosen, name, state, style) = match *row {
-            EditorRow::Editor(editor) => {
-                let chosen = editor == chosen_editor;
-                let (state, style) = if program_installed(editor) {
-                    ("installed".to_string(), Style::default().fg(th.ok))
-                } else if chosen && fallback.missing.is_some() {
-                    (
-                        format!("not installed — opens {}", fallback.command),
-                        Style::default().fg(th.warn),
-                    )
-                } else if tools.editor_plan(editor).is_some() {
-                    ("install…".to_string(), Style::default().fg(th.accent))
-                } else {
-                    ("not installed".to_string(), dim)
-                };
-                (chosen, editor.to_string(), state, style)
-            }
-            EditorRow::App(word) => {
-                let choice = crate::outside_editor::Choice::parse(word);
-                let name = match choice {
-                    crate::outside_editor::Choice::App(_) => crate::outside_editor::value_label(
-                        word,
-                        &crate::outside_editor::Places::default(),
-                    )
+    for word in rows {
+        let choice = crate::outside_editor::Choice::parse(word);
+        let name = match choice {
+            crate::outside_editor::Choice::App(_) => {
+                crate::outside_editor::value_label(word, &crate::outside_editor::Places::default())
                     .split(" — ")
                     .next()
                     .unwrap_or(word)
-                    .to_string(),
-                    _ => word.to_string(),
-                };
-                let (state, style) = match (choice, crate::outside_editor::resolve(choice, &places))
-                {
-                    (crate::outside_editor::Choice::Auto, Ok(target)) => {
-                        (format!("opens {}", target.name), text)
-                    }
-                    (crate::outside_editor::Choice::System, _) => {
-                        ("the system's own pick".to_string(), dim)
-                    }
-                    (_, Ok(_)) => ("installed".to_string(), Style::default().fg(th.ok)),
-                    (_, Err(_)) => ("not installed".to_string(), dim),
-                };
-                (choice == chosen_app, name, state, style)
+                    .to_string()
             }
+            _ => word.to_string(),
         };
+        let (state, style) = match (choice, crate::outside_editor::resolve(choice, &places)) {
+            (crate::outside_editor::Choice::Auto, Ok(target)) => {
+                (format!("opens {}", target.name), text)
+            }
+            (crate::outside_editor::Choice::System, _) => {
+                ("the system's own pick".to_string(), dim)
+            }
+            (_, Ok(_)) => ("installed".to_string(), Style::default().fg(th.ok)),
+            (_, Err(_)) => ("not installed".to_string(), dim),
+        };
+        let chosen = choice == chosen_app;
         cells.push(vec![
             format!("{} {name}", if chosen { "●" } else { "○" }),
             state,
@@ -1296,23 +1208,12 @@ fn editors(
         styles.push(style);
     }
     let widths = column_widths(&cells, width);
-    let editors_head = crate::hints::expand(
-        "File editor — every file opens in it, inside Orion: {find_file}, {grep}, {tree_browser}",
-        keymap,
-    );
     let apps_head = crate::hints::expand(
         "Open in app — {open_outside} hands a file or a checkout to it",
         keymap,
     );
-    for (i, (row, cell)) in rows.iter().zip(cells).enumerate() {
-        match (i, row) {
-            (0, _) => body.heading(&editors_head, th),
-            (_, EditorRow::App(word)) if *word == crate::outside_editor::AUTO => {
-                body.blank();
-                body.heading(&apps_head, th);
-            }
-            _ => {}
-        }
+    body.heading(&apps_head, th);
+    for (i, cell) in cells.into_iter().enumerate() {
         let name_style = if cell[0].starts_with('●') {
             Style::default().fg(th.accent)
         } else {
@@ -1543,7 +1444,6 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
             warn: missing,
         }
     };
-    let editor = cfg.editor_resolved();
     let base = match cfg.worktree_base_branch.trim() {
         "" => "origin's default branch".to_string(),
         name => name.to_string(),
@@ -1554,11 +1454,6 @@ fn summary(app: &App, cfg: &Config) -> Vec<Chosen> {
         .unwrap_or_default();
     vec![
         agents,
-        Chosen {
-            what: "File editor",
-            value: cfg.value_label(SettingKind::Editor),
-            warn: editor.missing.is_some(),
-        },
         Chosen {
             what: "Open in app",
             value: cfg.value_label(SettingKind::OutsideEditor),
@@ -1738,18 +1633,15 @@ fn prev(app: &mut App) {
 }
 
 /// Where the cursor lands on arriving at `page`: on the Editor page the
-/// editor chosen now, so `i` there installs it; the first row elsewhere.
+/// app chosen now; the first row elsewhere.
 fn landing_row(page: Page, cfg: &Config) -> usize {
     if page != Page::Editor {
         return 0;
     }
-    let chosen = match crate::editor::program_name(&cfg.editor) {
-        "" => crate::editor::DEFAULT_EDITOR,
-        program => program,
-    };
+    let chosen = crate::outside_editor::Choice::parse(&cfg.outside_editor);
     editor_rows()
         .iter()
-        .position(|row| matches!(row, EditorRow::Editor(editor) if *editor == chosen))
+        .position(|word| crate::outside_editor::Choice::parse(word) == chosen)
         .unwrap_or(0)
 }
 
@@ -1849,21 +1741,11 @@ fn app_step(app: &mut App) {
     app.should_quit = true;
 }
 
-/// Enter or Space on an Editor page row: that editor, or that app, is the
-/// one. A hand-typed command for the same editor (`micro -autosu true`)
-/// is left as typed.
+/// Enter or Space on an Editor page row: that app is the one.
 fn choose_editor_row(app: &mut App, row: usize) {
-    match editor_rows().get(row).copied() {
-        Some(EditorRow::Editor(editor)) => persist(|cfg| {
-            if crate::editor::program_name(&cfg.editor) != editor {
-                cfg.editor = editor.to_string();
-            }
-        }),
-        Some(EditorRow::App(word)) => {
-            persist(|cfg| cfg.outside_editor = word.to_string());
-            crate::outside_editor::forget_hint_name();
-        }
-        None => {}
+    if let Some(word) = editor_rows().get(row) {
+        persist(|cfg| cfg.outside_editor = word.to_string());
+        crate::outside_editor::forget_hint_name();
     }
     app.dirty = true;
 }
@@ -1877,10 +1759,6 @@ fn ask_install(app: &mut App) {
     };
     let program = match page {
         Page::Agents => cfg.harness_registry().get(row).map(|e| e.program.clone()),
-        Page::Editor => match editor_rows().get(row) {
-            Some(EditorRow::Editor(editor)) => Some(editor.to_string()),
-            _ => None,
-        },
         _ => None,
     };
     let Some(program) = program else {
@@ -2679,109 +2557,28 @@ mod tests {
         });
     }
 
-    /// The Editor page: every **File editor** choice with whether it is
-    /// installed, the chosen one dotted — and, chosen but missing, what
-    /// opens instead — then **Open in app**'s choices. `i` on a missing
-    /// editor runs `brew install <formula>`; Enter chooses.
+    /// The Editor page: **Open in app**'s choices, the chosen one dotted,
+    /// and no **File editor** rows — files open in fresh. Enter chooses,
+    /// and the page opens on the choice.
     #[test]
-    fn the_editor_page_installs_and_chooses() {
+    fn the_editor_page_chooses_the_app() {
         with_temp_config(|| {
-            with_programs(&["vim", "edit", "brew"], || {
-                let mut app = App::new();
-                open(&mut app, &Config::load(), 0);
-                to_page(&mut app, Page::Editor);
-                let shot = draw_at(&mut app, 150, 40);
-                let inner = words(&shot);
-                for needle in [
-                    "File editor — every file opens in it",
-                    "› ● fresh not installed — opens edit",
-                    "○ micro install…",
-                    "○ edit installed",
-                    "Open in app — ",
-                    "● auto opens",
-                ] {
-                    assert!(inner.contains(needle), "{needle}:\n{shot}");
-                }
-                assert!(
-                    inner.contains(
-                        "fresh is your choice but isn't installed, so files open in edit"
-                    ),
-                    "{shot}"
-                );
-                press(&mut app, KeyCode::Char('i'));
-                press(&mut app, KeyCode::Enter);
-                assert_eq!(
-                    crate::install::take_ran()[0].args,
-                    ["install", "fresh-editor"],
-                    "the formula"
-                );
-                press(&mut app, KeyCode::Down);
-                press(&mut app, KeyCode::Char('i'));
-                press(&mut app, KeyCode::Enter);
-                assert_eq!(crate::install::take_ran()[0].args, ["install", "micro"]);
-
-                press(&mut app, KeyCode::Down);
-                press(&mut app, KeyCode::Down);
-                press(&mut app, KeyCode::Enter);
-                assert_eq!(Config::load().editor, "vim");
-                let rows = editor_rows();
-                let zed = rows
-                    .iter()
-                    .position(|r| *r == EditorRow::App("zed"))
-                    .unwrap();
-                for _ in view(&app).row..zed {
-                    press(&mut app, KeyCode::Down);
-                }
-                press(&mut app, KeyCode::Char(' '));
-                assert_eq!(Config::load().outside_editor, "zed");
-            });
-        });
-    }
-
-    /// The Editor page opens on the editor chosen now — a missing one's
-    /// `i` right there.
-    #[test]
-    fn the_editor_page_opens_on_the_chosen_editor() {
-        with_temp_config(|| {
-            persist(|cfg| cfg.editor = "hx".into());
             let mut app = App::new();
             open(&mut app, &Config::load(), 0);
             to_page(&mut app, Page::Editor);
-            assert_eq!(
-                editor_rows()[view(&app).row],
-                EditorRow::Editor("hx"),
-                "on the choice"
-            );
-        });
-    }
-
-    /// Without Homebrew, `i` on an editor names its install page, and
-    /// Enter opens it in the browser — it runs nothing.
-    #[test]
-    fn without_homebrew_the_editor_page_points_at_the_page() {
-        with_temp_config(|| {
-            with_programs(&["vim"], || {
-                let mut app = App::new();
-                open(&mut app, &Config::load(), 0);
-                to_page(&mut app, Page::Editor);
-                press(&mut app, KeyCode::Char('i'));
-                let shot = draw_text(&mut app);
-                assert!(words(&shot).contains("Homebrew isn't installed"), "{shot}");
-                assert!(shot.contains("github.com/sinelaw/fresh"), "{shot}");
-                assert!(!shot.contains("run it here"), "{shot}");
-                assert!(shot.contains("Enter open the page"), "{shot}");
-                press(&mut app, KeyCode::Enter);
-                assert!(crate::install::take_ran().is_empty());
-                assert_eq!(
-                    crate::event_loop::take_opened(),
-                    ["https://github.com/sinelaw/fresh#installation"]
-                );
-                assert!(!view(&app).asking());
-                assert_eq!(
-                    view(&app).note.as_deref(),
-                    Some("Opened fresh's install page in your browser")
-                );
-            });
+            let shot = draw_at(&mut app, 150, 40);
+            let inner = words(&shot);
+            assert!(inner.contains("Open in app — "), "{shot}");
+            assert!(inner.contains("● auto"), "{shot}");
+            assert!(!inner.contains("File editor"), "{shot}");
+            let zed = editor_rows().iter().position(|w| *w == "zed").unwrap();
+            for _ in view(&app).row..zed {
+                press(&mut app, KeyCode::Down);
+            }
+            press(&mut app, KeyCode::Char(' '));
+            assert_eq!(Config::load().outside_editor, "zed");
+            to_page(&mut app, Page::Editor);
+            assert_eq!(editor_rows()[view(&app).row], "zed", "on the choice");
         });
     }
 
@@ -2848,8 +2645,8 @@ mod tests {
                 assert_eq!(chosen[0].what, "Agents");
                 assert_eq!(chosen[0].value, "Claude");
                 assert!(!chosen[0].warn);
-                assert_eq!(chosen[1].value, "fresh");
-                assert!(chosen[3].value.starts_with(".env files linked"));
+                assert_eq!(chosen[1].what, "Open in app");
+                assert!(chosen[2].value.starts_with(".env files linked"));
 
                 let mut app = App::new();
                 open(&mut app, &cfg, 0);
@@ -2867,7 +2664,7 @@ mod tests {
                     inner.contains(&format!("{new_agent} start an agent")),
                     "{shot}"
                 );
-                assert!(inner.contains("Agents Claude File editor fresh"), "{shot}");
+                assert!(inner.contains("Agents Claude Open in app"), "{shot}");
                 assert!(!shot.contains("Turn on an agent"), "{shot}");
                 assert!(shot.contains("Enter start using Orion"), "{shot}");
 
