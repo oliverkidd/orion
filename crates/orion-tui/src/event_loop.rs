@@ -27222,10 +27222,8 @@ mod tests {
             );
             let cfg = crate::config::Config::load();
             let account = &cfg.claude_accounts[0];
-            assert_eq!(
-                (account.id.as_str(), account.name.as_str()),
-                ("claude-2", "Work")
-            );
+            assert_eq!(account.id.as_str(), "claude-2");
+            assert_eq!(cfg.harnesses["claude-2"].label.as_deref(), Some("Work"));
             assert_eq!(account.dir(), root.join(".claude-2"));
             assert_eq!(
                 cfg.effective_harness_by_id("claude-2").display_label(),
@@ -27238,8 +27236,10 @@ mod tests {
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert!(matches!(app.overlay, Some(Overlay::Settings(_))));
             assert_eq!(
-                crate::config::Config::load().claude_accounts[0].name,
-                "Work"
+                crate::config::Config::load().harnesses["claude-2"]
+                    .label
+                    .as_deref(),
+                Some("Work")
             );
 
             // The default account.

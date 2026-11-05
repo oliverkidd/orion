@@ -92,16 +92,11 @@ read as nothing.
 | `codex_enabled` | bool | `false` | Accounts | HARNESS TOGGLE for Codex, same rules. |
 | `cursor_enabled` | bool | `false` | Accounts | HARNESS TOGGLE for Cursor, same rules. |
 | `opencode_enabled` | bool | `false` | Accounts | HARNESS TOGGLE for OpenCode, same rules. |
-| `claude_model` | string | `"default"` | Accounts | Default `--model` for new Claude sessions. The literal `"default"` is the sentinel meaning *don't pass the flag, let the CLI pick* — it is what you see in a fresh file, not a missing value. Overlay list: `fable`, `opus`, `sonnet`, `haiku` — unless `claude_models` below or Claude Code's own `availableModels` allowlist replaces it; any other string is passed through verbatim. |
+| `harnesses.<id>.model_default` | string | `"default"` | Accounts | Default `--model` for new sessions on harness `<id>` — `claude`, `codex`, `cursor`, `grok`, `opencode`, or a Claude account's id: every account, the default one included, has its own. The literal `"default"` is the sentinel meaning *don't pass the flag, let the CLI pick*. Claude's list: `fable`, `opus`, `sonnet`, `haiku` — unless `claude_models` below or Claude Code's own `availableModels` allowlist replaces it. Codex: `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-luna`. Cursor: the model *family*, from the cached catalogue (`cursor_models.json`). OpenCode: a `provider/model` id (`opencode models` lists what your machine has credentials for). Any other string is passed through verbatim. Through 2.x the built-ins kept this as `claude_model`, `codex_model`, `cursor_model` and `opencode_model`, and an added Claude account followed the default account's until it had its own: those move here once, each account keeping what it launched with, and the save after drops the old keys. |
+| `harnesses.<id>.effort_default` | string | `"default"` | Accounts | Default reasoning effort for new sessions on `<id>`, every Claude account its own: Claude's `--effort` (`low`, `medium`, `high`, `xhigh`, `max`), Codex's `-c model_reasoning_effort=` (`low` … `max`, `ultra` — which models take which is Codex's call), Cursor's suffix the DAEMON joins onto the family into one `--model <family>-<effort>` id (the choices follow the family, so the row reads `n/a` while the model has no effort variants), or the `"default"` sentinel. OpenCode has none. Moved here from `claude_effort`, `codex_effort` and `cursor_effort`, as the model was. |
 | `claude_models` | array of strings | `[]` | — (hand-edited) | The Claude model rows every picker offers (the NEW AGENT PICKER and QUICK PROMPT submenus, the AGENTS TAB, the PRESET EDITOR) in place of the built-in aliases, verbatim, `"default"` always first: `["claude-sonnet-5", "us.anthropic.claude-opus-5-v1:0"]`. For an organization that restricts models (Claude Code refuses `--model sonnet` with *Model "sonnet" is restricted by your organization's settings. Using claude-sonnet-5 instead.*) or a provider whose ids the aliases don't reach (Bedrock, Vertex, a gateway; on Bedrock `sonnet` even means Sonnet 4.5). Empty, the list follows Claude Code's `availableModels` when one is on disk — `~/.claude/remote-settings.json` (server-managed cache), the macOS MDM profile, `managed-settings.json` and `managed-settings.d/` in the system directory, then `~/.claude/settings.json`, read once at TUI start — else the aliases. A hand edit here applies without a restart. |
-| `claude_effort` | string | `"default"` | Accounts | Default reasoning effort (`--effort`) for new Claude sessions: `low`, `medium`, `high`, `xhigh`, `max`, or the `"default"` sentinel. |
-| `codex_model` | string | `"default"` | Accounts | Default `--model` for new Codex sessions (Codex spells the flag the same way Claude does): `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-luna`, or the `"default"` sentinel. |
-| `codex_effort` | string | `"default"` | Accounts | Default `-c model_reasoning_effort=` for new Codex sessions: `low`, `medium`, `high`, `xhigh`, `max`, `ultra` (which models take which is Codex's call — Luna stops at `max`), or the `"default"` sentinel. |
-| `cursor_model` | string | `"default"` | Accounts | Default model *family* for new Cursor sessions, from the cached catalogue (`cursor_models.json`), or the `"default"` sentinel. |
-| `cursor_effort` | string | `"default"` | Accounts | The effort suffix the DAEMON joins onto `cursor_model` into one flat `--model <family>-<effort>` id. The choices follow the family, so the overlay row reads `n/a` while the model is unset or has no effort variants. |
-| `opencode_model` | string | `"default"` | Accounts | Default `--model` for new OpenCode sessions: a `provider/model` id passed verbatim (`opencode models` lists what your machine has credentials for). The overlay lists a few well-known ids (`opencode/big-pickle`, `anthropic/claude-sonnet-5`, …); a hand-edited one passes through. `"default"` means don't pass the flag, so OpenCode opens on its own last-picked model. There is no `opencode_effort`: OpenCode has no effort flag (reasoning is a per-model variant picked inside its TUI), so its Agents section has no Effort row. |
 | `harnesses` | object | `{"grok": {"enabled": false}}` | Accounts | The harness registry: per-harness deltas over the compiled-in known harnesses (Claude, Codex, Cursor, Grok Build, OpenCode), and whole new third-party CLIs. The Accounts tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the NEW AGENT PICKER, AGENT PRESETS, spawn, resume and hooks all read the merged rows. An entry keyed by a `claude_accounts` id is deltas over that account's row (its own model default, say). A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Run `orion config harnesses` to print the effective rows to copy from. Written even when empty, so removing its last entry sticks. |
-| `claude_accounts` | array | `[]` | Accounts | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as, after its `name` when it has one (`"name": "Work"`, written only while set — `Work (you@example.com)`). `enabled: false` switches one off (written only while off). The Accounts tab's **Claude accounts** section and first-run onboarding add, rename, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
+| `claude_accounts` | array | `[]` | Accounts | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as, after its name when it has one (`harnesses.<id>.label`, `Work (you@example.com)`; an older release's `"name"` on the entry moves there on load). Its model and effort are `harnesses.<id>` rows too. `enabled: false` switches one off (written only while off). The Accounts tab's **Claude accounts** section and first-run onboarding add, rename, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
 | `account_tags` | object | `{}` | — | The ACCOUNT TAG each Claude account's sessions wear on the grid, set by hand: by account id (`claude` for the default one), `{"claude-2": {"tag": "wk", "tint": 2}}`, either half alone. With more than one Claude account, every list row and card shows two letters right after its status dot, tinted per account, so you can see which account each session runs on at a glance; Settings → Accounts and the usage modal show each account's tag. An account with no entry gets two letters from its name, else its email, never the same as another's, and the next of six tints, none of them a status color. Written only while set. |
 | `keybindings` | object | `{}` | — (hand-edited) | KEYMAP overrides, keyed by action id, valued with a comma-separated chord list: `{"git_diff": "cmd+g, g"}`. An empty string deliberately unbinds; unknown ids are ignored. The Keys tab lists the result and edits nothing. |
 | `prewarm_agents` | bool | `true` | — (hand-edited) | DAEMON-owned PREWARM POOL: keep one booted agent CLI standing by in the selected WORKTREE, so creating a session there adopts it and feels instant. **Costs one idle CLI process per warm slot** (150–300 MB each, up to 15 minutes), and that spare is a real session as far as the CLI is concerned — Claude's own `/list-agents` lists it beside the sessions you made, named after the directory (`my-repo-3f`). Off drains the pool on the DAEMON's next sweep (within 30 s). |
@@ -274,9 +269,10 @@ Nullable rows (`program`, `model_flag`, `permissions_flag`, `hooks`, `env`, …)
 one of `claude`, `codex`, `cursor`, `grok` or `opencode`). A row that
 stops making sense (an empty program, a resume flag plus a resume subcommand, an unknown dialect,
 an `env` name a shell can't export) refuses its launches with the reason while every other harness
-keeps working. The per-harness keys
-the Accounts tab edits (`claude_model`, `codex_enabled`, …) keep working as a fallback wherever the
-map stays silent. Omit the map entirely and you get every built-in, enabled, with its defaults —
+keeps working. The per-harness switches
+the Accounts tab edits for built-ins (`claude_enabled`, `codex_enabled`, …) keep working as a
+fallback wherever the map stays silent; every harness's model, effort and name are its `harnesses`
+entry's alone. Omit the map entirely and you get every built-in, enabled, with its defaults —
 including ones a later orion adds. Like every other object key, a `harnesses` map in
 `config.local.json` replaces the whole map from `config.json` rather than merging per harness,
 so keep machine-specific overrides in one layer.
@@ -307,8 +303,12 @@ pointed at another dir, so that is all a CLAUDE ACCOUNT is here:
 {
   "claude_accounts": [
     { "id": "claude-2", "config_dir": "~/.claude-2" },
-    { "id": "claude-work", "config_dir": "~/.claude-work", "name": "Work" }
-  ]
+    { "id": "claude-work", "config_dir": "~/.claude-work" }
+  ],
+  "harnesses": {
+    "claude": { "label": "Personal", "model_default": "opus", "effort_default": "xhigh" },
+    "claude-work": { "label": "Work", "model_default": "opus", "effort_default": "medium" }
+  }
 }
 ```
 
@@ -316,11 +316,16 @@ Built-in Claude is the DEFAULT ACCOUNT, in Claude Code's own default dir (orion'
 `$CLAUDE_CONFIG_DIR`, else `~/.claude`); each entry adds one more. An entry becomes a harness that
 *is* Claude's row — the program, model and effort flags, `--resume`, the system prompt, the hooks,
 the model list, whatever `harnesses.claude` changes — plus `CLAUDE_CONFIG_DIR`, so a later change to
-Claude's row reaches every account and nothing is copied by hand. It also takes Claude's model and
-effort defaults until its own Model / Effort rows on the Accounts tab are changed, which write
-`harnesses.<id>`. The `id` is what its sessions point back at, so it stays put; lowercase letters,
-digits and hyphens, never a built-in's. `name` is the one it goes by, as typed — `Work Laptop` —
-and the only thing a rename changes: never the `id`, never the dir. `enabled: false` switches one off like any harness. The
+Claude's row reaches every account and nothing is copied by hand. ONE STORE PER ACCOUNT: what is
+an account's own — its name, its model, its effort — is its `harnesses.<id>` entry, `claude` for
+the default one, and the Accounts tab and a rename write there and nowhere else, so one account's
+model never moves with another's. The `id` is what its sessions point back at, so it stays put;
+lowercase letters, digits and hyphens, never a built-in's. Its name (`label`) is the one it goes by,
+as typed — `Work Laptop` — and the only thing a rename changes: never the `id`, never the dir.
+A file from before this kept the default account's model and effort as `claude_model` /
+`claude_effort` and an added account's name on its `claude_accounts` entry, and let the added one
+follow the default's model: each moves into its own entry once, as orion loads the file, and every
+account launches as it did. `enabled: false` switches one off like any harness. The
 list is this machine's logins: a remote reached over `orion ssh` keeps its own. A session on an
 account is a Claude session with the account's id beside it, so everything orion does for Claude
 — model and title sync, usage, resume, the transcript checks — it does on every account. Take an
@@ -332,8 +337,8 @@ and that account once, when the daemon first starts after the upgrade (store mig
 PROMPT's `Tab` list, the Accounts tab, onboarding, the preset editor, **Continue on** and the card a
 usage limit stops — it reads its name and who it is signed in as: `Work (you@example.com)`,
 `Work (not signed in)` before its first login, and `Claude (you@example.com)` while it has no name
-of its own. The name is an entry's `name`; for the default account it is `harnesses.claude.label`,
-and a hand-written entry's is its `label` (`Claude B (b@example.com)`). Short of room — a card, a
+of its own. The name is `harnesses.<id>.label` — `harnesses.claude.label` for the default
+account — and a hand-written entry's is its `label` too (`Claude B (b@example.com)`). Short of room — a card, a
 list row, the quick prompt's `harness` field, a preset's line — it is the name alone, else the
 email, and only while the machine has more than one account; with one, `claude` says it all. The email is
 Claude Code's own record, `oauthAccount.emailAddress` in `.claude.json`: inside the config dir for an
@@ -349,7 +354,7 @@ every account under **Claude accounts**, the default first: its name, `on` or `o
 | Key | Action |
 |---|---|
 | `Enter` | sign it in, or in again: asks for the email to sign in as — it fills Claude's login page; empty leaves the choice to the browser — then runs Claude Code's own `claude auth login [--email …]` with the account's `CLAUDE_CONFIG_DIR`, in the editor modal over the overlay. On a Mac the login page opens in a private window (see below). The browser finishes it; the row says who it is once the modal closes. When it can't — the page shows a code instead — paste the code into the modal and press `Enter`. `Ctrl+Q` closes it early |
-| `r` | rename it: a prompt prefilled with its name, `Enter` keeps what is typed and an empty one takes the name away (back to `Claude (you@example.com)`), `Esc` leaves it. Only the name moves — the id its sessions point back at and the dir its login lives in stay. The default account's name is written as `harnesses.claude.label`, a hand-written entry's as its `harnesses` label |
+| `r` | rename it: a prompt prefilled with its name, `Enter` keeps what is typed and an empty one takes the name away (back to `Claude (you@example.com)`), `Esc` leaves it. Only the name moves — the id its sessions point back at and the dir its login lives in stay. It is written as the account's `harnesses.<id>.label` (`harnesses.claude.label` for the default account), beside its model and effort |
 | `o` | sign it out, behind a confirm: `claude auth logout` in the same modal. Its dir keeps its settings and transcripts |
 | `←` / `→` | switch it on or off — the same switch as its section's **Enabled** row further down |
 | `⌫` | remove an added account, behind a confirm: its entry (and any `harnesses.<id>` deltas, and the `⌘N` default when it named it) leaves config.json. `Enter` keeps its dir on disk, for a later **Add account** by the same name to take back whole — `t` moves it to the Trash; a dir another account also runs in is never moved. The default account, and a hand-written `harnesses` entry, are not orion's to remove: switch the one off, edit the file for the other |

@@ -26,9 +26,10 @@ use serde::{Deserialize, Serialize};
 use crate::harness::HarnessDescriptor;
 
 /// One extra Claude account, as `claude_accounts` in config.json holds it:
-/// `{"id": "claude-2", "config_dir": "~/.claude-2"}`, plus `"name":
-/// "Work"` once it has a display name. Built-in Claude is the default
-/// account and has no entry.
+/// `{"id": "claude-2", "config_dir": "~/.claude-2"}`. Everything else an
+/// account has that a harness has — its name, its model and effort — is
+/// its `harnesses.<id>` entry's, as for every harness. Built-in Claude is
+/// the default account and has no entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeAccount {
     /// Stable id: the registry id the account's sessions point back at
@@ -40,12 +41,11 @@ pub struct ClaudeAccount {
     /// where it is used, so the entry travels to another machine as
     /// written.
     pub config_dir: String,
-    /// The name it goes by, as the user typed it — `Work`, `Work
-    /// Laptop` — shown before the email it is signed in as (`Work
-    /// (a@b.co)`). Empty: no name of its own, so it is `Claude (a@b.co)`.
-    /// A rename changes this alone, never the id or the dir its sessions
-    /// and its login hang off; written only while set, so an unnamed
-    /// entry stays the two keys above.
+    /// MOVED to the account's `harnesses.<id>.label`: the name an older
+    /// release kept on the entry. The TUI carries it across on load and it
+    /// is never set again; until then it is the row's label, and written
+    /// back while it waits — a `harnesses` map this build can't read
+    /// holds it there.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     /// Whether the pickers offer it — the Accounts tab's switch. Written
@@ -103,15 +103,22 @@ impl ClaudeAccount {
 
     /// The registry row this account launches as: `claude` — the
     /// effective row, the `harnesses` map's deltas for it included — under
-    /// the account's id, with its own switch, its [`ClaudeAccount::name`]
-    /// for a label — empty while it has none, never Claude's (the TUI
-    /// adds the email it is signed in as) — and its config dir in `env`,
-    /// on top of any env Claude's row carries.
+    /// the account's id, with its own switch, the `default` model and
+    /// effort until its own `harnesses.<id>` entry names one, never
+    /// Claude's label (its
+    /// own is its `harnesses.<id>.label`, applied over this row, or an old
+    /// `name` not yet carried there; the TUI adds the email it is signed
+    /// in as) and its config dir in `env`, on top of any env Claude's row
+    /// carries.
     pub fn descriptor(&self, claude: &HarnessDescriptor) -> HarnessDescriptor {
         let mut descriptor = claude.clone();
         descriptor.id = self.id.trim().to_string();
         descriptor.label = self.name.trim().to_string();
         descriptor.enabled = self.enabled;
+        // One store per account: the default account's model and effort
+        // are its own, never another account's.
+        descriptor.model.default = crate::harness::DEFAULT_CHOICE.into();
+        descriptor.effort.default = crate::harness::DEFAULT_CHOICE.into();
         descriptor.env.insert(
             crate::env::CLAUDE_CONFIG_DIR.to_string(),
             self.config_dir.trim().to_string(),
@@ -219,27 +226,23 @@ mod tests {
         assert_eq!(serde_json::to_value(&off).unwrap()["enabled"], false);
     }
 
-    /// A display name is a third key, written only while there is one, and
-    /// an entry an older build wrote — no `name` — reads as unnamed.
+    /// The name an older release kept on the entry is read — it is what
+    /// the move into `harnesses` takes — and written back only while it
+    /// waits for that move.
     #[test]
-    fn a_name_is_written_only_while_set() {
+    fn an_old_name_is_read_until_it_moves() {
         let named: ClaudeAccount = serde_json::from_str(
             r#"{"id": "claude-work", "config_dir": "~/.claude-work", "name": "Work Laptop"}"#,
         )
         .unwrap();
         assert_eq!(named.name, "Work Laptop");
-        assert_eq!(
-            serde_json::to_value(&named).unwrap(),
-            serde_json::json!({
-                "id": "claude-work", "config_dir": "~/.claude-work", "name": "Work Laptop"
-            })
-        );
-        let unnamed = ClaudeAccount {
+        assert_eq!(serde_json::to_value(&named).unwrap()["name"], "Work Laptop");
+        let moved = ClaudeAccount {
             name: String::new(),
             ..named
         };
         assert_eq!(
-            serde_json::to_value(&unnamed).unwrap(),
+            serde_json::to_value(&moved).unwrap(),
             serde_json::json!({"id": "claude-work", "config_dir": "~/.claude-work"})
         );
     }

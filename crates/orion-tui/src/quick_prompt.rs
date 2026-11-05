@@ -949,6 +949,7 @@ pub(crate) fn open_preset_picker_for_pr(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::HarnessField;
 
     fn worktree() -> QuickTarget {
         QuickTarget::Worktree(WorktreeId::from("wt-1".to_string()))
@@ -978,13 +979,13 @@ mod tests {
 
     #[test]
     fn the_setting_picks_the_harness_and_its_own_model_and_effort() {
-        let cfg = Config {
+        let mut cfg = Config {
             quick_prompt_kind: "codex".into(),
-            codex_model: "gpt-5.1-codex".into(),
-            codex_effort: "high".into(),
-            claude_model: "opus".into(),
             ..Config::default()
         };
+        cfg.set_default("codex", HarnessField::Model, "gpt-5.1-codex");
+        cfg.set_default("codex", HarnessField::Effort, "high");
+        cfg.set_default("claude", HarnessField::Model, "opus");
         let launch = QuickLaunch::from_config(worktree(), &cfg);
         assert_eq!(launch.kind, AgentKind::Codex);
         assert_eq!(launch.model.as_deref(), Some("gpt-5.1-codex"));
@@ -1020,11 +1021,9 @@ mod tests {
     /// kind's AGENTS TAB defaults, and a drilled-into submenu wins.
     #[test]
     fn a_picked_harness_fills_the_rest_from_its_own_defaults() {
-        let cfg = Config {
-            codex_model: "gpt-5.5".into(),
-            codex_effort: "high".into(),
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
+        cfg.set_default("codex", HarnessField::Model, "gpt-5.5");
+        cfg.set_default("codex", HarnessField::Effort, "high");
         let launch = QuickLaunch::of_kind(worktree(), AgentKind::Codex, None, None, None, &cfg);
         assert_eq!(launch.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(launch.effort.as_deref(), Some("high"));
@@ -1044,10 +1043,8 @@ mod tests {
     /// AGENT PRESET launch from the SESSIONS PANEL does.
     #[test]
     fn a_preset_pins_what_it_names_and_wraps_the_task() {
-        let cfg = Config {
-            claude_effort: "high".into(),
-            ..Config::default()
-        };
+        let mut cfg = Config::default();
+        cfg.set_default("claude", HarnessField::Effort, "high");
         let reviewer = AgentPreset {
             model: Some("opus".into()),
             prefix: "Be strict.".into(),
