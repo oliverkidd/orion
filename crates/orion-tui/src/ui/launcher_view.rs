@@ -1030,7 +1030,6 @@ fn draw_bands(
                         draw_any_card(buf, &*app, r, card, selected, keys, th, &mut cfg)
                     });
                     note_tail_card(app, card);
-                    app.hits.extend(card_issue_hit(app, card, placed));
                     app.hits.push((
                         placed.rect,
                         HitTarget::LauncherCard(crate::launcher::CardRef {
@@ -1073,7 +1072,6 @@ fn draw_bands(
                         )
                     });
                     note_tail_card(app, card);
-                    app.hits.extend(card_issue_hit(app, card, placed));
                     app.hits
                         .push((placed.rect, HitTarget::LauncherCard(slot.at)));
                 }
@@ -2604,7 +2602,7 @@ fn draw_card(
     // project is not on the card either: the grid is one project's,
     // named in the header.
     let harness = runs_on_line(a, cfg);
-    let mut second = if harness.is_empty() {
+    let second = if harness.is_empty() {
         Vec::new()
     } else {
         vec![Span::styled(
@@ -2612,26 +2610,6 @@ fn draw_card(
             Style::default().fg(quiet_or(dim)),
         )]
     };
-    // The issue it was started from, at the row's right end — a link, and
-    // the only thing on the card under the pointer that is not the card
-    // (`HitTarget::LauncherCardIssue`, placed by `card_issue_rect`).
-    if let Some(label) = card_issue_label(app, a) {
-        let label_w = label.chars().count();
-        if card_issue_rect(area, label_w).is_some() {
-            let room = width - label_w - 1;
-            let harness = truncate(&harness, room);
-            let pad = width - label_w - harness.chars().count();
-            let mut style = Style::default().fg(quiet_or(th.accent));
-            if app.hover_crumb == Some(HitTarget::LauncherCardIssue(a.id.clone())) {
-                style = style.add_modifier(Modifier::UNDERLINED);
-            }
-            second = vec![
-                Span::styled(harness, Style::default().fg(quiet_or(dim))),
-                Span::raw(" ".repeat(pad)),
-                Span::styled(label, style),
-            ];
-        }
-    }
 
     // The last thing it was asked to do, on the prompt's own `›` (which
     // `hide_card_marks` leaves off), over the card's last rows rather than
@@ -2658,69 +2636,6 @@ fn draw_card(
         let Some(r) = row_rect(inner, i) else { break };
         Paragraph::new(Line::from(spans)).render(r, buf);
     }
-}
-
-/// The `#15` an ISSUE SESSION's card shows for the GitHub issue it was
-/// started from, while the `card_issue_number` setting is on. None on
-/// every other card, and on every card with the setting off.
-fn card_issue_label(_app: &App, _a: &orion_core::Agent) -> Option<String> {
-    None
-}
-
-/// Where a card drawn whole at `area` puts its issue number `label_w`
-/// cells wide: the right end of the row saying what it runs on, inside
-/// the border and its cell of air (`draw_card`). None on a card too
-/// small to hold it with a cell to spare.
-fn card_issue_rect(area: Rect, label_w: usize) -> Option<Rect> {
-    let inner = Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
-    };
-    let label_w = u16::try_from(label_w).ok()?;
-    if inner.height < 2 || inner.width <= label_w {
-        return None;
-    }
-    Some(Rect {
-        x: inner.x + inner.width - label_w,
-        y: inner.y + 1,
-        width: label_w,
-        height: 1,
-    })
-}
-
-/// The click target of the issue number on the session card `card`,
-/// placed at `placed` (cut or whole): the chip's cell when that row of
-/// the card is on screen, for [`draw_bands`] to register ahead of the
-/// card so the chip wins.
-fn card_issue_hit(
-    app: &App,
-    card: &crate::launcher::Card,
-    placed: crate::launcher::Placed,
-) -> Option<(Rect, HitTarget)> {
-    let crate::launcher::Card::Session(row) = card else {
-        return None;
-    };
-    let label = card_issue_label(app, &row.agent)?;
-    // The chip on the whole card laid out from row 0, then its row moved
-    // to the screen — kept only while the window shows that row.
-    let full = Rect {
-        y: 0,
-        height: placed.rect.height + placed.cut_top + placed.cut_bottom,
-        ..placed.rect
-    };
-    let chip = card_issue_rect(full, label.chars().count())?;
-    let row_on_screen = chip.y.checked_sub(placed.cut_top)?;
-    (row_on_screen < placed.rect.height).then(|| {
-        (
-            Rect {
-                y: placed.rect.y + row_on_screen,
-                ..chip
-            },
-            HitTarget::LauncherCardIssue(row.agent.id.clone()),
-        )
-    })
 }
 
 /// How a session shows its state wherever orion draws it — a card's head,
@@ -4922,27 +4837,6 @@ mod tests {
             assert!(!lines.iter().any(|l| l.contains("limit reached")));
             assert!(lines.iter().any(|l| l.contains("fix the login redirect")));
         });
-    }
-
-    /// GitHub issue numbers on cards are retired: even with the stored
-    /// flag on, an ISSUE SESSION does not paint `#15` or register a click.
-    #[test]
-    fn card_issue_number_is_not_drawn() {
-        let mut app = a_tree();
-        select(&mut app, "api");
-        app.tree.agents[0].issue_url = Some("https://github.com/o/r/issues/15".into());
-        app.card_issue_number = true;
-        let body = Rect::new(0, 0, 100, 30);
-        let lines = drawn_lines(&mut app, body);
-        let row = lines
-            .iter()
-            .position(|l| l.contains("s0"))
-            .expect("the session's card drawn");
-        assert!(!lines[row + 1].contains("#15"), "{:?}", lines[row + 1]);
-        assert!(!app
-            .hits
-            .iter()
-            .any(|(_, h)| matches!(h, HitTarget::LauncherCardIssue(_))));
     }
 
     /// The runs-on line is the harness, then the model, then the effort,

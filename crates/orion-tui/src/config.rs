@@ -655,100 +655,6 @@ impl SettingKind {
     pub fn is_project(self) -> bool {
         matches!(self, SettingKind::RunCommand | SettingKind::OpenCommand)
     }
-
-    /// The day the row first shipped, `(year, month, day)`: the date of
-    /// the first release tag whose settings overlay lists it, or the day
-    /// it was written for a row no release carries yet. The overlay marks
-    /// a row `(new)` for [`NEW_SETTING_DAYS`] from here. The match is
-    /// exhaustive on purpose — a new row can't compile without its date.
-    pub fn added_on(self) -> (i32, u32, u32) {
-        match self {
-            // v0.1.0
-            SettingKind::PaletteEnterAttaches
-            | SettingKind::Editor
-            | SettingKind::SessionIdleTimeout
-            | SettingKind::Theme
-            | SettingKind::Animations => (2026, 8, 22),
-            // v0.16.0
-            SettingKind::DoneSound => (2026, 8, 28),
-            // v0.19.0 – v0.21.0
-            SettingKind::CloseFinderOnOpen
-            | SettingKind::QuickPromptKind
-            | SettingKind::QuickPromptFocus => (2026, 8, 29),
-            // v0.23.0 / v0.24.0
-            SettingKind::FeedbackSound
-            | SettingKind::WorktreeBaseBranch
-            | SettingKind::PrewarmAgents
-            | SettingKind::PrewarmSessions => (2026, 9, 9),
-            // v0.27.0 / v0.28.0
-            SettingKind::SshSyncConfig
-            | SettingKind::HideDraftPrs
-            | SettingKind::HideUninstalledHarnesses => (2026, 9, 15),
-            // v0.29.0 / v0.31.0
-            SettingKind::RunCommand | SettingKind::OpenCommand | SettingKind::RememberHarness => {
-                (2026, 9, 17)
-            }
-            // v0.33.0
-            SettingKind::PresetText => (2026, 9, 18),
-            // v0.34.0
-            SettingKind::BlackBackground | SettingKind::SessionPane => (2026, 9, 22),
-            // v0.38.0, then rows not yet in a release
-            SettingKind::DeleteEmptyWorktree
-            | SettingKind::ShowAllWorktrees
-            | SettingKind::HideCardMarks
-            | SettingKind::WorktreeLayout
-            | SettingKind::CardIssueNumber => (2026, 9, 24),
-            SettingKind::ExpandAllWorktrees | SettingKind::FollowNewSession => (2026, 9, 26),
-            SettingKind::HighlightCurrentCard => (2026, 9, 28),
-            SettingKind::LinkEnvFiles
-            | SettingKind::OutsideTerminal
-            | SettingKind::LinearAccount
-            | SettingKind::LinearAutoAttach
-            | SettingKind::LinearTaskTemplate
-            | SettingKind::LinearKey
-            | SettingKind::LinearTest
-            | SettingKind::OutsideEditor => (2026, 10, 3),
-            SettingKind::RunSetup | SettingKind::Git | SettingKind::Gh => (2026, 10, 5),
-            SettingKind::QuickPromptNewWorktree => (2026, 10, 9),
-            SettingKind::DiffTreeView
-            | SettingKind::DiffStart
-            | SettingKind::DiffTicked
-            | SettingKind::PrMergeMethod
-            | SettingKind::PrDeleteBranch
-            | SettingKind::PrDraft => (2026, 10, 4),
-            SettingKind::BaseFetch => (2026, 10, 6),
-            SettingKind::UsageClaude | SettingKind::UsageCursor => (2026, 10, 5),
-            SettingKind::WorktreeContainers => (2026, 10, 5),
-            // Auto-fix PRs went from off / ask / auto to on by default.
-            SettingKind::PrAutofix => (2026, 11, 4),
-            SettingKind::AutofixModel | SettingKind::AutofixEffort | SettingKind::Spotify => {
-                (2026, 10, 6)
-            }
-            SettingKind::ReviewAccount | SettingKind::ReviewModel | SettingKind::ReviewEffort => {
-                (2026, 10, 10)
-            }
-        }
-    }
-
-    /// The row shipped fewer than [`NEW_SETTING_DAYS`] days before
-    /// `today` (days since the Unix epoch, see [`today_days`]).
-    pub fn is_new(self, today: i64) -> bool {
-        let (y, m, d) = self.added_on();
-        (0..NEW_SETTING_DAYS).contains(&(today - days_from_civil(y, m, d)))
-    }
-}
-
-/// How many days a settings row wears its `(new)` prefix.
-pub const NEW_SETTING_DAYS: i64 = 7;
-
-/// What a newly shipped settings row is prefixed with.
-pub const NEW_SETTING_PREFIX: &str = "(new) ";
-
-/// Today as days since the Unix epoch, in UTC.
-pub fn today_days() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| (d.as_secs() / 86_400) as i64)
 }
 
 /// Days since the Unix epoch of a proleptic Gregorian date (Howard
@@ -4175,27 +4081,6 @@ mod tests {
             days_from_civil(2026, 9, 24) - days_from_civil(2026, 8, 22),
             33
         );
-    }
-
-    #[test]
-    fn a_setting_is_new_for_a_week_from_its_release() {
-        let shipped = days_from_civil(2026, 9, 22);
-        let kind = SettingKind::BlackBackground;
-        assert!(!kind.is_new(shipped - 1), "not new before it shipped");
-        assert!(kind.is_new(shipped));
-        assert!(kind.is_new(shipped + NEW_SETTING_DAYS - 1));
-        assert!(!kind.is_new(shipped + NEW_SETTING_DAYS));
-    }
-
-    #[test]
-    fn no_setting_ships_in_the_future_of_its_own_code() {
-        // A date past today is a typo: the row would miss its `(new)` week.
-        for tab in 0..tab_count() {
-            for spec in tab_settings(tab) {
-                let (y, m, d) = spec.kind.added_on();
-                assert!(days_from_civil(y, m, d) <= today_days(), "{}", spec.label);
-            }
-        }
     }
     use crate::keymap::Keymap;
 

@@ -125,13 +125,6 @@ pub enum HitTarget {
     /// The STACK MARK `⬡` at a band's right end, registered ahead of the
     /// rule so it wins: a click opens the Stacks modal on that stack.
     LauncherBandStack(WorktreeId),
-    /// The ISSUE NUMBER on a session's card — its `#15`, drawn while the
-    /// `card_issue_number` setting is on — by the card's session,
-    /// registered ahead of the card, so it wins: a click lands the cursor
-    /// on the card and opens the issue in the browser, through the very
-    /// `launcher::open_issue` `⇧I` runs. Only as wide as its text, so the
-    /// rest of the card is still the card's.
-    LauncherCardIssue(AgentId),
     /// The `❮` / `❯` beside a BAND's row of cards on the grid, by the
     /// band's place in `launcher::bands` — drawn only while the row has
     /// cards off that edge: a click steps the cursor one card that way

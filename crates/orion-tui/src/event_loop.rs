@@ -4773,9 +4773,7 @@ fn dispatch_action(
         Action::New => match app.focus {
             Focus::Projects => open_prompt(app, PromptKind::AddProject),
             Focus::Worktrees => {
-                if app.selected_worktree_pr().is_some() {
-                    open_pr_agent_picker(app);
-                } else if let Some(p) = app.selected_project() {
+                if let Some(p) = app.selected_project() {
                     let project = p.id.clone();
                     open_new_worktree_prompt(app, project);
                 }
@@ -7758,27 +7756,6 @@ fn open_new_agent_picker(app: &mut App, worktree: WorktreeId) {
     agent_picker::open_kind_picker(app, KindPicker::new_session(worktree));
 }
 
-/// ROOT WORKTREE used by PROJECT-scoped actions. An OPEN PRS row has no
-/// checkout of its own, so PR-created AGENTS follow the same established
-/// fallback as PROJECT-scoped TERMINAL SESSION and LINK creation.
-fn selected_project_main_worktree(app: &App) -> Option<WorktreeId> {
-    let project = app.selected_project()?;
-    app.root_worktree(&project.id)
-}
-
-/// `n` on a PROJECT OPEN PRS GROUP row: the NEW AGENT PICKER's harness
-/// rows, every one carrying the PR's URL and — through the same MODEL /
-/// EFFORT submenus, and as directly on Enter — launching a PR SESSION.
-pub(super) fn open_pr_agent_picker(app: &mut App) {
-    let Some(pr) = app.selected_worktree_pr().cloned() else {
-        return;
-    };
-    let Some(worktree) = selected_project_main_worktree(app) else {
-        return;
-    };
-    agent_picker::open_kind_picker(app, KindPicker::pr_session(worktree, &pr));
-}
-
 /// The CONTEXT MENU for a PROJECT ISSUES GROUP row: the browser. The
 /// launches are the row's keys (`p`, `e`), as the footer says.
 fn issue_row_menu_items(issue: &crate::issues::Issue) -> Vec<MenuItem> {
@@ -7788,15 +7765,10 @@ fn issue_row_menu_items(issue: &crate::issues::Issue) -> Vec<MenuItem> {
     )]
 }
 
-/// The CONTEXT MENU for a PROJECT OPEN PRS GROUP row: a PR SESSION row per
-/// enabled harness (none when the PROJECT has no ROOT WORKTREE to launch
-/// in), then **Check out** (`pr_checkout`) and the row's browser and diff
-/// verbs.
+/// The CONTEXT MENU for a PROJECT OPEN PRS GROUP row: **Check out**
+/// (`pr_checkout`) and the row's browser and diff verbs.
 fn pr_row_menu_items(app: &App, pr: &crate::pull_request::OpenPr) -> Vec<MenuItem> {
-    let mut items = match selected_project_main_worktree(app) {
-        Some(worktree) => agent_picker::pr_session_menu_rows(worktree, pr),
-        None => Vec::new(),
-    };
+    let mut items = Vec::new();
     if let Some(project) = app.selected_project().map(|p| p.id.clone()) {
         items.push(MenuItem::new(
             "Check out",
@@ -8074,7 +8046,6 @@ fn select_clicked_row(app: &mut App, target: &HitTarget, out: &mut Vec<ClientReq
         HitTarget::LauncherBandPr(ref wid) | HitTarget::LauncherBandStack(ref wid) => {
             launcher::select_band_of(app, wid, out)
         }
-        HitTarget::LauncherCardIssue(ref id) => launcher::select_issue_card(app, id, out),
         _ => false,
     }
 }
@@ -12455,7 +12426,6 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
                 | HitTarget::LauncherBandStack(_)
-                | HitTarget::LauncherCardIssue(_)
                 | HitTarget::LauncherStripLeft(_)
                 | HitTarget::LauncherStripRight(_)
                 | HitTarget::LauncherBandMore(_)
@@ -13252,10 +13222,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::LauncherBandStack(wid)) => {
                     crate::stacks::open_at(app, &wid);
                 }
-                // The ISSUE NUMBER on a session's card: the cursor onto
-                // the card, and the issue in the browser, through the very
-                // `open_issue` `⇧I` runs.
-                Some(HitTarget::LauncherCardIssue(id)) => launcher::click_issue(app, &id, out),
                 // `‹ sessions` in a full-screen session's header: back
                 // down to the pane beside the grid, the same way `^q`
                 // goes back.
@@ -13483,7 +13449,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
                             | HitTarget::LauncherBandStack(_)
-                            | HitTarget::LauncherCardIssue(_)
                             | HitTarget::LauncherStripLeft(_)
                             | HitTarget::LauncherStripRight(_)
                             | HitTarget::LauncherBandMore(_)

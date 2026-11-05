@@ -843,35 +843,6 @@ pub(super) fn open_issue(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
 }
 
-/// A click on the ISSUE NUMBER on a session's card — its `#15`
-/// (`HitTarget::LauncherCardIssue`): the cursor lands on that card, as
-/// the pointer landing on it puts it there ([`select_card`]), and the
-/// issue opens in the browser through the very [`open_issue`] `⇧I` runs.
-/// INPUT PARITY: the click and the key end in the same state. Like a
-/// click on a band's pull request ([`click_pull_request`]), it leaves a
-/// folded pane folded: the link leaves orion for the browser.
-pub(super) fn click_issue(app: &mut App, id: &AgentId, out: &mut Vec<ClientRequest>) {
-    select_card(app, SessionRef::Agent(id.clone()), out);
-    take_aim(app);
-    open_issue(app, out);
-}
-
-/// A right-click's first half on a card's ISSUE NUMBER: the chip is the
-/// card to this button — the cursor onto it and the pane open on it, as
-/// on the rest of the card ([`select_card_row`]); the menu it opens
-/// carries **Open issue** already. False for a session no longer on the
-/// grid.
-pub(super) fn select_issue_card(app: &mut App, id: &AgentId, out: &mut Vec<ClientRequest>) -> bool {
-    let bands = view::bands(app);
-    let at = bands.iter().enumerate().find_map(|(band, b)| {
-        b.cards
-            .iter()
-            .position(|c| c.sref() == SessionRef::Agent(id.clone()))
-            .map(|card| CardRef { band, card })
-    });
-    at.is_some_and(|at| select_card_row(app, at, out))
-}
-
 /// `⇧P` on a card, and **Duplicate** in its menu: the QUICK PROMPT, set to
 /// launch what the card runs — the same harness, model and effort, into
 /// the same checkout, for the same issue where the card is an ISSUE
@@ -10615,23 +10586,6 @@ mod tests {
             );
             assert_eq!(by_menu.flash, by_key.flash);
             assert_eq!(format!("{sent_by_menu:?}"), format!("{sent:?}"));
-        });
-    }
-
-    /// GitHub issue numbers on cards are retired: the stored flag no
-    /// longer draws a `#15` chip or a click target.
-    #[test]
-    fn the_cards_issue_number_is_not_drawn() {
-        with_default_config(|| {
-            let mut app = card_from_an_issue();
-            app.card_issue_number = true;
-            draw(&mut app);
-            assert!(
-                !app.hits
-                    .iter()
-                    .any(|(_, h)| matches!(h, HitTarget::LauncherCardIssue(_))),
-                "no issue link drawn"
-            );
         });
     }
 
