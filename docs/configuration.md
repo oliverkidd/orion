@@ -2,324 +2,126 @@
 
 <sub>[← README](../README.md) · [Keys](keys.md) · [Commands](commands.md) · [Sessions](sessions.md) · [Configuration](configuration.md) · [How it works](how-it-works.md)</sub>
 
-CONFIG.JSON is the settings file, in the DATA DIR beside the SQLITE STORE — hand-editable, and
-what the `s` SETTINGS OVERLAY writes:
+Settings live in one JSON file, `config.json`, in the DATA DIR beside the database:
 
 - `~/Library/Application Support/dev.orion.orion/config.json`
-- `ORION_CONFIG_FILE` moves that one file — into a dotfiles checkout, say — and leaves everything
-  else where it is. A save writes through a symlink instead of replacing it, so linking `config.json`
-  into a repo works as well.
-- `ORION_DATA_DIR` moves the whole directory, config included (tests, parallel instances).
+- `ORION_CONFIG_FILE` moves that one file (into a dotfiles checkout, say); a save writes through a
+  symlink rather than replacing it. `ORION_DATA_DIR` moves the whole data dir.
 - `orion config path` prints where each settings file is.
 
-CONFIG.LOCAL.JSON, beside it in the DATA DIR, has the same keys and wins over `config.json` one key at
-a time. It is for what only makes sense on this machine — an editor a remote box lacks,
-a short `session_idle_timeout` on a small one — and it is never exported, never sent over `orion ssh`, and
-never written by an import. Create it by hand with just the keys to pin; after that the overlay
-writes a key it holds back into it, so changing that setting here keeps it local, and every other key
-into `config.json`:
+`config.local.json`, beside it, has the same keys and wins over `config.json` one key at a time:
+for what only makes sense on this machine. Create it by hand with the keys to pin; from then on a
+save writes a key it holds back into it. `onboarded`, `seen_version` and `linear_assignee_email`
+are always written there.
 
-```json
-{ "editor": "vim", "session_idle_timeout": "1m" }
-```
-
-Both halves of orion read the two files. The TUI owns most keys; the DAEMON owns
-`session_idle_timeout`, reads
-`harnesses` and `claude_accounts` beside the TUI (spawn and resume go through
-them), reads `quick_prompt_kind` and `claude_enabled` for the account a SPARE WORKTREE boots, and
-reads four keys out of each `projects` entry: `base_branch`, `setup_command`, `run_command` and
-`worktree_containers`. Each side
-deserializes only its own fields and ignores the rest, and both load
-them fresh on every use — so a hand edit applies without restarting either. No key is required: a
-missing file is all defaults, an unknown field is skipped, a value this build can't read costs only
-that key (it takes its default and stays as stored in the file), and a malformed file is logged and
-ignored rather than failing the operation that read it. The overlay patches only the keys it knows
-and leaves everything else in the JSON untouched, so hand-written fields survive a save — the
-[compatibility rule](#compatibility-rules) that lets two orion versions share the file.
-
-Files beside it in the DATA DIR: `orion.db` (the SQLITE STORE), `config.local.json` (above),
-`agent_presets.json` (AGENT PRESETS), `cursor_models.json` (the cached `cursor-agent --list-models` answer, refreshed after 24h),
-`ssh_hosts.json` (the SSH HOSTS FILE), `reviewed.json` (REVIEWED MARKS). All but the database are
-convenience stores: missing or malformed reads as empty.
+The SETTINGS OVERLAY (`s` or `⌘,`) writes the file, and hand edits are fine: the TUI and the DAEMON
+both read it fresh on every use, so a change applies without a restart. No key is required. A
+missing file is all defaults, a value this build can't read costs only that key (it takes its
+default and stays in the file as written), and a malformed file is logged and ignored.
 
 ## Every setting
 
-Thirty-three keys. **Overlay** is the SETTINGS OVERLAY tab whose row edits the key; `—` means the key
-exists only in the file, so it is hand-edit-only. The overlay has five tabs: **General ·
-Accounts · Projects · Presets · Keys**. Most rows toggle or cycle on `Enter` / `←` / `→`; a
-*typed* row (the Projects tab's **Base branch**, **Setup command**, **Run command** and **Open command**) opens a
-one-line prompt on `Enter` instead, pre-filled with the stored value, and an empty answer puts its
-default back. **General** groups its rows under **Launching**, **Sounds** and **Look**.
-**Accounts** opens on **New agents on** (which account or harness `⌘N` starts on), then **Claude
-accounts** (see [Claude accounts](#claude-accounts)), then one header per harness — **Claude
-(you@example.com)**, **Codex**, **Cursor**, **Grok Build**, **OpenCode** — so a harness's rows read
-`Enabled` / `Model` / `Effort` under its name rather than repeating it. The **Projects** tab is the
-one tab whose rows are not orion's but each project's: every project in turn, named with its path,
-and each row under it reads and writes that project's own entry under `projects` — so the same row
-shows a different value on the next project over; its **Linear key** row is where that project's
-key was found ([Linear](#linear)). **Presets** is the AGENT PRESETS themselves: orion's own under
-**Used by orion** (PR autofix, Linear Ticket, Week review, each tagged `orion`), then yours under
-**Yours**, then **+ New preset**; its keys follow the row ([Sessions](sessions.md#agent-presets)).
-**Keys** lists every action and its chords, read-only (rebinding is `keybindings`, below).
+The overlay has five tabs: **General · Accounts · Projects · Presets · Keys**. `Tab` / `⇧Tab`,
+`[` / `]` or `1`–`5` change tab; `Enter` or `Space` toggles a row, `←` / `→` cycle it, and a typed
+row opens a prompt prefilled with its value (empty puts the default back). `⇧R` puts every setting
+back to its default, after a confirm, and removes `config.local.json`. **Presets** is the
+[presets screen](#presets), kept in its own file; **Keys** lists every action and its chords and
+edits nothing (rebinding is [`keybindings`](#hand-edited)).
 
-Some things are no longer settings at all, because they are how orion works: `.env` files are
-linked into every new worktree, a file opened from Go to file or find in files closes the finder,
-dead sessions boot when the selection rests on their worktree, Claude and Cursor usage are read,
-every checkout has a band on the grid, the window is painted black, a pull request is linked to the
-Linear ticket its branch was cut for, `⌘K` Enter selects a row rather than attaching it, the DIFF
-VIEWER opens on its commits, and each project's base branch is fetched every five minutes. A merge
-form opens on the method the project last merged by with its branch to be deleted, and a new pull
-request form opens with Draft off. Those keys, if a file still holds them, are left as they are and
-read as nothing.
+The DAEMON reads `session_idle_timeout`, `harnesses`, `claude_accounts`, `quick_prompt_kind`,
+`claude_enabled` and four keys of each `projects` entry (`base_branch`, `setup_command`,
+`run_command`, `worktree_containers`). The TUI reads the rest.
 
-| Key | Type | Default | Overlay | What it does |
-|---|---|---|---|---|
-| `outside_editor` | string | `"auto"` | General | **Open files in**: the GUI editor `⌘O` hands a file to — from Go to file, find in files, the TREE BROWSER, a MARKDOWN PAGE and the BUILT-IN EDITOR — and the OPEN MENU's **Checkout in …** row opens the checkout in: `cursor`, `vscode` or `sublime`. `auto` is the first of Cursor, VS Code and Sublime Text installed, else whatever macOS's `open` hands the file to; the row shows which (`auto · Cursor`) and its hint lists the ones installed. A stored `zed` or `default` reads as `auto`. With a named app missing, `i` on the row installs it — `brew install --cask cursor`, `visual-studio-code` or `sublime-text` — in the install modal. An app is launched through the command-line tool inside its own bundle in `/Applications` or `~/Applications` (`Cursor.app/Contents/Resources/app/bin/cursor`, `Visual Studio Code.app/…/bin/code`, `Sublime Text.app/Contents/SharedSupport/bin/subl`), then the one on `PATH` — never Cursor's agent CLI shim, the `~/.local/bin/cursor` the `cursor-agent` installer writes, which only forwards to another `cursor` and otherwise fails — then `open -a`. A tool goes to the file's line (`cursor`/`code` with `--goto <file>:<line>` in the checkout's window, `subl` with `<file>:<line>`); `open -a` and `open` open the file at its top. The hints name the app (`⌘O: VS Code`). A named app that isn't installed, or a tool that fails, says why in the footer instead; over ssh the file opens in the BUILT-IN EDITOR. |
-| `onboarded` | bool | `false` | — (config.local.json) | Whether **Orion setup** has been seen. While it is false, orion opens it over the grid at startup: four pages under a STEP STRIP — Welcome; **Claude**, its CLI `installed` or `install…` (`i` installs it, [Installing editors and agent CLIs](#installing-editors-and-agent-clis)) and every Claude account, each signed in (which switches it on) or added; **First project**, the repo orion was started in opened as a project, its **Base branch**, **Setup command** and **Run command**; and **Ready**, the keys that matter. `Esc` or a click outside skips it; either way the key is set and it does not come back. It lives in `config.local.json`, so a remote reached over `orion ssh` asks on its own first run. Delete the key, or **Run setup** in the palette, or `orion setup`, to see it again. |
-| `seen_version` | string | `""` | — (config.local.json) | The orion version this machine last saw **What's new** for. On the first launch of a newer build — after `orion upgrade` or the footer's update — the **What's new in Orion** sheet is up over the grid: every release since this one, stacked newest first however many the upgrade jumped, each with its date and what its commits said. Closing it — or setup — stamps this build's version; it is never lowered, so an older or dev build in between shows nothing twice. A first run stamps it without showing notes; a config from before the key shows the newest releases. The notes are baked in at build time from git — each release is the commits between its `v*` tag and the one before (`crates/orion-tui/build.rs`) — so a build without git or tags has none. |
-| `linear_assignee_email` | string | `""` | — (config.local.json) | Whose open issues `⌘L` lists. Empty is the owner of the project's `LINEAR_API_KEY`; an email names another member of the workspace, for a key a team shares. Set by hand; a save keeps it in `config.local.json`, so `orion ssh` never carries it to a remote. |
-| `session_idle_timeout` | string | `"5m"` | General | DAEMON-owned IDLE TIMEOUT: how long a session in a WORKTREE no client is viewing goes unwatched before the IDLE REAPER kills its PTY. See the values below. |
-| `done_sound` | string | `"Glass"` | General | The DONE SOUND rung when a turn you haven't seen reaches FINISHED: `off`, `bell` (the terminal BEL — silent in Ghostty unless its `bell-features` include `audio`), or a macOS system sound from `/System/Library/Sounds` played with `afplay` (`Glass`, `Ping`, `Pop`, `Hero`, …). Over `orion ssh` and off macOS it is always the bell. Stepping the row in the settings overlay plays each sound. It rings only for news: a turn that finishes in the pane on screen was watched and rings nothing. It waits 3 s for the finish to settle, and stays quiet if by then the session is working again, has been looked at, or was archived or deleted. It rings once per unseen stretch — the follow-up turns a session starts on its own (a task notification, a queued message) ring nothing more until you have looked at it, and then its next finish rings again. And it never rings within 10 s of the last sound of either kind, so a burst of finishes is one ding. The one switch for that finish's DESKTOP NOTIFICATION too: while the terminal window is in the background, each finish that settles is named in one (`Fix Login finished`, under its project and branch) — even when the 10 s rule kept the sound quiet — on the same terms as `feedback_sound`'s. `off` silences the sound and the notification together. |
-| `feedback_sound` | string | `"Sosumi"` | General | The FEEDBACK SOUND rung when a turn stops at NEEDS FEEDBACK — a permission prompt or a question — or when a session's CLI dies with an error in the middle of a turn, with the same values and fallbacks as `done_sound`, and a different default so red and green sound different from the next room. It never rings for the session whose pane you are locked into typing at while the terminal window has focus: that prompt, or that error, is already under your hands. The one switch for their DESKTOP NOTIFICATIONS too: while the terminal window is in the background (from the focus reports orion asks the terminal for — tmux needs `focus-events on`), each session that goes red is also named in a desktop notification (`Fix Login needs feedback`), and so is each that crashes (`Fix Login stopped with an error`). On macOS they come from orion's own NOTIFIER APP — a copy of Homebrew's `terminal-notifier` re-badged with orion's name and logo, built on first use under the data dir, whose click brings the terminal back; `osascript` when `terminal-notifier` is not installed; never over `orion ssh`, where the desktop is the wrong machine's; a notifier that is missing or fails is a debug line, not an error. `off` silences the sound and the notifications together. |
-| `theme` | string | `"default"` | General | The THEME: `default`, `ocean`, `forest`, `rose`, `amber`, `lavender`, `coral`, `slate`, `sand`, `mono`. An unknown name falls back to `default`. A theme is the accent — the focus chrome: the selection rail, the cursor's frame, the lit tab and rule — and the focus tint. Every status color is fixed and the same in every theme (crimson needs you or crashed, a gold spinner working, gray at rest, purple merged), as are the grays, so a terminal's palette can't move them; the one status that follows the theme is DONE, NOT SEEN, which takes the accent itself — sky blue instead where the accent is warm (`rose`, `amber`, `coral`, `sand`), gray (`mono`) or too near the merged purple (`lavender`). |
-| `animations` | bool | `true` | General | Master switch for the motion: the UNREAD SHIMMER (a finish nobody has read, on its row and its project's tab, until it is read), the ONE-SHOT SWEEP (a session that just started needing you or crashed, a just-merged checkout, for about five seconds), the WORKING SPINNER a running session's dot turns into (a still `◐` with this off) and the SPLASH's motion. Off trades them for fewer repaints on a constrained machine. |
-| `spotify` | bool | `true` | General | **Spotify in footer**: what the Spotify desktop app is playing, `♪ Midnight City · M83  ⏮ ⏸ ⏭`, in the FOOTER just left of the memory readout — the title in text (dimmed too while paused), the artist dim, and the three glyphs buttons: back a track (or to the start of this one, a few seconds in), play/pause, next. macOS only, asked over AppleScript once a second while a track is up and every five seconds while Spotify is closed or stopped; it never launches Spotify, and nothing is drawn while there is nothing to show. There are no keys: the Mac's media keys already reach Spotify. The first ask raises macOS's AUTOMATION prompt for your terminal; denied, orion stops asking for the rest of the run and says once where to allow it (System Settings → Privacy & Security → Automation). On a narrow bar the artist shortens first, then the title, and then the readout goes. Off stops the polling too. |
-| `hide_draft_prs` | bool | `false` | — (hand-edited) | Leave draft pull requests out of the grid's PR COUNT and the jump list's (`⌘K`) pull-request rows, so browsing what's open shows only the rows asking for a reviewer; the PULL REQUESTS MODAL lists drafts either way. A view filter, not a fetch filter: the open-list lookup still fetches the drafts and the PR CACHE still holds them, so `false` brings them back at once and a draft marked ready joins the rows on the refresh that says so. Sessions and the pull request under their cards are never hidden. |
-| `diff_tree_view` | bool | `true` | — (⌘B) | Whether the DIFF VIEWER (`⌘E`, and a pull request's diff) lists its files as a directory tree rather than flat paths. `⌘B` flips the open viewer and writes the answer here, so the next one — after a restart too — opens the way the last was left. Replaces the tree state the UI-state blob carried through 0.42, which no longer decides it. |
-| `pr_autofix` | string | `"auto"` | General | **Auto-fix my PRs**: on (`auto`) or `off`. When one of *your* open pull requests (`gh`'s signed-in user opened it) hits merge conflicts or failing checks, a fresh `autofix-<n>` session starts on it, nothing to confirm, and the footer says so. It runs on the harness, Claude account, model and effort of the session that did the work on the PR's branch (the most recently active one there), and with none on your default agent at the **PR autofix** system preset's model and effort — unless that preset's **Runs on** row pins a harness, which it then runs on, at the preset's model and effort, while that harness is on. Its prompt is the PR and what broke, wrapped in that preset's text (see [Sessions](sessions.md#agent-presets)): orion's own rules unless you changed them — fix only what is listed; resolve conflicts; reproduce each failing unit test locally and fix it; re-run only the e2e specs that failed, never the full suite, unless earlier attempts failed the same way; push; watch the PR until it is green and go round again. Failing checks are acted on once every check has finished (or after 20 minutes); conflicts alone at once. Each breakage — head commit, conflicts, failing checks — is sent once, across restarts; there is never a second `autofix-<n>` on a pull request while one is starting, working or waiting on you. Another session live on the branch, working or waiting on you, does not hold it back: the agent is told where that session's conversation is and reads it first, and when that session is already on this fix it runs `orion autofix stand-down "<why>"`, which archives it, and the footer shows why. A live session whose conversation can't be read (not a Claude session, or no transcript yet) holds it back instead, and the footer says so once. After 3 sends in a row that didn't turn the PR green it stops, with a footer message and a desktop notification. Unit vs e2e is read off each check's name. Seen while the TUI runs: within about 15s for the selected project, 5 minutes for the others; a breakage from while it was closed is picked up on the next launch. `⌘G` in the PULL REQUESTS MODAL still opens the AUTOFIX MODAL for any PR, whatever this says. An older orion's `ask` reads as on. |
-| `projects` | object | `{}` | Projects | PROJECT SETTINGS: one entry per project set up differently from the rest, keyed by the project's repo path exactly as the DAEMON stores it, holding that project's rows from the **Projects** tab — `{"projects": {"/Users/me/src/app": {"base_branch": "dev", "setup_command": "npm ci", "run_command": "npm run dev", "open_command": "open http://localhost:3000", "worktree_containers": "remove"}}}`. **Base branch** (`base_branch`, string, default `""`) is where the project's new WORKTREES start when nobody named a base — a bare `orion worktree`, the QUICK PROMPT's **+ new worktree** (`orion worktree --base` always wins). Empty, shown as `auto`, is origin's own default branch: `origin/HEAD` freshly fetched. A name — `dev`, `master` — is resolved the way `--base` resolves one: origin is fetched and origin's copy of that branch is the start point, untracked, never the checkout's local branch of that name; a branch origin lacks that the checkout has locally is used as named, and a name the repo has no branch of at all falls back to `origin/HEAD` with a line in `daemon.log`. A leading `origin/` is dropped. Typed, like the commands. The same branch is what the grid's ahead/behind counts, the COMMIT LIST and the background base fetch measure against, and what a merge never deletes. **Setup command** (`setup_command`, string, default `""`) is the SETUP COMMAND the DAEMON runs once in each worktree it creates for the project, on a setup line in its band — see [Setup command](#setup-command); empty (shown as `not set`) is none. Typed, and read fresh at each create. **Run command** (`run_command`, string, default `""`) is the RUN COMMAND `⌘⇧S` (**Start stack** in a card's or the project tab's right-click menu) starts in *that project's* worktrees; empty (shown as `not set`) is none, and **Start stack** says where to set one. Typed, not cycled: `Enter` opens a prompt titled with the project, an empty answer unsets it. The DAEMON reads it fresh at each start. **Open command** (`open_command`, string, default `""`) is its twin for the OPEN COMMAND `⌘O` → **Open command** fires on that project's worktrees — `open http://localhost:3000`, say — with the same prompt; the TUI reads it fresh at each press, since it runs on the machine you are sitting at. **On worktree delete** (`worktree_containers`, string, default `""` shown as `off`) is what deleting one of the project's worktrees does to the docker compose projects started in it — see [Worktree containers](#worktree-containers). **Linear key** is no setting: it says where the project's `LINEAR_API_KEY` was found, and `Enter` tests it ([Linear](#linear)). `merge_method` (string, default `""`, squash) has no row: it is the method the project's last merge took (`squash`, `merge` or `rebase`), which its next merge form opens on. Releases before these keys kept **Base branch**, **On worktree delete** and **Merge method** once for every project (`worktree_base_branch`, `worktree_containers`, `pr_merge_method`): the first time the grid lists the projects, each project with no value of its own takes the old one, and the old key leaves the file on the next save. The tab lists every project under its name and path; with no project in the tree it says so. A project with no entry reads as the defaults, and an entry that only repeats them is dropped on save, so the map names only the projects that differ; an empty row is left out of an entry rather than written; a key inside an entry this build doesn't know — the retired `hide_root_worktree` an older build wrote among them — is carried through a save. To the file's rules the map is one key: a value in it this build can't read costs the whole map, not one project. |
-| `quick_prompt_kind` | string | `"claude"` | Accounts | Which AGENT KIND the QUICK PROMPT (`⌘N`) launches: `claude`, `codex`, `cursor`, `grok` or `opencode` — or another CLAUDE ACCOUNT's id (`claude-2`), which the **New agents on** row steps through right after `claude` and shows by name, `Claude (you@example.com)`. Its model and effort come from that harness's own defaults below, so this is one name, not a third pair. A kind or an account switched off here is stepped around, and an older orion reading an account's id falls back to Claude. A Claude account at its limit — a session on it stopped there, or nothing left at the last usage reading — is stepped around for the box's opening too: it opens on your next Claude account that isn't, and says so. The NEW AGENT PICKER opens on it too, and a SPARE WORKTREE's `claude` boots on it (see [Spare worktrees](#spare-worktrees)): only while it names a Claude account. |
-| `follow_new_session` | bool | `true` | General | FOLLOW NEW SESSION (**Follow new session**): a QUICK PROMPT launch lands the cursor on the new session's card — the grid scrolls to keep it on screen and the pane shows it, the keys still on the grid — so a run of launches can be watched going up. It selects the card and no more: a QUICK PROMPT never enters its session's terminal. It covers every QUICK PROMPT: `⌘N`, **New agent — choose harness**'s box, **Duplicate session** on a card, and the box the PULL REQUESTS MODAL opens. Off, the cursor, the pane and the keys stay on the card you were on while the new session's card goes up in its band — first in it, stand-in rows first for a launch that cuts a fresh worktree — and the footer names the branch it went to (`started a session in feat`): the BACKGROUND LAUNCH's stillness, in the project on screen. A launch with no card under the cursor — the aim let go with `Esc`, an empty band, an empty grid — has nothing to keep and lands on its new card either way. Terminals (`t`) always come up in the pane. |
-| `claude_enabled` | bool | `false` | Accounts | HARNESS TOGGLE. Off leaves Claude — the default CLAUDE ACCOUNT — out of the NEW AGENT PICKER, and boots no SPARE WORKTREE on it; existing sessions keep attaching and resuming. Every harness starts off — a file that never names the key reads as off too — until setup or the Accounts tab turns it on, so the picker only offers what you use. Its other accounts keep switches of their own (see [Claude accounts](#claude-accounts)). |
-| `codex_enabled` | bool | `false` | Accounts | HARNESS TOGGLE for Codex, same rules. |
-| `cursor_enabled` | bool | `false` | Accounts | HARNESS TOGGLE for Cursor, same rules. |
-| `opencode_enabled` | bool | `false` | Accounts | HARNESS TOGGLE for OpenCode, same rules. |
-| `harnesses.<id>.model_default` | string | `"default"` | Accounts | Default `--model` for new sessions on harness `<id>` — `claude`, `codex`, `cursor`, `grok`, `opencode`, or a Claude account's id: every account, the default one included, has its own. The literal `"default"` is the sentinel meaning *don't pass the flag, let the CLI pick*. Claude's list: `fable`, `opus`, `sonnet`, `haiku` — unless `claude_models` below or Claude Code's own `availableModels` allowlist replaces it. Codex: `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-luna`. Cursor: the model *family*, from the cached catalogue (`cursor_models.json`). OpenCode: a `provider/model` id (`opencode models` lists what your machine has credentials for). Any other string is passed through verbatim. Through 2.x the built-ins kept this as `claude_model`, `codex_model`, `cursor_model` and `opencode_model`, and an added Claude account followed the default account's until it had its own: those move here once, each account keeping what it launched with, and the save after drops the old keys. |
-| `harnesses.<id>.effort_default` | string | `"default"` | Accounts | Default reasoning effort for new sessions on `<id>`, every Claude account its own: Claude's `--effort` (`low`, `medium`, `high`, `xhigh`, `max`), Codex's `-c model_reasoning_effort=` (`low` … `max`, `ultra` — which models take which is Codex's call), Cursor's suffix the DAEMON joins onto the family into one `--model <family>-<effort>` id (the choices follow the family, so the row reads `n/a` while the model has no effort variants), or the `"default"` sentinel. OpenCode has none. Moved here from `claude_effort`, `codex_effort` and `cursor_effort`, as the model was. |
-| `claude_models` | array of strings | `[]` | — (hand-edited) | The Claude model rows every picker offers (the NEW AGENT PICKER and QUICK PROMPT submenus, the AGENTS TAB, the PRESET EDITOR) in place of the built-in aliases, verbatim, `"default"` always first: `["claude-sonnet-5", "us.anthropic.claude-opus-5-v1:0"]`. For an organization that restricts models (Claude Code refuses `--model sonnet` with *Model "sonnet" is restricted by your organization's settings. Using claude-sonnet-5 instead.*) or a provider whose ids the aliases don't reach (Bedrock, Vertex, a gateway; on Bedrock `sonnet` even means Sonnet 4.5). Empty, the list follows Claude Code's `availableModels` when one is on disk — `~/.claude/remote-settings.json` (server-managed cache), the macOS MDM profile, `managed-settings.json` and `managed-settings.d/` in the system directory, then `~/.claude/settings.json`, read once at TUI start — else the aliases. A hand edit here applies without a restart. |
-| `harnesses` | object | `{"grok": {"enabled": false}}` | Accounts | The harness registry: what is yours of each compiled-in harness (Claude, Codex, Cursor, Grok Build, OpenCode) and of each Claude account. The Accounts tab grows one section per entry — Enabled, Model, and Effort rows while the harness offers effort — and the NEW AGENT PICKER, AGENT PRESETS, spawn, resume and hooks all read the merged rows. Each entry is what is yours of a harness — its switch, name, default model and effort, model list and `env` — keyed by its id, a Claude account's included; an unknown id adds a CLI by the name of its program. See [The harness registry](#the-harness-registry). A hand edit that breaks one entry refuses its launches with the reason, never the whole file. Written even when empty, so removing its last entry sticks. |
-| `claude_accounts` | array | `[]` | Accounts | CLAUDE ACCOUNTS beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. Each is a Claude Code config dir with a login of its own, launched as built-in Claude's row — program, flags, hooks, resume — with `CLAUDE_CONFIG_DIR` pointing there, and named after the email it is signed in as, after its name when it has one (`harnesses.<id>.label`, `Work (you@example.com)`; an older release's `"name"` on the entry moves there on load). Its model and effort are `harnesses.<id>` rows too. `enabled: false` switches one off (written only while off). The Accounts tab's **Claude accounts** section and first-run onboarding add, rename, sign in, sign out and remove them. Like `harnesses`, never sent over `orion ssh`. See [Claude accounts](#claude-accounts). |
-| `account_tags` | object | `{}` | Accounts | The ACCOUNT CHIP each Claude account's sessions wear, by account id (`claude` for the default one): `{"claude-2": {"icon": "★", "tint": 2}}`, either half alone. With more than one Claude account, every grid row shows a filled chip right after its status dot — the account's letter, black on its tint (`mono` draws it inverse, in its grays; an archived row's is dim) — so you can see which account each session runs on at a glance; the pane's header, the PR page's SESSIONS line, the usage modal and Settings → Accounts show it too. `icon` is one character that replaces the letter, a letter or a glyph (Settings → Accounts `g`); `tint` is which of six tints fills it, none of them a status color (`c` steps it). An account with no entry gets the first letter of its name, else its email, that no other account's chip has, and the next tint in line. An older `tag` (two letters) still gives its first letter while no `icon` is set. Written only while set. |
-| `keybindings` | object | `{}` | — (hand-edited) | KEYMAP overrides, keyed by action id, valued with a comma-separated chord list: `{"git_diff": "cmd+g, g"}`. An empty string deliberately unbinds; unknown ids are ignored. The Keys tab lists the result and edits nothing. |
+### General
 
-### Ghostty's keys in Orion.app
+| Key | Default | Row | What it does |
+|---|---|---|---|
+| `follow_new_session` | `true` | Launching → **Follow new session** | A QUICK PROMPT launch puts the cursor on the new session's row and the pane on it, without entering it. Off, the cursor stays where it was and the footer names where the session went. |
+| `session_idle_timeout` | `"5m"` | **Idle session timeout** | How long a session in a worktree no client is viewing may sit idle before the IDLE REAPER kills its PTY. See [below](#idle-timeout). |
+| `pr_autofix` | `"auto"` | **Auto-fix my PRs** | `auto` or `off`. When one of your pull requests hits conflicts or failing checks, an `autofix-<n>` session starts on it with the **PR autofix** preset's text, on the PR's own agent (see [Presets](#presets)). It stops after 3 sends in a row that didn't turn the PR green. `⌘G` on a pull request sends one by hand either way. |
+| `outside_editor` | `"auto"` | **Open files in** | The app `⌘O` opens a file or checkout in: `auto`, `cursor`, `vscode` or `sublime`. `auto` is the first installed of Cursor, VS Code and Sublime Text, else macOS's `open`. `i` on the row installs a missing app (`brew install --cask cursor`, `visual-studio-code`, `sublime-text`). Over ssh a file opens in the BUILT-IN EDITOR. |
+| `done_sound` | `"Glass"` | Sounds → **Turn finished** | Rung when a turn you haven't seen finishes: `off`, `bell`, or a macOS system sound (`Glass`, `Ping`, `Pop`, `Hero`, …). `←` / `→` play each. While the window is in the background the finish is also a desktop notification; `off` silences both. |
+| `feedback_sound` | `"Sosumi"` | Sounds → **Needs you** | The same, for a turn that stops to ask you or a CLI that dies mid-turn. Never rung for the pane you are typing in. |
+| `theme` | `"default"` | Look → **Theme** | The accent: `default`, `ocean`, `forest`, `rose`, `amber`, `lavender`, `coral`, `slate`, `sand`, `mono`. Status colours are the same in every theme. |
+| `animations` | `true` | Look → **Animations** | The unread shimmer, the one-shot sweep, the working spinner and the splash's motion. Off means fewer repaints. |
+| `spotify` | `true` | Look → **Spotify in footer** | What Spotify is playing, with ⏮ ⏸ ⏭ buttons, in the footer. macOS only; the first ask raises macOS's Automation prompt. Off stops the polling. |
 
-Ghostty claims a lot of ⌘ chords for itself and never passes them to the program inside it — `⌘K`
-clears the screen, `⌘N` opens a window, `⌘T` a tab, `⌘⇧P` is its own palette, `⌘F` searches. In
-[Orion.app](#orionapp) the program inside is always orion, so the app's own config clears Ghostty's
-whole key table (`keybind = clear`) and binds back only what a Mac app should still answer to
-itself:
+Sounds are played with `afplay` and fall back to the terminal bell over ssh. Desktop
+notifications are posted by Orion.app itself (its name and icon, a click brings the window back);
+outside the app, with `osascript`; never over ssh.
 
-| Key | Stays the app's |
-|---|---|
-| `⌘C` | copy — only while Ghostty has a selection of its own (a ⇧-drag); with none it reaches orion, and a text field copies its SELECTION, the editor its own, the session pane its drag selection |
-| `⌘V` | paste |
-| `⌘Q` | quit the app (sessions keep running in the daemon) |
-| `⌘⇧W` | close the window |
-| `⌘Enter`, `⌃⌘F` | full screen |
-| `⌘=`, `⌘+`, `⌘-`, `⌘0` | text size |
-| `⌘←`, `⌘→`, `⌥←`, `⌥→` | typed as the keys a shell reads, as Ghostty types them anywhere: the line's start and end (`^A`, `^E`), a word back and on (`⎋b`, `⎋f`) — what orion's fields, its editor and every agent's prompt expect |
+#### Idle timeout
 
-Every other chord reaches orion as the key it is, whatever your keymap or a rebind says — `⌘T`,
-`⌘N`, `⌘D`, `⌘W`, `⌘1`–`⌘9` and the rest of Ghostty's tab, split and window keys included. `⌘.` is
-the one chord macOS takes
-before a terminal can send it (it is Cancel, Escape's twin, in every Mac app), so the app's config
-binds it to the bytes the kitty protocol spells it with (`csi:46;9u`); orion also reads an Escape
-still carrying ⌘ as `⌘.`, for a terminal without that line.
+The overlay cycles `off`, `1m`, `5m`, `15m`, `30m`, `1h`; by hand any `<n>s`, `<n>m` or `<n>h`
+works, and `"off"` or `"0"` turns reaping off. A malformed value means `5m`, not off. The reaper
+sweeps every 15 s and spares running agents, agents waiting on you, agents with a backgrounded tool
+call still running, and terminals with a command running. A reaped session comes back on the next
+attach, and an agent resumes its conversation. A worktree's dead sessions also boot as the cursor
+rests on it, so attaching is instant; this timeout is what bounds that cost.
 
-Nothing is written into your own Ghostty config. So in a Ghostty window of your own — or in
-Terminal.app, which never sends ⌘ — orion's ⌘ shortcuts don't reach it.
+### Accounts
 
-### Installing editors and agent CLIs
+| Key | Default | Row | What it does |
+|---|---|---|---|
+| `quick_prompt_kind` | `"claude"` | **New agents on** | What `⌘N` starts: `claude`, `codex`, `cursor`, `grok`, `opencode`, or a Claude account's id (`claude-2`). A harness or account that is off is stepped around; one at its usage limit is too, and the box says so. |
+| `claude_accounts` | `[]` | **Claude accounts** | Claude accounts beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. See [Claude accounts](#claude-accounts). |
+| `account_tags` | `{}` | `c` / `g` on an account | The ACCOUNT CHIP each account's rows wear, by account id (`claude` for the default): `{"claude-2": {"icon": "★", "tint": 2}}`. `icon` replaces the letter; `tint` picks one of six tints. Without an entry an account gets the first letter of its name or email no other chip uses. Chips show only with more than one account. |
+| `claude_enabled`, `codex_enabled`, `cursor_enabled`, `opencode_enabled` | `false` | **Enabled** | Whether the pickers offer that harness. Sessions that exist keep attaching and resuming. A harness whose CLI isn't installed is never offered. |
+| `harnesses` | `{"grok": {"enabled": false}}` | **Enabled**, **Model**, **Effort** | What is yours of each harness and each Claude account, by id. See [The harness registry](#the-harness-registry). |
 
-orion runs programs it does not ship: the editor behind the BUILT-IN EDITOR, and a CLI per harness.
-`install.sh` makes sure of three after orion itself: git, which it stops without; fresh, the editor
-with VS Code's keys every file opens in (`brew install fresh-editor`; without Homebrew, a pointer to
-its install page); and gh, which pull
-requests are read with (`brew install gh`, else a pointer to its install page); and on a
-Mac, Ghostty, which Orion.app is made from (`brew install --cask ghostty`; without Homebrew, the
-newest disk image Ghostty's own update feed lists, copied into `/Applications` — or `~/Applications`
-when that can't be written — once the app inside is seen to be signed by Ghostty's team). It says nothing about what is already there, and `--no-deps` (`curl … | sh -s
--- --no-deps`) or `ORION_NO_DEPS=1` skips the step.
+The tab opens on **New agents on**, then **Claude accounts**, then one section per harness and
+account with its **Enabled**, **Model** and **Effort** rows. `i` on a harness whose CLI is missing
+installs it.
 
-A first install on a Mac then opens orion as [Orion.app](#orionapp), so setup starts where the ⌘
-shortcuts work and orion is in the Dock from then on: orion's keybinds go into Ghostty's config
-first, so no reload is needed. The terminal the installer ran in can be closed. An update, `orion
-upgrade`, ssh or tmux, `--no-launch` or `ORION_NO_LAUNCH=1`, or no Ghostty, skips it — an orion
-that was here already moves with `orion app`.
+### Projects
 
-### Orion.app
-
-On a Mac orion can run as an app of its own: **Orion** in the Dock, Launchpad, Spotlight and ⌘-Tab
-under its constellation icon, one click to open it, and a second click that brings the window back
-rather than opening another. `orion app` opens it, and so does the installer on a first install.
-
-orion is drawn in a terminal, so the app is one: a copy of the Ghostty.app on this Mac, kept at
-`~/Applications/Orion.app` under orion's name, icon and bundle id (`dev.orion.app`) and signed ad
-hoc — made the first time it is opened, in about a second. It needs Ghostty installed to copy, and
-it reads your Ghostty config first, so your font and theme carry over, and then its own
-(`Orion.app/Contents/Resources/orion.conf`), which wins: the window is black to the edge and opaque,
-opens filling the screen, and shows the three window buttons and no title, and Ghostty's key table
-is cleared down to a few ([Ghostty's keys in Orion.app](#ghosttys-keys-in-orionapp)).
-
-**Nothing moves into the app.** It is a window onto the orion already here: it runs the installed
-`orion` binary, attaches to the same daemon and reads the same data dir. Sessions keep running
-through the move, and projects, settings, accounts and history are where they were. Deleting
-`~/Applications/Orion.app` removes the app and nothing else.
-
-**The app is where orion runs on a Mac.** With Ghostty installed, a bare `orion` typed in a terminal
-opens Orion.app and leaves the terminal, saying so. An upgrade moves an orion kept in a terminal
-over the same way: it reopens orion, and the reopening opens the app, before anything of the new
-release is drawn — the release notes are read there. With the app already open it is brought to
-the front instead. orion stays where it was started under tmux, over ssh,
-on a Mac without Ghostty, when `ORION_RUNTIME_DIR` or `ORION_DATA_DIR` points it at a daemon
-or data of its own, when it is a build from a checkout, and when `ORION_APP=off` says to — the way
-back into a terminal should the app ever not come up. If the app can't be made, orion carries on in
-the terminal and says why in its footer. The other commands (`orion add`, `orion doctor`, …) run
-where they are typed.
-
-The app starts orion through your login shell (`$SHELL -l -i`), so the PATH your shell profile sets
-— the one your agents' CLIs are on — is the one orion gets; a click in the Dock has no other. From
-the Dock it starts in your home folder, from `orion app` or setup in the folder you were in.
-Quitting orion closes the app.
-
-Desktop notifications come from the app itself — its name, its icon, and a click that brings its
-window back — so macOS asks once whether Orion may send them. Outside the app they are posted with
-`osascript`.
-
-The copy is rebuilt when the Ghostty it came from is updated, when `orion` is installed somewhere
-else, or when a newer orion gives it a different config or layout: by `orion app` when the app isn't running, or
-as orion quits inside it. Ghostty's own updater is off in the copy. macOS treats it as a new app,
-so whatever it once asked you to allow Ghostty — a folder such as Documents, notifications — it may
-ask again for "Orion", and once more after a rebuild.
-
-Inside orion, `i` on a row whose program isn't on PATH — setup's **Claude** page, **Open files in**
-on Settings → General, a
-Claude account's row or a harness's **Enabled** row on the Accounts tab, and the footer's word that
-fresh is missing when a file was to open — shows the command that
-installs it, and `Enter` runs it in the editor modal, the installer's own output on screen (`Ctrl+Q`
-stops it), the footer reading `installing …` meanwhile. When it exits the modal stays, its title and
-the footer saying whether the program is here now, until `Enter`; the footer and the page or tab
-under the modal then keep the result. Ghostty counts as here once its app is in `/Applications` or
-`~/Applications`. The rows read
-PATH as they draw. An
-installer that puts its program somewhere new and adds that to your shell profile leaves orion's
-own PATH as it was: start orion again from a new shell. Nothing is installed unasked, and `orion
-doctor` ([Commands](commands.md#checking-the-machine)) names the same commands without running
-them.
-
-| Program | Command | Documented at |
-|---|---|---|
-| fresh | `brew install fresh-editor` | [github.com/sinelaw/fresh](https://github.com/sinelaw/fresh#installation) |
-| Claude (`claude`) | `curl -fsSL https://claude.ai/install.sh \| bash` | [code.claude.com](https://code.claude.com/docs/en/setup) |
-| Codex (`codex`) | `brew install --cask codex`, or without Homebrew `npm install -g @openai/codex` | [github.com/openai/codex](https://github.com/openai/codex) |
-| Cursor (`cursor-agent`) | `curl https://cursor.com/install -fsS \| bash` | [cursor.com/docs/cli](https://cursor.com/docs/cli/installation) |
-| Grok Build (`grok`) | `curl -fsSL https://x.ai/cli/install.sh \| bash` | [docs.x.ai](https://docs.x.ai/build/overview) |
-| OpenCode (`opencode`) | `curl -fsSL https://opencode.ai/install \| bash` | [opencode.ai/docs](https://opencode.ai/docs/) |
-| Ghostty (macOS) | `brew install --cask ghostty` | [ghostty.org/download](https://ghostty.org/download) |
-| git | `brew install git` | [git-scm.com](https://git-scm.com/downloads) |
-| gh | `brew install gh` | [cli.github.com](https://cli.github.com) |
-| Open files in (macOS) | `brew install --cask cursor` / `visual-studio-code` / `sublime-text` | each app's download page |
-
-Without Homebrew an editor's or Ghostty's row names its install page instead and runs nothing;
-in first-run setup `Enter` opens that page in the browser. vim has no
-installer here: macOS ships it, and it is the last fallback.
-
-### Prewarming
-
-Orion boots processes you never asked for, worth knowing about on a laptop or a small remote box. A
-worktree's dead sessions boot when your selection rests on it, so attaching is instant; that is how
-orion works, with no switch. `session_idle_timeout` is what bounds the cost.
-
-### Spare worktrees
-
-For every project you have used in the last 24 hours — a session created, attached or working in
-it — the DAEMON keeps a SPARE WORKTREE: your next new worktree, cut ahead of time from the project's
-**Base branch**, its `.env` links made and its **Setup command** run, with a `claude` booted in it on
-the `⌘N` account (`quick_prompt_kind`) at that account's default model and effort, sitting at its
-prompt. Its branch and its directory are both `orion-spare-<id>`
-(`../<repo>-worktrees/orion-spare-3kq9xa`), so whoever meets it in `git worktree list` knows whose
-it is; the grid, the worktree sync and the WORKTREE PICKER's branch rows leave it out, and Claude's
-`/list-agents` shows its CLI as a peer named after that directory.
-
-A launch into a new worktree — `⌘⇧N`, the box's **+ new worktree**, a Linear launch — on the account,
-model and effort the spare's CLI booted with, in edit mode, takes it: the branch is renamed to the
-launch's (`git branch -m`; the directory keeps its `orion-spare-` name), the worktree appears, and
-the task is typed into the booted CLI as its first turn once it is at its prompt. A new spare is cut
-behind it. Any other launch, or one onto a branch name that exists, cuts its worktree as before.
-
-A spare follows its base. The DAEMON fetches `origin` for it every five minutes; when the base has
-moved, or the **Base branch** setting now names another, a spare nobody has taken is reset to the
-new base (`git reset --hard` — nothing in it is anyone's; untracked files such as installed
-dependencies stay, and the setup is not run again) and its CLI is booted again on the new files. A
-spare is never reset once a launch has taken it, nor while its setup is still running.
-
-A spare outlives a DAEMON restart only when it is worth keeping: one that finished setting up under
-the setup command its project still has, for a project still in use, is kept and its CLI booted
-again; anything else the last DAEMON left — a spare still setting up, a spare branch nothing has
-checked out, a spare directory git no longer knows — is removed at boot. Removing a project removes
-its spare, and a spare's removal releases its containers as **On worktree delete** says, as any
-deleted worktree's does. The footer's memory readout counts each spare's setup and CLI in orion's
-total, not among the agents.
-
-There is no switch, only what it follows: no spare is kept while `⌘N` starts another harness or the
-account it names is off, and a project's spare goes once nobody has used the project for a day. One
-whose setup fails is taken away, and the next is cut ten minutes later; a CLI that dies, or never
-gets to its prompt, is booted again two minutes later. Spares are cut one at a time, never while
-another is still setting up. Each costs one idle worktree and one 150–300 MB CLI.
-
-### The harness registry
-
-The known harnesses ship compiled in — how each CLI is driven, its flags, its resume shape, its
-hook dialect, is orion's — and `harnesses` holds what is yours of each, one entry per harness by
-its id: `enabled`, `label` (the name it goes by), `model_default`, `effort_default`, `models` (the
-model list its pickers offer) and `env`. A Claude account's entry is keyed by its id, the default
-account's by `claude`. An id no built-in or account holds adds a CLI by the name of its program:
-`agy` launches `agy`, with `--model`, a trailing first prompt and status from the process — a CLI
-that needs more is one orion has to learn.
+One block per project in the tree, each row reading and writing that project's entry in
+`projects`, keyed by its repo path:
 
 ```json
-{
-  "harnesses": {
-    "cursor": { "enabled": false },
-    "claude": { "label": "Personal", "model_default": "opus", "effort_default": "xhigh" },
-    "agy": { "model_default": "big-1" }
-  }
-}
+{ "projects": { "/Users/me/src/app": {
+    "base_branch": "dev", "setup_command": "just setup-worktree",
+    "run_command": "just start", "open_command": "open http://localhost:3000",
+    "worktree_containers": "remove" } } }
 ```
 
-The per-harness switches the Accounts tab edits for built-ins (`claude_enabled`, `codex_enabled`,
-…) keep working as a fallback wherever the map stays silent; every harness's model, effort and name
-are its `harnesses` entry's alone. A field an older release read here (`program`, `hooks`,
-`resume_flag`, the other flags) is no longer read, and stays in the file as it was. Omit the map
-entirely and you get every built-in, enabled, with its defaults — including ones a later orion
-adds. Like every other object key, a `harnesses` map in `config.local.json` replaces the whole map
-from `config.json` rather than merging per harness, so keep machine-specific overrides in one layer.
+| Key | Default | Row | What it does |
+|---|---|---|---|
+| `base_branch` | `""` (`auto`) | **Base branch** | Where the project's new worktrees start. Empty is `origin/HEAD`, freshly fetched; a name (`dev`) is origin's copy of that branch, else a local branch of that name, else `origin/HEAD` with a line in `daemon.log`. A leading `origin/` is dropped. The grid's ahead/behind counts, the commit list and the background base fetch measure against it, and a merge never deletes it. `orion worktree --base` wins over it. |
+| `setup_command` | `""` | **Setup command** | Run once in each worktree orion creates for the project. See [Setup command](#setup-command). |
+| `run_command` | `""` | **Run command** | What `⌘⇧S` (**Start stack**) runs. See [Run and open commands](#run-and-open-commands). |
+| `open_command` | `""` | **Open command** | What `⌘O` → **Open command** runs. |
+| `worktree_containers` | `""` (`off`) | **On worktree delete** | What deleting a worktree does to the docker compose projects started in it. See [Worktree containers](#worktree-containers). |
+| `merge_method` | `""` (squash) | — | The method the project's last merge took; its next merge form opens on it. |
+| — | — | **Linear key** | Not a setting: where the project's `LINEAR_API_KEY` was found. See [Linear](#linear). |
 
-`env` gives a harness's CLI environment variables of its own, on top of yours: a map of names to
-values, a leading `~/` expanded. They are set on the session's process and exported again after
-your login shell's profile has run, so an rc file that exports the same name cannot undo them. A
-map replaces the row's whole `env`; `null` clears it. A name a shell can't export, or one of
-orion's own `ORION_*` session variables, refuses the harness's launches with the reason while every
-other harness keeps working.
+A project with no entry reads as the defaults, and an entry that only repeats them is dropped on
+save. A key inside an entry this build doesn't know is kept.
 
-A second Claude account is one `claude_accounts` entry ([below](#claude-accounts)): built-in
-Claude's row with `CLAUDE_CONFIG_DIR` set for you. A `harnesses` entry whose `env` pins
-`CLAUDE_CONFIG_DIR` is no account — it runs its own program, with no hooks — so a second account
-an older release set up that way becomes one line, as below.
+### Hand-edited
 
-### Claude accounts
+These have no row.
 
-Claude Code keeps everything an account is — its login, its settings, every transcript — in one
-config dir: `CLAUDE_CONFIG_DIR`, `~/.claude` when unset. A second subscription is the same `claude`
-pointed at another dir, so that is all a CLAUDE ACCOUNT is here:
+| Key | Default | What it does |
+|---|---|---|
+| `keybindings` | `{}` | Key overrides by action id, each a comma-separated chord list: `{"git_diff": "cmd+g, g"}`. An empty string unbinds; an unknown id is ignored. `Ctrl+q` always unlocks a terminal, whatever is bound. |
+| `claude_models` | `[]` | The Claude model rows the pickers offer, in place of the built-in aliases (`fable`, `opus`, `sonnet`, `haiku`): `["claude-sonnet-5", "us.anthropic.claude-opus-5-v1:0"]`, for an organization allowlist or a provider such as Bedrock. Empty follows Claude Code's own `availableModels` when one is set, else the aliases. |
+| `hide_draft_prs` | `false` | Leaves draft pull requests out of the grid's PR count and `⌘K`'s rows. The pull requests modal lists them either way. |
+| `linear_assignee_email` | `""` | Whose issues `⌘L` lists. Empty is the owner of the project's `LINEAR_API_KEY`. Kept in `config.local.json`. |
+| `diff_tree_view` | `true` | Whether `⌘E` lists files as a tree. `⌘B` in the viewer flips it and writes it here. |
+| `onboarded` | `false` | Whether setup has been seen. Kept in `config.local.json`; delete it, or run **Run setup** (palette) or `orion setup`, to see it again. |
+| `seen_version` | `""` | The release this machine last showed **What's new** for. Kept in `config.local.json`. |
+
+## Claude accounts
+
+Claude Code keeps an account's login, settings and transcripts in one config dir
+(`CLAUDE_CONFIG_DIR`, else `~/.claude`). A CLAUDE ACCOUNT is that same `claude` pointed at another
+dir. The default account is `claude`; each `claude_accounts` entry adds one. Its name, model and
+effort are its `harnesses.<id>` entry, the default account's under `harnesses.claude`:
 
 ```json
 {
-  "claude_accounts": [
-    { "id": "claude-2", "config_dir": "~/.claude-2" },
-    { "id": "claude-work", "config_dir": "~/.claude-work" }
-  ],
+  "claude_accounts": [{ "id": "claude-work", "config_dir": "~/.claude-work" }],
   "harnesses": {
     "claude": { "label": "Personal", "model_default": "opus", "effort_default": "xhigh" },
     "claude-work": { "label": "Work", "model_default": "opus", "effort_default": "medium" }
@@ -327,376 +129,268 @@ pointed at another dir, so that is all a CLAUDE ACCOUNT is here:
 }
 ```
 
-Built-in Claude is the DEFAULT ACCOUNT, in Claude Code's own default dir (orion's
-`$CLAUDE_CONFIG_DIR`, else `~/.claude`); each entry adds one more. An entry becomes a harness that
-*is* Claude's row — the program, model and effort flags, `--resume`, the system prompt, the hooks,
-the model list, whatever `harnesses.claude` changes — plus `CLAUDE_CONFIG_DIR`, so a later change to
-Claude's row reaches every account and nothing is copied by hand. ONE STORE PER ACCOUNT: what is
-an account's own — its name, its model, its effort — is its `harnesses.<id>` entry, `claude` for
-the default one, and the Accounts tab and a rename write there and nowhere else, so one account's
-model never moves with another's. The `id` is what its sessions point back at, so it stays put;
-lowercase letters, digits and hyphens, never a built-in's. Its name (`label`) is the one it goes by,
-as typed — `Work Laptop` — and the only thing a rename changes: never the `id`, never the dir.
-A file from before this kept the default account's model and effort as `claude_model` /
-`claude_effort` and an added account's name on its `claude_accounts` entry, and let the added one
-follow the default's model: each moves into its own entry once, as orion loads the file, and every
-account launches as it did. `enabled: false` switches one off like any harness. The
-list is this machine's logins: a remote reached over `orion ssh` keeps its own. A session on an
-account is a Claude session with the account's id beside it, so everything orion does for Claude
-— model and title sync, usage, resume, the transcript checks — it does on every account. Take an
-entry out and its sessions refuse to start ("Claude account `claude-2` is no longer set up") until
-it is back; nothing is lost. Sessions an older orion started on an account are moved onto Claude
-and that account once, when the daemon first starts after the upgrade (store migration 33).
+An account runs as Claude in every way (flags, hooks, resume, usage, title and model sync), with
+`CLAUDE_CONFIG_DIR` set. Its `id` is what its sessions point back at, so it never changes:
+lowercase letters, digits and hyphens. `"enabled": false` on an entry switches it off. Take an
+entry out and its sessions refuse to start until it is back. Everywhere an account is listed it
+reads `Work (you@example.com)`, the email read from the account's `.claude.json`.
 
-**Named after who they are.** Everywhere an account is listed — the NEW AGENT PICKER, the QUICK
-PROMPT's `Tab` list, the Accounts tab, onboarding, the preset editor, **Continue on** and the card a
-usage limit stops — it reads its name and who it is signed in as: `Work (you@example.com)`,
-`Work (not signed in)` before its first login, and `Claude (you@example.com)` while it has no name
-of its own. The name is `harnesses.<id>.label` — `harnesses.claude.label` for the default
-account. Short of room — a card, a
-list row, the quick prompt's `harness` field, a preset's line — it is the name alone, else the
-email, and only while the machine has more than one account; with one, `claude` says it all. The email is
-Claude Code's own record, `oauthAccount.emailAddress` in `.claude.json`: inside the config dir for an
-account (as Claude Code keeps it whenever `CLAUDE_CONFIG_DIR` is set, `~/.claude` named that way
-included), in the home dir — `~/.claude.json` — for the default account. orion reads that one field
-and nothing else from the file, off the TUI's loop: a file's size and mtime are checked every few
-seconds and it is parsed again only when they move, and at once after a sign-in from orion.
-
-**The Accounts tab** (`s`, then the Accounts tab, or **Claude accounts** in the COMMAND PALETTE) lists
-every account under **Claude accounts**, the default first: with more than one, the ACCOUNT CHIP its
-sessions wear; its name, `on` or `off`, its dir, and `signed in`, `not signed in` or `same as
-~/.claude`. On an account's row:
+On the Accounts tab's **Claude accounts** rows:
 
 | Key | Action |
 |---|---|
-| `Enter` | sign it in, or in again: asks for the email to sign in as — it fills Claude's login page; empty leaves the choice to the browser — then runs Claude Code's own `claude auth login [--email …]` with the account's `CLAUDE_CONFIG_DIR`, in the editor modal over the overlay. On a Mac the login page opens in a private window (see below). The browser finishes it; the row says who it is once the modal closes. When it can't — the page shows a code instead — paste the code into the modal and press `Enter`. `Ctrl+Q` closes it early |
-| `r` | rename it: a prompt prefilled with its name, `Enter` keeps what is typed and an empty one takes the name away (back to `Claude (you@example.com)`), `Esc` leaves it. Only the name moves — the id its sessions point back at and the dir its login lives in stay. It is written as the account's `harnesses.<id>.label` (`harnesses.claude.label` for the default account), beside its model and effort |
-| `o` | sign it out, behind a confirm: `claude auth logout` in the same modal. Its dir keeps its settings and transcripts |
-| `c` | its chip's colour: the next of the six tints, at once, written as `account_tags.<id>.tint` (with more than one account, the only time there is a chip) |
-| `g` | its chip's letter or glyph: a prompt prefilled with the one it was given; `Enter` keeps the first character typed — a letter, `★`, an emoji — as `account_tags.<id>.icon`, and an empty one puts orion's letter back |
-| `←` / `→` | switch it on or off — the same switch as its section's **Enabled** row further down |
-| `⌫` | remove an added account, behind a confirm: its entry (and any `harnesses.<id>` deltas, and the `⌘N` default when it named it) leaves config.json. `Enter` keeps its dir on disk, for a later **Add account** by the same name to take back whole — `t` moves it to the Trash; a dir another account also runs in is never moved. The default account is not orion's to remove: switch it off instead |
+| `Enter` | sign in (`claude auth login`, an email to sign in as asked first), in the editor modal. On a Mac the login page opens in a private browser window, so it can't silently sign in as the account the browser already holds |
+| `r` | rename it (`harnesses.<id>.label`); empty takes the name away |
+| `o` | sign out, behind a confirm; the dir keeps its settings and transcripts |
+| `c` / `g` | the chip's tint / its letter or glyph (`account_tags.<id>`) |
+| `←` / `→` | switch it on or off |
+| `⌫` | remove an added account, behind a confirm: `Enter` keeps its dir, `t` moves it to the Trash |
 
-**Add account** asks for a name — `Work` makes `claude-work` in `~/.claude-work`, going by `Work`
-as typed; nothing makes the next `claude-2`, `claude-3` … whose dir is not there yet, with no name;
-a name whose dir already exists adopts it, login and all, and the question and the notice say so
-(`~/.claude-work is already on this machine, signed in as …`) — then, when the default account has
-any of it, asks whether to share its setup: `CLAUDE.md`, `settings.json`, `skills`, `agents`, `commands`, `plugins` and
-`keybindings.json` are linked from the default dir into the new one (`Enter` / `y`; `n` starts it
-empty). Only those, only the ones that exist, and never over anything the new dir already holds —
-never its login (`.claude.json`, the credentials), `projects`, history, sessions or caches, which are
-what make it another account. Being links, an edit in either account is an edit in both. Then
-`Enter` on its row signs it in. First-run onboarding has the same step right after Agents (while
-Claude is on there): the same rows, `Enter` on an account to sign it in, `Enter` on **Add account**
-for the same two questions, and the same warning.
+**Add account** asks for a name (`Work` makes `claude-work` in `~/.claude-work`; an existing dir is
+adopted), then offers to link the default account's `CLAUDE.md`, `settings.json`, `skills`,
+`agents`, `commands`, `plugins` and `keybindings.json` into the new dir. Two dirs signed in as one
+login are flagged (`same as ~/.claude`). `⇧C` on a session moves it, conversation and all, to
+another account ([Sessions](sessions.md#usage-limits-and-a-second-account)).
 
-**One login, twice.** claude.ai's browser sign-in approves whichever account the browser is
-signed in to, so a second dir signed in from the same browser silently becomes the first account
-again — one subscription, one usage limit, and **Continue on** gaining nothing. The Accounts tab,
-onboarding and **Continue on** flag it: `same as ~/.claude` on the row and a warning under the
-accounts (`⚠ ~/.claude and ~/.claude-2 are signed in as one account`), and `· same account` on a
-**Continue on** row. To fix it, `Enter` on one and sign it in again as the other account, typing
-its email if you like (`claude auth login --email <other>`).
+## The harness registry
 
-On a Mac, orion sidesteps the trap: its sign-in sets Claude Code's `BROWSER` to a small script
-(`claude-sign-in-browser` in orion's data dir) that opens the login page in a private window — the
-default browser's when it has one (Chrome, Firefox, Brave, Edge, Vivaldi, Chromium, Opera), else the
-first of those installed (Safari has no private window to open from the command line), else the
-page opens as before. A private window is signed in to nobody, so claude.ai asks who is signing in,
-and its redirect back to `claude auth login` finishes the sign-in with no code to paste. Elsewhere,
-sign in from a private browser window yourself, or sign out of claude.ai first.
+Claude, Codex, Cursor, Grok Build and OpenCode are compiled in: how each CLI is driven is orion's.
+`harnesses` holds what is yours of each, one entry per id (a built-in, a Claude account, or a new
+CLI):
 
-**From a hand-written entry.** A second account an older release ran as a `harnesses` entry — a
-wrapper script in `program`, or Claude's flags copied beside an `env` that pins `CLAUDE_CONFIG_DIR`
-— no longer launches as Claude: those fields are not read. It becomes one line. Keep its id, so its
-sessions follow it, and delete the entry:
-
-```json
-{
-  "claude_accounts": [{ "id": "claude-b", "config_dir": "~/.claude-b" }]
-}
-```
-
-with `"claude-b": {…}` gone from `harnesses` (the wrapper can go too). orion does not rewrite a
-hand-written entry for you: **Add account** refuses an id `harnesses` already defines and points
-here.
-
-Grok Build launches `grok` and starts off: a config with no `harnesses` map at all — `{}`, or a
-file from before the map — reads as `"grok": {"enabled": false}`, and its Enabled toggle is stored
-under `harnesses.grok.enabled`. A `harnesses` map that is there is read as written. Set `harnesses.grok.model_default` and `effort_default` in config.json
-to pass `--model` and `--effort`; unset values use the CLI defaults. The picker offers
-only `default` unless you configure `models` and `efforts` lists in that same block.
-`--rules` carries orion's guidance (and, on a fresh launch, the AUTO-TITLE instruction), and
-orion installs its hooks as one file of its own, `~/.grok/hooks/orion.json` (`$GROK_HOME/hooks/`
-when that is set), which Grok reads with no trust prompt. They report `SessionStart`,
-`UserPromptSubmit`, `Stop`, `StopFailure` and the subagent events, so a Grok row shows working and
-done, and its `sessionId` is saved for `grok --resume` after a restart. Grok has no hook for a
-permission prompt, and orion passes no `--always-approve`, so a Grok row never shows that it is
-waiting on you — the picker row says so. A `permissions_flag` of `--always-approve` in its
-`harnesses` entry leaves it nothing to ask. Its first-turn `orion rename` asks for permission like
-any other command until you allow it (`Always allow` at the prompt, or `allow =
-["Bash(orion rename *)"]` under `[permission]` in `~/.grok/config.toml`).
-
-### Linear
-
-A pull request a `⌘L` launch opens is always attached to its issues through the API, as a closing
-link, so Linear's pull request automations move the issue when it opens and merges. Linear keeps
-one attachment per pull request, so it never duplicates, and the link does not depend on the branch
-name carrying an issue ID. An issue sent to another worktree leaves the pull request orion had
-attached it to. Whose issues `⌘L` lists is `linear_assignee_email`, set by hand (empty: the key's
-owner). Each project's key is on Settings → **Projects**, under that project:
-
-| Row | Default | What it is |
-|---|---|---|
-| **Linear key** | — | read-only: where that project's `LINEAR_API_KEY` was found — `found in .env.local`, `found in .env`, `found in orion's environment`, or `not found`. The lookup is the one every Linear call makes: the checkout's `.env.local`, then its `.env`, then orion's own environment. The value is never shown, logged or stored. `Enter` sends Linear's `viewer` query with that key and the row adds whose it is — `✓ Jane Doe · jane@acme.dev` — or why not — `✗ Authentication required`; the explanation line under the rows says it in full. A key that moves or changes since drops the answer again |
-
-Only `LINEAR_API_KEY` is read from an env file. It goes to `api.linear.app` alone, on `curl`'s
-standard input (`--config -`), never on a command line.
-
-### What `session_idle_timeout` accepts
-
-The overlay cycles `off`, `1m`, `5m`, `15m`, `30m`, `1h`, but the DAEMON parses more than that: any
-`<n>s` / `<n>m` / `<n>h` works, and **`"off"` (or `"0"`) disables reaping entirely**. A malformed
-value falls back to the 5m default, *not* to off — a typo makes reaping ordinary, not absent.
-
-The IDLE REAPER sweeps every 15s and only takes sessions in WORKTREES no client is viewing. RUNNING
-and NEEDS FEEDBACK agents, agents whose backgrounded tool call is still running (a Claude
-`run_in_background` Bash call or Monitor watch, a Codex shell command — the idle clock restarts when
-that job ends), and terminals with a command running, are spared. A reaped session revives on the
-next ATTACH or prewarm, and an agent RESUMES its conversation there.
-
-## What the settings overlay owns
-
-- **Settings live in one JSON file** (`config.json`, beside the database, with `config.local.json` over
-  it), read fresh on each use by both the daemon and the TUI, so hand edits apply without a restart.
-  `s` opens the settings overlay over the same file, in five tabs. **General**: whether a new
-  agent's card comes under the cursor, the idle timeout, auto-fixing your pull requests and the app
-  files open in; the done sound (`done_sound`: a ding when a turn you haven't seen finishes, 3 s
-  after it settles, once until you look at the session, and never within 10 s of another sound — a
-  macOS system sound such as `Glass`, the default; `bell` for the terminal bell, which Ghostty keeps
-  silent unless its `bell-features` include `audio`; or `off`. Over `orion ssh` and off macOS it is
-  always the bell. While the terminal window is in the background the finish is also named in a
-  desktop notification; `off` silences both) and the feedback sound (`feedback_sound`: the same
-  choices, `Sosumi` by default, rung when a turn stops to ask you or crashes mid-turn — and, while
-  the terminal window is in the background, a desktop notification naming the session and its
-  worktree; `off` silences both) — stepping either sound row with ←/→ plays the sound it lands on,
-  so you can pick by ear; and the theme, animations and Spotify in the footer. **Accounts**: which
-  account `⌘N` starts on, the Claude accounts, and which agent CLIs the new-session menu offers (at
-  least one stays on) with their default model and reasoning effort. **Projects**: each project's
-  own settings (`projects`, keyed by repo path — the branch its new worktrees start from, `auto`
-  for origin's default or a name such as `dev`; its run and open commands; what deleting one of its
-  worktrees does to its docker compose projects; and its Linear key). **Presets** lists the AGENT
-  PRESETS, orion's then yours, and edits, makes and deletes them, and **Keys** lists the keys. `R` inside the overlay puts every setting — hotkeys
-  included — back to its default, after a confirmation, and removes `config.local.json`.
-- **Every grid key is rebindable by hand.** The overlay's Keys tab lists every action and what it
-  answers to, and nothing on it edits: overrides go into the same file by hand
-  (`"keybindings": {"git_diff": "cmd+g, g"}`), and an empty value unbinds. `Ctrl+q` is the one
-  exception: it unlocks a terminal no matter what you bind, since unbinding your way out would trap
-  you in the session.
-
-## Backup, restore and other machines
-
-```sh
-orion config path                  # where each settings file is
-```
-
-- **Copy the file.** Both halves re-read `config.json` on every use, so a backup copied over it — or
-  to wherever `ORION_CONFIG_FILE` points — applies at once, with no restart. `agent_presets.json`
-  and `ssh_hosts.json` sit beside it and copy the same way; `config.local.json` is this machine's.
-- **Over ssh**, `orion ssh` runs the remote's own orion on the remote's own settings: nothing of
-  this machine's travels with it.
-
-### Compatibility rules
-
-Two orion versions share these files all the time: a remote a few releases behind the machine that
-connects to it, a backup restored into a newer build. One rule keeps either from breaking the other:
-**a key a build doesn't know is ignored when read and written back untouched on save** — a key a
-newer orion added, or one an older orion wrote that this one has retired. The overlay's `R` reset is
-the one thing that drops it. `crates/orion-core/fixtures/` holds the config file the newest release
-wrote, every key off its default, and the test suite checks that it still loads and survives a save.
-
-`config.json` carries no version number. An older build could only refuse a newer file or ignore the
-number, and the keys a file holds already tell a newer build everything it needs.
-
-## Run and open commands
-
-Each project can carry two shell command lines, **Run command** and **Open command** on the SETTINGS
-OVERLAY's Projects tab (`s`), kept in `config.json` under the project's `projects` entry, beside the
-**Setup command** a new worktree runs ([Setup command](#setup-command)). Both run in the selected
-worktree's checkout:
-
-- **Run command** — the RUN COMMAND: how a worktree's stack starts, `npm run dev` say. `⌘⇧S` on the
-  grid, or **Start stack** in a card's right-click menu (or the project tab's), starts it in the
-  background — its run line comes up in the band, and the cursor and the pane stay where they were;
-  the same key, or the row now **Stop stack**, stops it. On a worktree still running its setup it
-  waits for the setup to finish first. The DAEMON runs it in a RUN
-  TERMINAL: your login shell (`$SHELL -l -i -c`, the wrapper an agent launch uses, so `npm`, `bun` or
-  `mise` resolve the way they do typed) running that line and nothing else. Its process is the
-  worktree's RUNNING state — it is a terminal in the worktree's band, its `▶` lit while the process
-  lives. Like every session it outlives
-  the TUI and every client sees it, and the idle reaper never takes it. Stopping sends the run a `^C`,
-  as you would at a terminal, so its own trap winds down what it started — a compose stack, a dev
-  server. Meanwhile its run line counts down, `stopping… 1:52`, and the footer says the key again kills
-  it; a second stop, or two minutes without it exiting, kills the whole process tree and removes the
-  row. A stop you asked for takes the run line with it once the run has wound down. A command that
-  exits on its own, with nobody stopping it, leaves its line behind saying how it ended — a faint
-  `done` for a clean exit, a red `exited 1` for any other; attaching it replays how the run ended,
-  and nothing but **Start stack** runs it again — not an attach, not the prewarm sweep. The DAEMON
-  reads the run's output for the localhost addresses it prints (`http://localhost:3000`,
-  `http://127.0.0.1:…`, `http://0.0.0.0:…`) and every client shows their ports after the command,
-  `:3000 :5173`, each a link to it on localhost; the first is what `⌘O` → **Open app** opens.
-  **Restart stack** (the command palette, or the run line's right-click menu) stops the run as a stop
-  does and starts it again in the same line once it has gone, with the command as it is set at the
-  press; a run that isn't up just starts. There is one run per worktree: a second client's start on a worktree
-  already running never starts another.
-- **Open command** — the OPEN COMMAND, `open http://localhost:3000` say. `⌘O` → **Open command** on a
-  worktree fires it once, from the TUI rather than the DAEMON, since what it opens — a browser tab, an
-  editor — belongs on the machine you are sitting at. It runs through `$SHELL -c` with its output
-  discarded, and orion does not wait for it. It answers from any card: the worktree is the one whose
-  band the cursor is on. A card's right-click menu has **Open** too, and **Open checkout in editor**
-  can be given a key of its own in `keybindings` (Settings → Keys lists every action and its keys).
-
-Both are read fresh at every press, so an edit applies on the next **Start stack** or **Open command**.
-They are one project's settings, so each project can run and open its own way; with none set, the
-footer says so and names Settings → Projects. See `projects` in [Every setting](#every-setting).
-
-## Worktree containers
-
-A checkout that runs `docker compose up` — a database, a cache, an object store per worktree —
-leaves that compose project behind when orion deletes the checkout: running, or stopped but holding
-its volumes. **On worktree delete** (Settings → Projects, each project's `worktree_containers`) has the DAEMON deal
-with them as part of the delete:
-
-| Value | What a deleted worktree's compose projects get |
+| Field | What it is |
 |---|---|
-| `off` (default) | Nothing; they stay as they are. |
-| `stop` | `docker compose -p <project> stop`: nothing left running, everything kept. |
-| `remove` | `docker compose -p <project> down --remove-orphans`: containers and networks gone, named volumes kept. |
-| `remove+volumes` | The same with `--volumes`: the project's data goes too. |
+| `enabled` | whether the pickers offer it |
+| `label` | the name it goes by |
+| `model_default` | the `--model` new sessions get; `"default"` passes none |
+| `effort_default` | the effort new sessions get (Claude `--effort`, Codex `model_reasoning_effort`, Cursor a model suffix, Grok `--effort`); `"default"` passes none |
+| `models` | the model rows its pickers offer: `[{"id": "big-1", "hint": "the big one"}]` |
+| `env` | environment variables for its CLI, exported after your login shell's profile runs; a leading `~/` is expanded, `null` clears it |
 
-How a project is matched, and when it is left alone:
+An id no built-in or account holds adds a CLI by the name of its program: `"agy": {}` launches
+`agy` with `--model`, the first prompt as its last argument, and status from the process. A broken
+entry refuses its own launches with the reason; every other harness keeps working. Like every
+object key, a `harnesses` map in `config.local.json` replaces the whole map from `config.json`.
 
-- **By where it was started, never by name.** Compose stamps every container with the directory
-  `up` ran from (`com.docker.compose.project.working_dir`). A project goes when every one of its
-  containers was started in the deleted checkout or a directory under it — a nested checkout's
-  included. A project with containers started elsewhere too (two checkouts sharing a project name)
-  is left alone, with a warning naming it, since tearing it down would take the other checkout's
-  data with it. No compose file is needed: compose finds what to stop by its labels.
-- **Any docker engine.** It drives the `docker` CLI, so OrbStack, Docker Desktop and Colima all
-  work. The DAEMON looks for `docker` on its own `PATH`, then in `~/.orbstack/bin`, `/usr/local/bin`,
-  `/opt/homebrew/bin` and Docker Desktop's app bundle, since launchd's `PATH` names none of them. A
-  machine with no docker CLI has nothing to clean up.
-- **Only after a delete that succeeded.** It runs after `git worktree remove` and the row drop,
-  under the DAEMON's worktree lock — so a create of the same path waits for it — and is skipped while
-  the directory is still on disk. Worktrees removed outside orion run nothing.
-- **It only reports.** Docker not answering, a compose command failing, or one running past 60 s
-  (`docker ps` gets 15 s) is a one-line warning in every client; the worktree stays deleted. What it
-  stopped or removed is logged in `daemon.log`.
+Grok Build reports working and done through hooks (`~/.grok/hooks/orion.json`) and resumes with
+`--resume`, but has no hook for a permission prompt, so a Grok row never shows it is waiting on
+you; its picker row says so.
 
-While a checkout is still there, its stack's state is on the grid: the DAEMON asks `docker ps` every
-5 seconds (`ORION_STACK_POLL_MS` changes that; it waits 30 seconds after docker stops answering) and
-every client draws a `⬡` at the right end of the band of a worktree with a stack — green while the
-stack runs, faint while it is stopped. The DAEMON asks only while a client is connected: with none,
-docker is left alone.
+## Presets
 
-`orion doctor` lists the compose projects whose every container was started in a directory that is
-gone — a checkout deleted while this was `off`, or deleted outside orion — with the
-`docker compose -p <project> down --volumes` that removes each ([Commands](commands.md#checking-the-machine)).
+Settings → **Presets** manages the AGENT PRESETS, kept in `agent_presets.json` in the data dir. A
+preset is a name, the account or harness it **Runs on** (the box's own by default, or one it
+pins), a model and effort (Settings → Accounts' by default), and one text with `{task}` where the
+task goes (after the text, past a blank line, when it names none). Its **Task** row is `ask` (an
+optional task is asked for) or `skip` (it launches on its text alone). The editor shows a preview
+of what the agent will get.
+
+**Used by orion** lists the three SYSTEM PRESETS, each tagged `orion`:
+
+| Preset | Used for | Runs on |
+|---|---|---|
+| **PR autofix** | the text round what broke, for every autofix agent | the PR's own agent (the session that worked on its branch), else your default |
+| **Linear Ticket** | wraps every `⌘L` launch; `{issues}`, `{ids}` and `{first_id}` are filled in | the box's agent |
+| **Week review** | the rules the week in review is written by | your default agent's account, at sonnet · medium |
+
+A system preset always has text: empty, it shows orion's built-in text greyed and uses it. It can't
+be renamed or deleted. On it `Enter` edits and `^R` puts orion's text back. On one of yours, under
+**Yours**, `Enter` edits, `^N` makes a new one and `^D` deletes it.
+
+Presets are picked, never managed, elsewhere: `⌘U` / `^X` in the QUICK PROMPT, `⇧Tab` on a Linear
+issue or a todo, **Agent presets** in the palette, and `⌘U` over an agent's locked pane, which
+pastes the text in at the caret.
 
 ## Setup command
 
-A new checkout often needs work before it is any use — dependencies installed, `.env` files linked,
-a build cache cleared. The **Setup command** on the SETTINGS OVERLAY's Projects tab (`setup_command`
-in the project's `projects` entry, typed like the Run command, and on setup's **First project** page
-too) is that work as one shell line, `just setup-worktree` say. The DAEMON reads it fresh each time it
-creates a worktree for the project — a bare `orion worktree`, the QUICK PROMPT's **+ new worktree**, a
-branch picked in the WORKTREE PICKER, a PR SESSION's checkout — and runs it there once:
+A project's **Setup command** (`setup_command`, also on setup's **First project** page) runs once
+in each worktree orion creates for it: `orion worktree`, **+ new worktree**, `⌘⇧N`, a branch picked
+in the worktree picker, a pull request's checkout, a spare worktree.
 
-- **On a setup line in the worktree's band**, `▶ setup` with its command on a `$`, laid out as a run
-  line is. It is your login shell (`$SHELL -l -i -c`, the wrapper a run command and an agent launch
-  use, so `npm`, `bun`, `nvm` or `mise` resolve the way they do typed) running that line in the new
-  checkout, once its ENV LINKS are in.
-- **For as long as it takes.** There is no time cap, and the create does not wait for it: the
-  worktree is in the grid at once, and sessions can start in it while it sets up. The idle reaper
-  never takes it.
-- **`setting up…`** at the right of its line while it runs. A clean exit takes the line with it. Any
-  other leaves it, a red `setup failed (1)`: attaching it replays what it printed, and nothing runs it
-  again — close the line when you are done with it. A daemon restart in between loses the output, and
-  the line then reads `setup failed` with no code.
-- **Start stack waits for it.** `⌘⇧S` on a checkout that is still setting up starts nothing yet: the
-  footer holds `setting up · the stack starts once setup finishes · ⌘⇧S again cancels`, and the run
-  starts once the setup exits cleanly. A second press, or **Cancel start** in the menu, calls the
-  start off and leaves the setup running. A setup that fails starts nothing that was waiting on it,
-  and a warning says so; **Start stack** then starts the run as usual.
+- It runs on a **setup** row in the worktree's band, through your login shell (`$SHELL -l -i -c`),
+  in the new checkout once its `.env` links are in. There is no time cap; sessions can start in the
+  worktree meanwhile.
+- The row reads `setting up…`. A clean exit removes it; anything else leaves a red
+  `setup failed (1)`, whose output attaching replays.
+- **Start stack** waits for it: the footer says the stack starts once setup finishes, and a second
+  `⌘⇧S` (or **Cancel start**) calls the start off.
 
-Worktrees created outside orion, which WORKTREE SYNC merely notices, run nothing. An empty row (`not
-set`) is no setup at all.
+Worktrees made outside orion run nothing.
 
-Releases before this one ran WORKTREE HOOKS from git config instead (`orion.worktreeCreateHook`,
-`orion.worktreeDeleteHook`). They are gone, and a repository that still sets them runs nothing: move a
-create hook's work into the project's **Setup command**. Nothing replaces a delete hook — **On
-worktree delete** above stops or removes the checkout's compose projects, and anything else the
-checkout held is yours to release.
+## Run and open commands
+
+- **Run command**: `⌘⇧S`, or **Start stack** in a row's or a project tab's menu, starts it in the
+  background, in a RUN TERMINAL through your login shell. Its run line shows in the band with the
+  localhost ports it prints (`:3000 :5173`, each a link; `⌘O` → **Open app** opens the first).
+  `⌘⇧S` again sends it `^C`; the line counts down `stopping… 1:52` and a further press, or two
+  minutes, kills it. A stop you asked for removes the line; an exit nobody asked for leaves `done`
+  or a red `exited 1`. **Restart stack** stops it and starts it again. One run per worktree.
+- **Open command**: `⌘O` → **Open command** runs it from the TUI with `$SHELL -c`, output
+  discarded, since what it opens belongs on the machine you sit at.
+
+Both are read fresh at every press. With none set, the footer says so and names Settings → Projects.
+
+## Worktree containers
+
+**On worktree delete** decides what a deleted worktree's docker compose projects get:
+
+| Value | What happens |
+|---|---|
+| `off` (default) | nothing |
+| `stop` | `docker compose -p <project> stop` |
+| `remove` | `docker compose -p <project> down --remove-orphans`; named volumes kept |
+| `remove+volumes` | the same with `--volumes` |
+
+A project is matched by the directory its containers were started in, never by name; one with
+containers started elsewhere too is left alone, with a warning. It runs only after a delete that
+succeeded, works with any docker engine (OrbStack, Docker Desktop, Colima), and only ever warns on
+failure. While a checkout is there, its band shows a `⬡` while it has a stack: green running,
+faint stopped. The DAEMON asks `docker ps` every 5 s, and only while a client is connected.
+`orion doctor` lists compose projects whose checkout is gone.
+
+## Spare worktrees
+
+For each project used in the last 24 hours, the DAEMON keeps one SPARE WORKTREE: cut from the
+project's **Base branch**, its `.env` links made and its **Setup command** run, with a `claude`
+booted on the `⌘N` account at its default model and effort, waiting at its prompt. Its branch and
+directory are `orion-spare-<id>`; the grid, worktree sync and the worktree picker leave it out.
+
+A new-worktree launch (`⌘⇧N`, **+ new worktree**, a Linear launch) on that account, model and
+effort, in edit mode, takes it: the branch is renamed to the launch's (the directory keeps its
+name), the worktree appears, the task is typed in as the first turn, and a new spare is cut behind
+it. Any other launch cuts a worktree as usual.
+
+The DAEMON fetches origin for a spare every 5 minutes; when the base moves, an untaken spare is
+reset to it and its CLI rebooted (setup is not run again). A finished spare survives a DAEMON
+restart; a half-made one is removed. There is no switch: no spare is kept while `⌘N` starts another
+harness or its account is off. Each costs one idle worktree and a 150–300 MB process, counted in the
+footer's memory readout.
+
+## Linear
+
+Each project's `LINEAR_API_KEY` is read from its checkout's `.env.local`, then `.env`, then orion's
+own environment. Only that variable is read, and it goes only to `api.linear.app`, on `curl`'s
+standard input. The Projects tab's **Linear key** row says where it was found (`found in .env.local`,
+`not found`); `Enter` asks Linear whose key it is (`✓ Jane Doe · jane@acme.dev` or `✗ <why>`). A
+pull request a `⌘L` launch opens is attached to its issues as a closing link.
+
+## Orion.app
+
+On a Mac orion runs as an app of its own: **Orion** in the Dock, Spotlight and ⌘-Tab. `orion app`
+opens it, as does a first install. It is a copy of the Ghostty.app on this Mac, kept at
+`~/Applications/Orion.app` under orion's name and icon and signed ad hoc. It reads your Ghostty
+config (font, theme) and then its own, which makes the window black and full-screen and clears
+Ghostty's key table.
+
+Nothing moves into it: it runs the installed `orion` against the same daemon and data dir. With
+Ghostty installed, a bare `orion` in a terminal opens the app. orion stays in the terminal under
+tmux, over ssh, without Ghostty, with `ORION_RUNTIME_DIR` or `ORION_DATA_DIR` set, for a build
+from a checkout, or with `ORION_APP=off`. The app starts orion through your login shell, so it gets
+your PATH. It is rebuilt when Ghostty updates or orion moves.
+
+### Ghostty's keys in Orion.app
+
+The app's Ghostty keeps only these; every other chord reaches orion as the key it is:
+
+| Key | Stays Ghostty's |
+|---|---|
+| `⌘C` | copy, only while Ghostty has a selection of its own (a ⇧-drag); otherwise it reaches orion |
+| `⌘V` | paste |
+| `⌘Q` | quit (sessions keep running) |
+| `⌘⇧W` | close the window |
+| `⌘Enter`, `⌃⌘F` | full screen |
+| `⌘=`, `⌘+`, `⌘-`, `⌘0` | text size |
+| `⌘←`, `⌘→`, `⌥←`, `⌥→` | typed as `^A`, `^E`, `⎋b`, `⎋f` |
+
+`⌘.` is sent as itself (macOS would make it Escape). Nothing is written into your own Ghostty
+config, so in a Ghostty window of your own Ghostty keeps its ⌘ chords.
+
+## Installing editors and agent CLIs
+
+`install.sh` makes sure of git (it stops without it), fresh, gh and Ghostty; `--no-deps` or
+`ORION_NO_DEPS=1` skips that. Inside orion, `i` on a row whose program is missing (setup's Claude
+page, **Open files in**, a harness's **Enabled** row, the footer's note that fresh is missing) runs
+its installer in the editor modal. `orion doctor` names the same commands without running them.
+
+| Program | Command |
+|---|---|
+| fresh | `brew install fresh-editor` |
+| Claude (`claude`) | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| Codex (`codex`) | `brew install --cask codex`, else `npm install -g @openai/codex` |
+| Cursor (`cursor-agent`) | `curl https://cursor.com/install -fsS \| bash` |
+| Grok Build (`grok`) | `curl -fsSL https://x.ai/cli/install.sh \| bash` |
+| OpenCode (`opencode`) | `curl -fsSL https://opencode.ai/install \| bash` |
+| Ghostty | `brew install --cask ghostty` |
+| git / gh | `brew install git` / `brew install gh` |
+| Open files in | `brew install --cask cursor` / `visual-studio-code` / `sublime-text` |
+
+fresh runs off orion's own config, `<data dir>/fresh/config.json` (orion only adds settings it
+lacks, so your edits stay), with orion's theme written to `~/.config/fresh/themes/orion.json` and
+fresh's animations on. Your own `~/.config/fresh/config.json` is never used. `ORION_EDITOR` names
+any other editor, opened as `<command> +<line> <file>`.
+
+## ssh and other machines
+
+`orion ssh <host> [dir]` opens orion on another machine over `ssh -t`, installing it there first
+when it is missing. What you drive is the remote's own orion: its daemon, sessions and settings.
+Nothing of this machine's travels with it. Each destination is remembered in `ssh_hosts.json`
+(newest first, up to 20); **SSH hosts** in the palette lists them: `Enter` connects, `a` adds one,
+`d` forgets one. Connecting quits this TUI and runs `orion ssh`; the local daemon keeps running.
+
+To back up or move settings, copy `config.json` (it applies at once) and `agent_presets.json`.
 
 ## Logs
 
-`daemon.log` and `tui.log` live in the state dir, under the DATA DIR — the `directories` crate has
-no state dir on macOS, so orion uses `<DATA DIR>/state`:
+`daemon.log` and `tui.log` are in `<data dir>/state/`. `ORION_LOG=debug` logs more. A log past 5 MB
+when its process starts is moved to `daemon.log.1` (or `tui.log.1`) and a new one begun. No
+`daemon.log` at all means the DAEMON never started.
 
-- `~/Library/Application Support/dev.orion.orion/state/`
-- With `ORION_DATA_DIR` set, always `$ORION_DATA_DIR/state/`, so a test or a parallel instance keeps
-  its logs beside its own data.
+## What orion keeps
 
-`ORION_LOG=debug` for more. No `daemon.log` at all means the DAEMON never started.
+Everything orion writes under its data dir:
 
-Neither grows without end: a log past 5 MB when its process starts is set aside as `daemon.log.1`
-(or `tui.log.1`), replacing the one set aside before, and a new one begun. A DAEMON that stays up
-keeps writing the file it opened, so the cap is checked at each start, not while it runs.
-
-## What orion keeps, and for how long
-
-Everything orion fetches is cut at the ask, and everything it stores is pruned to what is still on
-screen, so a year of use reads and writes what a week does:
-
-| What | Kept |
-|---|---|
-| Open pull requests | the 100 newest per project |
-| Merged pull requests | the ones merged in the last 7 days among the 100 most recently touched |
-| Linear issues | open ones — 100 of yours, 250 of your teams' — and the ones done in the last 7 days, 50 of each |
-| Linear lists (`linear-cache/issues.json`) | each project's last answer, with the comments read on its issues — what `⌘L` and `⌘K` show before the next ask lands; rewritten whole when one lands |
-| Pull request pages (`pr-cache/details/`) | one file each, while the pull request is on a row; written only when read again |
-| Linear branch links (`linear-links.json`) | until 90 days after they were last linked, once no checkout is on the branch and no open pull request is from it |
-| Ticked todos (`todos/`) | 120 days after they were ticked, pruned when the list loads; a group left with nothing in it goes with them. Open todos stay until you tick or delete them |
-| Week in review (`reviews/`) | the last 12 per project (and 12 of all projects), each with what it was written from; a second one for the same day, range and scope takes the first's place |
-| Pull request read marks (the DAEMON's `pr_seen`) | 180 days after you last read the pull request; pruned when the DAEMON starts |
-| Files dropped or pasted into a prompt (`attachments/`) | 7 days |
-| Logs | 5 MB, and the 5 MB before it |
+| File | What it holds | Kept |
+|---|---|---|
+| `orion.db` | projects, worktrees, sessions, terminals, the TUI's remembered state, pull request read marks | read marks: 180 days after you last read the PR |
+| `config.json`, `config.local.json` | settings | — |
+| `agent_presets.json` | presets | — |
+| `ssh_hosts.json` | ssh destinations | the 20 newest |
+| `todos/` | each project's todo list | ticked items: 120 days |
+| `reviews/` | week in review write-ups | the last 12 per project, and 12 across projects |
+| `pr-cache/` | the last pull request lists and pages | 100 open per project, the last 7 days' merges, the last 30 days' closes; pages while their PR is on a row |
+| `linear-cache/issues.json` | each project's last Linear lists and comments | rewritten on each fetch |
+| `linear-links.json` | which branch was cut for which Linear issue | 90 days after the last link, once nothing is on the branch |
+| `usage.json` | the last usage readings (no tokens) | the accounts still set up |
+| `cursor_models.json` | Cursor's model list | refreshed after 24 h |
+| `recent_files.json` | Go to file's recent files | 20 per checkout |
+| `reviewed.json` | the diff viewer's reviewed marks | until the checkout's HEAD moves |
+| `quick_prompt_drafts.json` | unsent QUICK PROMPT text | until it is sent or cleared |
+| `attachments/` | files dropped or pasted into a prompt | 7 days |
+| `fresh/config.json` | fresh's config | — |
+| `claude-sign-in-browser` | the private-window script sign-in uses | — |
+| `state/` | `daemon.log`, `tui.log` | 5 MB each, and the 5 MB before |
 
 ## Environment variables
 
-Knobs worth reaching for by hand:
+| Var | What it does |
+|---|---|
+| `ORION_LOG` | tracing filter for the DAEMON and the TUI (`debug`) |
+| `ORION_EDITOR` | an editor to open files in instead of fresh |
+| `ORION_APP` | `off` keeps a bare `orion` in the terminal it was typed in |
+| `ORION_CONFIG_FILE` | where `config.json` is; after changing it, `orion kill` and relaunch |
+| `ORION_DATA_DIR` | the data dir (tests, parallel instances) |
+| `ORION_RUNTIME_DIR` | the dir holding the daemon socket and pidfile (default `$XDG_RUNTIME_DIR/orion`, else `/tmp/orion-<uid>`) |
+| `ORION_AGENT_CMD` | one command line in place of every agent CLI (tests) |
+| `ORION_INSTALL_URL` | the install script `orion upgrade` and `orion ssh` fetch |
+| `ORION_USAGE` | `off` stops usage reads |
+| `ORION_UPDATE_CHECK_SECS` | how often to check for a new release (default 3600; `0` off) |
+| `ORION_SPOTIFY_POLL_SECS` | how often to ask Spotify (default 1; `0` off) |
+| `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |
 
-| Var | Default | What it does |
-|---|---|---|
-| `ORION_LOG` | — | `RUST_LOG`-style tracing filter for both the DAEMON and the TUI. |
-| `ORION_EDITOR` | — | Editor command the file modals open, ahead of the `editor` setting. |
-| `ORION_APP` | unset | `off` keeps a bare `orion` in the terminal it was typed in, on a Mac where it would otherwise open [Orion.app](#orionapp). The app's launcher sets it to `1` for the orion it starts; orion takes it out of its environment again, so nothing it starts inherits it. |
-| `ORION_CONFIG_FILE` | `<DATA DIR>/config.json` | Moves `config.json` alone — into a dotfiles checkout, say — leaving the database, logs and `config.local.json` in the DATA DIR. Give an absolute or `~/` path. The DAEMON reads it from its own environment, so after changing it run `orion kill` and relaunch. |
+The DAEMON sets `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` on every agent so its hooks
+can reach it; they are not for you to set. Empty and unset mean the same.
 
-Overrides for tests and parallel instances — real, but not things a normal install needs:
+## Compatibility
 
-| Var | Default | What it does |
-|---|---|---|
-| `ORION_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/orion`, else `/tmp/orion-<uid>` | The RUNTIME DIR holding the DAEMON SOCKET and pidfile. |
-| `ORION_DATA_DIR` | the platform app-support dir | The DATA DIR holding the database, config and logs. |
-| `ORION_AGENT_CMD` | — | Replaces every agent CLI with one command line, taken verbatim (tests stand in `/bin/sh` or a stub script). |
-| `ORION_INSTALL_URL` | the published install script | The URL `orion upgrade` / `orion ssh` fetch. |
-| `ORION_USAGE` | unset | `off` stops ACCOUNT USAGE asking any provider, background reads included — what the e2e tests set so a run never reads the machine's logins. |
-| `ORION_UPDATE_CHECK_SECS` | `3600` | How often the TUI asks GitHub whether a newer release is published, for the FOOTER's `⇡ vX.Y.Z` indicator (one `curl` to the release page's redirect, no `gh` token); `0` turns it off. See [Keys](keys.md#chips-and-readouts). |
-| `ORION_SPOTIFY_POLL_SECS` | `1` | How often the TUI asks Spotify what it is playing while a track is up, for the FOOTER's Spotify readout (one `osascript`; every five seconds while Spotify is closed or stopped); `0` turns it off, as the e2e tests do. macOS only. See the `spotify` setting. |
-| `ORION_IDLE_REAP_MS` | `15000` | IDLE REAPER sweep period in ms. This is how often it looks, not how long a session may idle — that is `session_idle_timeout`. |
-| `ORION_WORKTREE_SYNC_MS` | `2000` | WORKTREE SYNC probe period in ms: how often the DAEMON reconciles `git worktree list` so worktrees made outside orion appear. |
-
-`ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` are set *by* the DAEMON on every agent
-PTY (and scrubbed from plain terminals) so hooks can reach the HOOK RECEIVER — never something you
-set yourself. For all of these, empty and unset mean the same thing: use the default.
+A key this build doesn't know is left in the file as it is, and survives every save. (`⇧R`, reset
+all, is the one thing that drops it.)
