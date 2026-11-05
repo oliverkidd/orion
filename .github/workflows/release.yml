@@ -13,7 +13,7 @@ name: Release
 #   - patch (x.y.Z) otherwise: TUI and CLI only, so an upgrade reopens orion
 #     and the running daemon keeps its sessions.
 # A major release is a judgement call, never automatic: raise the floor in
-# Cargo.toml to the next major (2.0.0) in the change that earns it. The stamped
+# Cargo.toml to the next major (X.0.0) in the change that earns it. The stamped
 # version is written into the build only, never committed back to main.
 #
 # Put `[skip release]` in the head commit message to push without releasing.
