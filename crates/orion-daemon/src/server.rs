@@ -300,6 +300,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     branch,
                     base,
                     existing,
+                    launch,
                 } => {
                     // A create fetches `origin` and then runs the WORKTREE
                     // HOOK, each bounded by a 30 s timeout; off the request
@@ -308,15 +309,19 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     let daemon = daemon.clone();
                     let out_tx = out_tx.clone();
                     tokio::spawn(async move {
-                        reply(
-                            &out_tx,
-                            req_id,
-                            daemon
-                                .create_worktree(&project, &branch, base.as_deref(), existing)
-                                .await
-                                .map(Some),
-                        )
-                        .await;
+                        let created = match launch.filter(|_| base.is_none() && !existing) {
+                            Some(launch) => {
+                                daemon
+                                    .create_launch_worktree(&project, &branch, &launch)
+                                    .await
+                            }
+                            None => {
+                                daemon
+                                    .create_worktree(&project, &branch, base.as_deref(), existing)
+                                    .await
+                            }
+                        };
+                        reply(&out_tx, req_id, created.map(Some)).await;
                     });
                 }
                 ClientRequest::DeleteWorktree { req_id, id, force } => {

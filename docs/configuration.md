@@ -241,6 +241,12 @@ prompt. Its branch and its directory are both `orion-spare-<id>`
 it is; the grid, the worktree sync and the WORKTREE PICKER's branch rows leave it out, and Claude's
 `/list-agents` shows its CLI as a peer named after that directory.
 
+A launch into a new worktree — `⌘⇧N`, the box's **+ new worktree**, a Linear launch — on the account,
+model and effort the spare's CLI booted with, in edit mode, takes it: the branch is renamed to the
+launch's (`git branch -m`; the directory keeps its `orion-spare-` name), the worktree appears, and
+the task is typed into the booted CLI as its first turn once it is at its prompt. A new spare is cut
+behind it. Any other launch, or one onto a branch name that exists, cuts its worktree as before.
+
 There is no switch, only what it follows: no spare is kept while `⌘N` starts another harness or the
 account it names is off, and a project's spare goes once nobody has used the project for a day. One
 whose setup fails is taken away, and the next is cut ten minutes later; a CLI that dies, or never

@@ -96,6 +96,14 @@ pub enum ClientRequest {
         /// branch of that name; `base` is ignored. A row already on the
         /// branch is the answer.
         existing: bool,
+        /// The launch this checkout is cut for — the `CreateAgent` its Ack
+        /// sends next — when there is one. A new branch off the project's
+        /// own base (no `base`, not `existing`) for a launch that is the
+        /// one its SPARE WORKTREE's CLI booted as takes the spare: its
+        /// branch renamed to `branch`, its row sent, and its CLI handed to
+        /// that `CreateAgent`. Anything else is cut as before.
+        #[serde(default)]
+        launch: Option<LaunchSpec>,
     },
     DeleteWorktree {
         req_id: u64,

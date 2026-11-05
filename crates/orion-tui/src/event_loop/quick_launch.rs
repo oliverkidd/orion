@@ -98,7 +98,16 @@ pub(super) fn submit(
             // `base: None` is the project's **Base branch** (the DAEMON reads it),
             // else its fetched `origin/HEAD` (`git::add_worktree_off_default`)
             // — never this checkout's HEAD. An `existing` branch (a WORKTREE
-            // PICKER branch row) is checked out as it is instead.
+            // PICKER branch row) is checked out as it is instead. The launch
+            // rides along, so the DAEMON can hand it the project's SPARE
+            // WORKTREE when its CLI booted as exactly this.
+            let spec = orion_core::LaunchSpec {
+                kind: launch.kind,
+                custom_harness: launch.custom.clone(),
+                model: launch.model.clone(),
+                effort: launch.effort.clone(),
+                mode: launch.mode,
+            };
             send_with_follow(
                 app,
                 out,
@@ -114,6 +123,7 @@ pub(super) fn submit(
                     branch,
                     base: None,
                     existing,
+                    launch: Some(spec),
                 },
             );
         }

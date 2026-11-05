@@ -125,7 +125,7 @@ pub struct Daemon {
     pub shutdown: tokio_util::sync::CancellationToken,
     /// Serializes worktree create/delete with the background auto-sync so
     /// a checkout is never adopted twice while its row is mid-insert.
-    worktree_ops: tokio::sync::Mutex<()>,
+    pub(crate) worktree_ops: tokio::sync::Mutex<()>,
     /// Cached `command -v` results per CLI so a missing binary doesn't get
     /// re-probed (login shell spawn) on every create.
     cli_probes: Mutex<HashMap<String, (bool, Instant)>>,
@@ -1173,14 +1173,34 @@ impl Daemon {
             .get_worktree(&worktree_id)?
             .context("worktree not found")?;
         self.spares.note_used(&worktree.project_id);
+        // A SPARE WORKTREE a launch just took holds the CLI it booted for
+        // this very launch: the row takes that CLI's id, and the task goes
+        // in as its first turn. A PR rule rides a CLI's argv, so a launch
+        // with one never adopts.
+        let adopted = pr_url
+            .is_none()
+            .then(|| {
+                let launch = orion_core::LaunchSpec {
+                    kind,
+                    custom_harness: custom_harness.clone(),
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    mode,
+                };
+                self.take_held_cli(&worktree_id, &launch)
+            })
+            .flatten();
+        // Only the cold path needs asking: an adopted CLI is proof it runs.
         // Without this, a missing CLI still "succeeds" — the login shell
         // prints `command not found` into a PTY that dies at once, leaving
         // a dead row that looks identical to a fresh one.
-        if !self.cli_available_for_create(&program).await {
+        if adopted.is_none() && !self.cli_available_for_create(&program).await {
             bail!("{}", cli_missing_message(&program));
         }
         let agent = Agent {
-            id: AgentId::generate(),
+            id: adopted
+                .as_ref()
+                .map_or_else(AgentId::generate, |cli| cli.agent.clone()),
             worktree_id,
             name: if name.trim().is_empty() {
                 "agent".into()
@@ -1218,20 +1238,25 @@ impl Daemon {
                 .unwrap()
                 .insert(agent.id.clone(), AgentStatusMachine::launching());
         }
-        let spawned = self.spawn_agent_session_with(
-            &agent,
-            &worktree,
-            DEFAULT_COLS,
-            DEFAULT_ROWS,
-            starting_prompt.as_deref(),
-            mode,
-        );
-        self.rollback_agent_on_spawn_error(&agent.id, spawned)?;
+        if adopted.is_none() {
+            let spawned = self.spawn_agent_session_with(
+                &agent,
+                &worktree,
+                DEFAULT_COLS,
+                DEFAULT_ROWS,
+                starting_prompt.as_deref(),
+                mode,
+            );
+            self.rollback_agent_on_spawn_error(&agent.id, spawned)?;
+        }
         let mut broadcast_agent = agent.clone();
         broadcast_agent.alive = true;
         self.broadcast(ServerEvent::EntityUpserted {
             entity: Entity::Agent(broadcast_agent),
         });
+        if let Some(cli) = adopted {
+            self.send_first_turn(agent.id.clone(), cli.boot, starting_prompt);
+        }
         Ok(EntityId::Agent(agent.id))
     }
 
@@ -1299,6 +1324,7 @@ impl Daemon {
             self.kill_session(&SessionRef::Terminal(t.id.clone()));
             self.forget_command(&t.id);
         }
+        self.drop_held_in(worktree_ids);
     }
 
     /// Is the harness's CLI on the user's PATH (as their login shell sees

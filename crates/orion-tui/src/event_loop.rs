@@ -9028,6 +9028,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                     branch,
                     base: None,
                     existing: false,
+                    launch: None,
                 },
             );
         }
@@ -32940,7 +32941,14 @@ mod tests {
                     branch: b,
                     base: None,
                     existing: false,
-                }] if project == &ProjectId("p1".into()) && b == &branch => *req_id,
+                    launch: Some(launch),
+                }] if project == &ProjectId("p1".into())
+                    && b == &branch
+                    && launch.kind == AgentKind::Codex
+                    && launch.mode == orion_core::harness::AgentMode::Edit =>
+                {
+                    *req_id
+                }
                 other => panic!("one base-less CreateWorktree first: {other:?}"),
             };
             out.clear();
@@ -34153,7 +34161,14 @@ mod tests {
                     branch: b,
                     base: None,
                     existing: false,
-                }] if project == &ProjectId("p1".into()) && b == &branch => *req_id,
+                    launch: Some(launch),
+                }] if project == &ProjectId("p1".into())
+                    && b == &branch
+                    && launch.kind == AgentKind::Claude
+                    && launch.mode == orion_core::harness::AgentMode::Edit =>
+                {
+                    *req_id
+                }
                 other => panic!("one base-less CreateWorktree first: {other:?}"),
             };
             out.clear();

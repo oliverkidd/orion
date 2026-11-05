@@ -167,6 +167,22 @@
   footer says) and starts the run once the setup exits cleanly; a `StopRun` meanwhile calls it off. It
   replaces the WORKTREE HOOKS of git config (`orion.worktreeCreateHook` / `orion.worktreeDeleteHook`),
   which nothing reads any more. See [Configuration](configuration.md#setup-command).
+- **The next worktree is already there — the SPARE WORKTREE.** For each project used in the last
+  day the DAEMON keeps one checkout ahead of you: cut from the **Base branch**, set up, with `claude`
+  booted in it on the `⌘N` account at that account's default model and effort, sitting at its
+  prompt, under the name `orion-spare-<id>` (branch and directory both). It has no rows, the
+  worktree sync leaves it out, and so does every branch list. A launch into a new worktree — `⌘⇧N`,
+  the box's **+ new worktree**, a Linear launch — sends its harness, model, effort and mode with its
+  `CreateWorktree`; when they are the ones the spare's CLI booted with and the branch name is free,
+  the DAEMON takes the spare instead of cutting: `git branch -m` to the launch's branch (the
+  directory keeps its name), the row goes out, a setup still running becomes the worktree's setup
+  row, and the `CreateAgent` that follows adopts the booted CLI and types the task in as its first
+  turn — once the CLI has fired its `SessionStart` and its screen has sat still for half a second, so
+  nothing goes into a CLI still starting. A CLI that never says it booted within a minute is put
+  down and the task boots a fresh one, as a cold launch would. A new spare is cut behind it. A
+  launch on another account, model or effort, in plan mode, onto a branch that exists, or for a pull
+  request is cut cold, as before, and leaves the spare for the next. See
+  [Configuration](configuration.md#spare-worktrees).
 - **A worktree runs its own project — the RUN COMMAND.** The Projects tab of the SETTINGS OVERLAY
   holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a card's or the
   project tab's right-click menu, has the DAEMON start `run` — once the worktree's setup, if any, has

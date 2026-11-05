@@ -248,6 +248,20 @@ pub async fn add_spare_worktree(repo: &Path, branch: &str, start: &str) -> Resul
     add_worktree_inner(repo, branch, Some(start), false).await
 }
 
+/// Whether `name` is already a branch here or on `origin` (as last
+/// fetched): a new worktree of that name would check it out rather than
+/// cut it ([`add_worktree_off_default`]).
+pub async fn branch_taken(repo: &Path, name: &str) -> bool {
+    local_branch(repo, name).await || origin_branch(repo, name).await.is_some()
+}
+
+/// `git branch -m <from> <to>`: what a SPARE WORKTREE's branch becomes
+/// when a launch takes it. git moves the checkout's HEAD with it.
+pub async fn rename_branch(repo: &Path, from: &str, to: &str) -> Result<()> {
+    git(repo, &["branch", "-m", from, to]).await?;
+    Ok(())
+}
+
 /// Take a SPARE WORKTREE off the disk: its checkout, whatever is in it,
 /// then its branch. A checkout already gone is pruned from git's list
 /// instead. Each step is tried whatever the one before it did; the first

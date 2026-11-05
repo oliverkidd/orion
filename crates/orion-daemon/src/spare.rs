@@ -15,6 +15,17 @@
 //! `git::list_worktrees` leaves its branch out, so the worktree sync never
 //! adopts it, and the TUI's branch lists leave it out too.
 //!
+//! A launch into a new worktree takes it ([`Daemon::create_launch_worktree`])
+//! when it is the launch the spare's CLI booted as — same account, model,
+//! effort, edit mode — and its branch name is free: the branch is renamed
+//! (`git branch -m`; the directory keeps its name), the row goes out under
+//! the id the setup and the CLI were spawned with, a setup still running
+//! shows as the worktree's setup row, and the CLI is held for the
+//! `CreateAgent` that follows ([`Daemon::take_held_cli`]), which adopts it
+//! and types the task in as its first turn once the CLI is at its prompt
+//! ([`Daemon::send_first_turn`]). A new spare is cut behind it. Any other
+//! launch is cut cold, as before.
+//!
 //! [`Daemon::tend_spares`], on its own tick, keeps the book: it cuts the
 //! spare a project in use lacks — one at a time, and none while another
 //! spare is still setting up — and takes away the spare of a project
@@ -28,9 +39,10 @@ use crate::git;
 use crate::pty::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::registry::Daemon;
 use anyhow::{Context, Result};
+use orion_core::harness::AgentMode;
 use orion_core::{
-    Agent, AgentId, AgentStatus, LaunchSpec, Project, ProjectId, SessionRef, TerminalId,
-    TerminalTab, Worktree, WorktreeId,
+    Agent, AgentId, AgentStatus, Entity, EntityId, LaunchSpec, Project, ProjectId, ServerEvent,
+    SessionRef, TerminalId, TerminalTab, Worktree, WorktreeId,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -49,7 +61,21 @@ const REBOOT_AFTER: Duration = Duration::from_secs(2 * 60);
 /// A spare's CLI that has not fired its `SessionStart` this long after it
 /// was spawned is stuck short of its prompt — a login, a trust question,
 /// hooks that never installed — and is not warm.
-pub(crate) const BOOT_LIMIT: Duration = Duration::from_secs(60);
+const BOOT_LIMIT: Duration = Duration::from_secs(60);
+/// How long a just-booted CLI's screen must sit still after its
+/// `SessionStart` before a first turn is typed at it: the prompt is drawn.
+const SETTLE: Duration = Duration::from_millis(500);
+/// Past this long after its `SessionStart`, a CLI whose screen never sits
+/// still is typed at all the same.
+const SETTLE_CAP: Duration = Duration::from_secs(5);
+/// How often a first turn waiting on its CLI looks again.
+const SETTLE_POLL: Duration = Duration::from_millis(50);
+/// A taken spare's CLI whose `CreateAgent` has not come this long after the
+/// take is killed: the client that took it went away.
+const HELD_LIMIT: Duration = Duration::from_secs(2 * 60);
+/// How long after a take the next spare is cut, so its fetch and setup do
+/// not crowd the launch that just started.
+const RECUT_DELAY: Duration = Duration::from_secs(2);
 
 /// The DAEMON's SPARE WORKTREES, and what it keeps to tend them.
 #[derive(Default)]
@@ -67,6 +93,9 @@ struct Book {
     /// Every spare CLI by its agent id, until its first turn is in: what
     /// its `SessionStart` marks.
     boots: HashMap<AgentId, Arc<Boot>>,
+    /// The CLIs of spares a launch took, by the worktree they are in, until
+    /// the launch's `CreateAgent` adopts them.
+    held: HashMap<WorktreeId, Held>,
     /// When each project was last used here, epoch ms, beside what the
     /// store's agent rows say ([`Daemon::last_used`]).
     used: HashMap<ProjectId, i64>,
@@ -113,9 +142,24 @@ struct SpareCli {
     boot: Arc<Boot>,
 }
 
+/// A taken spare's CLI, waiting for its launch's `CreateAgent`.
+struct Held {
+    cli: SpareCli,
+    launch: LaunchSpec,
+    taken_at: Instant,
+}
+
+/// The CLI a `CreateAgent` adopts ([`Daemon::take_held_cli`]): the agent id
+/// its row takes — the one in the CLI's own env — and its boot, which its
+/// first turn waits on.
+pub(crate) struct Adopted {
+    pub(crate) agent: AgentId,
+    pub(crate) boot: Arc<Boot>,
+}
+
 /// One spare CLI's boot: when it was spawned and when it said it was up.
 pub(crate) struct Boot {
-    pub(crate) spawned_at: Instant,
+    spawned_at: Instant,
     hook_at: Mutex<Option<Instant>>,
 }
 
@@ -128,7 +172,7 @@ impl Boot {
     }
 
     /// When the CLI fired its `SessionStart`, if it has.
-    pub(crate) fn hook_at(&self) -> Option<Instant> {
+    fn hook_at(&self) -> Option<Instant> {
         *self.hook_at.lock().unwrap()
     }
 
@@ -146,6 +190,12 @@ enum Tend {
 }
 
 impl SpareBook {
+    /// CLI `id` has had its first turn, or is gone: nothing waits on its
+    /// boot.
+    fn forget_boot(&self, id: &AgentId) {
+        self.book.lock().unwrap().boots.remove(id);
+    }
+
     /// Project `project` was just used: a create in it, an attach.
     pub(crate) fn note_used(&self, project: &ProjectId) {
         self.note_used_at(project, orion_core::clock::now_ms());
@@ -189,6 +239,261 @@ impl SpareBook {
 }
 
 impl Daemon {
+    /// `CreateWorktree` for a launch: project `project`'s spare when the
+    /// launch can take it, else a worktree cut as any other is.
+    pub async fn create_launch_worktree(
+        self: &Arc<Self>,
+        project: &ProjectId,
+        branch: &str,
+        launch: &LaunchSpec,
+    ) -> Result<EntityId> {
+        self.create_launch_worktree_with(project, branch, launch, &Config::load())
+            .await
+    }
+
+    /// [`Daemon::create_launch_worktree`] against a given config.
+    pub(crate) async fn create_launch_worktree_with(
+        self: &Arc<Self>,
+        project: &ProjectId,
+        branch: &str,
+        launch: &LaunchSpec,
+        config: &Config,
+    ) -> Result<EntityId> {
+        if let Some(worktree) = self.take_spare(project, branch, launch, config).await? {
+            return Ok(EntityId::Worktree(worktree));
+        }
+        self.create_worktree_with(project, branch, None, false, config)
+            .await
+    }
+
+    /// Hand project `project`'s spare to a launch as worktree `branch`:
+    /// None — and the spare left as it was — when there is none ready, the
+    /// launch is not the one its CLI booted as, the project's base has
+    /// changed since it was cut, or `branch` is taken already. Holds
+    /// `worktree_ops` throughout, as every create does.
+    pub(crate) async fn take_spare(
+        self: &Arc<Self>,
+        project: &ProjectId,
+        branch: &str,
+        launch: &LaunchSpec,
+        config: &Config,
+    ) -> Result<Option<WorktreeId>> {
+        let branch = branch.trim();
+        if branch.is_empty() || launch.mode != AgentMode::Edit {
+            return Ok(None);
+        }
+        let _ops = self.worktree_ops.lock().await;
+        // Claimed under the book's lock: no tick touches it meanwhile, and
+        // its setup's end is still recorded on it.
+        let (repo, from, base) = {
+            let mut book = self.spares.book.lock().unwrap();
+            let Some(spare) = book.spares.get(project) else {
+                return Ok(None);
+            };
+            if book.busy.contains(project)
+                || &spare.launch != launch
+                || matches!(spare.setup, Setup::Failed)
+                || !spare.worktree.path.exists()
+            {
+                return Ok(None);
+            }
+            let claim = (
+                spare.repo.clone(),
+                spare.worktree.branch.clone(),
+                spare.base.name.clone(),
+            );
+            book.busy.insert(project.clone());
+            claim
+        };
+        let renamed = async {
+            let now = git::new_worktree_base(&repo, config.base_branch(&repo), false).await;
+            if now != base || git::branch_taken(&repo, branch).await {
+                return Ok(false);
+            }
+            git::rename_branch(&repo, &from, branch)
+                .await
+                .map(|()| true)
+        }
+        .await;
+        let mut book = self.spares.book.lock().unwrap();
+        book.busy.remove(project);
+        match renamed {
+            Ok(true) => {}
+            Ok(false) => return Ok(None),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't take the spare worktree; cutting one");
+                return Ok(None);
+            }
+        }
+        let spare = book.spares.remove(project).expect("claimed spares stay");
+        let worktree = Worktree {
+            branch: branch.to_string(),
+            ..spare.worktree.clone()
+        };
+        if let Err(e) = self.store.insert_worktree(&worktree) {
+            // Renamed already: the sync adopts the checkout as any other.
+            self.kill_spare_sessions(&spare);
+            return Err(e);
+        }
+        self.send_taken_rows(&mut book, &worktree, spare.setup, spare.cli, spare.launch);
+        drop(book);
+        tracing::info!(worktree = %worktree.path.display(), branch, "a launch took the spare worktree");
+        self.spares.note_used(project);
+        let daemon = self.clone();
+        let project = project.clone();
+        let config = config.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RECUT_DELAY).await;
+            let Ok(Some(project)) = daemon.store.get_project(&project) else {
+                return;
+            };
+            daemon.cut_spare(&project, &config).await;
+        });
+        Ok(Some(worktree.id))
+    }
+
+    /// The rows a take sends, under the book's lock — the order a setup's
+    /// exit hears it in ([`SpareBook::setup_ended`]): the worktree, then a
+    /// setup still running as its setup row. Its CLI waits for the
+    /// `CreateAgent`.
+    fn send_taken_rows(
+        &self,
+        book: &mut Book,
+        worktree: &Worktree,
+        setup: Setup,
+        cli: Option<SpareCli>,
+        launch: LaunchSpec,
+    ) {
+        self.broadcast(ServerEvent::EntityUpserted {
+            entity: Entity::Worktree(worktree.clone()),
+        });
+        if let Setup::Running(mut term) = setup {
+            match self.store.insert_terminal(&term) {
+                Ok(()) => {
+                    term.alive = self.is_alive(&SessionRef::Terminal(term.id.clone()));
+                    self.broadcast(ServerEvent::EntityUpserted {
+                        entity: Entity::Terminal(term),
+                    });
+                }
+                Err(e) => tracing::warn!(error = %e, "taken spare's setup row not stored"),
+            }
+        }
+        if let Some(cli) = cli {
+            book.held.insert(
+                worktree.id.clone(),
+                Held {
+                    cli,
+                    launch,
+                    taken_at: Instant::now(),
+                },
+            );
+        }
+    }
+
+    /// The CLI a taken spare holds in `worktree`, for a `CreateAgent` there
+    /// launching as `launch`. One booted as something else, or dead, is
+    /// killed, and the create boots cold.
+    pub(crate) fn take_held_cli(
+        &self,
+        worktree: &WorktreeId,
+        launch: &LaunchSpec,
+    ) -> Option<Adopted> {
+        let held = self.spares.book.lock().unwrap().held.remove(worktree)?;
+        let sref = SessionRef::Agent(held.cli.agent.id.clone());
+        if &held.launch != launch || !self.is_alive(&sref) {
+            self.spares.forget_boot(&held.cli.agent.id);
+            self.kill_session(&sref);
+            return None;
+        }
+        Some(Adopted {
+            agent: held.cli.agent.id,
+            boot: held.cli.boot,
+        })
+    }
+
+    /// Type `task` into adopted CLI `id` as its first turn once it is at its
+    /// prompt. One that never gets there is put down, and booted again with
+    /// `task` as its first prompt, as a cold launch would be; one that died
+    /// is booted that way too ([`Daemon::send_turn`]). No task: the CLI's
+    /// own input is the first prompt, and nothing waits on its boot.
+    pub(crate) fn send_first_turn(
+        self: &Arc<Self>,
+        id: AgentId,
+        boot: Arc<Boot>,
+        task: Option<String>,
+    ) {
+        let Some(text) = task else {
+            self.spares.forget_boot(&id);
+            return;
+        };
+        let daemon = self.clone();
+        tokio::spawn(async move {
+            if !daemon.settled(&id, &boot).await {
+                tracing::info!(agent = %id, "the spare's CLI never reached its prompt; booting it on the task");
+                daemon.kill_session(&SessionRef::Agent(id.clone()));
+            }
+            daemon.spares.forget_boot(&id);
+            let sent = tokio::task::spawn_blocking(move || {
+                daemon.send_turn(&id, &text, DEFAULT_COLS, DEFAULT_ROWS)
+            })
+            .await;
+            match sent {
+                Ok(Err(e)) => tracing::warn!(error = %e, "the first turn didn't go in"),
+                Err(e) => tracing::warn!(error = %e, "the first turn panicked"),
+                Ok(Ok(())) => {}
+            }
+        });
+    }
+
+    /// Wait for CLI `id` to be at its prompt: its `SessionStart` in and its
+    /// screen still for [`SETTLE`]. True once it is — or once it is gone,
+    /// which the turn's own boot answers; false when it never says it has
+    /// booted inside [`BOOT_LIMIT`].
+    async fn settled(&self, id: &AgentId, boot: &Boot) -> bool {
+        let sref = SessionRef::Agent(id.clone());
+        let mut seen = None;
+        let mut still_since = Instant::now();
+        loop {
+            let Some(session) = self.session(&sref) else {
+                return true;
+            };
+            let end = session.ring.lock().unwrap().end_seq();
+            if seen != Some(end) {
+                seen = Some(end);
+                still_since = Instant::now();
+            }
+            match boot.hook_at() {
+                Some(at) if still_since.elapsed() >= SETTLE || at.elapsed() >= SETTLE_CAP => {
+                    return true
+                }
+                None if boot.spawned_at.elapsed() >= BOOT_LIMIT => return false,
+                _ => tokio::time::sleep(SETTLE_POLL).await,
+            }
+        }
+    }
+
+    /// Kill the held CLIs of taken spares in these worktrees (a delete, a
+    /// project's removal), and every one whose `CreateAgent` never came.
+    pub(crate) fn drop_held_in(&self, worktrees: &[WorktreeId]) {
+        let doomed: Vec<AgentId> = {
+            let mut book = self.spares.book.lock().unwrap();
+            let gone: Vec<WorktreeId> = book
+                .held
+                .iter()
+                .filter(|(w, h)| worktrees.contains(w) || h.taken_at.elapsed() > HELD_LIMIT)
+                .map(|(w, _)| w.clone())
+                .collect();
+            gone.iter()
+                .filter_map(|w| book.held.remove(w))
+                .map(|h| h.cli.agent.id)
+                .collect()
+        };
+        for id in doomed {
+            self.spares.forget_boot(&id);
+            self.kill_session(&SessionRef::Agent(id));
+        }
+    }
+
     /// One tick of the SPARE WORKTREES, under the settings as they are now.
     pub async fn tend_spares(self: &Arc<Self>) {
         self.tend_spares_with(&Config::load()).await;
@@ -212,6 +517,7 @@ impl Daemon {
         for project in gone {
             self.remove_spare(&project, false).await;
         }
+        self.drop_held_in(&[]);
         let launch = config.spare_launch();
         let mut cut_one = false;
         for project in &projects {
@@ -588,7 +894,9 @@ fn spare_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::tests::{init_repo, project_at, test_daemon, EnvGuard};
+    use crate::registry::tests::{git_in, init_repo, project_at, test_daemon, EnvGuard};
+    use crate::registry::CreateAgentSpec;
+    use crate::status::HookEvent;
     use orion_core::env;
 
     /// A config with Claude on for `⌘N` and `rows` as the project at
@@ -672,11 +980,12 @@ mod tests {
         until("the spare's setup", || marker.exists()).await;
 
         assert!(git_worktree_paths(&repo).contains(&*spare.path.to_string_lossy()));
-        assert!(git::list_worktrees(&repo)
-            .await
-            .unwrap()
-            .iter()
-            .all(|w| w.path != spare.path));
+        let listed = git::list_worktrees(&repo).await.unwrap();
+        assert_eq!(
+            listed.len(),
+            1,
+            "orion's listing is the main checkout alone: {listed:?}"
+        );
         daemon.sync_project_worktrees(&project).await.unwrap();
         let (_, worktrees, agents, terminals) = daemon.store.load_tree().unwrap();
         assert_eq!(
@@ -754,6 +1063,190 @@ mod tests {
         assert!(!spare.path.exists());
         daemon.tend_spares_with(&cfg).await;
         assert!(daemon.spare_of(&project.id).is_none(), "no recut yet");
+        daemon.kill_all();
+    }
+
+    /// A project in use with its spare cut and `/bin/cat` for its CLI.
+    async fn with_spare(
+        rows: serde_json::Value,
+    ) -> (Arc<Daemon>, tempfile::TempDir, Project, Config, EnvGuard) {
+        let daemon = test_daemon();
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = init_repo(tmp.path());
+        let project = project_at(&daemon, &repo);
+        let cmd = EnvGuard::set(env::AGENT_CMD, "/bin/cat");
+        let cfg = spare_config(&repo, rows);
+        daemon.spares.note_used(&project.id);
+        daemon.tend_spares_with(&cfg).await;
+        assert!(daemon.spare_of(&project.id).is_some(), "a spare to take");
+        (daemon, tmp, project, cfg, cmd)
+    }
+
+    fn create_spec(
+        worktree: &WorktreeId,
+        launch: &LaunchSpec,
+        task: Option<&str>,
+    ) -> CreateAgentSpec {
+        CreateAgentSpec {
+            worktree: worktree.clone(),
+            name: String::new(),
+            kind: launch.kind,
+            custom_harness: launch.custom_harness.clone(),
+            model: launch.model.clone(),
+            effort: launch.effort.clone(),
+            auto_title: true,
+            starting_prompt: task.map(String::from),
+            pr_url: None,
+            mode: launch.mode,
+        }
+    }
+
+    fn created_worktree(id: EntityId) -> WorktreeId {
+        match id {
+            EntityId::Worktree(id) => id,
+            other => panic!("a worktree: {other:?}"),
+        }
+    }
+
+    /// A launch the spare's CLI booted as takes the lot: the branch is
+    /// renamed, the row goes out on the spare's directory, the create
+    /// that follows adopts the booted CLI, and the task is typed into it
+    /// once it says it is up.
+    #[tokio::test]
+    async fn a_launch_like_the_spares_takes_it_and_its_booted_cli() {
+        let (daemon, tmp, project, cfg, _cmd) = with_spare(serde_json::json!({})).await;
+        let (spare, cli) = daemon.spare_of(&project.id).unwrap();
+        let cli = cli.expect("a booted CLI");
+        let launch = cfg.spare_launch().unwrap();
+        let mut events = daemon.events.subscribe();
+
+        let id = created_worktree(
+            daemon
+                .create_launch_worktree_with(&project.id, "feat", &launch, &cfg)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            id, spare.id,
+            "the row takes the id its CLI was spawned under"
+        );
+        let row = daemon.store.get_worktree(&id).unwrap().expect("its row");
+        assert_eq!(
+            (row.path.clone(), row.branch.as_str()),
+            (spare.path.clone(), "feat")
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Ok(ServerEvent::EntityUpserted { entity: Entity::Worktree(w) }) if w.id == id
+        ));
+        let listed = git::list_worktrees(&tmp.path().join("repo")).await.unwrap();
+        assert_eq!(
+            listed.iter().map(|w| w.branch.as_str()).collect::<Vec<_>>(),
+            ["main", "feat"],
+            "renamed in git, and so in the sync's eyes a worktree like any"
+        );
+        assert!(!branches(&project.repo_path).contains(&spare.branch));
+        assert!(daemon.spare_of(&project.id).is_none(), "taken");
+
+        let agent = daemon
+            .create_agent(create_spec(&id, &launch, Some("the task")))
+            .await
+            .unwrap();
+        assert_eq!(
+            agent,
+            EntityId::Agent(cli.clone()),
+            "the booted CLI, adopted"
+        );
+        let row = daemon.store.get_agent(&cli).unwrap().expect("its row");
+        assert_eq!(row.status, AgentStatus::Running, "working from the create");
+        daemon.apply_hook_event(&cli, HookEvent::SessionStart { source: None }, None);
+        let session = daemon
+            .session(&SessionRef::Agent(cli))
+            .expect("still the one CLI");
+        until("the first turn", || {
+            String::from_utf8_lossy(&session.snapshot(None).1)
+                .matches("the task")
+                .count()
+                >= 2
+        })
+        .await;
+        daemon.kill_all();
+    }
+
+    /// A launch on another model, a branch name already taken, or one in
+    /// plan mode is cut cold, and the spare stays for the next.
+    #[tokio::test]
+    async fn any_other_launch_is_cut_cold_and_the_spare_stays() {
+        let (daemon, _tmp, project, cfg, _cmd) = with_spare(serde_json::json!({})).await;
+        let (spare, _) = daemon.spare_of(&project.id).unwrap();
+        let launch = cfg.spare_launch().unwrap();
+        let opus = LaunchSpec {
+            model: Some("opus".into()),
+            ..launch.clone()
+        };
+        let plan = LaunchSpec {
+            mode: AgentMode::Plan,
+            ..launch.clone()
+        };
+        git_in(&project.repo_path, &["branch", "taken"]);
+        for (branch, launch) in [("on-opus", &opus), ("in-plan", &plan), ("taken", &launch)] {
+            let id = created_worktree(
+                daemon
+                    .create_launch_worktree_with(&project.id, branch, launch, &cfg)
+                    .await
+                    .unwrap(),
+            );
+            let row = daemon.store.get_worktree(&id).unwrap().unwrap();
+            assert_eq!(
+                row.path,
+                git::worktree_dir(&project.repo_path, branch),
+                "{branch}: cold"
+            );
+            assert_eq!(daemon.spare_of(&project.id).unwrap().0.path, spare.path);
+        }
+        daemon.kill_all();
+    }
+
+    /// A spare taken while its setup still runs: the setup shows as the
+    /// worktree's setup row, which goes when it ends cleanly.
+    #[tokio::test]
+    async fn a_setup_still_running_comes_with_the_take() {
+        let (daemon, _tmp, project, cfg, _cmd) =
+            with_spare(serde_json::json!({ "setup_command": "sleep 1" })).await;
+        let launch = cfg.spare_launch().unwrap();
+        let id = created_worktree(
+            daemon
+                .create_launch_worktree_with(&project.id, "feat", &launch, &cfg)
+                .await
+                .unwrap(),
+        );
+        let setups = daemon.store.setup_terminals_in(&id).unwrap();
+        assert_eq!(setups.len(), 1, "the setup row is the worktree's now");
+        let setup = SessionRef::Terminal(setups[0].id.clone());
+        assert!(daemon.is_alive(&setup), "still running");
+        until("the setup's row going", || {
+            daemon.store.setup_terminals_in(&id).unwrap().is_empty()
+        })
+        .await;
+        daemon.kill_all();
+    }
+
+    /// A taken spare's CLI that no create comes for goes with its worktree.
+    #[tokio::test]
+    async fn a_held_cli_goes_with_its_worktree() {
+        let (daemon, _tmp, project, cfg, _cmd) = with_spare(serde_json::json!({})).await;
+        let (_, cli) = daemon.spare_of(&project.id).unwrap();
+        let cli = SessionRef::Agent(cli.unwrap());
+        let launch = cfg.spare_launch().unwrap();
+        let id = created_worktree(
+            daemon
+                .create_launch_worktree_with(&project.id, "feat", &launch, &cfg)
+                .await
+                .unwrap(),
+        );
+        assert!(daemon.is_alive(&cli), "held for the create");
+        daemon.delete_worktree(&id, true).await.unwrap();
+        assert!(!daemon.is_alive(&cli));
         daemon.kill_all();
     }
 }

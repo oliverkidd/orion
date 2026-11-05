@@ -388,6 +388,7 @@ async fn full_crud_attach_and_restart_persistence() {
             branch: "feature-x".into(),
             base: None,
             existing: false,
+            launch: None,
         },
     )
     .await
@@ -1098,6 +1099,7 @@ async fn hook_cwd_rehomes_agent_to_other_worktree() {
             branch: "feat".into(),
             base: None,
             existing: false,
+            launch: None,
         },
     )
     .await
@@ -2245,6 +2247,182 @@ async fn add_project_get_main_worktree(c: &mut UnixStream, repo: &Path) -> orion
             _ => None,
         })
         .expect("main worktree upsert")
+}
+
+/// The SPARE WORKTREES under `repo`'s WORKTREE DIR, by directory name.
+fn spare_dirs(repo: &Path) -> Vec<String> {
+    let dir = repo.parent().unwrap().join("repo-worktrees");
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| orion_core::is_spare_branch(name))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+async fn until(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} never happened"
+        );
+        tokio::time::sleep(POLL_STEP).await;
+    }
+}
+
+/// A new-worktree launch on the `⌘N` account takes the project's SPARE
+/// WORKTREE end to end: the daemon cuts it for the project in use and
+/// boots the CLI in it; the launch's `CreateWorktree` comes back as that
+/// checkout under the launch's branch; its `CreateAgent` adopts the CLI
+/// that was already booted and types the task into it; and a new spare is
+/// cut behind it.
+#[tokio::test]
+async fn a_new_worktree_launch_takes_the_spare_and_types_its_task() {
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    env.write_config(r#"{"claude_enabled": true}"#);
+    // Stand-in claude: says it booted (SessionStart, as claude's hook
+    // does), leaves a mark, then sits at a shell prompt.
+    let script = env.tmp.path().join("spare-agent.sh");
+    std::fs::write(
+        &script,
+        concat!(
+            "#!/bin/sh\n",
+            "curl -sS -m 3 -X POST -H \"Authorization: Bearer $ORION_API_TOKEN\" \\\n",
+            "  -H 'Content-Type: application/json' -d '{\"session_id\":\"spare-sid\"}' \\\n",
+            "  \"$ORION_API_URL/api/hooks/claude?agentId=$ORION_AGENT_ID&hookEvent=SessionStart\" \\\n",
+            "  >/dev/null 2>&1\n",
+            "touch .spare-booted\n",
+            "echo SPARE_BOOTED\n",
+            "exec /bin/sh\n",
+        ),
+    )
+    .unwrap();
+    make_executable(&script);
+    let mut daemon =
+        env.spawn_daemon_with(script.to_str().unwrap(), &[(env::SPARE_TICK_MS, "200")]);
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let main = add_project_get_main_worktree(&mut c, &repo).await;
+
+    // Adding the project is using it: its spare is cut and its CLI boots.
+    let worktrees = repo.parent().unwrap().join("repo-worktrees");
+    until("the spare's CLI booting", SPAWN_CHAIN_TIMEOUT, || {
+        spare_dirs(&repo)
+            .first()
+            .is_some_and(|name| worktrees.join(name).join(".spare-booted").exists())
+    })
+    .await;
+    // Its CLI is up a beat before the daemon files the spare away.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let spare = spare_dirs(&repo).remove(0);
+
+    let claude = orion_core::harness::builtin("claude").unwrap();
+    write_frame(
+        &mut c,
+        &ClientRequest::CreateWorktree {
+            req_id: 3,
+            project: main.project_id.clone(),
+            branch: "feat-spare".into(),
+            base: None,
+            existing: false,
+            launch: Some(orion_core::LaunchSpec {
+                kind: AgentKind::Claude,
+                custom_harness: None,
+                model: claude.default_model().map(String::from),
+                effort: claude.default_effort().map(String::from),
+                mode: Default::default(),
+            }),
+        },
+    )
+    .await
+    .unwrap();
+    let row_of = |evs: &[ServerEvent]| {
+        evs.iter().find_map(|e| match e {
+            ServerEvent::EntityUpserted {
+                entity: Entity::Worktree(w),
+            } if !w.is_main => Some(w.clone()),
+            _ => None,
+        })
+    };
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        matches!(find_ack(evs, 3), Some(ServerEvent::Error { .. }))
+            || (find_ack(evs, 3).is_some() && row_of(evs).is_some())
+    })
+    .await;
+    let Some(ServerEvent::Ack {
+        created: Some(EntityId::Worktree(worktree)),
+        ..
+    }) = find_ack(&events, 3)
+    else {
+        panic!("CreateWorktree failed: {events:#?}");
+    };
+    let row = row_of(&events).unwrap();
+    assert_eq!(&row.id, worktree);
+    assert_eq!(row.branch, "feat-spare");
+    assert_eq!(
+        row.path.file_name().unwrap().to_string_lossy(),
+        spare,
+        "the spare's own checkout, its directory keeping its name"
+    );
+
+    write_frame(
+        &mut c,
+        &ClientRequest::CreateAgent {
+            mode: Default::default(),
+            req_id: 4,
+            worktree: worktree.clone(),
+            name: String::new(),
+            kind: AgentKind::Claude,
+            custom_harness: None,
+            model: claude.default_model().map(String::from),
+            effort: claude.default_effort().map(String::from),
+            auto_title: true,
+            starting_prompt: Some("echo SPARE_TOOK_THE_TASK".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 4).is_some()).await;
+    let Some(ServerEvent::Ack {
+        created: Some(EntityId::Agent(agent)),
+        ..
+    }) = find_ack(&events, 4)
+    else {
+        panic!("CreateAgent failed: {events:#?}");
+    };
+    write_frame(
+        &mut c,
+        &ClientRequest::Attach {
+            session: SessionRef::Agent(agent.clone()),
+            from_seq: None,
+            cols: 100,
+            rows: 30,
+        },
+    )
+    .await
+    .unwrap();
+    // Booted before the launch (its mark is in the replay), and handed the
+    // task: the typed line, then what it printed.
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        let out = String::from_utf8_lossy(&collected_output(evs)).into_owned();
+        out.contains("SPARE_BOOTED") && out.matches("SPARE_TOOK_THE_TASK").count() >= 2
+    })
+    .await;
+
+    until("a new spare behind it", SPAWN_CHAIN_TIMEOUT, || {
+        spare_dirs(&repo).iter().any(|name| *name != spare)
+    })
+    .await;
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
 }
 
 /// `kill -0` liveness probe (also true for an unreaped zombie).
