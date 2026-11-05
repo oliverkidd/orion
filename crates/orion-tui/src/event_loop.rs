@@ -27469,7 +27469,10 @@ mod tests {
             sort_order: 0,
             alive,
             run_command: Some("just start".into()),
-            run: orion_core::RunState { stopping_until },
+            run: orion_core::RunState {
+                stopping_until,
+                ..Default::default()
+            },
         };
         hse(
             &mut app,

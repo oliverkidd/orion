@@ -157,9 +157,10 @@
   PTY's life is the worktree's RUNNING state, broadcast as that terminal's `alive` and drawn as its
   card's `▶`; **Stop stack** writes a `^C` into that PTY so the run's own trap winds down, broadcasts
   the row as stopping (`stopping_until`, the moment of the kill, which every client counts down to),
-  and kills the process tree and drops the row only on a second stop or after two minutes. The idle reaper and the prewarm
-  sweep leave that terminal alone, and a run that exits on its own keeps its PTY, so an attach replays
-  the ending instead of respawning — a command starts only when you pick **Start stack**. `⌘O` → **Open command** runs `open`
+  and drops the row once the run has wound down — killing the process tree first on a second stop or
+  after two minutes. The idle reaper and the prewarm sweep leave that terminal alone, and a run that
+  exits with nobody stopping it keeps its row, its exit code (`done`, `exited 1`) and its PTY, so an
+  attach replays the ending instead of respawning — a command starts only when you pick **Start stack**. `⌘O` → **Open command** runs `open`
   once, from the TUI. See [Configuration](configuration.md#run-and-open-commands).
 - **Agents boot `claude`, `codex`, `cursor-agent`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New agent — choose harness** first asks which CLI to
   run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree.

@@ -1840,21 +1840,32 @@ pub(super) fn terminal_mark(t: &orion_core::TerminalTab, th: Theme) -> Span<'sta
     )
 }
 
-/// What a dead terminal's entry says at its right.
-const EXITED_BADGE: &str = " exited";
-
 /// What a terminal's entry says at its right end, where a session's age
-/// goes, at `now` (epoch ms): a run winding down from its stop counts
-/// down to its kill, `stopping… 1:52`, in the working gold; a dead
-/// terminal says `exited`.
+/// goes, at `now` (epoch ms). A run winding down from its stop counts
+/// down to its kill, `stopping… 1:52`, in the working gold. One that
+/// ended with nobody stopping it says how: a faint `done` for a clean
+/// exit, a red `exited 1` for any other; a run whose ending the DAEMON
+/// never saw (it restarted since) is a faint `stopped`. A dead shell is a
+/// faint `exited`. A stop that was asked for leaves no row to say any of
+/// it.
 fn terminal_badge(t: &orion_core::TerminalTab, now: i64, th: Theme) -> (String, Style) {
-    match t.run.stopping_until {
-        Some(kill_at) => (
+    let faint = Style::default().fg(th.faint);
+    if let Some(kill_at) = t.run.stopping_until {
+        return (
             format!("stopping… {}", countdown(kill_at - now)),
             Style::default().fg(th.warn),
-        ),
-        None if t.alive => (String::new(), Style::default()),
-        None => (EXITED_BADGE.into(), Style::default().fg(th.exited)),
+        );
+    }
+    if t.alive {
+        return (String::new(), Style::default());
+    }
+    if t.run_command.is_none() {
+        return ("exited".into(), faint);
+    }
+    match t.run.exit_code {
+        Some(0) => ("done".into(), faint),
+        Some(code) => (format!("exited {code}"), Style::default().fg(th.err)),
+        None => ("stopped".into(), faint),
     }
 }
 
@@ -3656,20 +3667,25 @@ mod tests {
         assert!(row_of(&lines, "shell-1").contains("exited"), "{lines:#?}");
     }
 
+    /// A RUN TERMINAL in the `api` checkout running `npm run dev`.
+    fn a_run(alive: bool) -> orion_core::TerminalTab {
+        orion_core::TerminalTab {
+            id: orion_core::TerminalId("t1".into()),
+            worktree_id: orion_core::WorktreeId("w0".into()),
+            name: "run".into(),
+            sort_order: 0,
+            alive,
+            run_command: Some("npm run dev".into()),
+            run: Default::default(),
+        }
+    }
+
     /// A run winding down from its stop says so at the right end of its
     /// line, counting down to the kill in the working gold.
     #[test]
     fn a_stopping_run_counts_down_to_its_kill() {
         let th = Theme::default();
-        let mut run = orion_core::TerminalTab {
-            id: orion_core::TerminalId("t1".into()),
-            worktree_id: orion_core::WorktreeId("w0".into()),
-            name: "run".into(),
-            sort_order: 0,
-            alive: true,
-            run_command: Some("npm run dev".into()),
-            run: Default::default(),
-        };
+        let mut run = a_run(true);
         assert_eq!(terminal_badge(&run, 0, th).0, "", "running: nothing yet");
         run.run.stopping_until = Some(112_000);
         let (badge, style) = terminal_badge(&run, 0, th);
@@ -3689,6 +3705,42 @@ mod tests {
                 || line.trim_end().ends_with("stopping… 0:59"),
             "{line:?}"
         );
+    }
+
+    /// A run that ended with nobody stopping it says how at the right
+    /// end of its line: a faint `done` for a clean exit, a red `exited N`
+    /// for any other, a faint `stopped` when the DAEMON never saw it end.
+    /// Nothing is copper any more, a dead shell's `exited` included.
+    #[test]
+    fn a_run_that_ended_on_its_own_says_how() {
+        let th = Theme::default();
+        let mut run = a_run(false);
+        for (code, said, color) in [
+            (Some(0), "done", th.faint),
+            (Some(1), "exited 1", th.err),
+            (Some(137), "exited 137", th.err),
+            (None, "stopped", th.faint),
+        ] {
+            run.run.exit_code = code;
+            let (badge, style) = terminal_badge(&run, 0, th);
+            assert_eq!((badge.as_str(), style.fg), (said, Some(color)), "{code:?}");
+        }
+        let shell = orion_core::TerminalTab {
+            run_command: None,
+            ..a_run(false)
+        };
+        assert_eq!(
+            terminal_badge(&shell, 0, th),
+            ("exited".into(), Style::default().fg(th.faint))
+        );
+
+        let mut app = a_tree();
+        select(&mut app, "api");
+        run.run.exit_code = Some(2);
+        app.tree.terminals.push(run);
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
+        assert!(line.trim_end().ends_with("exited 2"), "{line:?}");
     }
 
     /// A session's line says what it runs on — the model and the

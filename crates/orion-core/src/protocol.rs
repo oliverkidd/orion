@@ -365,7 +365,9 @@ pub enum ClientRequest {
         req_id: u64,
         worktree: WorktreeId,
     },
-    /// `r` again: kill the worktree's RUN TERMINAL and drop its row.
+    /// `r` again: a `^C` into the worktree's RUN TERMINAL, the row sent
+    /// as stopping (`RunState::stopping_until`) and dropped once the run
+    /// has wound down; a second `StopRun`, or two minutes, kills it first.
     /// Nothing running is not an error.
     StopRun {
         req_id: u64,

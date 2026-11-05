@@ -95,9 +95,6 @@ pub struct Theme {
     pub removed: Color,
     /// Files a change modifies (`M`).
     pub modified: Color,
-    /// A terminal whose process has exited: its `exited` tag. A crashed
-    /// *session* is `err` (it needs you); a dead shell is just over.
-    pub exited: Color,
     /// Selected-row fill in the focused panel (a subtle raised surface,
     /// not a reverse-video slab).
     pub sel_bg: Color,
@@ -190,7 +187,6 @@ impl Theme {
             added: Color::Indexed(108),    // sage
             removed: Color::Indexed(174),  // rose
             modified: Color::Indexed(180), // sand
-            exited: Color::Indexed(173),   // copper
             sel_bg: Color::Indexed(237),
             sel_bg_dim: Color::Indexed(235),
             edge: Color::Indexed(238),
@@ -434,7 +430,6 @@ mod tests {
                 ("added", th.added, base.added),
                 ("removed", th.removed, base.removed),
                 ("modified", th.modified, base.modified),
-                ("exited", th.exited, base.exited),
             ] {
                 assert_eq!(a, b, "{name}: {role} moved with the preset");
             }

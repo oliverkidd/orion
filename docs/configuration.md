@@ -538,9 +538,10 @@ selected worktree's checkout:
   as you would at a terminal, so its own trap winds down what it started — a compose stack, a dev
   server. Meanwhile its run line counts down, `stopping… 1:52`, and the footer says the key again kills
   it; a second stop, or two minutes without it exiting, kills the whole process tree and removes the
-  row. A command that exits on its own, or on its `^C`, leaves its row behind, dimmed;
-  attaching it replays how the run ended, and nothing but **Start stack** runs it again — not an
-  attach, not the prewarm sweep. There is one run per worktree: a second client's start on a worktree
+  row. A stop you asked for takes the run line with it once the run has wound down. A command that
+  exits on its own, with nobody stopping it, leaves its line behind saying how it ended — a faint
+  `done` for a clean exit, a red `exited 1` for any other; attaching it replays how the run ended,
+  and nothing but **Start stack** runs it again — not an attach, not the prewarm sweep. There is one run per worktree: a second client's start on a worktree
   already running never starts another.
 - **Open command** — the OPEN COMMAND, `open http://localhost:3000` say. `⌘O` → **Open command** on a
   worktree fires it once, from the TUI rather than the DAEMON, since what it opens — a browser tab, an

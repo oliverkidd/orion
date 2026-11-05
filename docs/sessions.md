@@ -416,7 +416,9 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   The band the keys are on opens on `❯` where the rest open on `──`.
   The entries under it are the checkout's sessions, then its terminals, the names and what each
   runs on in columns down the band. A terminal is `❯ shell-1` with what runs in it — `▶` on a RUN
-  TERMINAL, `exited` at the right once its shell is gone. A session is its status dot and name,
+  TERMINAL, a faint `exited` at the right once its shell is gone. A RUN TERMINAL's line says
+  `stopping… 1:52` there while a stop winds it down, and goes once it has; one that ended with
+  nobody stopping it says how, a faint `done` or a red `exited 1`. A session is its status dot and name,
   what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
   `›`, and how long ago at the right. The pull requests come from the same `gh` lookups
