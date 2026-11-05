@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 50;
+pub const PROTOCOL_VERSION: u32 = 51;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -279,6 +279,8 @@ pub enum ClientRequest {
         req_id: u64,
         id: AgentId,
         paths: Vec<PathBuf>,
+        /// One per path: the line a `file:42` asked for, None for the top.
+        lines: Vec<Option<u64>>,
     },
     /// Kills the PTY, sets archived=1.
     ArchiveAgent {
@@ -535,6 +537,8 @@ pub enum ServerEvent {
         agent: AgentId,
         root: PathBuf,
         paths: Vec<PathBuf>,
+        /// One per path, as `OpenFiles` asked: the line each tab opens on.
+        lines: Vec<Option<u64>>,
     },
 
     /// STACK STATUS: every docker compose project on the machine, sent

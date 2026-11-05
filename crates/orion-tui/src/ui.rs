@@ -2342,6 +2342,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             let max_scroll = clamp_count
                 .saturating_sub(body.height as usize)
                 .min(u16::MAX as usize) as u16;
+            view.settle_seek(rendered.as_ref());
             let scroll = view.scroll.min(max_scroll);
             if !editing && body.height > 0 {
                 let lines = match &rendered {
@@ -2377,6 +2378,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 v.body_area = body;
                 v.view_height = body.height;
                 v.scroll = scroll;
+                v.seek = view.seek;
                 v.preview_line_count = clamp_count;
                 if rendered.is_some() {
                     // A reflow moved the rows the selection points at.

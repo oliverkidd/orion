@@ -1383,7 +1383,7 @@ impl DiffView {
     /// ([`Self::line_on_screen`]): where `⌘O` and `Enter` on the diff open
     /// it. None on a directory's row, and for a file the change deletes.
     pub fn file_at_line(&self) -> Option<(String, u64)> {
-        let file = self.selected_file().filter(|f| !f.xy.contains(&'D'))?;
+        let file = self.selected_file().filter(|f| !f.is_deleted())?;
         Some((file.path.clone(), self.line_on_screen()))
     }
 
@@ -1679,7 +1679,10 @@ pub struct FinderMatch {
     pub positions: Vec<usize>,
 }
 
-/// Fuzzy file finder over every file of the selected worktree (`f`).
+/// Fuzzy file finder over every file of the selected worktree (`f`). A
+/// query ending in a line — `app.rs:42` — matches on the path and opens
+/// the file there. With nothing typed it leads with the checkout's changed
+/// files, then the ones opened last.
 #[derive(Debug, Clone)]
 pub struct FileFinder {
     /// Checkout dir the listing was read from.
@@ -1716,6 +1719,15 @@ pub struct FileFinder {
     /// How many of `matches` lead as the `Recent` section: `recent_files`
     /// while the query is empty, none once anything is typed.
     pub recent: usize,
+    /// The checkout's changed files as `git status` lists them, root
+    /// relative (`with_changed`).
+    pub changed: Vec<String>,
+    /// Up to [`FINDER_CHANGED`] of `changed` still in `files`, by index, in
+    /// status order.
+    changed_at: Vec<usize>,
+    /// How many of `matches` lead as the `Changed` section, above `Recent`:
+    /// `changed_at` while the query is empty, none once anything is typed.
+    pub changed_lead: usize,
     /// Line Enter opens the file at: 1, or the line of a clicked path
     /// whose candidates this finder lists (`with_line`).
     pub line: u64,
@@ -1732,6 +1744,9 @@ pub enum FinderRow {
 
 /// How many recent files the FILE FINDER leads with.
 pub const FINDER_RECENTS: usize = 3;
+/// How many changed files the FILE FINDER leads with, above the recent
+/// ones: a branch that touched hundreds would bury the rest.
+pub const FINDER_CHANGED: usize = 10;
 
 impl FileFinder {
     pub fn new(root: PathBuf, branch: String, editor: String, files: Vec<String>) -> Self {
@@ -1749,10 +1764,25 @@ impl FileFinder {
             recents: Vec::new(),
             recent_files: Vec::new(),
             recent: 0,
+            changed: Vec::new(),
+            changed_at: Vec::new(),
+            changed_lead: 0,
             line: 1,
         };
         finder.apply_filter();
         finder
+    }
+
+    /// The query as a path and the line it ends with, if any: `app.rs:42`
+    /// is `app.rs` at 42.
+    pub fn typed(&self) -> (&str, Option<u64>) {
+        crate::links::split_line_suffix(self.query.as_str())
+    }
+
+    /// The line Enter opens the chosen file at: the query's own, else
+    /// [`FileFinder::line`].
+    pub fn open_line(&self) -> u64 {
+        self.typed().1.unwrap_or(self.line)
     }
 
     /// Open the chosen file at `line` rather than its first.
@@ -1765,15 +1795,31 @@ impl FileFinder {
     /// while the query is empty.
     pub fn with_recents(mut self, recents: Vec<String>) -> Self {
         self.recents = recents;
-        self.find_recent_files();
+        self.find_lead_files();
         self.apply_filter();
         self
     }
 
-    /// Where `recents` sit in `files`: one pass over the listing.
-    fn find_recent_files(&mut self) {
-        let rank: HashMap<&str, usize> = self
-            .recents
+    /// Lead with `changed` — the checkout's changed files, in `git status`
+    /// order — above the recent ones while the query is empty.
+    pub fn with_changed(mut self, changed: Vec<String>) -> Self {
+        self.changed = changed;
+        self.find_lead_files();
+        self.apply_filter();
+        self
+    }
+
+    /// Where `changed` and `recents` sit in `files`. A recent file that is
+    /// also changed leads once, as changed.
+    fn find_lead_files(&mut self) {
+        self.changed_at = self.positions_of(&self.changed, FINDER_CHANGED, &[]);
+        self.recent_files = self.positions_of(&self.recents, FINDER_RECENTS, &self.changed_at);
+    }
+
+    /// Up to `cap` of `wanted` in `files`, by index, in `wanted`'s order,
+    /// leaving out the indices in `taken`: one pass over the listing.
+    fn positions_of(&self, wanted: &[String], cap: usize, taken: &[usize]) -> Vec<usize> {
+        let rank: HashMap<&str, usize> = wanted
             .iter()
             .enumerate()
             .map(|(i, r)| (r.as_str(), i))
@@ -1783,13 +1829,10 @@ impl FileFinder {
             .iter()
             .enumerate()
             .filter_map(|(file, f)| rank.get(f.as_str()).map(|&r| (r, file)))
+            .filter(|(_, file)| !taken.contains(file))
             .collect();
         found.sort_unstable();
-        self.recent_files = found
-            .into_iter()
-            .take(FINDER_RECENTS)
-            .map(|(_, file)| file)
-            .collect();
+        found.into_iter().take(cap).map(|(_, file)| file).collect()
     }
 
     /// A finder up before its listing is: `f` opens this at once, and
@@ -1805,7 +1848,7 @@ impl FileFinder {
     pub fn set_files(&mut self, files: Vec<String>) {
         self.files = files;
         self.listing = None;
-        self.find_recent_files();
+        self.find_lead_files();
         self.apply_filter();
     }
 
@@ -1815,25 +1858,43 @@ impl FileFinder {
         window_start(self.display_row(self.selected), height)
     }
 
-    /// Whether the `Files` header shows: there is a `Recent` section and
+    /// The sections leading `matches` while the query is empty, in order,
+    /// each with how many matches it holds: `Changed`, then `Recent` — an
+    /// empty one left out.
+    fn lead(&self) -> impl Iterator<Item = (&'static str, usize)> {
+        [("Changed", self.changed_lead), ("Recent", self.recent)]
+            .into_iter()
+            .filter(|(_, n)| *n > 0)
+    }
+
+    /// Whether the `Files` header shows: there is a leading section and
     /// something listed after it.
     fn files_header(&self) -> bool {
-        self.recent > 0 && self.matches.len() > self.recent
+        let led = self.changed_lead + self.recent;
+        led > 0 && self.matches.len() > led
     }
 
-    /// The list's rows as drawn: the matches, and — while there is a
-    /// `Recent` section — a header over it and one over the rest.
+    /// The list's rows as drawn: the matches, a header over each leading
+    /// section, and — after them — one over the rest.
     pub fn row_count(&self) -> usize {
-        self.matches.len() + usize::from(self.recent > 0) + usize::from(self.files_header())
+        self.matches.len() + self.lead().count() + usize::from(self.files_header())
     }
 
-    /// The drawn row of `matches[index]`.
+    /// The drawn row of `matches[index]`: below the header of its own
+    /// section and of every one above it.
     pub fn display_row(&self, index: usize) -> usize {
-        match self.recent {
-            0 => index,
-            n if index < n => index + 1,
-            _ => index + 2,
+        let mut headers = 0;
+        let mut start = 0;
+        for (_, n) in self.lead() {
+            if index >= start {
+                headers += 1;
+            }
+            start += n;
         }
+        if self.files_header() && index >= start {
+            headers += 1;
+        }
+        index + headers
     }
 
     /// What drawn row `row` is; None past the end.
@@ -1841,14 +1902,24 @@ impl FileFinder {
         if row >= self.row_count() {
             return None;
         }
-        let n = self.recent;
-        Some(match row {
-            r if n == 0 => FinderRow::Match(r),
-            0 => FinderRow::Header("Recent"),
-            r if r <= n => FinderRow::Match(r - 1),
-            r if r == n + 1 => FinderRow::Header("Files"),
-            r => FinderRow::Match(r - 2),
-        })
+        let (mut r, mut first) = (row, 0);
+        for (title, n) in self.lead() {
+            if r == 0 {
+                return Some(FinderRow::Header(title));
+            }
+            if r <= n {
+                return Some(FinderRow::Match(first + r - 1));
+            }
+            r -= n + 1;
+            first += n;
+        }
+        if self.files_header() {
+            if r == 0 {
+                return Some(FinderRow::Header("Files"));
+            }
+            r -= 1;
+        }
+        Some(FinderRow::Match(first + r))
     }
 
     /// Clamped absolute selection in the filtered list.
@@ -1864,29 +1935,33 @@ impl FileFinder {
     }
 
     /// Recompute `matches` from `query` and reset the selection to the top
-    /// row. Best matches first, listing order when the query is empty.
-    /// With the query empty the RECENT FILES still listed lead, newest
-    /// first, and the rest follow without them, so ⌘P then Enter reopens
-    /// the last file.
+    /// row. Best matches first, listing order when the query is empty; a
+    /// line at the query's end (`:42`) is no part of the path it matches.
+    /// With the query empty the changed files still listed lead, then the
+    /// RECENT FILES, newest first, and the rest follow without them — so
+    /// ⌘P then Enter opens the first changed file, or reopens the last one
+    /// when nothing is changed.
     pub fn apply_filter(&mut self) {
+        let (query, _) = self.typed();
         let mut matches: Vec<FinderMatch> =
-            crate::fuzzy::rank(&self.query, self.files.iter().map(String::as_str))
+            crate::fuzzy::rank(query, self.files.iter().map(String::as_str))
                 .into_iter()
                 .map(|(file, positions)| FinderMatch { file, positions })
                 .collect();
-        let recent: &[usize] = if self.query.as_str().trim().is_empty() {
-            &self.recent_files
+        let (changed, recent): (&[usize], &[usize]) = if query.trim().is_empty() {
+            (&self.changed_at, &self.recent_files)
         } else {
-            &[]
+            (&[], &[])
         };
-        if !recent.is_empty() {
-            matches.retain(|m| !recent.contains(&m.file));
-            let lead = recent.iter().map(|&file| FinderMatch {
+        if !changed.is_empty() || !recent.is_empty() {
+            matches.retain(|m| !changed.contains(&m.file) && !recent.contains(&m.file));
+            let lead = changed.iter().chain(recent).map(|&file| FinderMatch {
                 file,
                 positions: Vec::new(),
             });
             matches.splice(0..0, lead);
         }
+        self.changed_lead = changed.len();
         self.recent = recent.len();
         self.matches = matches;
         self.selected = 0;

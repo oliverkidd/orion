@@ -238,6 +238,26 @@ fn line_suffix(rest: &[(char, (u16, u16))]) -> (Option<u64>, usize) {
     (None, 0)
 }
 
+/// A typed `path:42` — or `path:42:7`, `path#L42` — as the path and its
+/// line: the suffix [`line_suffix`] reads after a path on screen, here at
+/// the end of a whole string (`orion open src/a.rs:42`, `a.rs:42` typed in
+/// Go to file). No suffix, or one with more after it, is all path.
+pub fn split_line_suffix(text: &str) -> (&str, Option<u64>) {
+    let cells: Vec<(char, (u16, u16))> = text.chars().map(|c| (c, (0, 0))).collect();
+    let mut byte = 0;
+    for (i, &(c, _)) in cells.iter().enumerate() {
+        if i > 0 {
+            if let (Some(line), len) = line_suffix(&cells[i..]) {
+                if i + len == cells.len() {
+                    return (&text[..byte], Some(line));
+                }
+            }
+        }
+        byte += c.len_utf8();
+    }
+    (text, None)
+}
+
 /// Whether a token reads as a file path rather than prose. Tokens with a
 /// directory separator need a plausible extension (or an explicit line
 /// suffix) so "and/or" and "24/7" stay prose; bare filenames additionally
@@ -418,6 +438,21 @@ mod tests {
                 ("src/z.py", Some(42)),
             ]
         );
+    }
+
+    /// A typed location splits into its path and line, in each spelling
+    /// the screen scan reads; anything else stays whole.
+    #[test]
+    fn a_typed_location_splits_into_path_and_line() {
+        assert_eq!(split_line_suffix("src/a.rs:42"), ("src/a.rs", Some(42)));
+        assert_eq!(split_line_suffix("src/a.rs:42:7"), ("src/a.rs", Some(42)));
+        assert_eq!(split_line_suffix("src/a.rs#L9"), ("src/a.rs", Some(9)));
+        assert_eq!(split_line_suffix("a.rs:0"), ("a.rs", Some(1)));
+        assert_eq!(split_line_suffix("src/a.rs"), ("src/a.rs", None));
+        assert_eq!(split_line_suffix("a.rs:"), ("a.rs:", None));
+        assert_eq!(split_line_suffix("a.rs:4x"), ("a.rs:4x", None));
+        assert_eq!(split_line_suffix(":42"), (":42", None), "no path");
+        assert_eq!(split_line_suffix("é.md:3"), ("é.md", Some(3)));
     }
 
     #[test]

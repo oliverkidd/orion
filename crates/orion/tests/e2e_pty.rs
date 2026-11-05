@@ -3759,9 +3759,10 @@ async fn orion_open_cli_hands_the_files_to_every_subscriber() {
     let main_rs = repo.join("main.rs");
     std::fs::write(&main_rs, "fn main() {}\n").unwrap();
 
-    // Relative paths resolve against the CLI's cwd — the agent's.
+    // Relative paths resolve against the CLI's cwd — the agent's — and a
+    // `:42` is the line that tab opens on.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_orion"))
-        .args(["open", "docs/notes.md", "main.rs"])
+        .args(["open", "docs/notes.md", "main.rs:42"])
         .current_dir(&repo)
         .env(env::RUNTIME_DIR, &env.runtime_dir)
         .env(env::AGENT_ID, &agent_id.0)
@@ -3784,12 +3785,19 @@ async fn orion_open_cli_hands_the_files_to_every_subscriber() {
         .iter()
         .find(|e| matches!(e, ServerEvent::FilesOpened { .. }))
         .unwrap();
-    let ServerEvent::FilesOpened { agent, root, paths } = opened else {
+    let ServerEvent::FilesOpened {
+        agent,
+        root,
+        paths,
+        lines,
+    } = opened
+    else {
         unreachable!()
     };
     assert_eq!(agent, &agent_id);
     assert_eq!(root, &worktree.path, "the agent's checkout rides along");
     assert_eq!(paths, &want, "absolute, in the order given");
+    assert_eq!(lines, &[None, Some(42)], "each file's line, by place");
 
     // A missing file is the CLI's error, before the daemon hears anything.
     let out = agent_cli(&env, &agent_id, &["open", "/nowhere/at/all.md"]);

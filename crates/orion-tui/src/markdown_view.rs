@@ -138,8 +138,7 @@ impl MarkdownPage {
     pub fn settle(&mut self) {
         if let (Some(line), Some(rendered)) = (self.seek, &self.rendered) {
             self.seek = None;
-            let row = seek_row(&self.text, line, rendered);
-            self.scroll = row.saturating_sub(SEEK_CONTEXT).min(u16::MAX as usize) as u16;
+            self.scroll = scroll_to_row(seek_row(&self.text, line, rendered));
         }
         self.scroll = self.scroll.min(self.max_scroll());
     }
@@ -180,6 +179,13 @@ impl MarkdownPage {
     }
 }
 
+/// The scroll that shows `row` a few rows down from the top, the rows
+/// above it kept for context — where a page or preview opened at a line
+/// starts.
+pub(crate) fn scroll_to_row(row: usize) -> u16 {
+    row.saturating_sub(SEEK_CONTEXT).min(u16::MAX as usize) as u16
+}
+
 /// `⌘C` / `^y`: the page's copy — the DOC SELECTION, else the path.
 pub fn is_copy(key: &KeyEvent) -> bool {
     crate::hints::COPY_PATH.matches(key)
@@ -188,7 +194,7 @@ pub fn is_copy(key: &KeyEvent) -> bool {
 /// The rendered row that shows source line `line` (1-based) of `text`: the
 /// first row holding the start of that line's words, markdown marks
 /// stripped — else the same fraction of the way down the page.
-fn seek_row(text: &str, line: u64, rendered: &Rendered) -> usize {
+pub(crate) fn seek_row(text: &str, line: u64, rendered: &Rendered) -> usize {
     let source: Vec<&str> = text.lines().collect();
     let index = (line.saturating_sub(1) as usize).min(source.len().saturating_sub(1));
     let words: String = source

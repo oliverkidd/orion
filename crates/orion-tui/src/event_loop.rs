@@ -5115,7 +5115,7 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
     match &app.overlay {
         Some(Overlay::Files(finder)) => finder
             .selected_path()
-            .map(|path| (finder.root.clone(), path.to_string(), 1)),
+            .map(|path| (finder.root.clone(), path.to_string(), finder.open_line())),
         Some(Overlay::Tree(view)) => view
             .selected_node()
             .filter(|node| !node.is_dir)
@@ -5127,7 +5127,7 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
             (
                 view.root.clone(),
                 tab.path.to_string_lossy().into_owned(),
-                1,
+                tab.line,
             )
         }),
         // The DIFF VIEWER's file, at the line at the top of its diff, while
@@ -5415,12 +5415,9 @@ fn open_diff_view(app: &mut App) {
         // list to open on: the files are up on this keypress and the first
         // diff is being read while the `git status` below checks them, not
         // after it. `fill_view` reconciles the two when that lands.
-        let polled = app
-            .changed_files
-            .as_ref()
-            .filter(|(id, files)| Some(id) == selected.as_ref() && !files.is_empty());
-        if let Some((_, files)) = polled {
-            view.replace_files(files.clone());
+        let polled = polled_changes(app);
+        if !polled.is_empty() {
+            view.replace_files(polled.to_vec());
             crate::git_diff::load_selected_diff(&mut view);
         }
         app.overlay = Some(Overlay::Diff(view));
@@ -5473,11 +5470,18 @@ fn open_file_finder(app: &mut App) {
     // The modal is up on this keypress, taking what is typed; the list
     // lands when `git ls-files` answers (`land_view_answer`).
     let recents = crate::recent_files::load(&path);
+    let changed: Vec<String> = polled_changes(app)
+        .iter()
+        .filter(|file| !file.is_deleted())
+        .map(|file| file.path.clone())
+        .collect();
     if let Some(jobs) = app.view_jobs.clone() {
         let editor = crate::config::Config::load().editor_command();
         let ticket = request_worktree_files(&jobs, &path);
         app.overlay = Some(Overlay::Files(
-            FileFinder::opening(path, branch, editor, ticket).with_recents(recents),
+            FileFinder::opening(path, branch, editor, ticket)
+                .with_recents(recents)
+                .with_changed(changed),
         ));
         return;
     }
@@ -5485,8 +5489,21 @@ fn open_file_finder(app: &mut App) {
         return;
     };
     app.overlay = Some(Overlay::Files(
-        FileFinder::new(path, branch, editor, files).with_recents(recents),
+        FileFinder::new(path, branch, editor, files)
+            .with_recents(recents)
+            .with_changed(changed),
     ));
+}
+
+/// The selected checkout's changed files as the badge's last `git status`
+/// found them — two seconds old at most (`keep_changed_files`) — or none
+/// when that poll was of another checkout, or hasn't run.
+fn polled_changes(app: &App) -> &[crate::git_diff::DiffFile] {
+    let selected = app.selected_worktree().map(|w| &w.id);
+    match &app.changed_files {
+        Some((id, files)) if Some(id) == selected => files,
+        _ => &[],
+    }
 }
 
 /// Ask for a checkout's file listing off the loop; the ticket is what the
@@ -5846,7 +5863,11 @@ fn open_selected_file(app: &mut App) {
     let Some(path) = finder.selected_path().map(str::to_string) else {
         return;
     };
-    let (root, editor, line) = (finder.root.clone(), finder.editor.clone(), finder.line);
+    let (root, editor, line) = (
+        finder.root.clone(),
+        finder.editor.clone(),
+        finder.open_line(),
+    );
     // Size guess from the last-drawn body; the post-draw sync corrects it.
     let size = editor_size_guess(app);
     if open_file(app, &editor, &root, &path, line, size) {
@@ -5862,7 +5883,7 @@ fn create_typed_file(app: &mut App) {
         return;
     };
     let (root, editor) = (finder.root.clone(), finder.editor.clone());
-    let path = match create_file_in(&root, finder.query.as_str()) {
+    let path = match create_file_in(&root, finder.typed().0) {
         Ok(path) => path,
         Err(err) => {
             app.flash = Some(crate::flash::Flash::failed(err));
@@ -12474,8 +12495,10 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             crate::stacks::listed(app, stacks);
         }
         // `orion open` in a session: the user asked to see these files.
-        ServerEvent::FilesOpened { root, paths, .. } => {
-            crate::file_tabs::open(app, root, paths);
+        ServerEvent::FilesOpened {
+            root, paths, lines, ..
+        } => {
+            crate::file_tabs::open(app, root, paths, &lines);
         }
         ServerEvent::Metrics { req_id, snapshot } => {
             // Answered with Metrics, not Ack — clear the pending slot by hand.
@@ -28769,6 +28792,97 @@ mod tests {
         });
     }
 
+    /// The checkout's changed files lead an empty query under `Changed`,
+    /// above `Recent` — a file both changed and recent listed once, as
+    /// changed — and like `Recent` they go once anything is typed.
+    #[test]
+    fn changed_files_lead_above_the_recent_ones() {
+        let files = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
+            .map(String::from)
+            .to_vec();
+        let fin = FileFinder::new("/r".into(), "main".into(), "vim".into(), files)
+            .with_recents(vec!["d.rs".into(), "b.rs".into()])
+            .with_changed(vec!["e.rs".into(), "gone.rs".into(), "b.rs".into()]);
+        let shown: Vec<&str> = fin
+            .matches
+            .iter()
+            .map(|m| fin.files[m.file].as_str())
+            .collect();
+        assert_eq!(shown, ["e.rs", "b.rs", "d.rs", "a.rs", "c.rs"]);
+        assert_eq!((fin.changed_lead, fin.recent), (2, 1));
+        use crate::app::FinderRow::{Header, Match};
+        let rows: Vec<_> = (0..fin.row_count() + 1).map(|r| fin.row(r)).collect();
+        assert_eq!(
+            rows,
+            [
+                Some(Header("Changed")),
+                Some(Match(0)),
+                Some(Match(1)),
+                Some(Header("Recent")),
+                Some(Match(2)),
+                Some(Header("Files")),
+                Some(Match(3)),
+                Some(Match(4)),
+                None
+            ]
+        );
+        assert_eq!(
+            (0..5).map(|i| fin.display_row(i)).collect::<Vec<_>>(),
+            [1, 2, 4, 6, 7]
+        );
+
+        let mut typed = fin.clone();
+        typed.query.insert_str("e");
+        typed.apply_filter();
+        assert_eq!((typed.changed_lead, typed.recent), (0, 0));
+        assert_eq!(typed.row(0), Some(Match(0)));
+    }
+
+    /// `c.rs:12` typed in Go to file matches on `c.rs` and opens it at line
+    /// 12 — Enter and ⌘O both; without the `:12` it opens at the top. The
+    /// `Changed` section is the badge's last `git status` of the checkout.
+    #[test]
+    fn a_line_typed_after_the_path_opens_the_file_there() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = test_repo(&dir);
+            std::fs::write(repo.join("fresh.txt"), "one\ntwo\nthree\n").unwrap();
+            crate::recent_files::with_store_path(dir.path().join("recent.json"), || {
+                let mut app = App::new();
+                seed_repo_tree(&mut app, &repo);
+                let worktree = app.selected_worktree().unwrap().id.clone();
+                app.changed_files = Some((
+                    worktree,
+                    crate::git_diff::parse_status_z(b"?? fresh.txt\0 D gone.txt\0"),
+                ));
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                app.editor_tx = Some(tx);
+                let mut out = Vec::new();
+
+                press(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER, &mut out);
+                assert_eq!(finder(&app).changed, ["fresh.txt"], "no deletions");
+                assert_eq!(finder(&app).changed_lead, 1);
+                assert_eq!(finder(&app).selected_path(), Some("fresh.txt"));
+                for c in "fresh.txt:2".chars() {
+                    press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+                }
+                let fin = finder(&app);
+                assert_eq!(fin.selected_path(), Some("fresh.txt"));
+                assert_eq!(fin.typed(), ("fresh.txt", Some(2)));
+                assert_eq!(fin.open_line(), 2);
+                assert_eq!(
+                    overlay_file(&app).map(|(_, file, line)| (file, line)),
+                    Some(("fresh.txt".to_string(), 2))
+                );
+                if let Some(Overlay::Files(f)) = &mut app.overlay {
+                    f.editor = "/bin/sh".into();
+                }
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert_eq!(app.editor.as_ref().map(|e| e.line), Some(2));
+            });
+        });
+    }
+
     // ---- `b` tree browser ----
 
     fn tree_view(app: &App) -> &crate::tree_browser::TreeBrowser {
@@ -35460,6 +35574,7 @@ mod tests {
                     agent: AgentId("a1".into()),
                     root: dir.path().to_path_buf(),
                     paths: vec![a, b],
+                    lines: Vec::new(),
                 },
                 &mut out,
             );
@@ -35476,6 +35591,61 @@ mod tests {
             assert_eq!(view.tab, 1);
             assert_eq!(preview_text(view, 0), "fn main() {}");
             assert!(out.is_empty(), "nothing goes to the daemon");
+        });
+    }
+
+    /// `orion open b.rs:30`: the tab says its line, its preview comes up
+    /// with the line in view a couple of rows down, and Enter — or ⌘O —
+    /// opens the file there.
+    #[test]
+    fn a_file_opened_at_a_line_previews_and_edits_there() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let a = dir.path().join("a.md");
+            let b = dir.path().join("b.rs");
+            std::fs::write(&a, "# alpha\n").unwrap();
+            let body: String = (1..=80).map(|i| format!("let x{i} = {i};\n")).collect();
+            std::fs::write(&b, body).unwrap();
+            let mut app = App::new();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            app.editor_tx = Some(tx);
+            let mut out = Vec::new();
+            handle_server_event(
+                &mut app,
+                ServerEvent::FilesOpened {
+                    agent: AgentId("a1".into()),
+                    root: dir.path().to_path_buf(),
+                    paths: vec![a, b],
+                    lines: vec![None, Some(30)],
+                },
+                &mut out,
+            );
+            let labels: Vec<&str> = file_tabs(&app)
+                .tabs
+                .iter()
+                .map(|t| t.label.as_str())
+                .collect();
+            assert_eq!(labels, ["a.md", "b.rs:30"]);
+            assert_eq!(file_tabs(&app).tabs[0].line, 1);
+
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| ui::draw(f, &mut app)).unwrap();
+            assert_eq!(file_tabs(&app).scroll, 27, "line 30, two rows down");
+            assert_eq!(file_tabs(&app).seek, None, "brought into view once");
+            assert!(buffer_text(&term).contains("30 let x30 = 30;"));
+            assert_eq!(
+                overlay_file(&app).map(|(_, _, line)| line),
+                Some(30),
+                "⌘O takes the line too"
+            );
+
+            if let Some(Overlay::FileTabs(view)) = &mut app.overlay {
+                view.editor = "/bin/sh".into();
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let editor = app.editor.as_ref().expect("the editor opened");
+            assert_eq!(editor.line, 30, "Enter edits at the tab's line");
         });
     }
 

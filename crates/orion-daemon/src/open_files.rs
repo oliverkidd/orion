@@ -36,10 +36,15 @@ name the paths instead.";
 impl Daemon {
     /// `orion open`, run by the agent inside its own session: the caller
     /// has to be a known row (its worktree is the editor's cwd on the other
-    /// side), and then the files go to every subscriber at once. No file is
-    /// read here — the CLI already resolved and checked them, and the TUI
-    /// reads what it shows.
-    pub fn open_files(&self, id: &AgentId, paths: Vec<PathBuf>) -> Result<()> {
+    /// side), and then the files go to every subscriber at once, each with
+    /// the line a `file:42` asked for. No file is read here — the CLI
+    /// already resolved and checked them, and the TUI reads what it shows.
+    pub fn open_files(
+        &self,
+        id: &AgentId,
+        paths: Vec<PathBuf>,
+        lines: Vec<Option<u64>>,
+    ) -> Result<()> {
         if paths.is_empty() {
             bail!("no files to open");
         }
@@ -52,6 +57,7 @@ impl Daemon {
             agent: id.clone(),
             root: worktree.path,
             paths,
+            lines,
         });
         Ok(())
     }

@@ -175,11 +175,13 @@ pub(crate) enum Command {
     /// other binary is refused, since a terminal has nothing to show for it.
     /// The files open in orion's file tabs — a modal with one tab per file,
     /// the focused one previewed, Enter editing it — in every orion
-    /// attached to this daemon, and this session carries on untouched.
+    /// attached to this daemon, and this session carries on untouched. A
+    /// `:42` after a file opens its tab at line 42.
     #[command(after_help = OPEN_EXAMPLES)]
     Open {
-        /// The files to show, relative to the current directory or absolute.
-        #[arg(required = true, num_args = 1.., value_name = "FILE")]
+        /// The files to show, relative to the current directory or
+        /// absolute, each with an optional `:line`.
+        #[arg(required = true, num_args = 1.., value_name = "FILE[:LINE]")]
         files: Vec<String>,
     },
     /// What an autofix session runs on itself.
@@ -314,7 +316,8 @@ Examples:
 const OPEN_EXAMPLES: &str = "\
 Examples:
   orion open README.md                one tab
-  orion open src/main.rs docs/keys.md a tab each, in this order";
+  orion open src/main.rs docs/keys.md a tab each, in this order
+  orion open src/app.rs:42            at line 42";
 
 const SSH_EXAMPLES: &str = "\
 Examples:
