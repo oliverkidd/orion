@@ -426,20 +426,33 @@ pub async fn spawn_sibling_for_current_agent(
     Ok(())
 }
 
-/// CLI: `orion open <file>…` from inside an agent session — resolve the
-/// paths here, where the cwd is the agent's, and hand them to the daemon,
-/// which raises every attached TUI's FILE TABS on them. Never spawns a
-/// daemon: no daemon means nobody is looking. What this prints is read by
-/// the model that ran it.
+/// A file `orion open` was given, as the file and the line: `src/a.rs:42`
+/// is `src/a.rs` at line 42 (also `:42:7` and `#L42`) — unless a file is
+/// there by the whole name, colon and all.
+fn file_and_line(file: &str) -> Result<(std::path::PathBuf, Option<u64>)> {
+    if let Ok(path) = std::fs::canonicalize(file) {
+        return Ok((path, None));
+    }
+    let (path, line) = crate::links::split_line_suffix(file);
+    let path =
+        std::fs::canonicalize(path).with_context(|| format!("can't open {file}: no such file"))?;
+    Ok((path, line))
+}
+
+/// CLI: `orion open <file>[:line]…` from inside an agent session — resolve
+/// the paths here, where the cwd is the agent's, and hand them to the
+/// daemon, which raises every attached TUI's FILE TABS on them, each tab at
+/// its line. Never spawns a daemon: no daemon means nobody is looking.
+/// What this prints is read by the model that ran it.
 pub async fn open_files_for_current_agent(files: &[String]) -> Result<()> {
     let agent_id = current_agent_id("open")?;
     if files.is_empty() {
         bail!("nothing to open — `orion open <file>…` needs at least one file");
     }
     let mut resolved = Vec::with_capacity(files.len());
+    let mut lines = Vec::with_capacity(files.len());
     for file in files {
-        let path = std::fs::canonicalize(file)
-            .with_context(|| format!("can't open {file}: no such file"))?;
+        let (path, line) = file_and_line(file)?;
         if !path.is_file() {
             bail!("can't open {file}: not a file");
         }
@@ -455,6 +468,7 @@ pub async fn open_files_for_current_agent(files: &[String]) -> Result<()> {
             );
         }
         resolved.push(path);
+        lines.push(line);
     }
     let sock = paths::socket_path();
     let Ok(stream) = try_connect(&sock).await else {
@@ -469,6 +483,7 @@ pub async fn open_files_for_current_agent(files: &[String]) -> Result<()> {
             req_id,
             id: AgentId(agent_id),
             paths: resolved,
+            lines,
         },
     )
     .await?;

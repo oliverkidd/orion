@@ -273,6 +273,10 @@ pub(crate) fn handle_key(app: &mut App, key: &KeyEvent, out: &mut Vec<ClientRequ
         open_pull_requests(app);
         return true;
     }
+    if crate::hints::IN_TREE.matches(key) {
+        reveal_in_tree(app);
+        return true;
+    }
     let Some(Overlay::Diff(view)) = &app.overlay else {
         return false;
     };
@@ -302,23 +306,33 @@ fn edit_at_line(app: &mut App) {
     let Some((path, line)) = view.file_at_line() else {
         return;
     };
-    let root = match &view.pr_review {
-        None => view.root.clone(),
-        Some(review) => match checkout_of_pr(app, &review.url) {
-            Some(root) => root,
-            None => {
-                app.flash = Some(Flash::note(format!(
-                    "#{} isn't checked out here — {} in the pull requests modal checks it out",
-                    review.number,
-                    crate::pr_modal::keys::CHECKOUT.label()
-                )));
-                return;
-            }
-        },
+    let Some(root) = viewer_checkout(app) else {
+        return;
     };
     let editor = crate::config::Config::load().editor_command();
     let size = crate::event_loop::editor_size_guess(app);
     crate::event_loop::spawn_editor_modal(app, &editor, &root, &path, line, size);
+}
+
+/// The checkout the viewer's files are opened in: the one it reads — for
+/// a pull request's viewer, the project's checkout of its branch, the
+/// footer saying how to make one when there is none.
+fn viewer_checkout(app: &mut App) -> Option<std::path::PathBuf> {
+    let Some(Overlay::Diff(view)) = &app.overlay else {
+        return None;
+    };
+    let Some(review) = &view.pr_review else {
+        return Some(view.root.clone());
+    };
+    let (number, url) = (review.number, review.url.clone());
+    let root = checkout_of_pr(app, &url);
+    if root.is_none() {
+        app.flash = Some(Flash::note(format!(
+            "#{number} isn't checked out here — {} in the pull requests modal checks it out",
+            crate::pr_modal::keys::CHECKOUT.label()
+        )));
+    }
+    root
 }
 
 /// The project's checkout of pull request `url`'s branch, when there is
@@ -348,6 +362,25 @@ fn open_pull_requests(app: &mut App) {
     }
     let url = pull_request(app, &view).map(|pr| pr.url);
     crate::pr_modal::open_from_diff(app, view, url);
+}
+
+/// `⌘⇧B`: the TREE BROWSER on the viewer's checkout ([`viewer_checkout`])
+/// with its cursor on the file the viewer is on — none, for a folder's row
+/// or a file the change deletes — and Esc there comes back to the viewer
+/// as it was.
+fn reveal_in_tree(app: &mut App) {
+    let Some(Overlay::Diff(view)) = &app.overlay else {
+        return;
+    };
+    let (branch, file) = (
+        view.branch.clone(),
+        view.file_at_line().map(|(path, _)| path),
+    );
+    let Some(root) = viewer_checkout(app) else {
+        return;
+    };
+    let back = app.overlay.take();
+    crate::event_loop::tree_revealing(app, root, branch, file.as_deref(), back);
 }
 
 /// `Enter` on conflicted `path`: the CONFLICT RESOLVER over the viewer, on
@@ -754,6 +787,49 @@ mod tests {
             Some("notes.txt")
         );
         assert_eq!(view.scroll, scroll, "the reader's place kept");
+    }
+
+    /// `⌘⇧B` in the viewer opens the TREE BROWSER on its checkout with the
+    /// cursor on the viewer's file, its folders open; Esc there puts the
+    /// viewer back on that file, read afresh.
+    #[test]
+    fn cmd_shift_b_shows_the_viewers_file_in_the_tree_and_esc_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        repo_with_long_diff(dir.path());
+        std::fs::create_dir_all(dir.path().join("docs/deep")).unwrap();
+        std::fs::write(dir.path().join("docs/deep/n.txt"), "new\n").unwrap();
+        let mut app = app_on(dir.path());
+        crate::event_loop::run_action(&mut app, crate::keymap::Action::GitDiff);
+        let Some(Overlay::Diff(view)) = &mut app.overlay else {
+            panic!("no viewer");
+        };
+        let at = view
+            .files
+            .iter()
+            .position(|f| f.path == "docs/deep/n.txt")
+            .expect("the new file listed");
+        view.select(at as i64);
+        screen(&mut app);
+        let cmd_shift_b = KeyEvent::new(
+            KeyCode::Char('B'),
+            crossterm::event::KeyModifiers::SUPER | crossterm::event::KeyModifiers::SHIFT,
+        );
+        crate::event_loop::handle_overlay_key(&mut app, cmd_shift_b, &mut Vec::new());
+        let Some(Overlay::Tree(tree)) = &app.overlay else {
+            panic!("no tree: {:?}", app.overlay);
+        };
+        assert_eq!(
+            tree.selected_node().map(|n| n.path.as_str()),
+            Some("docs/deep/n.txt")
+        );
+        assert!(tree.back.is_some());
+        // What the tree's Esc runs (`closes_on_esc`).
+        crate::overlay_close::click_outside(&mut app, &mut Vec::new());
+        assert_eq!(
+            the_view(&app).selected_file().map(|f| f.path.as_str()),
+            Some("docs/deep/n.txt"),
+            "the viewer back, read afresh, on its file"
+        );
     }
 
     /// A pull request's viewer edits in the project's checkout of its

@@ -34,6 +34,11 @@ impl DiffFile {
         self.xy == ['?', '?']
     }
 
+    /// The change deletes it: there is no file in the checkout to open.
+    pub fn is_deleted(&self) -> bool {
+        self.xy.contains(&'D')
+    }
+
     /// The raw two-character code for the list column ("M ", " M", "??", …).
     pub fn status_str(&self) -> String {
         self.xy.iter().collect()

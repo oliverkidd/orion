@@ -17,7 +17,7 @@ orion kill                 shut the running daemon down (stops all sessions)
 orion rename <title>       title the session this runs inside          (agents run this)
 orion worktree [name]      move this session into a worktree           (agents run this)
 orion spawn <task>         start another agent session beside it       (agents run this)
-orion open <file>…         show files in this orion's file tabs       (agents run this)
+orion open <file[:line]>…  show files in this orion's file tabs       (agents run this)
 orion config <cmd>         locate this machine's settings
 orion ssh <host>           open orion on a remote host over ssh
 orion setup                open orion on its setup, every step
@@ -64,7 +64,9 @@ orion spawn <task> [--kind <claude|codex|cursor|grok|opencode>]  # start a new a
 orion open <file>…       # show the files in this orion's FILE TABS — a modal with one tab per
                           # file, the focused one previewed, Enter editing it (agents run this only
                           # when you ask to see a file; text files only — an image or any other
-                          # binary is refused, and the agent names the path instead)
+                          # binary is refused, and the agent names the path instead). `file:42`
+                          # (also `:42:7`, `#L42`) opens that tab at line 42; a file whose own
+                          # name ends that way opens whole
 ```
 
 ## Settings

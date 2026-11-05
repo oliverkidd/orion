@@ -259,6 +259,12 @@ impl DocSelect {
         self.selection.is_some_and(|s| s.active)
     }
 
+    /// A press is down that hasn't moved off its cell yet: let go now, it
+    /// was a click.
+    pub fn is_armed(&self) -> bool {
+        self.selection.is_some_and(|s| s.dragging && !s.active)
+    }
+
     /// The selected text of `doc`, when there is a real selection.
     pub fn text(&self, doc: &Rendered) -> Option<String> {
         self.selection?.text(&doc.lines, &doc.wraps)
@@ -447,6 +453,8 @@ mod tests {
             width: 20,
             lines: lines(&["alpha beta", "gamma"]),
             wraps: vec![Wrap::default(); 2],
+            links: Vec::new(),
+            dests: Vec::new(),
         };
         let area = Rect::new(0, 0, 20, 5);
         let mut s = DocSelect::default();
@@ -479,6 +487,8 @@ mod tests {
             width: 20,
             lines: lines(&refs),
             wraps: vec![Wrap::default(); 20],
+            links: Vec::new(),
+            dests: Vec::new(),
         };
         let area = Rect::new(0, 2, 20, 5);
         let mut s = DocSelect::default();

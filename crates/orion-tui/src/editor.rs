@@ -118,6 +118,23 @@ impl Kind {
         }
     }
 
+    /// The cursor's line, if `row` is the editor's status bar: fresh's
+    /// starts with its `{cursor}` item, `Ln 42, Col 7` in the English it
+    /// ships with (orion's own config puts it first, [`FRESH_CONFIG`]).
+    /// None for any other row, and for an editor whose status bar orion
+    /// can't read.
+    pub fn cursor_line(self, row: &str) -> Option<u64> {
+        if self != Kind::Fresh {
+            return None;
+        }
+        let rest = row.trim_start().strip_prefix("Ln ")?;
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if !rest[digits..].starts_with(", Col ") {
+            return None;
+        }
+        rest[..digits].parse().ok().filter(|&line| line > 0)
+    }
+
     /// The key the editor binds its next match to — `back`, its previous
     /// one: fresh's `F3` and `⇧F3`. What Enter and `⇧Enter` are typed as
     /// straight after a find, where fresh's own Enter is a new line at the
@@ -540,6 +557,21 @@ mod tests {
         assert_eq!(Kind::Other.mac_key(&k(KeyCode::Left, cmd)), None);
         assert_eq!(Kind::Other.mac_key(&k(KeyCode::Char('a'), ctrl)), None);
         assert!(Kind::Fresh.quits_on_ctrl_q() && !Kind::Other.quits_on_ctrl_q());
+    }
+
+    /// fresh's status bar as it draws it (`Ln 42, Col 1`, then its message
+    /// and the language) gives the cursor's line; any other row, or any
+    /// other editor, none.
+    #[test]
+    fn the_cursor_line_is_read_off_freshs_status_bar() {
+        let bar = " Ln 42, Col 1       Opened /tmp/sample.txt                 Text";
+        assert_eq!(Kind::Fresh.cursor_line(bar), Some(42));
+        assert_eq!(Kind::Fresh.cursor_line("Ln 7, Col 12"), Some(7));
+        assert_eq!(Kind::Fresh.cursor_line("Search:"), None);
+        assert_eq!(Kind::Fresh.cursor_line("  42 │ line number 42"), None);
+        assert_eq!(Kind::Fresh.cursor_line(" Ln x, Col 1"), None);
+        assert_eq!(Kind::Fresh.cursor_line(" Ln 4 Col 1"), None);
+        assert_eq!(Kind::Other.cursor_line(bar), None);
     }
 
     /// `⌘⇧L` — however the terminal spells the shifted letter — is a burst

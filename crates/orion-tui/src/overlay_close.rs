@@ -97,6 +97,17 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
         Some(Overlay::Conflicts(_)) => crate::conflicts::back(app),
         // The PR REVIEW too; what is pending stays GitHub's.
         Some(Overlay::Review(_)) => crate::pr_review::back(app),
+        // A TREE BROWSER opened to reveal a file goes back to what it was
+        // opened over — a DIFF VIEWER read afresh, as it is after anything
+        // that stood over it.
+        Some(Overlay::Tree(view)) if view.back.is_some() => {
+            let back = match app.overlay.take() {
+                Some(Overlay::Tree(tree)) => tree.back,
+                _ => None,
+            };
+            app.overlay = back.map(std::sync::Arc::unwrap_or_clone);
+            crate::event_loop::reread_overlay(app);
+        }
         // Nothing to unwind on the way out.
         Some(
             Overlay::Help(_)

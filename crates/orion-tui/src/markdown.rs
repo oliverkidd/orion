@@ -89,8 +89,8 @@ pub fn render_with_wraps(
     base: Style,
     th: Theme,
 ) -> (Vec<Line<'static>>, Vec<Wrap>) {
-    let (lines, wraps, _) = lay_out(text, width, breaks, base, th, &[]);
-    (lines, wraps)
+    let laid = lay_out(text, width, breaks, base, th, &[]);
+    (laid.lines, laid.wraps)
 }
 
 /// A GitHub body ([`Breaks::Hard`]) with its FOLDS as the reader left
@@ -104,8 +104,18 @@ pub fn render_folding(
     th: Theme,
     flipped: &[usize],
 ) -> (Vec<Line<'static>>, Vec<Fold>) {
-    let (lines, _, folds) = lay_out(text, width, Breaks::Hard, base, th, flipped);
-    (lines, folds)
+    let laid = lay_out(text, width, Breaks::Hard, base, th, flipped);
+    (laid.lines, laid.folds)
+}
+
+/// A document laid out: its lines, and beside them each line's [`Wrap`],
+/// the FOLDS on show, where its links landed and the address of each.
+struct Laid {
+    lines: Vec<Line<'static>>,
+    wraps: Vec<Wrap>,
+    folds: Vec<Fold>,
+    links: Vec<LinkSpot>,
+    dests: Vec<String>,
 }
 
 fn lay_out(
@@ -115,7 +125,7 @@ fn lay_out(
     base: Style,
     th: Theme,
     flipped: &[usize],
-) -> (Vec<Line<'static>>, Vec<Wrap>, Vec<Fold>) {
+) -> Laid {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -128,6 +138,16 @@ fn lay_out(
         r.event(event);
     }
     r.finish()
+}
+
+/// Where one row of a link's text landed: its row, its columns, and the
+/// link — its place among the document's links ([`Rendered::dests`]), the
+/// same on every row a wrapped link takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSpot {
+    pub row: usize,
+    pub cols: std::ops::Range<u16>,
+    pub link: usize,
 }
 
 /// A FOLD: a `<details>` whose summary is on show, by its place in the
@@ -185,6 +205,11 @@ pub struct Rendered {
     pub lines: Vec<Line<'static>>,
     /// One per line: how a copy of it joins the line above.
     pub wraps: Vec<Wrap>,
+    /// Where the links landed, in document order: what a click or `Tab`
+    /// on the MARKDOWN PAGE follows.
+    pub links: Vec<LinkSpot>,
+    /// Each link's address, by its place ([`LinkSpot::link`]).
+    pub dests: Vec<String>,
 }
 
 /// How a rendered line relates to the one above it, for copying: a SOFT
@@ -209,12 +234,13 @@ impl Rendered {
         match cached {
             Some(r) if r.width == width => r,
             _ => {
-                let (lines, wraps) =
-                    render_with_wraps(text, width as usize, breaks, Style::default(), th);
+                let laid = lay_out(text, width as usize, breaks, Style::default(), th, &[]);
                 Rendered {
                     width,
-                    lines,
-                    wraps,
+                    lines: laid.lines,
+                    wraps: laid.wraps,
+                    links: laid.links,
+                    dests: laid.dests,
                 }
             }
         }
@@ -245,10 +271,40 @@ struct Atom {
     /// An image's stand-in (`[alt]`), so a link that is only a badge can
     /// keep its address to itself.
     image: bool,
+    /// The link it is the text of, by its place among the document's.
+    link: Option<usize>,
 }
 
 /// A flowed row: its spans and their width in columns.
 type Row = (Vec<Span<'static>>, usize);
+
+/// A link's text on one flowed row: the row's place in the flow, its
+/// columns, and the link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mark {
+    row: usize,
+    from: usize,
+    to: usize,
+    link: usize,
+}
+
+/// Note that `link`'s text takes `from..to` of flowed row `row`, running
+/// on from the mark before when it is the same link's on the same row —
+/// the space between two of its words included.
+fn mark(marks: &mut Vec<Mark>, row: usize, from: usize, to: usize, link: Option<usize>) {
+    let Some(link) = link else {
+        return;
+    };
+    match marks.last_mut() {
+        Some(m) if m.row == row && m.link == link && from <= m.to + 1 => m.to = to,
+        _ => marks.push(Mark {
+            row,
+            from,
+            to,
+            link,
+        }),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -321,8 +377,13 @@ struct Renderer {
     /// Inside an HTML or metadata block, whose text is shown raw.
     raw_block: bool,
     table: Option<Table>,
-    /// Open links: the address and where in `inline` the text began.
-    links: Vec<(String, usize)>,
+    /// Open links: where in `inline` the text began, and the link's place
+    /// among the document's.
+    links: Vec<(usize, usize)>,
+    /// Every link begun so far, by its place: its address.
+    dests: Vec<String>,
+    /// Where each link's text landed.
+    spots: Vec<LinkSpot>,
     /// Open images: where in `inline` the alt text began.
     images: Vec<usize>,
     /// GITHUB HTML: what is open, so the body draws as github.com does.
@@ -382,6 +443,8 @@ impl Renderer {
             raw_block: false,
             table: None,
             links: Vec::new(),
+            dests: Vec::new(),
+            spots: Vec::new(),
             images: Vec::new(),
             html: HtmlState::default(),
             flipped: Vec::new(),
@@ -389,7 +452,7 @@ impl Renderer {
         }
     }
 
-    fn finish(mut self) -> (Vec<Line<'static>>, Vec<Wrap>, Vec<Fold>) {
+    fn finish(mut self) -> Laid {
         self.flush_inline();
         while self
             .out
@@ -407,7 +470,18 @@ impl Renderer {
                 };
             }
         }
-        (self.out, wraps, self.folds)
+        Laid {
+            lines: self.out,
+            wraps,
+            folds: self.folds,
+            links: self.spots,
+            dests: self.dests,
+        }
+    }
+
+    /// The innermost open link, which text pushed now is part of.
+    fn open_link(&self) -> Option<usize> {
+        self.links.last().map(|&(_, link)| link)
     }
 
     // ---- styles ----
@@ -507,7 +581,21 @@ impl Renderer {
     /// One content line, behind the gutter, after the blank line the
     /// block before asked for.
     fn emit(&mut self, content: Vec<Span<'static>>) {
+        self.emit_marked(content, &[]);
+    }
+
+    /// [`Renderer::emit`], with the [`Mark`]s of the links in the content
+    /// noted where they land behind the gutter.
+    fn emit_marked(&mut self, content: Vec<Span<'static>>, marks: &[Mark]) {
         self.settle_blank();
+        let row = self.out.len();
+        let lead = self.gutter_width();
+        let col = |c: usize| (lead + c).min(u16::MAX as usize) as u16;
+        self.spots.extend(marks.iter().map(|m| LinkSpot {
+            row,
+            cols: col(m.from)..col(m.to),
+            link: m.link,
+        }));
         let mut spans = self.gutter_spans(true);
         spans.extend(content);
         self.out.push(fit_width(spans, self.width));
@@ -548,6 +636,7 @@ impl Renderer {
                 style,
                 kind,
                 image: false,
+                link: self.open_link(),
             });
             self.space = false;
         }
@@ -559,6 +648,7 @@ impl Renderer {
             style: Style::default(),
             kind: Kind::Break,
             image: false,
+            link: None,
         });
         self.space = false;
     }
@@ -585,14 +675,17 @@ impl Renderer {
         if atoms.is_empty() {
             return 0;
         }
-        let rows = flow_marked(&atoms, self.avail(), self.base);
+        let (rows, marks) = flow_marked(&atoms, self.avail(), self.base);
         let widest = rows.iter().map(|((_, w), _)| *w).max().unwrap_or(0);
-        for ((row, _), wrapped) in rows {
+        let mut marks = marks.as_slice();
+        for (at, ((row, _), wrapped)) in rows.into_iter().enumerate() {
             if wrapped {
                 let lead = self.gutter_width().min(u16::MAX as usize) as u16;
                 self.soft.push((self.out.len(), lead));
             }
-            self.emit(row);
+            let (on_row, rest) = marks.split_at(marks.iter().take_while(|m| m.row == at).count());
+            marks = rest;
+            self.emit_marked(row, on_row);
         }
         widest
     }
@@ -687,26 +780,37 @@ impl Renderer {
         }
         let edge = self.edge();
         for (r, row) in rows.iter().enumerate() {
-            let cells: Vec<Vec<Row>> = widths
+            let cells: Vec<(Vec<Row>, Vec<Mark>)> = widths
                 .iter()
                 .enumerate()
                 .map(|(c, w)| {
                     let atoms = row.get(c).map(Vec::as_slice).unwrap_or(&[]);
-                    flow(atoms, *w, base)
+                    let (rows, marks) = flow_marked(atoms, *w, base);
+                    (rows.into_iter().map(|(row, _)| row).collect(), marks)
                 })
                 .collect();
-            let height = cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
+            let height = cells.iter().map(|(c, _)| c.len()).max().unwrap_or(0).max(1);
             for line in 0..height {
                 let mut spans = Vec::new();
-                for (c, cell) in cells.iter().enumerate() {
+                let mut on_row = Vec::new();
+                let mut x = 0;
+                for (c, (cell, marks)) in cells.iter().enumerate() {
                     if c > 0 {
                         spans.push(Span::styled(COL_SEP, edge));
+                        x += COL_SEP.width();
                     }
                     let (content, used) = cell.get(line).cloned().unwrap_or_default();
                     let align = t.aligns.get(c).copied().unwrap_or(Alignment::None);
+                    let left = x + pads(used, widths[c], align).0;
+                    on_row.extend(marks.iter().filter(|m| m.row == line).map(|m| Mark {
+                        from: left + m.from,
+                        to: left + m.to,
+                        ..*m
+                    }));
                     spans.extend(aligned(content, used, widths[c], align, base));
+                    x += widths[c];
                 }
-                self.emit(spans);
+                self.emit_marked(spans, &on_row);
             }
             if r + 1 == head_rows {
                 let rule: Vec<String> = widths.iter().map(|w| "─".repeat(*w)).collect();
@@ -891,7 +995,8 @@ impl Renderer {
             Tag::Strikethrough => self.strike += 1,
             Tag::Link { dest_url, .. } => {
                 self.link += 1;
-                self.links.push((dest_url.to_string(), self.inline.len()));
+                self.links.push((self.inline.len(), self.dests.len()));
+                self.dests.push(dest_url.to_string());
             }
             Tag::Image { .. } => self.images.push(self.inline.len()),
             Tag::FootnoteDefinition(_)
@@ -987,7 +1092,8 @@ impl Renderer {
             TagEnd::Strikethrough => self.strike = self.strike.saturating_sub(1),
             TagEnd::Link => {
                 self.link = self.link.saturating_sub(1);
-                if let Some((dest, start)) = self.links.pop() {
+                if let Some((start, link)) = self.links.pop() {
+                    let dest = self.dests[link].clone();
                     let text = self.inline_text(start);
                     // A badge — a link that is nothing but an image — is
                     // read, not followed: its address stays out of the way.
@@ -1032,6 +1138,7 @@ impl Renderer {
             style,
             kind,
             image: true,
+            link: self.open_link(),
         });
         self.space = false;
     }
@@ -1447,16 +1554,19 @@ pub(crate) fn chunk_runs(runs: &[(String, Style)], width: usize) -> Vec<Vec<Span
 /// row is empty.
 fn flow(atoms: &[Atom], avail: usize, base: Style) -> Vec<Row> {
     flow_marked(atoms, avail, base)
+        .0
         .into_iter()
         .map(|(row, _)| row)
         .collect()
 }
 
 /// [`flow`], each row saying whether it only started because the one
-/// before ran out of width — a SOFT WRAP, which a copy joins back up.
-fn flow_marked(atoms: &[Atom], avail: usize, base: Style) -> Vec<(Row, bool)> {
+/// before ran out of width — a SOFT WRAP, which a copy joins back up —
+/// and beside the rows the [`Mark`]s of the links' text on them.
+fn flow_marked(atoms: &[Atom], avail: usize, base: Style) -> (Vec<(Row, bool)>, Vec<Mark>) {
     let avail = avail.max(1);
     let mut rows: Vec<(Row, bool)> = Vec::new();
+    let mut marks: Vec<Mark> = Vec::new();
     let mut line: Vec<Span<'static>> = Vec::new();
     let mut cur = 0usize;
     // Whether the row being built continues the one before it.
@@ -1500,21 +1610,24 @@ fn flow_marked(atoms: &[Atom], avail: usize, base: Style) -> Vec<(Row, bool)> {
                         cur = 0;
                     }
                     push_char(&mut line, ch, a.style);
+                    mark(&mut marks, rows.len(), cur, cur + cw, a.link);
                     cur += cw;
                 }
             }
         } else {
             for a in word {
                 push_run(&mut line, &a.text, a.style);
+                let aw = a.text.width();
+                mark(&mut marks, rows.len(), cur, cur + aw, a.link);
+                cur += aw;
             }
-            cur += w;
         }
         i = j;
     }
     if !line.is_empty() {
         rows.push(((line, cur), wrapped));
     }
-    rows
+    (rows, marks)
 }
 
 /// The widest word in `atoms` — what a table column can't go under
@@ -1616,12 +1729,7 @@ fn aligned(
     align: Alignment,
     base: Style,
 ) -> Vec<Span<'static>> {
-    let pad = width.saturating_sub(used);
-    let (left, right) = match align {
-        Alignment::Right => (pad, 0),
-        Alignment::Center => (pad / 2, pad - pad / 2),
-        Alignment::Left | Alignment::None => (0, pad),
-    };
+    let (left, right) = pads(used, width, align);
     if left > 0 {
         spans.insert(0, Span::styled(" ".repeat(left), base));
     }
@@ -1629,6 +1737,17 @@ fn aligned(
         spans.push(Span::styled(" ".repeat(right), base));
     }
     spans
+}
+
+/// The columns [`aligned`] puts left and right of a cell's `used` columns
+/// to fill `width` the way `align` says.
+fn pads(used: usize, width: usize, align: Alignment) -> (usize, usize) {
+    let pad = width.saturating_sub(used);
+    match align {
+        Alignment::Right => (pad, 0),
+        Alignment::Center => (pad / 2, pad - pad / 2),
+        Alignment::Left | Alignment::None => (0, pad),
+    }
 }
 
 /// The safety net under every emitted line: nothing wider than the pane
@@ -1995,6 +2114,40 @@ mod tests {
             [3, 3],
             "the floor holds; the row is clipped rather than a column erased"
         );
+    }
+
+    /// Each link's text is noted where it landed — behind a list's
+    /// marker, in a table's column, a row apiece where it wraps, and the
+    /// gap between its words inside it — so the MARKDOWN PAGE can follow
+    /// a click or a `Tab` there.
+    #[test]
+    fn links_are_noted_where_their_text_lands() {
+        let text = "See [the keys](docs/keys.md) here.\n\n- an [item link](b.md)\n\n\
+                    | a | b |\n|---|---|\n| x | [cell](c.md) |\n\n\
+                    [one two three four five six](wrap.md)\n";
+        let doc = Rendered::for_width(None, text, 24, Breaks::Reflow, th());
+        let rows = plain(&doc.lines);
+        let shown: Vec<(usize, String, &str)> = doc
+            .links
+            .iter()
+            .map(|s| {
+                let row: Vec<char> = rows[s.row].chars().collect();
+                let cut = row[s.cols.start as usize..s.cols.end as usize].iter();
+                (s.link, cut.collect(), doc.dests[s.link].as_str())
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (0, "the keys".to_string(), "docs/keys.md"),
+                (1, "item link".to_string(), "b.md"),
+                (2, "cell".to_string(), "c.md"),
+                (3, "one two three four five".to_string(), "wrap.md"),
+                (3, "six".to_string(), "wrap.md"),
+            ],
+            "{rows:#?}"
+        );
+        assert_eq!(doc.links[4].row, doc.links[3].row + 1, "the wrap's row");
     }
 
     #[test]

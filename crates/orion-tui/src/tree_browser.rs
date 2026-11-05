@@ -1,6 +1,9 @@
 //! Full-worktree tree browser (`b`): directory tree left, file preview
 //! right, with an always-live fuzzy filter that narrows the tree to the
-//! matching files and the hierarchies containing them.
+//! matching files and the hierarchies containing them. Each changed file
+//! wears its `git status` letter, and a folder with changes in it a dot.
+//! It can open on a file — the one the editor or the DIFF VIEWER is on —
+//! its folders unfolded to it ([`TreeBrowser::reveal`]).
 
 use crate::app::{
     clamp_files_width, clamp_selection, max_scroll, scrolled_by, window_start, DEFAULT_TREE_FILES_W,
@@ -178,6 +181,67 @@ pub struct TreeBrowser {
     pub waiting: Option<u64>,
     /// Stops the preview in flight when the cursor moves on.
     pub cancel: crate::view_jobs::Cancel,
+    /// Each changed file's mark, and each folder's with one under it, by
+    /// path ([`marks_of`]) — shared, since the modal is cloned for every
+    /// frame it draws.
+    pub marks: std::sync::Arc<HashMap<String, Mark>>,
+    /// The file to put the cursor on once the listing lands.
+    pub reveal_on_listing: Option<String>,
+    /// The overlay the browser was opened over to reveal a file in — the
+    /// DIFF VIEWER, the finder the editor came from — which its Esc puts
+    /// back as it was.
+    pub back: Option<std::sync::Arc<crate::app::Overlay>>,
+}
+
+/// What a tree row wears on its right for `git status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// A changed file: its two status columns.
+    File([char; 2]),
+    /// A folder with a changed file under it.
+    Dir,
+}
+
+impl Mark {
+    /// The one letter a changed file's row wears: what the change is —
+    /// staged, else in the working tree, the column [`change_color`]
+    /// colours it by — `U` for a file git doesn't track yet, as an
+    /// editor's file tree has it, and `!` for one a merge left unresolved.
+    /// A folder's is a dot.
+    ///
+    /// [`change_color`]: crate::ui::change_color
+    pub fn letter(self) -> char {
+        match self {
+            Mark::Dir => '•',
+            Mark::File(xy) if is_unmerged(xy) => '!',
+            Mark::File(['?', '?']) => 'U',
+            Mark::File([' ', y]) => y,
+            Mark::File([x, _]) => x,
+        }
+    }
+}
+
+/// A file a merge left unresolved: either side `U`, or both added or both
+/// deleted — git's unmerged pairs.
+pub(crate) fn is_unmerged(xy: [char; 2]) -> bool {
+    xy.contains(&'U') || matches!(xy, ['A', 'A'] | ['D', 'D'])
+}
+
+/// The marks of a checkout's changed `files`: each file's status, and a
+/// dot on every folder above one.
+pub fn marks_of(files: &[crate::git_diff::DiffFile]) -> std::sync::Arc<HashMap<String, Mark>> {
+    let mut marks = HashMap::new();
+    for file in files {
+        marks.insert(file.path.clone(), Mark::File(file.xy));
+        let mut dir = file.path.as_str();
+        while let Some(at) = dir.rfind('/') {
+            dir = &dir[..at];
+            if marks.insert(dir.to_string(), Mark::Dir).is_some() {
+                break;
+            }
+        }
+    }
+    std::sync::Arc::new(marks)
 }
 
 impl TreeBrowser {
@@ -211,6 +275,38 @@ impl TreeBrowser {
             .best_row
             .unwrap_or(0)
             .min(self.rows.len().saturating_sub(1));
+        match self.reveal_on_listing.take() {
+            Some(path) => self.reveal(&path),
+            None => self.load_preview(),
+        }
+    }
+
+    /// The `git status` mark of `node`, if it has one.
+    pub fn mark(&self, node: &TreeNode) -> Option<Mark> {
+        self.marks.get(&node.path).copied()
+    }
+
+    /// Put the cursor on the file at `path` (relative to the checkout):
+    /// the filter cleared, its folders unfolded, its preview read. Before
+    /// the listing lands, once it does. A path the tree doesn't have
+    /// leaves the cursor where it is.
+    pub fn reveal(&mut self, path: &str) {
+        if self.listing.is_some() {
+            self.reveal_on_listing = Some(path.to_string());
+            return;
+        }
+        let Some(node) = self.nodes.iter().position(|n| !n.is_dir && n.path == path) else {
+            self.load_preview();
+            return;
+        };
+        self.filter = TextInput::new();
+        let mut parent = self.nodes[node].parent;
+        while let Some(dir) = parent {
+            self.expanded[dir] = true;
+            parent = self.nodes[dir].parent;
+        }
+        self.rebuild_rows();
+        self.selected = self.rows.iter().position(|r| r.node == node).unwrap_or(0);
         self.load_preview();
     }
 
@@ -249,6 +345,9 @@ impl TreeBrowser {
             listing: None,
             waiting: None,
             cancel: crate::view_jobs::Cancel::default(),
+            marks: std::sync::Arc::default(),
+            reveal_on_listing: None,
+            back: None,
         };
         browser.rebuild_rows();
         browser.load_preview();
@@ -493,6 +592,99 @@ impl TreeBrowser {
         if !self.pretty {
             self.preview_line_count = self.preview_lines.len();
         }
+    }
+}
+
+#[cfg(test)]
+mod git_marks_tests {
+    use super::*;
+
+    fn browser() -> TreeBrowser {
+        let files = ["src/a.rs", "src/deep/b.rs", "docs/c.md", "top.txt"]
+            .map(String::from)
+            .to_vec();
+        TreeBrowser::new("/r".into(), "main".into(), "fresh".into(), files)
+    }
+
+    fn node<'a>(view: &'a TreeBrowser, path: &str) -> &'a TreeNode {
+        view.nodes.iter().find(|n| n.path == path).unwrap()
+    }
+
+    /// A changed file wears its status; a folder with one under it — at
+    /// any depth — a dot; the rest nothing.
+    #[test]
+    fn changed_files_and_their_folders_are_marked() {
+        let changes =
+            crate::git_diff::parse_status_z(b" M src/deep/b.rs\0?? top.txt\0M  src/c.rs\0");
+        let mut view = browser();
+        view.marks = marks_of(&changes);
+        let letters: Vec<char> = [" M", "??", "AM", "RM", "UU", "AA", "D "]
+            .iter()
+            .map(|xy| {
+                let xy: Vec<char> = xy.chars().collect();
+                Mark::File([xy[0], xy[1]]).letter()
+            })
+            .collect();
+        assert_eq!(letters, ['M', 'U', 'A', 'R', '!', '!', 'D']);
+        assert_eq!(Mark::Dir.letter(), '•');
+        assert_eq!(
+            view.mark(node(&view, "src/deep/b.rs")),
+            Some(Mark::File([' ', 'M']))
+        );
+        assert_eq!(
+            view.mark(node(&view, "top.txt")),
+            Some(Mark::File(['?', '?']))
+        );
+        assert_eq!(view.mark(node(&view, "src")), Some(Mark::Dir));
+        assert_eq!(view.mark(node(&view, "src/deep")), Some(Mark::Dir));
+        assert_eq!(view.mark(node(&view, "src/a.rs")), None);
+        assert_eq!(view.mark(node(&view, "docs")), None);
+    }
+
+    /// Revealing a file opens the folders down to it, clears the filter
+    /// and puts the cursor on it; before the listing it waits for it, and
+    /// a file the tree hasn't got leaves the cursor be.
+    #[test]
+    fn reveal_unfolds_to_the_file_and_selects_it() {
+        let mut view = browser();
+        view.filter.insert_str("top");
+        view.apply_filter();
+        view.reveal("src/deep/b.rs");
+        assert!(view.filter.is_empty());
+        assert_eq!(
+            view.selected_node().map(|n| n.path.as_str()),
+            Some("src/deep/b.rs")
+        );
+        let shown: Vec<&str> = view
+            .rows
+            .iter()
+            .map(|r| view.nodes[r.node].path.as_str())
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "docs",
+                "src",
+                "src/deep",
+                "src/deep/b.rs",
+                "src/a.rs",
+                "top.txt"
+            ]
+        );
+        view.reveal("nowhere.rs");
+        assert_eq!(
+            view.selected_node().map(|n| n.path.as_str()),
+            Some("src/deep/b.rs")
+        );
+
+        let mut waiting = TreeBrowser::new("/r".into(), "main".into(), "fresh".into(), Vec::new());
+        waiting.listing = Some(1);
+        waiting.reveal("docs/c.md");
+        waiting.set_files(vec!["docs/c.md".into(), "z.txt".into()]);
+        assert_eq!(
+            waiting.selected_node().map(|n| n.path.as_str()),
+            Some("docs/c.md")
+        );
     }
 }
 

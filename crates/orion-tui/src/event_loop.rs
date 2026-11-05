@@ -594,6 +594,9 @@ async fn main_loop(
                 }
                 let _ = reassert_modes(terminal.backend_mut());
                 next_mode_reassert = tokio::time::Instant::now() + MODE_REASSERT;
+                // The same beat re-reads a MARKDOWN PAGE whose file moved —
+                // paused, like the re-ask, while a drag holds the button.
+                refresh_page(&mut app);
             }
             // The EDGE AUTO-SCROLL beat: a drag-selection resting past the
             // pane's top or bottom edge scrolls the history under it, with
@@ -1158,6 +1161,16 @@ fn keep_changed_files(
     app.changed_files = files
         .filter(|files| files.len() <= CHANGED_FILES_KEEP)
         .map(|files| (worktree.clone(), files));
+    // A TREE BROWSER open on the checkout keeps its marks to the poll.
+    let root = app.tree.worktrees.iter().find(|w| &w.id == worktree);
+    if let (Some(root), Some(Overlay::Tree(view))) =
+        (root.map(|w| w.path.clone()), &mut app.overlay)
+    {
+        if view.root == root {
+            let files = app.changed_files.as_ref().map_or(&[][..], |(_, f)| f);
+            view.marks = crate::tree_browser::marks_of(files);
+        }
+    }
 }
 
 /// Record a checkout's changed-file count. Stored whichever checkout it is
@@ -3018,6 +3031,14 @@ pub(crate) fn close_editor(app: &mut App) {
     if let Some(page) = &mut app.page {
         page.refresh();
     }
+    reread_overlay(app);
+}
+
+/// The open overlay read again after something stood over it — the editor,
+/// or a TREE BROWSER it was moved into — and may have changed its files:
+/// the tree's preview, the FILE TABS' file (the cursor back on the strip),
+/// the CONFLICT RESOLVER's merge, the DIFF VIEWER's diff.
+pub(crate) fn reread_overlay(app: &mut App) {
     match &mut app.overlay {
         Some(Overlay::Tree(view)) => view.load_preview(),
         Some(Overlay::FileTabs(view)) => view.editor_closed(),
@@ -3726,7 +3747,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // The editor modal sits above every overlay: all keys forward to it —
     // except Ctrl+Q, the same hatch the terminal lock uses.
     if app.editor.is_some() {
-        handle_editor_key(app, key);
+        handle_editor_key(app, key, out);
         return;
     }
     // fresh missing, and the footer saying so: `i` installs it, over
@@ -5154,7 +5175,7 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
     match &app.overlay {
         Some(Overlay::Files(finder)) => finder
             .selected_path()
-            .map(|path| (finder.root.clone(), path.to_string(), 1)),
+            .map(|path| (finder.root.clone(), path.to_string(), finder.open_line())),
         Some(Overlay::Tree(view)) => view
             .selected_node()
             .filter(|node| !node.is_dir)
@@ -5166,7 +5187,7 @@ fn overlay_file(app: &App) -> Option<(std::path::PathBuf, String, u64)> {
             (
                 view.root.clone(),
                 tab.path.to_string_lossy().into_owned(),
-                1,
+                tab.line,
             )
         }),
         // The DIFF VIEWER's file, at the line at the top of its diff, while
@@ -5432,12 +5453,9 @@ fn open_diff_view(app: &mut App) {
         // list to open on: the files are up on this keypress and the first
         // diff is being read while the `git status` below checks them, not
         // after it. `fill_view` reconciles the two when that lands.
-        let polled = app
-            .changed_files
-            .as_ref()
-            .filter(|(id, files)| Some(id) == selected.as_ref() && !files.is_empty());
-        if let Some((_, files)) = polled {
-            view.replace_files(files.clone());
+        let polled = polled_changes(app, &path);
+        if !polled.is_empty() {
+            view.replace_files(polled.to_vec());
             crate::git_diff::load_selected_diff(&mut view);
         }
         app.overlay = Some(Overlay::Diff(view));
@@ -5490,11 +5508,18 @@ fn open_file_finder(app: &mut App) {
     // The modal is up on this keypress, taking what is typed; the list
     // lands when `git ls-files` answers (`land_view_answer`).
     let recents = crate::recent_files::load(&path);
+    let changed: Vec<String> = polled_changes(app, &path)
+        .iter()
+        .filter(|file| !file.is_deleted())
+        .map(|file| file.path.clone())
+        .collect();
     if let Some(jobs) = app.view_jobs.clone() {
         let editor = crate::config::Config::load().editor_command();
         let ticket = request_worktree_files(&jobs, &path);
         app.overlay = Some(Overlay::Files(
-            FileFinder::opening(path, branch, editor, ticket).with_recents(recents),
+            FileFinder::opening(path, branch, editor, ticket)
+                .with_recents(recents)
+                .with_changed(changed),
         ));
         return;
     }
@@ -5502,8 +5527,29 @@ fn open_file_finder(app: &mut App) {
         return;
     };
     app.overlay = Some(Overlay::Files(
-        FileFinder::new(path, branch, editor, files).with_recents(recents),
+        FileFinder::new(path, branch, editor, files)
+            .with_recents(recents)
+            .with_changed(changed),
     ));
+}
+
+/// The changed files of the checkout at `root` as the badge's last `git
+/// status` found them — two seconds old at most (`keep_changed_files`),
+/// and only ever of the selected checkout — or none when that poll was of
+/// another checkout, or hasn't run.
+fn polled_changes<'a>(app: &'a App, root: &std::path::Path) -> &'a [crate::git_diff::DiffFile] {
+    match &app.changed_files {
+        Some((id, files))
+            if app
+                .tree
+                .worktrees
+                .iter()
+                .any(|w| &w.id == id && w.path == root) =>
+        {
+            files
+        }
+        _ => &[],
+    }
 }
 
 /// Ask for a checkout's file listing off the loop; the ticket is what the
@@ -5528,23 +5574,96 @@ fn open_tree_browser(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
     };
-    // Up on this keypress; the tree lands when `git ls-files` answers.
-    if let Some(jobs) = app.view_jobs.clone() {
-        let editor = crate::config::Config::load().editor_command();
-        let ticket = request_worktree_files(&jobs, &path);
-        app.overlay = Some(Overlay::Tree(TreeBrowser::opening(
-            path, branch, editor, jobs, ticket,
-        )));
-        return;
+    if let Some(view) = tree_browser_at(app, path, branch) {
+        app.overlay = Some(Overlay::Tree(view));
     }
-    let Some((files, editor)) = load_worktree_files(app, &path) else {
+}
+
+/// A TREE BROWSER on the checkout at `root`, its rows marked with what the
+/// badge's last `git status` found changed there: up on this keypress, the
+/// tree landing when `git ls-files` answers. None — flashing why, when
+/// git failed — when there is nothing to list.
+fn tree_browser_at(app: &mut App, root: std::path::PathBuf, branch: String) -> Option<TreeBrowser> {
+    let marks = crate::tree_browser::marks_of(polled_changes(app, &root));
+    let mut view = match app.view_jobs.clone() {
+        Some(jobs) => {
+            let editor = crate::config::Config::load().editor_command();
+            let ticket = request_worktree_files(&jobs, &root);
+            TreeBrowser::opening(root, branch, editor, jobs, ticket)
+        }
+        None => {
+            let (files, editor) = load_worktree_files(app, &root)?;
+            TreeBrowser::new(root, branch, editor, files)
+        }
+    };
+    view.marks = marks;
+    Some(view)
+}
+
+/// `⌘⇧B` from the DIFF VIEWER or the editor: the TREE BROWSER on `root`
+/// with its cursor on `file` (relative to it), its folders unfolded to it.
+/// `back` is the overlay it opens over, which its Esc puts back — a tree's
+/// own `back`, not the tree, so trees never nest. False, with `back` left
+/// up, when there is no tree to show.
+pub(crate) fn tree_revealing(
+    app: &mut App,
+    root: std::path::PathBuf,
+    branch: String,
+    file: Option<&str>,
+    back: Option<Overlay>,
+) -> bool {
+    let Some(mut view) = tree_browser_at(app, root, branch) else {
+        app.overlay = back;
+        return false;
+    };
+    view.back = match back {
+        Some(Overlay::Tree(tree)) => tree.back,
+        back => back.map(std::sync::Arc::new),
+    };
+    if let Some(file) = file {
+        view.reveal(file);
+    }
+    app.overlay = Some(Overlay::Tree(view));
+    true
+}
+
+/// `⌘⇧B` in the editor: the TREE BROWSER revealing its file, and the editor
+/// moved into the tree's preview pane — unsaved work and all — so quitting
+/// it lands on the file in the tree, and the tree's Esc on whatever the
+/// editor was opened from. A MARKDOWN PAGE under it goes: the tree takes
+/// its place.
+fn reveal_editor_file(app: &mut App) {
+    let Some(vim) = &app.editor else {
         return;
     };
-    app.overlay = Some(Overlay::Tree(TreeBrowser::new(path, branch, editor, files)));
+    let (root, file) = (vim.cwd.clone(), vim.rel_file());
+    let shown = match app.overlay.take() {
+        Some(Overlay::Tree(mut view)) if view.root == root => {
+            view.reveal(&file);
+            app.overlay = Some(Overlay::Tree(view));
+            true
+        }
+        back => {
+            let branch = app
+                .tree
+                .worktrees
+                .iter()
+                .find(|w| w.path == root)
+                .map(|w| w.branch.clone())
+                .unwrap_or_default();
+            tree_revealing(app, root, branch, Some(&file), back)
+        }
+    };
+    if shown {
+        app.page = None;
+        embed_editor(app);
+    }
 }
 
 /// Find-in-files (`F`): live `git grep` over the selected worktree; Enter
 /// on a hit opens it in the editor modal. Same shell as `open_diff_view`.
+/// Text dragged over in the pane is the query it opens on, searched at
+/// once: its first line, trimmed.
 fn open_grep_view(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
@@ -5552,8 +5671,21 @@ fn open_grep_view(app: &mut App) {
     let editor = crate::config::Config::load().editor_command();
     let mut view = GrepView::new(path, branch, editor);
     view.jobs = app.view_jobs.clone();
+    let selected = selection_text(app);
+    if let Some(first) = selected
+        .as_deref()
+        .and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty()))
+    {
+        let phrase: String = first.chars().take(GREP_PREFILL_MAX).collect();
+        view.query.insert_str(&phrase);
+        view.run_search();
+    }
     app.overlay = Some(Overlay::Grep(view));
 }
+
+/// The most of a pane's selection find in files takes as its query: a
+/// phrase to look for, not a paragraph.
+const GREP_PREFILL_MAX: usize = 200;
 
 /// A BACKGROUND READ came back (`view_jobs`): hand it to the view that
 /// asked, if that view is still the one on screen. Every answer carries
@@ -5599,6 +5731,11 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
             Some(Overlay::FileTabs(view)) => view.land_preview(ticket, *preview),
             _ => {}
         },
+        Answer::GrepPreview { ticket, preview } => {
+            if let Some(Overlay::Grep(view)) = &mut app.overlay {
+                view.land_preview(ticket, preview);
+            }
+        }
         Answer::Usage(answer) => crate::usage::land(app, answer),
         Answer::ClipboardViaTerminal { payload, flash } => {
             app.pending_clipboard = Some(payload);
@@ -5863,7 +6000,11 @@ fn open_selected_file(app: &mut App) {
     let Some(path) = finder.selected_path().map(str::to_string) else {
         return;
     };
-    let (root, editor, line) = (finder.root.clone(), finder.editor.clone(), finder.line);
+    let (root, editor, line) = (
+        finder.root.clone(),
+        finder.editor.clone(),
+        finder.open_line(),
+    );
     // Size guess from the last-drawn body; the post-draw sync corrects it.
     let size = editor_size_guess(app);
     if open_file(app, &editor, &root, &path, line, size) {
@@ -5879,7 +6020,7 @@ fn create_typed_file(app: &mut App) {
         return;
     };
     let (root, editor) = (finder.root.clone(), finder.editor.clone());
-    let path = match create_file_in(&root, finder.query.as_str()) {
+    let path = match create_file_in(&root, finder.typed().0) {
         Ok(path) => path,
         Err(err) => {
             app.flash = Some(crate::flash::Flash::failed(err));
@@ -6128,7 +6269,7 @@ fn resolve_file_link(root: &std::path::Path, path: &str) -> Option<String> {
 ///
 /// Enter straight after a find in fresh is its next match, not a new line
 /// ([`find_step`]).
-fn handle_editor_key(app: &mut App, key: KeyEvent) {
+fn handle_editor_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let Some(vim) = &mut app.editor else {
         return;
@@ -6146,10 +6287,20 @@ fn handle_editor_key(app: &mut App, key: KeyEvent) {
         close_editor(app);
         return;
     }
-    // ⌘O hands an editor's file to the app; a `claude auth` run or an
+    // ⌘O hands an editor's file to the app, ⌘⇧B shows it in the tree and
+    // ⌘⇧I sends where it is to the agent; a `claude auth` run or an
     // installer has none.
-    if is_cmd_o(&key) && !vim.account_auth && vim.install.is_none() {
+    let has_file = !vim.account_auth && vim.install.is_none() && !vim.file.is_empty();
+    if is_cmd_o(&key) && has_file {
         open_editor_file_outside(app);
+        return;
+    }
+    if has_file && crate::hints::IN_TREE.matches(&key) {
+        reveal_editor_file(app);
+        return;
+    }
+    if has_file && ui::editor_keys::TO_AGENT.matches(&key) {
+        send_location_to_agent(app, out);
         return;
     }
     // A Mac editing chord as the key this editor binds its action to
@@ -6226,13 +6377,82 @@ fn cmd_as_ctrl(key: KeyEvent) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), mods)
 }
 
+/// `⌘⇧I` in the editor: where its cursor is — `src/app.rs:42`, the path
+/// from the checkout (`EditorTerm::rel_file`), the line off fresh's status
+/// bar (`EditorTerm::line_now`) — typed into the prompt of the checkout's
+/// agent, unsent, quoted as a pasted image's path is
+/// (`dropped_files::quoted`) and with a space either side, since the
+/// agent's caret can't be seen from here. The agent is the one in the
+/// pane when it is this checkout's, pasted into as `⌘U` pastes a preset;
+/// else the checkout's live one listed first, typed into. Never into a
+/// prompt that takes keys as answers: the `42` would pick one. The editor
+/// stays up, and the footer says where it went.
+fn send_location_to_agent(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let Some(vim) = &app.editor else {
+        return;
+    };
+    let location = format!("{}:{}", vim.rel_file(), vim.line_now());
+    let Some(agent) = location_agent(app, &vim.cwd) else {
+        app.flash = Some(crate::flash::Flash::note(format!(
+            "no running agent in this checkout to send {location} to"
+        )));
+        return;
+    };
+    if agent.status == orion_core::AgentStatus::NeedsFeedback {
+        app.flash = Some(crate::flash::Flash::note(format!(
+            "{} is asking you something — answer it first, then send {location}",
+            agent.name
+        )));
+        return;
+    }
+    let (session, name) = (SessionRef::Agent(agent.id.clone()), agent.name.clone());
+    let in_pane = app.pane_prompt_agent() == Some(&agent.id);
+    let text = format!(" {} ", crate::dropped_files::quoted(&location));
+    if in_pane {
+        // Bracketed paste off in the pane is a dialog up in it.
+        if !paste_unsent(app, &session, &text, out) {
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "{name} isn't taking pasted text right now — {location} not sent"
+            )));
+            return;
+        }
+    } else {
+        typed_into(app, &session);
+        out.push(ClientRequest::Input {
+            session,
+            data: text.into_bytes(),
+        });
+    }
+    app.flash = Some(crate::flash::Flash::done(format!(
+        "{location} → {name}'s prompt"
+    )));
+}
+
+/// The agent `⌘⇧I` sends a location to for the checkout at `root`: the
+/// one in the pane when it is that checkout's, else its live one the
+/// SESSIONS list puts first (`app::recency_key`). None when it has none
+/// running.
+fn location_agent<'a>(app: &'a App, root: &std::path::Path) -> Option<&'a orion_core::Agent> {
+    let worktree = app.tree.worktrees.iter().find(|w| w.path == root)?;
+    let live = app
+        .tree
+        .agents
+        .iter()
+        .filter(|a| a.worktree_id == worktree.id && !a.archived && a.alive);
+    let in_pane = app.pane_prompt_agent();
+    live.clone()
+        .find(|a| Some(&a.id) == in_pane)
+        .or_else(|| live.min_by_key(|a| crate::app::recency_key(a)))
+}
+
 /// ⌘O in the editor: the file in the OPEN IN APP editor too, at the line
-/// it opened on — the editor stays up, holding whatever it hasn't saved.
+/// the cursor is on (`EditorTerm::line_now`, off fresh's status bar) — the
+/// editor stays up, holding whatever it hasn't saved.
 fn open_editor_file_outside(app: &mut App) {
     let Some(vim) = &app.editor else {
         return;
     };
-    let (root, file, line) = (vim.cwd.clone(), vim.file.clone(), vim.line);
+    let (root, file, line) = (vim.cwd.clone(), vim.file.clone(), vim.line_now());
     if app.is_remote {
         app.flash = Some(crate::flash::Flash::note(format!(
             "{} would open on the remote machine — the file stays here",
@@ -6243,12 +6463,13 @@ fn open_editor_file_outside(app: &mut App) {
     open_in_outside_app(app, &root, &file, line);
 }
 
-/// Keys on a MARKDOWN PAGE: it scrolls itself; Enter (or `e`) edits the
-/// file in the BUILT-IN EDITOR over it, `⌘O` hands it to the OPEN IN APP
-/// editor, `⌘C` copies its path, and Esc — or the HARDWIRED UNLOCK —
-/// closes it, back to whatever it was opened over.
+/// Keys on a MARKDOWN PAGE: it scrolls itself and walks its links (`Tab`);
+/// Enter follows the link `Tab` is on, or else edits the file in the
+/// BUILT-IN EDITOR over it (`e` always does), `⌘O` hands it to the OPEN IN
+/// APP editor, `⌘C` copies its path, and Esc goes back to the page a link
+/// left — or, on the first, closes it, as the HARDWIRED UNLOCK always
+/// does, back to whatever it was opened over.
 fn handle_page_key(app: &mut App, key: KeyEvent) {
-    use crate::markdown_view::PageKey;
     app.dirty = true;
     if crate::keymap::KeyChord::from_event(&key) == HARDWIRED_UNLOCK {
         app.page = None;
@@ -6267,18 +6488,48 @@ fn handle_page_key(app: &mut App, key: KeyEvent) {
     }
     page.select.clear();
     let asked = page.key(&key);
-    let (root, file, line, editor) = (
-        page.root.clone(),
-        page.file.clone(),
-        page.line,
-        page.editor.clone(),
-    );
+    act_on_page(app, asked);
+}
+
+/// The slow beat's look at a MARKDOWN PAGE's file: re-read when it
+/// changed on disk, so an agent's edit shows up while it is being read.
+fn refresh_page(app: &mut App) {
+    if app.page.as_mut().is_some_and(|page| page.refresh()) {
+        app.dirty = true;
+    }
+}
+
+/// Do what the MARKDOWN PAGE asked, by key or by a click on a link: the
+/// editor at the line it reads at, the app, the clipboard, a link off the
+/// page — in the browser, the editor, or the footer saying it leads
+/// nowhere — or the page closed.
+fn act_on_page(app: &mut App, asked: crate::markdown_view::PageKey) {
+    use crate::markdown_view::{Away, PageKey};
+    let Some(page) = &app.page else {
+        return;
+    };
+    let (root, file, editor) = (page.root.clone(), page.file.clone(), page.editor.clone());
     match asked {
         PageKey::Edit => {
-            let size = editor_size_guess(app);
+            let (line, size) = (page.edit_line(), editor_size_guess(app));
             spawn_editor_modal(app, &editor, &root, &file, line, size);
         }
-        PageKey::Outside => open_file_outside(app, &root, &file, line),
+        PageKey::Outside => {
+            let line = page.edit_line();
+            open_file_outside(app, &root, &file, line);
+        }
+        PageKey::Follow(Away::Web(url)) => {
+            if !open_url(&url) {
+                app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
+            }
+        }
+        PageKey::Follow(Away::File { file, line }) => {
+            let size = editor_size_guess(app);
+            open_file(app, &editor, &root, &file, line, size);
+        }
+        PageKey::Follow(Away::Missing(dest)) => {
+            app.flash = Some(crate::flash::Flash::failed(format!("no such file: {dest}")));
+        }
         PageKey::CopyPath => copy_and_flash(app, &file, &format!("copied {file}")),
         PageKey::Close => app.page = None,
         PageKey::Done => {}
@@ -7878,6 +8129,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 // Enter opens the hit in the editor modal, which closes this
                 // overlay unless `close_finder_on_open` is off.
                 _ if ui::finder_keys::OPEN.matches(&key) => open_selected_hit_in_editor(app),
+                // ⌘R (^R): the query as a regex, or back to the text itself.
+                _ if ui::finder_keys::REGEX.matches(&key) => view.toggle_regex(),
                 // ⌘C (^Y) copies the hit's path, as Go to file's does —
                 // unless the query holds a selection to copy.
                 _ if crate::hints::copies_path(&key, &view.query) => {
@@ -11188,19 +11441,31 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             MouseEventKind::Down(MouseButton::Left) if !page.frame.contains(mouse_pos) => {
                 app.page = None;
             }
-            // The left button over the text is the DOC SELECTION's.
+            // The left button over the text is the DOC SELECTION's — but
+            // a click that never became a drag, on a link, follows it.
             _ => {
                 let Some(doc) = &page.rendered else {
                     return;
                 };
-                match page.select.mouse(&mouse, page.area, page.scroll, doc) {
-                    doc_select::Outcome::Ignored => {
-                        if !matches!(mouse.kind, MouseEventKind::Down(_)) {
-                            return;
+                let clicked = matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                    && page.select.is_armed();
+                let link = clicked
+                    .then(|| page.link_at(mouse.column, mouse.row))
+                    .flatten();
+                if let Some(link) = link {
+                    page.select.clear();
+                    let asked = page.follow(link);
+                    act_on_page(app, asked);
+                } else {
+                    match page.select.mouse(&mouse, page.area, page.scroll, doc) {
+                        doc_select::Outcome::Ignored => {
+                            if !matches!(mouse.kind, MouseEventKind::Down(_)) {
+                                return;
+                            }
                         }
+                        doc_select::Outcome::Moved { scroll } => page.scroll_by(scroll),
+                        doc_select::Outcome::Copy(text) => copy_text_and_flash(app, &text),
                     }
-                    doc_select::Outcome::Moved { scroll } => page.scroll_by(scroll),
-                    doc_select::Outcome::Copy(text) => copy_text_and_flash(app, &text),
                 }
             }
         }
@@ -11521,11 +11786,16 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             MouseEventKind::Down(MouseButton::Left) => {
                 let list = view.list_area;
                 let first = view.window_start(list.height as usize);
-                if let Some(index) =
-                    crate::list_hit::row_at(list, first, view.hits.len(), mouse_pos)
-                {
-                    view.select(index as i64);
-                    open_selected_hit_in_editor(app);
+                let rows = view.rows();
+                // A file's header selects its first hit; a hit opens.
+                let hit = crate::list_hit::row_at(list, first, rows.len(), mouse_pos);
+                match hit.map(|row| rows[row]) {
+                    Some(ui::ListEntry::Row(index)) => {
+                        view.select(index as i64);
+                        open_selected_hit_in_editor(app);
+                    }
+                    Some(ui::ListEntry::Header { first: lead, .. }) => view.select(lead as i64),
+                    None => {}
                 }
                 app.dirty = true;
             }
@@ -12540,8 +12810,10 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             crate::stacks::listed(app, stacks);
         }
         // `orion open` in a session: the user asked to see these files.
-        ServerEvent::FilesOpened { root, paths, .. } => {
-            crate::file_tabs::open(app, root, paths);
+        ServerEvent::FilesOpened {
+            root, paths, lines, ..
+        } => {
+            crate::file_tabs::open(app, root, paths, &lines);
         }
         ServerEvent::Metrics { req_id, snapshot } => {
             // Answered with Metrics, not Ack — clear the pending slot by hand.
@@ -28015,6 +28287,133 @@ mod tests {
         assert!(app.page.is_none(), "a click outside closes it");
     }
 
+    /// A click on a link follows it — another page in place, Esc coming
+    /// back and saying so; an `https` link in the browser — while a press
+    /// that drags off it still selects. `Tab` to a code file's link and
+    /// Enter edits it at its `#L` line, over the page.
+    #[test]
+    fn a_click_on_a_link_follows_it_and_tab_enter_does_too() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a.md"),
+            "# A\n\n[bee](b.md) [site](https://example.com) [code](m.rs#L2)\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("b.md"), "# B\n").unwrap();
+        std::fs::write(dir.path().join("m.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        let mut app = App::new();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.editor_tx = Some(tx);
+        app.page = Some(crate::markdown_view::MarkdownPage::open(
+            dir.path().into(),
+            "a.md".into(),
+            1,
+            "/bin/sh".into(),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut draw = |app: &mut App| {
+            terminal.draw(|f| ui::draw(f, app)).unwrap();
+            buffer_text(&terminal)
+        };
+        let screen = draw(&mut app);
+        assert!(screen.contains("Tab link"), "{screen}");
+        assert!(screen.contains("Esc close"), "{screen}");
+        let at = |app: &App, link: usize| {
+            let page = app.page.as_ref().unwrap();
+            let spot = page.rendered.as_ref().unwrap().links[link].clone();
+            let row = page.area.y + (spot.row - page.scroll as usize) as u16;
+            (page.area.x + spot.cols.start + 1, row)
+        };
+        let mut out = Vec::new();
+        let left = MouseButton::Left;
+        let press_at = |app: &mut App, kinds: &[(MouseEventKind, u16)], row: u16| {
+            for &(kind, col) in kinds {
+                handle_mouse(app, mev(kind, col, row), &mut Vec::new());
+            }
+        };
+
+        // A drag that starts on the link selects; it follows nothing.
+        let (x, y) = at(&app, 0);
+        press_at(
+            &mut app,
+            &[
+                (MouseEventKind::Down(left), x),
+                (MouseEventKind::Drag(left), x + 2),
+                (MouseEventKind::Up(left), x + 2),
+            ],
+            y,
+        );
+        assert_eq!(app.page.as_ref().unwrap().file, "a.md");
+
+        let (x, y) = at(&app, 1);
+        press_at(
+            &mut app,
+            &[
+                (MouseEventKind::Down(left), x),
+                (MouseEventKind::Up(left), x),
+            ],
+            y,
+        );
+        assert_eq!(take_opened(), ["https://example.com"]);
+
+        let (x, y) = at(&app, 0);
+        press_at(
+            &mut app,
+            &[
+                (MouseEventKind::Down(left), x),
+                (MouseEventKind::Up(left), x),
+            ],
+            y,
+        );
+        assert_eq!(app.page.as_ref().unwrap().file, "b.md");
+        let screen = draw(&mut app);
+        assert!(screen.contains("Esc back"), "{screen}");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+        assert_eq!(app.page.as_ref().unwrap().file, "a.md");
+
+        draw(&mut app);
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+        }
+        let screen = draw(&mut app);
+        assert!(screen.contains("Enter follow"), "{screen}");
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        let vim = app.editor.as_ref().expect("the code file, in the editor");
+        assert_eq!((vim.file.as_str(), vim.line), ("m.rs", 2));
+        assert!(app.page.is_some(), "the page waits under it");
+    }
+
+    /// The slow beat reads a page's file again once it changed on disk —
+    /// an agent's edit shows while it is being read — and leaves it be
+    /// while it hasn't.
+    #[test]
+    fn the_slow_beat_rereads_a_page_whose_file_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.md");
+        std::fs::write(&path, "# one\n").unwrap();
+        let mut app = App::new();
+        app.page = Some(crate::markdown_view::MarkdownPage::open(
+            dir.path().into(),
+            "a.md".into(),
+            1,
+            "/bin/sh".into(),
+        ));
+        app.dirty = false;
+        refresh_page(&mut app);
+        assert!(!app.dirty, "unchanged: nothing to redraw");
+        std::fs::write(&path, "# two\n").unwrap();
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        refresh_page(&mut app);
+        assert!(app.dirty);
+        assert_eq!(app.page.as_ref().unwrap().text, "# two\n");
+    }
+
     /// A drag over the page's text selects and copies it, a double-click
     /// takes a word, the wheel keeps the selection and a key lets it go —
     /// with `⌘C` copying it while it is there.
@@ -28933,6 +29332,318 @@ mod tests {
         });
     }
 
+    /// The checkout's changed files lead an empty query under `Changed`,
+    /// above `Recent` — a file both changed and recent listed once, as
+    /// changed — and like `Recent` they go once anything is typed.
+    #[test]
+    fn changed_files_lead_above_the_recent_ones() {
+        let files = ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"]
+            .map(String::from)
+            .to_vec();
+        let fin = FileFinder::new("/r".into(), "main".into(), "vim".into(), files)
+            .with_recents(vec!["d.rs".into(), "b.rs".into()])
+            .with_changed(vec!["e.rs".into(), "gone.rs".into(), "b.rs".into()]);
+        let shown: Vec<&str> = fin
+            .matches
+            .iter()
+            .map(|m| fin.files[m.file].as_str())
+            .collect();
+        assert_eq!(shown, ["e.rs", "b.rs", "d.rs", "a.rs", "c.rs"]);
+        assert_eq!((fin.changed_lead, fin.recent), (2, 1));
+        use crate::app::FinderRow::{Header, Match};
+        let rows: Vec<_> = (0..fin.row_count() + 1).map(|r| fin.row(r)).collect();
+        assert_eq!(
+            rows,
+            [
+                Some(Header("Changed")),
+                Some(Match(0)),
+                Some(Match(1)),
+                Some(Header("Recent")),
+                Some(Match(2)),
+                Some(Header("Files")),
+                Some(Match(3)),
+                Some(Match(4)),
+                None
+            ]
+        );
+        assert_eq!(
+            (0..5).map(|i| fin.display_row(i)).collect::<Vec<_>>(),
+            [1, 2, 4, 6, 7]
+        );
+
+        let mut typed = fin.clone();
+        typed.query.insert_str("e");
+        typed.apply_filter();
+        assert_eq!((typed.changed_lead, typed.recent), (0, 0));
+        assert_eq!(typed.row(0), Some(Match(0)));
+    }
+
+    /// `c.rs:12` typed in Go to file matches on `c.rs` and opens it at line
+    /// 12 — Enter and ⌘O both; without the `:12` it opens at the top. The
+    /// `Changed` section is the badge's last `git status` of the checkout.
+    #[test]
+    fn a_line_typed_after_the_path_opens_the_file_there() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = test_repo(&dir);
+            std::fs::write(repo.join("fresh.txt"), "one\ntwo\nthree\n").unwrap();
+            crate::recent_files::with_store_path(dir.path().join("recent.json"), || {
+                let mut app = App::new();
+                seed_repo_tree(&mut app, &repo);
+                let worktree = app.selected_worktree().unwrap().id.clone();
+                app.changed_files = Some((
+                    worktree,
+                    crate::git_diff::parse_status_z(b"?? fresh.txt\0 D gone.txt\0"),
+                ));
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                app.editor_tx = Some(tx);
+                let mut out = Vec::new();
+
+                press(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER, &mut out);
+                assert_eq!(finder(&app).changed, ["fresh.txt"], "no deletions");
+                assert_eq!(finder(&app).changed_lead, 1);
+                assert_eq!(finder(&app).selected_path(), Some("fresh.txt"));
+                for c in "fresh.txt:2".chars() {
+                    press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+                }
+                let fin = finder(&app);
+                assert_eq!(fin.selected_path(), Some("fresh.txt"));
+                assert_eq!(fin.typed(), ("fresh.txt", Some(2)));
+                assert_eq!(fin.open_line(), 2);
+                assert_eq!(
+                    overlay_file(&app).map(|(_, file, line)| (file, line)),
+                    Some(("fresh.txt".to_string(), 2))
+                );
+                if let Some(Overlay::Files(f)) = &mut app.overlay {
+                    f.editor = "/bin/sh".into();
+                }
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert_eq!(app.editor.as_ref().map(|e| e.line), Some(2));
+            });
+        });
+    }
+
+    /// The tree marks each changed file with its `git status` letter — `U`
+    /// for one git doesn't track — and a folder with one under it with a
+    /// dot, from the badge's last poll of the checkout.
+    #[test]
+    fn the_tree_marks_changed_files_and_their_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/new.rs"), "fn x() {}\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        let mut app = App::new();
+        seed_repo_tree(&mut app, &repo);
+        let worktree = app.selected_worktree().unwrap().id.clone();
+        let files = crate::git_diff::changed_files(&repo).unwrap();
+        app.changed_files = Some((worktree.clone(), files));
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::SUPER, &mut out);
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        // A row of the tree: the stretch between its panel's borders.
+        let row = |name: &str| {
+            text.lines()
+                .filter_map(|l| l.split('│').nth(1))
+                .find(|tree| tree.contains(name))
+                .unwrap_or_default()
+                .trim_end()
+                .to_string()
+        };
+        assert!(row("new.rs").ends_with('U'), "{text}");
+        assert!(row("a.txt").ends_with('M'), "{text}");
+        assert!(row("▾ src").ends_with('•'), "{text}");
+
+        // The next poll's marks, not the opening's: the tree keeps up.
+        let polled = crate::git_diff::parse_status_z(b" M a.txt\0");
+        keep_changed_files(&mut app, &worktree, Some(polled));
+        let marks = &tree_view(&app).marks;
+        assert!(marks.get("src").is_none() && marks.contains_key("a.txt"));
+    }
+
+    /// `⌘⇧B` in the editor: the tree on its checkout, the cursor on its
+    /// file, and the editor carried into the tree's preview pane — quitting
+    /// it lands on the tree, whose Esc puts back what the editor was opened
+    /// from.
+    #[test]
+    fn cmd_shift_b_in_the_editor_shows_its_file_in_the_tree() {
+        with_config_json(r#"{"close_finder_on_open": false}"#, || {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = test_repo(&dir);
+            std::fs::create_dir(repo.join("src")).unwrap();
+            std::fs::write(repo.join("src/x.rs"), "fn x() {}\n").unwrap();
+            let mut app = App::new();
+            seed_repo_tree(&mut app, &repo);
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            app.editor_tx = Some(tx);
+            let mut out = Vec::new();
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER, &mut out);
+            for c in "x.rs".chars() {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+            }
+            if let Some(Overlay::Files(f)) = &mut app.overlay {
+                f.editor = "/bin/sh".into();
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(app.editor.as_ref().is_some_and(|v| !v.embedded));
+
+            press(
+                &mut app,
+                KeyCode::Char('B'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                &mut out,
+            );
+            let tree = tree_view(&app);
+            assert_eq!(
+                tree.selected_node().map(|n| n.path.as_str()),
+                Some("src/x.rs")
+            );
+            assert!(matches!(tree.back.as_deref(), Some(Overlay::Files(_))));
+            assert!(
+                app.editor.as_ref().is_some_and(|v| v.embedded),
+                "in the pane"
+            );
+
+            close_editor(&mut app);
+            assert!(matches!(&app.overlay, Some(Overlay::Tree(_))));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Files(_))),
+                "back to the finder: {:?}",
+                app.overlay
+            );
+        });
+    }
+
+    /// An editor on `file` in `/tmp/demo` — `seed_tree`'s checkout — that
+    /// draws fresh's status bar with its cursor on `line`.
+    fn editor_at(app: &mut App, file: &str, line: u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut vim = EditorTerm::spawn_cmd(
+            "/bin/sh",
+            &["-c".into(), "sleep 30".into()],
+            dir.path(),
+            "test".into(),
+            60,
+            10,
+            1,
+            tx,
+        )
+        .unwrap();
+        vim.cwd = "/tmp/demo".into();
+        vim.file = file.into();
+        vim.kind = crate::editor::Kind::Fresh;
+        vim.process(format!("\x1b[10;1H Ln {line}, Col 4   Rust").as_bytes());
+        app.editor = Some(vim);
+    }
+
+    /// `⌘⇧I` in the editor types `path:line` — the cursor's line — into the
+    /// prompt of the checkout's agent, unsent and set apart by spaces: as
+    /// keystrokes to one not in the pane, as a bracketed paste to the one
+    /// that is. The editor stays up, the footer saying where it went. Into
+    /// a prompt that takes keys as answers — a permission question, a
+    /// dialog in the pane — nothing goes, and with no agent running there
+    /// neither; the footer says why.
+    #[test]
+    fn cmd_shift_i_in_the_editor_sends_the_location_to_the_agent() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        editor_at(&mut app, "/tmp/demo/src/app.rs", 42);
+        let cmd_shift_i = KeyEvent::new(
+            KeyCode::Char('I'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+        );
+        let mut out = Vec::new();
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        let agent = SessionRef::Agent(AgentId("a1".into()));
+        match out.as_slice() {
+            [ClientRequest::Input { session, data }] => {
+                assert_eq!(session, &agent);
+                assert_eq!(data, b" src/app.rs:42 ");
+            }
+            other => panic!("expected one Input, got {other:?}"),
+        }
+        assert!(app.editor.is_some(), "the editor stays up");
+        assert_eq!(
+            app.flash,
+            Some(crate::flash::Flash::done(
+                "src/app.rs:42 → agent-1's prompt"
+            ))
+        );
+
+        let mut term = AttachedTerm::new(agent.clone(), 80, 24);
+        term.apply_output(0, b"\x1b[?2004h");
+        app.term = Some(term);
+        out.clear();
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        match out.as_slice() {
+            [ClientRequest::Input { data, .. }] => {
+                assert_eq!(data, b"\x1b[200~ src/app.rs:42 \x1b[201~");
+            }
+            other => panic!("expected one Input, got {other:?}"),
+        }
+
+        // A dialog up in the pane: bracketed paste off, nothing typed.
+        app.term = Some(AttachedTerm::new(agent.clone(), 80, 24));
+        out.clear();
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(
+            app.flash.as_ref().map(|f| f.kind),
+            Some(crate::flash::FlashKind::Failed)
+        );
+
+        app.term = None;
+        app.tree.agents[0].status = orion_core::AgentStatus::NeedsFeedback;
+        out.clear();
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        assert!(
+            out.is_empty(),
+            "a permission prompt takes no location: {out:?}"
+        );
+        assert!(
+            app.flash
+                .as_ref()
+                .is_some_and(|f| f.text.contains("asking you something")),
+            "{:?}",
+            app.flash
+        );
+
+        app.tree.agents.iter_mut().for_each(|a| a.alive = false);
+        out.clear();
+        app.flash = None;
+        handle_key(&mut app, cmd_shift_i, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(
+            app.flash
+                .as_ref()
+                .is_some_and(|f| f.text.contains("no running agent")),
+            "{:?}",
+            app.flash
+        );
+    }
+
+    /// The editor's own chords reach orion in Orion.app and are no chord of
+    /// the grid's, so in the editor they mean only what they mean there.
+    #[test]
+    fn the_editors_chords_reach_orion_and_clash_with_nothing() {
+        let app = App::new();
+        for key in [crate::hints::IN_TREE, ui::editor_keys::TO_AGENT] {
+            for chord in key.chords() {
+                assert!(crate::ghostty_config::releases(&chord), "{chord:?}");
+                assert_eq!(
+                    app.keymap.lookup(crate::keymap::Scope::Global, &chord),
+                    None,
+                    "{chord:?}"
+                );
+            }
+        }
+    }
+
     // ---- `b` tree browser ----
 
     fn tree_view(app: &App) -> &crate::tree_browser::TreeBrowser {
@@ -29402,6 +30113,151 @@ mod tests {
         });
     }
 
+    /// Hits come under a header per file; the selected one's file is
+    /// previewed beside them, numbered, the hit's line lifted and each
+    /// match lit; moving to a hit in another file previews that one, and
+    /// a click on a header selects its first hit.
+    #[test]
+    fn find_in_files_groups_hits_by_file_and_previews_the_selected_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        std::fs::write(repo.join("b.txt"), "one\nfind me, find me\nthree\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "find me too\n").unwrap();
+        let mut app = App::new();
+        seed_repo_tree(&mut app, &repo);
+        let mut out = Vec::new();
+        press(
+            &mut app,
+            KeyCode::Char('F'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            &mut out,
+        );
+        for c in "find me".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+        }
+        use crate::ui::ListEntry::{Header, Row};
+        assert_eq!(
+            grep_view(&app).rows(),
+            [
+                Header { first: 0, count: 1 },
+                Row(0),
+                Header { first: 1, count: 1 },
+                Row(1)
+            ]
+        );
+        let preview = grep_view(&app).preview.clone().expect("b.txt read");
+        assert_eq!(preview.path, "b.txt");
+        assert_eq!(preview.matches, [(2, 0..7), (2, 9..16)]);
+
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(text.contains(" b.txt  1"), "{text}");
+        assert!(text.contains("2 find me, find me"), "the preview:\n{text}");
+        let buf = terminal.backend().buffer().clone();
+        let (x, y) = (0..40)
+            .flat_map(|y| (0..160).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                (0..18).all(|i| {
+                    buf[(x + i, y)].symbol()
+                        == "2 find me, find me"
+                            .chars()
+                            .nth(i as usize)
+                            .unwrap()
+                            .to_string()
+                }) && x > 60
+            })
+            .expect("the preview's hit line");
+        assert_eq!(buf[(x + 2, y)].bg, app.theme.sel_bg, "a match, lit");
+        assert_eq!(buf[(x + 9, y)].bg, app.theme.sel_bg_dim, "the line, lifted");
+
+        press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+        assert_eq!(grep_view(&app).preview.as_ref().unwrap().path, "c.txt");
+        let list = grep_view(&app).list_area;
+        handle_mouse(
+            &mut app,
+            mev(MouseEventKind::Down(MouseButton::Left), list.x + 2, list.y),
+            &mut out,
+        );
+        assert_eq!(grep_view(&app).selected, 0, "the header's first hit");
+        assert!(app.editor.is_none(), "a header opens nothing");
+    }
+
+    /// `⌘R` reads the query as a regex — the title says so — and back;
+    /// the search runs again each way.
+    #[test]
+    fn cmd_r_in_find_in_files_toggles_a_regex() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        std::fs::write(repo.join("b.txt"), "abc\naxxc\n").unwrap();
+        let mut app = App::new();
+        seed_repo_tree(&mut app, &repo);
+        let mut out = Vec::new();
+        press(
+            &mut app,
+            KeyCode::Char('F'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            &mut out,
+        );
+        for c in "ax+c".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+        }
+        assert!(grep_view(&app).hits.is_empty(), "the text itself: no hit");
+        press(&mut app, KeyCode::Char('r'), KeyModifiers::SUPER, &mut out);
+        assert!(grep_view(&app).mode.regex);
+        assert_eq!(grep_view(&app).query, "ax+c", "the r is no part of it");
+        let lines: Vec<u64> = grep_view(&app).hits.iter().map(|h| h.line).collect();
+        assert_eq!(lines, [2]);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        assert!(
+            text.contains("Find in files (regex) — main (1 hits)"),
+            "{text}"
+        );
+        assert!(text.contains("⌘R text"), "{text}");
+        press(
+            &mut app,
+            KeyCode::Char('r'),
+            KeyModifiers::CONTROL,
+            &mut out,
+        );
+        assert!(!grep_view(&app).mode.regex);
+        assert!(grep_view(&app).hits.is_empty());
+    }
+
+    /// Text dragged over in the pane is the query find in files opens on,
+    /// searched at once: its first line, trimmed.
+    #[test]
+    fn find_in_files_opens_on_the_panes_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        std::fs::write(repo.join("b.txt"), "the needle is here\n").unwrap();
+        let mut app = App::new();
+        seed_repo_tree(&mut app, &repo);
+        let mut term = AttachedTerm::new(SessionRef::Agent(AgentId("a1".into())), 80, 24);
+        term.apply_output(0, b"look:  needle  \r\nsecond line");
+        app.term = Some(term);
+        let base = history_base(&app);
+        app.term_selection = Some(TermSelection {
+            anchor: (5, base),
+            head: (4, base + 1),
+            dragging: false,
+            active: true,
+            pointer: (0, 0),
+        });
+        let mut out = Vec::new();
+        press(
+            &mut app,
+            KeyCode::Char('F'),
+            KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            &mut out,
+        );
+        let view = grep_view(&app);
+        assert_eq!(view.query, "needle");
+        assert_eq!(view.hits.len(), 1, "searched at once: {:?}", view.hits);
+    }
+
     #[test]
     fn close_finder_on_open_also_closes_the_grep_overlay() {
         let dir = tempfile::tempdir().unwrap();
@@ -29525,9 +30381,13 @@ mod tests {
                 );
 
                 // Typing goes nowhere; Enter closes.
-                handle_editor_key(&mut app, KeyEvent::from(KeyCode::Char('x')));
+                handle_editor_key(
+                    &mut app,
+                    KeyEvent::from(KeyCode::Char('x')),
+                    &mut Vec::new(),
+                );
                 assert!(app.editor.is_some());
-                handle_editor_key(&mut app, KeyEvent::from(KeyCode::Enter));
+                handle_editor_key(&mut app, KeyEvent::from(KeyCode::Enter), &mut Vec::new());
                 assert!(app.editor.is_none());
                 match &app.overlay {
                     Some(Overlay::Onboard(view)) => {
@@ -29561,7 +30421,14 @@ mod tests {
             text.contains("Find in files — main (2 hits)"),
             "title:\n{text}"
         );
-        assert!(text.contains("src/alpha.rs:3"), "hit location:\n{text}");
+        assert!(
+            text.contains(" src/alpha.rs  1"),
+            "the file's header:\n{text}"
+        );
+        assert!(
+            text.contains(" 3  let zz = 1;"),
+            "the hit under it:\n{text}"
+        );
         assert!(text.contains("let zz = 1;"), "hit text:\n{text}");
         let view = grep_view(&app);
         assert!(view.area.width > 0, "draw writes hit-test area");
@@ -35640,6 +36507,7 @@ mod tests {
                     agent: AgentId("a1".into()),
                     root: dir.path().to_path_buf(),
                     paths: vec![a, b],
+                    lines: Vec::new(),
                 },
                 &mut out,
             );
@@ -35656,6 +36524,61 @@ mod tests {
             assert_eq!(view.tab, 1);
             assert_eq!(preview_text(view, 0), "fn main() {}");
             assert!(out.is_empty(), "nothing goes to the daemon");
+        });
+    }
+
+    /// `orion open b.rs:30`: the tab says its line, its preview comes up
+    /// with the line in view a couple of rows down, and Enter — or ⌘O —
+    /// opens the file there.
+    #[test]
+    fn a_file_opened_at_a_line_previews_and_edits_there() {
+        with_default_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let a = dir.path().join("a.md");
+            let b = dir.path().join("b.rs");
+            std::fs::write(&a, "# alpha\n").unwrap();
+            let body: String = (1..=80).map(|i| format!("let x{i} = {i};\n")).collect();
+            std::fs::write(&b, body).unwrap();
+            let mut app = App::new();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            app.editor_tx = Some(tx);
+            let mut out = Vec::new();
+            handle_server_event(
+                &mut app,
+                ServerEvent::FilesOpened {
+                    agent: AgentId("a1".into()),
+                    root: dir.path().to_path_buf(),
+                    paths: vec![a, b],
+                    lines: vec![None, Some(30)],
+                },
+                &mut out,
+            );
+            let labels: Vec<&str> = file_tabs(&app)
+                .tabs
+                .iter()
+                .map(|t| t.label.as_str())
+                .collect();
+            assert_eq!(labels, ["a.md", "b.rs:30"]);
+            assert_eq!(file_tabs(&app).tabs[0].line, 1);
+
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| ui::draw(f, &mut app)).unwrap();
+            assert_eq!(file_tabs(&app).scroll, 27, "line 30, two rows down");
+            assert_eq!(file_tabs(&app).seek, None, "brought into view once");
+            assert!(buffer_text(&term).contains("30 let x30 = 30;"));
+            assert_eq!(
+                overlay_file(&app).map(|(_, _, line)| line),
+                Some(30),
+                "⌘O takes the line too"
+            );
+
+            if let Some(Overlay::FileTabs(view)) = &mut app.overlay {
+                view.editor = "/bin/sh".into();
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let editor = app.editor.as_ref().expect("the editor opened");
+            assert_eq!(editor.line, 30, "Enter edits at the tab's line");
         });
     }
 

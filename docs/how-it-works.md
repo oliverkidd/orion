@@ -358,7 +358,8 @@
   and the session runs `orion open <file>…`; every TUI attached to the daemon raises its file tabs on
   them — a modal with one tab per file, the focused one previewed with syntax highlighting (a
   markdown file as a rendered page), `Enter`
-  editing it in place — so the agent puts the file in front of you instead of pasting it into the
+  editing it in place, and a `file:42` opening its tab at that line (the CLI sends each file's line
+  beside it) — so the agent puts the file in front of you instead of pasting it into the
   reply. Only when you ask: the appended prompt forbids opening anything unprompted, so an agent that
   wants you to look at its work names the path and waits. And text only: the CLI resolves the paths
   against the session's own directory and refuses a path that isn't there or isn't a text file (a NUL

@@ -28,11 +28,13 @@ const MAX_LABEL_CHARS: usize = 28;
 /// document to read rather than a terminal to follow.
 const WHEEL_LINES: i32 = 3;
 
-/// One tab: the file (absolute) and the label the strip shows for it.
+/// One tab: the file (absolute), the label the strip shows for it, and
+/// the line it opens on — 1, or the `:42` `orion open` was given.
 #[derive(Debug, Clone)]
 pub struct FileTab {
     pub path: PathBuf,
     pub label: String,
+    pub line: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -91,22 +93,32 @@ pub struct FileTabsView {
     pub cancel: crate::view_jobs::Cancel,
     /// The DOC SELECTION a drag over the rendered page makes.
     pub select: crate::doc_select::DocSelect,
+    /// The focused tab's line, brought into view by the draw that first
+    /// shows its preview ([`FileTabsView::settle_seek`]).
+    pub seek: Option<u64>,
 }
 
 impl FileTabsView {
     /// [`FileTabsView::new`], reading its files off the loop when there
-    /// are BACKGROUND READS to read them with.
+    /// are BACKGROUND READS to read them with. `lines` holds each file's
+    /// line, by place; a file past its end, or None, opens at the top.
     pub fn with_jobs(
         root: PathBuf,
         editor: String,
         paths: Vec<PathBuf>,
+        lines: &[Option<u64>],
         jobs: Option<crate::view_jobs::Jobs>,
     ) -> Self {
         let tabs = paths
             .into_iter()
-            .map(|path| FileTab {
-                label: label_for(&root, &path),
-                path,
+            .enumerate()
+            .map(|(i, path)| {
+                let line = lines.get(i).copied().flatten();
+                FileTab {
+                    label: label_for(&root, &path, line),
+                    line: line.unwrap_or(1).max(1),
+                    path,
+                }
             })
             .collect();
         let mut view = Self {
@@ -131,6 +143,7 @@ impl FileTabsView {
             waiting: None,
             cancel: crate::view_jobs::Cancel::default(),
             select: crate::doc_select::DocSelect::default(),
+            seek: None,
         };
         view.load_preview();
         view
@@ -182,6 +195,10 @@ impl FileTabsView {
 
     fn set_preview(&mut self, preview: Preview) {
         self.scroll = 0;
+        self.seek = self
+            .selected()
+            .map(|tab| tab.line)
+            .filter(|&line| line > 1 && preview.is_file);
         self.preview_is_file = preview.is_file;
         self.markdown = preview.markdown;
         self.rendered = None;
@@ -206,6 +223,20 @@ impl FileTabsView {
         if self.waiting == Some(ticket) {
             self.set_preview(placeholder("loading…"));
         }
+    }
+
+    /// Bring the tab's line into view, a couple of rows down — on the
+    /// rendered page the row that shows it (`markdown_view::seek_row`) —
+    /// the first time its preview is drawn.
+    pub fn settle_seek(&mut self, rendered: Option<&Rendered>) {
+        let Some(line) = self.seek.take() else {
+            return;
+        };
+        let row = match rendered {
+            Some(page) => crate::markdown_view::seek_row(&self.preview_text, line, page),
+            None => line.saturating_sub(1) as usize,
+        };
+        self.scroll = crate::markdown_view::scroll_to_row(row);
     }
 
     /// The preview is the rendered markdown page rather than the source.
@@ -267,16 +298,20 @@ fn placeholder(text: &str) -> Preview {
 }
 
 /// The strip's name for a file: its path under the checkout when it is
-/// there, else just the file name — cut from the front when long, since
-/// the tail is what tells `a/README.md` from `b/README.md`.
-fn label_for(root: &Path, path: &Path) -> String {
-    let shown = match path.strip_prefix(root) {
+/// there, else just the file name, and the `:42` it was opened at — cut
+/// from the front when long, since the tail is what tells `a/README.md`
+/// from `b/README.md`.
+fn label_for(root: &Path, path: &Path, line: Option<u64>) -> String {
+    let mut shown = match path.strip_prefix(root) {
         Ok(rel) if !rel.as_os_str().is_empty() => rel.to_string_lossy().into_owned(),
         _ => path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned()),
     };
+    if let Some(line) = line {
+        shown.push_str(&format!(":{line}"));
+    }
     let count = shown.chars().count();
     if count <= MAX_LABEL_CHARS {
         return shown;
@@ -286,11 +321,11 @@ fn label_for(root: &Path, path: &Path) -> String {
 }
 
 /// `FilesOpened` from the daemon — `orion open` in a session: raise the
-/// modal on the files, over whatever overlay was up. A running editor is
-/// left alone (it may hold an unsaved buffer) and keeps drawing as the
-/// floating modal above the new tabs; when it quits, the tabs are what is
-/// underneath, with the first file freshly read.
-pub(crate) fn open(app: &mut App, root: PathBuf, paths: Vec<PathBuf>) {
+/// modal on the files, each tab at its line, over whatever overlay was up.
+/// A running editor is left alone (it may hold an unsaved buffer) and
+/// keeps drawing as the floating modal above the new tabs; when it quits,
+/// the tabs are what is underneath, with the first file freshly read.
+pub(crate) fn open(app: &mut App, root: PathBuf, paths: Vec<PathBuf>, lines: &[Option<u64>]) {
     if paths.is_empty() {
         return;
     }
@@ -298,7 +333,7 @@ pub(crate) fn open(app: &mut App, root: PathBuf, paths: Vec<PathBuf>) {
         vim.embedded = false;
     }
     let editor = crate::config::Config::load().editor_command();
-    let view = FileTabsView::with_jobs(root, editor, paths, app.view_jobs.clone());
+    let view = FileTabsView::with_jobs(root, editor, paths, lines, app.view_jobs.clone());
     app.overlay = Some(Overlay::FileTabs(view));
     app.dirty = true;
 }
@@ -514,8 +549,8 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, pos: Position) {
     app.dirty = true;
 }
 
-/// Enter: the editor opens on the focused file — a markdown one too —
-/// embedded where the preview was: the modal and its tabs stay put
+/// Enter: the editor opens on the focused file at its line — a markdown
+/// one too — embedded where the preview was: the modal and its tabs stay put
 /// underneath, and quitting the editor (or its force close) lands back on
 /// the strip with the file re-read.
 fn open_in_editor(app: &mut App) {
@@ -525,7 +560,7 @@ fn open_in_editor(app: &mut App) {
     let Some(tab) = view.selected() else {
         return;
     };
-    let (root, editor) = (view.root.clone(), view.editor.clone());
+    let (root, editor, line) = (view.root.clone(), view.editor.clone(), tab.line);
     let path = tab.path.to_string_lossy().into_owned();
     // Size from the last-drawn body; the post-draw sync corrects it.
     let body = view.body_area;
@@ -534,7 +569,7 @@ fn open_in_editor(app: &mut App) {
     } else {
         crate::event_loop::editor_size_guess(app)
     };
-    if crate::event_loop::spawn_editor_modal(app, &editor, &root, &path, 1, size) {
+    if crate::event_loop::spawn_editor_modal(app, &editor, &root, &path, line, size) {
         crate::event_loop::embed_editor(app);
     }
 }
@@ -544,7 +579,7 @@ fn open_in_editor(app: &mut App) {
 impl FileTabsView {
     /// Tabs on `paths` in the order given, the first one previewed.
     pub fn new(root: PathBuf, editor: String, paths: Vec<PathBuf>) -> Self {
-        Self::with_jobs(root, editor, paths, None)
+        Self::with_jobs(root, editor, paths, &[], None)
     }
 }
 
@@ -580,15 +615,15 @@ mod tests {
     fn labels_are_checkout_relative_or_the_file_name_and_cut_from_the_front() {
         let root = PathBuf::from("/repo");
         assert_eq!(
-            label_for(&root, Path::new("/repo/docs/keys.md")),
+            label_for(&root, Path::new("/repo/docs/keys.md"), None),
             "docs/keys.md"
         );
         assert_eq!(
-            label_for(&root, Path::new("/elsewhere/notes.md")),
+            label_for(&root, Path::new("/elsewhere/notes.md"), None),
             "notes.md"
         );
         let long = format!("/repo/{}/README.md", "a".repeat(40));
-        let label = label_for(&root, Path::new(&long));
+        let label = label_for(&root, Path::new(&long), None);
         assert_eq!(label.chars().count(), MAX_LABEL_CHARS);
         assert!(
             label.starts_with('…') && label.ends_with("aaa/README.md"),

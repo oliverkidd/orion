@@ -541,8 +541,13 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     }
                     reply(&out_tx, req_id, result.map(Some)).await;
                 }
-                ClientRequest::OpenFiles { req_id, id, paths } => {
-                    reply_done(&out_tx, req_id, daemon.open_files(&id, paths)).await;
+                ClientRequest::OpenFiles {
+                    req_id,
+                    id,
+                    paths,
+                    lines,
+                } => {
+                    reply_done(&out_tx, req_id, daemon.open_files(&id, paths, lines)).await;
                 }
                 ClientRequest::EnterWorktree {
                     req_id,

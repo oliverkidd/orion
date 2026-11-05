@@ -14,6 +14,7 @@ use ratatui::Frame;
 
 mod diff_view;
 pub(crate) mod footer;
+mod grep_view;
 mod launcher_view;
 pub(crate) use launcher_view::session_line;
 
@@ -328,6 +329,11 @@ pub(crate) mod editor_keys {
     /// fresh missing: the footer's offer of its install
     /// (`event_loop::offer_editor_install`).
     pub const INSTALL: Key = Key::new(&["i"], "install");
+    /// `path:line` of the cursor into the checkout's agent's prompt
+    /// (`event_loop::send_location_to_agent`) — `⌘I`'s neighbour, the key
+    /// VS Code opens its agent with; fresh binds nothing to `^⇧I`, and
+    /// Orion.app's Ghostty keeps nothing of it.
+    pub const TO_AGENT: Key = Key::new(&["cmd+shift+i"], "to the agent");
 }
 
 /// The editor modal's keys while it runs an installer (`install`): the
@@ -370,6 +376,10 @@ pub(crate) fn editor_hints(vim: &crate::editor_term::EditorTerm) -> Vec<crate::h
         QUIT_FORCE.hint()
     });
     hints.push(crate::hints::in_app_hint());
+    if !vim.file.is_empty() {
+        hints.push(TO_AGENT.hint());
+        hints.push(crate::hints::IN_TREE.hint());
+    }
     hints
 }
 
@@ -398,7 +408,6 @@ fn draw_page(f: &mut Frame, app: &mut App) {
                 .bg(th.accent)
                 .add_modifier(Modifier::BOLD),
         ));
-    block = crate::hints::modal_block(block, &page_hints(page), area.width, th);
     let inner = block.inner(area);
     let text = Rect {
         x: inner.x + 1,
@@ -422,6 +431,9 @@ fn draw_page(f: &mut Frame, app: &mut App) {
         th,
     ));
     page.settle();
+    // The hints after the flow: whether there are links to `Tab` to is
+    // the flow's to say.
+    block = crate::hints::modal_block(block, &page_hints(page), area.width, th);
     if let Some(at) = page.position() {
         block = block.title_bottom(
             Line::from(Span::styled(format!(" {at} "), Style::default().fg(th.dim)))
@@ -438,6 +450,21 @@ fn draw_page(f: &mut Frame, app: &mut App) {
         .cloned()
         .collect();
     f.render_widget(Paragraph::new(rows), text);
+    // The link `Tab` is on, every row of it, in the selection's colours.
+    let shown = page.scroll as usize..page.scroll as usize + text.height as usize;
+    let focused = page.rendered.iter().flat_map(|r| &r.links).filter(|s| {
+        Some(s.link) == page.focus && shown.contains(&s.row) && s.cols.start < text.width
+    });
+    for spot in focused {
+        let cell = Rect {
+            x: text.x + spot.cols.start,
+            y: text.y + (spot.row - shown.start) as u16,
+            width: spot.cols.end.min(text.width) - spot.cols.start,
+            height: 1,
+        };
+        f.buffer_mut()
+            .set_style(cell, Style::default().bg(th.sel_bg));
+    }
     if let Some(sel) = page.select.selection {
         sel.paint(f.buffer_mut(), text, page.scroll);
     }
@@ -448,15 +475,31 @@ pub(crate) mod page_keys {
     use crate::hints::Key;
 
     pub const EDIT: Key = Key::new(&["enter", "e"], "edit");
+    /// The next link, `⇧Tab` the one before.
+    pub const LINK: Key = Key::new(&["tab", "shift+tab"], "link");
+    /// Enter on the link `Tab` is on.
+    pub const FOLLOW: Key = Key::new(&["enter"], "follow");
 }
 
-/// The MARKDOWN PAGE's bottom-border keys.
+/// The MARKDOWN PAGE's bottom-border keys: Enter follows the link `Tab` is
+/// on, else edits; Esc lets that link go, else goes back to the page a
+/// link left, else closes.
 pub(crate) fn page_hints(page: &crate::markdown_view::MarkdownPage) -> Vec<crate::hints::Hint> {
-    vec![
-        page_keys::EDIT.hint_as(format!("edit in {}", editor_name(&page.editor))),
-        crate::hints::in_app_hint(),
-        crate::hints::ESC_CLOSE.hint(),
-    ]
+    let mut hints = vec![match page.focus {
+        Some(_) => page_keys::FOLLOW.hint(),
+        None => page_keys::EDIT.hint_as(format!("edit in {}", editor_name(&page.editor))),
+    }];
+    if page.rendered.as_ref().is_some_and(|r| !r.links.is_empty()) {
+        hints.push(page_keys::LINK.hint());
+    }
+    hints.push(crate::hints::in_app_hint());
+    let esc = match (page.focus, page.has_back()) {
+        (Some(_), _) => "clear",
+        (None, true) => "back",
+        (None, false) => "close",
+    };
+    hints.push(crate::hints::ESC_CLOSE.hint_as(esc));
+    hints
 }
 
 /// How much of the box a modal floating over it leaves showing on every
@@ -2079,96 +2122,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 fin.list_area = list_inner;
             }
         }
-        Overlay::Grep(view) => {
-            let area = centered_rect_pct(f.area(), GREP_MODAL_PCT.0, GREP_MODAL_PCT.1);
-            let title = if view.query.chars().count() < crate::grep_search::MIN_QUERY_LEN {
-                format!(" Find in files — {} ", view.branch)
-            } else if view.waiting.is_some() {
-                format!(" Find in files — {} (searching…) ", view.branch)
-            } else if view.truncated {
-                format!(
-                    " Find in files — {} ({}+ hits) ",
-                    view.branch,
-                    view.hits.len()
-                )
-            } else {
-                format!(
-                    " Find in files — {} ({} hits) ",
-                    view.branch,
-                    view.hits.len()
-                )
-            };
-            f.render_widget(Clear, area);
-            let block = crate::hints::modal_block(
-                modal_block(title, th),
-                &[
-                    finder_keys::OPEN.hint_as(format!("edit in {}", editor_name(&view.editor))),
-                    crate::hints::COPY_PATH.hint(),
-                    crate::hints::in_app_hint(),
-                    crate::hints::ESC_CLOSE.hint(),
-                ],
-                area.width,
-                th,
-            );
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-
-            // First row: the always-live grep query.
-            if let Some(query_area) = row_rect(inner, 0) {
-                let line = search_line(&view.query, "type to search…", query_area, th);
-                f.render_widget(Paragraph::new(line), query_area);
-            }
-            let list_inner = below_first_row(inner);
-
-            // Placeholder row: error, too-short query, or an empty result.
-            let placeholder = if let Some(err) = &view.error {
-                Some(Span::styled(err.clone(), Style::default().fg(th.err)))
-            } else if view.query.chars().count() < crate::grep_search::MIN_QUERY_LEN {
-                Some(Span::styled(
-                    format!(
-                        "type at least {} characters to search",
-                        crate::grep_search::MIN_QUERY_LEN
-                    ),
-                    Style::default().fg(th.dim),
-                ))
-            } else if view.hits.is_empty() && view.waiting.is_none() {
-                Some(Span::styled(NO_MATCHES, Style::default().fg(th.dim)))
-            } else {
-                None
-            };
-            if let (Some(span), Some(row_area)) = (placeholder, row_rect(list_inner, 0)) {
-                f.render_widget(Paragraph::new(span), row_area);
-            }
-
-            let start = view.window_start(list_inner.height as usize);
-            for (row, (i, hit)) in view.hits.iter().enumerate().skip(start).enumerate() {
-                let Some(row_area) = row_rect(list_inner, row) else {
-                    break;
-                };
-                let budget = (list_inner.width as usize).saturating_sub(2);
-                let loc = format!("{}:{}", hit.path, hit.line);
-                let loc_len = loc.chars().count();
-                let mut spans = vec![Span::raw(" ")];
-                if loc_len + 2 >= budget {
-                    spans.push(Span::styled(
-                        truncate(&loc, budget),
-                        Style::default().fg(th.accent),
-                    ));
-                } else {
-                    spans.push(Span::styled(loc, Style::default().fg(th.accent)));
-                    spans.push(Span::raw("  "));
-                    spans.push(Span::raw(truncate(&hit.text, budget - loc_len - 2)));
-                }
-                render_row(f, row_area, spans, i == view.selected, true, th);
-            }
-
-            // Write-back (draw works on a clone): rects for mouse
-            // hit-testing.
-            if let Some(Overlay::Grep(v)) = &mut app.overlay {
-                v.area = area;
-                v.list_area = list_inner;
-            }
-        }
+        Overlay::Grep(view) => grep_view::draw(f, app, &view, th),
         Overlay::Hosts(view) => {
             let total = view.hosts.len();
             let selected = view.selected.min(total.saturating_sub(1));
@@ -2345,6 +2299,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             let max_scroll = clamp_count
                 .saturating_sub(body.height as usize)
                 .min(u16::MAX as usize) as u16;
+            view.settle_seek(rendered.as_ref());
             let scroll = view.scroll.min(max_scroll);
             if !editing && body.height > 0 {
                 let lines = match &rendered {
@@ -2380,6 +2335,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 v.body_area = body;
                 v.view_height = body.height;
                 v.scroll = scroll;
+                v.seek = view.seek;
                 v.preview_line_count = clamp_count;
                 if rendered.is_some() {
                     // A reflow moved the rows the selection points at.
@@ -2448,7 +2404,23 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 } else {
                     "  ".to_string()
                 };
-                let budget = (list_inner.width as usize).saturating_sub(indent.chars().count() + 3);
+                // A changed file's `git status` letter at the row's end —
+                // or, for a folder with one under it, a dot.
+                let mark = view.mark(node).map(|mark| {
+                    let color = match mark {
+                        crate::tree_browser::Mark::File(xy)
+                            if crate::tree_browser::is_unmerged(xy) =>
+                        {
+                            th.err
+                        }
+                        crate::tree_browser::Mark::File(xy) => change_color(xy, th),
+                        crate::tree_browser::Mark::Dir => th.muted,
+                    };
+                    (mark.letter(), color)
+                });
+                let mark_w = if mark.is_some() { 2 } else { 0 };
+                let budget =
+                    (list_inner.width as usize).saturating_sub(indent.chars().count() + 3 + mark_w);
                 let shown = truncate(&node.name, budget);
                 let positions = visible_positions(&r.positions, &shown, &node.name);
                 let mut spans = vec![
@@ -2459,6 +2431,12 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                     spans.push(Span::styled(shown, Style::default().fg(th.accent)));
                 } else {
                     spans.extend(fuzzy_highlight_spans(&shown, positions, th));
+                }
+                if let Some((letter, color)) = mark {
+                    let used: usize = spans.iter().map(|s| s.width()).sum();
+                    let pad = (list_inner.width as usize).saturating_sub(used + mark_w);
+                    spans.push(Span::raw(" ".repeat(pad)));
+                    spans.push(Span::styled(letter.to_string(), Style::default().fg(color)));
                 }
                 render_row(f, row_area, spans, i == view.selected, true, th);
             }
@@ -2769,11 +2747,13 @@ pub(crate) mod finder_keys {
     pub const SOURCE: Key = Key::new(&["cmd+r", "ctrl+r"], "source");
     /// Go to file: make the typed path and open it.
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new file");
+    /// Find in files: the query as a regex, or as the text itself.
+    pub const REGEX: Key = Key::new(&["cmd+r", "ctrl+r"], "regex");
 
     #[cfg(test)]
     #[test]
     fn every_finder_key_parses() {
-        for key in [OPEN, ATTACH, FOCUS_ROW, FOLD, SCROLL, SOURCE, NEW] {
+        for key in [OPEN, ATTACH, FOCUS_ROW, FOLD, SCROLL, SOURCE, NEW, REGEX] {
             assert!(key.parses(), "{:?}", key.chords);
         }
     }
