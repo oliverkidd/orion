@@ -5,7 +5,7 @@
 //! orion deletes it; this is how the DAEMON knows which one to stop or
 //! tear down (`worktree_containers`), how `orion doctor` spots the
 //! ones whose checkout is already gone, and how STACK STATUS — the band's
-//! `⬡` and the Stacks modal — knows which stacks run where.
+//! `⬡` — knows which stacks run where.
 //!
 //! Plain docker CLI, so it serves any engine that speaks it — OrbStack,
 //! Docker Desktop, Colima. Everything here is pure: what to run, and how
@@ -65,13 +65,14 @@ impl WorktreeContainers {
     /// None for `off`. They need no compose file: compose finds the
     /// project's containers, networks and volumes by their labels.
     pub fn compose_args(self, project: &str) -> Option<Vec<String>> {
-        let verb = match self {
+        let tail: &[&str] = match self {
             Self::Off => return None,
-            Self::Stop => StackVerb::Stop,
-            Self::Remove => StackVerb::Down,
-            Self::RemoveVolumes => StackVerb::DownVolumes,
+            Self::Stop => &["stop"],
+            Self::Remove => &["down", "--remove-orphans"],
+            Self::RemoveVolumes => &["down", "--remove-orphans", "--volumes"],
         };
-        Some(verb.compose_args(project))
+        let head = ["compose", "-p", project];
+        Some(head.iter().chain(tail).map(|s| s.to_string()).collect())
     }
 
     /// What was done, for a log line: "stopped", "removed", …
@@ -130,7 +131,7 @@ pub fn parse_ps_state(out: &str) -> Vec<(Container, bool)> {
 }
 
 /// STACK STATUS: one compose project on the machine, whoever started it —
-/// what the band's `⬡` and the Stacks modal read.
+/// what the band's `⬡` reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stack {
     pub project: String,
@@ -218,62 +219,6 @@ pub fn stack_in<'a>(stacks: &'a [Stack], dir: &Path, checkouts: &[&Path]) -> Opt
     }
     mine.find(|s| s.state() == StackState::Running)
         .or(Some(first))
-}
-
-/// What can be done to a stack from the Stacks modal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum StackVerb {
-    /// `docker compose start`: its existing containers, back up.
-    Start,
-    /// `docker compose stop`: nothing left running, everything kept.
-    Stop,
-    /// `docker compose down`: containers and networks gone, volumes kept.
-    Down,
-    /// `docker compose down --volumes`: the project's data goes too.
-    DownVolumes,
-}
-
-impl StackVerb {
-    /// The `docker` arguments that apply this verb to compose `project`.
-    /// They need no compose file: compose finds the project by its labels.
-    pub fn compose_args(self, project: &str) -> Vec<String> {
-        let tail: &[&str] = match self {
-            Self::Start => &["start"],
-            Self::Stop => &["stop"],
-            Self::Down => &["down", "--remove-orphans"],
-            Self::DownVolumes => &["down", "--remove-orphans", "--volumes"],
-        };
-        let head = ["compose", "-p", project];
-        head.iter().chain(tail).map(|s| s.to_string()).collect()
-    }
-
-    /// The verb, for an error: "couldn't stop …".
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Start => "start",
-            Self::Stop => "stop",
-            Self::Down | Self::DownVolumes => "take down",
-        }
-    }
-
-    /// What a row reads while the verb runs.
-    pub fn progress(self) -> &'static str {
-        match self {
-            Self::Start => "starting…",
-            Self::Stop => "stopping…",
-            Self::Down | Self::DownVolumes => "taking down…",
-        }
-    }
-
-    /// What was done, for a log line.
-    pub fn past_tense(self) -> &'static str {
-        match self {
-            Self::Start => "started",
-            Self::Stop => "stopped",
-            Self::Down => "taken down",
-            Self::DownVolumes => "taken down with its volumes",
-        }
-    }
 }
 
 /// One container compose made.
@@ -526,33 +471,6 @@ mod tests {
         );
         assert_eq!(owner_of(&all[2], &[wt, main]), None);
         assert_eq!(owner_of(&all[1], &[wt, nested]), Some(nested));
-    }
-
-    #[test]
-    fn stack_verbs_name_the_project_and_only_volumes_drop_data() {
-        assert_eq!(
-            StackVerb::Start.compose_args("p"),
-            ["compose", "-p", "p", "start"]
-        );
-        assert_eq!(
-            StackVerb::Stop.compose_args("p"),
-            ["compose", "-p", "p", "stop"]
-        );
-        assert_eq!(
-            StackVerb::Down.compose_args("p"),
-            ["compose", "-p", "p", "down", "--remove-orphans"]
-        );
-        assert_eq!(
-            StackVerb::DownVolumes.compose_args("p"),
-            [
-                "compose",
-                "-p",
-                "p",
-                "down",
-                "--remove-orphans",
-                "--volumes"
-            ]
-        );
     }
 
     #[test]

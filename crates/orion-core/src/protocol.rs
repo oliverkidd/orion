@@ -1,4 +1,4 @@
-use crate::compose::{Stack, StackVerb};
+use crate::compose::Stack;
 use crate::entities::{
     Agent, AgentKind, AgentStatus, Entity, EntityId, Link, Project, TerminalTab, Worktree,
 };
@@ -413,15 +413,6 @@ pub enum ClientRequest {
         req_id: u64,
     },
 
-    /// STACK STATUS: start, stop or take down compose project `project`
-    /// (`docker compose -p`). Acked once docker returns; the new state
-    /// follows as a `StacksChanged`.
-    StackAction {
-        req_id: u64,
-        project: String,
-        verb: StackVerb,
-    },
-
     /// The end of a live session's output ring — what a TERMINAL's card on
     /// the grid shows as the last lines its shell printed. Answered by
     /// `ServerEvent::OutputTail` with the same req_id (not an Ack).
@@ -645,17 +636,6 @@ mod stack_tests {
 
     #[test]
     fn stack_frames_round_trip() {
-        let req = ClientRequest::StackAction {
-            req_id: 3,
-            project: "riplo-wt".into(),
-            verb: StackVerb::DownVolumes,
-        };
-        let back: ClientRequest = rmp_serde::from_slice(&rmp_serde::to_vec(&req).unwrap()).unwrap();
-        assert!(matches!(
-            back,
-            ClientRequest::StackAction { req_id: 3, ref project, verb: StackVerb::DownVolumes }
-                if project == "riplo-wt"
-        ));
         let ev = ServerEvent::StacksChanged {
             stacks: Some(vec![Stack {
                 project: "riplo-wt".into(),

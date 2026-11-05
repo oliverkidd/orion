@@ -2629,7 +2629,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
         Overlay::Skills(view) => crate::skills::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
-        Overlay::Stacks(view) => crate::stacks::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
         Overlay::BranchSwitch(view) => crate::branch_switch::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {

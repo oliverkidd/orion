@@ -210,7 +210,6 @@ pub enum Action {
     /// `⇧U`: ACCOUNT USAGE — how much is left on each Claude and Cursor
     /// account, window by window.
     Usage,
-    Stacks,
     /// `⌘⇧S`: start the cursor's checkout's stack — its RUN COMMAND, in
     /// the pane — or stop it.
     ToggleStack,
@@ -932,19 +931,10 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &["shift+u"],
     },
     ActionSpec {
-        action: Action::Stacks,
-        id: "stacks",
-        label: "Stacks",
-        hint: "Every docker compose stack on this machine and the worktree it belongs to — start, stop or take one down",
-        group: "GENERAL",
-        scope: Scope::Global,
-        defaults: &["shift+s"],
-    },
-    ActionSpec {
         action: Action::ToggleStack,
         id: "toggle_stack",
         label: "Start/stop stack",
-        hint: "Start the selected checkout's stack — its run command (Settings → Project, or .orion.json \"run\"), else its compose stack — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
+        hint: "Start the selected checkout's stack — its run command (Settings → Project, or .orion.json \"run\") — with the pane on it as it boots; on a running one, stop it (a ^C, so it winds down in view; again kills it)",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         // ^Z rather than ^⇧S, which only the kitty protocol can send;
@@ -955,7 +945,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::StopAllStacks,
         id: "stop_all_stacks",
         label: "Stop all stacks",
-        hint: "Stop every running docker compose stack on this machine — containers and data are kept",
+        hint: "Stop every checkout's running stack — a ^C to each run, so each winds down in view",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],

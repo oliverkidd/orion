@@ -640,8 +640,7 @@ Both keys are optional shell command lines, and both run in the selected worktre
   and removes the row. A command that exits on its own, or on its `^C`, leaves its row behind, dimmed;
   attaching it replays how the run ended, and nothing but **Start stack** runs it again — not an
   attach, not the prewarm sweep. There is one run per worktree: a second client's start on a worktree
-  already running never starts another. With no run command anywhere, a worktree whose checkout has a
-  compose stack runs `docker compose start` on it in the same terminal instead.
+  already running never starts another. With no run command anywhere, the footer says so.
 - **`open`** — the OPEN COMMAND. `⌘O` → **Open command** on a worktree fires it once, from the TUI
   rather than the DAEMON, since what it opens — a browser tab, an editor — belongs on the machine you
   are sitting at. It runs through `$SHELL -c` with its output discarded, and orion does not wait for
@@ -705,8 +704,8 @@ How a project is matched, and when it is left alone:
 While a checkout is still there, its stack's state is on the grid: the DAEMON asks `docker ps` every
 5 seconds (`ORION_STACK_POLL_MS` changes that; it waits 30 seconds after docker stops answering) and
 every client draws a `⬡` at the right end of the band of a worktree with a stack — green while the
-stack runs, faint while it is stopped. `⇧S` opens STACKS, every compose stack on the machine with the
-worktree it belongs to, to start, stop or take one down ([Keys](keys.md)).
+stack runs, faint while it is stopped. The DAEMON asks only while a client is connected: with none,
+docker is left alone.
 
 `orion doctor` lists the compose projects whose every container was started in a directory that is
 gone — a checkout deleted while this was `off`, or deleted outside orion — with the

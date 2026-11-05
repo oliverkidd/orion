@@ -253,7 +253,7 @@ async fn serve() -> Result<()> {
     }
 
     // STACK STATUS: which docker compose stacks exist and run, for the
-    // band's `⬡` and the Stacks modal.
+    // band's `⬡`.
     {
         let daemon = daemon.clone();
         let interval = env_interval(env::STACK_POLL_MS, 5_000);

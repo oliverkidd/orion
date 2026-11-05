@@ -122,9 +122,6 @@ pub enum HitTarget {
     /// runs. Only a checkout with a pull request has one, and it is only
     /// as wide as its text, so the rest of the rule is still the band's.
     LauncherBandPr(WorktreeId),
-    /// The STACK MARK `⬡` at a band's right end, registered ahead of the
-    /// rule so it wins: a click opens the Stacks modal on that stack.
-    LauncherBandStack(WorktreeId),
     /// The ISSUE NUMBER on a session's card — its `#15`, drawn while the
     /// `card_issue_number` setting is on — by the card's session,
     /// registered ahead of the card, so it wins: a click lands the cursor
@@ -2390,8 +2387,6 @@ pub enum Overlay {
     Metrics(MetricsView),
     /// `⇧U`: ACCOUNT USAGE — how much is left on each linked account.
     Usage(crate::usage::UsageView),
-    /// `⇧S`: STACK STATUS — every docker compose stack, to start or stop.
-    Stacks(crate::stacks::StacksView),
     /// **Clean unused worktrees** (`crate::clean_worktrees`).
     CleanWorktrees(crate::clean_worktrees::CleanView),
     Hosts(HostsView),
@@ -4520,13 +4515,8 @@ pub struct App {
     pub worktree_ahead: HashMap<WorktreeId, (usize, usize)>,
     /// STACK STATUS: every docker compose stack on the machine, as the
     /// DAEMON last saw it — `None` while docker is out of reach (or before
-    /// the first answer), `stacks_error` saying why.
+    /// the first answer).
     pub stacks: Option<Vec<orion_core::compose::Stack>>,
-    pub stacks_error: Option<String>,
-    /// Stacks with a verb in flight, by project, and its req_id: what the
-    /// Stacks modal's row reads until the Ack or Error. The DAEMON polls
-    /// again before it acks, so the listing that follows shows the result.
-    pub stack_pending: HashMap<String, (orion_core::compose::StackVerb, u64)>,
     /// Checkouts whose run was sent a `^C` by `⌘⇧S`: the next press kills
     /// it, and says so.
     pub runs_stopping: std::collections::HashSet<WorktreeId>,
@@ -4956,8 +4946,6 @@ impl App {
             worktree_lines: HashMap::new(),
             worktree_ahead: HashMap::new(),
             stacks: None,
-            stacks_error: None,
-            stack_pending: HashMap::new(),
             runs_stopping: Default::default(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
@@ -6243,8 +6231,7 @@ impl App {
     }
 
     /// `project`'s checkouts in the order its BANDS stand on the grid
-    /// ([`App::worktree_order`]), whichever project is selected; the STACKS
-    /// modal lists every project's so.
+    /// ([`App::worktree_order`]), whichever project is selected.
     pub fn worktrees_in_band_order(&self, project: &ProjectId) -> Vec<&Worktree> {
         self.worktree_order(project)
             .into_iter()

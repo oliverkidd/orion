@@ -2197,7 +2197,7 @@ fn draw_band_rule(
             ));
         }
     }
-    hits.extend(paint_stack_mark(buf, r, app, &band.worktree));
+    paint_stack_mark(buf, r, app, &band.worktree);
     hits.push((r, HitTarget::LauncherBand(rule.index)));
     hits
 }
@@ -2208,19 +2208,18 @@ fn draw_band_rule(
 /// without one. A running stack's STACK TRAIL runs into it down the
 /// rule's dashes, one column a frame, and it flashes as the light lands;
 /// the light skips text but keeps time across it, so its pace is even.
-/// The click on the mark opens the Stacks modal.
-fn paint_stack_mark(
-    buf: &mut Buffer,
-    r: Rect,
-    app: &App,
-    worktree: &orion_core::WorktreeId,
-) -> Option<(Rect, HitTarget)> {
-    let stack = app.stack_of(worktree)?;
+fn paint_stack_mark(buf: &mut Buffer, r: Rect, app: &App, worktree: &orion_core::WorktreeId) {
+    let Some(stack) = app.stack_of(worktree) else {
+        return;
+    };
     let th = app.theme;
     // The rightmost dash: the rule's own last cell unless it was cut.
-    let h = (r.x..r.right())
+    let Some(h) = (r.x..r.right())
         .rev()
-        .find(|&x| buf[(x, r.y)].symbol() == "─")?;
+        .find(|&x| buf[(x, r.y)].symbol() == "─")
+    else {
+        return;
+    };
     let running = stack.state() == orion_core::compose::StackState::Running;
     let mut mark = if running { th.ok } else { th.faint };
     if running && app.animations {
@@ -2241,15 +2240,6 @@ fn paint_stack_mark(
         }
     }
     buf[(h, r.y)].set_symbol(crate::stacks::MARK).set_fg(mark);
-    Some((
-        Rect {
-            x: h,
-            width: 1,
-            height: 1,
-            ..r
-        },
-        HitTarget::LauncherBandStack(worktree.clone()),
-    ))
 }
 
 /// A terminal's mark, the counterpart of a session's STATUS MARK: `▶` for a
@@ -6036,42 +6026,6 @@ mod tests {
         let buf = rule_row(&app, &band, 40);
         assert_eq!(buf[(39, 0)].fg, app.theme.ok);
         assert_eq!(painted(&buf, 0, app.theme.stack_sweep[0]), "");
-    }
-
-    /// The `⬡` is its own click: registered ahead of the band's rule.
-    #[test]
-    fn the_stack_mark_is_a_hit_ahead_of_the_rule() {
-        let app = with_stack(5, 0);
-        let band = a_band(false, "feat-x");
-        let facts = rule_facts(&app, &band, app.theme);
-        let mut buf = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 40, 1));
-        let hits = draw_band_rule(
-            &mut buf,
-            &app,
-            Rect::new(0, 0, 40, 1),
-            &band,
-            &facts,
-            BandRule {
-                index: 0,
-                on: false,
-                lit: false,
-                more: 0,
-                cols: RuleColumns::of([&facts]),
-            },
-        );
-        let stack_at = hits
-            .iter()
-            .position(|(r, h)| {
-                *h == HitTarget::LauncherBandStack(orion_core::WorktreeId("w1".into()))
-                    && r.x == 39
-                    && r.width == 1
-            })
-            .expect("the mark's hit");
-        let band_at = hits
-            .iter()
-            .position(|(_, h)| *h == HitTarget::LauncherBand(0))
-            .unwrap();
-        assert!(stack_at < band_at);
     }
 
     /// Every rule on the grid gives its pull request and its counts the

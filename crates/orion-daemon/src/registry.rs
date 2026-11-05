@@ -72,7 +72,7 @@ const RUN_TERMINAL_NAME: &str = "run";
 /// `⌘⇧S` on a worktree with nothing to run: the footer line naming both
 /// places a RUN COMMAND can come from.
 const NO_RUN_COMMAND: &str =
-    "no run command and no compose stack for this worktree — set one in Settings (s) → Project, \
+    "no run command for this worktree — set one in Settings (s) → Project, \
                               or add .orion.json with {\"run\": \"npm run dev\"}";
 /// Why a RUN TERMINAL with nothing left to replay will not attach — its
 /// run ended before a DAEMON restart, typically.
@@ -2193,8 +2193,8 @@ impl Daemon {
     /// `⌘⇧S` on a worktree: start its RUN COMMAND — the project's
     /// `run_command` setting (Settings → Project), else `.orion.json`'s
     /// `run`, read fresh from the worktree's checkout, else the main
-    /// checkout's, else `docker compose start` on the checkout's own
-    /// stack — in the worktree's RUN TERMINAL. A run that already
+    /// checkout's — in the worktree's RUN TERMINAL; with none, the refusal
+    /// says so. A run that already
     /// exited lends its row; one still going is the answer as it stands,
     /// so a second client's press never starts a second server.
     pub fn start_run(self: &Arc<Self>, worktree_id: &WorktreeId) -> Result<EntityId> {
@@ -2231,7 +2231,7 @@ impl Daemon {
                 .map_err(anyhow::Error::msg)?
             {
                 Some(command) => command,
-                None => self.stack_start_line(&worktree).context(NO_RUN_COMMAND)?,
+                None => bail!(NO_RUN_COMMAND),
             },
         };
         let mut term = match existing {
@@ -2271,23 +2271,6 @@ impl Daemon {
         }
         spawned?;
         Ok(EntityId::Terminal(id))
-    }
-
-    /// With no RUN COMMAND set anywhere, the worktree's own compose stack
-    /// is what it runs: `docker compose start` on it, in the RUN TERMINAL,
-    /// so the start shows there like any other. None without a stack.
-    fn stack_start_line(&self, worktree: &Worktree) -> Option<String> {
-        let stacks = self.stacks.stacks()?;
-        let worktrees = self.store.load_tree().ok()?.1;
-        let checkouts: Vec<&Path> = worktrees.iter().map(|w| w.path.as_path()).collect();
-        let stack = orion_core::compose::stack_in(&stacks, &worktree.path, &checkouts)?;
-        let docker = crate::containers::find_docker()?;
-        let args = orion_core::compose::StackVerb::Start.compose_args(&stack.project);
-        let words = std::iter::once(docker.to_string_lossy().into_owned())
-            .chain(args)
-            .map(|w| orion_core::shell::single_quote(&w))
-            .collect::<Vec<_>>();
-        Some(words.join(" "))
     }
 
     /// Stop a worktree's run: a `^C` into its RUN TERMINAL, as a person at
