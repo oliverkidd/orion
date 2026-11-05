@@ -953,9 +953,8 @@ fn draw_bands(
     app.hits.push((area, HitTarget::PanelBg(Focus::Sessions)));
 }
 
-/// What an EMPTY BAND says under its rule: only that. What can be done
-/// there is the FOOTER's to say, for the band under the cursor
-/// (`ui::footer`), not every empty band's at once.
+/// What an EMPTY BAND says under its rule, before the ways to start
+/// something there ([`empty_band_hint`]).
 const EMPTY_BAND: &str = "nothing running";
 
 /// What the DORMANT DIVIDER says, ahead of the dashes that fill its row.
@@ -976,11 +975,45 @@ fn draw_dormant_divider(buf: &mut Buffer, r: Rect, th: Theme) {
     buf.set_string(r.x, r.y, text, Style::default().fg(th.faint));
 }
 
+/// What an EMPTY BAND's line says in `width` columns: [`EMPTY_BAND`],
+/// then the keys that start something there, from the live keymap —
+/// `nothing running · ⌘N new agent · ⌘⇧N new agent in a new worktree · t
+/// terminal` — an unbound one left out. Short of room the longest gives
+/// way first, whole, so the line never ends mid-word.
+fn empty_band_hint(app: &App, width: usize) -> String {
+    let mut ways: Vec<String> = [
+        (Action::QuickPrompt, "new agent"),
+        (
+            Action::QuickPromptNewWorktree,
+            "new agent in a new worktree",
+        ),
+        (Action::NewTerminal, "terminal"),
+    ]
+    .iter()
+    .filter_map(|(action, does)| {
+        crate::hints::key(&app.keymap, *action).map(|key| format!("{key} {does}"))
+    })
+    .collect();
+    loop {
+        let line = std::iter::once(EMPTY_BAND.to_string())
+            .chain(ways.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let longest = (0..ways.len()).max_by_key(|&i| ways[i].chars().count());
+        match longest {
+            Some(i) if line.chars().count() > width => {
+                ways.remove(i);
+            }
+            _ => return truncate(&line, width),
+        }
+    }
+}
+
 /// The line under an EMPTY BAND's rule — a checkout with nothing running
 /// in it — in place of the row
-/// of cards it has none of: [`EMPTY_BAND`], dim, and in the accent while
-/// the cursor is on the band with the keys on the grid. A click on it is
-/// a click on the band (the band's whole area).
+/// of cards it has none of: [`empty_band_hint`], dim, and in the accent
+/// while the cursor is on the band with the keys on the grid. A click on
+/// it is a click on the band (the band's whole area).
 fn draw_empty_band(
     f: &mut Frame,
     app: &App,
@@ -999,11 +1032,11 @@ fn draw_empty_band(
         return;
     };
     let fg = if lit { th.accent } else { th.dim };
+    let indent = "  ";
+    let room = usize::from(placed.rect.width).saturating_sub(indent.len());
+    let hint = format!("{indent}{}", empty_band_hint(app, room));
     f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            format!("  {EMPTY_BAND}"),
-            Style::default().fg(fg),
-        ))),
+        Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(fg)))),
         placed.rect,
     );
 }

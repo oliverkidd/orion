@@ -421,10 +421,12 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   its name whole wherever there is room for it. A tab's name, its `×`, the chip and the `+` all mark
   themselves while the pointer rests on them. The cards are grouped
   into **BANDS**, one per checkout — the root first, then the rest most recently worked in first.
-  A checkout with nothing running in it is an EMPTY BAND, its rule over a single line,
-  `nothing running` — what can be done there is
-  the footer's to say once the cursor is on it (`⌘N new agent · t terminal · ⌫ delete worktree`,
-  and `→ focus PR` beside the pull request the pane reads). `↑`/`↓` walk onto it like any band, `⌘N`/`t` start work in
+  A checkout with nothing running in it is an EMPTY BAND, its rule over a single line that says so
+  and how to start something — `nothing running · ⌘N new agent · ⌘⇧N new agent in a new worktree ·
+  t terminal`, the keys your keymap's, the longest giving way on a narrow grid; dim, and in the
+  accent while the cursor is on the band. The footer has the rest once the cursor is on it
+  (`⌘N new agent · t terminal · ⌫ delete worktree`, and `→ focus PR` beside the pull request the
+  pane reads). `↑`/`↓` walk onto it like any band, `⌘N`/`t` start work in
   that checkout, and `Backspace` (or **Delete worktree** in its right-click menu) deletes it behind the
   worktree's own confirm — and `⌘⌫` (`⇧D`) does the same from any card on a band, taking every
   session in it down with the checkout behind one confirm that names them; the root's band offers

@@ -4400,8 +4400,9 @@ mod tests {
             let mut app = with_empty_band();
             let screen = screen_text(&draw_tall(&mut app));
             assert!(screen.contains("idle"), "{screen}");
-            // The band says only that nothing runs there; what can be done
-            // is the footer's, once the cursor is on it.
+            // The band says that nothing runs there and how to start
+            // something; the rest of what can be done is the footer's, once
+            // the cursor is on it.
             assert!(screen.contains("  nothing running"), "{screen}");
             assert!(!screen.contains("delete worktree"), "{screen}");
             keys(&mut app, &[KeyCode::Down, KeyCode::Down]);
@@ -4430,6 +4431,59 @@ mod tests {
             key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
             assert!(app.flash.is_none());
+        });
+    }
+
+    /// An EMPTY BAND's line names the ways to start something there, on
+    /// every empty band — dim, in the accent once the cursor is on it —
+    /// the longest giving way, whole, on a narrow grid; and a band's rule
+    /// carries no run's ports: those are the run line's alone.
+    #[test]
+    fn an_empty_band_names_the_ways_in_and_a_rule_no_ports() {
+        with_default_config(|| {
+            const HINT: &str =
+                "  nothing running · ⌘N new agent · ⌘⇧N new agent in a new worktree · t terminal";
+            let mut app = with_empty_band();
+            seed_run(&mut app, vec![3000]);
+            let narrow = screen_text(&draw_tall(&mut app));
+            assert!(
+                narrow.contains("  nothing running · ⌘N new agent · t terminal  "),
+                "{narrow}"
+            );
+            let wide = |app: &mut App| draw_at(app, 200, 70);
+            let terminal = wide(&mut app);
+            let text = screen_text(&terminal);
+            let lines: Vec<&str> = text.lines().collect();
+            let rule = lines
+                .iter()
+                .position(|l| l.contains("⎇ idle"))
+                .expect("the empty band's rule");
+            assert!(lines[rule + 1].contains(HINT), "{text}");
+            let hint_at = |terminal: &Terminal<TestBackend>| {
+                let x = lines[rule + 1].find("nothing").unwrap();
+                let x = lines[rule + 1][..x].chars().count() as u16;
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((x, rule as u16 + 1))
+                    .unwrap()
+                    .fg
+            };
+            assert_eq!(hint_at(&terminal), app.theme.dim);
+
+            let main = lines
+                .iter()
+                .find(|l| l.contains("⌂ main"))
+                .expect("the root's rule");
+            assert!(!main.contains(":3000"), "{main}");
+            assert!(text.contains("$ npm run dev  :3000"), "{text}");
+
+            keys(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Down]);
+            assert_eq!(
+                app.selected_worktree().map(|w| w.id.clone()),
+                Some(WorktreeId("w3".into()))
+            );
+            assert_eq!(hint_at(&wide(&mut app)), app.theme.accent);
         });
     }
 
