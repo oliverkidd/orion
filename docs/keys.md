@@ -95,17 +95,17 @@ Ghostty config.
 
 ## The grid
 
-orion's whole screen is a GRID of cards (see [Sessions](sessions.md#the-grid)): the sessions and
-terminals of the project whose PROJECT TAB is lit in the header, grouped into a BAND per checkout —
-a titled rule over one row of cards — with a pane beside them that reads the card under the
-cursor. `↑`/`↓` walk the bands, `Tab` opens one in place (its cards walked with `←`/`→`) and `Tab`
-or `Esc` folds it back.
+orion's whole screen is a GRID (see [Sessions](sessions.md#the-grid)): the sessions and
+terminals of the project whose PROJECT TAB is lit in the header, a line apiece, grouped into a
+BAND per checkout under a titled rule — with a pane beside them that reads the entry under the
+cursor. `↑`/`↓` walk the lines, `Tab` opens a band that lists only its most recent, and `Tab` or
+`Esc` folds it back.
 
 | Key | Action |
 |---|---|
-| `↑` / `↓` | walk the BANDS — one checkout at a time, the pane swapping onto that checkout's remembered card as you pass; on the band opened with `Tab`, walk the rows of its cards and off its last row on to the next band. On the first band `↑` has nowhere to go: one press stays put, and a second within 400 ms walks up into the PROJECT TABS. Walking reads what the pane lands on — a `done` badge comes down as you arrive |
-| `←` / `→` | walk the cards of the band under the cursor, stopping at either end, the pane following onto each. A `❮` before the row or a `❯` after its last card says the rest went that way, and a click on either is the same step. With the pane beside the cards, `→` off the row's last card — or on a band with no cards — goes on into the pane, to read it ([below](#the-pane-focus-and-scroll)) |
-| `Tab` | **open the worktree in place**: every card of the band wrapped into rows under its rule, its terminals under a `terminals` rule. One band is open at a time; `Tab` on the open band folds it back. Remembered per project and across restarts. With Settings → Appearance → **Expand all worktrees** on, every band stays open and `Tab` does nothing |
+| `↑` / `↓` | walk the lines — down a band's sessions and terminals and off its last line onto the next band's first, the pane following onto each. On the first line `↑` has nowhere to go: one press stays put, and a second within 400 ms walks up into the PROJECT TABS. Walking reads what the pane lands on — a `done` badge comes down as you arrive |
+| `→` | with the pane beside the grid, into the pane, to read it ([below](#the-pane-focus-and-scroll)) |
+| `Tab` | **open the worktree in place**: every line of the band, where a collapsed one lists its 3 most recent. One band is open at a time; `Tab` on the open band folds it back. Remembered per project and across restarts. With Settings → Appearance → **Expand all worktrees** on, every band stays open and `Tab` does nothing |
 | `Enter`, a double-click | into the pane on the card under the cursor, its input locked. On a band with nothing on it but its pull request, into the pane to read it. On a terminal too short to draw the pane the session takes the whole screen instead |
 | `Esc` | close the open band first; in the ARCHIVED VIEW, back to the live sessions; with every band collapsed, let the band under the cursor go — the pane collapses. What was under the cursor is only let go of: the next arrow takes the aim back |
 | `Space` | the FOLLOW-UP MODAL: a small box over the grid for the selected session's next turn. `Enter` sends it down the PTY, `⇧Enter` / `⌥Enter` / `^J` break a line, `Esc` closes without sending. Nothing about the pane moves. Only a live local agent takes one; a session whose CLI is not up is booted first and the box kept |
@@ -219,7 +219,7 @@ the footer (or the modal's border) always names the way:
 
 | Key | Action |
 |---|---|
-| `↑`,`↑` on the top row of cards | **the PROJECT TABS take the keys.** A cursor of its own lands on the lit tab; the card you left stays selected with the pane still on it |
+| `↑`,`↑` on the first line | **the PROJECT TABS take the keys.** A cursor of its own lands on the lit tab; the card you left stays selected with the pane still on it |
 | `←` / `→`, `[` / `]` | walk the header's cursor along the tabs — **the grid switches with it**, each project on the card you last left it on |
 | `Enter`, `↓`,`↓` | hand the keys back to the cards of the project on screen |
 | `Backspace` | close the tab under the cursor, behind a confirm (or click its `×`; **Close project tab** has no key by default — bind one in Settings → Hotkeys) |

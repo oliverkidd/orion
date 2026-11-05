@@ -379,7 +379,7 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   nothing on its header to click — `t` opens a terminal on the project's root; the terminal comes
   up as a card inside its checkout's band with the keys in it, and `t` (or an EMPTY BAND's
   right-click **New terminal**) is the only way to open one: the grid has no `+` for it. From the keyboard the header can also be
-  walked: `↑`,`↑` on the top row of cards hands the keys up to the tabs, with a cursor of
+  walked: `↑`,`↑` on the first line hands the keys up to the tabs, with a cursor of
   their own on the lit tab; `←`/`→` move it and the grid switches with it, each project
   shown on its last-focused card as the cursor passes, and `Enter` — or `↓`,`↓` back
   down, or `Esc` — hands the keys back to the cards of the project on screen. The `×` on a tab, or `Backspace` on the
@@ -428,7 +428,7 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   setting on, deleting a worktree's last card never asks about the worktree: the band stays,
   empty, until its own `Backspace` — unless **Delete emptied worktree** is on, which still deletes the
   worktree with its last card. Each band is a
-  titled rule over one row of cards: the rule names the checkout by its SCOPE MARK (`⎇ feat`,
+  titled rule over its entries, a line apiece: the rule names the checkout by its SCOPE MARK (`⎇ feat`,
   `⌂ main` for the root, the purple `●` once its pull request has merged — the project is the
   grid's own scope, named once in the header; the root's branch is bright, a worktree's muted), and
   after the branch, dim, the folder it is checked out in when the branch's name doesn't spell it
@@ -443,80 +443,57 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   `p` fetches and pulls the band's checkout, and `⇧P` pushes it ([Keys](keys.md#the-grid)). A band
   with nothing to say in a column leaves it blank; a narrow rule drops the folder, then the pull
   request's column, then the counts', before the branch shortens.
-  How many cards the row had no room for sits just ahead of them (`▸ 2 more`).
+  How many entries a collapsed band leaves off sits just ahead of them (`▸ 2 more`).
   The band the keys are on opens on `❯` where the rest open on `──`, and the FOOTER says what
-  Tab does there — `Tab expand`, or `Tab collapse` on the one band open as an accordion, every card
-  of it wrapped into rows under the rule.
-  A collapsed band whose row left cards off its edges says so on the row of air under the cards,
-  centered — `▾ 2 more · see all 8` — where the eye leaves the row; a click on it opens the band as
-  Tab does.
-  The cards under it are the checkout's sessions, then its terminals as cards two columns wide,
-  gap included, so their output has room — a one-column grid gives them the one (`❯ shell-1`
-  with what runs in it, then the last lines its shell printed, asked of the daemon
-  once a second while the card is on screen, so a glance down the grid says what each shell is up
-  to; `▶` on a RUN TERMINAL, `exited` at the name's right once its shell is gone — the lines it
-  went out on stay, so the card says what it was doing when it went). A session
-  card is the session's name with its status dot and how long ago, what it runs on (`claude opus high`:
-  the harness, its model and the reasoning effort it was launched with — a session on the CLI's own
-  default effort stops at the model),
-  then the last thing it was asked to do, on a `›`, over four rows so a sentence reads as one
-  (what still does not fit ends in an ellipsis). The pull requests come from the same `gh` lookups
+  Tab does there — `Tab expand`, or `Tab collapse` on the one band open as an accordion, every
+  entry of it listed under the rule.
+  A collapsed band lists its 3 most recent sessions (the one the cursor is on stays listed too,
+  wherever it sits) and says what it left off on the line under them — `▾ 2 more · see all 5` —
+  where the eye leaves the list; a click on it opens the band as Tab does.
+  The entries under it are the checkout's sessions, then its terminals, the names and what each
+  runs on in columns down the band. A terminal is `❯ shell-1` with what runs in it — `▶` on a RUN
+  TERMINAL, `exited` at the right once its shell is gone. A session is its status dot and name,
+  what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
+  on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
+  `›`, and how long ago at the right. The pull requests come from the same `gh` lookups
   the PULL REQUESTS MODAL makes, swept over every checkout the grid lists. The header counts the project's open pull requests and issues beside the session count
   (`4 sessions  3 prs · 2 issues`), so what is waiting on the repo is read without opening `v` or
   `i` to find it — and a click on either count opens that list, as the key does. When the room left
-  cannot hold every card, the far right of that row says how many it could not draw and which way
-  they went — `↓ 7 hidden` for cards under the fold, `↑ 4 hidden` for ones scrolled off the top,
-  `↑↓ 5 hidden` for both. The count beside it still says how many sessions the project has, so a
-  card that is not on screen reads as something taking its room rather than as a session gone, and
+  cannot hold every entry, the far right of that row says how many it could not draw and which way
+  they went — `↓ 7 hidden` for entries under the fold, `↑ 4 hidden` for ones scrolled off the top,
+  `↑↓ 5 hidden` for both. The count beside it still says how many sessions the project has, so an
+  entry that is not on screen reads as something taking its room rather than as a session gone, and
   the arrow says whether the way back to it is `↓` down through the grid or the pane's edge dragged
   back down. On a row the tabs leave little of, the counts give way whole, least needed first: the
   session count (each band's rule says its own), then the pr and issue counts, and this one last.
   An open band's edges say it again where the eye looks for the rest: `↑ 2 more
   above` on the row of air under the PROJECT TABS once the top has scrolled off, `↓ 3 more below`
-  on a row kept under the cards while there is more past the bottom — the row stays as air once the
+  on a row kept under the grid while there is more past the bottom — the row stays as air once the
   grid is scrolled to its end, and neither appears on a grid that fits.
-- **Walking it.** `↑` and `↓` walk the bands — the rule of the band under the cursor takes the
-  accent and its branch goes bold, its remembered card (the session it was last left on, else its
-  first) is raised out of the row — a heavy accent frame (`┏━┓`, a weight no status frame takes) over
-  a gray fill — and the pane reads it; the accent goes with the keys, so with them up on the
-  PROJECT TABS or down in the pane the rule is gray like the others, the card's fill drops a shade,
-  and only the bold branch still says which checkout the pane reads. `←` and `→` walk the cards along the band's
-  row, which scrolls under the cursor. `Tab` opens the band in place, like an accordion: every one
-  of its cards wrapped into rows under its own rule — the sessions first, the terminals under a
-  `terminals` rule — pushing the bands under it down, one band open at a time. On the open band
-  the arrows walk the cards — `←` and `→` along a row, `↑` and `↓` down the
-  rows, on from the last row of sessions into the terminals, and off the band's last row onto the
-  next band — and `Tab` or `Esc` folds it back up with the cursor where it was. A collapsed band
-  with more cards than its row can hold counts the rest on its rule rather than wrapping, so a step
-  down is always a step onto the next checkout; open, there is room to wrap, and the whole grid
-  scrolls by rows to keep the cursor's card on screen. `Enter` opens the card under the cursor in
-  the pane, open band or collapsed. Which band is open is remembered per project — a trip to another
+- **Walking it.** `↑` and `↓` walk the lines as one column, off a band's last line onto the next
+  band's first — the rule of the band under the cursor takes the accent and its branch goes bold,
+  the entry under the cursor wears `▌` and a faint wash of its status color (the needs-you red, the
+  done color while a finish is unread, breathing while the animations are on; the accent's, still,
+  on one at rest), and the pane reads it; the accent goes with the keys, so with them up on the
+  PROJECT TABS or down in the pane the rule is gray like the others and only the bold branch and the
+  entry's mark still say what the pane reads. `Tab` opens the band in place, like an accordion:
+  every one of its entries listed, pushing the bands under it down, one band open at a time — and
+  `Tab` or `Esc` folds it back up with the cursor where it was. The whole grid scrolls by rows to
+  keep the cursor's entry on screen. `Enter` opens the entry under the cursor in the pane. Which band is open is remembered per project — a trip to another
   project's tab and back finds it still open — and across restarts, and a jump that
   names a session — `⌘K`, the attention walk, a terminal just opened — lands inside its checkout.
-  The wheel never walks the cursor, so a trackpad cannot swap the pane out from under the card you
+  The wheel never walks the cursor, so a trackpad cannot swap the pane out from under the entry you
   are reading: the grid scrolls the way a terminal's screen does — the wheel moves the bands three
-  rows a notch under a cursor that stays put, held at the grid's ends, and a card the window's edge cuts is drawn to the edge rather than
-  left out, so the window is full to its edges and no card-sized hole opens over the cards. The
-  next key that walks the cursor, or `↑`/`↓` against the grid's edge, scrolls just far enough to
-  bring the cursor's card whole back on screen — with the checkout's rule when it is on the first
-  row — and a click on a cut card does the same.
-- **The compact list.** Settings → Appearance → **Worktree layout** → `list` (`worktree_layout`)
-  swaps each band's row of cards for a list: every session one line under the band's rule —
-  its status dot and name, what it runs on, its last prompt — then its terminals, the shell's last
-  line where a session has its prompt, the names and harnesses in columns down the band. Each band
-  starts collapsed on its 3 most recent sessions (the one the cursor is on stays listed too,
-  wherever it sits), with `▾ 2 more · see all 5` on the line under them; `Tab`, or a click on
-  that line, opens the band to every entry and `Tab` or `Esc` folds it back — one band open at a
-  time, as with the cards. A band that already lists everything has nothing to open, and `Tab`
-  there does nothing. `↑` and `↓` walk the lines as one column, off a band's last line onto the next
-  band's first; `Enter` and a click work on a line as on a card.
+  rows a notch under a cursor that stays put, held at the grid's ends. The next key that walks the
+  cursor, or `↑`/`↓` against the grid's edge, scrolls just far enough to bring the cursor's entry
+  back on screen — with the checkout's rule when it is the first — and a click on one does the
+  same. A band that already lists everything has nothing to open, and `Tab` there does nothing.
 - **Every worktree open.** Settings → Appearance → **Expand all worktrees** (`expand_all_worktrees`,
   off by default) lays every band out open at once — each worktree's sessions and terminals wrapped
-  into rows under its rule, or every line of the compact list — so there is no accordion: `Tab`, and
+  listed under its rule — so there is no accordion: `Tab`, and
   a second click on a rule, open and fold nothing, the footer offers no `Tab` verb,
-  and `Esc` has no band to close. `←`/`→` walk a row, `↑`/`↓` walk down every worktree's rows as one
-  column — off a band's last row onto the next band's first, in the column the cursor was in. Which
-  band `Tab` last opened is kept, and comes back open when the setting is switched off.
+  and `Esc` has no band to close. Which band `Tab` last opened is kept, and comes back open when
+  the setting is switched off.
 - **The pane** runs down the right side of the cards, full height and half the width — or along
   the bottom, under them, with the `⬓` button just before the `×` on its header (`◨` there moves
   it back) or Settings → Appearance → **Session pane** (`session_pane`, which the button writes; a
@@ -537,14 +514,14 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   A click into the pane types into that session where it stands, with the grid still up over it, and
   `` ^` `` hands the keys back to the cards — press it again there and the pane folds away. Its top edge is draggable — a short `━` grip marks it, and
   pulling it up or down trades rows between the cards and the session under them, stopping against
-  the pane's own minimum one way and the header plus one row of cards the other — with the header's
+  the pane's own minimum one way and the header plus a few of the grid's rows the other — with the header's
   `↓ 7 hidden` counting whatever the cards lost the room for as you pull. The height you
   leave it at is remembered across restarts, and re-fitted to the window each frame. Beside the
   cards it is the edge facing them that drags, sideways, under a short `┃` grip, trading columns
   down to one column of cards — and that width is remembered apart from the height, so switching
   sides never turns one into the other. A double-click on either edge snaps it to the middle of the
   body, the cards and the pane sharing it evenly. On a terminal
-  too short for the header, a row of cards and a pane worth the name, there is no pane and a session
+  too short for the header, a few of the grid's rows and a pane worth the name, there is no pane and a session
   is only ever seen full-screen.
 - **A follow-up** is `Space` on a card: a small modal opens over the grid and `Enter` sends what you
   type as that session's next turn, straight down its PTY. The pane is left exactly as it is — this is

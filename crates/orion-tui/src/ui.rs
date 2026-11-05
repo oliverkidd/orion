@@ -184,7 +184,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 fn draw_screen(f: &mut Frame, app: &mut App) {
     app.hits.clear();
-    app.tail_cards.clear();
     app.host_cursor = None;
     app.welcome_on_screen = false;
 
@@ -3785,10 +3784,6 @@ fn status_name_spans(
     }
 }
 
-/// Columns a row's name must keep before the "23m ago" label is worth
-/// the space it costs. Below this the label drops and the name gets it all.
-const MIN_NAME_W: usize = 8;
-
 pub(crate) const PENDING_SESSION_BADGE: &str = " starting";
 
 fn ago_badge(status_changed_at: i64) -> String {
@@ -3798,16 +3793,6 @@ fn ago_badge(status_changed_at: i64) -> String {
     match crate::hosts::ago_label(crate::app::now_ms() - status_changed_at) {
         s if s.is_empty() => s,
         s => format!(" {s}"),
-    }
-}
-
-/// Fit an ago label into `free` columns beside a name: the label and the
-/// columns the name keeps. A narrow panel spends its columns on the name —
-/// the label drops out entirely rather than squeezing the title to nothing.
-fn fit_ago(ago: String, free: usize) -> (String, usize) {
-    match free.checked_sub(ago.chars().count()) {
-        Some(rest) if rest >= MIN_NAME_W => (ago, rest),
-        _ => (String::new(), free),
     }
 }
 

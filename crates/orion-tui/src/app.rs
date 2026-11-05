@@ -125,15 +125,8 @@ pub enum HitTarget {
     /// The STACK MARK `⬡` at a band's right end, registered ahead of the
     /// rule so it wins: a click opens the Stacks modal on that stack.
     LauncherBandStack(WorktreeId),
-    /// The `❮` / `❯` beside a BAND's row of cards on the grid, by the
-    /// band's place in `launcher::bands` — drawn only while the row has
-    /// cards off that edge: a click steps the cursor one card that way
-    /// along the band, the very step `h` / `l` take on it
-    /// (`event_loop::launcher::walk_band`).
-    LauncherStripLeft(usize),
-    LauncherStripRight(usize),
-    /// The `▾ 6 more · Tab: see all 8` under a collapsed BAND's row that
-    /// left cards off its edges, by the band's place in
+    /// The `▾ 6 more · see all 8` under a collapsed BAND's last entry,
+    /// by the band's place in
     /// `launcher::bands`: a click puts the cursor on the band and opens
     /// it as the ACCORDION, the very toggle Tab runs
     /// (`event_loop::launcher::click_band_more`).
@@ -3309,19 +3302,6 @@ pub struct TermCallbacks {
     pub clipboard: Option<String>,
 }
 
-/// The last lines a TERMINAL printed, as its card on the grid shows them
-/// (`launcher_view::draw_chip`): the end of its ring, asked of the daemon on
-/// the grid's beat (`event_loop::request_terminal_tails`) and laid out
-/// through a throwaway screen (`terminal_tail::parse_tail`), each row in
-/// the colours it was printed in. `end_seq` is the ring end the lines
-/// came from, sent back with the next ask so an idle terminal answers
-/// with nothing.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TerminalTail {
-    pub lines: Vec<crate::terminal_tail::TailRow>,
-    pub end_seq: u64,
-}
-
 impl vt100::Callbacks for TermCallbacks {
     fn copy_to_clipboard(&mut self, _: &mut vt100::Screen, _ty: &[u8], data: &[u8]) {
         // vt100 only gets here with a base64-clean payload.
@@ -4031,14 +4011,6 @@ pub struct App {
     /// reaped or exited one comes back as a new process whose ring starts
     /// over, and a QUICK PROMPT stand-in never had a PTY.
     pub term_cache: Vec<AttachedTerm>,
-    /// What each TERMINAL was last seen printing, by id, for its card on
-    /// the grid ([`TerminalTail`]). A terminal that exited keeps its last
-    /// lines: they are what it was doing when it went.
-    pub terminal_tails: HashMap<TerminalId, TerminalTail>,
-    /// The terminals whose cards the last frame drew, in the order drawn:
-    /// the ones the grid's beat asks the daemon about. Cleared with `hits`
-    /// at the top of every frame, so a folded grid asks after none.
-    pub tail_cards: Vec<TerminalId>,
     /// Input lock: keys forward to the attached PTY. Focusing the terminal
     /// pane alone (Tab / arrows) does NOT lock — Enter or a click does.
     pub term_locked: bool,
@@ -4174,14 +4146,8 @@ pub struct App {
     /// is [`App::launcher_pane_side`], which falls back to the bottom on a
     /// window too narrow to stand the pane beside the cards.
     pub launcher_pane_at: crate::launcher::PaneSide,
-    /// Each BAND is the compact LIST — its sessions stacked a line apiece,
-    /// the most recent few until Tab opens the rest — rather than its row
-    /// of cards: Settings → Appearance → **Worktree layout**
-    /// (`event_loop::apply_config`). What a frame lays out is
-    /// [`App::panel_layout`].
-    pub launcher_list: bool,
-    /// Every BAND is laid out open at once — its cards wrapped into rows,
-    /// or every entry of the LIST listed — and there is no ACCORDION:
+    /// Every BAND is laid out open at once — every entry listed — and
+    /// there is no ACCORDION:
     /// Settings → Appearance → **Expand all worktrees**
     /// (`event_loop::apply_config`). [`App::launcher_expanded`] is kept
     /// as it was but read by nothing while this is on, so switching it
@@ -4907,17 +4873,6 @@ pub struct App {
     /// (`launcher::bands`). Mirrors the config, refreshed at startup and
     /// when the settings overlay applies a change.
     pub show_all_worktrees: bool,
-    /// The `hide_card_marks` setting: a terminal card's name goes without
-    /// the `▶`/`❯` in front of it (`launcher_view::draw_chip`), a session
-    /// card's prompt without its `›` (`launcher_view::prompt_lines`).
-    /// Mirrors the config, refreshed at startup and when the settings
-    /// overlay applies a change.
-    pub hide_card_marks: bool,
-    /// The `highlight_current_card` setting: the cursor's card is washed
-    /// faintly in its status color instead of the gray fill
-    /// (`launcher_view::card_tint`). Mirrors the config, refreshed at
-    /// startup and when the settings overlay applies a change.
-    pub highlight_current_card: bool,
     /// The ROWS MEMO, armed by the frame and by [`App::reading_url`].
     pub rows_memo: RowsMemo,
 }
@@ -4942,8 +4897,6 @@ impl App {
             follow_up: None,
             term: None,
             term_cache: Vec::new(),
-            terminal_tails: HashMap::new(),
-            tail_cards: Vec::new(),
             term_locked: false,
             conn: ConnState::Disconnected,
             hits: Vec::new(),
@@ -4980,7 +4933,6 @@ impl App {
             launcher_pane_h: None,
             launcher_pane_w: None,
             launcher_pane_at: crate::launcher::PaneSide::default(),
-            launcher_list: false,
             launcher_all_open: false,
             launcher_pane_hidden: false,
             launcher_expanded: None,
@@ -5148,8 +5100,6 @@ impl App {
             card_issue_number: false,
             show_all_worktrees: false,
             black_background: false,
-            hide_card_marks: false,
-            highlight_current_card: false,
             rows_memo: RowsMemo::default(),
         }
     }
@@ -5611,54 +5561,35 @@ impl App {
         (self.open_band(bands) == Some(index)).then_some(index)
     }
 
-    /// The whole GRID laid out the way this frame draws it: the bands'
-    /// rows of cards with the ACCORDION's one open
-    /// (`launcher::panel_layout`), or, in the compact LIST
-    /// ([`App::launcher_list`]), every band's entries stacked under its
-    /// rule, the cursor's card among them wherever it sits
-    /// (`launcher::list_panel_layout`). With every band open
-    /// ([`App::launcher_all_open`]) each is laid out as the open one is
-    /// (`launcher::open_panel_layout`). The draw, the wheel and the keys
-    /// all read this one, so what `j`/`k` walk is what is on screen.
+    /// The whole GRID laid out the way this frame draws it: every band's
+    /// entries stacked under its rule, all of them on the ACCORDION's open
+    /// one — or on every band, with every band open
+    /// ([`App::launcher_all_open`]) — and the cursor's entry among them
+    /// wherever it sits (`launcher::panel_layout`). The draw, the wheel and
+    /// the keys all read this one, so what `j`/`k` walk is what is on
+    /// screen.
     pub fn panel_layout(&self, bands: &[crate::launcher::Band]) -> crate::launcher::PanelLayout {
-        if self.launcher_list {
-            crate::launcher::list_panel_layout(
-                self.body_area,
-                bands,
-                self.launcher_expanded
-                    .as_ref()
-                    .filter(|_| !self.launcher_all_open),
-                self.launcher_all_open,
-                crate::launcher::cursor(self, bands),
-            )
-        } else if self.launcher_all_open {
-            crate::launcher::open_panel_layout(self.body_area, bands)
-        } else {
-            crate::launcher::panel_layout(self.body_area, bands, self.launcher_expanded.as_ref())
-        }
+        crate::launcher::panel_layout(
+            self.body_area,
+            bands,
+            self.launcher_expanded
+                .as_ref()
+                .filter(|_| !self.launcher_all_open),
+            self.launcher_all_open,
+            crate::launcher::cursor(self, bands),
+        )
     }
 
-    /// The band whose cards the keys walk as rows, and those rows: the
-    /// ACCORDION's open band while the cursor is on it — or, in the
-    /// compact LIST, whichever band the cursor is on, every band there
-    /// being a column of entries — and, with every band open
-    /// ([`App::launcher_all_open`]), whichever band the cursor is on too.
-    /// None on a collapsed band of cards, where `h`/`l` walk the STRIP
-    /// and `j`/`k` the bands.
+    /// The band the keys walk, and its lines: whichever band the cursor is
+    /// on, every band being a column of entries. None with the cursor on
+    /// no band.
     pub fn walked_band(
         &self,
         bands: &[crate::launcher::Band],
     ) -> Option<(usize, crate::launcher::ExpandedLayout)> {
-        if self.launcher_list || self.launcher_all_open {
-            let index = crate::launcher::band_cursor(self, bands)?;
-            let layout = self.panel_layout(bands).bands.swap_remove(index).content?;
-            return Some((index, layout));
-        }
-        let index = self.cursor_in_open_band(bands)?;
-        Some((
-            index,
-            crate::launcher::expanded_layout(self.body_area, &bands[index]),
-        ))
+        let index = crate::launcher::band_cursor(self, bands)?;
+        let layout = self.panel_layout(bands).bands.swap_remove(index).content;
+        Some((index, layout))
     }
 
     /// `body` in two the way the LAUNCHER VIEW draws it: the grid's half

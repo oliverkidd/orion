@@ -406,7 +406,7 @@ fn into_pane(app: &App, bands: &[crate::launcher::Band]) -> Option<Hint> {
     } else {
         return None;
     };
-    let band = crate::launcher::band_cursor(app, bands)?;
+    let (band, layout) = app.walked_band(bands)?;
     let at = crate::launcher::card_cursor(app, &bands[band]);
     // A pane along the bottom is reached by Enter on a band with nothing
     // on it but what the pane reads (and by a click); `↓` stays the
@@ -416,14 +416,9 @@ fn into_pane(app: &App, bands: &[crate::launcher::Band]) -> Option<Hint> {
             .then(|| act(&app.keymap, Action::Activate, what))
             .flatten();
     }
-    let stuck = match app.walked_band(bands) {
-        Some((_, layout)) => layout.stepped(at, 1, 0).is_none_or(|n| Some(n) == at),
-        None => {
-            let len = bands[band].cards.len();
-            crate::launcher::grid_stepped(at, 1, 0, len, len).is_none_or(|n| Some(n) == at)
-        }
-    };
-    stuck
+    layout
+        .stepped(at, 1, 0)
+        .is_none_or(|n| Some(n) == at)
         .then(|| act(&app.keymap, Action::FocusRight, what))
         .flatten()
 }

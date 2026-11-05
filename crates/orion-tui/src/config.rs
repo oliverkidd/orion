@@ -75,13 +75,6 @@ pub const PANE_SIDES: &[&str] = &[
     crate::launcher::PaneSide::Bottom.as_str(),
 ];
 
-/// The **Worktree layout** choices (Settings → Appearance), in the order
-/// the row cycles them: the GRID's row of cards per worktree, the default,
-/// then the compact LIST — each worktree's sessions stacked one line apiece,
-/// the most recent few shown until Tab opens the rest
-/// ([`crate::launcher::LIST_RECENT`]).
-pub const WORKTREE_LAYOUTS: &[&str] = &["cards", "list"];
-
 /// The **Start on** choices (Settings → Review): the DIFF VIEWER panel
 /// that has the keys when it opens, the default first.
 pub const DIFF_STARTS: &[&str] = &["commits", START_ON_FILES, START_ON_DIFF];
@@ -540,10 +533,7 @@ pub enum SettingKind {
     Animations,
     Spotify,
     BlackBackground,
-    HideCardMarks,
-    HighlightCurrentCard,
     SessionPane,
-    WorktreeLayout,
     ExpandAllWorktrees,
     CardIssueNumber,
     HideDraftPrs,
@@ -837,27 +827,9 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
                 group: "",
             },
             SettingSpec {
-                kind: SettingKind::WorktreeLayout,
-                label: "Worktree layout",
-                hint: "Each worktree's sessions as a row of cards, or as a compact list of the 3 most recent (Tab shows them all)",
-                group: "",
-            },
-            SettingSpec {
                 kind: SettingKind::ExpandAllWorktrees,
                 label: "Expand all worktrees",
                 hint: "Show every worktree's sessions and terminals at once, with no Tab to open one (off = one worktree opens at a time, with Tab)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::HighlightCurrentCard,
-                label: "Highlight current card",
-                hint: "Wash the cursor's card faintly in its status color, breathing while it runs, asks or waits unread, and keep it lit while you type in its pane (off = the plain gray fill)",
-                group: "",
-            },
-            SettingSpec {
-                kind: SettingKind::HideCardMarks,
-                label: "Card marks",
-                hint: "Show or hide the ▶ (run terminal) and ❯ (shell) before a terminal card's name and the › before a session card's prompt",
                 group: "",
             },
             SettingSpec {
@@ -1499,18 +1471,6 @@ pub struct Config {
     /// Ghostty is a dark gray. On by default; off lets a transparency or
     /// image configured in the terminal show through.
     pub black_background: bool,
-    /// HIDE CARD MARKS: leave the `▶` (a RUN TERMINAL) and the `❯` (a
-    /// plain shell) off the front of a terminal card's name, and the `›`
-    /// off the front of a session card's prompt, each of which then starts
-    /// where its mark did. Off by default. Read under the key it had
-    /// before, `hide_terminal_glyphs`, too.
-    #[serde(alias = "hide_terminal_glyphs")]
-    pub hide_card_marks: bool,
-    /// HIGHLIGHT CURRENT CARD: the card under the cursor — the one the
-    /// pane reads — trades its gray fill for a faint wash of its status
-    /// color, breathing while something is going on, and keeps it while
-    /// the pane has the keys. On by default; off leaves the gray fill.
-    pub highlight_current_card: bool,
     /// Where the LAUNCHER VIEW's PANE — the session under the cursor, live
     /// — sits against the GRID of cards: `right` (down that side of them,
     /// the default) or `bottom` (under them). Also written by the SIDE
@@ -1520,12 +1480,6 @@ pub struct Config {
     /// pane beside the cards lays it out along the bottom until there is
     /// room (`launcher::fitted_side`).
     pub session_pane: String,
-    /// How the LAUNCHER VIEW lays out each worktree's BAND: `cards` (a row
-    /// of cards, the default) or `list` (every session one line, stacked
-    /// under the band's rule, the [`crate::launcher::LIST_RECENT`] most
-    /// recent shown until Tab — the ACCORDION — opens the rest). Read
-    /// through [`Config::list_layout`], so a word off the list is the cards.
-    pub worktree_layout: String,
     /// EXPAND ALL WORKTREES: every BAND on the GRID laid out open at once
     /// — each worktree's sessions and terminals wrapped into rows under
     /// its rule, every entry of the compact LIST listed — so there is no
@@ -1940,10 +1894,7 @@ impl Default for Config {
             animations: true,
             spotify: true,
             black_background: true,
-            hide_card_marks: false,
-            highlight_current_card: true,
             session_pane: crate::launcher::PaneSide::default().as_str().into(),
-            worktree_layout: WORKTREE_LAYOUTS[0].into(),
             expand_all_worktrees: false,
             hide_card_prompt: false,
             card_issue_number: true,
@@ -2006,12 +1957,6 @@ impl Default for Config {
         }
     }
 }
-
-/// Keys a field was renamed from, `(old, new)`: the field reads the old key
-/// through a `#[serde(alias)]`, and a save takes the old key out of both
-/// layers. Left in beside the new one, the pair is a `duplicate field` to
-/// serde — a file this build can only read key by key.
-const RENAMED_KEYS: &[(&str, &str)] = &[("hide_terminal_glyphs", "hide_card_marks")];
 
 /// Keys a save always writes to `config.local.json`, never to the
 /// `config.json` that `orion ssh` carries to other machines: who the user
@@ -2140,17 +2085,6 @@ impl Config {
         };
         let defaults = serde_json::to_value(Self::default()).map_err(invalid_data)?;
         let mut local_changed = false;
-        for (old, new) in RENAMED_KEYS {
-            root.remove(*old);
-            // An old key the local layer holds stays local under its new
-            // name, so the loop below writes the value back there.
-            if let Some(held) = local_root.as_mut() {
-                if let Some(value) = held.remove(*old) {
-                    held.entry(new.to_string()).or_insert(value);
-                    local_changed = true;
-                }
-            }
-        }
         for (key, value) in known {
             // A stored value this build couldn't read loaded as its default.
             // Unless it has been changed since, leave the stored one alone.
@@ -2246,11 +2180,6 @@ impl Config {
             "" => DEFAULT_LINEAR_TEMPLATE,
             _ => &self.linear_task_template,
         }
-    }
-
-    /// `worktree_layout` says the compact LIST rather than the cards.
-    pub fn list_layout(&self) -> bool {
-        self.worktree_layout.trim().eq_ignore_ascii_case("list")
     }
 
     /// The editor the file overlays launch: `ORION_EDITOR` when set,
@@ -3287,10 +3216,7 @@ impl Config {
             SettingKind::Animations => on_off(self.animations).into(),
             SettingKind::Spotify => on_off(self.spotify).into(),
             SettingKind::BlackBackground => on_off(self.black_background).into(),
-            SettingKind::HideCardMarks => shown_hidden(self.hide_card_marks).into(),
-            SettingKind::HighlightCurrentCard => on_off(self.highlight_current_card).into(),
             SettingKind::SessionPane => self.pane_side().as_str().into(),
-            SettingKind::WorktreeLayout => WORKTREE_LAYOUTS[usize::from(self.list_layout())].into(),
             SettingKind::ExpandAllWorktrees => on_off(self.expand_all_worktrees).into(),
             SettingKind::CardIssueNumber => on_off(self.card_issue_number).into(),
             SettingKind::HideDraftPrs => shown_hidden(self.hide_draft_prs).into(),
@@ -3471,21 +3397,11 @@ impl Config {
             SettingKind::BlackBackground => {
                 self.black_background = !self.black_background;
             }
-            SettingKind::HideCardMarks => {
-                self.hide_card_marks = !self.hide_card_marks;
-            }
-            SettingKind::HighlightCurrentCard => {
-                self.highlight_current_card = !self.highlight_current_card;
-            }
             SettingKind::SessionPane => {
                 // Cycled from the resolved side, so a hand edit off the
                 // list steps on from the right it reads as.
                 self.session_pane =
                     cycle_choice(self.pane_side().as_str(), PANE_SIDES, step).into();
-            }
-            SettingKind::WorktreeLayout => {
-                let now = WORKTREE_LAYOUTS[usize::from(self.list_layout())];
-                self.worktree_layout = cycle_choice(now, WORKTREE_LAYOUTS, step).into();
             }
             SettingKind::ExpandAllWorktrees => {
                 self.expand_all_worktrees = !self.expand_all_worktrees;
@@ -4041,22 +3957,13 @@ mod tests {
             .map(|i| (tab, cfg.agent_rows_from() + i))
     }
 
-    /// The first compatibility rule in docs/configuration.md: a key, once
-    /// shipped, keeps its name, its type and its meaning. Every key a
-    /// release wrote must still load to exactly the value it wrote — a
-    /// rename off the `RENAMED_KEYS` table leaves the key unknown, a type
-    /// change leaves it unreadable, and either reads back as something
-    /// else here. A key on that table reads through its alias into the
-    /// field's new name, and a save writes it back under that name alone.
+    /// The compatibility rule in docs/configuration.md: a key this build
+    /// still has keeps its name, its type and its meaning, so every key a
+    /// release wrote loads to exactly the value it wrote — a type change
+    /// leaves it unreadable, and reads back as something else here. A
+    /// retired key loads as nothing, and a save leaves it where it was.
     #[test]
     fn config_files_from_earlier_releases_still_load_every_key() {
-        let current = |key: &str| {
-            RENAMED_KEYS
-                .iter()
-                .find(|(old, _)| *old == key)
-                .map_or(key, |(_, new)| *new)
-                .to_string()
-        };
         for (release, raw) in CONFIG_FIXTURES {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("config.json");
@@ -4072,7 +3979,7 @@ mod tests {
             for (key, value) in fixture.as_object().unwrap() {
                 // A retired key loads as nothing; the save below, which
                 // leaves a key it doesn't know where it found it, keeps it.
-                let Some(loaded) = known.get(current(key)) else {
+                let Some(loaded) = known.get(key) else {
                     continue;
                 };
                 assert_eq!(
@@ -4080,20 +3987,15 @@ mod tests {
                     "{release}: `{key}` no longer loads as that release wrote it"
                 );
             }
-            // A save writes every one of them back unchanged — a renamed
-            // key under its new name, the old one gone.
+            // A save writes every one of them back unchanged.
             loaded.save_to(&path).unwrap();
             let saved = read_json_file(&path);
             for (key, value) in fixture.as_object().unwrap() {
-                let now = current(key);
                 assert_eq!(
-                    saved.get(&now),
+                    saved.get(key),
                     Some(value),
                     "{release}: `{key}` after a save"
                 );
-                if now != *key {
-                    assert_eq!(saved.get(key), None, "{release}: `{key}` after a save");
-                }
             }
         }
     }
@@ -5152,35 +5054,9 @@ mod tests {
         assert!(!loaded.card_issue_number);
     }
 
-    /// HIGHLIGHT CURRENT CARD: an Appearance row that reads `on` / `off`,
-    /// on by default (a config that predates the key too), and persisted
-    /// under `highlight_current_card`.
-    #[test]
-    fn highlight_current_card_default_on_toggle_on_the_appearance_tab_and_persist() {
-        let mut cfg = Config::default();
-        assert!(cfg.highlight_current_card, "on by default");
-        assert_eq!(cfg.value_label(SettingKind::HighlightCurrentCard), "on");
-
-        let (tab, row) = locate(SettingKind::HighlightCurrentCard).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        cfg.cycle(tab, row, 0);
-        assert!(!cfg.highlight_current_card);
-        assert_eq!(cfg.value_label(SettingKind::HighlightCurrentCard), "off");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains(r#""highlight_current_card": false"#), "{raw}");
-        assert!(!load_from(&path).highlight_current_card);
-
-        let legacy: Config = serde_json::from_str("{}").unwrap();
-        assert!(legacy.highlight_current_card);
-    }
-
-    /// EXPAND ALL WORKTREES: an Appearance row under **Worktree layout**
-    /// that reads `on` / `off`, off by default (a config that predates the
-    /// key too), and persisted under `expand_all_worktrees`.
+    /// EXPAND ALL WORKTREES: an Appearance row that reads `on` / `off`,
+    /// off by default (a config that predates the key too), and persisted
+    /// under `expand_all_worktrees`.
     #[test]
     fn expand_all_worktrees_is_off_by_default_toggles_and_persists() {
         let mut cfg = Config::default();
@@ -5189,11 +5065,6 @@ mod tests {
 
         let (tab, row) = locate(SettingKind::ExpandAllWorktrees).unwrap();
         assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        assert_eq!(
-            locate(SettingKind::WorktreeLayout),
-            Some((tab, row - 1)),
-            "under the layout it opens"
-        );
         cfg.cycle(tab, row, 0);
         assert!(cfg.expand_all_worktrees);
         assert_eq!(cfg.value_label(SettingKind::ExpandAllWorktrees), "on");
@@ -5300,91 +5171,6 @@ mod tests {
         assert!(older.spotify, "a config predating the key turns it on");
     }
 
-    /// HIDE CARD MARKS: off out of the box, toggled on from its
-    /// Appearance row, persisted under `hide_card_marks`; a config
-    /// predating the key keeps the marks, and one written under the old
-    /// `hide_terminal_glyphs` key still reads.
-    #[test]
-    fn hide_card_marks_default_off_toggle_and_persist() {
-        let mut cfg = Config::default();
-        assert!(!cfg.hide_card_marks);
-        let (tab, row) = locate(SettingKind::HideCardMarks).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        assert_eq!(cfg.value_label(SettingKind::HideCardMarks), "shown");
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.hide_card_marks);
-        assert_eq!(cfg.value_label(SettingKind::HideCardMarks), "hidden");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(load_from(&path).hide_card_marks);
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("hide_card_marks"), Some(&serde_json::json!(true)));
-        assert_eq!(raw.get("hide_terminal_glyphs"), None);
-
-        let older: Config = serde_json::from_str("{}").unwrap();
-        assert!(
-            !older.hide_card_marks,
-            "a config predating the key keeps the marks"
-        );
-        let renamed: Config = serde_json::from_str(r#"{"hide_terminal_glyphs":true}"#).unwrap();
-        assert!(renamed.hide_card_marks, "the old key still reads");
-    }
-
-    /// A v0.39.0 file says `hide_terminal_glyphs`; the first save of a
-    /// build that renamed it patched `hide_card_marks` in beside it. That
-    /// pair once loaded as every default, so the settings overlay (which
-    /// reads the file each frame) showed defaults whatever was chosen, and
-    /// each save wrote those defaults back. Every other value must survive
-    /// the pair, a toggle must read back, and the save must drop the old key.
-    #[test]
-    fn a_file_holding_both_card_marks_keys_keeps_its_settings_and_heals() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        std::fs::write(
-            &path,
-            r#"{"theme": "ocean", "worktree_layout": "list", "hide_card_marks": true, "hide_terminal_glyphs": false}"#,
-        )
-        .unwrap();
-
-        let mut cfg = load_from(&path);
-        assert_eq!(cfg.theme, "ocean", "the clash costs no other value");
-        assert!(cfg.list_layout());
-        assert!(cfg.hide_card_marks, "the new key wins over the old one");
-
-        let (tab, row) = locate(SettingKind::Animations).unwrap();
-        cfg.cycle(tab, row, 0);
-        cfg.save_to(&path).unwrap();
-        let reread = load_from(&path);
-        assert!(!reread.animations, "the toggle reads back");
-        assert_eq!(reread.theme, "ocean");
-        assert!(reread.hide_card_marks);
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("hide_terminal_glyphs"), None, "{raw}");
-
-        // Upgrading straight from v0.39.0: the old key alone carries over
-        // under its new name.
-        std::fs::write(&path, r#"{"hide_terminal_glyphs": true}"#).unwrap();
-        load_from(&path).save_to(&path).unwrap();
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("hide_card_marks"), Some(&serde_json::json!(true)));
-        assert_eq!(raw.get("hide_terminal_glyphs"), None, "{raw}");
-
-        // An old key the local layer holds moves to its new name there.
-        let local = dir.path().join("config.local.json");
-        std::fs::write(&local, r#"{"hide_terminal_glyphs": true}"#).unwrap();
-        std::fs::write(&path, "{}").unwrap();
-        load_from(&path).save_to(&path).unwrap();
-        let held: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&local).unwrap()).unwrap();
-        assert_eq!(held, serde_json::json!({"hide_card_marks": true}));
-        assert!(load_from(&path).hide_card_marks);
-    }
-
     /// The **Session pane**: down the right out of the box, cycled from
     /// its Appearance row to the bottom and back, persisted under
     /// `session_pane`. A config predating the key, or holding a word off
@@ -5422,39 +5208,6 @@ mod tests {
         assert_eq!(odd.pane_side(), PaneSide::Bottom, "steps on from the right");
         let left: Config = serde_json::from_str(r#"{"session_pane": "left"}"#).unwrap();
         assert_eq!(left.pane_side(), PaneSide::Right, "the retired left side");
-    }
-
-    /// The **Worktree layout**: the cards out of the box, cycled from its
-    /// Appearance row to the compact list and back, persisted under
-    /// `worktree_layout`. A config predating the key, or holding a word
-    /// off the list, reads as the cards.
-    #[test]
-    fn worktree_layout_defaults_to_cards_cycles_and_persists() {
-        let mut cfg = Config::default();
-        assert!(!cfg.list_layout());
-        let (tab, row) = locate(SettingKind::WorktreeLayout).unwrap();
-        assert_eq!(SETTINGS_TABS[tab].title, "Appearance");
-        assert_eq!(cfg.value_label(SettingKind::WorktreeLayout), "cards");
-        cfg.cycle(tab, row, 1);
-        assert!(cfg.list_layout());
-        assert_eq!(cfg.value_label(SettingKind::WorktreeLayout), "list");
-        cfg.cycle(tab, row, -1);
-        assert!(!cfg.list_layout(), "and back");
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.list_layout(), "Enter steps it on too");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert!(load_from(&path).list_layout());
-        let raw: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(raw.get("worktree_layout"), Some(&serde_json::json!("list")));
-
-        let older: Config = serde_json::from_str("{}").unwrap();
-        assert!(!older.list_layout(), "predating the key");
-        let odd: Config = serde_json::from_str(r#"{"worktree_layout": "grid"}"#).unwrap();
-        assert!(!odd.list_layout(), "a word off the list");
     }
 
     /// The QUICK PROMPT's focus toggle: off unless the user turns it on,

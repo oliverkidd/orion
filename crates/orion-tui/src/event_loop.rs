@@ -215,15 +215,6 @@ const METRICS_POLL: Duration = Duration::from_secs(2);
 /// refreshed.
 const FOOTER_METRICS_POLL: Duration = Duration::from_secs(5);
 
-/// How often the grid asks the daemon what each TERMINAL on it last
-/// printed, for the lines on its card (`request_terminal_tails`).
-const TAIL_POLL: Duration = Duration::from_secs(1);
-
-/// How much of a terminal's ring one such ask brings back: enough to lay
-/// its last screenful out, little enough that a grid of shells asking once
-/// a second is nothing on the socket — and an idle one answers with none.
-const TAIL_BYTES: u32 = 16 * 1024;
-
 /// The one hotkey that isn't only a hotkey. Whatever the user binds to
 /// [`crate::keymap::Action::UnlockTerminal`], Ctrl+q also unlocks a locked
 /// pane, force-closes the VIM MODAL and closes any OVERLAY outright — the
@@ -438,7 +429,6 @@ async fn main_loop(
     let spotify_interval = crate::spotify::interval();
     let mut next_spotify = tokio::time::Instant::now();
     let mut next_metrics_poll = tokio::time::Instant::now();
-    let mut next_tail_poll = tokio::time::Instant::now();
     let mut next_splash_frame = tokio::time::Instant::now();
     let mut next_confetti_frame = tokio::time::Instant::now();
     let mut next_sweep_frame = tokio::time::Instant::now();
@@ -571,16 +561,6 @@ async fn main_loop(
                     FOOTER_METRICS_POLL
                 };
                 next_metrics_poll = tokio::time::Instant::now() + period;
-            }
-            // The grid's TERMINAL cards: what each shell last printed, asked
-            // on a beat of its own for as long as any is on screen — with
-            // the grid folded away or no terminal drawn there is nothing
-            // to ask after, and the beat sleeps with it.
-            _ = tokio::time::sleep_until(next_tail_poll),
-                if !app.tail_cards.is_empty() && matches!(app.conn, ConnState::Connected) =>
-            {
-                request_terminal_tails(&mut app, &mut out);
-                next_tail_poll = tokio::time::Instant::now() + TAIL_POLL;
             }
             // First-run splash, or the empty grid's welcome drawn over the
             // same sky: while either is on screen nothing else repaints an
@@ -3237,64 +3217,6 @@ fn request_metrics(app: &mut App, out: &mut Vec<ClientRequest>) {
         None => land_client_rss(app, own_rss()),
     }
     send(app, out, |req_id| ClientRequest::GetMetrics { req_id });
-}
-
-/// Ask the daemon what each TERMINAL whose card the last frame drew has
-/// printed since its card last heard ([`App::tail_cards`],
-/// [`App::terminal_tails`]), for the lines under its name. The one the
-/// pane is on is skipped — its screen is right here, live — and so is a
-/// dead one: its ring went with its shell, and the card keeps the lines
-/// it had. Each ask carries the ring end the card has, so an idle shell
-/// answers with no bytes. The frame's notes are read, not taken: a grid
-/// nothing repaints keeps asking after the same cards until the next
-/// frame says otherwise. The reply is `ServerEvent::OutputTail`.
-fn request_terminal_tails(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let attached = app.term.as_ref().map(|t| t.sref.clone());
-    let mut asked = std::collections::HashSet::new();
-    for id in app.tail_cards.clone() {
-        if !asked.insert(id.clone()) {
-            continue;
-        }
-        let sref = SessionRef::Terminal(id.clone());
-        if attached.as_ref() == Some(&sref) {
-            continue;
-        }
-        if !app.tree.terminals.iter().any(|t| t.id == id && t.alive) {
-            continue;
-        }
-        let after_seq = app.terminal_tails.get(&id).map(|t| t.end_seq);
-        send(app, out, |req_id| ClientRequest::TailOutput {
-            req_id,
-            session: sref,
-            max_bytes: TAIL_BYTES,
-            after_seq,
-        });
-    }
-}
-
-/// The daemon's answer to [`request_terminal_tails`]: the end of the ring,
-/// laid out through a throwaway screen the PTY's size and kept as the
-/// card's lines. No bytes means nothing new since the card last heard,
-/// and no tail at all that the shell is gone — either way the lines stay.
-/// A frame only when they changed.
-fn land_terminal_tail(app: &mut App, id: TerminalId, tail: Option<orion_core::OutputTail>) {
-    let Some(tail) = tail else { return };
-    let entry = app.terminal_tails.entry(id).or_default();
-    if tail.data.is_empty() {
-        entry.end_seq = tail.end_seq;
-        return;
-    }
-    let lines = crate::terminal_tail::parse_tail(
-        &tail.data,
-        tail.cols,
-        tail.rows,
-        crate::launcher::PROMPT_LINES,
-    );
-    if entry.lines != lines {
-        entry.lines = lines;
-        app.dirty = true;
-    }
-    entry.end_seq = tail.end_seq;
 }
 
 /// Open the memory modal — `⇧M`, and a click on the footer's readout.
@@ -9241,10 +9163,7 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.black_background = cfg.black_background;
     app.card_issue_number = cfg.card_issue_number;
     app.show_all_worktrees = cfg.show_all_worktrees;
-    app.hide_card_marks = cfg.hide_card_marks;
-    app.highlight_current_card = cfg.highlight_current_card;
     app.launcher_pane_at = cfg.pane_side();
-    app.launcher_list = cfg.list_layout();
     app.launcher_all_open = cfg.expand_all_worktrees;
     app.diff_tree = cfg.diff_tree_view;
     app.diff_start = cfg.diff_start();
@@ -12257,8 +12176,6 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
             HitTarget::LauncherTab(_)
                 | HitTarget::LauncherBandPr(_)
                 | HitTarget::LauncherBandStack(_)
-                | HitTarget::LauncherStripLeft(_)
-                | HitTarget::LauncherStripRight(_)
                 | HitTarget::LauncherBandMore(_)
                 | HitTarget::LauncherDrawer(_)
                 | HitTarget::LauncherTabClose(_)
@@ -13025,14 +12942,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // A BAND's rule: the cursor lands on the band, as `j`/`k`
                 // walking onto it do.
                 Some(HitTarget::LauncherBand(i)) => launcher::click_band(app, i, out),
-                // The `❮` / `❯` beside a band's row: one card that way
-                // along the band, the very step `h` / `l` take.
-                Some(HitTarget::LauncherStripLeft(i)) => {
-                    launcher::click_strip_arrow(app, i, -1, out)
-                }
-                Some(HitTarget::LauncherStripRight(i)) => {
-                    launcher::click_strip_arrow(app, i, 1, out)
-                }
                 // `▾ 6 more · Tab: see all 8` under a band's row: the band
                 // opens, the very toggle Tab runs.
                 Some(HitTarget::LauncherBandMore(i)) => launcher::click_band_more(app, i, out),
@@ -13280,8 +13189,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                             | HitTarget::LauncherBand(_)
                             | HitTarget::LauncherBandPr(_)
                             | HitTarget::LauncherBandStack(_)
-                            | HitTarget::LauncherStripLeft(_)
-                            | HitTarget::LauncherStripRight(_)
                             | HitTarget::LauncherBandMore(_)
                             | HitTarget::LauncherDrawer(_)
                             | HitTarget::LauncherDrawerEntry(..)
@@ -13847,17 +13754,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             app.last_metrics = Some(snapshot);
             app.dirty = true;
         }
-        ServerEvent::OutputTail {
-            req_id,
-            session,
-            tail,
-        } => {
-            // Answered with OutputTail, not Ack — clear the slot by hand.
-            app.pending.remove(&req_id);
-            if let SessionRef::Terminal(id) = session {
-                land_terminal_tail(app, id, tail);
-            }
-        }
         ServerEvent::WorktreeHasChanges { req_id, id, files } => {
             // The checkout is still there, rows and sessions with it: put
             // the optimistic removal back, then ask about forcing it.
@@ -14188,10 +14084,7 @@ fn apply_removal(app: &mut App, id: &orion_core::EntityId) {
             app.tree.worktrees.retain(|w| &w.id != id);
         }
         EntityId::Agent(id) => app.tree.agents.retain(|a| &a.id != id),
-        EntityId::Terminal(id) => {
-            app.tree.terminals.retain(|t| &t.id != id);
-            app.terminal_tails.remove(id);
-        }
+        EntityId::Terminal(id) => app.tree.terminals.retain(|t| &t.id != id),
         EntityId::Link(id) => app.tree.links.retain(|l| &l.id != id),
     }
 }
@@ -15197,143 +15090,6 @@ mod tests {
         });
         let (fg, row) = dot(&mut app);
         assert_eq!(fg, app.theme.done, "a cloud row is never cold: {row}");
-    }
-
-    /// The grid's beat asks the daemon after every terminal the last
-    /// frame drew but the one the pane is on and the dead — each ask
-    /// carrying the ring end its card last heard — and the answer lands
-    /// as the card's lines, laid out at the PTY's width in the colours
-    /// they were printed in. An answer with no bytes, or none at all once
-    /// the shell is gone, leaves them.
-    #[test]
-    fn terminal_tails_are_asked_after_the_drawn_cards_and_land_as_lines() {
-        use crate::app::TerminalTail;
-        use orion_core::{OutputTail, TerminalTab};
-        let mut app = App::new();
-        let tab = |id: &str, alive: bool| TerminalTab {
-            id: TerminalId(id.into()),
-            worktree_id: WorktreeId("w1".into()),
-            name: id.into(),
-            sort_order: 0,
-            alive,
-            run_command: None,
-        };
-        app.tree.terminals = vec![tab("t1", true), tab("t2", true), tab("t3", false)];
-        app.term = Some(AttachedTerm::new(
-            SessionRef::Terminal(TerminalId("t2".into())),
-            80,
-            24,
-        ));
-        app.terminal_tails.insert(
-            TerminalId("t1".into()),
-            TerminalTail {
-                lines: vec!["old".into()],
-                end_seq: 40,
-            },
-        );
-        // As a frame leaves them: t1 twice (a band's strip and the pane's
-        // header could both draw it), the attached t2, the dead t3.
-        app.tail_cards = vec![
-            TerminalId("t1".into()),
-            TerminalId("t1".into()),
-            TerminalId("t2".into()),
-            TerminalId("t3".into()),
-        ];
-        let mut out = Vec::new();
-        request_terminal_tails(&mut app, &mut out);
-        let asks: Vec<(&SessionRef, Option<u64>)> = out
-            .iter()
-            .map(|r| match r {
-                ClientRequest::TailOutput {
-                    session, after_seq, ..
-                } => (session, *after_seq),
-                other => panic!("expected TailOutput, got {other:?}"),
-            })
-            .collect();
-        assert_eq!(
-            asks,
-            vec![(&SessionRef::Terminal(TerminalId("t1".into())), Some(40))],
-            "one ask, for the live terminal the pane is not on, from where it left off"
-        );
-        assert_eq!(
-            app.tail_cards.len(),
-            4,
-            "the frame's notes are read, not taken: an idle grid keeps asking"
-        );
-        let req_id = match &out[0] {
-            ClientRequest::TailOutput { req_id, .. } => *req_id,
-            other => panic!("{other:?}"),
-        };
-        assert!(app.pending.contains_key(&req_id));
-
-        // The answer: a shell's last lines, wrapped at the PTY's width.
-        app.dirty = false;
-        hse(
-            &mut app,
-            ServerEvent::OutputTail {
-                req_id,
-                session: SessionRef::Terminal(TerminalId("t1".into())),
-                tail: Some(OutputTail {
-                    cols: 10,
-                    rows: 5,
-                    end_seq: 70,
-                    data: b"$ npm test\r\n\x1b[32mok\x1b[0m 12\r\n\r\n$ ".to_vec(),
-                }),
-            },
-        );
-        assert!(
-            !app.pending.contains_key(&req_id),
-            "the slot is cleared by hand"
-        );
-        let tail = &app.terminal_tails[&TerminalId("t1".into())];
-        let texts: Vec<String> = tail.lines.iter().map(|r| r.text()).collect();
-        assert_eq!(texts, ["$ npm test", "ok 12", "$"]);
-        assert_eq!(
-            tail.lines[1].runs[0],
-            (
-                "ok".to_string(),
-                ratatui::style::Style::default().fg(ratatui::style::Color::Indexed(2))
-            ),
-            "the lines keep the colours they were printed in"
-        );
-        assert_eq!(tail.end_seq, 70);
-        assert!(app.dirty, "the card changed");
-
-        // Nothing new: the lines stay, the frame is spared.
-        app.dirty = false;
-        hse(
-            &mut app,
-            ServerEvent::OutputTail {
-                req_id: 999,
-                session: SessionRef::Terminal(TerminalId("t1".into())),
-                tail: Some(OutputTail {
-                    cols: 10,
-                    rows: 5,
-                    end_seq: 70,
-                    data: Vec::new(),
-                }),
-            },
-        );
-        assert_eq!(app.terminal_tails[&TerminalId("t1".into())].lines.len(), 3);
-        assert!(!app.dirty);
-        // The shell gone: likewise.
-        hse(
-            &mut app,
-            ServerEvent::OutputTail {
-                req_id: 1000,
-                session: SessionRef::Terminal(TerminalId("t1".into())),
-                tail: None,
-            },
-        );
-        assert_eq!(app.terminal_tails[&TerminalId("t1".into())].lines.len(), 3);
-        // The row removed: the lines go with it.
-        hse(
-            &mut app,
-            ServerEvent::EntityRemoved {
-                id: EntityId::Terminal(TerminalId("t1".into())),
-            },
-        );
-        assert!(!app.terminal_tails.contains_key(&TerminalId("t1".into())));
     }
 
     pub(super) fn hse(app: &mut App, ev: ServerEvent) {
@@ -25086,7 +24842,7 @@ diff --git a/src/c.rs b/src/c.rs
     /// it.
     #[test]
     fn launcher_pane_edge_drags_the_pane_taller_and_shorter() {
-        use crate::launcher::{pane_height, CARD_H, HEAD_H, PANE_MIN_H};
+        use crate::launcher::{pane_height, GRID_KEEP_H, HEAD_H, PANE_MIN_H};
         let mut app = App::new();
         // A pane along the bottom, whose edge trades rows; the one beside
         // the cards has its own drag test in `event_loop::launcher`.
@@ -25166,7 +24922,10 @@ diff --git a/src/c.rs b/src/c.rs
             mev(MouseEventKind::Drag(MouseButton::Left), 60, 0),
             &mut out,
         );
-        assert_eq!(app.launcher_pane_h, Some(body.height - (HEAD_H + CARD_H)));
+        assert_eq!(
+            app.launcher_pane_h,
+            Some(body.height - (HEAD_H + GRID_KEEP_H))
+        );
 
         // Past the bottom: the pane keeps its own minimum.
         handle_mouse(
@@ -39186,14 +38945,15 @@ diff --git a/src/c.rs b/src/c.rs
                 }
                 let mut out = Vec::new();
                 // Onto the reaped session: shown, the attach still waiting.
-                // `h` along the band onto it: the newest card leads the
-                // row, so the reaped one sits left of the cursor's.
+                // Down the band's lines onto it, or back up if it is above.
                 let reaped = AgentId("a2".into());
-                for _ in 0..crate::launcher::rows(&app).len() {
-                    if app.selected_session().map(|a| a.id) == Some(reaped.clone()) {
-                        break;
+                for code in [KeyCode::Down, KeyCode::Up] {
+                    for _ in 0..crate::launcher::rows(&app).len() {
+                        if app.selected_session().map(|a| a.id) == Some(reaped.clone()) {
+                            break;
+                        }
+                        press(&mut app, code, KeyModifiers::NONE, &mut out);
                     }
-                    press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
                 }
                 assert_eq!(
                     app.selected_session().map(|a| a.id),
