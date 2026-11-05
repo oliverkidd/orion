@@ -419,13 +419,8 @@ list` asks for every check on every pull request instead, which on a busy repo t
 lookup that fails keeps the last list that worked on screen, and the PULL REQUESTS MODAL says
 `couldn't refresh` under its filter until an answer lands. The same query brings the modal's
 **Merged** section: the merged pull requests most recently touched — name, author and merge
-time, no checks — cut to the ones merged in the last 7 days (`pull_request::MERGED_DAYS`). There is
-no cap on how many: GitHub cannot be asked for "merged since", so when a page of 100 ends on a pull
-request still touched inside the week, the next page is asked for, until one reaches back past it.
-That walk runs every five minutes at most; in between, the first page — where every new merge lands —
-is folded into the list already held, so a repo that merges 160 a week costs no more per refresh than
-a quiet one. If a page cannot be
-read, the section's count says `99+` rather than pass a short list off as the week.
+time, no checks — cut to the ones merged in the last 7 days (`pull_request::MERGED_DAYS`). It is
+the first page of them, the 100 most recently touched, which is where every new merge lands.
 
 The open list, the failing-checks recheck, a checkout's own lookup and the page the cursor rests on
 all say where the same pull request stands, on their own beats, and land in whatever order the

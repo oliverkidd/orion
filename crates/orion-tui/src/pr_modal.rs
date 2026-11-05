@@ -1892,20 +1892,10 @@ pub(crate) fn draw(
     for (entry, rect) in drawn {
         match entry {
             ListEntry::Header { first, count } => {
-                // A merged tail GitHub cut short says there are more: the
-                // count is never passed off as the week's.
-                let short = keys[first] == PrSection::Merged
-                    && !parsed.is_active()
-                    && app.merged_short.contains(&view.project);
-                let count = if short {
-                    format!("{count}+")
-                } else {
-                    count.to_string()
-                };
                 let rule = crate::ui::section_rule(
                     keys[first].name(),
                     th.muted,
-                    vec![Span::styled(count, Style::default().fg(th.dim))],
+                    vec![Span::styled(count.to_string(), Style::default().fg(th.dim))],
                     width,
                     th,
                 );

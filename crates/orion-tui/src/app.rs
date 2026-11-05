@@ -4573,15 +4573,6 @@ pub struct App {
     /// `couldn't refresh` rather than pass it off as current; the next
     /// answer that lands clears it.
     pub open_prs_failed: std::collections::HashSet<ProjectId>,
-    /// Projects whose merged tail (`OpenPrs::merged`) is not the whole
-    /// week — the walk through its pages stopped early
-    /// (`ListAnswer::merged_short`) — so the PULL REQUESTS MODAL's `Merged`
-    /// count says there are more rather than pass it off as exact.
-    pub merged_short: std::collections::HashSet<ProjectId>,
-    /// When each project's merged tail was last walked to its end: a list
-    /// asked sooner than `pull_request::MERGED_WALK_EVERY` after reads the
-    /// first page alone.
-    pub merged_walked: HashMap<ProjectId, std::time::Instant>,
     /// Bodies and conversations of the pull requests the cursor has rested
     /// on, keyed by URL. A second API call on top of the list, so it is
     /// fetched only for the row actually being read (and, while the PULL
@@ -4944,8 +4935,6 @@ impl App {
             open_prs: HashMap::new(),
             open_prs_inflight: Default::default(),
             open_prs_failed: std::collections::HashSet::new(),
-            merged_short: std::collections::HashSet::new(),
-            merged_walked: HashMap::new(),
             pr_detail: HashMap::new(),
             pr_detail_inflight: Default::default(),
             pr_detail_failed: std::collections::HashSet::new(),

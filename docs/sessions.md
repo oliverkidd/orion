@@ -645,8 +645,8 @@ the pane is reading (after a `⌘K` jump onto one), when it reads one.
 
 Under the open rows sits **Merged**: the pull requests that landed in the last 7 days, the latest
 merge first, each in the merged purple with how long ago it merged — so the list reads as a lineage,
-not only as what is left to do. They ride the same query as the open list (every pull request
-merged in the week, however many, read a page of 100 at a time), and only the modal lists them:
+not only as what is left to do. They ride the same query as the open list (the first page of 100
+merged pull requests, most recently touched first), and only the modal lists them:
 the grid's counts, the `⌘K` jump list and AUTOFIX see open pull requests alone. A merged row is read,
 diffed, commented on and opened in the browser like any other; the verbs that need an open pull
 request — `Enter`'s agent, merge, close, ready/draft, autofix — say it has merged and do nothing.

@@ -800,7 +800,7 @@ screen, so a year of use reads and writes what a week does:
 | What | Kept |
 |---|---|
 | Open pull requests | the 100 newest per project |
-| Merged pull requests | every one merged in the last 7 days, read a page of 100 at a time until the week is covered |
+| Merged pull requests | the ones merged in the last 7 days among the 100 most recently touched |
 | Linear issues | open ones — 100 of yours, 250 of your teams' — and the ones done in the last 7 days, 50 of each |
 | Pull request pages (`pr-cache/details/`) | one file each, while the pull request is on a row; written only when read again |
 | Linear branch links (`linear-links.json`) | until 90 days after they were last linked, once no checkout is on the branch and no open pull request is from it |

@@ -73,9 +73,10 @@ const ISSUE_CUT: usize = 1500;
 const FRESH: Duration = Duration::from_secs(5 * 60);
 /// How long one page of descriptions may take.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(45);
-/// How many pages [`fetch_merged`] reads before it gives up on a week:
-/// the merged tail's own guard.
-const PAGES_MAX: usize = crate::pull_request::MERGED_PAGES_MAX;
+/// How many pages [`fetch_merged`] reads before it gives up on a week: a
+/// guard against a walk that never ends, set where no repo's week reaches
+/// — a thousand merged pull requests touched in seven days.
+const PAGES_MAX: usize = 10;
 /// How long the write may take before it is given up on.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(300);
 

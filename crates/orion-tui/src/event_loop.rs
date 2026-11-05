@@ -1651,18 +1651,12 @@ fn spawn_open_prs(
     id: ProjectId,
     dir: std::path::PathBuf,
 ) {
-    // The merged tail is walked to its end only now and then; in between
-    // its first page says everything new.
-    let whole_week = app
-        .merged_walked
-        .get(&id)
-        .is_none_or(|at| at.elapsed() >= crate::pull_request::MERGED_WALK_EVERY);
     let Some(ticket) = app.open_prs_inflight.begin(id, crate::fetch::now()) else {
         return;
     };
     let prs_tx = prs_tx.clone();
     tokio::spawn(async move {
-        let answer = crate::pull_request::list(&dir, whole_week).await;
+        let answer = crate::pull_request::list(&dir).await;
         let _ = prs_tx.send(ListLanded {
             ticket,
             dir,
@@ -1769,10 +1763,8 @@ fn note_open_prs_answer(
 /// state, draft flag, conflicts and checks go to `prs` under that stamp
 /// first, and the list then drops any row `prs` says has merged or closed
 /// since — a page asked after this list was asked said so, and a list
-/// already on its way must not bring the row back. A slim answer carries
-/// each row's meta line over from the last list (`carry_meta`), and an
-/// answer with no merged tail — the slim one's, a failed one's — keeps
-/// the last tail there was.
+/// already on its way must not bring the row back. An answer with no
+/// merged tail — a failed one's — keeps the last tail there was.
 fn note_open_prs_answer_at(
     app: &mut App,
     project: orion_core::ProjectId,
@@ -1785,21 +1777,6 @@ fn note_open_prs_answer_at(
     let was_on = app.selected_worktree_pr().cloned();
     let mut status_changed = false;
     let mut merged = None;
-    // Whether the merged tail is the whole week is for an answer that
-    // walked it to say; one that brought the first page alone says
-    // nothing either way.
-    if let Some(answer) = answer
-        .as_ref()
-        .filter(|a| a.merged.is_some() && !a.merged_head)
-    {
-        if answer.merged_short {
-            app.merged_short.insert(project.clone());
-        } else {
-            app.merged_short.remove(&project);
-        }
-        app.merged_walked
-            .insert(project.clone(), std::time::Instant::now());
-    }
     let list = answer.map(|answer| {
         let mut rows = answer.rows;
         for row in &rows {
@@ -1813,13 +1790,7 @@ fn note_open_prs_answer_at(
             let seen = crate::pr_store::PrObservation::of_merged_row(row);
             status_changed |= app.prs.observe(&row.url, seen, asked);
         }
-        merged = answer.merged.map(|rows| (rows, answer.merged_head));
-        if answer.slim {
-            carry_meta(
-                &mut rows,
-                app.open_prs.get(&project).map(|o| o.list.as_slice()),
-            );
-        }
+        merged = answer.merged;
         rows.retain(|row| app.prs.status_or_open(&row.url).is_open());
         rows
     });
@@ -1863,14 +1834,7 @@ fn note_open_prs_answer_at(
     // answer lands through; the cursor reconcile below follows its PR by
     // URL, so the reorder never moves the selection off it.
     crate::pull_request::drafts_last(&mut list, &app.prs);
-    let held = previous.map(|o| o.merged.as_slice()).unwrap_or_default();
-    let merged = match merged {
-        Some((head, true)) => {
-            crate::pull_request::fold_merged(head, held, orion_core::clock::now_secs() as i64)
-        }
-        Some((whole, false)) => whole,
-        None => held.to_vec(),
-    };
+    let merged = merged.unwrap_or_else(|| previous.map(|o| o.merged.clone()).unwrap_or_default());
     let changed =
         previous.map(|o| (&o.list, &o.merged)) != Some((&list, &merged)) || status_changed;
     app.dirty |= changed;
@@ -1927,29 +1891,6 @@ fn note_open_prs_answer_at(
 /// it has not caught up to.
 fn row_status(row: &crate::pull_request::OpenPr) -> crate::pr_store::PrObservation {
     crate::pr_store::PrObservation::of_list_row(row)
-}
-
-/// A slim list's rows ([`crate::pull_request::ListAnswer::slim`]) take
-/// the meta line — author, age, review, labels, the tally, and whether you
-/// are asked to review, which is the row's section — from the same pull
-/// request's row in the last list, by URL. The slim query never asked for
-/// any of it, so an empty meta there is "not asked", and taking it at its
-/// word would move the row between sections, and its meta line in and out,
-/// on every beat GitHub balks at the full query. Carried after the rows
-/// were observed, so a carried tally is the meta line's alone and never
-/// the checks' verdict.
-fn carry_meta(
-    rows: &mut [crate::pull_request::OpenPr],
-    previous: Option<&[crate::pull_request::OpenPr]>,
-) {
-    let Some(previous) = previous else {
-        return;
-    };
-    for row in rows {
-        if let Some(was) = previous.iter().find(|was| was.url == row.url) {
-            row.meta = was.meta.clone();
-        }
-    }
 }
 
 /// The list answer moved a pull request's row on — its draft, title or
@@ -18302,54 +18243,12 @@ mod tests {
         assert_eq!(app.prs.status_or_open(&pr_url(7)).word(), "merged");
     }
 
-    /// A list from the slim query never asked for the meta line or who is
-    /// asked to review: each row keeps the last full answer's, stays in its
-    /// section, and the answer is no change to write.
-    #[test]
-    fn a_slim_list_keeps_the_meta_it_did_not_ask_for() {
-        use crate::pull_request::{ListAnswer, PrMeta, PrSection};
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let pid = app.selected_project().expect("a project").id.clone();
-        let full = || {
-            let mut row = a_pr(7, "Attach links", false);
-            row.meta = PrMeta {
-                author: "sam".into(),
-                review_requested: true,
-                comments: 3,
-                ..PrMeta::default()
-            };
-            row
-        };
-        note_open_prs_answer(&mut app, pid.clone(), Some(vec![full()]), &mut Vec::new());
-        assert_eq!(app.all_open_prs()[0].section(), PrSection::ReviewRequested);
-        app.pr_cache_dirty = false;
-
-        let slim = vec![a_pr(7, "Attach links", false)];
-        let asked = crate::fetch::Asked::At(crate::fetch::now());
-        note_open_prs_answer_at(
-            &mut app,
-            pid,
-            Some(ListAnswer {
-                rows: slim,
-                slim: true,
-                ..Default::default()
-            }),
-            asked,
-            &mut Vec::new(),
-        );
-        let row = &app.all_open_prs()[0];
-        assert_eq!(row.meta, full().meta, "the last full answer's meta");
-        assert_eq!(row.section(), PrSection::ReviewRequested, "same section");
-        assert!(!app.pr_cache_dirty, "nothing changed");
-    }
-
     /// The merged tail lands beside the open rows and is the PULL REQUESTS
     /// MODAL's alone — no open pull request to the group or the counts.
-    /// An answer that did not ask for it — the slim query's, a failed
-    /// call — keeps the last one; one that asked and found none empties it.
+    /// An answer that did not bring one — a failed call — keeps the last
+    /// one; one that asked and found none empties it.
     #[test]
-    fn the_merged_tail_lands_beside_the_open_rows_and_outlasts_a_slim_answer() {
+    fn the_merged_tail_lands_beside_the_open_rows_and_outlasts_a_failed_call() {
         use crate::pull_request::ListAnswer;
         let mut app = App::new();
         seed_tree(&mut app);
@@ -18359,51 +18258,31 @@ mod tests {
             row.meta.merged_at = "2026-10-06T09:10:27Z".into();
             row
         };
-        let land = |app: &mut App, merged: Option<Vec<_>>, slim| {
+        let land = |app: &mut App, merged: Option<Vec<_>>| {
             let answer = ListAnswer {
                 rows: vec![a_pr(7, "Attach links", false)],
-                slim,
                 merged,
                 ..Default::default()
             };
             let asked = crate::fetch::Asked::At(crate::fetch::now());
             note_open_prs_answer_at(app, pid.clone(), Some(answer), asked, &mut Vec::new());
         };
-        land(&mut app, Some(vec![landed()]), false);
+        land(&mut app, Some(vec![landed()]));
         assert_eq!(open_pr_numbers(&app), vec![7]);
         assert_eq!(app.open_prs[&pid].merged, vec![landed()]);
         assert_eq!(app.prs.status_or_open(&pr_url(5)).word(), "merged");
         assert!(app.live_pr_urls().contains(&pr_url(5)), "its page is kept");
         app.pr_cache_dirty = false;
 
-        land(&mut app, None, true);
-        assert_eq!(app.open_prs[&pid].merged, vec![landed()], "never asked");
+        land(&mut app, None);
+        assert_eq!(app.open_prs[&pid].merged, vec![landed()], "never said");
         assert!(!app.pr_cache_dirty, "nothing changed");
         note_open_prs_answer(&mut app, pid.clone(), None, &mut Vec::new());
         assert_eq!(app.open_prs[&pid].merged, vec![landed()], "a failed call");
 
-        land(&mut app, Some(Vec::new()), false);
+        land(&mut app, Some(Vec::new()));
         assert!(app.open_prs[&pid].merged.is_empty(), "a week on, it leaves");
         assert!(app.pr_cache_dirty);
-
-        // A tail GitHub cut short is remembered as short until one that
-        // was read to the end lands; a slim answer says nothing either way.
-        let short = |app: &mut App, merged: Option<Vec<_>>, merged_short| {
-            let answer = ListAnswer {
-                slim: merged.is_none(),
-                merged,
-                merged_short,
-                ..Default::default()
-            };
-            let asked = crate::fetch::Asked::At(crate::fetch::now());
-            note_open_prs_answer_at(app, pid.clone(), Some(answer), asked, &mut Vec::new());
-        };
-        short(&mut app, Some(vec![landed()]), true);
-        assert!(app.merged_short.contains(&pid));
-        short(&mut app, None, false);
-        assert!(app.merged_short.contains(&pid), "never asked");
-        short(&mut app, Some(vec![landed()]), false);
-        assert!(!app.merged_short.contains(&pid), "read to the end");
     }
 
     /// A page asked to be read again while its fetch runs — the list says
