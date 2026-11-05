@@ -1,0 +1,20 @@
+crates/orion/tests/e2e_tui.rs
+  s_61e50232cdb2f2::t_1264cecec444e4 966
+  s_61e50232cdb2f2::t_eab7f44aafef4c 1065-1068
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cbe5e9f5c15b037fbbc1e3bbb8461d3fdd129adf",
+  "prompts": {},
+  "sessions": {
+    "s_61e50232cdb2f2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df12aa21-1ffc-4111-873e-7e452dc4702c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
