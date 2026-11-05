@@ -145,10 +145,9 @@ pub enum Action {
     /// next turn, typed in a box over the grid and sent on Enter.
     FollowUp,
     /// `Shift+P`: the QUICK PROMPT on the card under the cursor's settings
-    /// — the same harness, model, effort and worktree, and the issue it
-    /// was started from — so the task is all there is to type. `p` opens
-    /// the box on the Agents tab defaults; the shifted key opens it on
-    /// the card.
+    /// — the same harness, model, effort and worktree — so the task is all
+    /// there is to type. `p` opens the box on the Agents tab defaults; the
+    /// shifted key opens it on the card.
     DuplicateSession,
     /// `Shift+C`: **Continue on** another Claude account — the Claude
     /// session under the cursor, conversation and all, carried onto
@@ -220,8 +219,8 @@ pub enum Action {
     /// `⌘⇧P`: the COMMAND PALETTE — every action by name, with its key.
     CommandPalette,
     /// `⌘O`: the OPEN MENU — what is under the cursor, outside orion: the
-    /// repo, pull request or issue on GitHub, the open command, the OPEN
-    /// IN APP editor, a Ghostty tab in the checkout.
+    /// repo or pull request on GitHub, the open command, the OPEN IN APP
+    /// editor, a Ghostty tab in the checkout.
     OpenOutside,
     /// The checkout under the cursor in the OPEN IN APP editor (the OPEN
     /// MENU's row). Its id keeps the name it shipped with, `open_in_cursor`,
@@ -970,7 +969,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::OpenOutside,
         id: "open_outside",
         label: "Open outside orion",
-        hint: "A menu of what the cursor is on, outside orion: the repo, pull request or issue on GitHub, the checkout's open command, your editor app, a terminal",
+        hint: "A menu of what the cursor is on, outside orion: the repo or pull request on GitHub, the checkout's open command, your editor app, a terminal",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["cmd+o"],

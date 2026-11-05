@@ -149,7 +149,7 @@ fn brew_plan(
 }
 
 /// The command-line tools the Tools tab lists besides the editors: git,
-/// which orion can't work without, and gh, for pull requests and issues —
+/// which orion can't work without, and gh, for pull requests —
 /// each one's Homebrew formula and install page.
 pub const CLIS: &[(&str, &str, &str)] = &[
     ("git", "git", "https://git-scm.com/downloads"),

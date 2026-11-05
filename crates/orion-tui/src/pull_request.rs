@@ -797,7 +797,7 @@ pub struct OpenPr {
 }
 
 /// `#42 title`, or `#42` alone for an untitled one — how a pull request
-/// or an issue is named on a row.
+/// is named on a row.
 pub fn numbered_label(number: u64, title: &str) -> String {
     if title.is_empty() {
         format!("#{number}")

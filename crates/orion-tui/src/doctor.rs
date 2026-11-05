@@ -211,17 +211,11 @@ fn git(m: &Machine) -> Check {
     }
 }
 
-/// gh, which pull requests and issues are read with: installed, and
-/// signed in.
+/// gh, which pull requests are read with: installed, and signed in.
 fn gh(m: &Machine) -> Check {
     let Some(gh) = m.find("gh") else {
         let fix = m.tools().cli_plan("gh").map(plan_fix).unwrap_or_default();
-        return Check::new(
-            "gh",
-            Status::Missing,
-            "not on PATH — pull requests and issues need it",
-        )
-        .fix(fix);
+        return Check::new("gh", Status::Missing, "not on PATH — pull requests need it").fix(fix);
     };
     match probe(m, &gh, &["auth", "status"], &m.cwd) {
         Some((true, _)) => Check::new("gh", Status::Ok, "signed in to GitHub"),

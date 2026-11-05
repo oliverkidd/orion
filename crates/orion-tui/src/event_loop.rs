@@ -3934,11 +3934,11 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         }
     }
 
-    // Reading a pull request or an issue in the pane: the diff modal's
-    // scroll keys work here too. Page/Home/End only — shift+↑/↓ already
-    // move a project, and ↑/↓ have to keep walking the list itself. From
-    // either list that can rest on one; a focused pane keeps its keys for
-    // the PTY.
+    // Reading a pull request in the pane: the diff modal's scroll keys
+    // work here too. Page/Home/End only — shift+↑/↓ already move a
+    // project, and ↑/↓ have to keep walking the list itself. From either
+    // list that can rest on one; a focused pane keeps its keys for the
+    // PTY.
     if app.reading_url().is_some() && matches!(app.focus, Focus::Worktrees | Focus::Sessions) {
         let page = app.term_area.height.max(1);
         let max = app.pr_preview_max_scroll();
@@ -3950,15 +3950,10 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             _ => None,
         };
         if let Some(to) = scrolled {
-            let does = if app.previewed_pr().is_some() {
-                "Scroll the pull request"
-            } else {
-                "Scroll the issue"
-            };
             crate::key_combo::note(
                 app,
                 &[crate::keymap::KeyChord::from_event(&key)],
-                Some(does),
+                Some("Scroll the pull request"),
             );
             app.dirty |= app.pr_preview_scroll != to;
             app.pr_preview_scroll = to;
@@ -6324,8 +6319,7 @@ fn toggle_open_prs(app: &mut App, out: &mut Vec<ClientRequest>) {
     // the checkout, wherever the fold puts it.
     app.open_prs_collapsed = !app.open_prs_collapsed;
     if on_pr {
-        // The last checkout — not the last row, which with an ISSUES
-        // group open below would be an issue.
+        // The last checkout, just above where the folded group was.
         app.set_sel_worktree(last_checkout_row(app));
         if app.selected_worktree().is_some() {
             restore_session(app, out);
@@ -11033,10 +11027,11 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::FooterCrumb(_)
         )
     });
-    // The ISSUES and PULL REQUESTS MODALS' `↗ open in browser` button is
-    // the one thing on a modal a click acts on without the cursor moving
-    // there first, so it takes the same mark; the modals hold their own
-    // rects outside the hit map, as they do their list edges.
+    // The PULL REQUESTS MODAL's and the LINEAR VIEW's `↗ open in browser`
+    // button is the one thing on a modal a click acts on without the
+    // cursor moving there first, so it takes the same mark; the modals
+    // hold their own rects outside the hit map, as they do their list
+    // edges.
     let crumb = crumb.or_else(|| {
         crate::ui::browser_button_under(
             app,
@@ -11788,8 +11783,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::LauncherPaneZoom) => {
                     launcher::toggle_full_screen(app, out);
                 }
-                // Never in the hit map: the ISSUES and PULL REQUESTS MODALS route
-                // the click on their button themselves, before this is reached.
+                // Never in the hit map: the PULL REQUESTS MODAL and the
+                // LINEAR VIEW route the click on their button themselves,
+                // before this is reached.
                 Some(HitTarget::ModalBrowser) => {}
                 Some(HitTarget::PanelBg(focus)) => {
                     // The LAUNCHER VIEW's GRID lies on the same
@@ -11804,9 +11800,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     // click that lands on nothing changes nothing.
                     app.focus = focus;
                 }
-                // A click on a page the pane reads — a pull request, an
-                // issue — focuses it, to scroll: there is nothing in it to
-                // type into or select through.
+                // A click on a page the pane reads — a pull request —
+                // focuses it, to scroll: there is nothing in it to type
+                // into or select through.
                 Some(HitTarget::TerminalPane) if app.pane_reads_page() => {
                     enter_terminal_pane(app, out);
                 }
@@ -11970,9 +11966,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 )
             ) || app.collapsed;
             if in_term && app.reading_url().is_some() {
-                // The pane is showing a pull request or an issue, not a
-                // session: the wheel reads it rather than reaching the
-                // PTY underneath.
+                // The pane is showing a pull request, not a session: the
+                // wheel reads it rather than reaching the PTY underneath.
                 let max = app.pr_preview_max_scroll();
                 app.pr_preview_scroll = if up {
                     app.pr_preview_scroll.saturating_sub(PR_PREVIEW_WHEEL_STEP)
@@ -12954,8 +12949,8 @@ fn reconcile_selection_inner(
             return;
         }
     }
-    // A pull request or issue row that left is followed nowhere: the
-    // cursor stays on the row that took its place.
+    // A pull request row that left is followed nowhere: the cursor stays
+    // on the row that took its place.
     if let Some(wid) = &before.worktree {
         if app.selected_worktree().map(|w| &w.id) != Some(wid) {
             restore_session(app, out);

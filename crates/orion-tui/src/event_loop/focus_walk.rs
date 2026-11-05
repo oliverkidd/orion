@@ -19,8 +19,8 @@ use std::time::Duration;
 /// waiting: keystrokes are about to need it.
 pub(super) fn enter_terminal_pane(app: &mut App, out: &mut Vec<ClientRequest>) {
     app.focus = Focus::Terminal;
-    // A pane reading a page — a pull request, an issue — takes the keys to
-    // scroll it: the session attached behind it is not what is on screen,
+    // A pane reading a page — a pull request — takes the keys to scroll
+    // it: the session attached behind it is not what is on screen,
     // and must not be what the next key types into.
     if app.pane_reads_page() {
         app.dirty = true;

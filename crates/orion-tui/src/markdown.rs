@@ -1,7 +1,7 @@
 //! MARKDOWN — CommonMark plus GitHub's tables, strikethrough, task lists
 //! and alerts, laid out as styled ratatui lines for one width: what the
-//! FILE TABS and the TREE BROWSER show for a `.md` file, and what the
-//! ISSUES and PR reading panes make of a GitHub body.
+//! FILE TABS and the TREE BROWSER show for a `.md` file, and what the PR
+//! reading panes make of a GitHub body.
 //!
 //! The whole document is flowed up front against the pane width (the PR
 //! PREVIEW's rule): scrolling is a slice and the line count is exact, so
@@ -142,7 +142,7 @@ pub struct Fold {
 /// Which FOLDS a reader turned on a page of GitHub bodies — the
 /// description and each comment, told apart by `FoldKey::body` — so a
 /// `<details>` opened stays open as the page is drawn again. The page
-/// holds one, and forgets it for another pull request or issue.
+/// holds one, and forgets it for another pull request.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Folds(std::collections::BTreeSet<FoldKey>);
 

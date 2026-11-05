@@ -1556,11 +1556,10 @@ pub struct Config {
     /// QUICK PROMPT NEW WORKTREE: every box a plain launch opens (`p`,
     /// `n`) starts aimed at a fresh worktree of its project rather than
     /// the checkout under the grid's cursor. The WORKTREE PICKER (`⌘.` /
-    /// `^T`) still re-aims one box either way. A PR SESSION's and an
-    /// ISSUE's box keep their own checkouts. Off by default. Retired in
-    /// 1.0 with the box's `[ ] new worktree` toggle and back as a row on
-    /// the Agents tab under the same key, so a choice an older build
-    /// stored still holds.
+    /// `^T`) still re-aims one box either way. A PR SESSION's box keeps
+    /// its own checkout. Off by default. Retired in 1.0 with the box's
+    /// `[ ] new worktree` toggle and back as a row on the Agents tab under
+    /// the same key, so a choice an older build stored still holds.
     pub quick_prompt_new_worktree: bool,
     /// Hotkey overrides, keyed by `keymap::ActionSpec::id`; the value is a
     /// comma-separated chord list (`"j, down"`), and an empty string means

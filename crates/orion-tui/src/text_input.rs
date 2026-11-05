@@ -3,10 +3,10 @@
 //!
 //! Every typed field in the TUI — the prompt dialog, the fuzzy filters,
 //! the grep query, the ssh destination, the task boxes, a preset's prefix
-//! and postfix, an issue's description — is one of these, so the keys are
-//! learned once and work everywhere: arrows and Home/End, word motion on
-//! ⌥←/⌥→, the readline control chords (Ctrl+A/E/B/F/W/U/K), and word/line
-//! deletes.
+//! and postfix, a pull request's description — is one of these, so the
+//! keys are learned once and work everywhere: arrows and Home/End, word
+//! motion on ⌥←/⌥→, the readline control chords (Ctrl+A/E/B/F/W/U/K), and
+//! word/line deletes.
 //!
 //! A field holds a SELECTION too, the way a macOS text field does: an
 //! anchor where it began and the caret where it ends. Shift on any motion

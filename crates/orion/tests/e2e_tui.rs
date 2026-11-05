@@ -33,8 +33,7 @@ const CTRL_R: &[u8] = &[0x12];
 const CTRL_U: &[u8] = &[0x15];
 const CTRL_S: &[u8] = &[0x13];
 const CTRL_A: &[u8] = &[0x01];
-/// `⌘U`, `⌘N`, `⌘E`, `⌘S` and `⌘F` as Ghostty's kitty protocol spells
-/// them.
+/// `⌘U`, `⌘N`, `⌘E` and `⌘F` as Ghostty's kitty protocol spells them.
 const CMD_U: &[u8] = b"\x1b[117;9u";
 const CMD_N: &[u8] = b"\x1b[110;9u";
 const CMD_E: &[u8] = b"\x1b[101;9u";
