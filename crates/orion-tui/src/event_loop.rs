@@ -18285,7 +18285,8 @@ mod tests {
     }
 
     /// The footer's right edge shows live session counts and orion's
-    /// total memory once a metrics reading arrives.
+    /// total memory once a metrics reading arrives — a SPARE WORKTREE's
+    /// CLI in the memory, not in the agents.
     #[test]
     fn footer_shows_session_counts_and_memory() {
         use orion_core::{MetricsSnapshot, SessionMetrics, TerminalId};
@@ -18307,14 +18308,23 @@ mod tests {
                 SessionMetrics {
                     session: SessionRef::Agent(AgentId("a1".into())),
                     pid: 10,
-                    rss_bytes: 700 * 1024 * 1024,
+                    rss_bytes: 400 * 1024 * 1024,
                     procs: 3,
+                    spare: false,
                 },
                 SessionMetrics {
                     session: SessionRef::Terminal(TerminalId("t1".into())),
                     pid: 11,
                     rss_bytes: 24 * 1024 * 1024,
                     procs: 2,
+                    spare: false,
+                },
+                SessionMetrics {
+                    session: SessionRef::Agent(AgentId("spare-cli".into())),
+                    pid: 12,
+                    rss_bytes: 300 * 1024 * 1024,
+                    procs: 4,
+                    spare: true,
                 },
             ],
         });
@@ -18430,6 +18440,7 @@ mod tests {
                 pid: 10,
                 rss_bytes: 724 * 1024 * 1024,
                 procs: 3,
+                spare: false,
             }],
         });
         app.spotify_enabled = true;

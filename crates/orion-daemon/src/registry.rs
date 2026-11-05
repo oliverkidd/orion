@@ -64,7 +64,7 @@ const NO_RUN_COMMAND: &str =
 /// run ended before a DAEMON restart, typically.
 const RUN_NOT_RUNNING: &str = "this run has stopped — ⌘⇧S on its worktree starts it again";
 /// What a SETUP TERMINAL's row is called in the Sessions panel.
-pub(crate) const SETUP_TERMINAL_NAME: &str = "setup";
+const SETUP_TERMINAL_NAME: &str = "setup";
 /// Why a SETUP TERMINAL with nothing left to replay will not attach: the
 /// DAEMON that ran it has restarted since, and its output went with it.
 const SETUP_NOT_RUNNING: &str =
@@ -350,14 +350,24 @@ impl Daemon {
             .is_some_and(|current| Arc::ptr_eq(current, session))
     }
 
-    /// (session, child pid) for every live PTY — the metrics reading's
-    /// input.
-    pub fn session_pids(&self) -> Vec<(SessionRef, u32)> {
-        self.sessions
+    /// (session, child pid, a SPARE WORKTREE's?) for every live PTY — the
+    /// metrics reading's input.
+    pub fn session_pids(&self) -> Vec<(SessionRef, u32, bool)> {
+        let live: Vec<(SessionRef, u32)> = self
+            .sessions
             .lock()
             .unwrap()
             .iter()
             .filter_map(|(sref, s)| Some((sref.clone(), s.child_pid?)))
+            .collect();
+        // Asked after the sessions lock is let go: the spare book is never
+        // taken inside it.
+        let spares = self.spares.sessions();
+        live.into_iter()
+            .map(|(sref, pid)| {
+                let spare = spares.contains(&sref);
+                (sref, pid, spare)
+            })
             .collect()
     }
 
@@ -746,10 +756,17 @@ impl Daemon {
             .map(|w| w.id)
             .collect();
         self.kill_sessions_in(&wt_ids, &agents, &terminals);
-        // Removing a project only forgets it in orion — never touches disk.
+        // Removing a project only forgets it in orion — never touches disk,
+        // but for its SPARE WORKTREE, which was orion's own.
         self.store.delete_project(id)?;
         self.broadcast(ServerEvent::EntityRemoved {
             id: EntityId::Project(id.clone()),
+        });
+        let daemon = self.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            daemon.remove_spare(&id, false).await;
+            daemon.spares.forget_project(&id);
         });
         Ok(())
     }
@@ -1010,7 +1027,7 @@ impl Daemon {
     /// Stop or tear down the compose projects started in a just-deleted
     /// checkout of the project at `repo`, as its **On worktree delete**
     /// says; whatever goes wrong is a client warning.
-    async fn release_containers(&self, repo: &Path, worktree: &Path) {
+    pub(crate) async fn release_containers(&self, repo: &Path, worktree: &Path) {
         let policy = crate::config::Config::load().worktree_containers(repo);
         for warning in crate::containers::release(worktree, policy).await {
             self.warn_clients(warning);
@@ -1020,7 +1037,7 @@ impl Daemon {
     /// Tell every client about something that went wrong after a request
     /// had already succeeded. Rides `ServerEvent::Error` with no `req_id`,
     /// which the TUI shows as a flash and ties to no pending intent.
-    fn warn_clients(&self, message: String) {
+    pub(crate) fn warn_clients(&self, message: String) {
         tracing::warn!("{message}");
         self.broadcast(ServerEvent::Error {
             req_id: None,
@@ -1226,8 +1243,17 @@ impl Daemon {
             recent_prompts: Vec::new(),
             usage_limit: None,
         };
-        self.store
-            .insert_agent_with_launch_context(&agent, auto_title, pr_url.as_deref())?;
+        if let Err(e) =
+            self.store
+                .insert_agent_with_launch_context(&agent, auto_title, pr_url.as_deref())
+        {
+            // An adopted CLI with no row would run on, unseen, to the end.
+            if adopted.is_some() {
+                self.spares.forget_boot(&agent.id);
+                self.kill_session(&SessionRef::Agent(agent.id.clone()));
+            }
+            return Err(e);
+        }
         if optimistic_run {
             // Seeded by hand, ahead of the spawn, so the CLI's own startup
             // progress-clear cannot green the row out before its turn has
@@ -1929,16 +1955,7 @@ impl Daemon {
         let Some(command) = config.setup_command(repo) else {
             return Ok(None);
         };
-        let term = TerminalTab {
-            id: TerminalId::generate(),
-            worktree_id: worktree.id.clone(),
-            name: SETUP_TERMINAL_NAME.into(),
-            sort_order: 0,
-            alive: false,
-            run_command: Some(command.to_string()),
-            setup: true,
-            run: Default::default(),
-        };
+        let term = setup_terminal_row(worktree, command);
         let id = term.id.clone();
         // Held across the insert and the spawn, as a run's start holds it:
         // an attach in between must find the PTY, not a row without one.
@@ -3642,6 +3659,22 @@ fn push_system_prompt(
     }
 }
 
+/// The row of a SETUP TERMINAL running `command` in `worktree`: a new
+/// worktree's, or a SPARE WORKTREE's, which becomes its worktree's when a
+/// launch takes it.
+pub(crate) fn setup_terminal_row(worktree: &Worktree, command: &str) -> TerminalTab {
+    TerminalTab {
+        id: TerminalId::generate(),
+        worktree_id: worktree.id.clone(),
+        name: SETUP_TERMINAL_NAME.into(),
+        sort_order: 0,
+        alive: false,
+        run_command: Some(command.to_string()),
+        setup: true,
+        run: Default::default(),
+    }
+}
+
 /// Validate an AGENT PRESET's composed starting prompt before it becomes the
 /// CLI's positional argument. It rides the login shell's `-c` string as
 /// well as the CLI's argv: quoting stops injection, but a NUL would
@@ -3679,7 +3712,7 @@ pub(crate) fn sanitize_title(raw: &str) -> String {
 /// Canonicalize for path containment tests, falling back to the raw path
 /// when it doesn't resolve (deleted checkout, not-yet-created dir). macOS
 /// symlinks (`/tmp` → `/private/tmp`) otherwise break `starts_with`.
-fn canonical_or_raw(path: &Path) -> std::path::PathBuf {
+pub(crate) fn canonical_or_raw(path: &Path) -> std::path::PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 

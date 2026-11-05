@@ -145,7 +145,9 @@ impl Config {
             Some(_) => None,
             None => registry
                 .iter()
-                .find(|e| e.id == name && e.enabled && e.is_claude_account())
+                .find(|e| {
+                    e.id == name && e.enabled && e.problem().is_none() && e.is_claude_account()
+                })
                 .or_else(claude),
         }?;
         // The default account's own switch is the legacy key wherever the

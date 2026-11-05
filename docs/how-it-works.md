@@ -183,7 +183,9 @@
   launch on another account, model or effort, in plan mode, onto a branch that exists, or for a pull
   request is cut cold, as before, and leaves the spare for the next. When the base moves (`origin`
   is fetched for it every five minutes) or the **Base branch** setting changes, an untaken spare is
-  `git reset --hard` to the new base and its CLI restarted; a taken one is never touched. See
+  `git reset --hard` to the new base and its CLI restarted; a taken one is never touched. At boot a
+  spare the last DAEMON left fully set up is kept and anything else of one is removed; removing a
+  project removes its spare. The footer's memory readout counts the spares. See
   [Configuration](configuration.md#spare-worktrees).
 - **A worktree runs its own project — the RUN COMMAND.** The Projects tab of the SETTINGS OVERLAY
   holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a card's or the

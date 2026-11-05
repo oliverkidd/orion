@@ -32,7 +32,13 @@
 //! nobody has used for a day, one whose setup failed, and one whose
 //! checkout has gone. A CLI that died, or never said it had booted, is
 //! booted again a little later; one booted for another account is
-//! replaced. When the project's base moves — `origin` is fetched for it
+//! replaced. At boot ([`Daemon::sweep_spares_at_boot`]) a spare the last
+//! DAEMON left is kept when it finished setting up under the setup command
+//! the project has now (a mark in its git admin dir says so) and its
+//! project is still in use — its CLI is booted again on the next tick —
+//! and removed otherwise; so are spare branches no checkout holds and
+//! spare directories git no longer lists. Removing a project removes its
+//! spare. When the project's base moves — `origin` is fetched for it
 //! every few minutes — or its **Base branch** setting names another, the
 //! spare is reset to the new base (`git reset --hard`: nothing in it is
 //! anyone's) and its CLI booted again. Only a spare still in the book is
@@ -89,6 +95,37 @@ const FETCH_EVERY: Duration = Duration::from_secs(5 * 60);
 #[derive(Default)]
 pub(crate) struct SpareBook {
     book: Mutex<Book>,
+}
+
+impl Book {
+    /// Whether some spare's setup is still running.
+    fn setting_up(&self) -> bool {
+        self.spares
+            .values()
+            .any(|s| matches!(s.setup, Setup::Running(_)))
+    }
+
+    /// Take project `project`'s spare out of the book, nothing of it left
+    /// behind. `recut`: it went wrong, and the next waits [`RECUT_AFTER`].
+    fn take_out(&mut self, project: &ProjectId, recut: bool) -> Option<Spare> {
+        let spare = self.spares.remove(project);
+        if let Some(cli) = spare.as_ref().and_then(|s| s.cli.as_ref()) {
+            self.boots.remove(&cli.agent.id);
+        }
+        self.fetched_at.remove(project);
+        if recut {
+            self.recut_at
+                .insert(project.clone(), Instant::now() + RECUT_AFTER);
+        }
+        spare
+    }
+
+    /// Forget all the book keeps of project `project`, which has gone.
+    fn forget_project(&mut self, project: &ProjectId) {
+        self.used.remove(project);
+        self.recut_at.remove(project);
+        self.fetched_at.remove(project);
+    }
 }
 
 #[derive(Default)]
@@ -204,6 +241,36 @@ enum Tend {
 }
 
 impl SpareBook {
+    /// Whether there is no spare, and no taken one's CLI waiting.
+    fn is_empty(&self) -> bool {
+        let book = self.book.lock().unwrap();
+        book.spares.is_empty() && book.held.is_empty()
+    }
+
+    /// Project `project` was removed: nothing of it is kept.
+    pub(crate) fn forget_project(&self, project: &ProjectId) {
+        self.book.lock().unwrap().forget_project(project);
+    }
+
+    /// Every session a spare owns — its setup, its CLI, a taken one's CLI
+    /// not yet adopted.
+    pub(crate) fn sessions(&self) -> HashSet<SessionRef> {
+        let book = self.book.lock().unwrap();
+        let mut owned = HashSet::new();
+        for spare in book.spares.values() {
+            if let Some(cli) = &spare.cli {
+                owned.insert(SessionRef::Agent(cli.agent.id.clone()));
+            }
+            if let Setup::Running(term) = &spare.setup {
+                owned.insert(SessionRef::Terminal(term.id.clone()));
+            }
+        }
+        for held in book.held.values() {
+            owned.insert(SessionRef::Agent(held.cli.agent.id.clone()));
+        }
+        owned
+    }
+
     /// Whether project `project`'s spare is due a look at its base, and if
     /// so whether `origin` is due a fetch for it; None when it has no
     /// spare.
@@ -224,7 +291,7 @@ impl SpareBook {
 
     /// CLI `id` has had its first turn, or is gone: nothing waits on its
     /// boot.
-    fn forget_boot(&self, id: &AgentId) {
+    pub(crate) fn forget_boot(&self, id: &AgentId) {
         self.book.lock().unwrap().boots.remove(id);
     }
 
@@ -252,20 +319,24 @@ impl SpareBook {
     /// SETUP TERMINAL `id` exited with `exit_code`: when it is a spare's,
     /// the spare records how its setup went and the answer is true.
     pub(crate) fn setup_ended(&self, id: &TerminalId, exit_code: Option<i32>) -> bool {
-        let mut book = self.book.lock().unwrap();
-        let Some(spare) = book
-            .spares
-            .values_mut()
-            .find(|s| matches!(&s.setup, Setup::Running(term) if &term.id == id))
-        else {
-            return false;
+        let done = {
+            let mut book = self.book.lock().unwrap();
+            let Some(spare) = book
+                .spares
+                .values_mut()
+                .find(|s| matches!(&s.setup, Setup::Running(term) if &term.id == id))
+            else {
+                return false;
+            };
+            tracing::info!(worktree = %spare.worktree.path.display(), exit_code, "spare worktree's setup ended");
+            if exit_code != Some(0) {
+                spare.setup = Setup::Failed;
+                return true;
+            }
+            spare.setup = Setup::Done;
+            (spare.worktree.path.clone(), spare.setup_command.clone())
         };
-        tracing::info!(worktree = %spare.worktree.path.display(), exit_code, "spare worktree's setup ended");
-        spare.setup = if exit_code == Some(0) {
-            Setup::Done
-        } else {
-            Setup::Failed
-        };
+        mark_set_up(&done.0, done.1.as_deref());
         true
     }
 }
@@ -317,7 +388,7 @@ impl Daemon {
         let _ops = self.worktree_ops.lock().await;
         // Claimed under the book's lock: no tick touches it meanwhile, and
         // its setup's end is still recorded on it.
-        let (repo, from, base) = {
+        let (repo, from, base, path) = {
             let mut book = self.spares.book.lock().unwrap();
             let Some(spare) = book.spares.get(project) else {
                 return Ok(None);
@@ -332,19 +403,26 @@ impl Daemon {
             let claim = (
                 spare.repo.clone(),
                 spare.worktree.branch.clone(),
-                spare.base.name.clone(),
+                spare.base.clone(),
+                spare.worktree.path.clone(),
             );
             book.busy.insert(project.clone());
             claim
         };
-        let renamed = async {
-            let now = git::new_worktree_base(&repo, config.base_branch(&repo), false).await;
-            if now != base || git::branch_taken(&repo, branch).await {
+        let renamed: Result<bool> = async {
+            // What a cold cut would start from now, as last fetched: a spare
+            // behind it waits for its refresh, and this launch is cut cold.
+            if spare_base(&repo, config, false).await.as_ref() != Some(&base)
+                || git::branch_taken(&repo, branch).await
+            {
                 return Ok(false);
             }
-            git::rename_branch(&repo, &from, branch)
-                .await
-                .map(|()| true)
+            git::rename_branch(&repo, &from, branch).await?;
+            // A spare no more: the next boot must not take it for one.
+            if let Some(mark) = set_up_mark(&path) {
+                let _ = std::fs::remove_file(mark);
+            }
+            Ok(true)
         }
         .await;
         let mut book = self.spares.book.lock().unwrap();
@@ -364,6 +442,10 @@ impl Daemon {
         };
         if let Err(e) = self.store.insert_worktree(&worktree) {
             // Renamed already: the sync adopts the checkout as any other.
+            if let Some(cli) = &spare.cli {
+                book.boots.remove(&cli.agent.id);
+            }
+            drop(book);
             self.kill_spare_sessions(&spare);
             return Err(e);
         }
@@ -399,6 +481,12 @@ impl Daemon {
         self.broadcast(ServerEvent::EntityUpserted {
             entity: Entity::Worktree(worktree.clone()),
         });
+        if matches!(setup, Setup::Failed) {
+            self.warn_clients(format!(
+                "setup failed in {} as it was taken — run it again there",
+                worktree.branch
+            ));
+        }
         if let Setup::Running(mut term) = setup {
             match self.store.insert_terminal(&term) {
                 Ok(()) => {
@@ -495,10 +583,12 @@ impl Daemon {
                 still_since = Instant::now();
             }
             match boot.hook_at() {
-                Some(at) if still_since.elapsed() >= SETTLE || at.elapsed() >= SETTLE_CAP => {
+                Some(at)
+                    if still_since.max(at).elapsed() >= SETTLE || at.elapsed() >= SETTLE_CAP =>
+                {
                     return true
                 }
-                None if boot.spawned_at.elapsed() >= BOOT_LIMIT => return false,
+                None if boot.stuck() => return false,
                 _ => tokio::time::sleep(SETTLE_POLL).await,
             }
         }
@@ -534,6 +624,10 @@ impl Daemon {
     /// [`Daemon::tend_spares`] against a given config, for the tests that
     /// can't pin the settings file.
     pub(crate) async fn tend_spares_with(self: &Arc<Self>, config: &Config) {
+        let launch = config.spare_launch();
+        if launch.is_none() && self.spares.is_empty() {
+            return;
+        }
         let Ok((projects, worktrees, agents, _)) = self.store.load_tree() else {
             return;
         };
@@ -549,9 +643,14 @@ impl Daemon {
         for project in gone {
             self.remove_spare(&project, false).await;
         }
+        self.spares
+            .book
+            .lock()
+            .unwrap()
+            .used
+            .retain(|id, _| projects.iter().any(|p| &p.id == id));
         self.drop_held_in(&[]);
-        let launch = config.spare_launch();
-        let mut cut_one = false;
+        let mut cut_this_tick = false;
         for project in &projects {
             let used = self.last_used(project, &worktrees, &agents);
             let wanted = launch.is_some() && used_lately(used);
@@ -559,9 +658,9 @@ impl Daemon {
                 Some(fetch) if wanted => spare_base(&project.repo_path, config, fetch).await,
                 _ => None,
             };
-            match self.what_to_tend(project, wanted, launch.as_ref(), cut_one, base) {
+            match self.what_to_tend(project, wanted, launch.as_ref(), cut_this_tick, base) {
                 Some(Tend::Cut) => {
-                    cut_one = true;
+                    cut_this_tick = true;
                     self.cut_spare(project, config).await;
                 }
                 Some(Tend::Remove { recut }) => self.remove_spare(&project.id, recut).await,
@@ -604,14 +703,14 @@ impl Daemon {
     }
 
     /// What this tick does for `project`: nothing while something is
-    /// already under way for it. `cut_one`: a spare was cut this tick.
+    /// already under way for it. `cut_this_tick`: a spare was cut this tick.
     /// `base`: where its spare would be cut from now, when it has one.
     fn what_to_tend(
         &self,
         project: &Project,
         wanted: bool,
         launch: Option<&LaunchSpec>,
-        cut_one: bool,
+        cut_this_tick: bool,
         base: Option<Base>,
     ) -> Option<Tend> {
         let mut guard = self.spares.book.lock().unwrap();
@@ -620,18 +719,17 @@ impl Daemon {
             return None;
         }
         let Some(spare) = book.spares.get_mut(&project.id) else {
-            // One cut a tick, and none while another spare's setup runs:
-            // a setup is an install, and several at once would drag the
-            // machine down for a launch nobody has asked for yet.
-            let setting_up = book
-                .spares
-                .values()
-                .any(|s| matches!(s.setup, Setup::Running(_)));
-            let due = book
-                .recut_at
-                .get(&project.id)
-                .is_none_or(|at| Instant::now() >= *at);
-            return (wanted && due && !cut_one && !setting_up).then_some(Tend::Cut);
+            // One cut a tick, and none while another spare's setup runs
+            // ([`Daemon::cut_spare`]).
+            let due = match book.recut_at.get(&project.id) {
+                Some(at) if Instant::now() < *at => false,
+                Some(_) => {
+                    book.recut_at.remove(&project.id);
+                    true
+                }
+                None => true,
+            };
+            return (wanted && due && !cut_this_tick && !book.setting_up()).then_some(Tend::Cut);
         };
         if !wanted {
             return Some(Tend::Remove { recut: false });
@@ -647,15 +745,17 @@ impl Daemon {
         // A CLI that died, never came up, or was booted for an account
         // `⌘N` no longer starts on goes; another is booted in its place
         // once its wait is over.
-        let relaunch = Some(&spare.launch) != launch;
+        let launch_changed = Some(&spare.launch) != launch;
         let stale = spare.cli.take_if(|cli| {
-            relaunch || cli.boot.stuck() || !self.is_alive(&SessionRef::Agent(cli.agent.id.clone()))
+            launch_changed
+                || cli.boot.stuck()
+                || !self.is_alive(&SessionRef::Agent(cli.agent.id.clone()))
         });
-        if stale.is_some() && !relaunch {
+        if stale.is_some() && !launch_changed {
             spare.reboot_at = Some(Instant::now() + REBOOT_AFTER);
         }
-        let due = spare.reboot_at.is_none_or(|at| Instant::now() >= at);
-        let tend = (spare.cli.is_none() && due).then_some(Tend::BootCli);
+        let reboot_due = spare.reboot_at.is_none_or(|at| Instant::now() >= at);
+        let tend = (spare.cli.is_none() && reboot_due).then_some(Tend::BootCli);
         if let Some(cli) = stale {
             book.boots.remove(&cli.agent.id);
             drop(guard);
@@ -673,7 +773,13 @@ impl Daemon {
         };
         {
             let mut book = self.spares.book.lock().unwrap();
-            if book.spares.contains_key(&project.id) || !book.busy.insert(project.id.clone()) {
+            // A setup is an install, and two at once would drag the machine
+            // down for launches nobody has asked for yet: the tick cuts
+            // this one once the other is done.
+            if book.spares.contains_key(&project.id)
+                || book.setting_up()
+                || !book.busy.insert(project.id.clone())
+            {
                 return;
             }
         }
@@ -685,6 +791,8 @@ impl Daemon {
                 if let Some(cli) = &spare.cli {
                     book.boots.insert(cli.agent.id.clone(), cli.boot.clone());
                 }
+                // The cut fetched: the next look at its base need not.
+                book.fetched_at.insert(project.id.clone(), Instant::now());
                 book.spares.insert(project.id.clone(), spare);
             }
             Err(e) => {
@@ -732,19 +840,22 @@ impl Daemon {
             "cut a spare worktree"
         );
         // Gone while the cut ran: nothing of it is wanted.
-        if self.shutdown.is_cancelled() || self.store.get_project(&project.id)?.is_none() {
+        if self.shutdown.is_cancelled()
+            || !matches!(self.store.get_project(&project.id), Ok(Some(_)))
+        {
             git::remove_spare_worktree(repo, &spare.worktree.path, &spare.worktree.branch).await?;
             anyhow::bail!("its project went while it was cut");
         }
         self.link_env_files(repo, &spare.worktree.path).await;
-        if let Some(command) = &spare.setup_command {
-            match self.start_spare_setup(&spare.worktree, command) {
+        match &spare.setup_command {
+            Some(command) => match self.start_spare_setup(&spare.worktree, command) {
                 Ok(term) => spare.setup = Setup::Running(term),
                 Err(e) => {
                     tracing::warn!(error = %e, "spare worktree's setup didn't start");
                     spare.setup = Setup::Failed;
                 }
-            }
+            },
+            None => mark_set_up(&spare.worktree.path, None),
         }
         spare.cli = self.spawn_spare_cli(&spare.worktree, &spare.launch).await;
         spare.reboot_at = spare.cli.is_none().then(|| Instant::now() + REBOOT_AFTER);
@@ -758,16 +869,7 @@ impl Daemon {
         worktree: &Worktree,
         command: &str,
     ) -> Result<TerminalTab> {
-        let term = TerminalTab {
-            id: TerminalId::generate(),
-            worktree_id: worktree.id.clone(),
-            name: crate::registry::SETUP_TERMINAL_NAME.into(),
-            sort_order: 0,
-            alive: false,
-            run_command: Some(command.to_string()),
-            setup: true,
-            run: Default::default(),
-        };
+        let term = crate::registry::setup_terminal_row(worktree, command);
         self.spawn_terminal_session(&term, worktree, DEFAULT_COLS, DEFAULT_ROWS)?;
         Ok(term)
     }
@@ -871,19 +973,31 @@ impl Daemon {
             git::reset_hard(&path, &base.sha).await
         }
         .await;
+        if let Err(e) = reset {
+            // Out of the book under the lock that lets it go, so no take
+            // gets a spare that is going.
+            tracing::warn!(worktree = %path.display(), error = %e, "spare worktree not refreshed; removing it");
+            let spare = {
+                let mut book = self.spares.book.lock().unwrap();
+                book.busy.remove(project);
+                book.take_out(project, true)
+            };
+            if let Some(spare) = spare {
+                self.kill_spare_sessions(&spare);
+                self.discard_spare(&spare.repo, &spare.worktree.path, &spare.worktree.branch)
+                    .await;
+            }
+            return;
+        }
         let old = {
             let mut book = self.spares.book.lock().unwrap();
             book.busy.remove(project);
             let Some(spare) = book.spares.get_mut(project) else {
                 return;
             };
-            if let Err(e) = &reset {
-                tracing::warn!(worktree = %path.display(), error = %e, "spare worktree not refreshed; removing it");
-            } else {
-                tracing::info!(worktree = %path.display(), base = %base.sha, "spare worktree refreshed to its moved base");
-                spare.base = base;
-                spare.reboot_at = None;
-            }
+            tracing::info!(worktree = %path.display(), base = %base.sha, "spare worktree refreshed to its moved base");
+            spare.base = base;
+            spare.reboot_at = None;
             let old = spare.cli.take();
             if let Some(cli) = &old {
                 book.boots.remove(&cli.agent.id);
@@ -895,10 +1009,7 @@ impl Daemon {
         }
         // Booted as it was before; a `⌘N` that moved meanwhile is the next
         // tick's to replace.
-        match reset {
-            Err(_) => self.remove_spare(project, true).await,
-            Ok(()) => self.boot_spare_cli(project, &launch).await,
-        }
+        self.boot_spare_cli(project, &launch).await;
     }
 
     /// Take project `project`'s spare off the disk — its PTYs killed, its
@@ -910,30 +1021,155 @@ impl Daemon {
             if !book.busy.insert(project.clone()) {
                 return;
             }
-            let spare = book.spares.remove(project);
-            if let Some(cli) = spare.as_ref().and_then(|s| s.cli.as_ref()) {
-                book.boots.remove(&cli.agent.id);
-            }
-            if recut {
-                book.recut_at
-                    .insert(project.clone(), Instant::now() + RECUT_AFTER);
-            }
-            spare
+            book.take_out(project, recut)
         };
         if let Some(spare) = spare {
             self.kill_spare_sessions(&spare);
-            tracing::info!(worktree = %spare.worktree.path.display(), "removing a spare worktree");
-            if let Err(e) = git::remove_spare_worktree(
-                &spare.repo,
-                &spare.worktree.path,
-                &spare.worktree.branch,
-            )
-            .await
-            {
-                tracing::warn!(worktree = %spare.worktree.path.display(), error = %e, "spare worktree not fully removed");
-            }
+            self.discard_spare(&spare.repo, &spare.worktree.path, &spare.worktree.branch)
+                .await;
         }
         self.spares.book.lock().unwrap().busy.remove(project);
+    }
+
+    /// A spare's checkout and branch off the disk, and whatever its setup
+    /// started released as **On worktree delete** says, as for any
+    /// worktree orion deletes.
+    async fn discard_spare(&self, repo: &Path, path: &Path, branch: &str) {
+        tracing::info!(worktree = %path.display(), "removing a spare worktree");
+        if let Err(e) = git::remove_spare_worktree(repo, path, branch).await {
+            tracing::warn!(worktree = %path.display(), error = %e, "spare worktree not fully removed");
+        }
+        self.release_containers(repo, path).await;
+    }
+
+    /// What the last DAEMON left, at boot: each project's spare that
+    /// finished setting up under the setup command it has now is kept —
+    /// one a project, and only for a project still in use — and every
+    /// other one is removed, with any spare branch no checkout holds and
+    /// any spare directory git no longer lists.
+    pub async fn sweep_spares_at_boot(self: &Arc<Self>) {
+        self.sweep_spares_at_boot_with(&Config::load()).await;
+    }
+
+    /// [`Daemon::sweep_spares_at_boot`] against a given config.
+    pub(crate) async fn sweep_spares_at_boot_with(self: &Arc<Self>, config: &Config) {
+        let Ok((projects, worktrees, agents, _)) = self.store.load_tree() else {
+            return;
+        };
+        let launch = config.spare_launch();
+        for project in &projects {
+            let repo = &project.repo_path;
+            let Ok(found) = git::list_spare_worktrees(repo).await else {
+                continue;
+            };
+            let wanted =
+                launch.is_some() && used_lately(self.last_used(project, &worktrees, &agents));
+            let command = config.setup_command(repo);
+            let mut kept = None;
+            for entry in &found {
+                let reusable = kept.is_none()
+                    && wanted
+                    && entry.path.exists()
+                    && set_up_with(&entry.path).as_deref() == Some(command.unwrap_or(""));
+                if reusable {
+                    kept = Some(entry.clone());
+                } else {
+                    self.discard_spare(repo, &entry.path, &entry.branch).await;
+                }
+            }
+            self.discard_stray_spares(repo, &found).await;
+            if let (Some(entry), Some(launch)) = (kept, &launch) {
+                self.keep_spare(project, entry, command, launch.clone(), config)
+                    .await;
+            }
+        }
+    }
+
+    /// Spare branches no checkout holds — a removal cut short — and spare
+    /// directories in the WORKTREE DIR that git does not list as one of
+    /// `listed`.
+    async fn discard_stray_spares(&self, repo: &Path, listed: &[git::WorktreeEntry]) {
+        for (branch, checked_out) in git::spare_branches(repo).await.unwrap_or_default() {
+            if !checked_out {
+                if let Err(e) = git::delete_branch(repo, &branch).await {
+                    tracing::warn!(branch, error = %e, "stray spare branch not deleted");
+                }
+            }
+        }
+
+        let Some(dir) = git::worktree_dir(repo, "x").parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let named = entry
+                .file_name()
+                .to_str()
+                .is_some_and(orion_core::is_spare_branch);
+            if named && path.is_dir() && !listed.iter().any(|e| same_dir(&e.path, &path)) {
+                tracing::info!(dir = %path.display(), "removing a stray spare directory");
+                if let Err(e) = tokio::fs::remove_dir_all(&path).await {
+                    tracing::warn!(dir = %path.display(), error = %e, "stray spare directory not removed");
+                }
+            }
+        }
+    }
+
+    /// Put spare `entry`, left by the last DAEMON fully set up, back in the
+    /// book: the next tick boots its CLI, and resets it should its base
+    /// have moved meanwhile.
+    async fn keep_spare(
+        &self,
+        project: &Project,
+        entry: git::WorktreeEntry,
+        command: Option<&str>,
+        launch: LaunchSpec,
+        config: &Config,
+    ) {
+        let Some(sha) = git::rev_parse(&entry.path, "HEAD").await else {
+            return;
+        };
+        let repo = &project.repo_path;
+        let name = git::new_worktree_base(repo, config.base_branch(repo), false).await;
+        // Spelled as a cut spells it — the project's repo path, not git's
+        // resolved one — so a taken row's path is what a cold one's is.
+        let ours = git::worktree_dir(repo, &entry.branch);
+        let path = if same_dir(&ours, &entry.path) {
+            ours
+        } else {
+            entry.path
+        };
+        tracing::info!(worktree = %path.display(), "kept the spare worktree the last daemon left");
+        let spare = Spare {
+            repo: project.repo_path.clone(),
+            worktree: Worktree {
+                id: WorktreeId::generate(),
+                project_id: project.id.clone(),
+                path,
+                branch: entry.branch,
+                is_main: false,
+                sort_order: 0,
+            },
+            base: Base { name, sha },
+            setup: if command.is_some() {
+                Setup::Done
+            } else {
+                Setup::None
+            },
+            setup_command: command.map(str::to_string),
+            launch,
+            cli: None,
+            reboot_at: None,
+        };
+        self.spares
+            .book
+            .lock()
+            .unwrap()
+            .spares
+            .insert(project.id.clone(), spare);
     }
 
     /// Kill a spare's setup and CLI.
@@ -975,6 +1211,38 @@ impl Daemon {
             .used
             .insert(project.clone(), at);
     }
+}
+
+/// Whether `a` and `b` are one directory, however each is spelled.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    use crate::registry::canonical_or_raw;
+    canonical_or_raw(a) == canonical_or_raw(b)
+}
+
+/// Where spare `checkout` records that its setup finished: a file in its
+/// own git admin dir (`<repo>/.git/worktrees/<name>/`), which goes with the
+/// checkout and is in no one's `git status`. None when the checkout's
+/// `.git` names none.
+fn set_up_mark(checkout: &Path) -> Option<PathBuf> {
+    let pointer = std::fs::read_to_string(checkout.join(".git")).ok()?;
+    let admin = Path::new(pointer.trim().strip_prefix("gitdir:")?.trim());
+    Some(checkout.join(admin).join("orion-spare-set-up"))
+}
+
+/// Record that spare `checkout` finished setting up under `command`.
+fn mark_set_up(checkout: &Path, command: Option<&str>) {
+    let Some(mark) = set_up_mark(checkout) else {
+        return;
+    };
+    if let Err(e) = std::fs::write(&mark, command.unwrap_or("")) {
+        tracing::warn!(mark = %mark.display(), error = %e, "spare worktree's setup not marked done");
+    }
+}
+
+/// The setup command spare `checkout` finished setting up under (empty
+/// for none); None when it never finished.
+fn set_up_with(checkout: &Path) -> Option<String> {
+    std::fs::read_to_string(set_up_mark(checkout)?).ok()
 }
 
 /// Whether a project last used at `used` (epoch ms) still has a spare.
@@ -1358,6 +1626,58 @@ mod tests {
         daemon.kill_all();
     }
 
+    /// An `origin` that can't be fetched (offline) leaves the spare on
+    /// origin's refs as last fetched, on the fetching ticks and the others
+    /// alike: no refresh churns it, and a launch still takes it.
+    #[tokio::test]
+    async fn an_unreachable_origin_leaves_the_spare_on_its_last_fetched_base() {
+        let daemon = test_daemon();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("up")).unwrap();
+        let upstream = init_repo(&tmp.path().join("up"));
+        git_in(
+            tmp.path(),
+            &["clone", "-q", &upstream.to_string_lossy(), "repo"],
+        );
+        let repo = tmp.path().join("repo");
+        git_in(
+            &repo,
+            &["remote", "set-url", "origin", "/nonexistent/orion-origin"],
+        );
+        let project = project_at(&daemon, &repo);
+        let _cmd = EnvGuard::set(env::AGENT_CMD, "/bin/cat");
+        let cfg = spare_config(&repo, serde_json::json!({}));
+        daemon.spares.note_used(&project.id);
+
+        daemon.tend_spares_with(&cfg).await;
+        let (spare, cli) = daemon.spare_of(&project.id).expect("cut, fetch or none");
+        let base = daemon.spare_base_sha(&project.id);
+        assert_eq!(base, git::rev_parse(&repo, "origin/main").await);
+        for _ in 0..2 {
+            // The next look fetches too: a stamp from long ago.
+            daemon.spares.book.lock().unwrap().fetched_at.clear();
+            daemon.tend_spares_with(&cfg).await;
+            daemon.tend_spares_with(&cfg).await;
+        }
+        assert_eq!(
+            daemon.spare_of(&project.id).unwrap().1,
+            cli,
+            "never refreshed"
+        );
+        let launch = cfg.spare_launch().unwrap();
+        let id = created_worktree(
+            daemon
+                .create_launch_worktree_with(&project.id, "feat", &launch, &cfg)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            daemon.store.get_worktree(&id).unwrap().unwrap().path,
+            spare.path
+        );
+        daemon.kill_all();
+    }
+
     /// The base moving — a commit on it, or the setting naming another —
     /// resets a spare nobody has taken to it and boots its CLI again; a
     /// spare already taken is never touched.
@@ -1412,6 +1732,132 @@ mod tests {
             dev,
             "a taken spare stays put"
         );
+        daemon.kill_all();
+    }
+
+    /// A daemon on the same store and repo as `daemon`, as a restart
+    /// leaves things: every PTY gone, the rows and the disk as they were.
+    fn restarted(daemon: &Arc<Daemon>, project: &Project) -> Arc<Daemon> {
+        daemon.kill_all();
+        let next = test_daemon();
+        next.store.insert_project(project).unwrap();
+        next
+    }
+
+    /// A spare the last daemon left set up under the setup command the
+    /// project still has is kept, and its CLI booted again on the next
+    /// tick; one whose project's setup command changed since is cleared.
+    #[tokio::test]
+    async fn a_set_up_spare_the_last_daemon_left_is_kept() {
+        let (daemon, _tmp, project, cfg, _cmd) =
+            with_spare(serde_json::json!({ "setup_command": "true" })).await;
+        let (spare, _) = daemon.spare_of(&project.id).unwrap();
+        until("the setup", || set_up_with(&spare.path).is_some()).await;
+
+        let next = restarted(&daemon, &project);
+        next.spares.note_used(&project.id);
+        next.sweep_spares_at_boot_with(&cfg).await;
+        let (kept, cli) = next.spare_of(&project.id).expect("kept");
+        assert_eq!(
+            (kept.path.clone(), kept.branch.clone()),
+            (spare.path.clone(), spare.branch.clone())
+        );
+        assert!(cli.is_none(), "its CLI died with the last daemon");
+        next.tend_spares_with(&cfg).await;
+        let (still, cli) = next.spare_of(&project.id).unwrap();
+        assert_eq!(still.path, spare.path, "not cut again");
+        assert!(next.is_alive(&SessionRef::Agent(cli.expect("booted again"))));
+
+        let changed = spare_config(
+            &project.repo_path,
+            serde_json::json!({ "setup_command": "make" }),
+        );
+        let after = restarted(&next, &project);
+        after.spares.note_used(&project.id);
+        after.sweep_spares_at_boot_with(&changed).await;
+        assert!(after.spare_of(&project.id).is_none());
+        assert!(!spare.path.exists() && !branches(&project.repo_path).contains(&spare.branch));
+        after.kill_all();
+    }
+
+    /// What a restart cut short is cleared at boot, leaving nothing of it:
+    /// a spare still setting up, a spare branch no checkout holds, a spare
+    /// directory git no longer lists — and every spare of a project no
+    /// longer in use.
+    #[tokio::test]
+    async fn what_a_restart_cut_short_is_cleared_at_boot() {
+        let (daemon, _tmp, project, cfg, _cmd) =
+            with_spare(serde_json::json!({ "setup_command": "sleep 30" })).await;
+        let repo = project.repo_path.clone();
+        let (spare, _) = daemon.spare_of(&project.id).unwrap();
+        git_in(&repo, &["branch", "orion-spare-stray00"]);
+        let stray_dir = git::worktree_dir(&repo, "orion-spare-stray11");
+        std::fs::create_dir_all(stray_dir.join("node_modules")).unwrap();
+        let theirs = git::worktree_dir(&repo, "orion-sparse-notours");
+        std::fs::create_dir_all(&theirs).unwrap();
+
+        let next = restarted(&daemon, &project);
+        next.spares.note_used(&project.id);
+        next.sweep_spares_at_boot_with(&cfg).await;
+        assert!(
+            next.spare_of(&project.id).is_none(),
+            "half set up: not kept"
+        );
+        assert!(!spare.path.exists(), "its checkout went");
+        assert!(!stray_dir.exists(), "the stray directory went");
+        assert!(theirs.exists(), "a directory not named a spare's stays");
+        let left = branches(&repo);
+        assert!(
+            !left.contains("orion-spare-"),
+            "no spare branch left: {left}"
+        );
+        assert!(
+            git_worktree_paths(&repo)
+                .lines()
+                .filter(|l| l.starts_with("worktree "))
+                .count()
+                == 1
+        );
+
+        // A set-up spare of a project nobody uses any more goes too.
+        let done = spare_config(&repo, serde_json::json!({}));
+        next.tend_spares_with(&done).await;
+        let (spare, _) = next.spare_of(&project.id).expect("cut again");
+        let idle = restarted(&next, &project);
+        idle.sweep_spares_at_boot_with(&done).await;
+        assert!(idle.spare_of(&project.id).is_none());
+        assert!(!spare.path.exists());
+        idle.kill_all();
+    }
+
+    /// Removing a project takes its spare off the disk with it.
+    #[tokio::test]
+    async fn removing_a_project_removes_its_spare() {
+        let (daemon, _tmp, project, _cfg, _cmd) = with_spare(serde_json::json!({})).await;
+        let (spare, cli) = daemon.spare_of(&project.id).unwrap();
+        daemon.remove_project(&project.id).unwrap();
+        until("the spare's removal", || !spare.path.exists()).await;
+        until("its branch's removal", || {
+            !branches(&project.repo_path).contains(&spare.branch)
+        })
+        .await;
+        assert!(daemon.spare_of(&project.id).is_none());
+        assert!(!daemon.is_alive(&SessionRef::Agent(cli.unwrap())));
+        daemon.kill_all();
+    }
+
+    /// The memory reading names a spare's sessions, so the footer counts
+    /// them in what orion spends and not among the user's agents.
+    #[tokio::test]
+    async fn the_metrics_reading_marks_a_spares_sessions() {
+        let (daemon, _tmp, project, _cfg, _cmd) =
+            with_spare(serde_json::json!({ "setup_command": "sleep 30" })).await;
+        let (_, cli) = daemon.spare_of(&project.id).unwrap();
+        let cli = SessionRef::Agent(cli.unwrap());
+        let pids = daemon.session_pids();
+        assert_eq!(pids.len(), 2, "its setup and its CLI: {pids:?}");
+        assert!(pids.iter().all(|(_, _, spare)| *spare));
+        assert!(pids.iter().any(|(sref, _, _)| *sref == cli));
         daemon.kill_all();
     }
 }

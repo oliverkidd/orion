@@ -253,6 +253,14 @@ new base (`git reset --hard` — nothing in it is anyone's; untracked files such
 dependencies stay, and the setup is not run again) and its CLI is booted again on the new files. A
 spare is never reset once a launch has taken it, nor while its setup is still running.
 
+A spare outlives a DAEMON restart only when it is worth keeping: one that finished setting up under
+the setup command its project still has, for a project still in use, is kept and its CLI booted
+again; anything else the last DAEMON left — a spare still setting up, a spare branch nothing has
+checked out, a spare directory git no longer knows — is removed at boot. Removing a project removes
+its spare, and a spare's removal releases its containers as **On worktree delete** says, as any
+deleted worktree's does. The footer's memory readout counts each spare's setup and CLI in orion's
+total, not among the agents.
+
 There is no switch, only what it follows: no spare is kept while `⌘N` starts another harness or the
 account it names is off, and a project's spare goes once nobody has used the project for a day. One
 whose setup fails is taken away, and the next is cut ten minutes later; a CLI that dies, or never

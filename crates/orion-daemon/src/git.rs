@@ -212,19 +212,20 @@ pub async fn rev_parse(repo: &Path, rev: &str) -> Option<String> {
 /// [`add_worktree_off_configured`] or [`add_worktree_off_default`] cut it
 /// from — origin's copy of the project's **Base branch** `configured`,
 /// else the local branch of that name, else `origin/HEAD`. None is the
-/// checkout's own HEAD: no origin, or one that could not be fetched.
-/// `fetch` fetches `origin` first; without it, the refs are as last
-/// fetched.
+/// checkout's own HEAD: a repo with no origin. `fetch` fetches `origin`
+/// first, and may ask it for its HEAD; either way the answer is read off
+/// origin's refs as last fetched, so a fetch that fails — offline — names
+/// the same ref as a look that never fetches, and a SPARE WORKTREE's base
+/// never flips between the two.
 pub async fn new_worktree_base(
     repo: &Path,
     configured: Option<&str>,
     fetch: bool,
 ) -> Option<String> {
-    let origin = if fetch {
-        fetch_origin_if_any(repo).await
-    } else {
-        git(repo, &["remote", "get-url", "origin"]).await.is_ok()
-    };
+    let origin = git(repo, &["remote", "get-url", "origin"]).await.is_ok();
+    if origin && fetch {
+        fetch_origin_if_any(repo).await;
+    }
     if let Some(configured) = configured {
         if let Some(remote) = origin_branch(repo, configured).await {
             return Some(remote);
@@ -233,10 +234,11 @@ pub async fn new_worktree_base(
             return Some(configured.to_string());
         }
     }
-    if origin {
-        origin_head(repo).await
-    } else {
-        None
+    match (origin, fetch) {
+        (false, _) => None,
+        (true, true) => origin_head(repo).await,
+        // A look between fetches asks the remote nothing.
+        (true, false) => recorded_origin_head(repo).await,
     }
 }
 
@@ -278,32 +280,48 @@ pub async fn reset_hard(checkout: &Path, commit: &str) -> Result<()> {
     Ok(())
 }
 
+/// The repo's SPARE WORKTREE branches, each with whether some checkout
+/// has it checked out.
+pub async fn spare_branches(repo: &Path) -> Result<Vec<(String, bool)>> {
+    let pattern = format!("refs/heads/{}*", orion_core::SPARE_PREFIX);
+    let out = git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%00%(worktreepath)",
+            &pattern,
+        ],
+    )
+    .await?;
+    Ok(out
+        .lines()
+        .filter_map(|line| line.split_once('\0'))
+        .map(|(branch, checkout)| (branch.to_string(), !checkout.is_empty()))
+        .collect())
+}
+
 /// Take a SPARE WORKTREE off the disk: its checkout, whatever is in it,
 /// then its branch. A checkout already gone is pruned from git's list
 /// instead. Each step is tried whatever the one before it did; the first
 /// failure is the answer.
 pub async fn remove_spare_worktree(repo: &Path, path: &Path, branch: &str) -> Result<()> {
-    let path_str = path.to_string_lossy();
-    let mut result = if path.exists() {
-        git(
-            repo,
-            &["worktree", "remove", "--force", "--force", &path_str],
-        )
-        .await
-        .map(drop)
-    } else {
-        git(repo, &["worktree", "prune"]).await.map(drop)
-    };
+    let mut result = remove_worktree(repo, path, true).await;
     if path.exists() {
         // What git would not take — a checkout it no longer lists.
-        if let Err(e) = std::fs::remove_dir_all(path) {
+        if let Err(e) = tokio::fs::remove_dir_all(path).await {
             result = result.and(Err(e.into()));
         }
     }
     if local_branch(repo, branch).await {
-        result = result.and(git(repo, &["branch", "-D", branch]).await.map(drop));
+        result = result.and(delete_branch(repo, branch).await);
     }
     result
+}
+
+/// `git branch -D <branch>`.
+pub async fn delete_branch(repo: &Path, branch: &str) -> Result<()> {
+    git(repo, &["branch", "-D", branch]).await?;
+    Ok(())
 }
 
 /// The branch a paused rebase in `checkout` is replaying, if there is one —
@@ -577,16 +595,8 @@ async fn git_remote(repo: &Path, args: &[&str]) -> Result<String> {
 /// answer in time.
 async fn origin_head(repo: &Path) -> Option<String> {
     for attempt in 0..2 {
-        if let Ok(out) = git(
-            repo,
-            &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
-        )
-        .await
-        {
-            let short = out.trim();
-            if !short.is_empty() {
-                return Some(short.to_string());
-            }
+        if let Some(head) = recorded_origin_head(repo).await {
+            return Some(head);
         }
         if attempt == 0
             && git_remote(repo, &["remote", "set-head", "origin", "--auto"])
@@ -597,6 +607,19 @@ async fn origin_head(repo: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// `origin/HEAD` as this checkout has it recorded (`origin/main`), asking
+/// the remote nothing.
+async fn recorded_origin_head(repo: &Path) -> Option<String> {
+    let out = git(
+        repo,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    .ok()?;
+    let short = out.trim();
+    (!short.is_empty()).then(|| short.to_string())
 }
 
 /// Check pull request `number`'s head branch `head` out into a new worktree

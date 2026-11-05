@@ -445,6 +445,11 @@ pub struct SessionMetrics {
     pub rss_bytes: u64,
     /// Live processes in the subtree, the root included.
     pub procs: u32,
+    /// The session is a SPARE WORKTREE's — its setup or its booted CLI,
+    /// with no row a client knows: memory orion spends, not a session the
+    /// user has.
+    #[serde(default)]
+    pub spare: bool,
 }
 
 /// Daemon-side half of the metrics modal's data; the client stacks its own
