@@ -139,6 +139,10 @@ pub struct Diagnosis {
     pub failing: Vec<PrCheck>,
     /// Some check has not finished.
     pub running: bool,
+    /// The files its head conflicts in with its base, as the repo merged
+    /// them ([`want_conflicts`]); none until that is known, or when it
+    /// could not say.
+    pub conflicted: Vec<String>,
 }
 
 /// Read a pull request's body for what is wrong with it — its failed and
@@ -301,6 +305,30 @@ pub struct State {
     pub dirty: bool,
     /// `⌘G` asked for this pull request's form, waiting on a fresh body.
     pub pending_open: Option<String>,
+    /// By PR URL: the files its head conflicts in with its base, as
+    /// `conflicts::local` answered ([`want_conflicts`]).
+    pub conflicted: HashMap<String, Conflicted>,
+    /// Sends waiting on their pull request's [`Conflicted`] answer, sent on
+    /// the beat once it is in ([`send_waiting`]). One per pull request.
+    pub waiting: Vec<AutofixForm>,
+}
+
+/// What a pull request's head was asked to merge with its base — the
+/// files that conflict, once `conflicts::local` has said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflicted {
+    head_sha: String,
+    base: String,
+    /// None while the ask is out; the files once it landed — none when the
+    /// repo could not say.
+    files: Option<Vec<String>>,
+}
+
+impl Conflicted {
+    /// Whether this is the answer for `head_sha` against `base`.
+    fn is_for(&self, head_sha: &str, base: &str) -> bool {
+        self.head_sha == head_sha && self.base == base
+    }
 }
 
 impl State {
@@ -323,6 +351,12 @@ impl State {
     fn forget(&mut self, url: &str) {
         self.watching.remove(url);
         self.held.remove(url);
+        self.conflicted.remove(url);
+    }
+
+    /// A send for `url` is waiting on its conflicting files.
+    fn is_waiting(&self, url: &str) -> bool {
+        self.waiting.iter().any(|form| form.pr.url == url)
     }
 }
 
@@ -476,10 +510,15 @@ pub fn land_detail(
         app.autofix.forget(url);
         return;
     };
+    // Its conflicting files, asked as soon as it is seen to conflict, so
+    // they are in by the time it is sent.
+    if diagnosis.conflicts {
+        want_conflicts(app, &watch.project, url, pr.number, &PrRefs::of(detail));
+    }
     let settling = diagnosis.running
         && !diagnosis.conflicts_only()
         && watch.first_seen.elapsed() < SETTLE_LIMIT;
-    if settling || fixer_on_it(app, &watch.project, &pr) {
+    if settling || fixer_on_it(app, &watch.project, &pr) || app.autofix.is_waiting(url) {
         app.autofix.recheck_later(url);
         return;
     }
@@ -523,7 +562,7 @@ pub fn land_detail(
         Mode::Off => {}
         Mode::Auto if record.attempts < AUTO_ATTEMPTS => {
             form.peers = peers;
-            dispatch(app, form, out);
+            send(app, form, out);
         }
         Mode::Auto => give_up(app, &form, record.attempts),
     }
@@ -880,7 +919,13 @@ fn context(
     for issue in ticked {
         let heading = issue.label();
         match issue {
-            Issue::Conflicts => lines.push(format!("- {heading} with {base}")),
+            Issue::Conflicts if diagnosis.conflicted.is_empty() => {
+                lines.push(format!("- {heading} with {base}"))
+            }
+            Issue::Conflicts => {
+                lines.push(format!("- {heading} with {base}, in:"));
+                lines.extend(diagnosis.conflicted.iter().map(|f| format!("  - {f}")));
+            }
             Issue::Checks if diagnosis.failing.is_empty() => lines.push(format!(
                 "- {heading} (none named by GitHub — check `gh pr checks {}`)",
                 pr.number
@@ -1038,6 +1083,10 @@ impl AutofixForm {
 pub fn open_for(app: &mut App, project: ProjectId, pr: OpenPr, detail: &PrDetail) {
     let conflicts = app.prs.status_or_open(&pr.url).health.conflicts;
     let mut form = AutofixForm::new(project, pr, detail, conflicts);
+    if conflicts {
+        want_conflicts(app, &form.project, &form.pr.url, form.pr.number, &form.refs);
+        form.diagnosis.conflicted = files_for(app, &form).unwrap_or_default();
+    }
     if let Some(Overlay::PullRequests(view)) = app.overlay.take() {
         form.under = Some(Box::new(view));
     }
@@ -1054,6 +1103,113 @@ fn close(app: &mut App) -> Option<AutofixForm> {
     app.overlay = form.under.take().map(|view| Overlay::PullRequests(*view));
     app.dirty = true;
     Some(form)
+}
+
+/// Ask the repo which files pull request `number` at `url` conflicts in —
+/// its head merged with its base in memory (`conflicts::local`), the head
+/// fetched by its pull ref first when the repo lacks it — off the loop,
+/// unless its head and base were asked already.
+fn want_conflicts(app: &mut App, project: &ProjectId, url: &str, number: u64, refs: &PrRefs) {
+    let (head_sha, base) = (refs.head_sha.clone(), refs.base.clone());
+    let asked = app
+        .autofix
+        .conflicted
+        .get(url)
+        .is_some_and(|known| known.is_for(&head_sha, &base));
+    if asked || head_sha.is_empty() || base.is_empty() {
+        return;
+    }
+    let Some(dir) = repo_dir(app, project) else {
+        return;
+    };
+    app.autofix.conflicted.insert(
+        url.to_string(),
+        Conflicted {
+            head_sha: head_sha.clone(),
+            base: base.clone(),
+            files: None,
+        },
+    );
+    let (url, quit) = (url.to_string(), app.git_sync.quit.clone());
+    crate::conflicts::off_loop(app, move || {
+        let merged = crate::conflicts::local(&dir, &base, &head_sha).or_else(|_| {
+            crate::conflicts::fetch_pull_head(&dir, number, &head_sha, &quit)?;
+            crate::conflicts::local(&dir, &base, &head_sha)
+        });
+        crate::conflicts::Answer::Autofix {
+            url,
+            files: merged.map(|local| local.files),
+            head_sha,
+            base,
+        }
+    });
+}
+
+/// [`want_conflicts`]'s answer: the files kept for the head and base it
+/// was asked for — and shown on the form up on that pull request.
+pub(crate) fn land_conflicts(
+    app: &mut App,
+    url: &str,
+    head_sha: &str,
+    base: &str,
+    files: Result<Vec<String>, String>,
+) {
+    let Some(known) = app.autofix.conflicted.get_mut(url) else {
+        return;
+    };
+    if !known.is_for(head_sha, base) {
+        return;
+    }
+    let files = files.unwrap_or_else(|why| {
+        tracing::debug!(url, "autofix: no conflicting files: {why}");
+        Vec::new()
+    });
+    known.files = Some(files.clone());
+    if let Some(Overlay::Autofix(form)) = &mut app.overlay {
+        if form.pr.url == url && form.refs.head_sha == head_sha && form.refs.base == base {
+            form.diagnosis.conflicted = files;
+        }
+    }
+}
+
+/// The files `form`'s pull request conflicts in for its head and base, as
+/// [`want_conflicts`] was answered — none when its head was never asked
+/// about — or None while that answer is out.
+fn files_for(app: &App, form: &AutofixForm) -> Option<Vec<String>> {
+    match app.autofix.conflicted.get(&form.pr.url) {
+        Some(known) if known.is_for(&form.refs.head_sha, &form.refs.base) => known.files.clone(),
+        _ => Some(Vec::new()),
+    }
+}
+
+/// Send `form`'s agent ([`dispatch`]) — naming the files its pull request
+/// conflicts in, when it conflicts: while the repo has yet to say which,
+/// it waits, and goes on the beat once it has ([`send_waiting`]).
+fn send(app: &mut App, mut form: AutofixForm, out: &mut Vec<ClientRequest>) {
+    if form.diagnosis.conflicts {
+        want_conflicts(app, &form.project, &form.pr.url, form.pr.number, &form.refs);
+        let Some(files) = files_for(app, &form) else {
+            app.autofix.waiting.retain(|w| w.pr.url != form.pr.url);
+            app.autofix.waiting.push(form);
+            return;
+        };
+        form.diagnosis.conflicted = files;
+    }
+    dispatch(app, form, out);
+}
+
+/// The beat: each send [`send`] left waiting whose conflicting files are
+/// in, sent.
+pub fn send_waiting(app: &mut App, out: &mut Vec<ClientRequest>) {
+    for mut form in std::mem::take(&mut app.autofix.waiting) {
+        match files_for(app, &form) {
+            Some(files) => {
+                form.diagnosis.conflicted = files;
+                dispatch(app, form, out);
+            }
+            None => app.autofix.waiting.push(form),
+        }
+    }
 }
 
 /// Send the agent: a PR SESSION named `autofix-<n>`, on the harness,
@@ -1178,7 +1334,7 @@ fn submit(app: &mut App, out: &mut Vec<ClientRequest>) {
         return;
     }
     if let Some(form) = close(app) {
-        dispatch(app, form, out);
+        send(app, form, out);
     }
 }
 
@@ -1228,9 +1384,14 @@ const EXPLAIN_ROWS: u16 = 3;
 fn row_note(form: &AutofixForm, issue: Issue) -> String {
     match issue {
         _ if !form.diagnosis.has(issue) => "none detected".into(),
-        Issue::Conflicts => format!(
+        Issue::Conflicts if form.diagnosis.conflicted.is_empty() => format!(
             "{} has moved on — merge it in and resolve",
             form.refs.base_or(SOME_BASE)
+        ),
+        Issue::Conflicts => format!(
+            "{}: {}",
+            crate::flash::plural(form.diagnosis.conflicted.len(), "file"),
+            form.diagnosis.conflicted.join(", ")
         ),
         Issue::Checks => format!("{} failing", form.diagnosis.failing.len()),
     }
@@ -2204,5 +2365,127 @@ mod tests {
         listed(&mut app);
         landed(&mut app, &running);
         assert_eq!(due_fetches(&mut app).len(), 1);
+    }
+
+    // ---- the conflicting files ----
+
+    /// [`app_with`] on a real repo whose `feature` conflicts with `main`
+    /// in `a.txt` and `gone.txt`, and a page of #7 at `feature`'s tip.
+    fn conflicted_app(dir: &tempfile::TempDir) -> (App, PrDetail) {
+        let (_, clone) = crate::conflicts::tests::conflicted_clone(dir);
+        let head = crate::conflicts::tests::git(&clone, &["rev-parse", "HEAD"]);
+        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        app.tree.projects[0].repo_path = clone;
+        let page = PrDetail {
+            head_sha: head,
+            ..detail(true, Vec::new())
+        };
+        (app, page)
+    }
+
+    /// The conflict's line in the prompt names each file the repo says
+    /// conflicts, under orion's rule to merge the base in and resolve.
+    #[test]
+    fn the_prompt_names_the_files_that_conflict() {
+        let page = detail(true, Vec::new());
+        let mut diagnosis = diag(&page);
+        diagnosis.conflicted = vec!["a.txt".into(), "src/gone.rs".into()];
+        let text = prompt(
+            &pr(),
+            &PrRefs::of(&page),
+            &diagnosis,
+            &[true, false],
+            "",
+            &orions(),
+        );
+        assert!(
+            text.contains("- Merge conflicts with `main`, in:\n  - a.txt\n  - src/gone.rs\n"),
+            "{text}"
+        );
+    }
+
+    /// An unasked send to a conflicting pull request names the files its
+    /// head conflicts in with its base, as the repo merges them
+    /// (`conflicts::local`).
+    #[test]
+    fn an_unasked_send_names_the_files_the_repo_says_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, page) = conflicted_app(&dir);
+        listed(&mut app);
+        let out = landed(&mut app, &page);
+        let prompt = sent_prompt(&out).expect("sent");
+        assert!(
+            prompt.contains("- Merge conflicts with `main`, in:\n  - a.txt\n  - gone.txt"),
+            "{prompt}"
+        );
+        assert!(app.autofix.waiting.is_empty());
+    }
+
+    /// The repo's answer is off the loop: the send waits for it — the PR
+    /// not asked about again meanwhile — and goes on the beat after it
+    /// lands, the files named.
+    #[tokio::test]
+    async fn a_send_waits_for_its_files_and_goes_on_the_beat() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, page) = conflicted_app(&dir);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.view_jobs = Some(crate::view_jobs::Jobs::new(tx));
+        listed(&mut app);
+        let out = landed(&mut app, &page);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(app.autofix.waiting.len(), 1);
+        let mut out = Vec::new();
+        send_waiting(&mut app, &mut out);
+        assert!(out.is_empty(), "the files are not in yet");
+
+        listed(&mut app);
+        assert!(landed(&mut app, &page).is_empty(), "no second send");
+        assert_eq!(app.autofix.waiting.len(), 1);
+
+        match rx.recv().await {
+            Some(crate::view_jobs::Answer::Conflicts(answer)) => {
+                crate::conflicts::land(&mut app, answer)
+            }
+            other => panic!("the repo's answer, not {other:?}"),
+        }
+        let dir = tempfile::tempdir().unwrap();
+        crate::agent_presets::with_presets_path(dir.path().join("agent_presets.json"), || {
+            crate::config::with_config_path(dir.path().join("config.json"), || {
+                send_waiting(&mut app, &mut out)
+            })
+        });
+        let prompt = sent_prompt(&out).expect("sent on the beat");
+        assert!(prompt.contains("  - a.txt\n  - gone.txt"), "{prompt}");
+        assert!(app.autofix.waiting.is_empty());
+        assert_eq!(app.autofix.ledger[&pr().url].attempts, 1);
+    }
+
+    /// `⌘G`'s form names the conflicting files on its Merge conflicts row.
+    #[test]
+    fn the_form_names_the_conflicting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut app, page) = conflicted_app(&dir);
+        app.prs.observe(
+            &page.url,
+            crate::pr_store::PrObservation::of_detail(&page),
+            crate::fetch::Asked::At(crate::fetch::now()),
+        );
+        open_for(&mut app, ProjectId("p".into()), pr(), &page);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let shot: String = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        assert!(
+            shot.contains("[x] Merge conflicts 2 files: a.txt, gone.txt"),
+            "{shot}"
+        );
     }
 }

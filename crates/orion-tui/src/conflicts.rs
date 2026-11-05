@@ -563,11 +563,19 @@ pub enum Answer {
         ticket: u64,
         result: Result<Local, String>,
     },
+    /// The files a pull request's head conflicts in with its base, for
+    /// AUTOFIX's prompt ([`local`], `autofix::want_conflicts`).
+    Autofix {
+        url: String,
+        head_sha: String,
+        base: String,
+        files: Result<Vec<String>, String>,
+    },
 }
 
 /// Run `work` on the blocking pool and land its answer — inline where
 /// there is no pool (the unit tests).
-fn off_loop(app: &mut App, work: impl FnOnce() -> Answer + Send + 'static) {
+pub(crate) fn off_loop(app: &mut App, work: impl FnOnce() -> Answer + Send + 'static) {
     match app.view_jobs.clone() {
         Some(jobs) => jobs.run(move || Some(crate::view_jobs::Answer::Conflicts(work()))),
         None => land(app, work()),
@@ -597,6 +605,12 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
         Answer::Prepared { ticket, result } => land_prepared(app, ticket, result),
         Answer::Committed { ticket, result } => land_committed(app, ticket, result),
         Answer::Local { ticket, result } => crate::diff_actions::land(app, ticket, result),
+        Answer::Autofix {
+            url,
+            head_sha,
+            base,
+            files,
+        } => crate::autofix::land_conflicts(app, &url, &head_sha, &base, files),
     }
     app.dirty = true;
 }

@@ -116,7 +116,10 @@
   viewer's top line, beside the branch's pull request and its checks. Nothing is checked out or
   fetched: base sync keeps origin's copy of the base fresh, so this works before a pull request
   exists and needs no network. Answers are kept by the two commits' SHAs, so opening the viewer
-  again on the same commits costs two `rev-parse`s. `Enter` on a `U` file opens the CONFLICT
+  again on the same commits costs two `rev-parse`s. AUTOFIX asks the same of a pull request it
+  sends an agent to — its head against its base, the head fetched by its pull ref when the repo
+  lacks it — as soon as it is seen to conflict, and names the files in the agent's prompt; a send
+  whose answer is still out waits for it and goes on the next git tick. `Enter` on a `U` file opens the CONFLICT
   RESOLVER on the checkout (`conflicts::resolve_in`), unless an `autofix-<n>` is already on the
   pull request. `Enter` on the diff edits its file in the built-in editor at the line at the top of
   the pane (`DiffView::file_at_line`, the same line `⌘O` opens at); when the editor closes, the

@@ -490,6 +490,7 @@ async fn main_loop(
                 for (url, number, dir) in crate::autofix::due_fetches(&mut app) {
                     spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
                 }
+                crate::autofix::send_waiting(&mut app, &mut out);
                 crate::autofix::note_stand_downs(&mut app);
                 // BASE SYNC: the most overdue project's root fetched, and
                 // fast-forwarded when it sits on the base branch.
