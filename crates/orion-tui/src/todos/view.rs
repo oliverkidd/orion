@@ -16,10 +16,9 @@
 //! (or opens again what was ticked while the modal was up), `⌘P` sets
 //! its priority and every item's in it — one then set on its own keeps
 //! its own until the group's is set again — and `⌥↑`/`⌥↓` move it; on a
-//! section's header they move the section past the one beside it. The
-//! project row says what was ticked today and this week, across every
-//! project, day by day — and a click on either opens the DONE page on it
-//! (`history`).
+//! section's header they move the section past the one beside it. Down
+//! the right, beside the lists, is the DONE panel (`done`): what was
+//! ticked, across every project — `→` puts the keys there, `←` back.
 //!
 //! An item ticked stays where it stood, struck through, the cursor on
 //! it — nothing moves under it; so does a group with everything in it
@@ -36,8 +35,8 @@
 //!
 //! The list is the [`App`]'s (`App::todos`, by checkout), so it outlives
 //! the modal; the view holds the cursor, the filter and the field being
-//! typed into. A project left for another is parked as it was — cursor,
-//! filter, DONE open or not — and comes back so while the modal is up;
+//! typed into. A project left for another is parked as it was — cursor
+//! and filter — and comes back so while the modal is up;
 //! what was half done on it (a field, a menu, a delete asked, a
 //! selection) is let go. Every change is saved at once (`store::save`). A
 //! row is edited where it stands: typing on it adds to its end, `⌫` opens
@@ -210,8 +209,9 @@ pub struct TodoView {
     pub project_name: String,
     /// The project's checkout: whose list this is.
     pub dir: PathBuf,
-    /// The DONE page, while it is up over the list: every key is its own.
-    pub page: Option<super::history::DonePage>,
+    /// The DONE panel down the right: one across the tabs, handed on to
+    /// the tab turned to.
+    pub done: super::done::DonePanel,
     /// The cursor's row, by index into the rows as last drawn; and the row
     /// itself, which it follows when the rows move under it (a priority
     /// re-sorts them).
@@ -248,9 +248,6 @@ pub struct TodoView {
     /// click.
     pub project_hits: Vec<(u16, u16)>,
     pub project_row: Rect,
-    /// Where `✓N today` and `✓N this week` were drawn, each with whether
-    /// it is the week: a click opens the DONE page on it.
-    pub summary_hits: Vec<(Rect, bool)>,
     /// The other projects' tabs as they were left, by project.
     pub parked: HashMap<ProjectId, TodoView>,
 }
@@ -261,7 +258,7 @@ impl TodoView {
             project,
             project_name,
             dir,
-            page: None,
+            done: Default::default(),
             selected: 0,
             cursor: None,
             anchor: None,
@@ -278,7 +275,6 @@ impl TodoView {
             row_rects: Vec::new(),
             project_hits: Vec::new(),
             project_row: Rect::default(),
-            summary_hits: Vec::new(),
             parked: HashMap::new(),
         }
     }
@@ -286,7 +282,8 @@ impl TodoView {
     /// Put away to come back to: the cursor and the filter kept, what was
     /// half done let go — and the ticks held in sight with it.
     fn park(mut self) -> Self {
-        self.page = None;
+        // The DONE panel goes on with the tab turned to.
+        self.done = Default::default();
         self.input = None;
         self.pick = None;
         self.confirm_delete = None;
@@ -306,13 +303,10 @@ pub(crate) mod keys {
     /// Tick or untick the item, or everything in a nested group; fold a
     /// section's header.
     pub const DONE: Key = Key::new(&["space"], "done");
-    /// The project tabs, as the LINEAR VIEW walks its tabs: `←`/`→` — `⇧`
-    /// too, the PULL REQUESTS MODAL's — round either end, and `Tab` on.
-    pub const TABS: Key = Key::new(
-        &["left", "right", "shift+left", "shift+right", "tab"],
-        "projects",
-    )
-    .show(2);
+    /// The project tabs, as the PULL REQUESTS MODAL walks its own:
+    /// `⇧←`/`⇧→` round either end, and `Tab` on — plain `→` is the DONE
+    /// panel's way in.
+    pub const TABS: Key = Key::new(&["shift+left", "shift+right", "tab"], "projects").show(2);
     /// Straight to a project's tab — matched through the grid's own
     /// binding (`project_tab_N`), so a rebind holds here too; this is its
     /// default, for the hint and the Ghostty release.
@@ -379,15 +373,13 @@ pub(crate) mod keys {
     /// The priority pick's rows by their digit: `1` urgent to `4` low,
     /// `0` none.
     pub const LEVEL: Key = Key::new(&["1", "2", "3", "4", "0"], "level");
-    /// The DONE page's: today or this week, as the tabs are walked.
-    pub const SPAN: Key = Key::new(&["left", "right", "tab"], "today / week").show(2);
-    /// The DONE page's: the item ticked by mistake, open again.
-    pub const UNDO: Key = Key::new(&["space"], "not done");
+    /// The DONE panel's way in.
+    pub const INTO_DONE: Key = super::super::done::keys::INTO;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         DONE, TABS, PROJECT, JUMP, MOVE, GROUP, SELECT, NEW, NEW_GROUP, EDIT, PRIORITY, DELETE,
         CUT, COPY, FILTER, SAVE, SAVE_MOVE, SAVE_GROUP, CONFIRM, AGENT, PRESET, PICK, CHOOSE,
-        LEVEL, SPAN, UNDO,
+        LEVEL, INTO_DONE,
     ];
 }
 
@@ -396,19 +388,11 @@ fn project_hint() -> crate::hints::Hint {
     crate::hints::Hint::new(format!("{}-9", keys::PROJECT.label()), "project")
 }
 
-/// The keys along the modal's bottom edge. Esc lets a selection go
-/// first, then the filter.
+/// The keys along the modal's bottom edge while the lists have them (the
+/// DONE panel spells its own). Esc lets a selection go first, then the
+/// filter.
 pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
-    if view.page.is_some() {
-        return vec![
-            keys::UNDO.hint().kept(),
-            keys::SPAN.hint(),
-            keys::PICK.hint_as("move"),
-            keys::JUMP.hint(),
-            Hint::new("Esc", "back"),
-        ];
-    }
     if let Some((kind, _)) = &view.input {
         let mut hints = vec![keys::SAVE.hint().kept(), keys::SAVE_MOVE.hint()];
         if matches!(kind, InputKind::Item { .. }) {
@@ -454,6 +438,7 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
         keys::DONE.hint().kept(),
         keys::AGENT.hint().kept(),
         keys::TABS.hint(),
+        keys::INTO_DONE.hint(),
         keys::NEW.hint(),
         keys::EDIT.hint(),
         keys::PRIORITY.hint(),
@@ -619,6 +604,8 @@ fn show_project(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
     let mut next = parked.remove(&project).unwrap_or(fresh);
     // The name may have changed since it was parked.
     next.project_name = name;
+    // The DONE panel is every project's: it stays as it is.
+    next.done = view.done.clone();
     let left = std::mem::replace(view, next).park();
     parked.insert(left.project.clone(), left);
     view.parked = parked;
@@ -916,9 +903,9 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(view) = view_mut(app) else {
         return false;
     };
-    // The priority pick, the delete question and the DONE page take no
+    // The priority pick, the delete question and the DONE panel take no
     // text.
-    if view.pick.is_some() || view.confirm_delete.is_some() || view.page.is_some() {
+    if view.pick.is_some() || view.confirm_delete.is_some() || view.done.focused {
         return true;
     }
     // What `⌘X`/`⌘C` took, pasted into an empty new item's field: the
@@ -1050,8 +1037,8 @@ fn tidy(text: &str) -> &str {
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     app.dirty = true;
-    if view(app).is_some_and(|v| v.page.is_some()) {
-        super::history::handle_key(app, key);
+    if view(app).is_some_and(|v| v.done.focused) {
+        super::done::handle_key(app, key);
         return;
     }
     if view(app).is_some_and(|v| v.input.is_some()) {
@@ -1109,10 +1096,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::GROUP.matches(&key) && !filtering => {
             group_chosen(app, matches!(key.code, KeyCode::Right | KeyCode::Char('f')))
         }
-        // Plain ←/→ move the filter's caret while it is up.
-        _ if keys::TABS.matches(&key)
-            && !(filtering && key.modifiers.is_empty() && key.code != KeyCode::Tab) =>
-        {
+        // Plain `→` moves the filter's caret while it is up.
+        _ if keys::INTO_DONE.matches(&key) && !filtering => super::done::focus(app),
+        _ if keys::TABS.matches(&key) => {
             step_project(app, if key.code == KeyCode::Left { -1 } else { 1 });
         }
         _ if tab.is_some() => {
@@ -1427,6 +1413,7 @@ fn paste_clip_at(app: &mut App, text: &str, group: Option<u64>, after: Option<u6
                     item.done = None;
                     item.created = today;
                     item.agent = None;
+                    item.worktree = None;
                 }
                 item
             })
@@ -1781,7 +1768,7 @@ fn done(app: &mut App) {
 
 /// `ids`, just ticked or unticked, kept in sight where they stand until
 /// the modal goes.
-fn hold(app: &mut App, ids: &[u64]) {
+pub(super) fn hold(app: &mut App, ids: &[u64]) {
     if let Some(view) = view_mut(app) {
         for id in ids {
             if !view.held.contains(id) {
@@ -2067,18 +2054,19 @@ pub(crate) fn handle_mouse(
         return;
     };
     let click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
-    if view.page.is_some() {
-        super::history::handle_mouse(app, mouse, pos);
+    // The DONE panel's, unless the lists are in the middle of something.
+    let idle = view.pick.is_none() && view.input.is_none() && view.confirm_delete.is_none();
+    if idle && super::done::handle_mouse(app, mouse, pos) {
         return;
     }
-    let summary = click
-        .then(|| view.summary_hits.iter().find(|(r, _)| r.contains(pos)))
-        .flatten()
-        .map(|(_, week)| *week);
-    if let Some(week) = summary {
-        super::history::open(app, week);
+    // A click on the lists takes the keys back from the DONE panel.
+    let Some(view) = view_mut(app) else {
         return;
+    };
+    if click {
+        view.done.focused = false;
     }
+    let view = &*view;
     if view.pick.is_some() {
         if click {
             pick_click(app, pos);
@@ -2210,30 +2198,61 @@ pub(super) fn indent(depth: u16) -> Span<'static> {
     Span::raw(" ".repeat((INDENT_W * depth) as usize))
 }
 
+/// The DONE panel's share of the modal, and its bounds.
+const DONE_PCT: u16 = 36;
+const DONE_MIN_W: u16 = 30;
+const DONE_MAX_W: u16 = 56;
+/// The fewest columns the lists keep beside the DONE panel: a narrower
+/// modal is the lists alone.
+const LISTS_MIN_W: u16 = 42;
+
+/// The modal's two columns: the lists, and the DONE panel down the right
+/// — none when the modal is too narrow to hold both.
+fn columns(area: Rect) -> (Rect, Option<Rect>) {
+    let share = u32::from(area.width) * u32::from(DONE_PCT) / 100;
+    let done_w = u16::try_from(share)
+        .unwrap_or(u16::MAX)
+        .clamp(DONE_MIN_W, DONE_MAX_W);
+    if area.width < done_w + LISTS_MIN_W {
+        return (area, None);
+    }
+    let lists = Rect {
+        width: area.width - done_w,
+        ..area
+    };
+    let done = Rect {
+        x: lists.right(),
+        width: done_w,
+        ..area
+    };
+    (lists, Some(done))
+}
+
 pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, backdrop: bool) {
-    let focused = !backdrop;
     let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
     f.render_widget(Clear, area);
+    let (lists_area, done_area) = columns(area);
+    let done_focused = view.done.focused && done_area.is_some();
+    let focused = !backdrop && !done_focused;
+    match done_area {
+        Some(done_area) => {
+            super::done::draw(f, app, &view.done, done_area, th, !backdrop && done_focused)
+        }
+        None => {
+            if let Some(Overlay::Todos(v)) = &mut app.overlay {
+                v.done.hide();
+            }
+        }
+    }
     let today = super::today();
     let empty = TodoFile::new(&view.dir);
     let file = app.todos.get(&view.dir).unwrap_or(&empty);
     let title = format!("Todos · {}", day_label(today));
     let block = panel_block(&title, focused, th);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if view.page.is_some() {
-        super::history::draw(f, app, view, inner, th, focused);
-        if !backdrop {
-            crate::hints::draw_on_border(f, area, &hints(view), 0, th);
-        }
-        if let Some(Overlay::Todos(v)) = &mut app.overlay {
-            v.area = area;
-        }
-        return;
-    }
+    let inner = block.inner(lists_area);
+    f.render_widget(block, lists_area);
 
-    // A tab per project on the first line, each with what is open in it,
-    // and against its right edge the week so far, when there is room.
+    // A tab per project on the first line, each with what is open in it.
     let tabs = projects(app);
     let project_row = row_rect(inner, 0).unwrap_or_default();
     let labels: Vec<String> = tabs
@@ -2257,30 +2276,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         false,
         th,
     );
-    let strip_w = width_of(&strip);
     f.render_widget(Paragraph::new(Line::from(strip)), project_row);
-    let summary = week_summary(&super::history::week_ticks(app, today), today, th);
-    // A gap after the tabs, and the frame's margin on the right.
-    const GAP: usize = 2;
-    const MARGIN: u16 = 1;
-    let summary_w = width_of(&summary);
-    let mut summary_hits = Vec::new();
-    if strip_w + GAP + summary_w + usize::from(MARGIN) <= project_row.width as usize {
-        let right = Rect {
-            width: project_row.width.saturating_sub(MARGIN),
-            ..project_row
-        };
-        // `✓N today` and `✓N this week`, each a way onto the DONE page.
-        let x0 = right.right().saturating_sub(summary_w as u16);
-        let at = |from: usize, to: usize, week: bool| {
-            let x = x0 + width_of(&summary[..from]) as u16;
-            let w = width_of(&summary[from..to]) as u16;
-            (Rect::new(x, right.y, w, 1), week)
-        };
-        summary_hits = vec![at(0, 2, false), at(3, 5, true)];
-        let line = Line::from(summary).alignment(ratatui::layout::Alignment::Right);
-        f.render_widget(Paragraph::new(line), right);
-    }
     // Under the tabs the filter while `⌘F` has it up, else a blank row.
     let below_tabs = crate::ui::below_first_row(inner);
     if let Some(query_area) = row_rect(below_tabs, 0).filter(|_| view.filtering) {
@@ -2361,10 +2357,15 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
 
     let mut pick = view.pick.clone();
     if let Some(pick) = &mut pick {
-        draw_pick(f, area, file, pick, th);
+        draw_pick(f, lists_area, file, pick, th);
     }
     if !backdrop {
-        crate::hints::draw_on_border(f, area, &hints(view), 0, th);
+        let hints = if done_focused {
+            super::done::hints()
+        } else {
+            hints(view)
+        };
+        crate::hints::draw_on_border(f, area, &hints, 0, th);
     }
 
     if let Some(Overlay::Todos(v)) = &mut app.overlay {
@@ -2376,7 +2377,6 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         v.row_rects = row_rects;
         v.project_hits = project_hits;
         v.project_row = project_row;
-        v.summary_hits = summary_hits;
         if let Some(at) = cursor {
             v.selected = at;
             v.cursor = entries.get(at).copied();
@@ -2391,40 +2391,6 @@ fn spaced(entry: Entry) -> bool {
         entry,
         Entry::Header { depth: 0, .. } | Entry::Input { depth: 0 } | Entry::AddRow
     )
-}
-
-/// The tab row's right end: what was ticked today and this week — `days`,
-/// Monday first — then the week a bar a day — today's brightest, the
-/// days to come a faint `·`. Spans 0–1 are `✓N today`, 3–4 `✓N this
-/// week`: what a click opens the DONE page on.
-fn week_summary(days: &[usize; 7], today: NaiveDate, th: Theme) -> Vec<Span<'static>> {
-    use chrono::Datelike;
-    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let at = today.weekday().num_days_from_monday() as usize;
-    let max = days.iter().copied().max().unwrap_or(0).max(1);
-    // The busiest day reaches the tallest bar.
-    const TOP: usize = BARS.len() - 1;
-    let mut spans = vec![
-        Span::styled(format!("✓{}", days[at]), Style::default().fg(th.ok)),
-        Span::styled(" today", Style::default().fg(th.dim)),
-        Span::styled(" · ", Style::default().fg(th.dim)),
-        Span::styled(
-            format!("✓{}", days.iter().sum::<usize>()),
-            Style::default().fg(th.ok),
-        ),
-        Span::styled(" this week", Style::default().fg(th.dim)),
-        Span::raw(" "),
-    ];
-    for (i, n) in days.iter().enumerate() {
-        let (bar, color) = match (i.cmp(&at), *n) {
-            (std::cmp::Ordering::Greater, _) => ('·', th.faint),
-            (_, 0) => (BARS[0], th.faint),
-            (std::cmp::Ordering::Equal, n) => (BARS[n * TOP / max], th.text),
-            (_, n) => (BARS[n * TOP / max], th.muted),
-        };
-        spans.push(Span::styled(bar.to_string(), Style::default().fg(color)));
-    }
-    spans
 }
 
 /// A row's lines, and where the chips a click acts on sit on its first:
@@ -2962,6 +2928,10 @@ mod tests {
         v.confirm_delete = None;
         v.filtering = true;
         check(&v);
+        crate::hints::assert_hints_from(
+            &super::super::done::hints(),
+            super::super::done::keys::ALL,
+        );
     }
 
     /// Lines break at spaces, the first narrower than the rest, each
@@ -2982,12 +2952,10 @@ mod tests {
     }
 
     /// A tab put away keeps its cursor and filter, and lets go of what
-    /// was half done on it — the selection, the held ticks and the DONE
-    /// page too.
+    /// was half done on it — the selection and the held ticks too.
     #[test]
     fn a_parked_tab_keeps_its_place_and_drops_the_half_done() {
         let mut v = view();
-        v.page = Some(super::super::history::DonePage::default());
         v.query.insert_str("resend");
         v.cursor = Some(Entry::Item { id: 3, depth: 1 });
         v.input = Some((
@@ -3002,7 +2970,6 @@ mod tests {
         v.anchor = Some(3);
         v.held = vec![3];
         let parked = v.clone().park();
-        assert!(parked.page.is_none());
         assert_eq!(parked.query.trim(), "resend");
         assert_eq!(parked.cursor, v.cursor);
         assert!(parked.input.is_none() && parked.pick.is_none());

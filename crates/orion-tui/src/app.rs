@@ -5228,9 +5228,11 @@ impl App {
     }
 
     /// This client just saw `worktree`'s pull request turn merged: start
-    /// the row's ONE-SHOT SWEEP. Stamps that have run out go as new ones
-    /// arrive, so the map holds a few seconds' worth at most.
+    /// the row's ONE-SHOT SWEEP, and tick the todos its agents were sent
+    /// at. Stamps that have run out go as new ones arrive, so the map holds
+    /// a few seconds' worth at most.
     pub fn note_merge_landed(&mut self, worktree: WorktreeId) {
+        crate::todos::merge_landed(self, &worktree);
         self.merge_landed
             .retain(|_, at| at.elapsed() < ONE_SHOT_SWEEP);
         self.merge_landed

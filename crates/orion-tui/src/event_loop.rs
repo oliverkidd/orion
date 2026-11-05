@@ -12357,6 +12357,8 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             app.tree.links = links;
             app.pr_seen = pr_seen.into_iter().map(|s| (s.url, s.marker)).collect();
             adopt_project_keys(app);
+            // Every project's todos, for the sessions' rows that name theirs.
+            crate::todos::view::load_every_list(app);
             // The cache painted rows for whatever the last run's tree had;
             // the ones this tree no longer has go, before they could be
             // written back.
@@ -37506,9 +37508,10 @@ mod tests {
     }
 
     /// A tab per open project, in the projects' order, each with what is
-    /// open in it: `←`/`→` walk them round the ends — `⇧←`/`⇧→` and `Tab`
-    /// too, and `⌘2` goes straight to the second — each project's tab
-    /// coming back as it was left: its cursor, its filter, DONE open.
+    /// open in it: `⇧←`/`⇧→` walk them round the ends — `Tab` too, and
+    /// `⌘2` goes straight to the second — each project's tab coming back
+    /// as it was left: its cursor, its filter. Plain `→` is the DONE
+    /// panel's, which stays as it is from tab to tab.
     #[test]
     fn arrows_walk_a_tab_per_project() {
         use crate::todos::view::Entry;
@@ -37532,11 +37535,17 @@ mod tests {
             assert!(text.contains("nightshift"), "{text}");
             assert!(!text.contains("Log"), "no Today/Log tabs: {text}");
 
-            // Right, plain, the moment the modal is up.
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            // ⇧→ the moment the modal is up, and back.
+            press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
             assert_eq!(todo_view(&app).project.0, "p2");
-            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
             assert_eq!(todo_view(&app).project.0, "p1");
+            // Plain → puts the keys on the DONE panel; ← hands them back.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            assert_eq!(todo_view(&app).project.0, "p1");
+            assert!(todo_view(&app).done.focused);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            assert!(!todo_view(&app).done.focused);
 
             // Left on an item with a filter typed: ←/→ are the filter's
             // caret then, ⇧→ still the tabs'.
@@ -37633,10 +37642,10 @@ mod tests {
     }
 
     /// A tick strikes the item through where it stands, the cursor
-    /// staying on it — nothing moves under it; the summary says so. Once
-    /// the modal goes, so does the item — and its DONE page,
-    /// opened by a click on the summary, has it under its group, where
-    /// `space` puts it back on the list.
+    /// staying on it — nothing moves under it — and the DONE panel beside
+    /// the list has it at once. Once the modal goes, so does the item from
+    /// the list; the panel still has it under its project, with when, and
+    /// `space` there puts it back on the list.
     #[test]
     fn a_ticked_todo_stays_put_then_leaves_the_list() {
         let mut out = Vec::new();
@@ -37648,7 +37657,7 @@ mod tests {
             let text = buffer_text(&terminal);
             assert!(text.contains("☑"), "{text}");
             assert!(text.contains("· 1 open · ✓1"), "{text}");
-            assert!(text.contains("✓1 today · ✓1 this week"), "{text}");
+            assert!(text.contains("✓1 this week"), "the panel has it: {text}");
             let (x, y) = find_cell(&terminal, "run plan");
             let cell = &terminal.backend().buffer()[(x, y)];
             assert!(cell
@@ -37676,33 +37685,101 @@ mod tests {
             run_action(&mut app, crate::keymap::Action::Todos);
             assert_eq!(order(&app), ["setup resend"]);
             let terminal = draw_todos(&mut app);
-            let text = buffer_text(&terminal);
-            assert!(!text.contains("run plan"), "{text}");
-            assert!(!text.contains("DONE BEFORE TODAY"), "{text}");
-
-            // A click on `✓1 today`: the DONE page, project over group
-            // over item.
-            let (x, y) = find_cell(&terminal, "✓1 today");
-            click(&mut app, x, y, &mut out);
-            let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("Today ✓1"), "{text}");
-            let (project, group, item) = (
-                text.find("DEMO").unwrap(),
-                text.find("Emails").unwrap(),
-                text.find("run plan").unwrap(),
+            let (list_x, _) = find_cell(&terminal, "setup resend");
+            let (done_x, _) = find_cell(&terminal, "run plan");
+            assert!(
+                done_x > list_x,
+                "only on the panel: {}",
+                buffer_text(&terminal)
             );
-            assert!(project < group && group < item, "{text}");
-            assert!(text.contains("10:00"), "when: {text}");
-            // `→` turns to the week; `space` puts it back; Esc to the list.
+            assert!(buffer_text(&terminal).contains("Tue"), "when it was ticked");
+
+            // `→` into the panel; `Tab` to today, the time it was ticked;
+            // `space` puts it back; `←` back to the list.
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            assert!(buffer_text(&draw_todos(&mut app)).contains("Tue 6 Oct"));
+            press(&mut app, KeyCode::Tab, KeyModifiers::SHIFT, &mut out);
+            let text = buffer_text(&draw_todos(&mut app));
+            assert!(text.contains("✓1 today"), "{text}");
+            assert!(text.contains("10:00"), "when: {text}");
             press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
             assert!(todo_file(&app).items.iter().all(|i| i.done.is_none()));
             let text = buffer_text(&draw_todos(&mut app));
-            assert!(text.contains("nothing ticked this week yet"), "{text}");
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(todo_view(&app).page.is_none());
+            assert!(text.contains("nothing ticked today yet"), "{text}");
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            assert!(!todo_view(&app).done.focused);
             assert_eq!(order(&app), ["run plan", "setup resend"]);
+        });
+    }
+
+    /// A todo an agent was sent at is ticked when that agent's pull request
+    /// is seen to merge — its worktree kept on the item, so a session
+    /// deleted since counts too — struck through where it stands while the
+    /// modal is up, on the DONE panel at once, and the footer says so. One
+    /// sent at another session, and a pull request met already merged,
+    /// tick nothing.
+    #[test]
+    fn a_todo_is_ticked_when_its_agents_pull_request_merges() {
+        crate::todos::with_now(todo_clock(6), || {
+            let mut app = todos_with(TWO_EMAILS);
+            let w1 = orion_core::WorktreeId("w1".into());
+            let ids: Vec<u64> = todo_file(&app).items.iter().map(|i| i.id).collect();
+            let todo = crate::todos::TodoRef {
+                repo_path: "/tmp/demo".into(),
+                item: ids[0],
+                also: Vec::new(),
+            };
+            crate::todos::agent_started(&mut app, todo, &orion_core::AgentId("a1".into()));
+            assert_eq!(
+                todo_file(&app).item(ids[0]).unwrap().worktree.as_deref(),
+                Some("w1")
+            );
+            if let Some(file) = app.todos.get_mut(std::path::Path::new("/tmp/demo")) {
+                file.item_mut(ids[1]).unwrap().agent = Some("elsewhere".into());
+                let deleted = file.item_mut(ids[2]).unwrap();
+                deleted.agent = Some("deleted-since".into());
+                deleted.worktree = Some("w1".into());
+            }
+            let merged = |number| {
+                let mut pr = cached_pr(number);
+                pr.answered_state = crate::pull_request::STATE_MERGED.into();
+                pr
+            };
+            land_pull_request(&mut app, w1.clone(), Lookup::Found(merged(7)));
+            assert!(
+                todo_file(&app).items.iter().all(|i| i.done.is_none()),
+                "met already merged: not news"
+            );
+
+            land_pull_request(&mut app, w1.clone(), Lookup::Found(cached_pr(8)));
+            land_pull_request(&mut app, w1.clone(), Lookup::Found(merged(8)));
+            let file = todo_file(&app);
+            assert!(
+                file.item(ids[0]).unwrap().done.is_some(),
+                "its agent's PR merged"
+            );
+            assert!(
+                file.item(ids[1]).unwrap().done.is_none(),
+                "another session's"
+            );
+            assert!(
+                file.item(ids[2]).unwrap().done.is_some(),
+                "its session gone"
+            );
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("2 todos done — their pull request merged")
+            );
+            assert!(
+                todo_view(&app).held.contains(&ids[0]),
+                "in sight where it stood"
+            );
+            let terminal = draw_todos(&mut app);
+            let (x, y) = find_cell(&terminal, "run plan");
+            let cell = &terminal.backend().buffer()[(x, y)];
+            assert!(cell
+                .modifier
+                .contains(ratatui::style::Modifier::CROSSED_OUT));
+            assert!(buffer_text(&terminal).contains("✓2 this week"));
         });
     }
 

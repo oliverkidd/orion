@@ -78,8 +78,8 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         Overlay::ProjectPicker(p) => vec![(Field::Only, &mut p.query)],
         Overlay::Autofix(form) => vec![(Field::AutofixNote, &mut form.note)],
         Overlay::WeekReview(v) => match v.mode {
-            crate::week_review::Mode::Compose => vec![(Field::ReviewNote, &mut v.note)],
-            crate::week_review::Mode::Reviews => Vec::new(),
+            crate::week_review::Mode::Screen => vec![(Field::ReviewNote, &mut v.note)],
+            crate::week_review::Mode::Page => Vec::new(),
         },
         // An open item field has every key, the filter's too.
         Overlay::Todos(v) => match &mut v.input {
@@ -130,6 +130,7 @@ fn focus(app: &mut App, field: Field) {
             form.row = crate::autofix::Row::Note;
         }
         (Some(Overlay::WeekReview(view)), Field::ReviewNote) => {
+            view.side = crate::week_review::Side::Form;
             view.row = crate::week_review::Row::Note;
         }
         (Some(Overlay::Review(view)), Field::PrReviewSummary) => {

@@ -8,15 +8,16 @@
 //! its level's run. `⌥→` groups items — one alone becomes a group of its
 //! name — and `⌥←` takes them out again. Ticking an item strikes it through
 //! where it stands while the modal is up; once it goes, so does the item
-//! — kept in the file for the DONE page (`history`), what was ticked today or this
-//! week. A group with everything in it ticked is complete, and goes the
-//! same way. The modal itself is `view`.
+//! — kept in the file for the DONE panel (`done`) beside the lists, what
+//! was ticked today, this week, month or quarter. A group with everything
+//! in it ticked is complete, and goes the same way. The modal itself is
+//! `view`.
 //!
 //! Days are local, never UTC: a tick at 11pm is that day's. "Today" is
 //! read off the clock at every draw ([`today`]), so the list rolls over
 //! by itself after midnight with no day stored anywhere.
 
-pub mod history;
+pub mod done;
 pub mod store;
 pub mod view;
 
@@ -67,8 +68,15 @@ pub struct TodoRef {
 
 /// The DAEMON made the session a launch from the TODOS MODAL asked for:
 /// each item it was sent at remembers it — its chip, and `Enter`'s way
-/// back to it.
+/// back to it — and the worktree it works in, whose pull request merging
+/// ticks the item.
 pub(crate) fn agent_started(app: &mut crate::app::App, todo: TodoRef, agent: &orion_core::AgentId) {
+    let worktree = app
+        .tree
+        .agents
+        .iter()
+        .find(|a| &a.id == agent)
+        .map(|a| a.worktree_id.0.clone());
     let Some(file) = app.todos.get_mut(&todo.repo_path) else {
         return;
     };
@@ -76,6 +84,7 @@ pub(crate) fn agent_started(app: &mut crate::app::App, todo: TodoRef, agent: &or
     for id in std::iter::once(todo.item).chain(todo.also) {
         if let Some(item) = file.item_mut(id) {
             item.agent = Some(agent.0.clone());
+            item.worktree.clone_from(&worktree);
             changed = true;
         }
     }
@@ -83,6 +92,77 @@ pub(crate) fn agent_started(app: &mut crate::app::App, todo: TodoRef, agent: &or
         store::save(file);
         app.dirty = true;
     }
+}
+
+/// The todo the session `agent` was sent at, in whichever list holds it:
+/// what the session's row on the grid names after its prompt.
+pub(crate) fn of_agent<'a>(
+    app: &'a crate::app::App,
+    agent: &orion_core::AgentId,
+) -> Option<&'a Item> {
+    // An open one first: a launch at several items puts its agent on each.
+    app.todos
+        .values()
+        .flat_map(|file| &file.items)
+        .filter(|item| item.agent.as_deref() == Some(agent.0.as_str()))
+        .min_by_key(|item| item.done.is_some())
+}
+
+/// An item's box: `☑` ticked, `☐` open.
+pub(crate) fn mark(item: &Item) -> &'static str {
+    if item.done.is_some() {
+        "☑"
+    } else {
+        "☐"
+    }
+}
+
+/// `worktree`'s pull request was just seen to merge: every open todo an
+/// agent was sent at there is ticked — held in sight where it stands, as
+/// a tick by hand is, on a TODOS MODAL up on its list — and the footer
+/// says so. The item's own worktree finds it, and for one kept from
+/// before that was, the agent on it.
+pub(crate) fn merge_landed(app: &mut crate::app::App, worktree: &orion_core::WorktreeId) {
+    let agents: Vec<String> = app
+        .tree
+        .agents
+        .iter()
+        .filter(|a| &a.worktree_id == worktree)
+        .map(|a| a.id.0.clone())
+        .collect();
+    view::load_every_list(app);
+    let on_it = |item: &Item| match &item.worktree {
+        Some(w) => *w == worktree.0,
+        None => item.agent.as_ref().is_some_and(|a| agents.contains(a)),
+    };
+    let now = now();
+    let open_dir = view::view(app).map(|v| v.dir.clone());
+    let (mut count, mut first, mut held) = (0, None, Vec::new());
+    for (dir, file) in &mut app.todos {
+        let before = count;
+        for item in file.items.iter_mut() {
+            if item.done.is_some() || item.agent.is_none() || !on_it(item) {
+                continue;
+            }
+            item.done = Some(now);
+            count += 1;
+            first.get_or_insert_with(|| item.text.clone());
+            if open_dir.as_ref() == Some(dir) {
+                held.push(item.id);
+            }
+        }
+        if count > before {
+            store::save(file);
+        }
+    }
+    let words = match (count, first) {
+        (1, Some(text)) => format!("done: {text} — its pull request merged"),
+        (0, _) | (_, None) => return,
+        (n, _) => format!("{n} todos done — their pull request merged"),
+    };
+    view::hold(app, &held);
+    app.flash = Some(crate::flash::Flash::done(words));
+    app.dirty = true;
 }
 
 /// How deep groups nest: a top-level group and the groups in it. The
@@ -405,22 +485,6 @@ impl TodoFile {
         for sub in self.subgroups(Some(group)) {
             self.add_counts(sub.id, today, counts, depth + 1);
         }
-    }
-
-    /// How many items were ticked on each day of `today`'s week, Monday
-    /// first: the tab row's sparkline. Days still to come are 0.
-    pub fn week_ticks(&self, today: NaiveDate) -> [usize; 7] {
-        let monday = monday(today);
-        let mut days = [0; 7];
-        for day in self.items.iter().filter_map(Item::done_on) {
-            let Ok(i) = usize::try_from((day - monday).num_days()) else {
-                continue;
-            };
-            if let Some(n) = days.get_mut(i) {
-                *n += 1;
-            }
-        }
-        days
     }
 
     /// Every open item, the count on the project's tab.
@@ -950,6 +1014,7 @@ impl TodoFile {
             created: today,
             done: None,
             agent: None,
+            worktree: None,
         });
         id
     }
@@ -1254,21 +1319,16 @@ mod tests {
         assert!(!file.lift_deep_groups(), "once");
     }
 
-    /// The week runs Monday to Sunday: a tick the Sunday before is last
-    /// week's, one on Monday the week's first day.
+    /// The week runs Monday to Sunday: a Sunday's is the Monday before.
     #[test]
-    fn the_week_counts_ticks_from_monday() {
-        let mut file = TodoFile::new(Path::new("/r"));
-        let g = file.add_group(None, "G");
+    fn the_week_starts_on_monday() {
         // 2026-10-04 is a Sunday, 10-05 a Monday, 10-07 a Wednesday.
-        for (d, h) in [(4, 12), (5, 9), (5, 18), (7, 8)] {
-            let id = file.add_item(g, "x", day(1));
-            file.toggle(id, at(d, h));
-        }
-        file.add_item(g, "open", day(1));
-        assert_eq!(file.week_ticks(day(7)), [2, 0, 1, 0, 0, 0, 0]);
-        assert_eq!(file.week_ticks(day(4)), [0, 0, 0, 0, 0, 0, 1]);
         assert_eq!(monday(day(7)), day(5));
+        assert_eq!(monday(day(5)), day(5));
+        assert_eq!(
+            monday(day(4)),
+            NaiveDate::from_ymd_opt(2026, 9, 28).unwrap()
+        );
     }
 
     /// A deleted item's id is never handed out again — not even across a

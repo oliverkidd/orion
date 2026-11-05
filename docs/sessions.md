@@ -452,7 +452,8 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   A session is its status dot and name,
   what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
-  `›`, and how long ago at the right. The pull requests come from the same `gh` lookups
+  `›` — and, for a session sent at a todo, that todo after it, a dim `☐ text` (`☑` once ticked)
+  that a long prompt leaves its share of the line — and how long ago at the right. The pull requests come from the same `gh` lookups
   the PULL REQUESTS MODAL makes, swept over every checkout the grid lists. The header counts the project's open pull requests beside the session count
   (`4 sessions  3 prs`), so what is waiting on the repo is read without opening `v` to find it —
   and a click on the count opens that list, as the key does. When the room left
@@ -629,28 +630,39 @@ rebindable (`pull_requests`).
 
 ## The WEEK IN REVIEW
 
-`⌘⇧Y` (`⇧W`) writes up what was finished in the selected PROJECT in the last 7 days — the pull
-requests merged, the Linear issues done, the todos ticked — as a review to read aloud with the
-product on screen: by product area, each point numbered, with what to **Show** and what to **Say**
-under the ones worth a demo.
+`⌘⇧Y` (`⇧W`) writes up what was finished in the selected PROJECT in the last 7 days — or 2 weeks,
+or a month — the pull requests merged, the Linear issues done, the todos ticked — as a review to
+read aloud with the product on screen: by product area, each point numbered, with what to **Show**
+and what to **Say** under the ones worth a demo.
 
-orion gathers; a model writes. Opening the modal fetches every pull request merged in the week with
+It is a screen of its own. Down the left, **New review**: its options — Whose, Where, the Range, the
+sources and the Note — and under them exactly what would be sent. Down the right, **Reviews**: the
+one being written, then the ones kept, newest first, each named for the week it ends in (`Week 45`,
+`Weeks 43–45` for two, `Month to 5 Nov`) and whose it is, `new` until it has been read. `Tab` moves
+between the two. `Enter` on the new review writes it and turns to a fresh page that shows it being
+written and what went in; when it lands, that page is the review. `Enter` (or a click) on a review
+in the list opens it on its page, and `Esc` comes back to the screen. Closed while one is being
+written, the modal opens next time on that review's page.
+
+orion gathers; a model writes. Opening the modal fetches every pull request merged in the range with
 its description (the PULL REQUESTS MODAL's merged list carries titles, and a review is written from
-what a pull request says it does), a page of 100 at a time until the week is covered. The done
-issues and ticked todos come from the lists already in hand. `Enter` then puts all of it in one
-prompt and sends it through a Claude account's print mode with no tools: text in, text out. No
-session starts, nothing runs in a checkout, and there is nothing to tidy up after.
+what a pull request says it does), a page of 100 at a time until the range is covered; a longer
+range is a fetch of its own, asked for as it is picked. The done issues and ticked todos come from
+the lists already in hand — Linear's holds the last 7 days of done issues, so a longer range has
+that week of them, as its row says. `Enter` then puts all of it in one prompt and sends it through
+a Claude account's print mode with no tools: text in, text out. No session starts, nothing runs in
+a checkout, and there is nothing to tidy up after.
 
 The account is one orion runs sessions on, never whatever a bare `claude` would sign in as: the one
 the **Week review** system preset runs on (see [Agent presets](#agent-presets); a new list puts it
 on your default agent's account), else your default agent's when that is a Claude account, and
 otherwise the first Claude account that is switched on. The model and effort are the preset's too,
 sonnet · medium unless you change them. It runs as that account's own CLI with that account's config dir, so the ask lands on
-that sign-in and that account's usage. Compose says which on its **Via** line, as Claude accounts
+that sign-in and that account's usage. The new review says which on its **Via** line, as Claude accounts
 names it — `Work (a@b.co)`, or `Work (not signed in)` — and refuses to send, saying why, when no
 Claude account is on or its CLI is not on your PATH. An account that reads as not signed in is still
 tried: that record only knows a browser sign-in, and one on an API key answers all the same; one that
-cannot answer says so itself, and Compose shows what it said. A very large
+cannot answer says so itself, and the new review shows what it said. A very large
 pull request — a feature branch merged in one go — sends far more of its description than an
 ordinary one, since its commit list is all the description it has; one that only moves a standing
 branch into `main` is marked a release and left out.
@@ -661,19 +673,19 @@ area lists who contributed to it. **Where** is this project or all of them.
 
 The model is asked to list only what a person outside the team that built it would want to know or
 see, and never to count. What it sends back is held to its shape without a model: every pull
-request it names was in the week, every owner is the author of the point's first pull request. A
+request it names was in the range, every owner is the author of the point's first pull request. A
 reply that strays is still shown, with a line under its title saying how. The last line — how many
 were merged and not listed — is orion's own subtraction, so it is exact.
 
-Reviews are kept as Markdown under the DATA DIR (`reviews/`), the last 12 per project, with what
-each was written from beside it. The **Note** typed on Compose is kept per project, so what matters
-there is said once.
+Reviews are kept as Markdown under the DATA DIR (`reviews/`), the last 12 per project (and 12 of
+all projects), with what each was written from beside it. The **Note** typed on the new review is
+kept per project, so what matters there is said once.
 
 ## TODOS
 
 `⌘I` (`^Q` where the terminal sends no ⌘) opens the TODOS MODAL: every open PROJECT's own todo
 list, a tab each along the top in the order of the grid's project tabs, then any project whose
-tab is closed, opened on the selected project's tab (`←`/`→`, `Tab` or a click for another,
+tab is closed, opened on the selected project's tab (`⇧←`/`⇧→`, `Tab` or a click for another,
 `⌘1`–`⌘9` straight to one; each comes back as it was left while the modal is up). Each
 list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, in
 an order that is the list's own. The list is this machine's alone — one file per checkout under orion's data folder
@@ -695,12 +707,17 @@ the bottom of the group it is in (or of the list). Ticked items and complete gro
 until the modal closes; the next time it opens they are gone from the list. Nothing unfinished goes
 anywhere — it is simply still there tomorrow, a day older.
 
-The project row's right end says what was ticked today and this week, across every project, with a
-bar for each day from Monday. A click on `✓N today` or `✓N this week` opens the **DONE** page: what
-was ticked in that span, a section per project in the tabs' order, each over the groups it was
-ticked in and nested groups under theirs, with the time (today) or day (this week) it was ticked.
-`←`/`→` turn between today and the week, `Space` puts an item ticked by mistake back on its list,
-`Esc` goes back. Days are local: a tick at 11pm is that day's, and the week starts on Monday.
+Down the right, beside the lists, is the **DONE** panel: your ticked todos and nothing else,
+across every project, over one span — **Today**, the **Week** (from Monday, the one it opens on),
+the **Month** (from the 1st) or the **Quarter** (from its first day). Under the span, how many were
+ticked in it and a bar chart of it: a bar a day for today and the week (Monday to Sunday, today's
+bright, the days to come dotted) and for the month (a bar a week when the panel is too narrow for
+its days), a bar a week for the quarter, labelled with its months. Then what was ticked, a section
+per project in the tabs' order, the latest first, each with when — the time today, the day this
+week, the date further back. `→` puts the keys on the panel and `←` (or `Esc`) hands them back;
+there `↑`/`↓` walk the items, `Tab` (`⇧Tab`) turns the span — a click on one does too — and
+`Space` puts an item ticked by mistake back on its list. A window too narrow for both columns shows
+the lists alone. Days are local: a tick at 11pm is that day's.
 
 The order is yours: `⌥↑`/`⌥↓` move an item a place up or down the list as it is drawn, whatever
 its priority — past the next item, into a nested group it meets and through it, out of the bottom
@@ -744,4 +761,9 @@ the item's text in the box with `Context: todo in <group › subgroup>` under it
 and `Enter` sends it; `Esc` comes back to the list. `⇧Tab` picks one of your AGENT PRESETS
 instead. The session it starts is written onto the item: its row shows `● agent`, in the session's
 STATUS MARK colour, and from then on `Enter` — or a click on the chip — closes the modal and lands
-on that session. When the session is deleted the chip goes, and `Enter` sends a new one.
+on that session. When the session is deleted the chip goes, and `Enter` sends a new one. The
+session's row on the grid names the todo after its prompt, a dim `☐ text`. And when orion sees the
+pull request on that session's worktree merge, the item is ticked — every item one launch was sent
+at, the session deleted since or not, since the item keeps its worktree too — and the footer says so (`done: <text> — its pull request merged`); with the modal up it
+strikes through where it stands, as a tick by hand does. A pull request found already merged (a
+first lookup) ticks nothing, so an item put back on its list stays there.
