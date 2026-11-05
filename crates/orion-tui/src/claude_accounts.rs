@@ -391,10 +391,7 @@ pub fn label(base: &str, record: &Record) -> String {
 /// off the last refresh, so a grid never opens the config to ask; a
 /// rename asks for one at once.
 pub fn short_name(kind: AgentKind, custom: Option<&str>) -> Option<String> {
-    let id = match kind {
-        AgentKind::Custom => custom?.trim(),
-        _ => kind.as_str(),
-    };
+    let id = orion_core::harness::registry_id(kind, custom);
     store::short(|short| short.get(id).cloned())
 }
 
@@ -516,10 +513,7 @@ fn pick_letters(seed: &str, taken: &[String]) -> String {
 /// Claude account on a machine with more than one, None everywhere else
 /// — one account, any other harness — and the row keeps its width.
 pub fn account_tag(kind: AgentKind, custom: Option<&str>) -> Option<AccountTag> {
-    match kind {
-        AgentKind::Custom => tag_of(custom?),
-        _ => tag_of(kind.as_str()),
-    }
+    tag_of(orion_core::harness::registry_id(kind, custom))
 }
 
 /// [`account_tag`] by the account's registry id.
@@ -539,7 +533,8 @@ pub fn sessions_on<'a>(agents: &'a [orion_core::Agent], id: &str) -> Vec<&'a ori
     agents
         .iter()
         .filter(|a| {
-            a.kind == AgentKind::Custom && a.custom_harness.as_deref().map(str::trim) == Some(id)
+            a.custom_harness.is_some()
+                && orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref()) == id
         })
         .collect()
 }
@@ -1297,14 +1292,14 @@ mod tests {
                 short_name(AgentKind::Claude, None).as_deref(),
                 Some("a@b.co")
             );
-            assert_eq!(short_name(AgentKind::Custom, Some("claude-2")), None);
+            assert_eq!(short_name(AgentKind::Claude, Some("claude-2")), None);
             m.sign(".claude-2/.claude.json", Some("c@d.co"));
             assert!(refresh_now());
             assert!(!refresh_now(), "nothing moved since");
             let cfg = Config::load();
             assert_eq!(label_of(&cfg, "claude-2"), "Claude (c@d.co)");
             assert_eq!(
-                short_name(AgentKind::Custom, Some("claude-2")).as_deref(),
+                short_name(AgentKind::Claude, Some("claude-2")).as_deref(),
                 Some("c@d.co")
             );
             assert!(same_account_groups(&cfg.harness_registry()).is_empty());
@@ -1667,13 +1662,13 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             ..agent(kind, custom)
         };
         let agents = vec![
-            named("one", AgentKind::Custom, Some("claude-2")),
+            named("one", AgentKind::Claude, Some("claude-2")),
             orion_core::Agent {
                 archived: true,
-                ..named("two", AgentKind::Custom, Some("claude-2"))
+                ..named("two", AgentKind::Claude, Some("claude-2"))
             },
             named("default", AgentKind::Claude, None),
-            named("other", AgentKind::Custom, Some("claude-3")),
+            named("other", AgentKind::Claude, Some("claude-3")),
         ];
         let on: Vec<&str> = sessions_on(&agents, "claude-2")
             .iter()
@@ -1720,7 +1715,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
                 )]
             );
             assert_eq!(
-                cfg.continue_targets(&agent(AgentKind::Custom, Some("claude-2"))),
+                cfg.continue_targets(&agent(AgentKind::Claude, Some("claude-2"))),
                 [(
                     "claude".to_string(),
                     "Claude (a@b.co) · same account".to_string()
@@ -1744,7 +1739,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
             assert_eq!(
                 crate::agent_picker::session_harness_badge_in(
-                    &agent(AgentKind::Custom, Some("claude-2")),
+                    &agent(AgentKind::Claude, Some("claude-2")),
                     &cfg
                 ),
                 "c@d.co"
@@ -1755,7 +1750,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
             let preset = crate::agent_presets::AgentPreset {
                 name: "r".into(),
-                kind: AgentKind::Custom,
+                kind: AgentKind::Claude,
                 custom_harness: Some("claude-2".into()),
                 model: Some("opus".into()),
                 effort: None,
@@ -1771,7 +1766,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             refresh_now();
             assert_eq!(
                 crate::agent_picker::session_harness_badge_in(
-                    &agent(AgentKind::Custom, Some("claude-2")),
+                    &agent(AgentKind::Claude, Some("claude-2")),
                     &Config::load()
                 ),
                 "claude-2",
@@ -1811,7 +1806,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             assert_eq!(cfg.quick_prompt_kind, "claude-2");
             assert_eq!(
                 cfg.quick_prompt_harness(),
-                (AgentKind::Custom, Some("claude-2".to_string()))
+                (AgentKind::Claude, Some("claude-2".to_string()))
             );
             assert_eq!(
                 cfg.value_label(crate::config::SettingKind::QuickPromptKind),
@@ -1823,7 +1818,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             );
             assert_eq!(
                 (launch.kind, launch.custom.as_deref()),
-                (AgentKind::Custom, Some("claude-2"))
+                (AgentKind::Claude, Some("claude-2"))
             );
             cfg.claude_accounts[0].enabled = false;
             assert_eq!(cfg.quick_prompt_harness(), (AgentKind::Claude, None));
@@ -1974,7 +1969,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             assert_eq!(label_of(&cfg, "claude-work"), "Work (not signed in)");
             assert_eq!(label_of(&cfg, "claude"), "Claude (a@b.co)");
             assert_eq!(
-                short_name(AgentKind::Custom, Some("claude-work")).as_deref(),
+                short_name(AgentKind::Claude, Some("claude-work")).as_deref(),
                 Some("Work"),
                 "named, so not its id even signed out"
             );
@@ -1993,7 +1988,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             refresh_now();
             assert_eq!(label_of(&Config::load(), "claude-work"), "Work (w@corp.co)");
             assert_eq!(
-                short_name(AgentKind::Custom, Some("claude-work")).as_deref(),
+                short_name(AgentKind::Claude, Some("claude-work")).as_deref(),
                 Some("Work")
             );
         });
@@ -2131,7 +2126,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             let cfg = Config::load();
             assert_eq!(label_of(&cfg, "claude-work"), "work (me@work.co)");
             assert_eq!(
-                short_name(AgentKind::Custom, Some("claude-work")).as_deref(),
+                short_name(AgentKind::Claude, Some("claude-work")).as_deref(),
                 Some("work")
             );
 
@@ -2139,7 +2134,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             assert!(note.contains("stays on disk"), "{note}");
             refresh_now();
             let cfg = Config::load();
-            assert_eq!(short_name(AgentKind::Custom, Some("claude-work")), None);
+            assert_eq!(short_name(AgentKind::Claude, Some("claude-work")), None);
             assert_eq!(
                 dir_state(&home.join(".claude-work")),
                 Some(SignIn::As("me@work.co".into()))

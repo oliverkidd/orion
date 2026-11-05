@@ -92,8 +92,8 @@ pub(crate) struct CreateAgentSpec {
     pub worktree: WorktreeId,
     pub name: String,
     pub kind: AgentKind,
-    /// Registry id of the custom harness, when `kind` is
-    /// [`AgentKind::Custom`].
+    /// The registry id beside `kind`: the Claude account, or the custom
+    /// harness ([`orion_core::harness::registry_id`]).
     pub custom_harness: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -1207,6 +1207,9 @@ impl Daemon {
         // with its reason, and a deleted entry breaks respawns the same
         // way at boot.
         let harness = resolve_harness(kind, custom_harness.as_deref())?;
+        // The row is stored as what its harness is — a Claude account as
+        // Claude with the account's id — whatever the request called it.
+        let (kind, custom_harness) = harness.session_kind();
         let program = harness.program.trim().to_string();
         // A launch that hands the CLI a first prompt is working from the
         // moment it spawns, so the row says so now instead of staying gray
@@ -1227,9 +1230,11 @@ impl Daemon {
         // name, so the create feels instant. A starting prompt rides the
         // CLI's argv, and a spare already booted bare cannot be handed one;
         // neither can it be handed a PR rule.
-        // Nor can one booted in edit mode be handed plan or ask.
+        // Nor can one booted in edit mode be handed plan or ask, nor one
+        // booted on the default account a launch on another account.
         let adopted = (pr_url.is_none()
             && starting_prompt.is_none()
+            && custom_harness.is_none()
             && mode == orion_core::harness::AgentMode::Edit)
             .then(|| self.take_prewarmed(&worktree_id, kind, model.as_deref(), effort.as_deref()))
             .flatten();
@@ -1260,11 +1265,7 @@ impl Daemon {
             archived_at: 0,
             unseen: false,
             kind,
-            custom_harness: custom_harness
-                .as_deref()
-                .map(str::trim)
-                .filter(|id| !id.is_empty())
-                .map(str::to_string),
+            custom_harness,
             model,
             effort,
             session_id: None,
@@ -3828,7 +3829,7 @@ fn resolve_harness_in(
     id: Option<&str>,
     all: &[orion_core::harness::HarnessDescriptor],
 ) -> Result<orion_core::harness::HarnessDescriptor> {
-    if kind == AgentKind::Custom && id.map(str::trim).filter(|id| !id.is_empty()).is_none() {
+    if orion_core::harness::registry_id(kind, id).is_empty() {
         bail!("custom harness launch is missing its registry id");
     }
     orion_core::harness::resolve(all, kind, id)
@@ -4404,7 +4405,8 @@ mod tests {
             enabled: true,
         };
         let all = harness_registry_in(&std::collections::BTreeMap::new(), &[account]);
-        let harness = resolve_harness_in(AgentKind::Custom, Some("claude-2"), &all).unwrap();
+        let harness = resolve_harness_in(AgentKind::Claude, Some("claude-2"), &all).unwrap();
+        assert_eq!(harness.id, "claude-2");
         assert_eq!(harness.program, "claude");
         assert_eq!(
             harness.launch_env(),
@@ -5074,6 +5076,7 @@ mod tests {
         );
         let mut wrapper = claude.clone();
         wrapper.id = "claude-b".into();
+        wrapper.kind = AgentKind::Custom;
         wrapper.program = "/home/me/bin/claude-b".into();
         let custom = agent(AgentKind::Custom, Some("claude-b"));
         assert_eq!(daemon.claude_projects_roots(&custom, &wrapper), None);
@@ -5083,6 +5086,18 @@ mod tests {
             .insert("CLAUDE_CONFIG_DIR".into(), "/home/me/.claude-b".into());
         assert_eq!(
             daemon.claude_projects_roots(&custom, &pinned),
+            Some(vec![PathBuf::from("/home/me/.claude-b/projects")])
+        );
+        // A Claude account: Claude with its id, in its own dir alone.
+        let account = orion_core::claude_account::ClaudeAccount {
+            id: "claude-b".into(),
+            config_dir: "/home/me/.claude-b".into(),
+            name: String::new(),
+            enabled: true,
+        }
+        .descriptor(&claude);
+        assert_eq!(
+            daemon.claude_projects_roots(&agent(AgentKind::Claude, Some("claude-b")), &account),
             Some(vec![PathBuf::from("/home/me/.claude-b/projects")])
         );
         let codex = orion_core::harness::builtin("codex").unwrap();

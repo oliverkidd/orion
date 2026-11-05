@@ -5,10 +5,13 @@
 //! `~/.claude` when that is unset. A second subscription is the same
 //! `claude` pointed at another dir, so an account here is that dir under
 //! a stable id (`claude_accounts` in config.json), and
-//! [`ClaudeAccount::descriptor`] makes it a registry harness: built-in
+//! [`ClaudeAccount::descriptor`] makes it a registry row: built-in
 //! Claude's row — program, flags, hooks, resume, everything — plus
 //! `env.CLAUDE_CONFIG_DIR`. A change to Claude's row reaches every
-//! account, and nothing is copied by hand.
+//! account, and nothing is copied by hand. A session on it is a Claude
+//! session — `AgentKind::Claude` — with the account's id beside it
+//! (`Agent::custom_harness`), so everything orion does for Claude it does
+//! for every account.
 //!
 //! Who a dir is signed in as is Claude Code's own record:
 //! `oauthAccount.emailAddress` in `.claude.json` — inside the config dir
@@ -29,7 +32,8 @@ use crate::harness::HarnessDescriptor;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaudeAccount {
     /// Stable id: the registry id the account's sessions point back at
-    /// (`custom_harness`), so it outlives a rename of anything else.
+    /// (`custom_harness`, beside `AgentKind::Claude`), so it outlives a
+    /// rename of anything else.
     /// Lowercase letters, digits and hyphens, never a built-in's id.
     pub id: String,
     /// The account's Claude Code config dir. A leading `~/` is expanded
@@ -269,6 +273,11 @@ mod tests {
         };
         let row = off.descriptor(&claude);
         assert_eq!(row.id, "claude-2");
+        assert_eq!(
+            row.session_kind(),
+            (crate::AgentKind::Claude, Some("claude-2".into())),
+            "its sessions are Claude's, with the account beside"
+        );
         assert_eq!(row.label, "");
         assert!(!row.enabled);
         assert_eq!(row.program, "/opt/claude");

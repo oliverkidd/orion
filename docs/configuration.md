@@ -321,9 +321,12 @@ effort defaults until its own Model / Effort rows on the Accounts tab are change
 `harnesses.<id>`. The `id` is what its sessions point back at, so it stays put; lowercase letters,
 digits and hyphens, never a built-in's. `name` is the one it goes by, as typed — `Work Laptop` —
 and the only thing a rename changes: never the `id`, never the dir. `enabled: false` switches one off like any harness. The
-list is this machine's logins: a remote reached over `orion ssh` keeps its own. An entry an older orion reads
-is an unknown key it leaves alone: its sessions refuse to start there ("custom harness `claude-2` is
-no longer defined") and nothing is lost.
+list is this machine's logins: a remote reached over `orion ssh` keeps its own. A session on an
+account is a Claude session with the account's id beside it, so everything orion does for Claude
+— model and title sync, usage, resume, the transcript checks — it does on every account. Take an
+entry out and its sessions refuse to start ("Claude account `claude-2` is no longer set up") until
+it is back; nothing is lost. Sessions an older orion started on an account are moved onto Claude
+and that account once, when the daemon first starts after the upgrade (store migration 32).
 
 **Named after who they are.** Everywhere an account is listed — the NEW AGENT PICKER, the QUICK
 PROMPT's `Tab` list, the Accounts tab, onboarding, the preset editor, **Continue on** and the card a

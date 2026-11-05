@@ -4549,8 +4549,8 @@ fn cycle_box_effort(app: &mut App, back: crate::quick_prompt::QuickReturn) {
         .unwrap_or(crate::config::DEFAULT_CHOICE);
     let next = crate::config::cycle_owned(current, &choices, 1);
     let mut cfg = crate::config::Config::load();
-    let id = custom.unwrap_or_else(|| kind.as_str()).to_string();
-    if cfg.set_agent_effort(&id, &next) {
+    let id = orion_core::harness::registry_id(kind, custom);
+    if cfg.set_agent_effort(id, &next) {
         let _ = cfg.try_save();
     }
     let effort = crate::config::fit_effort(kind, model, crate::config::non_default(&next), custom);
@@ -4589,10 +4589,7 @@ fn cycle_default_effort(app: &mut App) {
     if crate::config::effort_choices(kind, model.as_deref(), custom.as_deref()).is_empty() {
         return;
     }
-    let id = custom
-        .as_deref()
-        .unwrap_or_else(|| kind.as_str())
-        .to_string();
+    let id = orion_core::harness::registry_id(kind, custom.as_deref()).to_string();
     cfg.cycle_agent_row(&id, crate::config::HarnessField::Effort, 1);
     let next = cfg.agent_value(&id, crate::config::HarnessField::Effort);
     let _ = cfg.try_save();
@@ -7290,6 +7287,8 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
         .as_ref()
         .filter(|q| q.launch.kind == *kind && q.launch.custom.as_deref() == custom.as_deref())
         .map(|q| &q.launch);
+    // The row's own harness: a Claude account's defaults are its own.
+    let descriptor = cfg.effective_harness(*kind, custom.as_deref());
     let (title, choices, configured) = match sub {
         SubmenuKind::Models => (
             format!(
@@ -7299,21 +7298,18 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
             crate::config::model_choices(*kind, custom.as_deref()),
             from_box
                 .and_then(|l| l.model.clone())
-                .or_else(|| cfg.default_model(*kind)),
+                .or_else(|| descriptor.default_model().map(str::to_string)),
         ),
         SubmenuKind::Efforts => (
             format!("{} effort", kind_label(*kind)),
             crate::config::effort_choices(*kind, model.as_deref(), custom.as_deref()),
             from_box
                 .and_then(|l| l.effort.clone())
-                .or_else(|| cfg.default_effort(*kind)),
+                .or_else(|| crate::config::launch_effort(&descriptor)),
         ),
     };
     let configured = configured.unwrap_or_else(|| crate::config::DEFAULT_CHOICE.into());
-    let catalog = cfg
-        .effective_harness(*kind, custom.as_deref())
-        .model
-        .catalog;
+    let catalog = descriptor.model.catalog;
     let items: Vec<MenuItem> = choices
         .iter()
         .map(|choice| {
@@ -8847,13 +8843,10 @@ fn rename_claude_account(app: &mut App, id: &str, name: &str) {
 /// tab and row update too, so an Esc-then-`s` lands back where `?` left.
 fn open_harness_settings(app: &mut App, kind: AgentKind, custom: Option<String>) {
     use crate::config::{accounts_tab, locate_agent, HarnessField};
-    let id = match kind {
-        AgentKind::Custom => custom.unwrap_or_default(),
-        _ => kind.as_str().to_string(),
-    };
+    let id = orion_core::harness::registry_id(kind, custom.as_deref());
     let tab = accounts_tab();
     app.settings_tab = tab;
-    if let Some((_, row)) = locate_agent(&id, HarnessField::Enabled) {
+    if let Some((_, row)) = locate_agent(id, HarnessField::Enabled) {
         if let Some(slot) = app.settings_selected.get_mut(tab) {
             *slot = row;
         }
@@ -10569,8 +10562,9 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
     // Nor does a PR SESSION: the DAEMON adopts no unscoped spare for one,
     // and `worktree` there is the ROOT WORKTREE, which only names the
     // project — a refill would boot a Claude in the main checkout for a
-    // launch that never runs there.
-    if kind == AgentKind::Claude && !with_first_prompt && pr_url.is_none() {
+    // launch that never runs there. A launch on another Claude account
+    // never takes the default account's spare either.
+    if kind == AgentKind::Claude && custom.is_none() && !with_first_prompt && pr_url.is_none() {
         out.extend(default_claude_prewarm(worktree));
     }
 }

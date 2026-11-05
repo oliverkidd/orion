@@ -14,9 +14,11 @@
 //! fields.
 //!
 //! [`AgentKind`](crate::AgentKind) stays the identity — built-ins by
-//! variant, customs by id beside `AgentKind::Custom` — so exhaustive
-//! matches still fail to compile when a built-in is added. Behavior never
-//! branches on it directly anymore; it resolves to a descriptor first.
+//! variant, a Claude account as `AgentKind::Claude` with the account's id
+//! beside it, customs by id beside `AgentKind::Custom` ([`registry_id`],
+//! [`HarnessDescriptor::session_kind`]) — so exhaustive matches still fail
+//! to compile when a built-in is added. Behavior never branches on it
+//! directly anymore; it resolves to a descriptor first.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -232,8 +234,14 @@ impl ModeSpec {
 /// a [`placeholder`] for new ids) through [`HarnessOverride`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HarnessDescriptor {
-    /// Stable id: the builtin name or the custom entry id.
+    /// Stable id: the builtin name, the Claude account's id, or the custom
+    /// entry id.
     pub id: String,
+    /// The kind a session on this row is stored as: the built-in's own,
+    /// [`AgentKind::Claude`] for every Claude account — the extra ones
+    /// carry their id beside it — and [`AgentKind::Custom`] for a CLI the
+    /// `harnesses` map adds.
+    pub kind: AgentKind,
     /// Display label for the picker, badges and tab sections.
     pub label: String,
     /// The CLI orion launches, resolved on PATH through the login shell.
@@ -359,6 +367,15 @@ impl Default for EffortSpec {
 }
 
 impl HarnessDescriptor {
+    /// What a session launched on this row stores: its kind, and the
+    /// registry id beside it wherever the kind alone does not name the
+    /// row — an extra Claude account's, a custom harness's. The inverse
+    /// of [`registry_id`].
+    pub fn session_kind(&self) -> (AgentKind, Option<String>) {
+        let named = self.kind == AgentKind::Custom || self.id != self.kind.as_str();
+        (self.kind, named.then(|| self.id.clone()))
+    }
+
     /// The label the picker and session rows show.
     pub fn display_label(&self) -> &str {
         if self.label.trim().is_empty() {
@@ -616,6 +633,7 @@ fn models(ids: &[&str]) -> Vec<ModelEntry> {
 pub fn placeholder(id: &str) -> HarnessDescriptor {
     HarnessDescriptor {
         id: id.trim().to_string(),
+        kind: AgentKind::Custom,
         label: String::new(),
         program: id.trim().to_string(),
         env: BTreeMap::new(),
@@ -640,6 +658,7 @@ pub fn placeholder(id: &str) -> HarnessDescriptor {
 pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
     let base = HarnessDescriptor {
         program: String::new(),
+        kind: AgentKind::parse(id.trim())?,
         ..placeholder(id)
     };
     Some(match id.trim() {
@@ -1062,6 +1081,15 @@ pub fn registry(
     out
 }
 
+/// The ids of the `claude_accounts` entries the registry carries: what a
+/// session on one of them stores beside `AgentKind::Claude`.
+pub fn account_ids(accounts: &[ClaudeAccount]) -> Vec<String> {
+    registered_accounts(accounts)
+        .into_iter()
+        .map(|account| account.id.trim().to_string())
+        .collect()
+}
+
 /// The `claude_accounts` entries the registry carries: valid ones, each id
 /// once.
 fn registered_accounts(accounts: &[ClaudeAccount]) -> Vec<&ClaudeAccount> {
@@ -1100,23 +1128,43 @@ pub fn continue_targets<'a>(
         .collect()
 }
 
+/// The registry id a session's `(kind, custom_harness)` names: the
+/// Claude account's id for a Claude row that carries one, the entry's id
+/// for a custom harness — empty while it has none — and the kind's own
+/// name for everything else. The inverse of
+/// [`HarnessDescriptor::session_kind`].
+pub fn registry_id(kind: AgentKind, custom: Option<&str>) -> &str {
+    let custom = custom.map(str::trim).filter(|id| !id.is_empty());
+    match (kind, custom) {
+        (AgentKind::Claude | AgentKind::Custom, Some(id)) => id,
+        (AgentKind::Custom, None) => "",
+        _ => kind.as_str(),
+    }
+}
+
 /// Resolve a session's harness to its effective descriptor: built-ins by
-/// kind, customs by registry id. `Err` names why the launch is refused —
-/// an unknown id, or the entry's [`problem`][HarnessDescriptor::problem].
+/// kind, a Claude account and a custom harness by the id beside it
+/// ([`registry_id`]). `Err` names why the launch is refused — an unknown
+/// id, a Claude row on an id that is no Claude account, or the entry's
+/// [`problem`][HarnessDescriptor::problem]. A custom row naming a Claude
+/// account still finds it: a row an older release stored before its
+/// account was set up again.
 pub fn resolve<'a>(
     all: &'a [HarnessDescriptor],
     kind: AgentKind,
     custom: Option<&str>,
 ) -> Result<&'a HarnessDescriptor, String> {
-    let id = match kind {
-        AgentKind::Custom => custom.unwrap_or_default().trim(),
-        _ => kind.as_str(),
-    };
-    let Some(descriptor) = all.iter().find(|entry| entry.id == id) else {
-        if kind == AgentKind::Custom {
-            return Err(format!("custom harness `{id}` is no longer defined"));
-        }
-        return Err(format!("harness `{id}` is not in the registry"));
+    let id = registry_id(kind, custom);
+    let found = all.iter().find(|entry| entry.id == id);
+    let Some(descriptor) = found.filter(|entry| kind != AgentKind::Claude || entry.kind == kind)
+    else {
+        return Err(match kind {
+            AgentKind::Custom => format!("custom harness `{id}` is no longer defined"),
+            AgentKind::Claude if id != kind.as_str() => {
+                format!("Claude account `{id}` is no longer set up (Settings → Accounts)")
+            }
+            _ => format!("harness `{id}` is not in the registry"),
+        });
     };
     if let Some(problem) = descriptor.problem() {
         return Err(problem);
@@ -1394,6 +1442,56 @@ mod tests {
         let all = registry(&BTreeMap::from([("broken".into(), program("  "))]), &[]);
         assert!(resolve(&all, AgentKind::Custom, Some("broken")).is_err());
         assert_eq!(usable(&all).len(), 5, "the broken entry is hidden");
+    }
+
+    /// A Claude account's sessions are Claude's, the account's id beside
+    /// the kind; a custom harness's are Custom with its id; a built-in's
+    /// carry its kind alone — and every pair resolves back to its row. A
+    /// Claude row on an id that is no account is refused rather than
+    /// launched as whatever holds the id, and a custom row an older
+    /// release stored for an account still finds it.
+    #[test]
+    fn a_claude_account_is_claude_with_its_id_beside() {
+        let accounts = [ClaudeAccount {
+            id: "claude-2".into(),
+            config_dir: "~/.claude-2".into(),
+            name: String::new(),
+            enabled: true,
+        }];
+        let all = registry(&BTreeMap::from([("agy".into(), program("agy"))]), &accounts);
+        let kinds: Vec<(AgentKind, Option<String>)> =
+            all.iter().map(HarnessDescriptor::session_kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                (AgentKind::Claude, None),
+                (AgentKind::Claude, Some("claude-2".into())),
+                (AgentKind::Codex, None),
+                (AgentKind::Cursor, None),
+                (AgentKind::Grok, None),
+                (AgentKind::OpenCode, None),
+                (AgentKind::Custom, Some("agy".into())),
+            ]
+        );
+        for entry in &all {
+            let (kind, custom) = entry.session_kind();
+            assert_eq!(registry_id(kind, custom.as_deref()), entry.id);
+            assert_eq!(resolve(&all, kind, custom.as_deref()).unwrap().id, entry.id);
+        }
+        assert_eq!(registry_id(AgentKind::Claude, Some("  ")), "claude");
+        assert_eq!(registry_id(AgentKind::Codex, Some("x")), "codex");
+        assert_eq!(registry_id(AgentKind::Custom, None), "");
+
+        let err = resolve(&all, AgentKind::Claude, Some("agy")).unwrap_err();
+        assert!(err.contains("Claude account `agy`"), "{err}");
+        let err = resolve(&all, AgentKind::Claude, Some("claude-9")).unwrap_err();
+        assert!(err.contains("no longer set up"), "{err}");
+        assert_eq!(
+            resolve(&all, AgentKind::Custom, Some("claude-2"))
+                .unwrap()
+                .id,
+            "claude-2"
+        );
     }
 
     /// The second Claude account as config.json writes it: `env` merges

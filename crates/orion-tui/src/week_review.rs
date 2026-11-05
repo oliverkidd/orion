@@ -859,11 +859,8 @@ fn account_through(
     cfg: &crate::config::Config,
     preset: &crate::agent_presets::AgentPreset,
 ) -> Option<Account> {
-    let pinned = match preset.kind {
-        orion_core::AgentKind::Custom => preset.custom_harness.clone().unwrap_or_default(),
-        kind => kind.as_str().to_string(),
-    };
-    let entry = cfg.review_account(&pinned)?;
+    let pinned = orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref());
+    let entry = cfg.review_account(pinned)?;
     Some(Account {
         program: entry.program.trim().to_string(),
         env: entry.launch_env(),
@@ -3331,7 +3328,7 @@ AL Ada L · GR Grace
             let claude = on(orion_core::AgentKind::Claude, None);
             let through = account_through(&cfg, &claude).expect("the one pinned");
             assert_eq!(pinned(&through), None, "built-in Claude, its own sign-in");
-            let work_on = on(orion_core::AgentKind::Custom, Some("claude-work"));
+            let work_on = on(orion_core::AgentKind::Claude, Some("claude-work"));
             assert!(pinned(&account_through(&cfg, &work_on).unwrap()).is_some());
 
             cfg.quick_prompt_kind = "codex".into();

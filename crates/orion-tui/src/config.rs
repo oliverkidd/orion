@@ -289,6 +289,23 @@ pub fn fit_effort_in(
     }
 }
 
+/// The default effort new sessions on `descriptor` launch with; None =
+/// "default" = don't pass the flag. A composing harness fits the effort
+/// against its configured family ([`fit_effort`]). An effort with no
+/// flag mapped is None whatever the file holds — spawn would drop it
+/// anyway.
+pub fn launch_effort(descriptor: &HarnessDescriptor) -> Option<String> {
+    if descriptor.effort.flag.is_none()
+        && descriptor.effort.config_key.is_none()
+        && !descriptor.compose_model_effort
+    {
+        return None;
+    }
+    let model = descriptor.default_model().map(str::to_string);
+    let effort = descriptor.default_effort().map(str::to_string);
+    fit_effort_in(descriptor, model.as_deref(), effort)
+}
+
 /// The fallback effort for a static list: `high`, else `medium`, else the
 /// first the harness ships.
 fn static_fallback_effort(efforts: &[String]) -> Option<&str> {
@@ -307,19 +324,7 @@ fn static_fallback_effort(efforts: &[String]) -> Option<&str> {
 /// longer names degrades to a placeholder under its own name, so rows
 /// outliving their entry still render.
 fn describe(kind: AgentKind, custom: Option<&str>) -> orion_core::harness::HarnessDescriptor {
-    let id = match kind {
-        AgentKind::Custom => custom.unwrap_or_default().trim(),
-        _ => kind.as_str(),
-    };
-    let cfg = Config::load();
-    if let Some(descriptor) = cfg
-        .harness_registry()
-        .into_iter()
-        .find(|entry| entry.id == id)
-    {
-        return descriptor;
-    }
-    orion_core::harness::placeholder(id)
+    Config::load().effective_harness(kind, custom)
 }
 
 /// One setting row in the overlay; rows live inside a [`SettingsTab`].
@@ -1614,18 +1619,7 @@ impl Config {
     /// row, or a placeholder under its own name when the registry no
     /// longer names the id, so rows outliving their entry still render.
     pub fn effective_harness(&self, kind: AgentKind, custom: Option<&str>) -> HarnessDescriptor {
-        let id = match kind {
-            AgentKind::Custom => custom.unwrap_or_default().trim(),
-            _ => kind.as_str(),
-        };
-        if let Some(descriptor) = self
-            .harness_registry()
-            .into_iter()
-            .find(|entry| entry.id == id)
-        {
-            return descriptor;
-        }
-        orion_core::harness::placeholder(id)
+        self.effective_harness_by_id(orion_core::harness::registry_id(kind, custom))
     }
 
     /// The configured default model for new sessions of `kind`, as the
@@ -1641,25 +1635,13 @@ impl Config {
             .map(str::to_string)
     }
 
-    /// The configured default effort for new sessions of `kind`;
-    /// None = "default" = don't pass the flag. A composing harness fits
-    /// the effort against its configured family ([`fit_effort`]). An
-    /// effort with no flag mapped is None whatever the file holds — spawn
-    /// would drop it anyway.
+    /// The configured default effort for new sessions of `kind`, as
+    /// [`launch_effort`] reads it off the built-in's row.
     pub fn default_effort(&self, kind: AgentKind) -> Option<String> {
         if kind == AgentKind::Custom {
             return None;
         }
-        let descriptor = self.builtin_descriptor(kind);
-        if descriptor.effort.flag.is_none()
-            && descriptor.effort.config_key.is_none()
-            && !descriptor.compose_model_effort
-        {
-            return None;
-        }
-        let model = descriptor.default_model().map(str::to_string);
-        let effort = descriptor.default_effort().map(str::to_string);
-        fit_effort_in(&descriptor, model.as_deref(), effort)
+        launch_effort(&self.builtin_descriptor(kind))
     }
 
     /// Whether the NEW AGENT PICKER offers `kind` at all.
@@ -1681,8 +1663,10 @@ impl Config {
             .collect()
     }
 
-    /// Every harness the picker and presets offer, in registry order:
-    /// `(kind, None)` for built-ins, `(Custom, Some(id))` for customs.
+    /// Every harness the picker and presets offer, in registry order, as
+    /// a session on it stores them ([`HarnessDescriptor::session_kind`]):
+    /// `(kind, None)` for built-ins and the default Claude account,
+    /// `(Claude, Some(id))` for another, `(Custom, Some(id))` for customs.
     /// Disabled and broken entries are out (broken ones surface in the
     /// Accounts tab with their reason), and so is anything whose program is
     /// missing from PATH. The daemon stays authoritative at launch: it
@@ -1710,20 +1694,14 @@ impl Config {
         orion_core::harness::usable(&all)
             .into_iter()
             .filter(|entry| installed(&entry.program))
-            .map(|entry| match AgentKind::parse(&entry.id) {
-                Some(kind) => (kind, None),
-                None => (AgentKind::Custom, Some(entry.id.clone())),
-            })
+            .map(HarnessDescriptor::session_kind)
             .collect()
     }
 
     /// Whether a preset may launch: its harness's Accounts tab switch,
     /// enabled and valid.
     pub fn preset_harness_usable(&self, preset: &crate::agent_presets::AgentPreset) -> bool {
-        let id = match preset.kind {
-            AgentKind::Custom => preset.custom_harness.clone().unwrap_or_default(),
-            _ => preset.kind.as_str().to_string(),
-        };
+        let id = orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref());
         self.harness_registry()
             .iter()
             .find(|entry| entry.id == id)
@@ -2215,23 +2193,25 @@ impl Config {
 
     /// The harness the QUICK PROMPT launches, as a picker row names one:
     /// `(kind, None)` for a built-in ([`Config::quick_prompt_kind`]), and
-    /// `(Custom, Some(id))` while `quick_prompt_kind` names another CLAUDE
+    /// `(Claude, Some(id))` while `quick_prompt_kind` names another CLAUDE
     /// ACCOUNT that is on and launches — so `⌘N` can start on any
     /// account. One switched off or gone since steps aside as a built-in
     /// does, and an older build reading the id falls back to Claude.
     pub fn quick_prompt_harness(&self) -> (AgentKind, Option<String>) {
         let name = self.quick_prompt_kind.trim();
-        if AgentKind::parse(name).is_none()
-            && self.raw_harness_registry().iter().any(|entry| {
+        if AgentKind::parse(name).is_some() {
+            return (self.quick_prompt_kind(), None);
+        }
+        self.raw_harness_registry()
+            .iter()
+            .find(|entry| {
                 entry.id == name
                     && entry.enabled
                     && entry.problem().is_none()
                     && entry.is_claude_account()
             })
-        {
-            return (AgentKind::Custom, Some(name.to_string()));
-        }
-        (self.quick_prompt_kind(), None)
+            .map(HarnessDescriptor::session_kind)
+            .unwrap_or_else(|| (self.quick_prompt_kind(), None))
     }
 
     /// What the Accounts tab's **New agents on** row cycles through: every built-in
@@ -2296,11 +2276,8 @@ impl Config {
         let all = self.harness_registry();
         let on = claude_accounts_on(&all);
         let (kind, custom) = self.quick_prompt_harness();
-        let default_agent = match kind {
-            AgentKind::Custom => custom.unwrap_or_default(),
-            other => other.as_str().to_string(),
-        };
-        let chosen = [pinned.trim(), default_agent.as_str()]
+        let default_agent = orion_core::harness::registry_id(kind, custom.as_deref());
+        let chosen = [pinned.trim(), default_agent]
             .into_iter()
             .find_map(|id| on.iter().find(|entry| entry.id == id))
             .or(on.first())
@@ -2349,10 +2326,7 @@ impl Config {
             .find(|p| (review || new_review) && p.system == Some(SystemPreset::WeekReview))
         {
             if let Some(entry) = through {
-                (preset.kind, preset.custom_harness) = match AgentKind::parse(&entry.id) {
-                    Some(kind) => (kind, None),
-                    None => (AgentKind::Custom, Some(entry.id)),
-                };
+                (preset.kind, preset.custom_harness) = entry.session_kind();
             }
             if let Some(model) = model.as_deref().and_then(non_default) {
                 preset.model = Some(model);
@@ -2504,7 +2478,7 @@ impl Config {
             // A CLAUDE ACCOUNT — the default one too — reads as the name
             // it goes by, with its email.
             SettingKind::QuickPromptKind => match self.quick_prompt_harness() {
-                (AgentKind::Custom, Some(id)) => self
+                (_, Some(id)) => self
                     .effective_harness_by_id(&id)
                     .display_label()
                     .to_string(),
@@ -3626,7 +3600,7 @@ mod tests {
         let review = of(SystemPreset::WeekReview);
         assert_eq!(
             (review.kind, review.custom_harness.as_deref()),
-            (AgentKind::Custom, Some("claude-work")),
+            (AgentKind::Claude, Some("claude-work")),
             "written where it was: the default agent's account"
         );
         assert_eq!(review.model.as_deref(), Some("sonnet"));

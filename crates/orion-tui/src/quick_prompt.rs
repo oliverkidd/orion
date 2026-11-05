@@ -361,7 +361,7 @@ pub(crate) fn open_picked_box(app: &mut App, launch: QuickLaunch) {
 /// ([`crate::claude_accounts::short_name`]).
 pub fn harness_name(kind: AgentKind, custom: Option<&str>) -> String {
     crate::claude_accounts::short_name(kind, custom)
-        .unwrap_or_else(|| custom.unwrap_or_else(|| kind.as_str()).to_string())
+        .unwrap_or_else(|| orion_core::harness::registry_id(kind, custom).to_string())
 }
 
 impl QuickLaunch {

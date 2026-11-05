@@ -719,11 +719,11 @@ fn live_on_branch<'a>(
 /// before the session has an id, or with no such file.
 fn transcript_of(agent: &orion_core::Agent) -> Option<PathBuf> {
     let session = agent.session_id.as_deref()?;
-    let id = match agent.kind {
-        orion_core::AgentKind::Custom => agent.custom_harness.as_deref()?.trim().to_string(),
-        kind => kind.as_str().to_string(),
-    };
-    let entry = crate::config::Config::load().effective_harness_by_id(&id);
+    let id = orion_core::harness::registry_id(agent.kind, agent.custom_harness.as_deref());
+    if id.is_empty() {
+        return None;
+    }
+    let entry = crate::config::Config::load().effective_harness_by_id(id);
     let dir = crate::claude_accounts::dir_of(&entry)?;
     let file = format!("{session}.jsonl");
     std::fs::read_dir(dir.join("projects"))

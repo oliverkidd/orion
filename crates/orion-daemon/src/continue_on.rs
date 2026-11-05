@@ -1,7 +1,8 @@
 //! CONTINUE ON ANOTHER ACCOUNT — carrying a Claude session onto another
-//! Claude account: a `claude_accounts` entry, which is Claude's own row
-//! with `CLAUDE_CONFIG_DIR` pointing at its config dir, or any
-//! Claude-dialect harness whose `env` pins one. Claude Code keeps a session's whole conversation in its
+//! Claude account: the default one, a `claude_accounts` entry — Claude's
+//! own row with `CLAUDE_CONFIG_DIR` pointing at its config dir, its
+//! sessions Claude's with the account's id beside — or any Claude-dialect
+//! harness whose `env` pins one. Claude Code keeps a session's whole conversation in its
 //! config dir, at `projects/<cwd slug>/<session id>.jsonl`, with a
 //! `<session id>/` folder beside it for what hangs off it (subagent
 //! transcripts, the title `/rename` set). A resume reads it from its own
@@ -257,14 +258,11 @@ impl Daemon {
                 return Err(e);
             }
         };
-        let (kind, custom) = match AgentKind::parse(&target.id) {
-            Some(kind) => (kind, None),
-            None => (AgentKind::Custom, Some(target.id.as_str())),
-        };
+        let (kind, custom) = target.session_kind();
         let model = agent.model.as_deref().filter(|m| target.offers_model(m));
         let effort = agent.effort.as_deref().filter(|e| target.offers_effort(e));
         self.store
-            .set_agent_harness(id, kind, custom, model, effort)?;
+            .set_agent_harness(id, kind, custom.as_deref(), model, effort)?;
         // Whatever stopped it was the old account's. The CLI comes back
         // at its input box on the new one: a turn over, nothing unread.
         // The row goes out as one upsert, never a StatusChanged, so

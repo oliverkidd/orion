@@ -493,7 +493,9 @@ impl AgentPresetEditor {
             PresetField::Kind => crate::config::Config::load()
                 .offered_harnesses()
                 .into_iter()
-                .map(|(kind, custom)| custom.unwrap_or_else(|| kind.as_str().to_string()))
+                .map(|(kind, custom)| {
+                    orion_core::harness::registry_id(kind, custom.as_deref()).to_string()
+                })
                 .collect(),
             PresetField::Model => crate::config::model_choices(self.kind, self.custom.as_deref()),
             PresetField::Effort => {
@@ -510,11 +512,7 @@ impl AgentPresetEditor {
 
     fn row_value(&self) -> String {
         match self.field {
-            PresetField::Kind => self
-                .custom
-                .as_deref()
-                .unwrap_or_else(|| self.kind.as_str())
-                .to_string(),
+            PresetField::Kind => self.harness_id().to_string(),
             PresetField::Model => self.model.clone(),
             PresetField::Effort => self.effort.clone(),
             PresetField::Text => self.text.as_str().to_string(),
@@ -523,17 +521,21 @@ impl AgentPresetEditor {
         }
     }
 
+    /// The registry id of the harness the form is on.
+    pub fn harness_id(&self) -> &str {
+        orion_core::harness::registry_id(self.kind, self.custom.as_deref())
+    }
+
     fn set_row_value(&mut self, value: &str) {
         match self.field {
             PresetField::Kind => {
-                if let Some(kind) = AgentKind::parse(value) {
-                    self.set_kind(kind, None);
-                } else if crate::config::Config::load()
+                if let Some(entry) = crate::config::Config::load()
                     .harness_registry()
                     .iter()
-                    .any(|entry| entry.id == value)
+                    .find(|entry| entry.id == value)
                 {
-                    self.set_kind(AgentKind::Custom, Some(value.to_string()));
+                    let (kind, custom) = entry.session_kind();
+                    self.set_kind(kind, custom);
                 }
             }
             PresetField::Model => {
@@ -913,13 +915,7 @@ pub(crate) fn open_agent_preset_task(
         return;
     };
     if !crate::config::Config::load().preset_harness_usable(&preset) {
-        app.flash = Some(crate::flash::Flash::setup(format!(
-            "{} is turned off in Settings → Accounts",
-            preset
-                .custom_harness
-                .as_deref()
-                .unwrap_or(preset.kind.as_str())
-        )));
+        app.flash = Some(turned_off(&preset));
         return;
     }
     let skip = preset.skip_task;
@@ -938,6 +934,14 @@ pub(crate) fn open_agent_preset_task(
         let (launch, head, tail) = launch.inline_preset("", None);
         crate::quick_prompt::reopen_around(app, launch, &head, &tail);
     }
+}
+
+/// What the footer says of a preset whose harness can't launch.
+fn turned_off(preset: &AgentPreset) -> crate::flash::Flash {
+    crate::flash::Flash::setup(format!(
+        "{} is turned off in Settings → Accounts",
+        orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref())
+    ))
 }
 
 /// The picker's Enter: adopt the hovered AGENT PRESET — its harness,
@@ -960,13 +964,7 @@ fn apply_preset_to_quick_prompt(
     };
     let cfg = crate::config::Config::load();
     if !cfg.preset_harness_usable(&preset) {
-        app.flash = Some(crate::flash::Flash::setup(format!(
-            "{} is turned off in Settings → Accounts",
-            preset
-                .custom_harness
-                .as_deref()
-                .unwrap_or(preset.kind.as_str())
-        )));
+        app.flash = Some(turned_off(&preset));
         return;
     }
     if preset.skip_task && back.text.trim().is_empty() {
@@ -1648,11 +1646,7 @@ pub(crate) fn draw_editor(f: &mut Frame, app: &mut App, editor: &AgentPresetEdit
             }
             _ => {
                 let value = match field {
-                    PresetField::Kind => editor
-                        .custom
-                        .as_deref()
-                        .unwrap_or_else(|| editor.kind.as_str())
-                        .to_string(),
+                    PresetField::Kind => editor.harness_id().to_string(),
                     PresetField::Model => editor.model.clone(),
                     PresetField::Effort => editor.effort.clone(),
                     PresetField::Text => editor.text.as_str().to_string(),

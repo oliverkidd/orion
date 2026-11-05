@@ -1007,10 +1007,7 @@ fn limited_harnesses(app: &App) -> BTreeSet<&str> {
                     .as_ref()
                     .is_some_and(|l| l.reason == orion_core::LimitReason::RateLimit)
         })
-        .filter_map(|a| match a.kind {
-            orion_core::AgentKind::Custom => a.custom_harness.as_deref(),
-            kind => Some(kind.as_str()),
-        })
+        .map(|a| orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref()))
         .collect()
 }
 

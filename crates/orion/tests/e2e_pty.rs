@@ -4360,16 +4360,11 @@ async fn continue_on_carries_the_session_onto_the_other_account() {
     let account_b = env.tmp.path().join("claude-b");
     env.write_config(
         &serde_json::json!({
-            "harnesses": {
-                "claude-b": {
-                    "label": "Claude B",
-                    "program": "claude",
-                    "hooks": "claude",
-                    "resume_flag": "--resume",
-                    "catalog": "claude",
-                    "env": {"CLAUDE_CONFIG_DIR": account_b.to_str().unwrap()},
-                }
-            }
+            "claude_accounts": [{
+                "id": "claude-b",
+                "config_dir": account_b.to_str().unwrap(),
+                "name": "Claude B",
+            }]
         })
         .to_string(),
     );
@@ -4460,7 +4455,8 @@ async fn continue_on_carries_the_session_onto_the_other_account() {
     let events = read_events_until(&mut c, SPAWN_CHAIN_TIMEOUT, |evs| {
         matches!(find_ack(evs, 13), Some(ServerEvent::Error { .. }))
             || (find_ack(evs, 13).is_some()
-                && upserted_agent(evs, &agent_id).is_some_and(|a| a.kind == AgentKind::Custom))
+                && upserted_agent(evs, &agent_id)
+                    .is_some_and(|a| a.custom_harness.as_deref() == Some("claude-b")))
     })
     .await;
     assert!(
@@ -4478,7 +4474,11 @@ async fn continue_on_carries_the_session_onto_the_other_account() {
     );
     assert!(slug.join("sid-1.jsonl").is_file(), "the source is kept");
     let moved = upserted_agent(&events, &agent_id).expect("the row's upsert");
-    assert_eq!(moved.kind, AgentKind::Custom);
+    assert_eq!(
+        moved.kind,
+        AgentKind::Claude,
+        "an account's session is Claude's"
+    );
     assert_eq!(moved.custom_harness.as_deref(), Some("claude-b"));
     assert_eq!(moved.name, "moving");
     assert_eq!(moved.session_id.as_deref(), Some("sid-1"));

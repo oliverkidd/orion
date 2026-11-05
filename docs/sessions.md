@@ -276,8 +276,10 @@ name you gave it and the email it is signed in as, `Work (you@example.com)` — 
 without moving its sessions or its dir. On a machine with more than one a card says which its
 session runs on by that name, else that email (`Work opus high`), where it would say `claude`. A
 removed account's dir stays, unless you send it to the Trash, for an account added by the same name
-to take back. See [Configuration](configuration.md#claude-accounts) for the
-`claude_accounts` entry behind it, signing in and out, renaming and removing one.
+to take back. A session on any account is a Claude session — the same hooks, model sync, title sync
+and resume — that keeps to its own account's config dir. See
+[Configuration](configuration.md#claude-accounts) for the `claude_accounts` entry behind it,
+signing in and out, renaming and removing one.
 
 Two accounts signed in to the same claude.ai login are one subscription with one limit — the
 browser sign-in approves whichever account the browser is signed in to, so it is easy to end up

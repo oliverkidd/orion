@@ -73,7 +73,10 @@ async fn serve() -> Result<()> {
         .with_context(|| format!("bind {}", sock.display()))?;
     tracing::info!(pid = std::process::id(), socket = %sock.display(), "orion daemon listening");
 
-    let store = std::sync::Arc::new(store::Store::open(&paths::db_path())?);
+    // The Claude accounts set up now: the rows migration 32 moves onto
+    // Claude with their account beside.
+    let accounts = orion_core::harness::account_ids(&config::Config::load().claude_accounts);
+    let store = std::sync::Arc::new(store::Store::open(&paths::db_path(), &accounts)?);
     // Agents persisted as live had their PTYs die with the previous daemon.
     // They are resumed below, once the daemon can spawn.
     let interrupted = match store.sweep_disconnected() {

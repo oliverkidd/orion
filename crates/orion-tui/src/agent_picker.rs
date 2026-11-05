@@ -147,11 +147,10 @@ fn entry_in<'a>(
     kind: AgentKind,
     custom: Option<&str>,
 ) -> Option<&'a orion_core::harness::HarnessDescriptor> {
-    let id = match (kind, custom) {
-        (AgentKind::Custom, Some(id)) => id,
-        (AgentKind::Custom, None) => return None,
-        _ => kind.as_str(),
-    };
+    let id = orion_core::harness::registry_id(kind, custom);
+    if id.is_empty() {
+        return None;
+    }
     registry.iter().find(|entry| entry.id == id)
 }
 
@@ -208,6 +207,7 @@ pub(crate) fn session_harness_badge_in(agent: &Agent, cfg: &Config) -> String {
         return name;
     }
     match (agent.kind, agent.custom_harness.as_deref()) {
+        (AgentKind::Claude, Some(id)) => id.to_string(),
         (AgentKind::Custom, Some(id)) => {
             let entry = cfg.effective_harness_by_id(id);
             if entry.is_claude_account() {
