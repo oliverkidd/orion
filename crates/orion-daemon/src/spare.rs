@@ -32,7 +32,12 @@
 //! nobody has used for a day, one whose setup failed, and one whose
 //! checkout has gone. A CLI that died, or never said it had booted, is
 //! booted again a little later; one booted for another account is
-//! replaced.
+//! replaced. When the project's base moves — `origin` is fetched for it
+//! every few minutes — or its **Base branch** setting names another, the
+//! spare is reset to the new base (`git reset --hard`: nothing in it is
+//! anyone's) and its CLI booted again. Only a spare still in the book is
+//! ever reset, and only while it is still on its own branch: a taken one
+//! has left the book, and its branch has been renamed.
 
 use crate::config::Config;
 use crate::git;
@@ -76,6 +81,9 @@ const HELD_LIMIT: Duration = Duration::from_secs(2 * 60);
 /// How long after a take the next spare is cut, so its fetch and setup do
 /// not crowd the launch that just started.
 const RECUT_DELAY: Duration = Duration::from_secs(2);
+/// How often a project with a spare has `origin` fetched, to see whether
+/// its base has moved.
+const FETCH_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// The DAEMON's SPARE WORKTREES, and what it keeps to tend them.
 #[derive(Default)]
@@ -101,6 +109,8 @@ struct Book {
     used: HashMap<ProjectId, i64>,
     /// No spare is cut for these projects before then.
     recut_at: HashMap<ProjectId, Instant>,
+    /// When `origin` was last fetched for each project's spare.
+    fetched_at: HashMap<ProjectId, Instant>,
 }
 
 struct Spare {
@@ -185,11 +195,33 @@ impl Boot {
 /// What a tick does about one project's spare.
 enum Tend {
     Cut,
-    Remove { recut: bool },
+    Remove {
+        recut: bool,
+    },
     BootCli,
+    /// Its base has moved to this.
+    Refresh(Base),
 }
 
 impl SpareBook {
+    /// Whether project `project`'s spare is due a look at its base, and if
+    /// so whether `origin` is due a fetch for it; None when it has no
+    /// spare.
+    fn fetch_due(&self, project: &ProjectId) -> Option<bool> {
+        let mut book = self.book.lock().unwrap();
+        if !book.spares.contains_key(project) {
+            return None;
+        }
+        let due = book
+            .fetched_at
+            .get(project)
+            .is_none_or(|at| at.elapsed() >= FETCH_EVERY);
+        if due {
+            book.fetched_at.insert(project.clone(), Instant::now());
+        }
+        Some(due)
+    }
+
     /// CLI `id` has had its first turn, or is gone: nothing waits on its
     /// boot.
     fn forget_boot(&self, id: &AgentId) {
@@ -523,7 +555,11 @@ impl Daemon {
         for project in &projects {
             let used = self.last_used(project, &worktrees, &agents);
             let wanted = launch.is_some() && used_lately(used);
-            match self.what_to_tend(project, wanted, launch.as_ref(), cut_one) {
+            let base = match self.spares.fetch_due(&project.id) {
+                Some(fetch) if wanted => spare_base(&project.repo_path, config, fetch).await,
+                _ => None,
+            };
+            match self.what_to_tend(project, wanted, launch.as_ref(), cut_one, base) {
                 Some(Tend::Cut) => {
                     cut_one = true;
                     self.cut_spare(project, config).await;
@@ -534,6 +570,7 @@ impl Daemon {
                         self.boot_spare_cli(&project.id, launch).await;
                     }
                 }
+                Some(Tend::Refresh(base)) => self.refresh_spare(&project.id, base).await,
                 None => {}
             }
         }
@@ -568,12 +605,14 @@ impl Daemon {
 
     /// What this tick does for `project`: nothing while something is
     /// already under way for it. `cut_one`: a spare was cut this tick.
+    /// `base`: where its spare would be cut from now, when it has one.
     fn what_to_tend(
         &self,
         project: &Project,
         wanted: bool,
         launch: Option<&LaunchSpec>,
         cut_one: bool,
+        base: Option<Base>,
     ) -> Option<Tend> {
         let mut guard = self.spares.book.lock().unwrap();
         let book = &mut *guard;
@@ -599,6 +638,11 @@ impl Daemon {
         }
         if matches!(spare.setup, Setup::Failed) || !spare.worktree.path.exists() {
             return Some(Tend::Remove { recut: true });
+        }
+        // Reset under a setup still installing would pull the files out
+        // from under it: the next tick asks again.
+        if let Some(base) = base.filter(|b| *b != spare.base) {
+            return (!matches!(spare.setup, Setup::Running(_))).then_some(Tend::Refresh(base));
         }
         // A CLI that died, never came up, or was booted for an account
         // `⌘N` no longer starts on goes; another is booted in its place
@@ -800,6 +844,63 @@ impl Daemon {
         }
     }
 
+    /// Reset project `project`'s spare to `base`, which its base has moved
+    /// to, and boot its CLI again there: a CLI that read the old files has
+    /// nothing a launch wants. A spare no longer on its own branch is left
+    /// alone and taken away.
+    async fn refresh_spare(self: &Arc<Self>, project: &ProjectId, base: Base) {
+        let (path, branch, launch) = {
+            let mut book = self.spares.book.lock().unwrap();
+            let Some(spare) = book.spares.get(project) else {
+                return;
+            };
+            let claim = (
+                spare.worktree.path.clone(),
+                spare.worktree.branch.clone(),
+                spare.launch.clone(),
+            );
+            if !book.busy.insert(project.clone()) {
+                return;
+            }
+            claim
+        };
+        let reset = async {
+            if git::current_branch(&path).await.as_deref() != Some(branch.as_str()) {
+                anyhow::bail!("it is no longer on {branch}");
+            }
+            git::reset_hard(&path, &base.sha).await
+        }
+        .await;
+        let old = {
+            let mut book = self.spares.book.lock().unwrap();
+            book.busy.remove(project);
+            let Some(spare) = book.spares.get_mut(project) else {
+                return;
+            };
+            if let Err(e) = &reset {
+                tracing::warn!(worktree = %path.display(), error = %e, "spare worktree not refreshed; removing it");
+            } else {
+                tracing::info!(worktree = %path.display(), base = %base.sha, "spare worktree refreshed to its moved base");
+                spare.base = base;
+                spare.reboot_at = None;
+            }
+            let old = spare.cli.take();
+            if let Some(cli) = &old {
+                book.boots.remove(&cli.agent.id);
+            }
+            old
+        };
+        if let Some(cli) = old {
+            self.kill_session(&SessionRef::Agent(cli.agent.id));
+        }
+        // Booted as it was before; a `⌘N` that moved meanwhile is the next
+        // tick's to replace.
+        match reset {
+            Err(_) => self.remove_spare(project, true).await,
+            Ok(()) => self.boot_spare_cli(project, &launch).await,
+        }
+    }
+
     /// Take project `project`'s spare off the disk — its PTYs killed, its
     /// checkout and branch removed. `recut`: it went wrong, and the next
     /// one waits [`RECUT_AFTER`].
@@ -855,6 +956,13 @@ impl Daemon {
             spare.worktree.clone(),
             spare.cli.as_ref().map(|cli| cli.agent.id.clone()),
         ))
+    }
+
+    /// Project `project`'s spare's base commit, for tests.
+    #[cfg(test)]
+    pub(crate) fn spare_base_sha(&self, project: &ProjectId) -> Option<String> {
+        let book = self.spares.book.lock().unwrap();
+        Some(book.spares.get(project)?.base.sha.clone())
     }
 
     /// Stamp project `project` last used at `at` (epoch ms), for tests.
@@ -1247,6 +1355,63 @@ mod tests {
         assert!(daemon.is_alive(&cli), "held for the create");
         daemon.delete_worktree(&id, true).await.unwrap();
         assert!(!daemon.is_alive(&cli));
+        daemon.kill_all();
+    }
+
+    /// The base moving — a commit on it, or the setting naming another —
+    /// resets a spare nobody has taken to it and boots its CLI again; a
+    /// spare already taken is never touched.
+    #[tokio::test]
+    async fn a_moved_base_resets_the_spare_and_never_a_taken_one() {
+        let (daemon, _tmp, project, cfg, _cmd) = with_spare(serde_json::json!({})).await;
+        let repo = project.repo_path.clone();
+        let (spare, cli) = daemon.spare_of(&project.id).unwrap();
+        let head = || async { git::rev_parse(&repo, "HEAD").await.unwrap() };
+        assert_eq!(daemon.spare_base_sha(&project.id), Some(head().await));
+
+        git_in(&repo, &["commit", "--allow-empty", "-m", "base moves"]);
+        daemon.tend_spares_with(&cfg).await;
+        assert_eq!(
+            git::rev_parse(&spare.path, "HEAD").await,
+            Some(head().await)
+        );
+        assert_eq!(daemon.spare_base_sha(&project.id), Some(head().await));
+        assert_eq!(
+            git::current_branch(&spare.path).await.as_deref(),
+            Some(spare.branch.as_str()),
+            "reset in place, on its own branch"
+        );
+        let (_, rebooted) = daemon.spare_of(&project.id).unwrap();
+        let rebooted = rebooted.expect("its CLI booted again");
+        assert_ne!(Some(&rebooted), cli.as_ref(), "a new CLI on the new files");
+        assert!(daemon.is_alive(&SessionRef::Agent(rebooted)));
+        assert!(!daemon.is_alive(&SessionRef::Agent(cli.unwrap())));
+
+        // The setting naming another branch is a base that moved too.
+        git_in(&repo, &["branch", "dev"]);
+        git_in(&repo, &["commit", "--allow-empty", "-m", "main only"]);
+        let on_dev = spare_config(&repo, serde_json::json!({ "base_branch": "dev" }));
+        daemon.tend_spares_with(&on_dev).await;
+        let dev = git::rev_parse(&repo, "dev").await;
+        assert_eq!(git::rev_parse(&spare.path, "HEAD").await, dev);
+
+        // Taken: renamed, rowed, and out of the book's reach.
+        let launch = on_dev.spare_launch().unwrap();
+        let id = created_worktree(
+            daemon
+                .create_launch_worktree_with(&project.id, "feat", &launch, &on_dev)
+                .await
+                .unwrap(),
+        );
+        git_in(&repo, &["commit", "--allow-empty", "-m", "dev would move"]);
+        git_in(&repo, &["branch", "-f", "dev", "HEAD"]);
+        daemon.tend_spares_with(&on_dev).await;
+        let taken = daemon.store.get_worktree(&id).unwrap().unwrap();
+        assert_eq!(
+            git::rev_parse(&taken.path, "HEAD").await,
+            dev,
+            "a taken spare stays put"
+        );
         daemon.kill_all();
     }
 }

@@ -181,7 +181,9 @@
   nothing goes into a CLI still starting. A CLI that never says it booted within a minute is put
   down and the task boots a fresh one, as a cold launch would. A new spare is cut behind it. A
   launch on another account, model or effort, in plan mode, onto a branch that exists, or for a pull
-  request is cut cold, as before, and leaves the spare for the next. See
+  request is cut cold, as before, and leaves the spare for the next. When the base moves (`origin`
+  is fetched for it every five minutes) or the **Base branch** setting changes, an untaken spare is
+  `git reset --hard` to the new base and its CLI restarted; a taken one is never touched. See
   [Configuration](configuration.md#spare-worktrees).
 - **A worktree runs its own project — the RUN COMMAND.** The Projects tab of the SETTINGS OVERLAY
   holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a card's or the

@@ -247,6 +247,12 @@ launch's (`git branch -m`; the directory keeps its `orion-spare-` name), the wor
 the task is typed into the booted CLI as its first turn once it is at its prompt. A new spare is cut
 behind it. Any other launch, or one onto a branch name that exists, cuts its worktree as before.
 
+A spare follows its base. The DAEMON fetches `origin` for it every five minutes; when the base has
+moved, or the **Base branch** setting now names another, a spare nobody has taken is reset to the
+new base (`git reset --hard` — nothing in it is anyone's; untracked files such as installed
+dependencies stay, and the setup is not run again) and its CLI is booted again on the new files. A
+spare is never reset once a launch has taken it, nor while its setup is still running.
+
 There is no switch, only what it follows: no spare is kept while `⌘N` starts another harness or the
 account it names is off, and a project's spare goes once nobody has used the project for a day. One
 whose setup fails is taken away, and the next is cut ten minutes later; a CLI that dies, or never

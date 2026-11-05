@@ -262,6 +262,22 @@ pub async fn rename_branch(repo: &Path, from: &str, to: &str) -> Result<()> {
     Ok(())
 }
 
+/// The branch `checkout` has checked out; None for a detached HEAD.
+pub async fn current_branch(checkout: &Path) -> Option<String> {
+    let out = git(checkout, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .await
+        .ok()?;
+    Some(out.trim().to_string())
+}
+
+/// `git reset --hard <commit>` in `checkout`: its branch, index and files
+/// moved to `commit`, untracked and ignored files left where they are —
+/// what a SPARE WORKTREE's refresh does when its base moves.
+pub async fn reset_hard(checkout: &Path, commit: &str) -> Result<()> {
+    git(checkout, &["reset", "--hard", "--quiet", commit]).await?;
+    Ok(())
+}
+
 /// Take a SPARE WORKTREE off the disk: its checkout, whatever is in it,
 /// then its branch. A checkout already gone is pruned from git's list
 /// instead. Each step is tried whatever the one before it did; the first
