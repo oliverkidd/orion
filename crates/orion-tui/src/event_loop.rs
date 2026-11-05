@@ -286,6 +286,9 @@ async fn main_loop(
     // the background (`pr_cache`).
     app.pr_cache = Some(crate::pr_cache::PrCache::default_location());
     crate::pr_cache::hydrate(&mut app);
+    // Every project's Linear issues the last run read, the same way.
+    app.linear_cache = Some(crate::linear_cache::LinearCache::default_location());
+    crate::linear_cache::hydrate(&mut app);
     // A screenshot dropped onto a prompt box is copied here the moment it
     // lands, before macOS deletes the file behind its thumbnail.
     app.attachments_dir = Some(crate::dropped_files::default_dir());
@@ -508,6 +511,11 @@ async fn main_loop(
                         crate::pr_cache::write_all(&cache, &store, &live)
                     });
                 }
+                if let Some((cache, store)) = crate::linear_cache::take_flush(&mut app) {
+                    tokio::task::spawn_blocking(move || crate::linear_cache::write(&cache, &store));
+                }
+                // The selected project's Linear issues, asked on arrival.
+                crate::linear::prefetch(&mut app);
                 next_git_poll = tokio::time::Instant::now() + GIT_POLL;
             }
             // `Shift+R` asked for the pull requests now: the same lookups
@@ -740,6 +748,11 @@ async fn main_loop(
                 if app.pr_detail_delay().is_some() => {
                 lookup_pr_detail(&mut app, &detail_tx);
             }
+            // The LINEAR VIEW's cursor has rested on an issue: its comments.
+            _ = tokio::time::sleep(crate::linear::comments_delay(&app).unwrap_or(Duration::MAX)),
+                if crate::linear::comments_delay(&app).is_some() => {
+                crate::linear::fire_comments(&mut app);
+            }
             // The PULL REQUESTS MODAL's prefetch: your pull requests at
             // once, the rest one at a time behind them.
             _ = tokio::time::sleep(app.pr_prefetch_delay().unwrap_or(Duration::MAX)),
@@ -937,6 +950,9 @@ async fn main_loop(
             // handed to a thread here could be cut off with it.
             if let Some((cache, store, live)) = crate::pr_cache::take_flush(&mut app) {
                 crate::pr_cache::write_all(&cache, &store, &live);
+            }
+            if let Some((cache, store)) = crate::linear_cache::take_flush(&mut app) {
+                crate::linear_cache::write(&cache, &store);
             }
             // Persist selection so the next launch restores it.
             let _ = channels
@@ -4274,13 +4290,18 @@ fn dispatch_action(
         // The config read is per-open so edits apply without restarting.
         Action::Palette => {
             if app.focus != Focus::Terminal {
-                app.overlay = Some(Overlay::Palette(Palette::new(
+                // Every project's todos, for their rows.
+                crate::todos::view::load_every_list(app);
+                let mut extra = crate::palette::linear_rows(&app.tree, &app.linear);
+                extra.extend(crate::palette::todo_rows(&app.tree, &app.todos));
+                let palette = Palette::new(
                     &app.tree,
                     crate::config::Config::load().palette_enter_attaches,
                     &app.open_prs,
                     &app.prs,
                     app.hide_draft_prs,
-                )));
+                );
+                app.overlay = Some(Overlay::Palette(palette.with_extra(extra)));
             }
         }
         // `.` / `,`: the palette's attention order as a ring, no modal —
@@ -6894,11 +6915,16 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
     // (`launcher::open_pull_request`): ahead of the trailing Delete on an
     // archived card, which keeps no checkout verbs, and after the
     // checkout's Open on a live one.
-    let links: Vec<MenuItem> = crate::launcher::row(app, &a.id)
+    let mut links: Vec<MenuItem> = crate::launcher::row(app, &a.id)
         .and_then(|row| row.pr)
         .map(|pr| MenuItem::new("Open pull request", MenuAction::OpenLink(pr.url)))
         .into_iter()
         .collect();
+    // And the Linear issue it works on, in the LINEAR VIEW.
+    if let Some((project, id)) = crate::linear::worktree_issue(app, &a.worktree_id) {
+        let open = MenuAction::OpenLinearIssue { project, id };
+        links.push(MenuItem::new("Open Linear issue", open));
+    }
     if a.archived {
         let at = items.len().saturating_sub(1);
         items.splice(at..at, links);
@@ -9173,6 +9199,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             });
         }
         MenuAction::DuplicateAgent(id) => launcher::duplicate_agent(app, id),
+        MenuAction::OpenLinearIssue { project, id } => crate::linear::open_at(app, &project, &id),
         MenuAction::ContinueOn { id, harness } => {
             launcher::continue_on_harness(app, id, harness, out)
         }
@@ -9581,6 +9608,15 @@ pub(crate) fn jump_to_session(app: &mut App, id: AgentId, out: &mut Vec<ClientRe
     jump_to_target(app, PaletteTarget::Session(id), Landing::FocusOnly, out);
 }
 
+/// Close the overlay and land on `target` as the palette's `Enter` does:
+/// the LINEAR VIEW's **Go to session**.
+pub(crate) fn jump_as_palette(app: &mut App, target: PaletteTarget, out: &mut Vec<ClientRequest>) {
+    app.overlay = None;
+    let attaches = crate::config::Config::load().palette_enter_attaches;
+    let landing = Landing::for_enter_on(app, &target, attaches);
+    jump_to_target(app, target, landing, out);
+}
+
 /// Land the palette/finder on `target`, attaching without the debounce —
 /// the user typed a query and picked a row, which is as explicit as it gets.
 fn jump_to_target(
@@ -9615,6 +9651,8 @@ fn jump_to_target_inner(
         // session in it the empty grid and no pane.
         PaletteTarget::Project(id) => launcher::open_tab(app, &id, out),
         PaletteTarget::AddProject => open_prompt(app, PromptKind::AddProject),
+        PaletteTarget::LinearIssue { project, id } => crate::linear::open_at(app, &project, &id),
+        PaletteTarget::Todo { project, item } => crate::todos::view::open_at(app, &project, item),
         PaletteTarget::Worktree(id) => {
             if app.selected_worktree().is_some_and(|w| w.id == id) {
                 app.focus = Focus::Sessions;
@@ -38064,5 +38102,55 @@ mod tests {
             assert_eq!(todo_file(&app).items.len(), 5, "the pick takes no paste");
             assert!(todo_view(&app).query.is_empty());
         });
+    }
+
+    /// A session whose checkout works on a Linear issue has **Open Linear
+    /// issue** on its right-click menu, which opens the LINEAR VIEW on
+    /// it; one in a checkout no issue names has none.
+    #[test]
+    fn a_sessions_menu_opens_the_linear_issue_its_checkout_works_on() {
+        use crate::linear::{tests::issue, LinearList};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let project = ProjectId("p1".into());
+        let worktree = orion_core::Worktree {
+            id: WorktreeId("w2".into()),
+            project_id: project.clone(),
+            path: "/tmp/demo-eng-2".into(),
+            branch: "eng-2-logout".into(),
+            is_main: false,
+            sort_order: 1,
+        };
+        app.tree.worktrees.push(worktree);
+        let mut agent = app.tree.agents[0].clone();
+        agent.id = AgentId("a2".into());
+        agent.worktree_id = WorktreeId("w2".into());
+        app.tree.agents.push(agent.clone());
+        app.linear.insert(
+            project.clone(),
+            LinearList {
+                list: vec![issue("1", "ENG-1", "Login"), issue("2", "ENG-2", "Logout")],
+                ..Default::default()
+            },
+        );
+        let open = |app: &App, a: &orion_core::Agent| {
+            menu_items_for_session_in(app, a)
+                .into_iter()
+                .find(|i| i.label == "Open Linear issue")
+                .map(|i| i.action)
+        };
+        let main = app.tree.agents[0].clone();
+        assert!(
+            open(&app, &main).is_none(),
+            "the root checkout works on none"
+        );
+        let action = open(&app, &agent).expect("on the menu");
+        let mut out = Vec::new();
+        run_menu_action(&mut app, action, &mut out);
+        let Some(Overlay::Linear(view)) = &app.overlay else {
+            panic!("the LINEAR VIEW, got {:?}", app.overlay);
+        };
+        assert_eq!(view.project, project);
+        assert_eq!(view.selected, 1, "on ENG-2");
     }
 }

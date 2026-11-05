@@ -386,6 +386,12 @@ pub enum MenuAction {
     },
     /// A COMMAND PALETTE or OPEN MENU row: run the action as its key does.
     RunAction(crate::keymap::Action),
+    /// A card menu's **Open Linear issue**: the LINEAR VIEW on the issue
+    /// its checkout works on (`linear::worktree_issue`).
+    OpenLinearIssue {
+        project: ProjectId,
+        id: String,
+    },
 }
 
 /// Which submenu → (right arrow) opens from a menu row.
@@ -4369,6 +4375,16 @@ pub struct App {
     /// copy once its project's list lands — asked for because orion had
     /// not read it yet.
     pub linear_copy: Option<WorktreeId>,
+    /// The reads of the issues' comments, as the LINEAR VIEW's cursor
+    /// rests on each.
+    pub linear_comments: crate::linear::CommentReads,
+    /// Each project's lists asked as it is selected.
+    pub linear_prefetch: crate::linear::Prefetch,
+    /// The on-disk copy of the lists (`linear_cache`), when this app keeps
+    /// one — the main loop's does, a unit test's never — and whether a
+    /// list landed since it was last written.
+    pub linear_cache: Option<crate::linear_cache::LinearCache>,
+    pub linear_cache_dirty: bool,
     /// Each project's TODOS list, by its checkout, read when the modal
     /// first opens on it and kept for the session — saved on every change
     /// (`todos::store`).
@@ -4629,6 +4645,10 @@ impl App {
             linear_edits: crate::linear::LocalEdits::default(),
             linear_links: crate::linear::LinkStore::default(),
             linear_copy: None,
+            linear_comments: Default::default(),
+            linear_prefetch: Default::default(),
+            linear_cache: None,
+            linear_cache_dirty: false,
             todos: HashMap::new(),
             todo_pending: HashMap::new(),
             todo_clip: None,

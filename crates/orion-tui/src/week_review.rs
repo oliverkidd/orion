@@ -2869,6 +2869,7 @@ mod tests {
             updated_at: String::new(),
             completed_at: stamp(now, days_ago),
             prs: Vec::new(),
+            comments: Vec::new(),
         }
     }
 

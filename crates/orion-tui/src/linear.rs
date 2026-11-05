@@ -2,7 +2,8 @@
 //! assigned to you, and `Other issues`, the rest of your teams' — grouped
 //! by status, a line per issue with its priority's letter, the reading
 //! pane setting out its properties as Linear's sidebar does — who has it
-//! and who reported it among them — and filtered
+//! and who reported it among them — and its comments, read as the cursor
+//! rests on it ([`schedule_comments`]), and filtered
 //! by words (a status, priority or label as well as the title), `key:value`
 //! tokens and the FILTER PICK (`list_filter`).
 //! Issues are picked together so one agent fixes them in one worktree and
@@ -132,6 +133,23 @@ pub struct LinearIssue {
     /// them, open, merged or closed.
     #[serde(default)]
     pub prs: Vec<IssuePr>,
+    /// Its latest comments ([`COMMENTS_LIMIT`]), oldest first: read when
+    /// the cursor rests on it ([`schedule_comments`]) — the list never asks
+    /// for them — and kept across the lists that land after.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<IssueComment>,
+}
+
+/// A comment on a Linear issue, as the reading pane shows it and an
+/// agent is given it ([`issue_sections`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueComment {
+    /// Who wrote it, by display name — or, for one that came in through an
+    /// integration (Slack, email), who wrote it there.
+    pub author: String,
+    /// RFC 3339.
+    pub created_at: String,
+    pub body: String,
 }
 
 /// A pull request on a Linear issue, from the attachment's metadata:
@@ -239,7 +257,7 @@ pub struct LinearState {
 }
 
 /// Someone an issue can be assigned to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearUser {
     pub id: String,
     /// Their display name.
@@ -373,6 +391,41 @@ pub struct PickWorktree {
     pub branch: String,
 }
 
+/// `⌘N`: a new issue's title, in the reading pane's place, and the team it
+/// is filed in — into its Triage ([`create_issue`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewIssue {
+    pub title: TextInput,
+    /// The teams it can go to — the list's — and the one it goes to:
+    /// the cursor's issue's when `⌘N` was pressed, else the first.
+    pub teams: Vec<LinearTeam>,
+    pub team: usize,
+}
+
+/// `Enter` or `⇧Tab` on issues a worktree is on already ([`work_of`]):
+/// those worktrees, each with its sessions, in the reading pane's place —
+/// **Go to session** on them — and **New worktree anyway** under them, the
+/// only way to a second worktree for an issue that has one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkPick {
+    pub issues: Vec<LinearIssue>,
+    /// The worktrees the issues are on, in the grid's band order, each
+    /// with the identifiers of those on it.
+    pub worktrees: Vec<(PickWorktree, Vec<String>)>,
+    /// A row of `worktrees`, or the one past them: **New worktree anyway**.
+    pub selected: usize,
+    /// A new worktree goes by the preset pick (`⇧Tab`), not straight to
+    /// the QUICK PROMPT.
+    pub preset: bool,
+}
+
+impl WorkPick {
+    /// On **New worktree anyway**.
+    fn on_new(&self) -> bool {
+        self.selected >= self.worktrees.len()
+    }
+}
+
 impl LinearIssue {
     pub fn label(&self) -> String {
         if self.title.trim().is_empty() {
@@ -401,6 +454,23 @@ pub fn ids_of(issues: &[LinearIssue]) -> String {
 }
 
 impl LinearBatch {
+    /// `issues` with the task a launch on them sends: the **Linear
+    /// Ticket** preset's text, the issues filled in ([`ticket_task`]).
+    pub fn of(issues: Vec<LinearIssue>) -> Self {
+        let ticket = crate::agent_presets::system(crate::agent_presets::SystemPreset::LinearTicket);
+        let task = ticket_task(&ticket, &issues);
+        Self { issues, task }
+    }
+
+    /// Issue `id`'s comments, read after the box opened on it: the task
+    /// says them too.
+    fn put_comments(&mut self, id: &str, comments: &[IssueComment]) {
+        if let Some(issue) = self.issues.iter_mut().find(|i| i.id == id) {
+            issue.comments = comments.to_vec();
+            *self = Self::of(std::mem::take(&mut self.issues));
+        }
+    }
+
     pub fn ids(&self) -> String {
         ids_of(&self.issues)
     }
@@ -427,9 +497,10 @@ impl LinearBatch {
 
 /// `issues` written out in full, a markdown section each — identifier
 /// and title, then state, priority and link, then the whole description
-/// — as `{issues}` expands and as a typed task gets them appended
-/// (`QuickLaunch::compose`). The agent works from this text alone: a
-/// session needs no Linear access of its own to read what it is fixing.
+/// and the comments read on it — as `{issues}` expands and as a typed
+/// task gets them appended (`QuickLaunch::compose`). The agent works from
+/// this text alone: a session needs no Linear access of its own to read
+/// what it is fixing.
 pub fn issue_sections(issues: &[LinearIssue]) -> String {
     issues
         .iter()
@@ -447,12 +518,20 @@ pub fn issue_sections(issues: &[LinearIssue]) -> String {
                 "" => "(no description)",
                 desc => desc,
             };
-            format!(
+            let mut section = format!(
                 "### {}: {}\n{}\n\n{desc}",
                 i.identifier,
                 i.title,
                 facts.join(" · ")
-            )
+            );
+            if !i.comments.is_empty() {
+                section.push_str("\n\n#### Comments");
+                for c in &i.comments {
+                    let day = c.created_at.get(..10).unwrap_or_default();
+                    section.push_str(&format!("\n\n**{}** ({day}):\n{}", c.author, c.body.trim()));
+                }
+            }
+            section
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -565,6 +644,10 @@ pub struct LinearView {
     pub prop_pick: Option<PropPick>,
     /// The worktree picker, while it is up: every key but Esc is its own.
     pub worktree_pick: Option<WorktreePick>,
+    /// **Go to session**, while it is up: every key but Esc is its own.
+    pub work_pick: Option<WorkPick>,
+    /// The new issue `⌘N` is filing, while it is up: every key is its own.
+    pub new_issue: Option<NewIssue>,
     /// Which list shows: `My issues` or `Other issues`.
     pub tab: LinearTab,
     /// The tab strip's labels' screen x-ranges and its row, for the click.
@@ -677,6 +760,8 @@ impl LinearView {
             mode,
             prop_pick: None,
             worktree_pick: None,
+            work_pick: None,
+            new_issue: None,
             tab: LinearTab::Mine,
             tab_hits: Vec::new(),
             tab_row: Rect::default(),
@@ -691,6 +776,15 @@ impl LinearView {
 
     pub fn max_scroll(&self) -> u16 {
         crate::app::max_scroll(self.body_lines, self.view_height)
+    }
+
+    /// Something stands in the reading pane's place: a pick or a form.
+    fn side_up(&self) -> bool {
+        self.prop_pick.is_some()
+            || self.worktree_pick.is_some()
+            || self.work_pick.is_some()
+            || self.new_issue.is_some()
+            || self.filter_pick.is_some()
     }
 
     pub fn scroll_by(&mut self, delta: i32) {
@@ -723,6 +817,8 @@ pub struct LinearList {
     /// `prs` are some of the pull requests, not all, so a landing list
     /// keeps the ones already known for them ([`keep_cut_prs`]).
     pub prs_cut: std::collections::HashSet<String>,
+    /// The configured user's teams, in Linear's order: where `⌘N` files.
+    pub teams: Vec<LinearTeam>,
 }
 
 impl LinearList {
@@ -787,6 +883,20 @@ pub enum LinearAnswer {
         dir: PathBuf,
         result: Result<Viewer, String>,
     },
+    /// `⌘N` filed an issue in `project`'s team — or why not, with the
+    /// title to put back.
+    Created {
+        project: ProjectId,
+        dir: PathBuf,
+        team: LinearTeam,
+        title: String,
+        result: Result<Box<LinearIssue>, String>,
+    },
+    /// The comments of the issue the ticket names ([`request_comments`]).
+    Comments {
+        ticket: crate::fetch::Ticket<String>,
+        result: Result<Vec<IssueComment>, String>,
+    },
 }
 
 /// A state kind Linear counts as still to start: triage, the backlog or
@@ -797,7 +907,7 @@ fn unstarted_kind(kind: &str) -> bool {
 
 /// A Linear team an issue can be filed into ([`create_issue`]), with its
 /// triage state when it takes issues into Triage at all.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinearTeam {
     pub id: String,
     pub key: String,
@@ -931,6 +1041,34 @@ impl LocalEdits {
         });
     }
 }
+
+/// The issues' comments, read one issue at a time as the cursor rests on
+/// it ([`schedule_comments`]) — the comments themselves live on the
+/// issues ([`LinearIssue::comments`]).
+#[derive(Debug, Default)]
+pub struct CommentReads {
+    /// One read per issue at a time.
+    flights: crate::fetch::Flights<String>,
+    /// When each issue's last read landed, by issue id: one read within
+    /// [`COMMENTS_FRESH`] is not asked again.
+    pub(crate) read: HashMap<String, std::time::Instant>,
+    /// The issue the cursor rests on, the checkout whose key reads it, and
+    /// when the rest has been long enough to read its comments.
+    rest: Option<(String, PathBuf, std::time::Instant)>,
+    /// Issues a launch took whose comments were never read, with the
+    /// checkout whose key reads them: read on the loop's next turn, into
+    /// the launch's task ([`put_comments`]).
+    owed: Vec<(String, PathBuf)>,
+}
+
+/// How long the cursor rests on an issue before its comments are read —
+/// the pull request page's own rest.
+const COMMENTS_DEBOUNCE: std::time::Duration = crate::event_loop::PR_DETAIL_DEBOUNCE;
+/// How long a read of an issue's comments stands before a rest on it reads
+/// them again — shown meanwhile.
+const COMMENTS_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
+/// How many of an issue's comments are read: the latest.
+const COMMENTS_LIMIT: usize = 20;
 
 /// The account a key belongs to, as Linear's `viewer` query names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1727,6 +1865,23 @@ fn copy_linked(app: &mut App, wt: &orion_core::Worktree) {
     copy_issues(app, &issues, &format!(" from {}", wt.branch));
 }
 
+/// The issue checkout `worktree` works on — the first by status of those
+/// whose row names it ([`work_of`]) — by project and id: what a card's
+/// **Open Linear issue** opens. None for the root checkout, and while its
+/// project's list is not read.
+pub(crate) fn worktree_issue(
+    app: &App,
+    worktree: &orion_core::WorktreeId,
+) -> Option<(ProjectId, String)> {
+    let wt = app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| &w.id == worktree && !w.is_main)?;
+    let issue = linked_to(app, wt).into_iter().next()?;
+    Some((wt.project_id.clone(), issue.id))
+}
+
 /// The issues in `wt`'s project's list whose worktree it is, by status.
 fn linked_to(app: &App, wt: &orion_core::Worktree) -> Vec<LinearIssue> {
     let mut issues: Vec<LinearIssue> = rows(app, &wt.project_id)
@@ -1787,17 +1942,36 @@ pub(crate) fn open_attach(app: &mut App) {
     );
 }
 
+/// A `⌘K` row's issue: the view on `project`, on the issue's tab with
+/// the cursor on it.
+pub(crate) fn open_at(app: &mut App, project: &ProjectId, id: &str) {
+    let Some(p) = app.tree.projects.iter().find(|p| &p.id == project).cloned() else {
+        return;
+    };
+    let at = rows(app, project).iter().position(|i| i.id == id);
+    let tab = at.map(|i| LinearTab::of(&rows(app, project)[i]));
+    open_on(app, p.id, p.name, p.repo_path, LinearMode::Browse);
+    if let (Some(Overlay::Linear(view)), Some(at), Some(tab)) = (&mut app.overlay, at, tab) {
+        view.selected = at;
+        view.tab = tab;
+        view.focus = LinearFocus::List;
+    }
+    schedule_comments(app);
+}
+
 fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf, mode: LinearMode) {
     let mut view = LinearView::new(project.clone(), name, dir.clone(), mode);
     view.selected = clamp_selection(0, list_len(app, &project));
     app.overlay = Some(Overlay::Linear(view));
     request_list(app, project, dir, false);
+    schedule_comments(app);
     app.dirty = true;
 }
 
 pub(crate) fn reopen(app: &mut App, mut view: LinearView) {
     view.selected = clamp_selection(view.selected as i64, list_len(app, &view.project));
     app.overlay = Some(Overlay::Linear(view));
+    schedule_comments(app);
     app.dirty = true;
 }
 
@@ -1810,6 +1984,8 @@ fn list_len(app: &App, project: &ProjectId) -> usize {
 /// edit needs: while a list is out, it is owed and asked as soon as that
 /// one lands, never dropped.
 pub(crate) fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fresh: bool) {
+    // Asked for by name, a refusal is said, even of a prefetch's ask.
+    app.linear_prefetch.quiet.remove(&project);
     let Some(tx) = app.linear_tx.clone() else {
         return;
     };
@@ -1822,6 +1998,7 @@ pub(crate) fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fres
     let Some(ticket) = ticket else {
         return;
     };
+    app.linear_prefetch.asked.insert(project.clone(), now);
     app.linear_failed.remove(&project);
     app.dirty = true;
     let email = crate::config::Config::load()
@@ -1832,6 +2009,51 @@ pub(crate) fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fres
         let list = fetch_lists(&dir, &email).await;
         let _ = tx.send(LinearAnswer::List { ticket, dir, list });
     });
+}
+
+/// The LIST PREFETCH: each project's lists asked as it is selected, so
+/// `⌘L` — and the `⌘K` palette's issue rows — have them before they are
+/// asked for (`linear_cache` keeps them across launches meanwhile).
+#[derive(Debug, Default)]
+pub struct Prefetch {
+    /// The project selected at the last look: a prefetch asks on arrival.
+    seen: Option<ProjectId>,
+    /// When each project's lists were last asked, by any ask.
+    asked: HashMap<ProjectId, std::time::Instant>,
+    /// The projects whose list out now a prefetch asked for: a refusal of
+    /// one says nothing — the LINEAR VIEW says it when it opens.
+    quiet: std::collections::HashSet<ProjectId>,
+}
+
+/// How long a project's lists stand before arriving at it asks again.
+const PREFETCH_FRESH: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// On the GIT POLL: arriving at a project asks for its lists, unless they
+/// were asked within [`PREFETCH_FRESH`] or it has no key to ask with —
+/// quietly either way.
+pub(crate) fn prefetch(app: &mut App) {
+    let Some((id, dir)) = app
+        .selected_project()
+        .map(|p| (p.id.clone(), p.repo_path.clone()))
+    else {
+        return;
+    };
+    let ahead = &mut app.linear_prefetch;
+    if ahead.seen.as_ref() == Some(&id) {
+        return;
+    }
+    ahead.seen = Some(id.clone());
+    let fresh = ahead
+        .asked
+        .get(&id)
+        .is_some_and(|at| at.elapsed() < PREFETCH_FRESH);
+    // One already out is someone else's, to say as it likes.
+    let out = app.linear_flights.in_flight(&id);
+    if fresh || out || app.linear_tx.is_none() || key_source(&dir).is_none() {
+        return;
+    }
+    request_list(app, id.clone(), dir, false);
+    app.linear_prefetch.quiet.insert(id);
 }
 
 /// The LINEAR VIEW over `overlay`, wherever it stands: up, under the PR
@@ -1892,8 +2114,132 @@ fn keep_cut_prs(fresh: &mut LinearList, old: &[LinearIssue]) {
     }
 }
 
+/// An issue keeps the comments the last list had read on it: a list
+/// never asks for them.
+fn keep_comments(fresh: &mut LinearList, old: &[LinearIssue]) {
+    for issue in fresh.list.iter_mut().filter(|i| i.comments.is_empty()) {
+        if let Some(was) = old.iter().find(|o| o.id == issue.id) {
+            issue.comments = was.comments.clone();
+        }
+    }
+}
+
+/// The cursor moved, or the view changed under it: arm the read of the
+/// comments of the issue it is on now — [`COMMENTS_DEBOUNCE`] from now, so
+/// rows walked past are never asked about — unless they were read within
+/// [`COMMENTS_FRESH`] or are being read. Disarmed with no issue under the
+/// cursor, or the view gone.
+pub(crate) fn schedule_comments(app: &mut App) {
+    let on = match &app.overlay {
+        Some(Overlay::Linear(view)) => {
+            selected_issue(app).map(|issue| (issue.id.clone(), view.dir.clone()))
+        }
+        _ => None,
+    };
+    let reads = &mut app.linear_comments;
+    let Some((id, dir)) = on else {
+        reads.rest = None;
+        return;
+    };
+    if reads.rest.as_ref().is_some_and(|(rest, ..)| *rest == id) {
+        return;
+    }
+    let fresh = reads
+        .read
+        .get(&id)
+        .is_some_and(|at| at.elapsed() < COMMENTS_FRESH);
+    reads.rest = (!fresh && !reads.flights.in_flight(&id))
+        .then(|| (id, dir, std::time::Instant::now() + COMMENTS_DEBOUNCE));
+}
+
+/// How long until a read of comments is due: none for a launch's, the
+/// rest of the rest for the cursor's; None with neither.
+pub(crate) fn comments_delay(app: &App) -> Option<std::time::Duration> {
+    let reads = &app.linear_comments;
+    if !reads.owed.is_empty() {
+        return Some(std::time::Duration::ZERO);
+    }
+    let (.., at) = reads.rest.as_ref()?;
+    Some(at.saturating_duration_since(std::time::Instant::now()))
+}
+
+/// Read the comments due: a launch's, and the cursor's once it has
+/// rested.
+pub(crate) fn fire_comments(app: &mut App) {
+    for (id, dir) in std::mem::take(&mut app.linear_comments.owed) {
+        request_comments(app, dir, id);
+    }
+    let rested = app
+        .linear_comments
+        .rest
+        .as_ref()
+        .is_some_and(|(.., at)| *at <= std::time::Instant::now());
+    if let Some((id, dir, _)) = app.linear_comments.rest.take_if(|_| rested) {
+        request_comments(app, dir, id);
+    }
+}
+
+/// Ask Linear, off the loop, for issue `id`'s latest comments, with the
+/// key in `dir` — one read per issue at a time.
+fn request_comments(app: &mut App, dir: PathBuf, id: String) {
+    let Some(tx) = app.linear_tx.clone() else {
+        return;
+    };
+    let Some(ticket) = app.linear_comments.flights.begin(id, crate::fetch::now()) else {
+        return;
+    };
+    app.dirty = true;
+    tokio::spawn(async move {
+        let result = fetch_comments(&dir, &ticket.key).await;
+        let _ = tx.send(LinearAnswer::Comments { ticket, result });
+    });
+}
+
+/// Issue `id`'s comments, read: onto the issue in every list that has it
+/// — and into the task of a QUICK PROMPT already up on it.
+fn put_comments(app: &mut App, id: &str, comments: Vec<IssueComment>) {
+    for list in app.linear.values_mut() {
+        for issue in list.list.iter_mut().filter(|i| i.id == id) {
+            issue.comments = comments.clone();
+        }
+    }
+    if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
+        if let crate::app::PromptKind::QuickPrompt(launch) = &mut prompt.kind {
+            if let Some(batch) = &mut launch.linear {
+                batch.put_comments(id, &comments);
+            }
+        }
+    }
+}
+
 pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
     match answer {
+        LinearAnswer::Created {
+            project,
+            dir,
+            team,
+            title,
+            result,
+        } => land_created(app, project, dir, team, title, result),
+        LinearAnswer::Comments { ticket, result } => {
+            if app.linear_comments.flights.land(&ticket).is_none() {
+                return;
+            }
+            // A failed read is tried again on a rest after the next
+            // COMMENTS_FRESH, the comments known kept meanwhile.
+            app.linear_comments
+                .read
+                .insert(ticket.key.clone(), std::time::Instant::now());
+            // A rest armed on it meanwhile has nothing left to ask.
+            app.linear_comments
+                .rest
+                .take_if(|(id, ..)| *id == ticket.key);
+            if let Ok(comments) = result {
+                put_comments(app, &ticket.key, comments);
+                app.linear_cache_dirty = true;
+            }
+            app.dirty = true;
+        }
         LinearAnswer::Viewer { dir, result } => {
             let source = key_source(&dir);
             let test = match result {
@@ -1932,6 +2278,7 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                 Ok(mut fetched) => {
                     let old = app.linear.remove(&project).unwrap_or_default();
                     keep_cut_prs(&mut fetched, &old.list);
+                    keep_comments(&mut fetched, &old.list);
                     let me = fetched.me_id().map(str::to_string);
                     app.linear_edits.lay_over(
                         &project,
@@ -1940,15 +2287,20 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                         me.as_deref(),
                     );
                     app.linear_failed.remove(&project);
+                    app.linear_prefetch.quiet.remove(&project);
                     app.linear.insert(project.clone(), fetched);
+                    app.linear_cache_dirty = true;
                     follow_cursor(app, &project, &old.list);
+                    schedule_comments(app);
                     if let Some(wt) = waiting {
                         copy_linked(app, &wt);
                     }
                 }
                 Err(err) => {
                     app.linear_failed.insert(project.clone());
-                    app.flash = Some(crate::flash::Flash::failed(err));
+                    if !app.linear_prefetch.quiet.remove(&project) {
+                        app.flash = Some(crate::flash::Flash::failed(err));
+                    }
                 }
             }
             app.dirty = true;
@@ -2612,6 +2964,13 @@ pub(crate) mod keys {
     /// MODAL's.
     pub const LEVEL: Key = crate::todos::view::keys::LEVEL;
     pub const LINK: Key = Key::new(&["enter"], "link");
+    /// **Go to session**'s: to the worktree under the cursor, or a new one.
+    pub const GO: Key = Key::new(&["enter"], "go to session");
+    /// A new issue, into its team's Triage — the TODOS MODAL's new item.
+    pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "new issue");
+    /// The new issue's: file it, and pick its team.
+    pub const FILE: Key = Key::new(&["enter"], "file in Triage");
+    pub const TEAM: Key = Key::new(&["tab"], "team");
     /// `My issues` ⇄ `Other issues`: plain or with ⇧, as the PULL
     /// REQUESTS MODAL's tab keys are.
     pub const TABS: Key = Key::new(&["left", "right", "shift+left", "shift+right"], "tabs").show(2);
@@ -2629,12 +2988,17 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         MARK, ROWS, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE,
-        PICK, SET, LEVEL, LINK, TABS, FILTER, JUMP, SELECT, COPY,
+        PICK, SET, LEVEL, LINK, GO, NEW, FILE, TEAM, TABS, FILTER, JUMP, SELECT, COPY,
     ];
 }
 
 /// The keys along the modal's bottom edge, for browsing or for picking
-/// the issues a pull request attaches to. Esc clears a typed filter first.
+/// the issues a pull request attaches to — what fits a 120-column window
+/// (the modal's border there, its scroll position kept clear, cuts `⌘N`
+/// first). The rest are in `docs/keys.md`: `←`/`→` the tabs the strip
+/// shows, `⌘F` the filter its line names, `⇧↑`/`⇧↓`, `⌘↑`/`⌘↓`, `⌘C`,
+/// `⌘U`, `⌘.`, `⇧Tab`, `⌘O` (the `↗` on the page) and `⌘R`. Esc clears a
+/// typed filter first.
 pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     let esc = if !view.query.is_empty() {
@@ -2661,6 +3025,22 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
             Hint::new("Esc", "cancel"),
         ];
     }
+    if let Some(form) = &view.new_issue {
+        let mut hints = vec![keys::FILE.hint().kept()];
+        if form.teams.len() > 1 {
+            hints.push(keys::TEAM.hint());
+        }
+        hints.push(Hint::new("Esc", "cancel"));
+        return hints;
+    }
+    if let Some(pick) = &view.work_pick {
+        let go = if pick.on_new() {
+            keys::GO.hint_as("new worktree")
+        } else {
+            keys::GO.hint()
+        };
+        return vec![go.kept(), keys::PICK.hint(), Hint::new("Esc", "cancel")];
+    }
     if view.filter_pick.is_some() {
         return crate::list_filter::hints();
     }
@@ -2668,41 +3048,24 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
         LinearFocus::List => keys::MARK.hint(),
         LinearFocus::Search => keys::ROWS.hint(),
     };
-    match view.mode {
-        LinearMode::Browse => vec![
-            mark,
-            keys::CONFIRM.hint().kept(),
-            keys::TABS.hint(),
-            keys::FILTER.hint(),
-            // An issue's own properties before where it is sent: a
-            // narrow border cuts the hints from the right.
-            keys::STATUS.hint(),
-            keys::PRIORITY.hint(),
-            keys::ASSIGN.hint(),
-            keys::SELECT.hint(),
-            keys::COPY.hint(),
-            keys::JUMP.hint(),
-            keys::ATTACH.hint(),
-            keys::WORKTREE.hint(),
-            keys::PRESET.hint(),
-            keys::BROWSER.hint(),
-            keys::REFRESH.hint(),
-            Hint::new("Esc", esc),
-        ],
-        LinearMode::Attach { .. } => vec![
-            mark,
-            keys::CONFIRM.hint_as("attach marked to this PR").kept(),
-            keys::TABS.hint(),
-            keys::FILTER.hint(),
-            keys::STATUS.hint(),
-            keys::PRIORITY.hint(),
-            keys::ASSIGN.hint(),
-            keys::SELECT.hint(),
-            keys::JUMP.hint(),
-            keys::BROWSER.hint(),
-            Hint::new("Esc", esc),
-        ],
+    let confirm = match view.mode {
+        LinearMode::Browse => keys::CONFIRM.hint(),
+        LinearMode::Attach { .. } => keys::CONFIRM.hint_as("attach marked to this PR"),
+    };
+    // An issue's own properties, then a new one: a narrow border cuts
+    // the hints from the right.
+    let mut hints = vec![
+        mark,
+        confirm.kept(),
+        keys::STATUS.hint(),
+        keys::PRIORITY.hint(),
+        keys::ASSIGN.hint(),
+    ];
+    if view.mode == LinearMode::Browse {
+        hints.push(keys::NEW.hint());
     }
+    hints.push(Hint::new("Esc", esc));
+    hints
 }
 
 /// A property picker for `issues` in the reading pane's place: `rows`,
@@ -3106,22 +3469,305 @@ fn link_worktree(app: &mut App) {
     detach_stale(app, &project, stale);
 }
 
+/// `⌘N` while browsing: the new issue's form, on the team of the issue
+/// under the cursor — or, with none, the list's first team.
+fn open_new_issue(app: &mut App) {
+    if !matches!(&app.overlay, Some(Overlay::Linear(v)) if v.mode == LinearMode::Browse) {
+        return;
+    }
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let teams = app
+        .linear
+        .get(&view.project)
+        .map(|l| l.teams.clone())
+        .unwrap_or_default();
+    if teams.is_empty() {
+        app.flash = Some(crate::flash::Flash::failed(
+            "no Linear team to file in yet — the list hasn't landed",
+        ));
+        return;
+    }
+    let on = selected_issue(app).map(|i| i.team_id.clone());
+    let team = teams
+        .iter()
+        .position(|t| Some(&t.id) == on.as_ref())
+        .unwrap_or(0);
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.filter_pick = None;
+        view.new_issue = Some(NewIssue {
+            title: TextInput::new(),
+            teams,
+            team,
+        });
+    }
+}
+
+/// Keys while `⌘N`'s form is up: `Tab` the next team, `Enter` files it,
+/// `Esc` drops it, the rest edit the title.
+fn new_issue_key(app: &mut App, key: KeyEvent) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let Some(form) = &mut view.new_issue else {
+        return;
+    };
+    match key.code {
+        KeyCode::Esc => view.new_issue = None,
+        _ if keys::TEAM.matches(&key) => form.team = (form.team + 1) % form.teams.len().max(1),
+        _ if keys::FILE.matches(&key) => file_new_issue(app),
+        _ => {
+            form.title.handle_key(&key);
+        }
+    }
+    app.dirty = true;
+}
+
+/// `Enter` in `⌘N`'s form: the issue filed off the loop, the form gone;
+/// an empty title files nothing.
+fn file_new_issue(app: &mut App) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let title = view
+        .new_issue
+        .as_ref()
+        .map(|f| f.title.trim().to_string())
+        .unwrap_or_default();
+    if title.is_empty() {
+        return;
+    }
+    let Some(form) = view.new_issue.take() else {
+        return;
+    };
+    let (project, dir) = (view.project.clone(), view.dir.clone());
+    let (Some(team), Some(tx)) = (form.teams.get(form.team).cloned(), app.linear_tx.clone()) else {
+        return;
+    };
+    app.flash = Some(crate::flash::Flash::working(format!(
+        "filing \"{title}\" in {}…",
+        team.name
+    )));
+    tokio::spawn(async move {
+        let draft = IssueDraft {
+            title: title.clone(),
+            priority: 0,
+            description: String::new(),
+        };
+        let result = create_issue(&dir, &team, &draft).await.map(Box::new);
+        let _ = tx.send(LinearAnswer::Created {
+            project,
+            dir,
+            team,
+            title,
+            result,
+        });
+    });
+}
+
+/// `⌘N`'s issue, filed: on the list at once — the cursor on it, while the
+/// view is still up on its project — and the lists asked again. Refused:
+/// why, and the form back with its title.
+fn land_created(
+    app: &mut App,
+    project: ProjectId,
+    dir: PathBuf,
+    team: LinearTeam,
+    title: String,
+    result: Result<Box<LinearIssue>, String>,
+) {
+    let me = me_id(app, &project);
+    let view = match &mut app.overlay {
+        Some(Overlay::Linear(view)) if view.project == project => Some(view),
+        _ => None,
+    };
+    match result {
+        Ok(issue) => {
+            let mut issue = *issue;
+            issue.mine = !issue.assignee_id.is_empty() && me.as_deref() == Some(&issue.assignee_id);
+            app.flash = Some(crate::flash::Flash::done(format!(
+                "filed {} in {}",
+                issue.identifier, team.name
+            )));
+            if let Some(view) = view {
+                view.tab = LinearTab::of(&issue);
+                view.focus = LinearFocus::List;
+                view.query.clear();
+                view.held.clear();
+                view.selected = 0;
+            }
+            if let Some(list) = app.linear.get_mut(&project) {
+                list.list.insert(0, issue);
+            }
+            request_list(app, project, dir, true);
+        }
+        Err(why) => {
+            app.flash = Some(crate::flash::Flash::failed(format!(
+                "couldn't file the issue: {why}"
+            )));
+            if let Some(view) = view.filter(|v| !v.side_up()) {
+                let teams = app
+                    .linear
+                    .get(&project)
+                    .map(|l| l.teams.clone())
+                    .unwrap_or_default();
+                let at = teams.iter().position(|t| t.id == team.id).unwrap_or(0);
+                view.new_issue = Some(NewIssue {
+                    title: TextInput::with_text(title),
+                    teams,
+                    team: at,
+                });
+            }
+        }
+    }
+    app.dirty = true;
+}
+
+/// The project's worktrees `issues` are on already ([`work_of`]), in the
+/// grid's band order, each with the identifiers of those on it.
+fn worked_on(
+    app: &App,
+    project: &ProjectId,
+    issues: &[LinearIssue],
+) -> Vec<(PickWorktree, Vec<String>)> {
+    let on: Vec<(String, &str)> = issues
+        .iter()
+        .filter_map(|i| Some((work_of(app, project, i)?.branch?, i.identifier.as_str())))
+        .collect();
+    app.worktrees_in_band_order(project)
+        .into_iter()
+        .filter_map(|w| {
+            let ids: Vec<String> = on
+                .iter()
+                .filter(|(branch, _)| *branch == w.branch)
+                .map(|(_, id)| id.to_string())
+                .collect();
+            let wt = PickWorktree {
+                id: w.id.clone(),
+                branch: w.branch.clone(),
+            };
+            (!ids.is_empty()).then_some((wt, ids))
+        })
+        .collect()
+}
+
+/// `Enter` (or `⇧Tab`, `preset`) while browsing: an agent on `issues` in
+/// a fresh worktree — unless a worktree is on some of them already, when
+/// the [`WorkPick`] offers it first.
+fn launch_or_go(app: &mut App, issues: Vec<LinearIssue>, preset: bool) {
+    let Some(Overlay::Linear(view)) = &app.overlay else {
+        return;
+    };
+    let worktrees = worked_on(app, &view.project, &issues);
+    if worktrees.is_empty() {
+        launch_new(app, issues, preset);
+        return;
+    }
+    if let Some(Overlay::Linear(view)) = &mut app.overlay {
+        view.filter_pick = None;
+        view.work_pick = Some(WorkPick {
+            issues,
+            worktrees,
+            selected: 0,
+            preset,
+        });
+    }
+}
+
+/// An agent on `issues` in a fresh worktree: the QUICK PROMPT, or the
+/// preset pick in front of it.
+fn launch_new(app: &mut App, issues: Vec<LinearIssue>, preset: bool) {
+    if preset {
+        open_preset_on(app, issues);
+    } else {
+        open_prompt(app, issues);
+    }
+}
+
+/// Keys while **Go to session** is up.
+fn handle_work_pick_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    let Some(Overlay::Linear(view)) = &mut app.overlay else {
+        return;
+    };
+    let Some(pick) = &mut view.work_pick else {
+        return;
+    };
+    let n = pick.worktrees.len() + 1;
+    match key.code {
+        KeyCode::Esc => view.work_pick = None,
+        KeyCode::Down => pick.selected = clamp_selection(pick.selected as i64 + 1, n),
+        KeyCode::Up => pick.selected = clamp_selection(pick.selected as i64 - 1, n),
+        _ if keys::GO.matches(&key) => {
+            let Some(pick) = view.work_pick.take() else {
+                return;
+            };
+            match pick.worktrees.get(pick.selected) {
+                Some((wt, _)) => go_to_work(app, &wt.id, out),
+                None => launch_new(app, pick.issues, pick.preset),
+            }
+        }
+        _ => {}
+    }
+    app.dirty = true;
+}
+
+/// **Go to session**: the view closed, and the cursor on the worktree's
+/// session that wants you most — the `/` palette's order — landed on as
+/// the palette's `Enter` lands; on the worktree's band when it has none.
+fn go_to_work(app: &mut App, worktree: &orion_core::WorktreeId, out: &mut Vec<ClientRequest>) {
+    use crate::palette::PaletteTarget;
+    let session = crate::palette::attention_sessions(&app.tree)
+        .into_iter()
+        .find(|id| {
+            app.tree
+                .agents
+                .iter()
+                .any(|a| &a.id == id && &a.worktree_id == worktree)
+        });
+    let target = match session {
+        Some(id) => PaletteTarget::Session(id),
+        None => PaletteTarget::Worktree(worktree.clone()),
+    };
+    crate::event_loop::jump_as_palette(app, target, out);
+}
+
 pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(Overlay::Linear(view)) = &mut app.overlay else {
         return false;
     };
+    if let Some(form) = &mut view.new_issue {
+        // A title is one line.
+        form.title.insert_str(&text.replace(['\r', '\n'], " "));
+        return true;
+    }
     view.query.insert_str(text);
     query_changed(app);
     true
 }
 
+/// A key in the LINEAR VIEW — and the read of the comments of whatever
+/// issue the cursor is on after it armed.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    view_key(app, key, out);
+    schedule_comments(app);
+}
+
+fn view_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.prop_pick.is_some()) {
         handle_pick_key(app, key);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.worktree_pick.is_some()) {
         handle_worktree_pick_key(app, key);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.work_pick.is_some()) {
+        handle_work_pick_key(app, key, out);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.new_issue.is_some()) {
+        new_issue_key(app, key);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::Linear(v)) if v.filter_pick.is_some()) {
@@ -3181,6 +3827,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::ATTACH.matches(&key) => open_pr_pick(app),
         _ if keys::WORKTREE.matches(&key) => open_worktree_pick(app),
         _ if keys::FILTER.matches(&key) => view.filter_pick = Some(FilterPick::default()),
+        _ if keys::NEW.matches(&key) => open_new_issue(app),
         _ if keys::COPY.matches(&key) && view.query.selected().is_none() => copy_picked(app),
         // Everything else edits the filter — and typing on the rows takes
         // the keys back to the search line.
@@ -3200,6 +3847,11 @@ pub(crate) fn handle_mouse(
     pos: Position,
     out: &mut Vec<ClientRequest>,
 ) {
+    view_mouse(app, mouse, pos, out);
+    schedule_comments(app);
+}
+
+fn view_mouse(app: &mut App, mouse: MouseEvent, pos: Position, out: &mut Vec<ClientRequest>) {
     if app.hover_crumb == Some(HitTarget::ModalBrowser)
         && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
     {
@@ -3559,7 +4211,7 @@ fn confirm(app: &mut App) {
         return;
     };
     match &view.mode {
-        LinearMode::Browse => open_prompt(app, issues),
+        LinearMode::Browse => launch_or_go(app, issues, false),
         LinearMode::Attach {
             pr_url, pr_number, ..
         } => {
@@ -3618,6 +4270,10 @@ fn open_preset(app: &mut App) {
     if issues.is_empty() {
         return;
     }
+    launch_or_go(app, issues, true);
+}
+
+fn open_preset_on(app: &mut App, issues: Vec<LinearIssue>) {
     let Some(launch) = launch_for(app, issues) else {
         return;
     };
@@ -3631,12 +4287,16 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
     let Some(Overlay::Linear(view)) = &app.overlay else {
         return None;
     };
-    let project = view.project.clone();
+    let (project, dir) = (view.project.clone(), view.dir.clone());
+    // Any comments not read yet land in the box's task when they come.
+    let reads = &mut app.linear_comments;
+    for issue in issues.iter().filter(|i| !reads.read.contains_key(&i.id)) {
+        reads.owed.push((issue.id.clone(), dir.clone()));
+    }
     let cfg = crate::config::Config::load();
     let mut ticket = crate::agent_presets::system(crate::agent_presets::SystemPreset::LinearTicket);
-    let task = ticket_task(&ticket, &issues);
     let taken = app.project_branches(&project);
-    let batch = LinearBatch { issues, task };
+    let batch = LinearBatch::of(issues);
     // A fresh worktree named after the batch (`LinearBatch::branch`),
     // never the project's root checkout: a batch of issues is a branch of
     // its own, and its pull request is what `remember_submit` links back.
@@ -3828,9 +4488,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     } else {
         head
     };
-    let side_up =
-        view.prop_pick.is_some() || view.worktree_pick.is_some() || view.filter_pick.is_some();
-    let list_focused = list_focused && !side_up;
+    let list_focused = list_focused && !view.side_up();
     let rows_focused = list_focused && view.focus == LinearFocus::List;
     let block = panel_block(&title, list_focused, th);
     let list_inner = block.inner(list_a);
@@ -3954,7 +4612,11 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     let body_inner = block.inner(body_a);
     let read_a = reading_area(body_inner);
     let lines: Vec<Line> = match current {
-        Some(issue) => body_lines(issue, read_a.width as usize, now, th),
+        Some(issue) => {
+            // A first read of its comments, still out, says so.
+            let reading = app.linear_comments.flights.in_flight(&issue.id);
+            body_lines(issue, read_a.width as usize, now, reading, th)
+        }
         None => Vec::new(),
     };
     let max_scroll = (lines.len() as u16).saturating_sub(read_a.height.max(1));
@@ -4008,6 +4670,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
         draw_prop_pick(f, body_inner, pick, me, th);
     } else if let Some(pick) = &view.worktree_pick {
         draw_worktree_pick(f, body_inner, app, pick, &view.project, th);
+    } else if let Some(pick) = &view.work_pick {
+        draw_work_pick(f, body_inner, app, pick, th);
+    } else if let Some(form) = &view.new_issue {
+        draw_new_issue(f, read_a, form, th);
     } else if let Some(pick) = &mut filter_pick {
         let facets = pick_facets(&placed, view.tab, th);
         pick.clamp(&facets);
@@ -4414,6 +5080,72 @@ fn draw_worktree_pick(
     );
 }
 
+/// `⌘N`'s form: the team it goes to, and the title being typed.
+fn draw_new_issue(f: &mut Frame, area: Rect, form: &NewIssue, th: Theme) {
+    let dim = Style::default().fg(th.dim);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let team = form.teams.get(form.team);
+    let into = match team {
+        Some(t) if t.triage_state.is_some() => "Triage",
+        _ => "its default state",
+    };
+    let team_name = team.map_or(String::new(), |t| format!("{} ({})", t.name, t.key));
+    let lines = [
+        Line::from(Span::styled("New issue", bold)),
+        Line::default(),
+        Line::from(vec![
+            Span::styled(format!("{:<8}", "Team"), dim),
+            Span::raw(team_name),
+            Span::styled(format!(" · {into}"), dim),
+        ]),
+    ];
+    for (i, line) in lines.into_iter().enumerate() {
+        if let Some(row) = row_rect(area, i) {
+            f.render_widget(Paragraph::new(line), row);
+        }
+    }
+    if let Some(row) = row_rect(area, 3) {
+        let [name, field] =
+            Layout::horizontal([Constraint::Length(8), Constraint::Min(1)]).areas(row);
+        f.render_widget(Paragraph::new(Span::styled("Title", dim)), name);
+        let line = crate::ui::search_line(&form.title, "what needs doing", field, th);
+        f.render_widget(Paragraph::new(line), field);
+    }
+}
+
+/// **Go to session**: each worktree the issues are on — its branch, which
+/// of them, and its sessions under it — then **New worktree anyway**.
+fn draw_work_pick(f: &mut Frame, area: Rect, app: &App, pick: &WorkPick, th: Theme) {
+    let width = usize::from(area.width).saturating_sub(PICK_INDENT.len());
+    let mut groups: Vec<PickGroup> = pick
+        .worktrees
+        .iter()
+        .map(|(w, ids)| PickGroup {
+            head: vec![
+                Span::raw(format!("⎇ {}", w.branch)),
+                Span::styled(format!("  {}", ids.join(", ")), Style::default().fg(th.dim)),
+            ],
+            sessions: pick_session_lines(app, &w.id, width, th),
+            dormant: app.worktree_dormant(&w.id),
+        })
+        .collect();
+    groups.push(PickGroup {
+        head: vec![Span::raw("+ New worktree anyway")],
+        sessions: Vec::new(),
+        dormant: false,
+    });
+    let on: Vec<&str> = pick
+        .worktrees
+        .iter()
+        .flat_map(|(_, ids)| ids.iter().map(String::as_str))
+        .collect();
+    let heading = match on.as_slice() {
+        [one] => format!("{one} is in a worktree already"),
+        _ => format!("{} are in worktrees already", on.join(", ")),
+    };
+    draw_grouped_pick(f, area, heading, &groups, pick.selected, th);
+}
+
 /// How far a session's line sits in under its checkout's.
 const PICK_INDENT: &str = "   ";
 /// The most sessions a checkout lists under it in the worktree picker;
@@ -4711,8 +5443,16 @@ fn properties(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
 const PAIR_W: usize = 34;
 
 /// The reading pane's text, `width` wide: the title, wrapped and bold,
-/// the properties under it over a rule, then the description.
-fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Line<'static>> {
+/// the properties under it over a rule, then the description and the
+/// comments read on it — or, `reading` them for the first time, a line
+/// saying so.
+fn body_lines(
+    issue: &LinearIssue,
+    width: usize,
+    now: i64,
+    reading: bool,
+    th: Theme,
+) -> Vec<Line<'static>> {
     let title = Style::default().fg(th.text).add_modifier(Modifier::BOLD);
     let mut lines: Vec<Line> = crate::pr_preview::wrap(&issue.title, width)
         .into_iter()
@@ -4733,6 +5473,58 @@ fn body_lines(issue: &LinearIssue, width: usize, now: i64, th: Theme) -> Vec<Lin
     } else {
         lines.extend(markdown::render(
             &issue.description,
+            width.max(20),
+            Breaks::Hard,
+            Style::default(),
+            th,
+        ));
+    }
+    lines.extend(comment_lines(issue, width, now, reading, th));
+    lines
+}
+
+/// The reading pane's comments, under the description: a `Comments · N`
+/// heading over a rule, then each one's author and day over its text.
+fn comment_lines(
+    issue: &LinearIssue,
+    width: usize,
+    now: i64,
+    reading: bool,
+    th: Theme,
+) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(th.dim);
+    if issue.comments.is_empty() {
+        if !reading {
+            return Vec::new();
+        }
+        return vec![
+            Line::default(),
+            Line::from(Span::styled("reading comments…", dim)),
+        ];
+    }
+    let mut lines = vec![
+        Line::default(),
+        Line::from(Span::styled(
+            format!("Comments · {}", issue.comments.len()),
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "─".repeat(width),
+            Style::default().fg(th.faint),
+        )),
+    ];
+    for comment in &issue.comments {
+        lines.push(Line::default());
+        let mut head = vec![Span::styled(
+            comment.author.clone(),
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+        )];
+        if let Some(day) = short_date(&comment.created_at, now) {
+            head.push(Span::styled(format!("  {day}"), dim));
+        }
+        lines.push(Line::from(head));
+        lines.extend(markdown::render(
+            &comment.body,
             width.max(20),
             Breaks::Hard,
             Style::default(),
@@ -4848,7 +5640,7 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
           }}) {{ nodes {{ {ISSUE_FIELDS} }} }}
           {me_field}
           teams(first: {TEAMS_LIMIT}, filter: {{ members: {{ some: {{ {me} }} }} }}) {{
-            nodes {{ id members(first: {MEMBERS_LIMIT}) {{ nodes {{ id displayName }} }} {TEAM_STATES} }}
+            nodes {{ id key name triageEnabled members(first: {MEMBERS_LIMIT}) {{ nodes {{ id displayName }} }} {TEAM_STATES} }}
           }}
         }}"#
     );
@@ -4892,10 +5684,12 @@ async fn update_issue(dir: &Path, issue_id: &str, change: &Change) -> Result<(),
 
 /// `draft` filed in `team` — into its Triage, set explicitly: an issue a
 /// team member makes through the API lands in the default state
-/// otherwise. The identifier Linear gave it. Nothing files through it
-/// yet: the LINEAR VIEW's own new-issue key will.
-#[allow(dead_code)]
-async fn create_issue(dir: &Path, team: &LinearTeam, draft: &IssueDraft) -> Result<String, String> {
+/// otherwise. The issue Linear made, read as the lists read one.
+async fn create_issue(
+    dir: &Path,
+    team: &LinearTeam,
+    draft: &IssueDraft,
+) -> Result<LinearIssue, String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let mut input = serde_json::json!({
         "teamId": team.id,
@@ -4906,17 +5700,13 @@ async fn create_issue(dir: &Path, team: &LinearTeam, draft: &IssueDraft) -> Resu
     if let Some(state) = &team.triage_state {
         input["stateId"] = serde_json::Value::String(state.clone());
     }
-    let json = graphql(
-        &key,
-        "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { identifier } } }",
-        serde_json::json!({ "input": input }),
-    )
-    .await?;
+    let query = format!(
+        "mutation($input: IssueCreateInput!) {{ issueCreate(input: $input) {{ success issue {{ {ISSUE_FIELDS} }} }} }}"
+    );
+    let json = graphql(&key, &query, serde_json::json!({ "input": input })).await?;
     mutation_result(&json, "issueCreate", "Linear did not create the issue")?;
-    json.pointer("/data/issueCreate/issue/identifier")
-        .and_then(|v| v.as_str())
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
+    json.pointer("/data/issueCreate/issue")
+        .and_then(issue_from)
         .ok_or_else(|| "Linear did not say which issue it made".into())
 }
 
@@ -5000,6 +5790,37 @@ fn parse_states(json: &serde_json::Value) -> HashMap<String, Vec<LinearState>> {
         out.insert(id.to_string(), states.into_iter().map(|(_, s)| s).collect());
     }
     out
+}
+
+/// The configured user's teams in a [`fetch_lists`] answer, each with its
+/// triage state while it takes issues into Triage.
+fn parse_teams(json: &serde_json::Value) -> Vec<LinearTeam> {
+    let teams = json.pointer("/data/teams/nodes").and_then(|v| v.as_array());
+    teams
+        .into_iter()
+        .flatten()
+        .filter_map(|team| {
+            let triage = team
+                .get("triageEnabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let triage_state = team
+                .pointer("/states/nodes")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("triage"))
+                .map(|s| json_text(s, "/id"))
+                .filter(|id| triage && !id.is_empty());
+            let id = json_text(team, "/id");
+            (!id.is_empty()).then(|| LinearTeam {
+                id,
+                key: json_text(team, "/key"),
+                name: json_text(team, "/name"),
+                triage_state,
+            })
+        })
+        .collect()
 }
 
 /// A node's `{ id displayName }` as someone to assign to; None without
@@ -5235,6 +6056,7 @@ fn parse_lists(json: &serde_json::Value) -> Result<LinearList, String> {
         states: parse_states(json),
         me: parse_me(json),
         members: parse_members(json),
+        teams: parse_teams(json),
         more: more("/data/others/pageInfo/hasNextPage"),
         more_mine: more("/data/mine/pageInfo/hasNextPage"),
         prs_cut,
@@ -5370,6 +6192,7 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
             .flatten()
             .filter_map(IssuePr::from_json)
             .collect(),
+        comments: Vec::new(),
     })
 }
 
@@ -5525,6 +6348,47 @@ async fn fetch_viewer(key: &str) -> Result<Viewer, String> {
     parse_viewer(&json)
 }
 
+/// Issue `id`'s latest comments ([`COMMENTS_LIMIT`]), with the key in
+/// `dir`, oldest first.
+async fn fetch_comments(dir: &Path, id: &str) -> Result<Vec<IssueComment>, String> {
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
+    let query = format!(
+        "query($id: String!) {{ issue(id: $id) {{ comments(first: {COMMENTS_LIMIT}, orderBy: createdAt) {{ \
+         nodes {{ body createdAt user {{ displayName }} externalUser {{ name }} }} }} }} }}"
+    );
+    let json = graphql(&key, &query, serde_json::json!({ "id": id })).await?;
+    parse_comments(&json)
+}
+
+/// The comments in a [`fetch_comments`] answer, oldest first — Linear
+/// sends the latest first — with an empty one left out.
+fn parse_comments(json: &serde_json::Value) -> Result<Vec<IssueComment>, String> {
+    if let Some(err) = graphql_error(json) {
+        return Err(err);
+    }
+    let nodes = json
+        .pointer("/data/issue/comments/nodes")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "Linear returned no comments".to_string())?;
+    let mut comments: Vec<IssueComment> = nodes
+        .iter()
+        .map(|node| IssueComment {
+            author: [
+                json_text(node, "/user/displayName"),
+                json_text(node, "/externalUser/name"),
+            ]
+            .into_iter()
+            .find(|name| !name.is_empty())
+            .unwrap_or_else(|| "unknown".into()),
+            created_at: json_text(node, "/createdAt"),
+            body: json_text(node, "/body"),
+        })
+        .filter(|c| !c.body.trim().is_empty())
+        .collect();
+    comments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    Ok(comments)
+}
+
 /// Linear's answer to the `viewer` query: the account's name and email,
 /// or the error it gave.
 fn parse_viewer(json: &serde_json::Value) -> Result<Viewer, String> {
@@ -5616,6 +6480,7 @@ pub(crate) mod tests {
             updated_at: String::new(),
             completed_at: String::new(),
             prs: Vec::new(),
+            comments: Vec::new(),
         }
     }
 
@@ -6096,10 +6961,6 @@ pub(crate) mod tests {
         ] {
             let (mut app, _dir, mut rx) = paired();
             browse_marked(&mut app);
-            let Some(Overlay::Linear(view)) = &app.overlay else {
-                unreachable!();
-            };
-            assert!(hints(view).iter().any(|h| h.does == "attach to PR"));
             press(&mut app, flip);
             let Some(Overlay::PullRequests(prs)) = &app.overlay else {
                 panic!("the PR PICK, got {:?}", app.overlay);
@@ -6179,9 +7040,6 @@ pub(crate) mod tests {
         app.tree.agents.last_mut().unwrap().name = "fx-agent".into();
         app.tree.agents.last_mut().unwrap().worktree_id = orion_core::WorktreeId("w2".into());
         browse_marked(&mut app);
-        assert!(hints(the_view(&app))
-            .iter()
-            .any(|h| h.does == "link to worktree"));
         press(
             &mut app,
             KeyEvent::new(KeyCode::Char('.'), KeyModifiers::SUPER),
@@ -7389,6 +8247,71 @@ pub(crate) mod tests {
         );
     }
 
+    /// Whether the QUICK PROMPT is up on a fresh worktree of its own.
+    fn box_on_a_new_worktree(app: &App) -> bool {
+        matches!(&app.overlay, Some(Overlay::Prompt(p)) if matches!(
+            &p.kind,
+            crate::app::PromptKind::QuickPrompt(launch)
+                if matches!(launch.target, QuickTarget::NewWorktree { .. })
+        ))
+    }
+
+    /// `Enter` on an issue a worktree is on already never cuts a second
+    /// one: it offers that worktree, and **Go to session** lands on its
+    /// session as the `⌘K` palette's `Enter` does. Only **New worktree
+    /// anyway** opens the box on a fresh one; `Esc` backs out of the
+    /// choice; an issue nothing is on goes straight to the box.
+    #[test]
+    fn enter_on_an_issue_with_a_worktree_goes_to_its_session() {
+        let (mut app, _dir, _rx) = paired();
+        worktree_on(&mut app, 0, "main", true);
+        worktree_on(&mut app, 1, "eng-1-login", false);
+        agent_in(&mut app, 1, orion_core::AgentStatus::Finished);
+        let enter_on = |app: &mut App, row: usize| {
+            open(app);
+            press(app, plain(KeyCode::Down));
+            for _ in 0..row {
+                press(app, plain(KeyCode::Down));
+            }
+            press(app, plain(KeyCode::Enter));
+        };
+
+        enter_on(&mut app, 0);
+        let pick = the_view(&app).work_pick.clone().expect("Go to session");
+        assert_eq!(pick.worktrees.len(), 1);
+        assert_eq!(pick.worktrees[0].1, ["ENG-1"]);
+        crate::hints::assert_hints_from(&hints(the_view(&app)), keys::ALL);
+        let screen = shot(&mut app, 200, 40);
+        assert!(
+            screen.contains("ENG-1 is in a worktree already"),
+            "{screen}"
+        );
+        assert!(screen.contains("⎇ eng-1-login"), "{screen}");
+        assert!(screen.contains("+ New worktree anyway"), "{screen}");
+        press(&mut app, plain(KeyCode::Enter));
+        assert!(app.overlay.is_none(), "{:?}", app.overlay);
+        assert_eq!(
+            app.selected_session().map(|a| a.id.0.clone()).as_deref(),
+            Some("a1"),
+            "on the worktree's session"
+        );
+
+        enter_on(&mut app, 0);
+        press(&mut app, plain(KeyCode::Esc));
+        assert!(the_view(&app).work_pick.is_none(), "Esc backs out");
+        assert!(matches!(app.overlay, Some(Overlay::Linear(_))));
+
+        press(&mut app, plain(KeyCode::Enter));
+        press(&mut app, plain(KeyCode::Down));
+        assert!(the_view(&app).work_pick.as_ref().unwrap().on_new());
+        press(&mut app, plain(KeyCode::Enter));
+        assert!(box_on_a_new_worktree(&app), "{:?}", app.overlay);
+
+        app.overlay = None;
+        enter_on(&mut app, 1);
+        assert!(box_on_a_new_worktree(&app), "ENG-2 has no worktree");
+    }
+
     /// `⌘C` copies the marked issues, else the one under the cursor —
     /// marks kept — and a selection in the filter line copies that
     /// instead.
@@ -7720,15 +8643,16 @@ pub(crate) mod tests {
     /// The issue Linear makes, as `issueCreate` answers.
     fn created_issue() -> serde_json::Value {
         serde_json::json!({"data": {"issueCreate": {"success": true, "issue": {
-            "identifier": "RIP-431", "url": "https://linear.app/x/issue/RIP-431",
+            "id": "i431", "identifier": "RIP-431", "title": "run plan",
+            "url": "https://linear.app/x/issue/RIP-431", "team": {"id": "t1"},
             "state": {"name": "Triage", "type": "triage", "color": "#fc7840"}, "priority": 2
         }}}})
     }
 
     /// [`create_issue`] files into the team's Triage, its state set — the
     /// API's default is not Triage — or, for a team with none, into its
-    /// default state; the title and priority go with it, and Linear's
-    /// identifier comes back.
+    /// default state; the title and priority go with it, and the issue
+    /// Linear made comes back.
     #[test]
     fn an_issue_is_created_in_the_teams_triage() {
         let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
@@ -7758,13 +8682,335 @@ pub(crate) mod tests {
                 (made, graphql_sent())
             },
         );
-        assert_eq!(made.as_deref(), Ok("RIP-431"));
+        let made = made.unwrap();
+        assert_eq!(
+            (made.identifier.as_str(), made.status.as_str()),
+            ("RIP-431", "Triage")
+        );
         let input = &sent[0]["input"];
         assert_eq!(input["teamId"], "t1");
         assert_eq!(input["stateId"], "s-triage");
         assert_eq!(input["priority"], 2);
         assert_eq!(input["title"], "run plan");
         assert!(sent[1]["input"].get("stateId").is_none(), "{sent:?}");
+    }
+
+    /// The teams ride the lists with their key, name and triage state —
+    /// none for a team that keeps Triage off, whatever states it has.
+    #[test]
+    fn the_teams_say_where_a_new_issue_goes() {
+        let (query, _) = lists_query("");
+        assert!(
+            query.contains("id key name triageEnabled members"),
+            "{query}"
+        );
+        let json = serde_json::json!({"data": {"teams": {"nodes": [
+            {"id": "t1", "key": "RIP", "name": "Riplo", "triageEnabled": true,
+             "states": {"nodes": [{"id": "s1", "type": "unstarted"}, {"id": "s0", "type": "triage"}]}},
+            {"id": "t2", "key": "OPS", "name": "Ops", "triageEnabled": false,
+             "states": {"nodes": [{"id": "s9", "type": "triage"}]}}
+        ]}}});
+        let mut want = teams();
+        want[0].triage_state = Some("s0".into());
+        assert_eq!(parse_teams(&json), want);
+    }
+
+    /// The list's teams: `Riplo`, which takes issues into Triage, and
+    /// `Ops`, which doesn't.
+    fn teams() -> Vec<LinearTeam> {
+        vec![
+            LinearTeam {
+                id: "t1".into(),
+                key: "RIP".into(),
+                name: "Riplo".into(),
+                triage_state: Some("s-triage".into()),
+            },
+            LinearTeam {
+                id: "t2".into(),
+                key: "OPS".into(),
+                name: "Ops".into(),
+                triage_state: None,
+            },
+        ]
+    }
+
+    /// `⌘N` files a new issue into the cursor's issue's team's Triage — the
+    /// title typed in the reading pane's place, `Tab` for the next team —
+    /// and the issue is on the list at once with the cursor on it, the
+    /// lists asked again. An empty title files nothing; a refusal says why
+    /// and puts the form back with its title.
+    #[test]
+    fn cmd_n_files_a_new_issue_in_the_teams_triage() {
+        let (mut app, _dir, mut rx) = paired();
+        let project = ProjectId("p1".into());
+        if let Some(list) = app.linear.get_mut(&project) {
+            list.teams = teams();
+        }
+        open(&mut app);
+        // The list `open` asked for is done with: a filing asks anew.
+        app.linear_flights.cancel(&project);
+        press(&mut app, cmd('n'));
+        let form = |app: &App| the_view(app).new_issue.clone();
+        assert_eq!(form(&app).map(|f| f.team), Some(0), "ENG-1's team");
+        crate::hints::assert_hints_from(&hints(the_view(&app)), keys::ALL);
+        let screen = shot(&mut app, 200, 40);
+        assert!(screen.contains("New issue"), "{screen}");
+        assert!(screen.contains("Riplo (RIP) · Triage"), "{screen}");
+        press(&mut app, plain(KeyCode::Enter));
+        assert!(form(&app).is_some(), "an empty title files nothing");
+
+        for c in "run plan".chars() {
+            press(&mut app, plain(KeyCode::Char(c)));
+        }
+        let sent = with_graphql_stub(
+            |_, _| Ok(created_issue()),
+            || {
+                run_linear(&mut app, &mut rx, |app| press(app, plain(KeyCode::Enter)));
+                graphql_sent()
+            },
+        );
+        let input = &sent[0]["input"];
+        assert_eq!(
+            (&input["teamId"], &input["stateId"], &input["title"]),
+            (&"t1".into(), &"s-triage".into(), &"run plan".into())
+        );
+        assert_eq!(app.flash.as_deref(), Some("filed RIP-431 in Riplo"));
+        assert!(form(&app).is_none());
+        assert_eq!(rows(&app, &project)[0].identifier, "RIP-431");
+        assert_eq!(the_view(&app).tab, LinearTab::Others, "nobody's yet");
+        assert_eq!(selected_id(&app).as_deref(), Some("RIP-431"));
+        assert!(
+            app.linear_flights.in_flight(&project),
+            "the lists asked again"
+        );
+        while rx.try_recv().is_ok() {}
+
+        press(&mut app, cmd('n'));
+        press(&mut app, plain(KeyCode::Tab));
+        press(&mut app, plain(KeyCode::Char('x')));
+        assert!(shot(&mut app, 200, 40).contains("Ops (OPS) · its default state"));
+        with_graphql_stub(
+            |_, _| Err("no access".into()),
+            || run_linear(&mut app, &mut rx, |app| press(app, plain(KeyCode::Enter))),
+        );
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("couldn't file the issue: no access")
+        );
+        let back = form(&app).expect("the form back");
+        assert_eq!((back.title.as_str(), back.team), ("x", 1));
+    }
+
+    // ---- ⌘K ----
+
+    /// `⌘K` finds an open issue by its title, under its project, and
+    /// `Enter` on it opens the LINEAR VIEW on it — on its own tab.
+    #[test]
+    fn the_palette_opens_the_view_on_an_issue() {
+        let (mut app, _dir, _rx) = paired();
+        let project = ProjectId("p1".into());
+        if let Some(list) = app.linear.get_mut(&project) {
+            list.list[2].mine = false;
+        }
+        crate::event_loop::run_action(&mut app, crate::keymap::Action::Palette);
+        for c in "signup".chars() {
+            press(&mut app, plain(KeyCode::Char(c)));
+        }
+        let Some(Overlay::Palette(palette)) = &app.overlay else {
+            panic!("the palette, got {:?}", app.overlay);
+        };
+        assert_eq!(
+            palette.selected_target(),
+            Some(&crate::palette::PaletteTarget::LinearIssue {
+                project,
+                id: "3".into()
+            })
+        );
+        press(&mut app, plain(KeyCode::Enter));
+        assert_eq!(the_view(&app).tab, LinearTab::Others);
+        assert_eq!(selected_id(&app).as_deref(), Some("ENG-3"));
+    }
+
+    /// The keys row fits a 120-column window whole — the issue's own keys
+    /// and `⌘N` among them — and the rest are left to `docs/keys.md`.
+    #[test]
+    fn the_key_row_fits_a_120_column_window() {
+        let mut app = view_on(vec![issue("1", "ENG-1", "Login")]);
+        let screen = shot(&mut app, 120, 30);
+        let border = line_with(&screen, "Esc close");
+        for hint in hints(the_view(&app)) {
+            let said = format!("{} {}", hint.key, hint.does);
+            assert!(border.contains(&said), "{said} missing from\n{border}");
+        }
+        assert!(border.contains("⌘N new issue"), "{border}");
+        assert!(!border.contains("⌘R"), "{border}");
+    }
+
+    // ---- the prefetch ----
+
+    /// Arriving at a project asks for its lists, once: not again while it
+    /// stays selected. A prefetch Linear refuses says nothing — `⌘L`'s own
+    /// ask, the same refusal, does — and one that lands is written to the
+    /// disk cache on the next beat.
+    #[test]
+    fn arriving_at_a_project_prefetches_its_lists_quietly() {
+        let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
+        let (mut app, _dir) = app_on(&[(".env", &line)]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.linear_tx = Some(tx);
+        let project = ProjectId("p1".into());
+        with_graphql_stub(
+            |_, _| Err("Linear is down".into()),
+            || {
+                run_linear(&mut app, &mut rx, prefetch);
+                assert!(app.linear_failed.contains(&project), "asked");
+                assert_eq!(app.flash, None, "a prefetch says nothing");
+                prefetch(&mut app);
+                assert!(
+                    !app.linear_flights.in_flight(&project),
+                    "staying selected asks nothing"
+                );
+                run_linear(&mut app, &mut rx, open);
+                assert_eq!(app.flash.as_deref(), Some("Linear is down"));
+            },
+        );
+
+        let (mut app, _dir) = app_on(&[(".env", &line)]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.linear_tx = Some(tx);
+        with_graphql_stub(
+            |_, _| {
+                Ok(serde_json::json!({"data": {"mine": {"nodes": []}, "others": {"nodes": []}}}))
+            },
+            || run_linear(&mut app, &mut rx, prefetch),
+        );
+        assert!(app.linear.contains_key(&project));
+        assert!(app.linear_cache_dirty, "to disk on the next beat");
+    }
+
+    /// A project with no key is never asked about.
+    #[test]
+    fn a_project_with_no_key_is_never_prefetched() {
+        let (mut app, dir) = app_on(&[]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.linear_tx = Some(tx);
+        // orion's own environment can hold a key too.
+        if key_source(dir.path()).is_none() {
+            prefetch(&mut app);
+            assert!(!app.linear_flights.in_flight(&ProjectId("p1".into())));
+        }
+    }
+
+    // ---- comments ----
+
+    /// Linear's `comments` answer for an issue: the latest first, one of
+    /// them empty and one from an integration.
+    fn comments_answer(_: &str, query: &str) -> Result<serde_json::Value, String> {
+        assert!(query.contains("comments(first: 20"), "{query}");
+        Ok(
+            serde_json::json!({"data": {"issue": {"comments": {"nodes": [
+                {"body": "Still broken on Safari.", "createdAt": "2026-10-06T09:00:00.000Z",
+                 "user": {"displayName": "Sam"}},
+                {"body": " ", "createdAt": "2026-10-05T12:00:00.000Z", "user": {"displayName": "Bot"}},
+                {"body": "Repro: log in twice.", "createdAt": "2026-10-05T10:00:00.000Z",
+                 "user": null, "externalUser": {"name": "Ana via Slack"}}
+            ]}}}}),
+        )
+    }
+
+    /// The task the QUICK PROMPT up now sends with `typed` in it.
+    fn box_task(app: &App, typed: &str) -> String {
+        match &app.overlay {
+            Some(Overlay::Prompt(p)) => match &p.kind {
+                crate::app::PromptKind::QuickPrompt(launch) => launch.compose(typed),
+                other => panic!("the QUICK PROMPT, got {other:?}"),
+            },
+            other => panic!("the QUICK PROMPT, got {other:?}"),
+        }
+    }
+
+    /// A rest on an issue reads its comments — a walk past a row asks
+    /// nothing — and the reading pane shows them oldest first under the
+    /// description; read once, a rest within the minute asks nothing, a
+    /// list landing keeps them, and a launch's task carries them.
+    #[test]
+    fn a_rest_on_an_issue_reads_its_comments_into_the_pane_and_the_task() {
+        let (mut app, dir, mut rx) = paired();
+        let project = ProjectId("p1".into());
+        open(&mut app);
+        let resting = |app: &App| app.linear_comments.rest.as_ref().map(|(id, ..)| id.clone());
+        assert_eq!(resting(&app).as_deref(), Some("1"), "armed, not asked");
+        assert!(comments_delay(&app).is_some_and(|d| d > std::time::Duration::ZERO));
+        press(&mut app, plain(KeyCode::Down));
+        press(&mut app, plain(KeyCode::Down));
+        assert_eq!(
+            resting(&app).as_deref(),
+            Some("2"),
+            "on the row it rests on"
+        );
+
+        let sent = with_graphql_stub(comments_answer, || {
+            run_linear(&mut app, &mut rx, |app| {
+                if let Some((.., at)) = &mut app.linear_comments.rest {
+                    *at = std::time::Instant::now();
+                }
+                fire_comments(app);
+            });
+            graphql_sent()
+        });
+        assert_eq!(sent[0]["id"], "2");
+        let authors = |app: &App| -> Vec<String> {
+            rows(app, &project)[1]
+                .comments
+                .iter()
+                .map(|c| c.author.clone())
+                .collect()
+        };
+        assert_eq!(authors(&app), ["Ana via Slack", "Sam"], "oldest first");
+        let screen = shot(&mut app, 200, 50);
+        assert!(screen.contains("Comments · 2"), "{screen}");
+        assert!(screen.contains("Repro: log in twice."), "{screen}");
+        assert!(screen.contains("Ana via Slack"), "{screen}");
+
+        press(&mut app, plain(KeyCode::Up));
+        press(&mut app, plain(KeyCode::Down));
+        assert_eq!(resting(&app), None, "read a moment ago");
+
+        app.linear_flights.cancel(&project);
+        let ticket = ask_list(&mut app);
+        let fresh = vec![
+            issue("1", "ENG-1", "Login"),
+            issue("2", "ENG-2", "Logout"),
+            issue("3", "ENG-3", "Signup"),
+        ];
+        land_list(&mut app, ticket, &dir, fresh);
+        assert_eq!(authors(&app).len(), 2, "a list never asks for them");
+
+        press(&mut app, plain(KeyCode::Enter));
+        let task = box_task(&app, "");
+        assert!(
+            task.contains("#### Comments\n\n**Ana via Slack** (2026-10-05):\nRepro: log in twice."),
+            "{task}"
+        );
+        assert!(box_task(&app, "also this").contains("**Sam** (2026-10-06)"));
+        assert!(app.linear_comments.owed.is_empty(), "nothing left to read");
+    }
+
+    /// Comments read after the box opened on an issue go into its task.
+    #[test]
+    fn comments_read_after_the_box_opened_go_into_its_task() {
+        let (mut app, _dir, mut rx) = paired();
+        open(&mut app);
+        press(&mut app, plain(KeyCode::Down));
+        press(&mut app, plain(KeyCode::Enter));
+        assert!(!box_task(&app, "").contains("#### Comments"));
+        assert_eq!(app.linear_comments.owed.len(), 1);
+        assert_eq!(comments_delay(&app), Some(std::time::Duration::ZERO));
+        with_graphql_stub(comments_answer, || {
+            run_linear(&mut app, &mut rx, fire_comments);
+        });
+        assert!(box_task(&app, "").contains("Still broken on Safari."));
+        assert!(box_task(&app, "typed").contains("Still broken on Safari."));
     }
 
     // ---- newest asked wins: ⌘S, the cursor, attaches ----
