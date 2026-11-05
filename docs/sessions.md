@@ -423,7 +423,9 @@ is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first th
   the localhost ports the run has printed — `http://localhost:3000`, `127.0.0.1` or `0.0.0.0` —
   underlined, `:3000 :5173`, kept after the lines that said them scroll away and cleared when the run
   starts again. A click on one opens it in the browser; the first is the app, and `⌘O` → **Open
-  app** opens it too. A session is its status dot and name,
+  app** opens it too. The run line's right-click menu has **Stop stack** (or **Start stack**) and
+  **Restart stack**: a stop, then a start in the same line once the run has gone, `restarting… 1:52`
+  meanwhile. A session is its status dot and name,
   what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
   `›`, and how long ago at the right. The pull requests come from the same `gh` lookups

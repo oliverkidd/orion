@@ -4049,6 +4049,11 @@ fn dispatch_action(
                 toggle_stack_in(app, &id, out);
             }
         }
+        Action::RestartStack => {
+            if let Some(id) = crate::git_sync::target(app) {
+                crate::stacks::restart(app, &id, out);
+            }
+        }
         // Tab walks forward and stops dead at the terminal pane —
         // leaning on the key can't spill past the pane and back round to
         // the first column. Landing on the pane takes the input lock:
@@ -6915,15 +6920,33 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
     items
 }
 
-fn menu_items_for_terminal(t: &orion_core::TerminalTab) -> Vec<MenuItem> {
-    vec![
-        MenuItem::new(
-            "Attach",
-            MenuAction::Attach(SessionRef::Terminal(t.id.clone())),
-        ),
-        MenuItem::new("Rename", MenuAction::RenameTerminal(t.id.clone())),
-        MenuItem::destructive("Close", MenuAction::CloseTerminal(t.id.clone())),
-    ]
+/// A terminal's menu. A RUN LINE's has its stack's verbs too: started or
+/// stopped, and restarted.
+fn menu_items_for_terminal(app: &App, t: &orion_core::TerminalTab) -> Vec<MenuItem> {
+    let mut items = vec![MenuItem::new(
+        "Attach",
+        MenuAction::Attach(SessionRef::Terminal(t.id.clone())),
+    )];
+    if t.run_command.is_some() {
+        let w = &t.worktree_id;
+        items.push(MenuItem::new(
+            crate::stacks::menu_label(app, w),
+            MenuAction::ToggleRun(w.clone()),
+        ));
+        items.push(MenuItem::new(
+            "Restart stack",
+            MenuAction::RestartRun(w.clone()),
+        ));
+    }
+    items.push(MenuItem::new(
+        "Rename",
+        MenuAction::RenameTerminal(t.id.clone()),
+    ));
+    items.push(MenuItem::destructive(
+        "Close",
+        MenuAction::CloseTerminal(t.id.clone()),
+    ));
+    items
 }
 
 pub(super) fn open_menu(app: &mut App, items: Vec<MenuItem>, at: (u16, u16)) {
@@ -7149,7 +7172,7 @@ fn context_menu_items(app: &App, focus: Focus) -> Option<Vec<MenuItem>> {
             }
             None => match app.selected_session_row()? {
                 SessionRow::Agent(a) => Some(menu_items_for_session_in(app, &a)),
-                SessionRow::Terminal(t) => Some(menu_items_for_terminal(&t)),
+                SessionRow::Terminal(t) => Some(menu_items_for_terminal(app, &t)),
                 SessionRow::Link(l) => Some(menu_items_for_link(&l)),
             },
         },
@@ -9256,6 +9279,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             }
         }
         MenuAction::ToggleRun(id) => toggle_stack_in(app, &id, out),
+        MenuAction::RestartRun(id) => crate::stacks::restart(app, &id, out),
         MenuAction::OpenWorktree(id) => {
             if let Some(w) = app.tree.worktrees.iter().find(|w| w.id == id).cloned() {
                 open_worktree(app, &w);

@@ -5,7 +5,7 @@
 //! the background, on a run line in its band. The ports that run prints
 //! are its app: a click on one, or ⌘O's **Open app**, opens it.
 
-use crate::app::App;
+use crate::app::{App, PendingIntent};
 use orion_core::compose::Stack;
 use orion_core::protocol::ClientRequest;
 use orion_core::WorktreeId;
@@ -27,6 +27,26 @@ pub(crate) fn menu_label(app: &App, worktree: &WorktreeId) -> &'static str {
     } else {
         "Start stack"
     }
+}
+
+/// **Restart stack**: `worktree`'s run stopped — a `^C`, so it winds down
+/// — then started again in its run line once it has gone, in the
+/// background as a start is (`ClientRequest::RestartRun`). On a run
+/// already winding down the DAEMON kills it and starts it at once.
+pub(crate) fn restart(app: &mut App, worktree: &WorktreeId, out: &mut Vec<ClientRequest>) {
+    if app.is_placeholder_worktree(worktree)
+        || !app.tree.worktrees.iter().any(|w| &w.id == worktree)
+    {
+        return;
+    }
+    app.flash = app
+        .run_stopping(worktree)
+        .map(|_| crate::flash::Flash::note("killing the run"));
+    let req_id = app.alloc_req_id(PendingIntent::RunStarted);
+    out.push(ClientRequest::RestartRun {
+        req_id,
+        worktree: worktree.clone(),
+    });
 }
 
 /// **Stop all stacks**: every checkout's run sent its `^C`, so its trap

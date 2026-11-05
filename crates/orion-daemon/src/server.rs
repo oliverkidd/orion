@@ -639,6 +639,9 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 ClientRequest::StopRun { req_id, worktree } => {
                     reply_done(&out_tx, req_id, daemon.stop_run(&worktree)).await;
                 }
+                ClientRequest::RestartRun { req_id, worktree } => {
+                    reply_done(&out_tx, req_id, daemon.restart_run(&worktree)).await;
+                }
             }
         }
         Ok(())

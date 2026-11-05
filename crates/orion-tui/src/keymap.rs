@@ -200,6 +200,9 @@ pub enum Action {
     /// `⌘⇧S`: start the cursor's checkout's stack — its RUN COMMAND, in
     /// the background — or stop it.
     ToggleStack,
+    /// **Restart stack**: the cursor's checkout's run stopped, then
+    /// started again in its row once it has gone (`stacks::restart`).
+    RestartStack,
     StopAllStacks,
     /// Delete every linked worktree, in every project, with no live
     /// session and no uncommitted changes, behind one confirm.
@@ -909,6 +912,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["cmd+shift+s"],
+    },
+    ActionSpec {
+        action: Action::RestartStack,
+        id: "restart_stack",
+        label: "Restart stack",
+        hint: "Stop the selected checkout's stack — a ^C to its run, so it winds down — then start it again in the same run line once it has gone; again kills it and starts it at once",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        defaults: &[],
     },
     ActionSpec {
         action: Action::StopAllStacks,

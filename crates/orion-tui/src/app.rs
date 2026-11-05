@@ -355,6 +355,9 @@ pub enum MenuAction {
     PushWorktree(WorktreeId),
     /// Start the worktree's RUN COMMAND, or stop it while it runs (`r`).
     ToggleRun(WorktreeId),
+    /// A run line's **Restart stack**: stop the worktree's run, then start
+    /// it again once it has gone.
+    RestartRun(WorktreeId),
     /// Fire the worktree's OPEN COMMAND (`Shift+Enter`).
     OpenWorktree(WorktreeId),
     AddProject,
@@ -2375,9 +2378,10 @@ pub enum PendingIntent {
     /// A row renamed, archived, unarchived or deleted on the keypress
     /// (`event_loop::optimistic`): put it back on Error.
     Undo(Undo),
-    /// `⌘⇧S`'s start: the run comes up in the background. Its Ack moves
-    /// nothing — no select, no attach, no pane — the upsert alone puts the
-    /// run line in its band; an Error says why in the footer.
+    /// `⌘⇧S`'s start, and **Restart stack**: the run comes up in the
+    /// background. Its Ack moves nothing — no select, no attach, no pane —
+    /// the upsert alone puts the run line in its band; an Error says why
+    /// in the footer.
     RunStarted,
     None,
 }

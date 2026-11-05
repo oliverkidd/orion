@@ -373,6 +373,14 @@ pub enum ClientRequest {
         req_id: u64,
         worktree: WorktreeId,
     },
+    /// **Restart stack**: `StopRun`, then `StartRun` in the same row once
+    /// the run has gone (`RunState::restarting` meanwhile). A run that
+    /// isn't up just starts; with no run command it is an Error, and
+    /// nothing is stopped.
+    RestartRun {
+        req_id: u64,
+        worktree: WorktreeId,
+    },
 
     /// Fire-and-forget opaque TUI blob (last selection etc.).
     SaveUiState {

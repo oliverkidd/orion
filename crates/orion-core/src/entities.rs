@@ -357,6 +357,9 @@ pub struct RunState {
     /// moment (`stopping… 1:52`). None for a run nobody is stopping, and
     /// always None once the PTY is gone.
     pub stopping_until: Option<i64>,
+    /// That stop is a restart's: once the run has gone it starts again in
+    /// this row (`restarting… 1:52`) rather than taking the row with it.
+    pub restarting: bool,
     /// A run that ended on its own, nobody having stopped it: the code it
     /// exited with — the run line's faint `done` for 0, a red `exited 1`
     /// for anything else. None while it runs, and for one whose ending

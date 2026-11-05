@@ -1911,8 +1911,8 @@ const RUN_MARK: &str = "$ ";
 
 /// What a terminal's entry says at its right end, where a session's age
 /// goes, at `now` (epoch ms). A live run is a dim `running`; one winding
-/// down from its stop counts down to its kill, `stopping… 1:52`, in the
-/// working gold. One that
+/// down from its stop counts down to its kill, `stopping… 1:52` (or
+/// `restarting… 1:52`, a restart's), in the working gold. One that
 /// ended with nobody stopping it says how: a faint `done` for a clean
 /// exit, a red `exited 1` for any other; a run whose ending the DAEMON
 /// never saw (it restarted since) is a faint `stopped`. A dead shell is a
@@ -1921,8 +1921,13 @@ const RUN_MARK: &str = "$ ";
 fn terminal_badge(t: &orion_core::TerminalTab, now: i64, th: Theme) -> (String, Style) {
     let faint = Style::default().fg(th.faint);
     if let Some(kill_at) = t.run.stopping_until {
+        let doing = if t.run.restarting {
+            "restarting"
+        } else {
+            "stopping"
+        };
         return (
-            format!("stopping… {}", countdown(kill_at - now)),
+            format!("{doing}… {}", countdown(kill_at - now)),
             Style::default().fg(th.warn),
         );
     }

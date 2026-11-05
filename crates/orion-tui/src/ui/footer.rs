@@ -521,9 +521,14 @@ fn pane_hints(app: &App) -> Vec<Option<Hint>> {
 pub(crate) fn stopping_line(app: &App) -> Option<Flash> {
     let worktree = crate::git_sync::target(app)?;
     app.run_stopping(&worktree)?;
+    let doing = if app.run_terminal(&worktree)?.run.restarting {
+        "restarting"
+    } else {
+        "stopping"
+    };
     let key = crate::hints::key_or(&app.keymap, Action::ToggleStack, "Stop stack");
     Some(Flash::working(format!(
-        "stopping run · {key} again kills it now"
+        "{doing} run · {key} again kills it now"
     )))
 }
 

@@ -544,7 +544,10 @@ selected worktree's checkout:
   and nothing but **Start stack** runs it again — not an attach, not the prewarm sweep. The DAEMON
   reads the run's output for the localhost addresses it prints (`http://localhost:3000`,
   `http://127.0.0.1:…`, `http://0.0.0.0:…`) and every client shows their ports after the command,
-  `:3000 :5173`, each a link to it on localhost; the first is what `⌘O` → **Open app** opens. There is one run per worktree: a second client's start on a worktree
+  `:3000 :5173`, each a link to it on localhost; the first is what `⌘O` → **Open app** opens.
+  **Restart stack** (the command palette, or the run line's right-click menu) stops the run as a stop
+  does and starts it again in the same line once it has gone, with the command as it is set at the
+  press; a run that isn't up just starts. There is one run per worktree: a second client's start on a worktree
   already running never starts another.
 - **Open command** — the OPEN COMMAND, `open http://localhost:3000` say. `⌘O` → **Open command** on a
   worktree fires it once, from the TUI rather than the DAEMON, since what it opens — a browser tab, an

@@ -163,7 +163,9 @@
   attach replays the ending instead of respawning — a command starts only when you pick **Start stack**. `⌘O` → **Open command** runs `open`
   once, from the TUI. The DAEMON reads a run's output for the localhost addresses it prints and sends
   their ports on its row (`run.ports`, kept as the lines scroll away, reset by a new start): the run
-  line's `:3000` links, the first of them ⌘O's **Open app**. See
+  line's `:3000` links, the first of them ⌘O's **Open app**. **Restart stack** is `RestartRun`: the
+  same stop, marked a restart (`run.restarting`), whose end starts the run again in its row rather
+  than dropping it. See
   [Configuration](configuration.md#run-and-open-commands).
 - **Agents boot `claude`, `codex`, `cursor-agent`, `grok`, `opencode`, or a custom registry program.** Creating an agent through **New agent — choose harness** first asks which CLI to
   run, then opens the QUICK PROMPT set to it, and the launch spawns it in the worktree.
