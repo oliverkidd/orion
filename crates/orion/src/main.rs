@@ -1,7 +1,5 @@
-mod browser;
 mod cli;
 mod ssh;
-mod tunnel;
 mod upgrade;
 
 use anyhow::Result;
@@ -15,7 +13,7 @@ fn main() -> Result<()> {
     orion_tui::app_bundle::run_if_launcher();
     orion_tui::app_bundle::settle_inside();
     let cli = Cli::parse();
-    // A `orion ssh` / `orion tunnel` from another machine may have sent its
+    // A `orion ssh` from another machine may have sent its
     // settings along. Merge them before anything reads a setting, and before
     // a thread or a child exists to inherit the variable.
     orion_tui::bundle::apply_forwarded();
@@ -54,42 +52,11 @@ fn main() -> Result<()> {
         Some(Command::Autofix(AutofixCommand::StandDown { reason })) => {
             orion_tui::run_stand_down(reason.join(" "))
         }
-        Some(Command::Browser {
-            port,
-            bind,
-            public,
-            credential,
-            no_open,
-        }) => browser::run_browser(browser::BrowserOpts {
-            port,
-            // --public is --bind 0.0.0.0 with a name; clap keeps the two
-            // from being given at once.
-            bind: bind.unwrap_or(if public {
-                browser::PUBLIC_BIND
-            } else {
-                browser::DEFAULT_BIND
-            }),
-            credential,
-            open: !no_open,
-        }),
         Some(Command::Ssh {
             host,
             path,
             no_sync_config,
         }) => ssh::run_ssh(&host, path.as_deref(), !no_sync_config),
-        Some(Command::Tunnel {
-            host,
-            path,
-            port,
-            remote_port,
-            no_sync_config,
-        }) => tunnel::run_tunnel(tunnel::TunnelOpts {
-            host,
-            path,
-            port,
-            remote_port,
-            sync_config: !no_sync_config,
-        }),
         Some(Command::Setup) => {
             orion_tui::reset_setup();
             run_tui(true)

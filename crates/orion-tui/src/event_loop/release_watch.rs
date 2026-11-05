@@ -22,7 +22,7 @@
 //! ends the watch and flips the host back. A fresh press of the same key
 //! is a new unarchive: the key had to come up first.
 //!
-//! A host without the protocol (Terminal.app, `orion browser`, tmux)
+//! A host without the protocol (Terminal.app, tmux)
 //! marks nothing, so there a held key's first repeat arrives as a press,
 //! ends the watch and unarchives as it always did: the watch is only as
 //! good as the host's reports.

@@ -233,8 +233,8 @@ through the move, and projects, settings, accounts and history are where they we
 opens Orion.app and leaves the terminal, saying so. An upgrade moves an orion kept in a terminal
 over the same way: it reopens orion, and the reopening opens the app, before anything of the new
 release is drawn — the release notes are read there. With the app already open it is brought to
-the front instead. orion stays where it was started under tmux, over ssh, on `orion browser`'s
-page, on a Mac without Ghostty, when `ORION_RUNTIME_DIR` or `ORION_DATA_DIR` points it at a daemon
+the front instead. orion stays where it was started under tmux, over ssh,
+on a Mac without Ghostty, when `ORION_RUNTIME_DIR` or `ORION_DATA_DIR` points it at a daemon
 or data of its own, when it is a build from a checkout, and when `ORION_APP=off` says to — the way
 back into a terminal should the app ever not come up. If the app can't be made, orion carries on in
 the terminal and says why in its footer. The other commands (`orion add`, `orion doctor`, …) run

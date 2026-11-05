@@ -15,37 +15,13 @@ use orion_core::shell::single_quote;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-/// The opening half of every remote script: leave a usable `orion` on the
-/// remote PATH, installing it first when there is none. `$1` is the install
-/// URL. A macro rather than a const because `concat!` only takes literals,
-/// and [`crate::tunnel`] builds a different tail onto the same head.
-macro_rules! install_prelude {
-    () => {
-        concat!(
-            // sshd hands a remote command a bare PATH — no login shell runs,
-            // so nothing the user configured applies. Prepend install.sh's
-            // default ORION_INSTALL_DIR, and append both Homebrew prefixes:
-            // on a macOS remote that is the only place ttyd (which
-            // `orion browser` needs) or a brew-installed orion lives.
-            "export PATH=\"$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin\"; ",
-            "if ! command -v orion >/dev/null 2>&1; then ",
-            "command -v curl >/dev/null 2>&1 || { ",
-            "echo \"orion: curl is required on the remote to install orion\" >&2; exit 127; }; ",
-            "echo \"orion not found on remote; installing...\" >&2; ",
-            "curl -fsSL \"$1\" | sh || exit 1; ",
-            "fi; "
-        )
-    };
-}
-pub(crate) use install_prelude;
-
 /// Hand the orion the script starts the SETTINGS BUNDLE in positional
 /// parameter `$n`, when the command carries one (see `orion_tui::bundle`).
 /// An environment variable rather than a `orion config import` step: a
 /// remote orion too old to know the variable ignores it, where it would fail
 /// on the unknown command — and the remote orion works out its own data dir,
-/// which a script writing the files would have to guess. A macro for the same
-/// reason as [`install_prelude!`].
+/// which a script writing the files would have to guess. A macro because
+/// `concat!` only takes literals.
 macro_rules! export_settings_bundle {
     ($n:literal) => {
         concat!(
@@ -57,13 +33,23 @@ macro_rules! export_settings_bundle {
         )
     };
 }
-pub(crate) use export_settings_bundle;
 
 /// Runs under `sh -c` on the remote: $1 = install URL, $2 = start dir
 /// (optional, may be empty; defaults to the remote $HOME), $3 = the settings
-/// bundle (optional).
+/// bundle (optional). It first leaves a usable `orion` on the remote PATH,
+/// installing it when there is none.
 const REMOTE_SCRIPT: &str = concat!(
-    install_prelude!(),
+    // sshd hands a remote command a bare PATH — no login shell runs, so
+    // nothing the user configured applies. Prepend install.sh's default
+    // ORION_INSTALL_DIR, and append both Homebrew prefixes: on a macOS
+    // remote that is the only place a brew-installed orion lives.
+    "export PATH=\"$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin\"; ",
+    "if ! command -v orion >/dev/null 2>&1; then ",
+    "command -v curl >/dev/null 2>&1 || { ",
+    "echo \"orion: curl is required on the remote to install orion\" >&2; exit 127; }; ",
+    "echo \"orion not found on remote; installing...\" >&2; ",
+    "curl -fsSL \"$1\" | sh || exit 1; ",
+    "fi; ",
     "cd -- \"${2:-$HOME}\" || exit 1; ",
     export_settings_bundle!("3"),
     "exec orion"

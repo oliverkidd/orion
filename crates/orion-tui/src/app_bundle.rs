@@ -19,9 +19,9 @@
 //! And it is where orion lives on a Mac. A bare `orion` typed in a
 //! terminal opens the app and leaves the terminal ([`opens_in_app`]) — which
 //! is also how an upgrade moves an orion kept in a terminal over: the
-//! upgrade reopens orion, and the reopening lands here. tmux, ssh and
-//! `orion browser` keep orion where it was started, as does a Mac without
-//! Ghostty to make the app from.
+//! upgrade reopens orion, and the reopening lands here. tmux and ssh keep
+//! orion where it was started, as does a Mac without Ghostty to make the
+//! app from.
 //!
 //! macOS starts an app as its bundle's executable with no arguments, and
 //! Ghostty is told what to run by argument, so that executable is a
@@ -248,17 +248,15 @@ pub fn bundle_in(home: &Path) -> PathBuf {
 
 /// Whether orion can move into its app from where it is running: on a
 /// local Mac with the Ghostty the app is made from, when it is not in the
-/// app already, in tmux (a choice the app would undo) or on `orion
-/// browser`'s page. A bare `orion` moves by itself where this holds
-/// ([`opens_in_app`]); setup's App step offers the move wherever it has
-/// not happened.
+/// app already, or in tmux (a choice the app would undo). A bare `orion`
+/// moves by itself where this holds ([`opens_in_app`]); setup's App step
+/// offers the move wherever it has not happened.
 #[cfg(not(test))]
 pub fn can_move() -> bool {
     cfg!(target_os = "macos")
         && !orion_core::host::is_remote_session()
         && !inside()
         && std::env::var_os("TMUX").is_none()
-        && std::env::var_os(orion_core::env::BROWSER).is_none()
         && crate::event_loop::ghostty_app().is_some()
 }
 

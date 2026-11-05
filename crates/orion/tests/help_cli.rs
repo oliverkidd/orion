@@ -24,9 +24,7 @@ const VISIBLE: &[&[&str]] = &[
     &["config", "path"],
     &["config", "export"],
     &["config", "import"],
-    &["browser"],
     &["ssh"],
-    &["tunnel"],
     &["doctor"],
     &["upgrade"],
 ];
@@ -71,26 +69,25 @@ fn every_visible_command_has_its_own_help_page() {
     }
 }
 
-/// The literal ask: `orion browser --help` prints browser information and
-/// nothing else. Cross-references by name (`orion tunnel` runs the remote
-/// half) are fine; another command's summary, or the root's command index,
-/// is not.
+/// The literal ask: `orion ssh --help` prints ssh information and nothing
+/// else. Cross-references by name are fine; another command's summary, or
+/// the root's command index, is not.
 #[test]
 fn a_subcommand_page_is_about_that_subcommand_only() {
-    let help = help_at("100", &["browser", "--help"]);
+    let help = help_at("100", &["ssh", "--help"]);
     assert!(
         !help.contains("Commands:"),
-        "the root command index leaked into `browser --help`:\n{help}"
+        "the root command index leaked into `ssh --help`:\n{help}"
     );
     for summary in [
         "Terminal multiplexer for Claude Code agents",
-        "Open orion on a remote host over ssh",
+        "Check what orion needs on this machine",
         "Install the latest published orion over this one",
         "Register a git checkout as a project",
     ] {
         assert!(
             !help.contains(summary),
-            "`browser --help` carries another command's summary ({summary}):\n{help}"
+            "`ssh --help` carries another command's summary ({summary}):\n{help}"
         );
     }
 }
@@ -119,8 +116,8 @@ fn the_root_help_lists_one_line_per_command() {
     }
     assert_eq!(
         commands.lines().count(),
-        16,
-        "fifteen commands plus `help`:\n{commands}"
+        14,
+        "thirteen commands plus `help`:\n{commands}"
     );
 }
 
@@ -148,11 +145,11 @@ fn help_wraps_to_the_width_it_is_given() {
     // A page short enough to fit either width proves nothing, so one prose-heavy
     // page has to visibly reflow: that is the difference between wrapping and a
     // no-op `StyledStr::wrap`.
-    let wide = widest(&help_at("100", &["tunnel", "--help"]));
-    let narrow = widest(&help_at("60", &["tunnel", "--help"]));
+    let wide = widest(&help_at("100", &["doctor", "--help"]));
+    let narrow = widest(&help_at("60", &["doctor", "--help"]));
     assert!(
         narrow < wide,
-        "`orion tunnel --help` did not reflow ({narrow} vs {wide}) \
+        "`orion doctor --help` did not reflow ({narrow} vs {wide}) \
          — has clap's `wrap_help` feature been dropped?"
     );
 }
@@ -177,7 +174,7 @@ fn hidden_commands_stay_hidden() {
 /// distinct only while every doc comment keeps its short first paragraph.
 #[test]
 fn short_help_is_terser_than_long_help() {
-    for args in [&["browser"], &["worktree"], &["tunnel"]] {
+    for args in [&["ssh"], &["worktree"], &["doctor"]] {
         let short = help_at("100", &[args[0], "-h"]);
         let long = help_at("100", &[args[0], "--help"]);
         assert!(

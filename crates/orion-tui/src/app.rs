@@ -5803,7 +5803,7 @@ impl App {
     /// way — in the pane or in a modal's text field? While it is, the
     /// host terminal is left exactly as it is:
     /// re-asking it for its modes mid-drag is a change under a gesture in
-    /// progress, and xterm.js (`orion browser`) takes the `?1000h` in
+    /// progress, and xterm.js takes the `?1000h` in
     /// that re-ask as the end of the drag — it drops its motion listener
     /// and reports nothing more until the next press. A motion report
     /// with no button named is still the drag.

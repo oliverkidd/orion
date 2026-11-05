@@ -123,7 +123,6 @@ flowchart LR
   subgraph clients["Clients (same binary)"]
     TUI["TUI<br/>(orion)"]
     CLI["One-shot CLIs<br/>(rename, add, …)"]
-    BROWSER["Browser client<br/>(orion browser → ttyd)"]
   end
 
   subgraph transport["Transport"]
@@ -145,7 +144,6 @@ flowchart LR
 
   TUI --> SOCK
   CLI --> SOCK
-  BROWSER --> SOCK
   SOCK --> CODEC
   CODEC --> SERVER
   SERVER --> REG

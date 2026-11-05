@@ -19,9 +19,7 @@ orion worktree [name]      move this session into a worktree           (agents r
 orion spawn <task>         start another agent session beside it       (agents run this)
 orion open <file>…         show files in this orion's file tabs       (agents run this)
 orion config <cmd>         back up, restore or locate this machine's settings
-orion browser              serve this TUI in a web browser via ttyd
 orion ssh <host>           open orion on a remote host over ssh
-orion tunnel <host>        open a remote host's orion in a tab here
 orion setup                open orion on its setup, every step
 orion app                  open orion as a Mac app of its own (Orion.app)
 orion doctor               check what orion needs on this machine
@@ -43,8 +41,8 @@ orion                    # launch the TUI (auto-starts the daemon). With no proj
 orion add <dir>          # add a repo as a project, named after its root directory
 orion add .              # same, for the repo you're in (bare `orion <dir>` / `orion .` also work)
                           # — but a directory whose name collides with a subcommand needs the long
-                          # form (`orion add browser`) or a `./` prefix, or bare `orion browser`
-                          # serves the TUI over ttyd instead of adding the directory
+                          # form (`orion add setup`) or a `./` prefix, or bare `orion setup`
+                          # opens setup instead of adding the directory
 orion daemon             # run the daemon (normally auto-spawned)
 orion daemon --foreground  # daemon with logs to stdout, for debugging
 orion kill               # stop the daemon and all sessions cleanly
@@ -133,31 +131,6 @@ orion ssh <host> [dir]   # open orion on a remote machine over ssh (installs it 
                           # orion merges them into its own settings (its config.local.json
                           # still wins); --no-sync-config or the ssh_sync_config setting leaves
                           # them here
-orion tunnel <host> [dir] [--port N] [--remote-port N]
-                          # that host's orion in a browser tab here, over one ssh tunnel: installs
-                          # orion there if missing, runs `orion browser` on its loopback, forwards
-                          # the port, and opens the local URL. Nothing is exposed on the remote's
-                          # network — the tunnel is the only way in — so it needs no --credential.
-                          # If that host already has a `orion browser` on the port, the tunnel
-                          # reuses it instead of failing on the clash (a --credential one will ask
-                          # for it in the tab).
-                          # Needs the OpenSSH client (`ssh`) on PATH here and ttyd on the remote;
-                          # Ctrl+C takes both ends down. --port is the local end (same rules as
-                          # `orion browser`), --remote-port the far end when something there
-                          # already holds that number. Settings ride along as they do for
-                          # `orion ssh` (--no-sync-config leaves them here)
-orion browser [--port N] [--bind ADDR | --public] [--credential USER:PASSWORD] [--no-open]
-                          # serve this TUI in a browser tab via ttyd and open it; needs ttyd on
-                          # PATH. With no --port it takes 7681 when that's free and a free port
-                          # otherwise, saying which — so one per checkout can serve at once.
-                          # --port 0 always picks a free one; --port N is that port or an error,
-                          # which is what you want behind an ssh tunnel. Listens on 127.0.0.1
-                          # unless --bind names an interface address or --public takes them all
-                          # (0.0.0.0) — for a orion on a remote box, where the access control
-                          # is the firewall/security group in front of the port. That serves a
-                          # live, writable terminal, so put something in front of it and use
-                          # --credential to add ttyd's HTTP basic auth on top. --no-open serves
-                          # without launching a desktop browser, for a box that has none
 orion upgrade            # install the latest release (--force on a dev build). Swapping the
                           # binary doesn't touch a running daemon, so afterwards it shuts an idle
                           # one (no live sessions) down for you and the next launch starts on the

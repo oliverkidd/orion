@@ -41,7 +41,7 @@ pub(crate) struct Cli {
     /// Directory to add as a project — shorthand for `orion add <dir>`.
     ///
     /// A directory whose name collides with a subcommand needs the long form
-    /// (`orion add browser`) or a `./` prefix.
+    /// (`orion add setup`) or a `./` prefix.
     pub(crate) dir: Option<String>,
 }
 
@@ -49,7 +49,7 @@ const ROOT_EXAMPLES: &str = "\
 Examples:
   orion                            open the TUI (auto-starts the daemon)
   orion add ~/code/my-app          register a project
-  orion browser --port 8080        serve this TUI in a browser tab
+  orion ssh user@server            open orion on a remote machine
 
 Run `orion <command> --help` for a command's flags and examples.";
 
@@ -202,48 +202,6 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Serve this TUI in a web browser via ttyd.
-    ///
-    /// Runs ttyd in front of a orion TUI and opens a tab on it, so a phone or
-    /// another machine can drive this orion. Needs ttyd on PATH
-    /// (`brew install ttyd`); Ctrl+C takes the server down. It listens on
-    /// loopback unless --bind or --public widens it.
-    #[command(after_help = BROWSER_EXAMPLES)]
-    Browser {
-        /// Port for ttyd to listen on.
-        ///
-        /// Omit to take 7681 when it's free and a free one otherwise — so a
-        /// checkout per worktree can each serve at once. `--port 0` always
-        /// picks a free one; a port named explicitly is used or the command
-        /// fails, which is what you want behind an ssh tunnel.
-        #[arg(long)]
-        port: Option<u16>,
-        /// Address to listen on (default 127.0.0.1).
-        ///
-        /// Name a specific interface address to reach this orion from another
-        /// host — e.g. `--bind 10.0.1.7`. See --public for every interface.
-        #[arg(long, value_name = "ADDR", conflicts_with = "public")]
-        bind: Option<std::net::IpAddr>,
-        /// Listen on every interface (0.0.0.0).
-        ///
-        /// For a orion on a remote box. This serves a live, writable terminal
-        /// to anything that can reach the port — put a firewall, security
-        /// group, or VPN in front of it, and consider --credential.
-        #[arg(long)]
-        public: bool,
-        /// HTTP basic auth for the served terminal, as USER:PASSWORD.
-        ///
-        /// ttyd asks for it in the browser tab. Worth adding to any bind wider
-        /// than loopback, on top of whatever guards the port itself.
-        #[arg(long, value_name = "USER:PASSWORD")]
-        credential: Option<String>,
-        /// Serve the URL but do not open a desktop browser.
-        ///
-        /// For a machine with no desktop to open it on — `orion tunnel` runs
-        /// the remote half this way.
-        #[arg(long)]
-        no_open: bool,
-    },
     /// Open orion on a remote host over ssh.
     ///
     /// Connects with ssh and runs orion there, installing it on the remote
@@ -261,40 +219,6 @@ pub(crate) enum Command {
         /// Leave this machine's settings behind for this connection.
         ///
         /// The `ssh_sync_config` setting turns the forward off for good.
-        #[arg(long)]
-        no_sync_config: bool,
-    },
-    /// Open a remote host's orion in a browser tab here.
-    ///
-    /// One ssh tunnel does the whole thing: it installs orion on the remote
-    /// if missing, runs `orion browser` on the remote's own loopback,
-    /// forwards the port, and opens the local URL. Nothing is exposed on the
-    /// remote's network — the tunnel is the only way in — so it needs no
-    /// --credential. A `orion browser` already serving that port is reused
-    /// rather than treated as a clash. Needs ttyd on the remote; Ctrl+C takes
-    /// both ends down.
-    #[command(after_help = TUNNEL_EXAMPLES)]
-    Tunnel {
-        /// ssh destination, passed verbatim (e.g. user@server).
-        host: String,
-        /// Remote directory to start in (default: remote $HOME).
-        path: Option<String>,
-        /// Local end of the tunnel, and the port the browser opens.
-        ///
-        /// Omit to take 7681 when it is free and a free port otherwise;
-        /// `--port 0` always picks a free one.
-        #[arg(long)]
-        port: Option<u16>,
-        /// Port the remote serves on (default: the same number as --port).
-        ///
-        /// Name one when something on the remote already holds that port.
-        #[arg(long, value_name = "PORT")]
-        remote_port: Option<u16>,
-        /// Leave this machine's settings behind for this connection.
-        ///
-        /// By default `config.json` and the agent presets ride along, as they
-        /// do for `orion ssh`; the `ssh_sync_config` setting turns that off
-        /// for good.
         #[arg(long)]
         no_sync_config: bool,
     },
@@ -401,14 +325,6 @@ Examples:
   orion open README.md                one tab
   orion open src/main.rs docs/keys.md a tab each, in this order";
 
-const BROWSER_EXAMPLES: &str = "\
-Examples:
-  orion browser                   serve on 127.0.0.1:7681, open a tab
-  orion browser --port 8080       take a specific port
-  orion browser --no-open         serve only; print the URL
-  orion browser --public --credential me:secret
-                                   reachable off-box, behind basic auth";
-
 const SSH_EXAMPLES: &str = "\
 Examples:
   orion ssh user@server           open the remote's orion
@@ -421,13 +337,6 @@ Examples:
   orion config path               where each settings file lives
   orion config export ~/backups   write ~/backups/orion-settings.json
   orion config import ~/backups   merge it back in, here or elsewhere";
-
-const TUNNEL_EXAMPLES: &str = "\
-Examples:
-  orion tunnel user@server           the remote's TUI in a tab here
-  orion tunnel user@server /srv/app  start in a directory there
-  orion tunnel user@server --port 9000
-                                      pick the local end of the tunnel";
 
 const DOCTOR_EXAMPLES: &str = "\
 Examples:
