@@ -958,6 +958,11 @@ fn tui_autofix_sends_unasked_when_my_pr_conflicts() {
 
     let mut tui = TuiHarness::spawn_with(&[("PATH", path)], r#", "pr_autofix": "ask""#);
     let repo = tui.make_repo("autofix-proj");
+    // The pull request's head branch, already here: with no origin to
+    // fetch it from, the DAEMON checks this one out for the agent
+    // (`git::add_pr_worktree`). Without it the create is refused at once,
+    // and `autofix-7` is on screen only between the send and the refusal.
+    repo_git(&repo, &["branch", "feat"]);
     tui.wait_for_text("to begin");
     run_command(&mut tui, "open a folder");
     tui.wait_for_text("Open project");
@@ -965,7 +970,13 @@ fn tui_autofix_sends_unasked_when_my_pr_conflicts() {
     tui.send(ENTER);
     tui.wait_for_gone("Open project");
 
-    tui.wait_for_text("autofix-7");
+    // The agent running in the DAEMON — the footer counts it off the
+    // daemon's own metrics — not only the `autofix-7 started` flash and
+    // the stand-in row, which go up the moment the create is sent.
+    tui.wait_for("autofix-7 running", |s| {
+        let text = screen_to_text(s);
+        text.contains("autofix-7") && text.contains("1 agent ·")
+    });
     assert!(
         !tui.screen_text().contains("[x] Merge conflicts"),
         "no modal to answer:\n{}",
