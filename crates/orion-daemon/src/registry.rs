@@ -5992,17 +5992,28 @@ mod tests {
         drop(dir);
     }
 
+    /// Held by every [`EnvGuard`] while it lives: tests run in parallel,
+    /// and one test's restore would otherwise unset the var under another
+    /// that set it too.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Save/restore around a process-wide env var a test has to set.
     struct EnvGuard {
         key: &'static str,
         was: Option<String>,
+        _held: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
+            let held = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let was = std::env::var(key).ok();
             std::env::set_var(key, value);
-            Self { key, was }
+            Self {
+                key,
+                was,
+                _held: held,
+            }
         }
     }
 
