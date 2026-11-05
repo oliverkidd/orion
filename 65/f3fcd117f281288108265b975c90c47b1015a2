@@ -1,0 +1,52 @@
+docs/how-it-works.md
+  s_61e50232cdb2f2::t_077ccd0b4e82ea 170-185
+docs/sessions.md
+  s_61e50232cdb2f2::t_077ccd0b4e82ea 346-349
+crates/orion-tui/src/event_loop/quick_launch.rs
+  s_61e50232cdb2f2::t_4a9a70cf528221 101-110,126
+crates/orion-daemon/src/spare.rs
+  s_61e50232cdb2f2::t_07daf60f42c01d 331,333-338,359,414,416-428
+  s_61e50232cdb2f2::t_79c67ca9b9679b 983,1142,1144-1145
+  s_61e50232cdb2f2::t_ead5de5ea3c0ea 250-262,265,344,350,897-899,1068-1084,1090-1128,1133,1138-1141,1143,1146-1154,1160-1162,1166-1199,1205-1251
+  s_61e50232cdb2f2::t_c2bf8b0e094060 313-315,396-400,984-988,1085-1089,1129-1132,1134-1137,1155-1159,1163-1165,1200-1204
+  s_61e50232cdb2f2::t_420bfea00284f5 18-28,42,44-45,64-78,96-98,145-159,162,175,193-198,242-249,263-264,266-312,316-330,332,339-343,345-349,351-358,360-395,401-413,415,429-496,520
+crates/orion-daemon/src/server.rs
+  s_61e50232cdb2f2::t_c2bf8b0e094060 313-317
+  s_61e50232cdb2f2::t_d733352e243d89 303,312,318-324
+crates/orion-daemon/src/git.rs
+  s_61e50232cdb2f2::t_420bfea00284f5 251-264
+docs/configuration.md
+  s_61e50232cdb2f2::t_077ccd0b4e82ea 244-249
+crates/orion/tests/e2e_pty.rs
+  s_61e50232cdb2f2::t_c2bf8b0e094060 391,1102,2252-2345,2359-2365,2368-2426
+  s_61e50232cdb2f2::t_433940e650ecf5 2346-2358,2366-2367
+  s_61e50232cdb2f2::t_f7f9bab56dd1be 2427
+crates/orion-tui/src/event_loop.rs
+  s_61e50232cdb2f2::t_4a9a70cf528221 9031
+  s_61e50232cdb2f2::t_22d440b724e67d 32944-32946,32948-32951,34164-34171
+  s_61e50232cdb2f2::t_1687e1689526e5 32947
+crates/orion-core/src/protocol.rs
+  s_61e50232cdb2f2::t_d733352e243d89 99-106
+crates/orion-daemon/src/registry.rs
+  s_61e50232cdb2f2::t_1530abbcc32929 128
+  s_61e50232cdb2f2::t_76ab2bd83af8a4 1176-1193,1197,1201-1203,1241-1251,1259,1327
+  s_61e50232cdb2f2::t_07daf60f42c01d 1257-1258
+ARCHITECTURE.md
+  s_61e50232cdb2f2::t_077ccd0b4e82ea 85-86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "65f3fcd117f281288108265b975c90c47b1015a2",
+  "prompts": {},
+  "sessions": {
+    "s_61e50232cdb2f2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "df12aa21-1ffc-4111-873e-7e452dc4702c",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
