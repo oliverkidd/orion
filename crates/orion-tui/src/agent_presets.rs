@@ -1,8 +1,9 @@
 //! AGENT PRESETS: saved launch definitions — an AGENT KIND, a MODEL / EFFORT
-//! choice, optional prefix / postfix text, and whether to ask for a task at
-//! all — that `e` lists for the checkout under the cursor. Launching one asks for an
-//! optional task (or, with `skip_task`, nothing) and hands the CLI
-//! `prefix + task + postfix` as its positional starting prompt.
+//! choice, the TEXT it sends with `{task}` where the task goes, and whether
+//! to ask for a task at all — made in Settings → Presets and picked
+//! wherever a launch is. Launching one asks for an optional task (or, with
+//! `skip_task`, nothing) and hands the CLI its text, the task at `{task}`,
+//! as its positional starting prompt.
 //!
 //! A plain JSON list in the DATA DIR beside `config.json`, in list order.
 //! A missing or malformed file reads as empty — like the SSH HOSTS FILE it
@@ -11,15 +12,32 @@
 //! read entry by entry, and a save keeps what this build can't read — a
 //! preset for a harness a newer orion added, a field it has no name for —
 //! so an older orion sharing the file never deletes a newer one's presets.
+//! An entry from before a preset held one text — a `prefix` and a
+//! `postfix` round the task — reads as its prefix, `{task}` and its
+//! postfix ([`migrate_entry`]), and the next save writes it so.
 
 use orion_core::AgentKind;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
 /// What a preset that follows the box says where a harness goes: the
-/// editor's Harness row, the presets list's line.
+/// editor's Runs on row, the presets list's line.
 pub const FOLLOW_BOX: &str = "the box's agent";
+/// What the PR autofix preset runs on while it follows: the agent that
+/// did the work on the pull request's branch.
+pub const FOLLOW_PR: &str = "the PR's own agent";
+/// What the week review is written through while it follows: the `⌘N`
+/// default's account.
+pub const FOLLOW_DEFAULT: &str = "your default agent";
+
+/// Where a preset's text puts the task. Text that names no place for it
+/// has the task after it, a blank line between ([`AgentPreset::compose`]).
+pub const TASK: &str = "{task}";
+
+/// The keys an entry from before one text held its text in, round the
+/// task: read once ([`migrate_entry`]), never written.
+const RETIRED_TEXT: [&str; 2] = ["prefix", "postfix"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentPreset {
@@ -47,15 +65,14 @@ pub struct AgentPreset {
     /// Launch effort; None = follow the Settings → Accounts default.
     #[serde(default)]
     pub effort: Option<String>,
-    /// Text sent before the task (may be empty).
+    /// What the preset sends: its TEXT, [`TASK`] where the task goes — at
+    /// the end, after a blank line, when it names no place. May be empty,
+    /// when the task goes alone.
     #[serde(default)]
-    pub prefix: String,
-    /// Text sent after the task (may be empty).
-    #[serde(default)]
-    pub postfix: String,
+    pub text: String,
     /// Launch without asking for a task: Enter on the preset starts the CLI
-    /// on prefix + postfix alone — a "commit and push" preset has nothing
-    /// left to say. Off, the task is still asked for, but optional.
+    /// on its text alone — a "commit and push" preset has nothing left to
+    /// say. Off, the task is still asked for, but optional.
     #[serde(default)]
     pub skip_task: bool,
     /// A SYSTEM PRESET: one orion itself reads its text from — the PR
@@ -102,13 +119,24 @@ impl SystemPreset {
         }
     }
 
-    /// orion's own text for the preset, as `(prefix, postfix)`: what it
-    /// says while the list holds none of the user's.
-    pub fn builtin_text(self) -> (&'static str, &'static str) {
+    /// What orion uses the preset for, in the few words its row in
+    /// Settings → Presets says beside its name; `{linear}` is the Linear
+    /// key, as the live keymap spells it (`hints::expand`).
+    pub const fn purpose(self) -> &'static str {
+        match self {
+            SystemPreset::PrAutofix => "sent when one of your PRs breaks",
+            SystemPreset::LinearTicket => "wraps every {linear} launch",
+            SystemPreset::WeekReview => "writes your week review",
+        }
+    }
+
+    /// orion's own text for the preset: what it says while the list holds
+    /// none of the user's.
+    pub fn builtin_text(self) -> &'static str {
         match self {
             SystemPreset::PrAutofix => crate::autofix::PRESET_TEXT,
-            SystemPreset::LinearTicket => (crate::linear::TICKET_TEXT, ""),
-            SystemPreset::WeekReview => (crate::week_review::brief_rules(), ""),
+            SystemPreset::LinearTicket => crate::linear::TICKET_TEXT,
+            SystemPreset::WeekReview => crate::week_review::brief_rules(),
         }
     }
 
@@ -129,8 +157,7 @@ impl SystemPreset {
             follow_box: Some(true),
             model,
             effort,
-            prefix: String::new(),
-            postfix: String::new(),
+            text: String::new(),
             skip_task: false,
             system: Some(self),
         }
@@ -162,18 +189,21 @@ pub fn ensure_system(presets: &mut Vec<AgentPreset>) -> bool {
 /// The list as stored, with its SYSTEM PRESETS made sure of — and the
 /// settings an older release kept in `config.json` for the agents they
 /// carry moved onto them ([`crate::config::Config::move_into_presets`]) —
-/// saved when that changed it: run once as orion starts, so the presets
-/// list shows them from then on. The moved keys leave `config.json` only
-/// once the presets holding them are saved.
+/// saved when that changed it, or when an entry still holds its text the
+/// way an older release did ([`migrate_entry`]): run once as orion
+/// starts, so the presets list shows them from then on and the file says
+/// what this build reads. The moved keys leave `config.json` only once the
+/// presets holding them are saved.
 pub fn seed_system() {
-    let mut presets = load();
+    let path = store_path();
+    let (mut presets, migrated) = read_from(&path);
     let mut cfg = crate::config::Config::load();
     let added = ensure_system(&mut presets);
     let moved = cfg.move_into_presets(&mut presets);
-    if !added && !moved {
+    if !added && !moved && !migrated {
         return;
     }
-    if let Err(err) = save(&presets) {
+    if let Err(err) = save_to(&path, &presets) {
         tracing::warn!(%err, "couldn't save the system presets");
         return;
     }
@@ -188,12 +218,20 @@ pub fn seed_system() {
 /// [`ensure_system`] ran, for a list that has not been seeded yet. Its
 /// text as stored: blank while it is orion's ([`AgentPreset::with_builtin_text`]).
 pub fn system(which: SystemPreset) -> AgentPreset {
-    let mut presets = load();
-    ensure_system(&mut presets);
-    presets
+    load_seeded()
         .into_iter()
         .find(|p| p.system == Some(which))
         .unwrap_or_else(|| which.default_preset())
+}
+
+/// The list as stored with its SYSTEM PRESETS made sure of
+/// ([`ensure_system`]), as Settings → Presets shows it and its editor
+/// indexes it — the stored list itself once orion has started
+/// ([`seed_system`]).
+pub fn load_seeded() -> Vec<AgentPreset> {
+    let mut presets = load();
+    ensure_system(&mut presets);
+    presets
 }
 
 impl AgentPreset {
@@ -211,10 +249,8 @@ impl AgentPreset {
     /// no text of the user's says orion's ([`SystemPreset::builtin_text`]),
     /// so it is never blank. Any other preset as it is.
     pub fn with_builtin_text(mut self) -> Self {
-        if let Some(which) = self.system.filter(|_| !self.has_wrapping()) {
-            let (prefix, postfix) = which.builtin_text();
-            self.prefix = prefix.into();
-            self.postfix = postfix.into();
+        if let Some(which) = self.system.filter(|_| !self.has_text()) {
+            self.text = which.builtin_text().into();
         }
         self
     }
@@ -224,22 +260,28 @@ impl AgentPreset {
     /// when that changes — and clearing it is the way back to orion's.
     pub fn without_builtin_text(mut self) -> Self {
         if let Some(which) = self.system {
-            let (prefix, postfix) = which.builtin_text();
-            if self.prefix.trim() == prefix.trim() && self.postfix.trim() == postfix.trim() {
-                self.prefix.clear();
-                self.postfix.clear();
+            if self.text.trim() == which.builtin_text().trim() {
+                self.text.clear();
             }
         }
         self
     }
 
+    /// What a preset that follows runs on, in its own words: the box's
+    /// agent for a launch ([`FOLLOW_BOX`]); for orion's own, the pull
+    /// request's agent ([`FOLLOW_PR`]) or the default agent
+    /// ([`FOLLOW_DEFAULT`]), there being no box.
+    pub fn follow_label(&self) -> &'static str {
+        follow_label(self.system)
+    }
+
     /// `claude · opus · high` / `codex · gpt-5.5` / `cursor` — the kind plus
     /// whichever of model and effort the preset pins; a CLAUDE ACCOUNT's
     /// email in place of the kind on a machine with more than one, and
-    /// [`FOLLOW_BOX`] for a preset that follows the box.
+    /// [`Self::follow_label`] for a preset that follows.
     pub fn spec_label(&self) -> String {
         let harness = match self.follows_box() {
-            true => FOLLOW_BOX.to_string(),
+            true => self.follow_label().to_string(),
             false => crate::quick_prompt::harness_name(self.kind, self.custom_harness.as_deref()),
         };
         let mut parts = vec![harness];
@@ -248,109 +290,88 @@ impl AgentPreset {
         parts.join(" · ")
     }
 
-    /// True when the preset wraps the task in any text at all.
-    pub fn has_wrapping(&self) -> bool {
-        !self.prefix.trim().is_empty() || !self.postfix.trim().is_empty()
+    /// True when the preset sends any text of its own with the task.
+    pub fn has_text(&self) -> bool {
+        !self.text.replace(TASK, "").trim().is_empty()
     }
 
-    /// The starting prompt: prefix, task and postfix — each trimmed, empty
-    /// parts skipped — joined by a blank line. Empty when all three are:
-    /// the launch then has no starting prompt at all.
+    /// The starting prompt: the text with `task` where it goes
+    /// ([`Self::halves`]) — at the first [`TASK`], or after the text with a
+    /// blank line between when it names no place. Sent with no task, the
+    /// marker goes and so does the gap it leaves. Empty when both are: the
+    /// launch then has no starting prompt at all.
     pub fn compose(&self, task: &str) -> String {
-        [self.prefix.as_str(), task, self.postfix.as_str()]
-            .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n")
+        let (before, after) = self.halves();
+        let out = match task.trim() {
+            "" => close_gap(&before, &after),
+            task => format!("{before}{task}{after}"),
+        };
+        out.trim().to_string()
+    }
+
+    /// The text either side of where the task goes, its own spacing kept
+    /// so that the task between them reads as [`Self::compose`] sends it:
+    /// what comes before the first [`TASK`] and what follows it — a later
+    /// marker closed up, the task having one place — or, for text that
+    /// names no place, all of it and the blank line the task goes under.
+    pub fn halves(&self) -> (String, String) {
+        let text = self.text.trim();
+        match text.split_once(TASK) {
+            Some((before, after)) => {
+                let mut rest = after.split(TASK);
+                let first = rest.next().unwrap_or_default().to_string();
+                (
+                    before.to_string(),
+                    rest.fold(first, |out, piece| close_gap(&out, piece)),
+                )
+            }
+            None if text.is_empty() => (String::new(), String::new()),
+            None => (format!("{text}\n\n"), String::new()),
+        }
     }
 
     /// The preset's text for a prompt already open, whose task is not ours
-    /// to see: a prefix with the blank line its task goes under, a postfix
-    /// with the blank line parting it from the task above, and both as
-    /// [`Self::compose`] joins them with no task between. Empty when the
-    /// preset holds no text.
+    /// to see: what goes before the task, the caret where the task goes,
+    /// or what follows it, parted from a task already typed; with text on
+    /// both sides, both as [`Self::compose`] joins them with no task.
+    /// Empty when the preset holds no text.
     pub fn standalone_text(&self) -> String {
-        let (prefix, postfix) = (self.prefix.trim(), self.postfix.trim());
-        match (prefix.is_empty(), postfix.is_empty()) {
-            (true, true) => String::new(),
-            (false, true) => format!("{prefix}\n\n"),
-            (true, false) => format!("\n\n{postfix}"),
-            (false, false) => format!("{prefix}\n\n{postfix}"),
+        match self.halves() {
+            (before, after) if before.trim().is_empty() => after,
+            (before, after) if after.trim().is_empty() => before,
+            _ => self.compose(""),
         }
     }
 }
 
-/// Which side of the task a preset's text goes: a PREFIX before it, a
-/// POSTFIX after it, or both. The PRESET EDITOR shows one box per side —
-/// its Text row picks — and `preset_text` (a hand-edited key,
-/// [`crate::config::Config::preset_text`]) is what a new preset starts on:
-/// prefix alone by default, the framing most people reach for and one box
-/// to fill. Never stored on the preset — a side is what it holds, so the
-/// form derives it ([`PresetText::for_preset`]) and an older orion reads
-/// the file unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresetText {
-    Prefix,
-    Postfix,
-    Both,
+/// [`AgentPreset::follow_label`] for a preset that is `system`, or none.
+pub fn follow_label(system: Option<SystemPreset>) -> &'static str {
+    match system {
+        Some(SystemPreset::PrAutofix) => FOLLOW_PR,
+        Some(SystemPreset::WeekReview) => FOLLOW_DEFAULT,
+        Some(SystemPreset::LinearTicket) | None => FOLLOW_BOX,
+    }
 }
 
-impl PresetText {
-    /// In cycle order, as the Text row and the setting step them.
-    pub const ALL: [PresetText; 3] = [PresetText::Prefix, PresetText::Postfix, PresetText::Both];
-    /// What a config that never set `preset_text` means.
-    pub const DEFAULT: PresetText = PresetText::Prefix;
-
-    /// The label the setting stores and both rows show.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            PresetText::Prefix => "prefix",
-            PresetText::Postfix => "postfix",
-            PresetText::Both => "prefix & postfix",
-        }
-    }
-
-    /// A label back to its side, case-insensitively and trimmed; `both` is
-    /// accepted for a hand edit. None for anything else.
-    pub fn parse(value: &str) -> Option<PresetText> {
-        let value = value.trim();
-        if value.eq_ignore_ascii_case("both") {
-            return Some(PresetText::Both);
-        }
-        Self::ALL
-            .into_iter()
-            .find(|side| side.as_str().eq_ignore_ascii_case(value))
-    }
-
-    pub fn has_prefix(self) -> bool {
-        matches!(self, PresetText::Prefix | PresetText::Both)
-    }
-
-    pub fn has_postfix(self) -> bool {
-        matches!(self, PresetText::Postfix | PresetText::Both)
-    }
-
-    /// The side (or sides) two flags name; None when neither is set.
-    pub fn of_sides(prefix: bool, postfix: bool) -> Option<PresetText> {
-        match (prefix, postfix) {
-            (true, true) => Some(PresetText::Both),
-            (true, false) => Some(PresetText::Prefix),
-            (false, true) => Some(PresetText::Postfix),
-            (false, false) => None,
-        }
-    }
-
-    /// What the editor shows for a stored preset under the `default`
-    /// setting: every side the preset already holds text on, plus the
-    /// side(s) the setting names — so nothing saved is ever hidden, and a
-    /// blank preset opens the way a new one would.
-    pub fn for_preset(preset: &AgentPreset, default: PresetText) -> PresetText {
-        Self::of_sides(
-            !preset.prefix.trim().is_empty() || default.has_prefix(),
-            !preset.postfix.trim().is_empty() || default.has_postfix(),
-        )
-        .unwrap_or(default)
+/// `head` and `tail` joined where a task marker came out of the text with
+/// no task to stand in it, the longer of the two breaks either side kept:
+/// a blank line between when the marker had a paragraph to itself, a line
+/// break when a line, a space when it sat inside one — so `Fix {task} now`
+/// reads `Fix now`, and a marker on its own line leaves no hole. `head`'s
+/// own lead and `tail`'s own end are left as they are.
+fn close_gap(head: &str, tail: &str) -> String {
+    let (left, right) = (head.trim_end(), tail.trim_start());
+    let breaks = |gap: &str| gap.matches('\n').count();
+    let gap = breaks(&head[left.len()..]).max(breaks(&tail[..tail.len() - right.len()]));
+    let sep = match gap {
+        0 => " ",
+        1 => "\n",
+        _ => "\n\n",
+    };
+    match (left.is_empty(), right.is_empty()) {
+        (true, _) => right.to_string(),
+        (_, true) => left.to_string(),
+        _ => format!("{left}{sep}{right}"),
     }
 }
 
@@ -382,13 +403,76 @@ pub(crate) fn store_path() -> PathBuf {
 }
 
 fn load_from(path: &Path) -> Vec<AgentPreset> {
-    let mut presets: Vec<AgentPreset> = orion_core::settings::read_list(path).0;
-    // An entry an older release wrote says nothing of following: settle
-    // it by the rule it reads by, so the next save writes it out once.
-    for preset in &mut presets {
-        preset.follow_box = Some(preset.follows_box());
+    read_from(path).0
+}
+
+/// The list at `path`, and whether a preset in it held its text the way
+/// an older release wrote it ([`migrate_entry`]) — so the file is behind
+/// what this build reads until the next save.
+fn read_from(path: &Path) -> (Vec<AgentPreset>, bool) {
+    let mut migrated = false;
+    let presets = read_entries(path)
+        .into_iter()
+        .filter_map(|mut entry| {
+            let old = migrate_entry(&mut entry);
+            let mut preset = serde_json::from_value::<AgentPreset>(entry).ok()?;
+            migrated |= old;
+            // An entry an older release wrote says nothing of following:
+            // settle it by the rule it reads by, so the next save writes
+            // it out once.
+            preset.follow_box = Some(preset.follows_box());
+            Some(preset)
+        })
+        .collect();
+    (presets, migrated)
+}
+
+/// The raw entries at `path`: none for a missing or malformed file.
+fn read_entries(path: &Path) -> Vec<Value> {
+    orion_core::settings::read_array(path)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// An entry from before a preset held one text, made one: its prefix,
+/// [`TASK`] and its postfix — each that holds anything — a blank line
+/// apart, as its text; the retired keys gone either way. An entry that
+/// already has text of its own keeps it. (A `{task}` an old prefix spelled
+/// out was only ever words; it is a marker from now on, and the first is
+/// where the task goes.) True when the entry held either key.
+fn migrate_entry(entry: &mut Value) -> bool {
+    let Value::Object(map) = entry else {
+        return false;
+    };
+    let old: Vec<Option<Value>> = RETIRED_TEXT.iter().map(|key| map.remove(*key)).collect();
+    if old.iter().all(Option::is_none) {
+        return false;
     }
-    presets
+    let has_text = map
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty());
+    if !has_text {
+        let side = |at: usize| {
+            old[at]
+                .as_ref()
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let (prefix, postfix) = (side(0), side(1));
+        if !prefix.is_empty() || !postfix.is_empty() {
+            let text = [prefix.as_str(), TASK, postfix.as_str()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            map.insert("text".into(), Value::String(text));
+        }
+    }
+    true
 }
 
 /// The `name` a raw preset entry carries, as the file spells it.
@@ -397,13 +481,11 @@ pub(crate) fn entry_name(entry: &Value) -> Option<&str> {
 }
 
 /// Write `presets` in order. Each keeps the fields its stored entry (same
-/// name) had that this build doesn't know, and every stored entry this build
+/// name) had that this build doesn't know — never the retired prefix and
+/// postfix, which its text has taken — and every stored entry this build
 /// can't read goes after them unless a preset now holds its name.
 fn save_to(store: &Path, presets: &[AgentPreset]) -> std::io::Result<()> {
-    let stored = orion_core::settings::read_array(store)
-        .ok()
-        .flatten()
-        .unwrap_or_default();
+    let stored = read_entries(store);
     let named = |name: &str| {
         stored
             .iter()
@@ -416,10 +498,13 @@ fn save_to(store: &Path, presets: &[AgentPreset]) -> std::io::Result<()> {
         else {
             unreachable!("a preset serializes to a JSON object");
         };
-        let mut entry = named(&preset.name)
+        let mut entry: Map<String, Value> = named(&preset.name)
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        for key in RETIRED_TEXT {
+            entry.remove(key);
+        }
         entry.extend(known);
         entries.push(Value::Object(entry));
     }
@@ -470,10 +555,16 @@ mod tests {
             follow_box: Some(false),
             model: None,
             effort: None,
-            prefix: String::new(),
-            postfix: String::new(),
+            text: String::new(),
             skip_task: false,
             system: None,
+        }
+    }
+
+    fn with_text(text: &str) -> AgentPreset {
+        AgentPreset {
+            text: text.into(),
+            ..preset("p", AgentKind::Claude)
         }
     }
 
@@ -486,7 +577,7 @@ mod tests {
         let (_dir, path) = store();
         let mut presets = vec![
             AgentPreset {
-                prefix: "Fix it my way.".into(),
+                text: "Fix it my way.".into(),
                 ..preset("pr AUTOFIX", AgentKind::Claude)
             },
             preset("reviewer", AgentKind::Codex),
@@ -498,9 +589,9 @@ mod tests {
             ["pr AUTOFIX", "reviewer", "Linear Ticket", "Week review"]
         );
         assert_eq!(presets[0].system, Some(SystemPreset::PrAutofix));
-        assert_eq!(presets[0].prefix, "Fix it my way.", "the user's text kept");
+        assert_eq!(presets[0].text, "Fix it my way.", "the user's text kept");
         assert_eq!(presets[2].system, Some(SystemPreset::LinearTicket));
-        assert!(!presets[2].has_wrapping(), "orion's text is kept as none");
+        assert!(!presets[2].has_text(), "orion's text is kept as none");
         let review = &presets[3];
         assert_eq!(review.system, Some(SystemPreset::WeekReview));
         assert_eq!(
@@ -527,39 +618,35 @@ mod tests {
     fn a_system_preset_always_holds_text_and_clearing_it_restores_orions() {
         for which in SystemPreset::ALL {
             let blank = which.default_preset();
-            let (prefix, postfix) = which.builtin_text();
-            assert!(!prefix.trim().is_empty(), "{which:?} has text of orion's");
+            let builtin = which.builtin_text();
+            assert!(!builtin.trim().is_empty(), "{which:?} has text of orion's");
             let shown = blank.clone().with_builtin_text();
-            assert_eq!(
-                (shown.prefix.as_str(), shown.postfix.as_str()),
-                (prefix, postfix)
-            );
-            assert!(shown.has_wrapping());
+            assert_eq!(shown.text, builtin);
+            assert!(shown.has_text());
             assert_eq!(shown.clone().without_builtin_text(), blank, "kept as none");
             let cleared = AgentPreset {
-                prefix: "  ".into(),
-                postfix: String::new(),
+                text: format!("  {TASK} \n"),
                 ..shown
             };
             assert_eq!(
-                cleared.with_builtin_text().prefix,
-                prefix,
-                "clearing it puts orion's back"
+                cleared.with_builtin_text().text,
+                builtin,
+                "clearing it — a lone marker is no text — puts orion's back"
             );
             let own = AgentPreset {
-                prefix: "Mine.".into(),
+                text: "Mine.".into(),
                 ..blank
             };
             assert_eq!(own.clone().with_builtin_text(), own);
             assert_eq!(own.clone().without_builtin_text(), own);
         }
         let users = AgentPreset {
-            prefix: crate::linear::TICKET_TEXT.into(),
+            text: crate::linear::TICKET_TEXT.into(),
             ..preset("mine", AgentKind::Claude)
         };
         assert_eq!(users.clone().without_builtin_text(), users);
         assert_eq!(
-            preset("mine", AgentKind::Claude).with_builtin_text().prefix,
+            preset("mine", AgentKind::Claude).with_builtin_text().text,
             ""
         );
     }
@@ -579,8 +666,7 @@ mod tests {
             AgentPreset {
                 model: Some("opus".into()),
                 effort: Some("high".into()),
-                prefix: "Be strict.".into(),
-                postfix: "Run the tests.".into(),
+                text: format!("Be strict.\n\n{TASK}\n\nRun the tests."),
                 ..preset("reviewer", AgentKind::Claude)
             },
             AgentPreset {
@@ -611,7 +697,7 @@ mod tests {
         .unwrap();
         let mut presets = load_from(&path);
         assert_eq!(presets.len(), 1, "only the readable preset lists");
-        presets[0].prefix = "Be strict.".into();
+        presets[0].text = "Be strict.".into();
         presets.push(preset("scratch", AgentKind::Claude));
         save_to(&path, &presets).unwrap();
 
@@ -620,7 +706,7 @@ mod tests {
         let names: Vec<&str> = saved.iter().filter_map(entry_name).collect();
         assert_eq!(names, ["reviewer", "scratch", "future"]);
         assert_eq!(saved[0]["pinned"], true);
-        assert_eq!(saved[0]["prefix"], "Be strict.");
+        assert_eq!(saved[0]["text"], "Be strict.");
         assert_eq!(saved[2]["kind"], "antigravity");
         assert_eq!(load_from(&path).len(), 2);
     }
@@ -634,103 +720,224 @@ mod tests {
         assert_eq!(presets[0].name, "old");
         assert_eq!(presets[0].kind, AgentKind::Claude);
         assert_eq!(presets[0].model, None);
-        assert!(presets[0].prefix.is_empty() && presets[0].postfix.is_empty());
+        assert!(presets[0].text.is_empty());
         assert!(!presets[0].skip_task, "an old record still asks for a task");
     }
 
+    /// The task goes where `{task}` is; after the text, a blank line
+    /// between, when the text names no place; and alone with no text.
+    /// Sent with no task the marker goes, and the gap it leaves with it.
     #[test]
-    fn compose_skips_empty_parts_and_trims() {
-        let mut p = preset("p", AgentKind::Claude);
-        assert_eq!(p.compose(""), "", "nothing at all composes to nothing");
-        assert_eq!(p.compose("  do it \n"), "do it");
-        p.prefix = "PRE\n".into();
-        assert_eq!(p.compose("do it"), "PRE\n\ndo it");
-        p.postfix = "  POST".into();
-        assert_eq!(p.compose("do it"), "PRE\n\ndo it\n\nPOST");
-        assert_eq!(p.compose(" \n"), "PRE\n\nPOST", "the task is optional");
-        p.prefix = "   ".into();
-        assert_eq!(p.compose("line1\nline2"), "line1\nline2\n\nPOST");
-        assert!(p.has_wrapping());
-        p.postfix.clear();
-        assert!(!p.has_wrapping());
+    fn compose_puts_the_task_at_its_marker_or_after_the_text() {
+        assert_eq!(
+            with_text("").compose(""),
+            "",
+            "nothing at all composes to nothing"
+        );
+        assert_eq!(with_text("").compose("  do it \n"), "do it");
+        assert_eq!(
+            with_text("PRE\n").compose("do it"),
+            "PRE\n\ndo it",
+            "no marker: after"
+        );
+        let around = with_text(&format!("PRE\n\n{TASK}\n\nPOST"));
+        assert_eq!(around.compose("do it"), "PRE\n\ndo it\n\nPOST");
+        assert_eq!(around.compose(" \n"), "PRE\n\nPOST", "the task is optional");
+        assert!(around.has_text());
+        let after = with_text(&format!("  {TASK}\n\nPOST"));
+        assert_eq!(after.compose("line1\nline2"), "line1\nline2\n\nPOST");
+        assert_eq!(after.compose(""), "POST");
+        let inline = with_text(&format!("Fix {TASK} now."));
+        assert_eq!(inline.compose("the login"), "Fix the login now.");
+        assert_eq!(
+            inline.compose(""),
+            "Fix now.",
+            "a marker inside a line leaves one space"
+        );
+        let lines = with_text(&format!("A\n{TASK}\nB"));
+        assert_eq!(
+            lines.compose(""),
+            "A\nB",
+            "a line to itself leaves one break"
+        );
+        // The task has one place: the first marker; a later one closes up.
+        let twice = with_text(&format!("a {TASK} b {TASK} c"));
+        assert_eq!(twice.compose("X"), "a X b c");
+        assert_eq!(twice.compose(""), "a b c");
+        assert!(!with_text(TASK).has_text(), "a lone marker is no text");
+        assert_eq!(with_text(TASK).compose("go"), "go");
     }
 
+    /// The text either side of the task, for a box or a pane to put the
+    /// caret between, spaced so the task between them reads as `compose`
+    /// sends it: all of it before, and a blank line, for text with no
+    /// marker.
     #[test]
-    fn standalone_text_leaves_room_for_the_task_on_the_side_it_goes() {
-        let mut preset = preset("p", AgentKind::Claude);
+    fn halves_and_standalone_text_leave_room_for_the_task_where_it_goes() {
+        let mut preset = with_text("");
+        assert_eq!(preset.halves(), (String::new(), String::new()));
         assert_eq!(preset.standalone_text(), "");
-        preset.prefix = "  frame \n".into();
+        preset.text = "  frame \n".into();
+        assert_eq!(preset.halves(), ("frame\n\n".into(), String::new()));
         assert_eq!(preset.standalone_text(), "frame\n\n");
-        preset.postfix = " finish ".into();
+        preset.text = format!("frame\n\n{TASK}\n\n finish ");
+        assert_eq!(preset.halves(), ("frame\n\n".into(), "\n\n finish".into()));
         assert_eq!(preset.standalone_text(), "frame\n\nfinish");
-        preset.prefix.clear();
+        preset.text = format!("{TASK}\n\nfinish");
         assert_eq!(preset.standalone_text(), "\n\nfinish");
-    }
-
-    #[test]
-    fn preset_text_labels_round_trip_and_both_is_an_alias() {
-        for side in PresetText::ALL {
-            assert_eq!(PresetText::parse(side.as_str()), Some(side));
+        preset.text = format!("Fix {TASK} now.");
+        assert_eq!(preset.halves(), ("Fix ".into(), " now.".into()));
+        assert_eq!(preset.standalone_text(), "Fix now.");
+        // Whatever the text, the halves round a task are what compose sends.
+        for text in [
+            "a {task} b {task} c",
+            "PRE\n\n{task}",
+            "{task}\n\nPOST",
+            "plain",
+            "x {task}y",
+        ] {
+            preset.text = text.into();
+            let (before, after) = preset.halves();
             assert_eq!(
-                PresetText::parse(&format!(" {} ", side.as_str().to_uppercase())),
-                Some(side)
+                format!("{before}T{after}").trim(),
+                preset.compose("T"),
+                "{text}"
             );
         }
-        assert_eq!(PresetText::parse(" both "), Some(PresetText::Both));
-        assert_eq!(PresetText::parse("suffix"), None);
-        assert_eq!(PresetText::parse(""), None);
-        assert_eq!(PresetText::DEFAULT, PresetText::Prefix);
-        assert!(PresetText::Prefix.has_prefix() && !PresetText::Prefix.has_postfix());
-        assert!(!PresetText::Postfix.has_prefix() && PresetText::Postfix.has_postfix());
-        assert!(PresetText::Both.has_prefix() && PresetText::Both.has_postfix());
-        assert_eq!(PresetText::of_sides(false, false), None);
     }
 
-    /// A stored side is never hidden: the form shows what the preset holds
-    /// on top of what the setting names, and a blank preset follows the
-    /// setting alone.
+    /// An entry from before one text — a prefix and a postfix round the
+    /// task — reads as its prefix, `{task}` and its postfix, each that
+    /// holds anything; and the save writes `text` alone, the retired keys
+    /// gone, whatever was in the stored entry.
     #[test]
-    fn for_preset_shows_every_side_with_text_and_the_setting_for_the_rest() {
-        use PresetText::*;
-        let blank = preset("p", AgentKind::Claude);
-        let pre = AgentPreset {
-            prefix: "PRE".into(),
-            ..blank.clone()
-        };
-        let post = AgentPreset {
-            postfix: "POST".into(),
-            ..blank.clone()
-        };
-        let both = AgentPreset {
-            prefix: "PRE".into(),
-            postfix: "POST".into(),
-            ..blank.clone()
-        };
-        assert_eq!(PresetText::for_preset(&blank, Prefix), Prefix);
-        assert_eq!(PresetText::for_preset(&blank, Postfix), Postfix);
-        assert_eq!(PresetText::for_preset(&blank, Both), Both);
-        assert_eq!(PresetText::for_preset(&pre, Prefix), Prefix);
+    fn an_old_prefix_and_postfix_read_as_one_text_round_the_task() {
+        let (_dir, path) = store();
+        std::fs::write(
+            &path,
+            r#"[
+              {"name": "both", "prefix": "Be strict.", "postfix": "Run the tests."},
+              {"name": "before", "prefix": "Plan first.\n", "postfix": ""},
+              {"name": "after", "prefix": "  ", "postfix": "Then push."},
+              {"name": "none", "prefix": "", "postfix": ""},
+              {"name": "new", "text": "Mine.", "prefix": "stale"},
+              {"name": "blank", "text": " ", "prefix": "Kept."}
+            ]"#,
+        )
+        .unwrap();
+        let (presets, migrated) = read_from(&path);
+        assert!(migrated);
+        let texts: Vec<&str> = presets.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(
-            PresetText::for_preset(&pre, Postfix),
-            Both,
-            "the prefix it holds stays on screen"
+            texts,
+            [
+                "Be strict.\n\n{task}\n\nRun the tests.",
+                "Plan first.\n\n{task}",
+                "{task}\n\nThen push.",
+                "",
+                "Mine.",
+                "Kept.\n\n{task}",
+            ]
         );
         assert_eq!(
-            PresetText::for_preset(&post, Prefix),
-            Both,
-            "the postfix it holds stays on screen"
+            presets[0].compose("Fix auth"),
+            "Be strict.\n\nFix auth\n\nRun the tests."
         );
-        assert_eq!(PresetText::for_preset(&post, Postfix), Postfix);
-        assert_eq!(PresetText::for_preset(&both, Prefix), Both);
-        let spaces = AgentPreset {
-            postfix: "  \n".into(),
-            ..blank
-        };
         assert_eq!(
-            PresetText::for_preset(&spaces, Prefix),
-            Prefix,
-            "whitespace is no text"
+            presets[1].compose(""),
+            "Plan first.",
+            "as the prefix alone sent"
         );
+        save_to(&path, &presets).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("prefix") && !raw.contains("postfix"), "{raw}");
+        assert_eq!(
+            read_from(&path),
+            (presets, false),
+            "read the same from then on"
+        );
+    }
+
+    /// The user's own list, as their `agent_presets.json` holds it — Linear
+    /// Ticket and PR autofix adopted as orion's (PR autofix never asking
+    /// for a task), Subagent Delegation theirs, all on Claude with nothing
+    /// to say they follow — comes through the start of a new build: each
+    /// text is its prefix then `{task}`, orion's two stay orion's and keep
+    /// their model and effort, Week review joins them, everything follows
+    /// the box, and the file is rewritten once in the new shape.
+    #[test]
+    fn the_users_presets_come_through_the_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent_presets.json");
+        let ticket = "You have a range of issues here that need fixing. please investigsate each upfront by reading the linear tickets.";
+        let autofix = "On the PR linked to this worktree the ci/cd has some failing tasks. Only fix what is listed below.";
+        let delegation =
+            "Please now setof opus 5.5 subagents on high effort to enact the planned work.";
+        let entry = |name: &str, prefix: &str, model: &str, effort: &str, extra: &str| {
+            format!(
+                r#"{{"custom_harness": null, "effort": {effort}, "kind": "claude", "model": {model},
+                    "name": "{name}", "postfix": "", "prefix": "{prefix}", "skip_task": {extra}}}"#
+            )
+        };
+        let file = format!(
+            "[{}, {}, {}]",
+            entry(
+                "Linear Ticket",
+                ticket,
+                "\"opus\"",
+                "\"medium\"",
+                r#"false, "system": "linear_ticket""#
+            ),
+            entry(
+                "PR autofix",
+                autofix,
+                "\"opus\"",
+                "\"medium\"",
+                r#"true, "system": "pr_autofix""#
+            ),
+            entry("Subagent Delegation", delegation, "null", "null", "false"),
+        );
+        std::fs::write(&path, file).unwrap();
+        crate::config::with_config_path(dir.path().join("config.json"), || {
+            with_presets_path(path.clone(), || {
+                seed_system();
+                let presets = load();
+                let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
+                assert_eq!(
+                    names,
+                    [
+                        "Linear Ticket",
+                        "PR autofix",
+                        "Subagent Delegation",
+                        "Week review"
+                    ]
+                );
+                assert_eq!(presets[0].text, format!("{ticket}\n\n{TASK}"));
+                assert_eq!(presets[1].text, format!("{autofix}\n\n{TASK}"));
+                assert_eq!(presets[2].text, format!("{delegation}\n\n{TASK}"));
+                assert_eq!(presets[0].system, Some(SystemPreset::LinearTicket));
+                assert_eq!(presets[1].system, Some(SystemPreset::PrAutofix));
+                assert!(presets[1].skip_task);
+                assert_eq!(presets[2].system, None);
+                assert_eq!(
+                    (presets[0].model.as_deref(), presets[0].effort.as_deref()),
+                    (Some("opus"), Some("medium"))
+                );
+                assert!(presets.iter().all(AgentPreset::follows_box));
+                let raw = std::fs::read_to_string(&path).unwrap();
+                assert!(!raw.contains("\"prefix\""), "rewritten once:\n{raw}");
+                // The ticket's text names no `{issues}`: the issues go where
+                // its task does, after the user's words.
+                let issue: crate::linear::LinearIssue = serde_json::from_value(serde_json::json!({
+                    "id": "1", "identifier": "ENG-12", "title": "Login",
+                    "url": "https://linear.app/x/issue/ENG-12", "status": "Todo"
+                }))
+                .unwrap();
+                let sent = crate::linear::ticket_task(&presets[0], &[issue]);
+                assert!(sent.starts_with(ticket), "{sent}");
+                assert!(sent.contains("\n\n### ENG-12: Login"), "{sent}");
+            })
+        });
     }
 
     #[test]
@@ -755,6 +962,18 @@ mod tests {
             following.spec_label(),
             format!("{FOLLOW_BOX} · opus · high")
         );
+        // orion's own say what following means for them: there is no box.
+        let autofix = SystemPreset::PrAutofix.default_preset();
+        assert_eq!(autofix.spec_label(), FOLLOW_PR);
+        let review = SystemPreset::WeekReview.default_preset();
+        assert_eq!(
+            review.spec_label(),
+            format!("{FOLLOW_DEFAULT} · sonnet · medium")
+        );
+        assert_eq!(
+            SystemPreset::LinearTicket.default_preset().spec_label(),
+            FOLLOW_BOX
+        );
     }
 
     /// FOLLOW THE BOX: every new preset follows; an entry an older release
@@ -771,7 +990,7 @@ mod tests {
             &path,
             r#"[
               {"name": "Linear Ticket", "kind": "claude", "custom_harness": null,
-               "prefix": "Plan it.", "system": "linear_ticket"},
+               "text": "Plan it.", "system": "linear_ticket"},
               {"name": "On riplo", "kind": "claude",
                "custom_harness": "claude-engineering-riplo-ai"},
               {"name": "On codex", "kind": "codex"},

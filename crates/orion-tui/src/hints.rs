@@ -633,10 +633,14 @@ mod tests {
             &crate::preset_overlays::list_hints(&presets),
             crate::preset_overlays::keys::ALL,
         );
-        assert_hints_from(
-            &crate::preset_overlays::editor_hints(),
-            &with(crate::preset_overlays::keys::ALL, &[newline]),
-        );
+        for system in [None, Some(crate::agent_presets::SystemPreset::LinearTicket)] {
+            let mut editor = crate::preset_overlays::AgentPresetEditor::new(0);
+            editor.system = system;
+            assert_hints_from(
+                &crate::preset_overlays::editor_hints(&editor),
+                &with(crate::preset_overlays::keys::ALL, &[newline]),
+            );
+        }
 
         let cfg = crate::config::Config::default();
         let mut onboard = crate::onboard::OnboardView::default();

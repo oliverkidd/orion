@@ -31,9 +31,10 @@
 //!   (`CreatePrAgent`, so the DAEMON finds or cuts the PR's worktree) named
 //!   `autofix-<n>` on the harness, account, model and effort of the session
 //!   that did the work on the branch ([`source_agent`]) — with none, the
-//!   default agent at the **PR autofix** SYSTEM PRESET's model and effort
-//!   — its first prompt [`prompt`]: the pull request and what failed,
-//!   wrapped in that preset's text, which is orion's own rules
+//!   default agent at the **PR autofix** SYSTEM PRESET's model and effort,
+//!   and a harness that preset pins over both ([`launch_of`]) — its first
+//!   prompt [`prompt`]: the pull request and what failed, at that preset's
+//!   `{task}`, its text orion's own rules
 //!   ([`PRESET_TEXT`]) while it holds none of the user's.
 //! * **Standing down.** Another session live on the branch — mid-turn, or
 //!   waiting on the user — does not hold the agent back. It is told where
@@ -57,7 +58,7 @@ use crate::pull_request::{CheckState, Checks, OpenPr, PrCheck, PrDetail, PrLaunc
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use orion_core::{AgentStatus, ClientRequest, ProjectId};
+use orion_core::{AgentKind, AgentStatus, ClientRequest, ProjectId};
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
@@ -848,12 +849,11 @@ impl PrRefs {
     }
 }
 
-/// orion's own text for the PR autofix SYSTEM PRESET, as `(prefix,
-/// postfix)`: the rules, then — after what broke — how to finish. What the
-/// agent is told while the preset holds none of the user's
+/// orion's own text for the PR autofix SYSTEM PRESET: the rules, then —
+/// at `{task}`, what broke — how to finish. What the agent is told while
+/// the preset holds none of the user's
 /// ([`crate::agent_presets::SystemPreset::builtin_text`]).
-pub const PRESET_TEXT: (&str, &str) = (
-    "You are orion's PR autofixer. Fix the pull request below so it can merge, and push the fix to its branch. Do not open a new pull request, force-push, merge it, or change unrelated code.
+pub const PRESET_TEXT: &str = "You are orion's PR autofixer. Fix the pull request below so it can merge, and push the fix to its branch. Do not open a new pull request, force-push, merge it, or change unrelated code.
 
 Rules:
 - Fix only what is listed under \"Fix\" below.
@@ -861,14 +861,16 @@ Rules:
 - Failing checks: read each one's failure logs (`gh pr checks`, then `gh run view <run-id> --log-failed`) to see what kind of check it is.
   - Unit tests: reproduce each failing test locally with this repo's test command, and fix it. Change a test only when this pull request meant to change the behaviour it checks.
   - E2E tests: take the failing specs from the CI logs and re-run only those specs locally, never the full suite — unless earlier attempts failed the same way, then run the full suite once.
-  - Any other check (lint, typecheck, build): reproduce it locally and fix it.",
-    "Then commit with a message that says what you fixed and `git push`. Watch the pull request with `gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again. Finish with a short summary: what you changed, and anything you could not fix and why.",
-);
+  - Any other check (lint, typecheck, build): reproduce it locally and fix it.
+
+{task}
+
+Then commit with a message that says what you fixed and `git push`. Watch the pull request with `gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again. Finish with a short summary: what you changed, and anything you could not fix and why.";
 
 /// The agent's first prompt: the pull request and the ticked issues —
-/// the failed checks by workflow — and the user's note, between the
-/// PR autofix preset's prefix and postfix — orion's own
-/// ([`PRESET_TEXT`]) while it holds none of the user's.
+/// the failed checks by workflow — and the user's note, at the PR autofix
+/// preset's `{task}` — orion's own text ([`PRESET_TEXT`]) while it holds
+/// none of the user's.
 pub fn prompt(
     pr: &OpenPr,
     refs: &PrRefs,
@@ -945,6 +947,41 @@ fn context(
         lines.push(format!("Note from the user: {note}"));
     }
     lines.join("\n")
+}
+
+/// What the PR autofix preset's `{task}` is filled with in the PRESET
+/// EDITOR's preview: [`context`]'s own words for a made-up pull request
+/// with one failing check.
+pub(crate) fn sample_task() -> String {
+    let pr = OpenPr {
+        number: 42,
+        title: "Fix the login redirect".into(),
+        url: "https://github.com/you/app/pull/42".into(),
+        answered_draft: false,
+        answered: Default::default(),
+        head: "fix-login".into(),
+        mine: true,
+        head_sha: String::new(),
+        meta: Default::default(),
+    };
+    let refs = PrRefs {
+        base: "main".into(),
+        head: "fix-login".into(),
+        head_sha: String::new(),
+    };
+    let diagnosis = Diagnosis {
+        failing: vec![PrCheck {
+            name: "unit-tests".into(),
+            workflow: "CI".into(),
+            state: CheckState::Failed,
+            word: String::new(),
+            started: String::new(),
+            completed: String::new(),
+            url: String::new(),
+        }],
+        ..Diagnosis::default()
+    };
+    context(&pr, &refs, &diagnosis, &[Issue::Checks], "`main`", "")
 }
 
 /// `name url` — its workflow is the line over it — leaving out a page
@@ -1212,11 +1249,10 @@ pub fn send_waiting(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
 }
 
-/// Send the agent: a PR SESSION named `autofix-<n>`, on the harness,
-/// account, model and effort of the session that did the work on the
-/// branch ([`source_agent`]) — the PR autofix preset's without one — told
-/// [`prompt`], under [`stand_down_preamble`] while other sessions are live
-/// there. The ledger counts it and the PR stops being watched.
+/// Send the agent: a PR SESSION named `autofix-<n>`, on [`launch_of`]'s
+/// harness, account, model and effort, told [`prompt`], under
+/// [`stand_down_preamble`] while other sessions are live there. The
+/// ledger counts it and the PR stops being watched.
 pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) {
     let Some(worktree) = app.root_worktree(&form.project) else {
         app.flash = Some(Flash::failed(
@@ -1224,18 +1260,10 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
         ));
         return;
     };
-    // The PR autofix SYSTEM PRESET: its text, and the model and effort
-    // the agent runs at when there is no session to copy.
+    // The PR autofix SYSTEM PRESET: its text, and what the agent runs on.
     let preset = crate::agent_presets::system(crate::agent_presets::SystemPreset::PrAutofix);
-    let (kind, custom, model, effort) = match source_agent(app, &form.project, &form.pr) {
-        Some(a) => (
-            a.kind,
-            a.custom_harness.clone(),
-            a.model.clone(),
-            a.effort.clone(),
-        ),
-        None => crate::config::Config::load().autofix_launch(&preset),
-    };
+    let (kind, custom, model, effort) =
+        launch_of(app, &form, &preset, &crate::config::Config::load());
     let task = prompt(
         &form.pr,
         &form.refs,
@@ -1276,6 +1304,29 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
         sent.join(", ").to_lowercase()
     )));
     app.dirty = true;
+}
+
+/// What `form`'s agent runs on, by the PR autofix `preset`'s Runs on row:
+/// following — the default — the harness, account, model and effort of
+/// the session that did the work on the branch ([`source_agent`]), and the
+/// preset's own with none; a harness the preset pins, while it is on, at
+/// the preset's model and effort ([`crate::config::Config::autofix_launch`]).
+/// `(kind, custom, model, effort)`.
+fn launch_of(
+    app: &App,
+    form: &AutofixForm,
+    preset: &AgentPreset,
+    cfg: &crate::config::Config,
+) -> (AgentKind, Option<String>, Option<String>, Option<String>) {
+    match source_agent(app, &form.project, &form.pr).filter(|_| !cfg.autofix_pins(preset)) {
+        Some(a) => (
+            a.kind,
+            a.custom_harness.clone(),
+            a.model.clone(),
+            a.effort.clone(),
+        ),
+        None => cfg.autofix_launch(preset),
+    }
 }
 
 pub mod keys {
@@ -1728,8 +1779,7 @@ mod tests {
     fn a_preset_replaces_orions_text_but_keeps_the_context() {
         let detail = detail(true, Vec::new());
         let preset = AgentPreset {
-            prefix: "Do it my way.".into(),
-            postfix: "Then push.".into(),
+            text: "Do it my way.\n\n{task}\n\nThen push.".into(),
             ..orions()
         };
         let text = prompt(
@@ -1933,6 +1983,38 @@ mod tests {
             usage_limit: None,
         });
         id
+    }
+
+    /// The PR autofix preset's Runs on row: following, the agent runs on
+    /// the session that did the work on the branch — Codex here — and on
+    /// the default agent with none; a harness it pins wins over both while
+    /// it is on, and while it is off the following rule comes back.
+    #[test]
+    fn the_autofix_agent_runs_on_the_prs_own_agent_unless_the_preset_pins_one() {
+        let mut app = App::new();
+        session_on_branch(&mut app, "did-the-work", AgentStatus::Finished);
+        let detail = detail(true, Vec::new());
+        let form = AutofixForm::new(ProjectId("p".into()), pr(), &detail, false);
+        let mut cfg = crate::config::Config::default();
+        let follows = orions();
+        assert_eq!(launch_of(&app, &form, &follows, &cfg).0, AgentKind::Codex);
+        assert_eq!(
+            launch_of(&App::new(), &form, &follows, &cfg).0,
+            cfg.quick_prompt_harness().0,
+            "no session on the branch: the default agent"
+        );
+        let pinned = AgentPreset {
+            kind: AgentKind::Cursor,
+            follow_box: Some(false),
+            ..orions()
+        };
+        assert_eq!(launch_of(&app, &form, &pinned, &cfg).0, AgentKind::Cursor);
+        cfg.cursor_enabled = false;
+        assert_eq!(
+            launch_of(&app, &form, &pinned, &cfg).0,
+            AgentKind::Codex,
+            "a pinned harness switched off: the PR's own agent again"
+        );
     }
 
     fn handled(sha: &str, conflicts: bool) -> Option<Fingerprint> {

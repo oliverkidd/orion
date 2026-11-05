@@ -11,7 +11,7 @@
 //! key `config.local.json` holds is written back there, never into the
 //! portable file.
 
-use crate::agent_presets::{AgentPreset, PresetText};
+use crate::agent_presets::AgentPreset;
 use orion_core::compose::{WorktreeContainers, WORKTREE_CONTAINERS};
 use orion_core::harness::HarnessDescriptor;
 use orion_core::AgentKind;
@@ -346,13 +346,15 @@ pub struct SettingSpec {
 /// Keys tab is generated from [`crate::keymap::ACTIONS`] instead, so a
 /// new action shows up there without being declared twice — and the Accounts
 /// tab is generated from the harness registry, so a new CLI shows up
-/// there without being declared twice.
+/// there without being declared twice. The Presets tab is the AGENT
+/// PRESETS themselves, read from their file (`presets_tab`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBody {
     Values(&'static [SettingSpec]),
     Project(&'static [SettingSpec]),
     Keys,
     Accounts,
+    Presets,
 }
 
 /// The Accounts tab's section listing every CLAUDE ACCOUNT, between the
@@ -409,8 +411,6 @@ pub enum SettingKind {
     /// found, if anywhere, and what the last test said
     /// (`linear::key_status`); Enter asks Linear whose key it is.
     LinearKey,
-    /// The Presets tab's one row: Enter opens the AGENT PRESETS list.
-    AgentPresets,
 }
 
 /// One harness field row in the Accounts tab. The tab renders one section
@@ -521,14 +521,10 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
         title: "Projects",
         body: TabBody::Project(PROJECT_SETTINGS),
     },
+    // orion's own presets, then the user's: the presets screen.
     SettingsTab {
         title: "Presets",
-        body: TabBody::Values(&[SettingSpec {
-            kind: SettingKind::AgentPresets,
-            label: "Agent presets",
-            hint: "Enter opens the presets: orion's own — PR autofix, Linear Ticket, Week review — and yours",
-            group: "",
-        }]),
+        body: TabBody::Presets,
     },
     SettingsTab {
         title: "Keys",
@@ -554,7 +550,7 @@ pub const GENERAL_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::PrAutofix,
         label: "Auto-fix my PRs",
-        hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work — with none, your default agent at the PR autofix preset's model and effort. It is told that preset's text. ^G in the pull requests modal sends one whatever this says",
+        hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work — with none, your default agent at the PR autofix preset's model and effort — unless that preset's Runs on row pins a harness. It is told that preset's text. ^G in the pull requests modal sends one whatever this says",
         group: "Launching",
     },
     SettingSpec {
@@ -645,6 +641,14 @@ pub fn keys_tab() -> usize {
         .expect("SETTINGS_TABS declares a Keys tab")
 }
 
+/// Index of the Presets tab, the AGENT PRESETS screen.
+pub fn presets_tab() -> usize {
+    SETTINGS_TABS
+        .iter()
+        .position(|t| t.body == TabBody::Presets)
+        .expect("SETTINGS_TABS declares a Presets tab")
+}
+
 /// Index of the Accounts tab, generated from the harness registry.
 pub fn accounts_tab() -> usize {
     SETTINGS_TABS
@@ -680,6 +684,7 @@ pub fn tab_len(tab: usize, projects: usize) -> usize {
             let cfg = Config::load();
             ACCOUNTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
         }
+        Some(TabBody::Presets) => crate::presets_tab::Screen::load().rows.len(),
         None => 0,
     }
 }
@@ -755,6 +760,7 @@ pub fn hint_at(tab: usize, index: usize) -> String {
             .unwrap_or("")
             .to_string(),
         Some(TabBody::Accounts) => Config::load().agent_hint_by_index(index),
+        Some(TabBody::Presets) => crate::presets_tab::Screen::load().explain(index),
         None => String::new(),
     }
 }
@@ -853,6 +859,7 @@ pub fn settings_rows(tab: usize, projects: usize) -> Vec<SettingsRow> {
             }
             out
         }
+        Some(TabBody::Presets) => crate::presets_tab::Screen::load().settings_rows(),
         None => Vec::new(),
     }
 }
@@ -956,14 +963,6 @@ pub struct Config {
     /// notification an unfocused terminal window gets: "off" silences the
     /// pair.
     pub feedback_sound: String,
-    /// PRESET TEXT: which side of the task a new AGENT PRESET's text goes
-    /// — `prefix` (one box, sent before the task), `postfix` (one box,
-    /// sent after it) or `prefix & postfix` (both). The PRESET EDITOR
-    /// opens a new preset on the box(es) named here, and its Text row
-    /// changes one preset; a stored side with text always shows. Resolved
-    /// by [`Config::preset_text`]; `prefix` by default, the framing most
-    /// people reach for and one box to fill. Hand-edited: no Settings row.
-    pub preset_text: String,
     /// Color theme name (see `theme::THEMES`). Unknown names fall back to
     /// the default theme.
     pub theme: String,
@@ -1275,7 +1274,6 @@ impl Default for Config {
             session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             done_sound: "Glass".into(),
             feedback_sound: "Sosumi".into(),
-            preset_text: PresetText::DEFAULT.as_str().into(),
             theme: "default".into(),
             animations: true,
             spotify: true,
@@ -1692,13 +1690,6 @@ impl Config {
             .iter()
             .find(|entry| entry.id == id)
             .is_some_and(|entry| entry.enabled && entry.problem().is_none())
-    }
-
-    /// PRESET TEXT resolved: the side(s) of the task a new AGENT PRESET's
-    /// text goes. `prefix` for a config that never set it or a hand edit
-    /// off the list; `both` is taken for `prefix & postfix`.
-    pub fn preset_text(&self) -> PresetText {
-        PresetText::parse(&self.preset_text).unwrap_or(PresetText::DEFAULT)
     }
 
     /// The effective descriptor for a registry id, or a placeholder under
@@ -2175,18 +2166,22 @@ impl Config {
         crate::autofix::Mode::parse(&self.pr_autofix)
     }
 
-    /// What the AUTOFIX agent launches on when no session on the branch
-    /// has run here to copy: the default agent
-    /// ([`Config::quick_prompt_harness`]) at `preset`'s model and effort —
-    /// the **PR autofix** SYSTEM PRESET's — each falling back to that
-    /// harness's own default when unset or not offered there (the default
-    /// agent changed since it was picked), and the effort fitted to the
-    /// model, as every launch surface does. `(kind, custom, model, effort)`.
+    /// What the AUTOFIX agent launches on when it does not run on the pull
+    /// request's own agent: the harness the **PR autofix** SYSTEM PRESET
+    /// pins, while that is on, else the default agent
+    /// ([`Config::quick_prompt_harness`]) — at the preset's model and
+    /// effort, each falling back to that harness's own default when unset
+    /// or not offered there (the harness changed since it was picked), and
+    /// the effort fitted to the model, as every launch surface does.
+    /// `(kind, custom, model, effort)`.
     pub fn autofix_launch(
         &self,
         preset: &AgentPreset,
     ) -> (AgentKind, Option<String>, Option<String>, Option<String>) {
-        let (kind, custom) = self.quick_prompt_harness();
+        let (kind, custom) = match self.autofix_pins(preset) {
+            true => (preset.kind, preset.custom_harness.clone()),
+            false => self.quick_prompt_harness(),
+        };
         let descriptor = self.effective_harness(kind, custom.as_deref());
         let model = picked(
             preset.model.as_deref().unwrap_or_default(),
@@ -2200,6 +2195,12 @@ impl Config {
         .or_else(|| descriptor.default_effort().map(str::to_string));
         let effort = fit_effort_in(&descriptor, model.as_deref(), effort);
         (kind, custom, model, effort)
+    }
+
+    /// Whether the **PR autofix** preset pins a harness that can launch:
+    /// then the agent runs on it, not on the pull request's own.
+    pub fn autofix_pins(&self, preset: &AgentPreset) -> bool {
+        !preset.follows_box() && self.preset_harness_usable(preset)
     }
 
     /// The Claude account the WEEK IN REVIEW is written through: `pinned`
@@ -2440,7 +2441,6 @@ impl Config {
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
             | SettingKind::LinearKey => ProjectSettings::default().value_label(kind),
-            SettingKind::AgentPresets => "orion's and yours".into(),
         }
     }
 
@@ -2514,14 +2514,13 @@ impl Config {
                     cycle_owned(&self.quick_prompt_kind, &self.quick_prompt_choices(), step);
             }
             // One project's, not the file's: see `set_project_text` and
-            // `cycle_project`. The presets row opens a list.
+            // `cycle_project`.
             SettingKind::BaseBranch
             | SettingKind::SetupCommand
             | SettingKind::RunCommand
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
-            | SettingKind::LinearKey
-            | SettingKind::AgentPresets => {}
+            | SettingKind::LinearKey => {}
         }
     }
 }
@@ -2896,7 +2895,7 @@ pub fn locate(kind: SettingKind) -> Option<(usize, usize)> {
                 settings.iter().position(|s| s.kind == kind)
             }
             TabBody::Accounts => ACCOUNTS_HEAD.iter().position(|s| s.kind == kind),
-            TabBody::Keys => None,
+            TabBody::Keys | TabBody::Presets => None,
         }
         .map(|i| (t, i))
     })
@@ -3638,10 +3637,23 @@ mod tests {
         if let Some(model) = model_choices_in(&descriptor).get(1) {
             let picked = AgentPreset {
                 model: Some(model.clone()),
-                ..preset
+                ..preset.clone()
             };
             assert_eq!(cfg.autofix_launch(&picked).2.as_ref(), Some(model));
         }
+
+        // A harness pinned on the preset is what it runs on, while it is
+        // on; switched off, the default agent stands in.
+        let pinned = AgentPreset {
+            kind: AgentKind::Codex,
+            follow_box: Some(false),
+            ..preset
+        };
+        assert!(cfg.autofix_pins(&pinned));
+        assert_eq!(cfg.autofix_launch(&pinned).0, AgentKind::Codex);
+        cfg.set_harness_enabled("codex", false);
+        assert!(!cfg.autofix_pins(&pinned));
+        assert_eq!(cfg.autofix_launch(&pinned).0, defaults.0);
     }
 
     /// The autofix and week review settings an older release kept in the
@@ -4795,6 +4807,7 @@ mod tests {
                     }
                     TabBody::Keys => assert!(headers > 0, "the Keys tab groups its rows"),
                     TabBody::Accounts => assert!(headers > 0, "the Accounts tab groups its rows"),
+                    TabBody::Presets => assert_eq!(headers, 2, "orion's presets, then yours"),
                 }
             }
         });

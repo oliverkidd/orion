@@ -76,7 +76,7 @@ const ENV_FILES: &[&str] = &[".env.local", ".env"];
 /// One Linear issue the view lists — open, or done within [`DONE_DAYS`]:
 /// assigned to the configured user (`mine`), or someone else's or
 /// nobody's in one of their teams.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LinearIssue {
     pub id: String,
     pub identifier: String,
@@ -547,31 +547,66 @@ pub const TICKET_TEXT: &str = "Fix these Linear issues together, in this worktre
 Work through them one at a time and make one commit per issue, its message starting with the issue's ID (for example \"{first_id}: …\"). When every issue is fixed, push the branch and open a single pull request with `gh pr create`, titled \"{ids}: <short summary>\", whose description starts with \"Fixes {ids}\" and then says what changed for each issue.";
 
 /// What a ⌘L launch on `issues` sends, the one set of instructions: the
-/// **Linear Ticket** preset's text — orion's own [`TICKET_TEXT`] while it
-/// holds none of the user's — with `{issues}`, `{ids}` and `{first_id}`
-/// filled in. A preset whose text never says where the issues go has them
-/// between its prefix and its postfix, where a task goes.
+/// **Linear Ticket** preset's text ([`ticket_template`]) with `{issues}`,
+/// `{ids}` and `{first_id}` filled in.
 pub fn ticket_task(preset: &crate::agent_presets::AgentPreset, issues: &[LinearIssue]) -> String {
+    expand_template(&ticket_template(preset), issues)
+}
+
+/// The **Linear Ticket** preset's text — orion's own [`TICKET_TEXT`] while
+/// it holds none of the user's — as a launch fills it in: text that never
+/// says where the issues go (`{issues}`) has them where a task goes, at
+/// its `{task}`, else after it; a `{task}` beside an `{issues}` is left
+/// empty, the issues being the task.
+pub fn ticket_template(preset: &crate::agent_presets::AgentPreset) -> String {
     let preset = preset.clone().with_builtin_text();
-    let marked = [&preset.prefix, &preset.postfix]
-        .iter()
-        .any(|text| text.contains("{issues}"));
-    let text = if marked {
+    if preset.text.contains("{issues}") {
         preset.compose("")
     } else {
         preset.compose("{issues}")
-    };
-    expand_template(&text, issues)
+    }
 }
 
 /// `template` with `{issues}`, `{ids}` and `{first_id}` filled in.
 pub fn expand_template(template: &str, issues: &[LinearIssue]) -> String {
-    let ids = ids_of(issues);
-    let first = issues.first().map(|i| i.identifier.as_str()).unwrap_or("");
-    template
-        .replace("{issues}", &issue_sections(issues))
-        .replace("{ids}", &ids)
-        .replace("{first_id}", first)
+    template_fills(issues)
+        .iter()
+        .fold(template.to_string(), |text, (token, fill)| {
+            text.replace(token, fill)
+        })
+}
+
+/// Each placeholder a Linear Ticket text can name, and what `issues` fill
+/// it with: the issues in full, their IDs, the first one's.
+pub(crate) fn template_fills(issues: &[LinearIssue]) -> [(&'static str, String); 3] {
+    let first = issues
+        .first()
+        .map(|i| i.identifier.clone())
+        .unwrap_or_default();
+    [
+        ("{issues}", issue_sections(issues)),
+        ("{ids}", ids_of(issues)),
+        ("{first_id}", first),
+    ]
+}
+
+/// Two made-up issues for the PRESET EDITOR's preview of the **Linear
+/// Ticket** preset: what a launch on them would fill its text with.
+pub(crate) fn sample_issues() -> Vec<LinearIssue> {
+    [
+        ("ENG-12", "Login redirect loops after sign-in"),
+        ("ENG-15", "Logout leaves the session cookie"),
+    ]
+    .into_iter()
+    .map(|(identifier, title)| LinearIssue {
+        id: identifier.into(),
+        identifier: identifier.into(),
+        title: title.into(),
+        url: format!("https://linear.app/team/issue/{identifier}"),
+        status: "Todo".into(),
+        ..LinearIssue::default()
+    })
+    .collect()
 }
 
 /// Browse assigned issues, or attach the current pull request to them.
@@ -4327,8 +4362,7 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
     // round it again. ⇧Tab in the box still picks another.
     let untouched = crate::agent_presets::SystemPreset::LinearTicket.default_preset();
     let launch = if ticket != untouched {
-        ticket.prefix.clear();
-        ticket.postfix.clear();
+        ticket.text.clear();
         QuickLaunch::of_preset(target, ticket, None, &cfg)
     } else {
         QuickLaunch::from_config(target, &cfg)
@@ -6577,8 +6611,8 @@ pub(crate) mod tests {
 
     /// A launch sends one set of instructions: orion's own while the
     /// Linear Ticket preset holds no text, else the preset's alone, its
-    /// placeholders filled — the issues where it puts `{issues}`, or
-    /// between its prefix and postfix when it names no place.
+    /// placeholders filled — the issues where it puts `{issues}`, else
+    /// where it puts `{task}`, else after its text.
     #[test]
     fn a_ticket_sends_the_presets_text_or_orions() {
         use crate::agent_presets::SystemPreset;
@@ -6590,7 +6624,7 @@ pub(crate) mod tests {
         );
 
         let marked = crate::agent_presets::AgentPreset {
-            prefix: "Fix {first_id} alone:\n\n{issues}".into(),
+            text: "Fix {first_id} alone:\n\n{issues}\n\n{task}".into(),
             ..empty.clone()
         };
         let sent = ticket_task(&marked, &issues);
@@ -6599,11 +6633,14 @@ pub(crate) mod tests {
             "{sent}"
         );
         assert!(!sent.contains("one commit per issue"), "never orion's too");
+        assert!(
+            !sent.contains("{task}"),
+            "the marker beside {{issues}} goes"
+        );
 
         let wrapping = crate::agent_presets::AgentPreset {
-            prefix: "Plan first.".into(),
-            postfix: "Then stop.".into(),
-            ..empty
+            text: "Plan first.\n\n{task}\n\nThen stop.".into(),
+            ..empty.clone()
         };
         let sent = ticket_task(&wrapping, &issues);
         assert!(
@@ -6612,6 +6649,17 @@ pub(crate) mod tests {
         );
         assert!(sent.ends_with("\n\nThen stop."), "{sent}");
         assert!(!sent.contains("one commit per issue"), "never orion's too");
+
+        // Text that names no place for them still gets the issues: after it.
+        let bare = crate::agent_presets::AgentPreset {
+            text: "Plan first.".into(),
+            ..empty
+        };
+        let sent = ticket_task(&bare, &issues);
+        assert!(
+            sent.starts_with("Plan first.\n\n### ENG-12: Login"),
+            "{sent}"
+        );
     }
 
     #[test]
@@ -6820,12 +6868,11 @@ pub(crate) mod tests {
     }
 
     /// Typing in a Linear box never drops the issues: the text goes first
-    /// and the marked issues follow in full, under the preset made from
-    /// the box's own picker — which goes straight onto the box on save,
-    /// its prefix written in. The box cuts a fresh worktree, never the
-    /// project's root checkout (`dev` here).
+    /// and the marked issues follow in full, under the preset picked in
+    /// the box's own picker, its text written in. The box cuts a fresh
+    /// worktree, never the project's root checkout (`dev` here).
     #[test]
-    fn a_typed_task_keeps_the_issues_under_a_preset_made_on_the_spot() {
+    fn a_typed_task_keeps_the_issues_under_a_picked_preset() {
         let (mut app, dir, _rx) = paired();
         app.tree.worktrees.push(orion_core::Worktree {
             id: orion_core::WorktreeId("w1".into()),
@@ -6837,29 +6884,25 @@ pub(crate) mod tests {
         });
         let store = dir.path().join("agent_presets.json");
         crate::agent_presets::with_presets_path(store, || {
+            crate::agent_presets::save(&[crate::agent_presets::AgentPreset {
+                text: "Plan first.".into(),
+                name: "Planner".into(),
+                system: None,
+                ..crate::agent_presets::SystemPreset::LinearTicket.default_preset()
+            }])
+            .unwrap();
             browse_marked(&mut app);
             press(&mut app, plain(KeyCode::Enter));
             press(
                 &mut app,
                 KeyEvent::new(KeyCode::Char('u'), KeyModifiers::SUPER),
             );
-            press(
-                &mut app,
-                KeyEvent::new(KeyCode::Char('n'), KeyModifiers::SUPER),
-            );
-            for c in "Linear Ticket".chars() {
-                press(&mut app, plain(KeyCode::Char(c)));
-            }
-            let Some(Overlay::AgentPresetEditor(editor)) = &mut app.overlay else {
-                panic!("the preset editor, got {:?}", app.overlay);
-            };
-            editor.prefix.insert_str("Plan first.");
             press(&mut app, plain(KeyCode::Enter));
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("the save hands the box back, got {:?}", app.overlay);
+                panic!("the pick hands the box back, got {:?}", app.overlay);
             };
             assert!(
-                prompt.title.contains("Linear ENG-1, ENG-3 · Linear Ticket"),
+                prompt.title.contains("Linear ENG-1, ENG-3 · Planner"),
                 "{}",
                 prompt.title
             );
@@ -6871,7 +6914,7 @@ pub(crate) mod tests {
             assert_eq!(
                 prompt.input.as_str(),
                 "Plan first.\n\n",
-                "the prefix is in the box"
+                "the text is in the box"
             );
             for c in "go".chars() {
                 press(&mut app, plain(KeyCode::Char(c)));

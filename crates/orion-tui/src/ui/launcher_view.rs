@@ -3416,8 +3416,7 @@ mod tests {
             follow_box: None,
             model: None,
             effort: None,
-            prefix: String::new(),
-            postfix: String::new(),
+            text: String::new(),
             skip_task: false,
             system: None,
         }

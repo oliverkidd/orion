@@ -45,11 +45,14 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         Overlay::Tree(v) => vec![(Field::Only, &mut v.filter)],
         Overlay::Diff(v) => vec![(Field::DiffFilter, &mut v.filter)],
         Overlay::Hosts(v) => v.input.iter_mut().map(|i| (Field::Only, i)).collect(),
-        Overlay::AgentPresetEditor(e) => vec![
-            (Field::Preset(PresetField::Name), &mut e.name),
-            (Field::Preset(PresetField::Prefix), &mut e.prefix),
-            (Field::Preset(PresetField::Postfix), &mut e.postfix),
-        ],
+        // A SYSTEM PRESET's name is orion's: drawn, never a field.
+        Overlay::AgentPresetEditor(e) => {
+            let mut fields = vec![(Field::Preset(PresetField::Text), &mut e.text)];
+            if e.system.is_none() {
+                fields.insert(0, (Field::Preset(PresetField::Name), &mut e.name));
+            }
+            fields
+        }
         Overlay::PullRequests(v) => match v.form.as_deref_mut() {
             Some(PrForm::Create(form)) => vec![
                 (Field::PrCreate(CreateField::From), &mut form.from),
@@ -225,11 +228,9 @@ fn route(app: &mut App, mouse: &MouseEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_presets::PresetText;
     use crate::app::FileFinder;
     use crate::preset_overlays::{AgentPresetEditor, PresetField};
     use crossterm::event::KeyModifiers;
-    use orion_core::WorktreeId;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -271,15 +272,15 @@ mod tests {
         }
     }
 
-    /// In the preset form (`⌘U`'s new preset) a click on a box the caret
+    /// In the PRESET EDITOR (Settings → Presets) a click on a box the caret
     /// is not in hands it the caret where it points, and a drag there
     /// selects; a click on the name takes the caret back up — the boxes
     /// type, click and select as the QUICK PROMPT's does.
     #[test]
     fn a_click_in_an_idle_box_takes_the_caret_there_and_a_drag_selects() {
         let mut app = App::new();
-        let mut form = AgentPresetEditor::new(WorktreeId("w1".into()), PresetText::Both);
-        form.postfix.set_text("hello world");
+        let mut form = AgentPresetEditor::new(0);
+        form.text.set_text("hello world");
         app.overlay = Some(Overlay::AgentPresetEditor(form));
         let terminal = frame(&mut app);
         assert_eq!(editor(&app).field, PresetField::Name);
@@ -290,8 +291,8 @@ mod tests {
             MouseEventKind::Down(MouseButton::Left),
             (x + 6, y)
         ));
-        assert_eq!(editor(&app).field, PresetField::Postfix);
-        assert_eq!(editor(&app).postfix.cursor_chars(), 6);
+        assert_eq!(editor(&app).field, PresetField::Text);
+        assert_eq!(editor(&app).text.cursor_chars(), 6);
         frame(&mut app);
         assert!(mouse(
             &mut app,
@@ -303,7 +304,7 @@ mod tests {
             MouseEventKind::Up(MouseButton::Left),
             (x + 11, y)
         ));
-        assert_eq!(editor(&app).postfix.selected(), Some("world"));
+        assert_eq!(editor(&app).text.selected(), Some("world"));
 
         let terminal = frame(&mut app);
         let (x, y) = cell_of(&terminal, "(required)");

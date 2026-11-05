@@ -80,28 +80,34 @@ stops to ask you something stays working**. The picker says so on its row, dim a
 
 ## AGENT PRESETS
 
-If you keep starting the same kind of session with the same framing, save it as an **agent preset**:
-**Agent presets** (the command palette, or `⇧Tab` in the quick prompt) lists them, and the launch lands in that card's checkout — its last row says which, and `Tab` flips it to a fresh worktree. Over the quick prompt the box's header says where instead, and its `⌘.` picks, so that row and its `Tab` are not drawn there. Type to find one by name: letters
+If you keep starting the same kind of session with the same framing, save it as an **agent preset**,
+in **Settings → Presets** (below). Wherever a launch is, a picker lists them — **Agent presets**
+(the command palette), `⌘U` in the quick prompt, `⌘U` over an agent's pane, `⇧Tab` on a pull
+request — and it only picks: making, changing and deleting presets is Settings' alone, so no picker
+offers it. From the palette the launch lands in that card's checkout — its last row says which, and
+`Tab` flips it to a fresh worktree. Over the quick prompt the box's header says where instead, and its `⌘.` picks, so that row and its `Tab` are not drawn there. Type to find one by name: letters
 narrow the list to the fuzzy matches, `↑`/`↓` move, `Backspace` widens and `Esc` clears — as in the
-model and effort submenus. `Ctrl+a` opens a small form — name, harness, model, effort, **Text**
-(which side of the task the preset's text goes: `prefix`, `postfix` or `prefix & postfix`, with a
-box for each side it names) and **Task** (`ask` or `skip`) — and `Ctrl+e` / `Ctrl+d` edit or
-delete; they are chords because plain letters type. A new preset starts on the side
-`preset_text` in CONFIG.JSON names, by hand — `prefix` unless you change it: one
-box, sent before your task — and cycling the row shows the other box or both; a side the row leaves
-out saves blank. Editing a preset also shows any side that already holds text, so one saved with
-both never loses either. `Enter` on a
-preset opens the QUICK PROMPT on it, the prefix and postfix written round the caret, and `Enter` there
-launches the CLI with `prefix + task + postfix` as its very first prompt. The task is optional:
-send the box with nothing typed and the prefix and postfix go on their own (a preset with neither starts the CLI
-with no first prompt). Set **Task** to `skip` for a preset that never needs one — a "commit and push" —
+model and effort submenus. The editor is a small form — name, **Runs on**, model, effort, **Task**
+(`ask` or `skip`) and one **Text** box: what the preset sends, with `{task}` where your task goes.
+Text with no `{task}` has the task after it, a blank line between, so a preset that only frames the
+task needs no marker at all. Beside the box (under it on a narrow screen) a **Preview** shows what
+the agent will get as you type: your text with a sample task in its place — in the accent colour,
+so you see where the task lands — or the text alone for a `skip` preset; Linear Ticket with two
+sample issues where they go; PR autofix with what broke on a sample pull request. It scrolls to the
+first sample, so a long text with the task at its end still shows it. `Enter` on a preset opens the QUICK PROMPT on it, its text written
+round the caret — the caret where `{task}` is — and `Enter` there launches the CLI with that text,
+your task in its place, as its very first prompt. The task is optional: send the box with nothing
+typed and the text goes on its own, the marker and the blank lines round it gone (a preset with no
+text starts the CLI with no first prompt). A preset saved by an older orion, with a prefix and a
+postfix round the task, reads as its prefix, `{task}` and its postfix, and is saved that way the
+first time orion starts. Set **Task** to `skip` for a preset that never needs one — a "commit and push" —
 and `Enter` launches it at once, no box at all; the list marks those rows `no task`. A `skip` preset
-picked with `Shift+Tab` in a quick prompt launches the same way when
+picked in a quick prompt (`⌘U`) launches the same way when
 the box is still empty, while text you already typed stays yours to send. The row it creates is an
 ordinary session: it names itself on that first turn, resumes, and shows status like any other. Presets
 live in `agent_presets.json` beside `config.json`.
 
-A preset FOLLOWS THE BOX unless it pins a harness: the form's Harness row starts on **the box's
+A preset FOLLOWS THE BOX unless it pins a harness: the form's **Runs on** row starts on **the box's
 agent**, so picked in a quick prompt the preset runs on the account and harness that box is on —
 another Claude account stays on it — at the box's model and effort, taking only the model or
 effort the preset pins that the harness offers; launched with no box up, it starts where `⌘N`
@@ -110,12 +116,20 @@ by id — and the preset launches that, refusing with the reason when it is swit
 preset an older release saved on the default Claude account, which every preset started on, follows
 the box from now on; one saved on any other harness or account keeps it.
 
-Three presets are **system presets**, on every list and marked `system` — the agents orion starts
+**Settings → Presets** is where they are made, changed and deleted. orion's own come first, under **Used by orion**,
+each tagged `orion` with a few words on what it is for, and marked `your text` while it holds text
+of yours; yours follow under **Yours**, each with where it runs, then **+ New preset**. The keys
+follow the row, and the frame names only those that work on it: `Enter` edits any preset; on one of
+orion's, `^R` puts back orion's text (once you confirm); on one of yours, `^N` makes a new one and
+`^D` deletes it (once you confirm). The editor comes back to the row it was opened on.
+
+Three presets are **system presets**, on every list and tagged `orion` — the agents orion starts
 itself:
 
 - **PR autofix** wraps what broke for the agent **Auto-fix my PRs** sends to a broken pull request.
-  That agent runs on the PR's own agent — the session that did the work on its branch — and, with
-  none, on your default agent at this preset's model and effort. orion's text: fix only what is
+  Its **Runs on** row starts on **the PR's own agent** — the session that did the work on its
+  branch — and, with none, your default agent at this preset's model and effort; pin a harness
+  there and the agent runs on that instead, at this preset's model and effort, while it is on. orion's text: fix only what is
   listed; resolve conflicts; reproduce each failing unit test locally and fix it; re-run only the
   e2e specs that failed, never the full suite, unless earlier attempts failed the same way; push;
   watch the PR until it is green and go round again.
@@ -123,28 +137,31 @@ itself:
   launch starts on your `⌘N` account, at the model and effort it pins once its text is yours —
   unless `⇧Tab` picks another: `{issues}` becomes each issue's ID, title, link and
   description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
-  `{issues}` gets them between its prefix and postfix. orion's text: one commit per issue, one pull
+  `{issues}` gets them where its `{task}` is — after its text when it names neither. orion's text: one commit per issue, one pull
   request titled `"{ids}: …"` whose description starts `Fixes {ids}`.
 - **Week review** holds the rules a WEEK IN REVIEW (`⌘⇧Y`) is written by — what earns a line, Show
   and Say, how a point is written — and the Claude account, model and effort that write it: sonnet ·
-  medium unless you change them. Following the box, it is written through your default agent's
-  account; an account it pins that is off falls back to that.
+  medium unless you change them. Its **Runs on** row starts on **your default agent**: it is
+  written through that agent's account; an account it pins that is off falls back to that.
 
-A system preset always holds text: its editor opens on orion's text, and saving it unchanged, or
-cleared, keeps nothing of yours, so it says orion's text from then on — including a better one a
-later release ships. Its text, harness, model and effort can be edited like any preset's; it can't
-be deleted or renamed. A list from before they existed keeps a preset you had already named `PR
+A system preset always holds text. While it holds none of yours its editor's box is empty, orion's
+text greyed in it — what the agent is sent — and `^R` puts that text in the box to edit from, or
+back over yours; saving it unchanged, or cleared, keeps nothing of yours, so it says orion's text
+from then on — including a better one a later release ships. Its text, harness, model and effort
+can be edited like any preset's; its name and its task are orion's, so the editor has no Name or
+Task field for it, and it can't be deleted or renamed. The box's border says what orion puts at
+its marker: what broke at PR autofix's `{task}`, the issues at Linear Ticket's `{issues}`. A list from before they existed keeps a preset you had already named `PR
 autofix`, `Linear Ticket` or `Week review`, text and all, as that system preset. The settings older
 releases kept for these agents in `config.json` — `autofix_model`, `autofix_effort`,
 `review_account`, `review_model`, `review_effort` — move onto them once, an account the old key
 named pinned as it resolved then, and leave the file.
 
 In the PULL REQUESTS MODAL (`v`), `Shift+Tab` on a pull request is a
-picker instead of the manager: the preset you pick launches a PR SESSION on that pull request. The
+picker for it: the preset you pick launches a PR SESSION on that pull request. The
 box comes back with the preset applied and the PR in its title, and `Enter` starts the agent in the
 project's worktree on the PR's head branch — reused when one is already checked out on it, cut by
 the daemon otherwise — with the PR link and its work rule in the system prompt and the preset's
-`prefix + task + postfix` as the first prompt, so the agent is already working on the PR when the
+text, your task at its `{task}`, as the first prompt, so the agent is already working on the PR when the
 pane opens. A `skip`-task preset launches straight from the picker. `Enter` on the pull request is the same launch
 without a preset: the box titled for the PR, your text alone as the first prompt, and the checkout's
 row up under the pull request as soon as you press `Enter` — never a random-branch worktree the
