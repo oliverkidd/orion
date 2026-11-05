@@ -84,6 +84,7 @@ fn app_on(files: Vec<ReviewFile>, threads: Vec<ReviewThread>) -> App {
     );
     view.threads = threads;
     view.reading = false;
+    view.pr_id = Some("PR_1".into());
     view.take_files(Ok(files));
     app.overlay = Some(Overlay::Review(Box::new(view)));
     app
@@ -407,4 +408,261 @@ fn the_hints_come_from_the_keys_table() {
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
         press(&mut app, KeyCode::Tab);
     }
+    press(&mut app, KeyCode::Char(']'));
+    crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
+    press(&mut app, KeyCode::Char('r'));
+    crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
+}
+
+// ---- writing ----
+
+fn chars(app: &mut App, text: &str) {
+    for c in text.chars() {
+        press(app, KeyCode::Char(c));
+    }
+}
+
+fn shift(app: &mut App, code: KeyCode) {
+    handle_key(app, KeyEvent::new(code, KeyModifiers::SHIFT));
+}
+
+/// A write landing on the screen as GitHub answered it.
+fn wrote(app: &mut App, result: Result<write::Wrote, String>) {
+    let ticket = view(app).ticket;
+    land(
+        app,
+        Answer::Wrote {
+            ticket,
+            number: 7,
+            what: "do it",
+            result,
+        },
+    );
+}
+
+fn sent() -> Vec<write::Write> {
+    write::tests::take_sent()
+}
+
+#[test]
+fn c_writes_a_comment_in_place_under_its_line_and_github_holds_it() {
+    let mut app = two_files();
+    sent();
+    // `one`, `two`, then `deux` — the line ada's thread is on.
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char('c'));
+    chars(&mut app, "nit: deux");
+    let shot = screen(&mut app, 140, 30);
+    assert!(shot.contains("Comment on line 2"), "{shot}");
+    // Under the line, after the thread already on it.
+    assert!(
+        row_of(&shot, "will do") < row_of(&shot, "Comment on line 2"),
+        "{shot}"
+    );
+    assert!(
+        row_of(&shot, "Comment on line 2") < row_of(&shot, "nit: deux"),
+        "{shot}"
+    );
+    assert!(shot.contains("Enter add to review"), "{shot}");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        sent(),
+        [write::Write::Comment(github::NewThread {
+            path: "a.rs".into(),
+            side: Side::Right,
+            line: 2,
+            start: None,
+            body: "nit: deux".into(),
+        })]
+    );
+    assert!(view(&app).saving.is_some());
+    // One write at a time.
+    press(&mut app, KeyCode::Enter);
+    assert!(sent().is_empty());
+    assert!(format!("{:?}", app.flash).contains("one moment"));
+
+    let made = thread(
+        "T_new",
+        "a.rs",
+        2,
+        vec![said("C_new", "me", "nit: deux", true, true)],
+    );
+    wrote(
+        &mut app,
+        Ok(write::Wrote::Comment {
+            review: "PRR_new".into(),
+            thread: made,
+        }),
+    );
+    let v = view(&app);
+    assert!(v.composer.is_none() && v.saving.is_none());
+    assert_eq!(v.pending.as_deref(), Some("PRR_new"));
+    assert_eq!(v.cursor, Some(Stop::Thread("T_new".into())));
+    assert!(format!("{:?}", app.flash).contains("held in your pending review"));
+    let shot = screen(&mut app, 140, 30);
+    let a = shot.lines().nth(row_of(&shot, "M a.rs")).unwrap();
+    assert!(a.contains("● 2"), "{a}");
+}
+
+#[test]
+fn shift_arrows_mark_a_run_of_lines_for_one_comment() {
+    let mut app = two_files();
+    sent();
+    shift(&mut app, KeyCode::Down);
+    shift(&mut app, KeyCode::Down);
+    let marked = hints(view(&app));
+    assert!(
+        marked.iter().any(|h| h.does == "comment on 3 lines"),
+        "{marked:?}"
+    );
+    assert!(
+        marked.iter().any(|h| h.does == "clear the lines"),
+        "{marked:?}"
+    );
+    press(&mut app, KeyCode::Char('c'));
+    let shot = screen(&mut app, 140, 30);
+    assert!(shot.contains("Comment on lines 1–2"), "{shot}");
+    chars(&mut app, "all of it");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        sent(),
+        [write::Write::Comment(github::NewThread {
+            path: "a.rs".into(),
+            side: Side::Right,
+            line: 2,
+            start: Some((Side::Right, 1)),
+            body: "all of it".into(),
+        })]
+    );
+    // Esc puts the comment away, then lets the marked lines go, before it
+    // leaves.
+    wrote(&mut app, Err("GraphQL: no".into()));
+    press(&mut app, KeyCode::Esc);
+    assert!(view(&app).composer.is_none());
+    assert!(view(&app).anchor.is_some());
+    press(&mut app, KeyCode::Esc);
+    assert!(view(&app).anchor.is_none());
+    assert!(app.overlay.is_some());
+}
+
+#[test]
+fn r_replies_x_resolves_and_backspace_drops_your_pending_comment() {
+    let mut app = two_files();
+    sent();
+    press(&mut app, KeyCode::Char(']'));
+    assert_eq!(view(&app).cursor, Some(Stop::Thread("T_a".into())));
+    press(&mut app, KeyCode::Char('r'));
+    chars(&mut app, "ok");
+    let shot = screen(&mut app, 140, 30);
+    assert!(row_of(&shot, "will do") < row_of(&shot, "Reply"), "{shot}");
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(
+        sent(),
+        [write::Write::Reply {
+            thread: "T_a".into(),
+            body: "ok".into()
+        }]
+    );
+    wrote(
+        &mut app,
+        Ok(write::Wrote::Reply {
+            review: "PRR_9".into(),
+            thread: "T_a".into(),
+            comment: said("C_new", "me", "ok", true, true),
+        }),
+    );
+    assert_eq!(view(&app).thread_at_cursor().unwrap().comments.len(), 3);
+
+    press(&mut app, KeyCode::Char('x'));
+    assert_eq!(
+        sent(),
+        [write::Write::Resolve {
+            thread: "T_a".into(),
+            resolve: true
+        }]
+    );
+    wrote(
+        &mut app,
+        Ok(write::Wrote::Resolved {
+            thread: "T_a".into(),
+            resolved: true,
+        }),
+    );
+    assert!(view(&app).thread_at_cursor().unwrap().resolved);
+    assert!(hints(view(&app)).iter().any(|h| h.does == "reopen"));
+
+    press(&mut app, KeyCode::Backspace);
+    assert_eq!(
+        sent(),
+        [write::Write::Drop {
+            thread: "T_a".into(),
+            comment: "C_new".into()
+        }]
+    );
+    wrote(
+        &mut app,
+        Ok(write::Wrote::Dropped {
+            thread: "T_a".into(),
+            comment: "C_new".into(),
+        }),
+    );
+    assert_eq!(view(&app).thread_at_cursor().unwrap().comments.len(), 2);
+
+    // bo's thread holds nothing of yours to drop.
+    press(&mut app, KeyCode::Char(']'));
+    press(&mut app, KeyCode::Backspace);
+    assert!(sent().is_empty());
+    assert!(format!("{:?}", app.flash).contains("this thread has none"));
+}
+
+#[test]
+fn a_refused_write_keeps_what_was_typed_and_says_why() {
+    let mut app = two_files();
+    sent();
+    press(&mut app, KeyCode::Char('c'));
+    assert!(paste(&mut app, "first\nsecond"));
+    press(&mut app, KeyCode::Enter);
+    assert_eq!(sent().len(), 1);
+    wrote(&mut app, Err("GraphQL: Line could not be resolved".into()));
+    let v = view(&app);
+    assert_eq!(v.composer.as_ref().unwrap().input.as_str(), "first\nsecond");
+    assert!(v.saving.is_none());
+    let flash = format!("{:?}", app.flash);
+    assert!(
+        flash.contains("couldn't do it: GraphQL: Line could not be resolved"),
+        "{flash}"
+    );
+
+    // Nothing is sent until GitHub has said which pull request this is.
+    if let Some(Overlay::Review(v)) = &mut app.overlay {
+        v.pr_id = None;
+    }
+    press(&mut app, KeyCode::Enter);
+    assert!(sent().is_empty());
+    assert!(format!("{:?}", app.flash).contains("still reading the pull request"));
+
+    // An empty comment goes nowhere.
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('c'));
+    press(&mut app, KeyCode::Enter);
+    assert!(sent().is_empty());
+    assert!(format!("{:?}", app.flash).contains("write something first"));
+
+    // A write landing once the screen is gone still says what it did.
+    let ticket = view(&app).ticket;
+    app.overlay = None;
+    land(
+        &mut app,
+        Answer::Wrote {
+            ticket,
+            number: 7,
+            what: "resolve the thread",
+            result: Ok(write::Wrote::Resolved {
+                thread: "T_a".into(),
+                resolved: true,
+            }),
+        },
+    );
+    assert!(format!("{:?}", app.flash).contains("#7: thread resolved"));
 }

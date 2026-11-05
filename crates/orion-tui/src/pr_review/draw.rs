@@ -11,9 +11,11 @@ use unicode_width::UnicodeWidthStr;
 
 use super::github::{ReviewThread, ThreadComment};
 use super::layout::{self, Item, Stop};
+use super::write::{Composer, Target};
 use super::{Focus, ReviewFile, ReviewScreen};
 use crate::app::{App, Overlay};
 use crate::markdown::Breaks;
+use crate::text_input::TextView;
 use crate::theme::Theme;
 use crate::ui::{
     centered_rect_pct, count_style, empty_list_row, panel_block, render_row, row_rect, truncate,
@@ -37,6 +39,8 @@ struct Laid {
     scroll: usize,
     stops: Vec<(Stop, usize, usize)>,
     cursor: Option<Stop>,
+    /// The cells the comment being written wraps in, and its rows.
+    composer: Option<TextView>,
 }
 
 /// Draw the screen and write back where everything went (`view` is a
@@ -68,6 +72,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ReviewScreen, th: Theme)
             v.stop_rows = laid.stops;
             v.cursor = laid.cursor;
             v.follow = false;
+            // ↑/↓ in the comment walk the rows it was drawn in.
+            if let (Some(composer), Some(at)) = (&mut v.composer, laid.composer) {
+                composer.input.set_view(at);
+            }
         }
     }
 }
@@ -219,7 +227,10 @@ fn lay_out(
         .filter(|c| item_stops.iter().flatten().any(|s| s == c))
         .or_else(|| item_stops.iter().flatten().next().cloned());
     let line_rows = file.doc.row_counts(content_w);
+    let marked = view.marked_lines();
     let now = orion_core::clock::now_ms() / 1000;
+    let mut composer_at = None;
+    let mut composer_view = None;
     // Every item's rows: a line of the diff counted without being drawn, a
     // thread drawn now — there are few.
     let mut drawn: Vec<Option<Vec<Line<'static>>>> = Vec::with_capacity(items.len());
@@ -245,13 +256,20 @@ fn lay_out(
                     th,
                 ))
             }
-            Item::Composer => Some(Vec::new()),
+            Item::Composer => view.composer.as_ref().map(|composer| {
+                let (rows, at) = composer_lines(composer, view, usize::from(content_w), indent, th);
+                composer_view = Some(at);
+                rows
+            }),
         };
         let n = match (&lines, item) {
             (Some(lines), _) => lines.len(),
             (None, Item::Line(i)) => line_rows[*i] as usize,
             (None, _) => 0,
         };
+        if *item == Item::Composer {
+            composer_at = Some((row, n, lead));
+        }
         if let Some(stop) = stop {
             stops.push((stop.clone(), row, n));
             leads.push(lead);
@@ -264,11 +282,16 @@ fn lay_out(
     let total = row;
     let height = usize::from(height.max(1));
     let mut scroll = view.scroll.min(total.saturating_sub(height));
-    let at_cursor = stops
-        .iter()
-        .zip(&leads)
-        .find(|((s, ..), _)| Some(s) == cursor.as_ref());
-    if let (true, Some(((_, first, n), lead))) = (view.follow, at_cursor) {
+    // What has to be in view: the comment being written, else the cursor.
+    let at_cursor = composer_at.or_else(|| {
+        stops
+            .iter()
+            .zip(&leads)
+            .find(|((s, ..), _)| Some(s) == cursor.as_ref())
+            .map(|((_, first, n), lead)| (*first, *n, *lead))
+    });
+    if let (true, Some((first, n, lead))) = (view.follow, at_cursor) {
+        let (first, n, lead) = (&first, &n, &lead);
         if *first < scroll {
             scroll = if first + n - lead <= height {
                 *lead
@@ -295,8 +318,10 @@ fn lay_out(
             (None, Item::Line(i)) => file.doc.render_line(*i, content_w, th),
             (None, _) => Vec::new(),
         };
-        let here = cursor.is_some() && item_stops[k] == cursor;
-        let mark = if here {
+        let in_marked =
+            matches!((item, marked), (Item::Line(i), Some((a, b))) if (a..=b).contains(i));
+        let here = cursor.is_some() && item_stops[k] == cursor && view.composer.is_none();
+        let mark = if here || in_marked {
             Span::styled(
                 "▌",
                 Style::default().fg(if focused { th.accent } else { th.dim }),
@@ -320,7 +345,77 @@ fn lay_out(
         scroll,
         stops,
         cursor,
+        composer: composer_view,
     }
+}
+
+/// The comment being written, as a block in the diff: on the accent's rule
+/// what it is on — the lines, or the thread it answers — then the live
+/// field, every row of it. And the cells the field was laid out in, for
+/// its ↑/↓.
+fn composer_lines(
+    composer: &Composer,
+    view: &ReviewScreen,
+    width: usize,
+    indent: usize,
+    th: Theme,
+) -> (Vec<Line<'static>>, TextView) {
+    let text_w = width.saturating_sub(indent + RULE.width()).max(MIN_TEXT_W);
+    let lead = || {
+        vec![
+            Span::raw(" ".repeat(indent)),
+            Span::styled(RULE, Style::default().fg(th.accent)),
+        ]
+    };
+    let on = match &composer.target {
+        Target::Lines { start, end, .. } if start != end => {
+            let line = |i: usize| {
+                view.current()
+                    .and_then(|f| layout::side_line(&f.doc, i))
+                    .map_or(0, |(_, n)| n)
+            };
+            format!("Comment on lines {}–{}", line(*start), line(*end))
+        }
+        Target::Lines { end, .. } => {
+            let line = view
+                .current()
+                .and_then(|f| layout::side_line(&f.doc, *end))
+                .map_or(0, |(_, n)| n);
+            format!("Comment on line {line}")
+        }
+        Target::Reply(_) => "Reply".to_string(),
+    };
+    let mut head = lead();
+    head.push(Span::styled(
+        on,
+        Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(saving) = &view.saving {
+        head.push(Span::styled(
+            format!(" · {saving}"),
+            Style::default().fg(th.warn),
+        ));
+    }
+    let mut out = vec![crate::pr_preview::fit(head, width)];
+    let (rows, _) = crate::ui::multiline_input_lines(&composer.input, text_w, th.accent, th);
+    let shown = rows.len();
+    for (n, row) in rows.into_iter().enumerate() {
+        let mut spans = lead();
+        spans.extend(row.spans);
+        if n == 0 && composer.input.is_empty() {
+            spans.push(Span::styled(
+                "held in your pending review until you submit it",
+                Style::default().fg(th.dim),
+            ));
+        }
+        out.push(crate::pr_preview::fit(spans, width));
+    }
+    let at = TextView {
+        width: u16::try_from(text_w).unwrap_or(u16::MAX),
+        height: u16::try_from(shown).unwrap_or(u16::MAX).max(1),
+        top: 0,
+    };
+    (out, at)
 }
 
 /// `2h`: how long ago `at` (RFC 3339) was.

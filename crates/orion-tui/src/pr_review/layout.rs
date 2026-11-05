@@ -58,6 +58,12 @@ pub fn is_code(doc: &DiffDoc, i: usize) -> bool {
     matches!(doc.lines.get(i), Some(DocLine::Code { .. }))
 }
 
+/// Whether lines `a` and `b` are in one hunk: nothing but code between
+/// them. A comment on a run of lines can't cross from one to the next.
+pub fn same_hunk(doc: &DiffDoc, a: usize, b: usize) -> bool {
+    (a.min(b)..=a.max(b)).all(|i| is_code(doc, i))
+}
+
 /// The line of `doc` thread `t` sits under; None for the top of the file.
 pub fn anchor(doc: &DiffDoc, t: &ReviewThread) -> Option<usize> {
     let line = t.line?;
@@ -240,5 +246,18 @@ mod tests {
         assert!(items(&doc, "b.rs", &threads, None)
             .iter()
             .all(|i| matches!(i, Item::Line(_))));
+    }
+
+    #[test]
+    fn a_run_of_lines_stays_in_its_hunk() {
+        let text = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+            @@ -1,2 +1,2 @@\n one\n-two\n+deux\n@@ -10,2 +10,2 @@\n ten\n-eleven\n+onze\n";
+        let doc = DiffDoc::build(&[], Some("a.rs"), text);
+        let one = line_of(&doc, "one");
+        let deux = line_of(&doc, "deux");
+        let ten = line_of(&doc, "ten");
+        assert!(same_hunk(&doc, one, deux));
+        assert!(same_hunk(&doc, deux, one));
+        assert!(!same_hunk(&doc, deux, ten));
     }
 }

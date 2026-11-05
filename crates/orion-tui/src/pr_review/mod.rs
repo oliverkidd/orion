@@ -11,17 +11,20 @@
 //! under the line it is on — the other reviewers' comments on a grey rule,
 //! yours on the accent ([`layout`]). The cursor walks the lines and the
 //! threads; `]` and `[` go to the next and the previous thread, file to
-//! file.
+//! file. `c` comments on the line under the cursor — `⇧↑`/`⇧↓` first make
+//! it a run of lines — in place under it, `r` replies to a thread, `x`
+//! resolves it and `⌫` drops a pending comment of yours ([`write`]).
 //!
 //! Nothing here blocks the loop: the diff is read on the blocking pool,
 //! and every GitHub call is a task of its own. Their answers land through
 //! one channel (`State::tx`), matched to the screen by ticket; a read for
-//! a screen since closed is dropped. What goes wrong is said in the
-//! footer.
+//! a screen since closed is dropped, and a write the footer reports. What
+//! goes wrong is said in the footer.
 
 mod draw;
 pub mod github;
 pub mod layout;
+pub mod write;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -107,6 +110,13 @@ pub struct ReviewScreen {
     pub scroll: usize,
     /// The cursor moved since the last draw: the draw brings it into view.
     pub follow: bool,
+    /// The other end of the run of lines the next comment is on, while
+    /// `⇧↑`/`⇧↓` mark one.
+    pub anchor: Option<usize>,
+    /// The comment being written.
+    pub composer: Option<write::Composer>,
+    /// What GitHub is being asked to do, while it is.
+    pub saving: Option<String>,
     /// The PULL REQUESTS MODAL it was opened from, to go back to.
     pub back: Option<Box<PullRequestsView>>,
     // As of the last draw, for the mouse and the page keys.
@@ -138,6 +148,9 @@ impl ReviewScreen {
             cursor: None,
             scroll: 0,
             follow: true,
+            anchor: None,
+            composer: None,
+            saving: None,
             back: None,
             area: Rect::default(),
             files_area: Rect::default(),
@@ -163,7 +176,7 @@ impl ReviewScreen {
 
     /// The pane's items for file `file`.
     fn items_of(&self, file: &ReviewFile) -> Vec<layout::Item> {
-        layout::items(&file.doc, &file.path, &self.threads, None)
+        layout::items(&file.doc, &file.path, &self.threads, self.composer_at(file))
     }
 
     /// The stops of the file on screen, in order.
@@ -212,6 +225,7 @@ impl ReviewScreen {
         if i != self.file {
             self.file = i;
             self.cursor = None;
+            self.anchor = None;
             self.scroll = 0;
             // The last draw's rows were the other file's.
             self.stop_rows.clear();
@@ -389,6 +403,14 @@ pub enum Answer {
         ticket: u64,
         result: Result<Vec<ReviewFile>, String>,
     },
+    /// A write on pull request `number` — `what` it was trying to do —
+    /// and what it made.
+    Wrote {
+        ticket: u64,
+        number: u64,
+        what: &'static str,
+        result: Result<write::Wrote, String>,
+    },
 }
 
 /// The screen on display, when it is the one `ticket` was asked for.
@@ -396,6 +418,14 @@ fn screen_for(app: &mut App, ticket: u64) -> Option<&mut ReviewScreen> {
     match &mut app.overlay {
         Some(Overlay::Review(view)) if view.ticket == ticket => Some(view),
         _ => None,
+    }
+}
+
+/// The threads as they stand now, onto pull request `url`'s page too: its
+/// Reviews tab reads the same ones.
+fn share_threads(app: &mut App, url: &str, threads: Vec<ReviewThread>) {
+    if let Some(detail) = app.pr_detail.get_mut(url) {
+        detail.threads = threads;
     }
 }
 
@@ -408,10 +438,7 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
             result,
         } => match result {
             Ok(read) => {
-                // The page reads the same threads.
-                if let Some(detail) = app.pr_detail.get_mut(&url) {
-                    detail.threads = read.threads.clone();
-                }
+                share_threads(app, &url, read.threads.clone());
                 if let Some(view) = screen_for(app, ticket) {
                     view.take_threads(read);
                 }
@@ -431,6 +458,12 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
                 view.take_files(result);
             }
         }
+        Answer::Wrote {
+            ticket,
+            number,
+            what,
+            result,
+        } => write::land(app, ticket, number, what, result),
     }
     app.dirty = true;
 }
@@ -593,6 +626,17 @@ pub(crate) mod keys {
     pub const NEXT_THREAD: Key = Key::new(&["]"], "next thread");
     pub const PREV_THREAD: Key = Key::new(&["["], "previous thread");
     pub const THREADS: Key = Key::new(&["]", "["], "thread").show(2);
+    /// A comment on the line under the cursor, or the lines marked.
+    pub const COMMENT: Key = Key::new(&["c"], "comment");
+    /// The run of lines the next comment is on, a line longer or shorter.
+    pub const RANGE: Key = Key::new(&["shift+up", "shift+down"], "lines").show(2);
+    pub const REPLY: Key = Key::new(&["r"], "reply");
+    pub const RESOLVE: Key = Key::new(&["x"], "resolve");
+    /// Your pending comment in the thread under the cursor, dropped.
+    pub const DROP: Key = Key::new(&["backspace"], "drop yours");
+    /// The comment being written, into the pending review.
+    pub const ADD: Key = Key::new(&["enter"], "add to review");
+    pub const NEWLINE: Key = crate::ui::task_keys::NEWLINE;
     pub const REFRESH: Key = crate::hints::REFRESH;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
@@ -604,6 +648,13 @@ pub(crate) mod keys {
         NEXT_THREAD,
         PREV_THREAD,
         THREADS,
+        COMMENT,
+        RANGE,
+        REPLY,
+        RESOLVE,
+        DROP,
+        ADD,
+        NEWLINE,
         REFRESH,
     ];
 }
@@ -612,6 +663,12 @@ pub(crate) mod keys {
 pub(crate) fn hints(view: &ReviewScreen) -> Vec<crate::hints::Hint> {
     use keys::*;
     let mut hints = Vec::new();
+    if view.composer.is_some() {
+        hints.push(ADD.hint().kept());
+        hints.push(NEWLINE.hint());
+        hints.push(crate::hints::ESC_CLOSE.hint_as("cancel"));
+        return hints;
+    }
     match view.focus {
         Focus::Files => {
             hints.push(MOVE.hint_as("file").kept());
@@ -620,7 +677,24 @@ pub(crate) fn hints(view: &ReviewScreen) -> Vec<crate::hints::Hint> {
             hints.push(PANEL.hint_as("diff"));
         }
         Focus::Diff => {
-            hints.push(MOVE.hint().kept());
+            match view.thread_at_cursor() {
+                Some(thread) => {
+                    hints.push(REPLY.hint().kept());
+                    hints.push(RESOLVE.hint_as(if thread.resolved { "reopen" } else { "resolve" }));
+                    if thread.my_pending().is_some() {
+                        hints.push(DROP.hint());
+                    }
+                }
+                None => {
+                    let lines = view.marked_lines().map_or(1, |(a, b)| b - a + 1);
+                    hints.push(match lines {
+                        1 => COMMENT.hint().kept(),
+                        n => COMMENT.hint_as(format!("comment on {n} lines")).kept(),
+                    });
+                    hints.push(RANGE.hint());
+                }
+            }
+            hints.push(MOVE.hint());
             hints.push(THREADS.hint());
             hints.push(PAGE.hint());
             hints.push(FILES.hint());
@@ -629,16 +703,29 @@ pub(crate) fn hints(view: &ReviewScreen) -> Vec<crate::hints::Hint> {
     }
     hints.push(REFRESH.hint());
     hints.push(match view.back {
+        _ if view.anchor.is_some() => crate::hints::ESC_CLOSE.hint_as("clear the lines"),
         Some(_) => crate::hints::ESC_CLOSE.hint_as("back to the pull request"),
         None => crate::hints::ESC_CLOSE.hint(),
     });
     hints
 }
 
+/// A paste on the screen: into the comment being written.
+pub(crate) fn paste(app: &mut App, text: &str) -> bool {
+    app.dirty = true;
+    match &mut app.overlay {
+        Some(Overlay::Review(view)) => write::paste(view, text),
+        _ => false,
+    }
+}
+
 /// A key on the screen.
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     use keys::*;
     app.dirty = true;
+    if matches!(&app.overlay, Some(Overlay::Review(v)) if v.composer.is_some()) {
+        return write::composer_key(app, key);
+    }
     if REFRESH.matches(&key) {
         return refresh(app);
     }
@@ -646,7 +733,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     };
     let plain = key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT;
+    let on_diff = view.focus == Focus::Diff;
     match key.code {
+        KeyCode::Esc if view.anchor.is_some() => view.anchor = None,
         KeyCode::Esc => back(app),
         _ if PANEL.matches(&key) => {
             view.focus = match view.focus {
@@ -660,6 +749,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
         _ if PREV_THREAD.matches(&key) => {
             view.jump_thread(false);
         }
+        _ if on_diff && RANGE.matches(&key) => view.extend_range(key.code == KeyCode::Down),
+        _ if on_diff && COMMENT.matches(&key) => write::start_comment(app),
+        _ if on_diff && REPLY.matches(&key) => write::start_reply(app),
+        _ if on_diff && RESOLVE.matches(&key) => write::toggle_resolved(app),
+        _ if on_diff && DROP.matches(&key) => write::drop_pending(app),
         _ if !plain => {}
         _ if view.focus == Focus::Files => match key.code {
             KeyCode::Up => view.pick_file(view.file.saturating_sub(1)),
@@ -669,8 +763,10 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
             _ if OPEN.matches(&key) => view.focus = Focus::Diff,
             _ => {}
         },
-        KeyCode::Up => view.step(-1),
-        KeyCode::Down => view.step(1),
+        KeyCode::Up | KeyCode::Down => {
+            view.anchor = None;
+            view.step(if key.code == KeyCode::Up { -1 } else { 1 });
+        }
         KeyCode::PageUp => view.page(false),
         KeyCode::PageDown => view.page(true),
         KeyCode::Home => view.jump_to_end(false),

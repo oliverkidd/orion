@@ -455,6 +455,11 @@ rests on it. A thread GitHub no longer places — a push moved its code, or it i
 sits at the top of its file, named by the line it was written on and marked `outdated`; a file a
 thread names that the pull request no longer changes keeps a row of its own.
 
+What you write goes into GitHub's own pending review: a comment or a reply shows at once, marked
+`pending`, and nobody else sees it until the review is submitted. Leaving the screen keeps it — the
+pending review is GitHub's, there on the next visit here or on github.com. A comment GitHub refused
+stays in its box with what you typed, the footer saying why.
+
 | Key | Where | Action |
 |---|---|---|
 | `Tab` / `⇧Tab` | anywhere | the files, the diff |
@@ -462,6 +467,13 @@ thread names that the pull request no longer changes keeps a row of its own.
 | `Enter`, `→` | the files | the diff takes the keys |
 | `↑` / `↓`, `PgUp` / `PgDn`, `Home` / `End` | the diff | the cursor, from line to line and thread to thread |
 | `←` | the diff | back to the files |
+| `c` | a line | a comment on it, written in place under the line (after the threads already there) |
+| `⇧↑` / `⇧↓` | a line | mark a run of lines, inside one hunk, for the next `c`; `Esc` lets them go |
+| `Enter`, `⇧Enter` | the comment | add it to the pending review; a new line |
+| `Esc` | the comment | put it away |
+| `r` | a thread | a reply at its foot, held pending the same way (`c` on a thread replies too) |
+| `x` | a thread | resolve it, or open a resolved one again — at once, not held |
+| `⌫` | a thread | drop your last pending comment in it; the thread goes with it when it was all there was |
 | `]` / `[` | anywhere | the next thread / the one before, file to file, round either end |
 | `⌘R` | anywhere | ask GitHub for the threads again |
 | the wheel, a click | | the wheel scrolls the diff; a click picks a file, or puts the cursor on the line or thread under it |

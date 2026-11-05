@@ -3328,6 +3328,9 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         crate::week_review::paste(app, text);
         return true;
     }
+    if matches!(&app.overlay, Some(Overlay::Review(_))) {
+        return crate::pr_review::paste(app, text);
+    }
     let Some(overlay) = &mut app.overlay else {
         return false;
     };
