@@ -963,11 +963,7 @@ fn tui_autofix_sends_unasked_when_my_pr_conflicts() {
     // and `autofix-7` is on screen only between the send and the refusal.
     repo_git(&repo, &["branch", "feat"]);
     tui.wait_for_text("to begin");
-    run_command(&mut tui, "open a folder");
-    tui.wait_for_text("Open project");
-    tui.type_str(&repo.to_string_lossy());
-    tui.send(ENTER);
-    tui.wait_for_gone("Open project");
+    add_project(&mut tui, &repo, "autofix-proj");
 
     // The agent running in the DAEMON — the footer counts it off the
     // daemon's own metrics — not only the `autofix-7 started` flash and
@@ -1066,11 +1062,10 @@ fn tui_conflict_resolver_runs_through_to_the_pull_request() {
     // agent at it and the resolver would wait for that agent to stop.
     let mut tui = TuiHarness::spawn_with(&[("PATH", path)], r#", "pr_autofix": "off""#);
     tui.wait_for_text("to begin");
-    run_command(&mut tui, "open a folder");
-    tui.wait_for_text("Open project");
-    tui.type_str(&repo.to_string_lossy());
-    tui.send(ENTER);
-    tui.wait_for_gone("Open project");
+    // On the grid with the project in it: `⌘U` sent the moment the prompt
+    // closes can reach the TUI before the daemon has added the project,
+    // and opens nothing.
+    add_project(&mut tui, &repo, "merge-proj");
 
     tui.send(CMD_U);
     tui.wait_for_text("Add things");
