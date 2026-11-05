@@ -70,6 +70,7 @@ Ghostty config.
 | Action | Key | What it opens |
 |---|---|---|
 | New agent | `⌘N` | the QUICK PROMPT, aimed at the checkout under the cursor (below) |
+| New agent in a new worktree | `⌘⇧N` | the QUICK PROMPT aimed at **+ new worktree** of the project under the cursor, its branch already named: type the task, and `Enter` cuts the worktree and starts the agent in it |
 | Select model | `⌘/` | a searchable model list for the QUICK PROMPT, opening the box first when it isn't up; type to narrow, `Enter` picks |
 | Cycle effort | `⌘Y`, `⌘?` (`⇧⌘/`) | step the effort (`default`, low, high, …) of the model the QUICK PROMPT is set to, shown in its header at once, and the Accounts tab default with it; with no box up, that default alone. macOS keeps `⇧⌘/` for every app's Help menu, so in Ghostty it opens Help and only `⌘Y` arrives; it stays bound for a terminal that lets it through, however that spells the press — `/` with ⇧, `?` with or without it |
 | Select worktree | `⌘.` | which checkout the next agent runs in, opening the box first; type to narrow, or **+ new worktree**, or any branch with no checkout yet — a teammate's included |

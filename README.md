@@ -42,6 +42,7 @@ The first launch walks you through setup: Claude Code (installed for you if it i
 | Key | Does |
 |---|---|
 | `⌘N` | New agent: type the task, `Enter` |
+| `⌘⇧N` | New agent in a new worktree, the same way |
 | `↑` `↓` · `Enter` · `Esc` | Walk the grid · step into a session · back out |
 | `⌘K` | Jump to any project, worktree or session |
 | `⌘E` · `⌘P` · `⌘⇧F` | Diff · find file · search |

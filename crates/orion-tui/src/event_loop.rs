@@ -4129,6 +4129,7 @@ fn dispatch_action(
         // the aim let go, or on a fresh worktree.
         Action::QuickPrompt if app.launcher_active() => launcher::open_box(app),
         Action::QuickPrompt => crate::quick_prompt::open_quick_prompt(app),
+        Action::QuickPromptNewWorktree => launcher::open_new_worktree_box(app),
         Action::SelectModel => select_model(app),
         Action::CycleEffort => cycle_effort(app),
         Action::SelectLaunchWorktree => select_launch_worktree(app),

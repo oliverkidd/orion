@@ -317,6 +317,8 @@ anything stops; an archived session or one off Claude has nowhere to go, and
 
 orion opens on a GRID of session cards — no modal over it, ever, on any launch. Starting a session
 is one chord from there: `⌘N` opens the QUICK PROMPT, focused, so the first thing you type is the task.
+`⌘⇧N` opens the same box aimed at a fresh worktree — the WORKTREE PICKER's **+ new worktree**, picked
+already — so a new agent in a new worktree is that one chord, the task and `Enter`.
 
 - **The box** starts on the selected project and in the checkout under the cursor — the worktree
   whose band the cursor is on, open or collapsed; the root branch with nothing selected —

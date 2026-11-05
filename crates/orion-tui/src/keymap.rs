@@ -144,6 +144,9 @@ pub enum Action {
     AgentPresets,
     /// The QUICK PROMPT: type a task, launch an agent on it.
     QuickPrompt,
+    /// `⌘⇧N`: the QUICK PROMPT aimed at **+ new worktree** — a new agent
+    /// in a new worktree of the project under the cursor, in one press.
+    QuickPromptNewWorktree,
     /// `Space`: the FOLLOW-UP MODAL for the selected session card — its
     /// next turn, typed in a box over the grid and sent on Enter.
     FollowUp,
@@ -711,6 +714,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["cmd+n"],
+    },
+    ActionSpec {
+        action: Action::QuickPromptNewWorktree,
+        id: "quick_prompt_new_worktree",
+        label: "New agent in a new worktree",
+        hint: "The new-agent box aimed at a fresh worktree of the project under the cursor, its branch named already: type the task, Enter cuts the worktree and starts the agent in it",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["cmd+shift+n"],
     },
     ActionSpec {
         action: Action::SelectModel,
