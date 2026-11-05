@@ -41912,34 +41912,21 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// An item's chips: the agent sent at it while its session is there,
-    /// its Linear issue — in the state the LINEAR VIEW last read it in —
     /// and how many days it has carried over.
     #[test]
     fn a_todo_row_draws_its_chips() {
         crate::todos::with_now(todo_clock(6), || {
             let mut app = App::new();
             seed_tree(&mut app);
-            let mut issue = crate::linear::tests::issue("1", "RIP-412", "Run plan");
-            issue.status = "In Progress".into();
-            issue.status_type = "started".into();
-            app.linear.insert(
-                orion_core::ProjectId("p1".into()),
-                crate::linear::LinearList {
-                    list: vec![issue],
-                    ..Default::default()
-                },
-            );
             let mut file = crate::todos::TodoFile::new(std::path::Path::new("/tmp/demo"));
             let g = file.add_group(None, "Emails");
             let id = file.add_item(g, "run plan", todo_clock(4).date_naive());
             let item = file.item_mut(id).unwrap();
             item.agent = Some("a1".into());
-            item.linear = Some("RIP-412".into());
             app.todos.insert("/tmp/demo".into(), file);
             run_action(&mut app, crate::keymap::Action::Todos);
             let text = buffer_text(&draw_todos(&mut app));
             assert!(text.contains("○ agent"), "{text}");
-            assert!(text.contains("◑ RIP-412 In Progress"), "{text}");
             assert!(text.contains("2d"), "{text}");
             // The session gone, its chip goes with it.
             app.tree.agents.clear();
@@ -42699,7 +42686,6 @@ diff --git a/src/c.rs b/src/c.rs
                 repo_path: "/tmp/demo".into(),
                 item: id,
                 also: Vec::new(),
-                issue_url: None,
             };
             let launch = |app: &mut App, out: &mut Vec<ClientRequest>| {
                 out.clear();
@@ -42939,8 +42925,8 @@ diff --git a/src/c.rs b/src/c.rs
     }
 
     /// The footer counts what the paste added: the same list again adds
-    /// nothing. A paste while the menu or the delete question is up adds
-    /// nothing either.
+    /// nothing. A paste while the priority pick or the delete question is
+    /// up adds nothing either.
     #[test]
     fn a_todo_paste_counts_what_it_added() {
         crate::todos::with_now(todo_clock(6), || {
@@ -42953,62 +42939,11 @@ diff --git a/src/c.rs b/src/c.rs
             );
             assert_eq!(todo_file(&app).items.len(), 3);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Char('l'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER, &mut out);
             assert!(todo_view(&app).pick.is_some());
             assert!(paste_into_overlay(&mut app, "- New\n    - thing\n"));
-            assert_eq!(todo_file(&app).items.len(), 3, "the menu takes no paste");
+            assert_eq!(todo_file(&app).items.len(), 3, "the pick takes no paste");
             assert!(todo_view(&app).query.is_empty());
-        });
-    }
-
-    /// Linear's answer while the TODOS MODAL stands under the box an
-    /// `Enter` opened lands on that modal: back from the box, the chip
-    /// says what Linear said. Teams to pick from with no modal to pick in
-    /// say so in the footer.
-    #[test]
-    fn linear_answers_reach_the_todos_under_the_box() {
-        crate::todos::with_now(todo_clock(6), || {
-            let mut out = Vec::new();
-            let mut app = todos_with(TWO_EMAILS);
-            press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert!(matches!(app.overlay, Some(Overlay::Prompt(_))));
-            let issue = crate::linear::LinkedIssue {
-                identifier: "RIP-1".into(),
-                url: "https://linear.app/x/issue/RIP-1".into(),
-                state: "Todo".into(),
-                state_type: "unstarted".into(),
-                state_color: String::new(),
-                priority: 0,
-            };
-            crate::todos::view::land_linked(
-                &mut app,
-                "/tmp/demo".into(),
-                crate::fetch::now(),
-                Ok(vec![("RIP-1".into(), issue)]),
-            );
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert!(todo_view(&app).linked.contains_key("RIP-1"));
-
-            app.overlay = None;
-            crate::todos::view::land_teams(
-                &mut app,
-                "/tmp/demo".into(),
-                1,
-                Ok(vec![
-                    crate::linear::LinearTeam {
-                        id: "t1".into(),
-                        key: "A".into(),
-                        name: "A".into(),
-                        triage_state: None,
-                    };
-                    2
-                ]),
-            );
-            assert!(app
-                .flash
-                .as_deref()
-                .is_some_and(|f| f.starts_with("Linear has several teams")));
         });
     }
 }

@@ -4836,9 +4836,6 @@ pub struct App {
     /// of yet — `⌘S` moves and attached pull requests — laid over every
     /// such list as it lands.
     pub linear_edits: crate::linear::LocalEdits,
-    /// The TODOS MODAL's asks after its linked issues: one in flight per
-    /// checkout, and when each chip's state was asked.
-    pub linear_linked: crate::linear::LinkedAsks,
     /// Branches a ⌘L launch cut, so a pull request on one can be attached.
     pub linear_links: crate::linear::LinkStore,
     /// The worktree whose linked issues **Copy linked Linear issues** will
@@ -4852,9 +4849,6 @@ pub struct App {
     /// Creates sent at a TODO, by request id: the Ack writes the session
     /// onto the item, an Error forgets it.
     pub todo_pending: HashMap<u64, crate::todos::TodoRef>,
-    /// TODOS whose **Create in Triage** Linear has not answered yet, by
-    /// checkout and item: a second one is refused until it has.
-    pub todo_creates: std::collections::HashSet<(std::path::PathBuf, u64)>,
     /// What `⌘X`/`⌘C` last took in the TODOS MODAL: pasted back into it,
     /// the items themselves go in.
     pub todo_clip: Option<crate::todos::view::TodoClip>,
@@ -5154,12 +5148,10 @@ impl App {
             linear_failed: std::collections::HashSet::new(),
             linear_tx: None,
             linear_edits: crate::linear::LocalEdits::default(),
-            linear_linked: crate::linear::LinkedAsks::default(),
             linear_links: crate::linear::LinkStore::default(),
             linear_copy: None,
             todos: HashMap::new(),
             todo_pending: HashMap::new(),
-            todo_creates: std::collections::HashSet::new(),
             todo_clip: None,
             linear_test: None,
             view_jobs: None,

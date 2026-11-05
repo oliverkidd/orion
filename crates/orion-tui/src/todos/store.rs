@@ -33,9 +33,6 @@ pub struct TodoFile {
     pub groups: Vec<Group>,
     #[serde(default)]
     pub items: Vec<Item>,
-    /// The Linear team **Create in Triage** files into, once picked.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub linear_team: Option<String>,
     /// The next id to hand out, past every one ever handed out: a
     /// deleted item's id is never reused, so nothing that remembered it
     /// (an agent's Ack) lands on another item.
@@ -73,8 +70,7 @@ pub struct Item {
     pub id: u64,
     pub group: u64,
     pub text: String,
-    /// Linear's scale: 0 none, 1 urgent, 2 high, 3 medium, 4 low — so an
-    /// issue made from it carries the same.
+    /// Linear's scale: 0 none, 1 urgent, 2 high, 3 medium, 4 low.
     #[serde(default)]
     pub priority: u8,
     /// The local day it was written down: how long it has carried over.
@@ -83,17 +79,9 @@ pub struct Item {
     /// that day, in the log after it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done: Option<DateTime<Local>>,
-    /// The Linear issue it is linked to, `RIP-412`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub linear: Option<String>,
     /// The agent session sent at it (`AgentId`), while there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// The kind of state (`started`, `completed`, …) the linked issue was
-    /// last seen in: it ticks the item only on the way into done, so an
-    /// untick sticks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub linear_seen: Option<String>,
 }
 
 impl TodoFile {
@@ -338,9 +326,7 @@ mod tests {
             priority: 2,
             created: NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(),
             done: Some(Local.with_ymd_and_hms(2026, 10, 6, 23, 30, 0).unwrap()),
-            linear: Some("RIP-412".into()),
             agent: None,
-            linear_seen: None,
         });
         file
     }
@@ -368,6 +354,17 @@ mod tests {
             assert!(raw.contains("\"repo_path\": \"/tmp/demo\""), "{raw}");
             assert!(!raw.contains("\"agent\""), "unset fields stay out");
         });
+    }
+
+    /// A file from when todos linked to Linear still reads: the fields
+    /// it had for that are passed over.
+    #[test]
+    fn a_file_with_linear_links_still_reads() {
+        let raw = r#"{"version": 2, "linear_team": "t1", "groups": [{"id": 1, "name": "G"}],
+            "items": [{"id": 2, "group": 1, "text": "x", "created": "2026-10-05",
+                       "linear": "RIP-1", "linear_seen": "started"}]}"#;
+        let file: TodoFile = serde_json::from_str(raw).unwrap();
+        assert_eq!(file.items[0].text, "x");
     }
 
     #[test]
@@ -454,9 +451,9 @@ mod tests {
         let queue = Mutex::new(Queue::new());
         let a = PathBuf::from("/a.json");
         let mut v1 = TodoFile::new(Path::new("/r"));
-        v1.linear_team = Some("v1".into());
+        v1.next_id = 1;
         let mut v2 = v1.clone();
-        v2.linear_team = Some("v2".into());
+        v2.next_id = 2;
         assert!(queue.lock().unwrap().put(a.clone(), v1), "starts a writer");
         assert!(!queue.lock().unwrap().put(a.clone(), v2), "one is on it");
         assert!(!queue
@@ -467,12 +464,9 @@ mod tests {
         drain(&queue, |path, file| {
             written
                 .borrow_mut()
-                .push((path.to_path_buf(), file.linear_team.clone()))
+                .push((path.to_path_buf(), file.next_id))
         });
-        assert_eq!(
-            written.into_inner(),
-            [(a, Some("v2".into())), ("/b.json".into(), None)]
-        );
+        assert_eq!(written.into_inner(), [(a, 2), ("/b.json".into(), 0)]);
         assert!(
             queue
                 .lock()

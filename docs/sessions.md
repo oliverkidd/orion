@@ -817,7 +817,7 @@ open items at each priority (`U`rgent, `H`igh, `M`edium, `L`ow — the letters t
 uses too), how many are open and how many were ticked today, nested groups and folded headers counted
 in. A group under it says only how many are open. Under each header is a line per item — more when
 its text is long enough to wrap: its box, its priority letter, the text, and on the right the agent
-sent at it, the Linear issue it is linked to and how many days it has carried over (`2d`). A
+sent at it and how many days it has carried over (`2d`). A
 nested group stands among its parent's items wherever it was put. `Space` ticks an item: it
 strikes through and drops to the bottom of its group, the next item coming up under the cursor.
 When everything in a group is ticked, the group is complete: its name struck through, `✓ done`, at
@@ -841,7 +841,7 @@ start of the first) out on its own as a top-level group; a top-level one past th
 beside it. `⌘P` puts an item set out of order at the end of the run of
 items at its new priority, so a list kept in priority order stays so. `⌥→` on one item makes it a
 nested group of that name, where it stood and at its priority, with the field for its first item
-open in it (an item linked to Linear or an agent is kept as that first item, link and all) — and
+open in it (an item an agent is on is kept as that first item, agent and all) — and
 typed into a new item's field, `⌥→` at the end of the text does the same, so `⌘N`, a name, `⌥→`
 starts a group. On a selection in one top-level group it puts them in a new group where they stood,
 its name typed at once (`Esc` keeps **New group**). Groups go one deep. `⌥←` takes items in a
@@ -852,7 +852,7 @@ nested group's header it makes it a top-level group of its own, right under the 
 too, and ticking, `⌘P`, moving, grouping, deleting, `Enter` and cut/copy then act on them all.
 `⌘X` cuts and `⌘C` copies: the clipboard gets their text, a line each, and that text pasted back
 into the modal — any project's tab, or a new item's empty field — puts the items themselves right
-after the cursor, priority and links kept.
+after the cursor, priority kept.
 
 A row is edited where it stands: typing on an item or a group header adds to its end, and `⌫` opens
 it with its last character gone; `Enter` saves, `↑`/`↓` save and move on, `Esc` puts it back.
@@ -873,25 +873,8 @@ rather than beside it; one without becomes an item, open and with no priority; i
 with no group go into **Inbox**.
 
 **An agent on an item.** `Enter` opens the QUICK PROMPT over the modal, aimed at a fresh worktree,
-the item's text in the box with `Context: todo in <group › subgroup>` under it — and its Linear
-issue, when it has one, whose URL is also the session's context, as an ISSUE SESSION's is. Edit it
+the item's text in the box with `Context: todo in <group › subgroup>` under it. Edit it
 and `Enter` sends it; `Esc` comes back to the list. `⇧Tab` picks one of your AGENT PRESETS
 instead. The session it starts is written onto the item: its row shows `● agent`, in the session's
 STATUS MARK colour, and from then on `Enter` — or a click on the chip — closes the modal and lands
 on that session. When the session is deleted the chip goes, and `Enter` sends a new one.
-
-**Linear.** `⌘L` on an item opens its Linear menu, with only what applies:
-
-- **Create in Triage** files the item in your team's Triage (`issueCreate`, with the project's
-  `LINEAR_API_KEY`): its text the title, its priority Linear's, `From orion todos · <group>` the
-  description. The team is the one the list remembers, the only one the key has, or — with several
-  — one you pick, remembered for next time. A team that does not use Triage gets the issue in its
-  default state, and the footer says so.
-- **Link existing…** opens the Linear issues modal to pick one: `Enter` links the issue under the
-  cursor and comes back, `Esc` comes back with nothing linked.
-- **Open in browser** and **Unlink**, once it is linked.
-
-A linked item's chip shows the issue's state — `◇` triage, `○` todo, `◑` in progress, `●` done —
-its identifier and the state's name; a click on it opens the issue. Linear is asked how every linked
-issue stands each time the modal opens, and again on `⌘R`; an issue done or canceled there ticks its
-item. The sync is one way: ticking an item leaves its issue alone.

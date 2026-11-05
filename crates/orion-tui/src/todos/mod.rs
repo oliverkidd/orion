@@ -60,14 +60,12 @@ pub fn with_now<T>(at: DateTime<Local>, f: impl FnOnce() -> T) -> T {
 }
 
 /// The todo an agent launch was sent at: which list, which item — and
-/// the others selected with it — and the URL of the Linear issue it is
-/// linked to, the session's context.
+/// the others selected with it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoRef {
     pub repo_path: std::path::PathBuf,
     pub item: u64,
     pub also: Vec<u64>,
-    pub issue_url: Option<String>,
 }
 
 /// The DAEMON made the session a launch from the TODOS MODAL asked for:
@@ -808,16 +806,16 @@ impl TodoFile {
 
     /// `⌥→` on one open item of a top-level group: the item made a nested
     /// group, named for it and at its priority, standing where it stood —
-    /// or, tied to a Linear issue or an agent, the item kept as the first
-    /// thing in it, so the tie is too. None when it is not in a top-level
-    /// group — groups nest one deep.
+    /// or, tied to an agent, the item kept as the first thing in it, so the
+    /// tie is too. None when it is not in a top-level group — groups nest
+    /// one deep.
     pub fn item_to_group(&mut self, item: u64) -> Option<u64> {
         let group = self.shared_group(&[item])?;
         if self.parent_of(group).is_some() {
             return None;
         }
         let me = self.item(item)?.clone();
-        if me.linear.is_some() || me.agent.is_some() {
+        if me.agent.is_some() {
             let new = self.group_items(&[item])?;
             if let Some(g) = self.group_mut(new) {
                 g.name = me.text;
@@ -952,9 +950,7 @@ impl TodoFile {
             priority: 0,
             created: today,
             done: None,
-            linear: None,
             agent: None,
-            linear_seen: None,
         });
         id
     }
@@ -1616,8 +1612,8 @@ mod tests {
     }
 
     /// `⌥→` on one item makes it a nested group where it stood, named for
-    /// it and at its priority — the item gone — unless it is tied to
-    /// Linear, when it is kept as the first thing in it.
+    /// it and at its priority — the item gone — unless an agent is on it,
+    /// when it is kept as the first thing in it.
     #[test]
     fn an_item_becomes_a_group_of_its_name() {
         let mut file = TodoFile::new(Path::new("/r"));
@@ -1636,11 +1632,11 @@ mod tests {
         assert_eq!(drawn(&file, top, &[]), ["a", "[storyline prompt]", "b"]);
         assert!(drawn(&file, sub, &[]).is_empty());
 
-        let linked = file.add_item(top, "RIP-1 thing", day(6));
-        file.item_mut(linked).unwrap().linear = Some("RIP-1".into());
+        let linked = file.add_item(top, "agent thing", day(6));
+        file.item_mut(linked).unwrap().agent = Some("a1".into());
         let kept = file.item_to_group(linked).unwrap();
-        assert_eq!(file.group(kept).unwrap().name, "RIP-1 thing");
-        assert_eq!(drawn(&file, kept, &[]), ["RIP-1 thing"]);
+        assert_eq!(file.group(kept).unwrap().name, "agent thing");
+        assert_eq!(drawn(&file, kept, &[]), ["agent thing"]);
 
         let inner = file.add_item(sub, "inner", day(6));
         assert!(file.item_to_group(inner).is_none(), "one deep");

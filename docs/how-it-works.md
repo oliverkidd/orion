@@ -447,8 +447,7 @@ the merge form and AUTOFIX — draws from that store. The newest-asked answer wi
 before a page can't undo what the page said; an answer that doesn't know (GitHub's `mergeable:
 UNKNOWN` right after a push, a recheck cut short) never replaces one that does; and the cache from the
 last launch loses to any live answer, the page saying `cached` beside its state until one lands. Linear's
-list, the ISSUES MODAL, the git counts on the bands and the todo chips keep their answers by the same
-rules.
+list, the ISSUES MODAL and the git counts on the bands keep their answers by the same rules.
 
 Settings and hotkeys live in [Configuration](configuration.md). The process model, the IPC CODEC and
 the crate layout are covered in more depth in [ARCHITECTURE.md](../ARCHITECTURE.md).

@@ -5,9 +5,8 @@
 //! the project's groups with their open items, a nested group standing
 //! among its parent's items where it was put. A line per item
 //! — more where its text wraps: its box, its priority as the one letter
-//! Linear's rows use too, the text, and on the right what it is tied to —
-//! the agent sent at it, the Linear issue it is linked to — and how many
-//! days it has carried over. A top-level group's header is a section —
+//! Linear's rows use too, the text, and on the right the agent sent at it
+//! and how many days it has carried over. A top-level group's header is a section —
 //! its name in capitals, a rule across to what is open in it at each
 //! priority, nested groups and all, and what was ticked today; a group
 //! under it says only how many are open, and its priority once it has
@@ -52,15 +51,9 @@
 //! headers over the items that match; a paste of more than one line, with
 //! no field open, is read as an indented list and added in (`import`).
 //!
-//! Each item reaches out two ways. `Enter` sends an agent at it — the
-//! QUICK PROMPT over the modal, the item's text and group in the box —
-//! and the session it starts is written onto the item (`TodoRef`), so a
-//! second `Enter` jumps to it. `⌘L` ties it to Linear: **Create in
-//! Triage** files it in the team's Triage with its priority, **Link
-//! existing…** picks an issue in the LINEAR VIEW, and the chip then says
-//! how the issue stands, read afresh each time the modal opens (`⌘R`
-//! asks again) — an issue done or canceled in Linear ticks its todo. The
-//! sync is one way: ticking a todo leaves its issue alone.
+//! `Enter` sends an agent at an item — the QUICK PROMPT over the modal,
+//! the item's text and group in the box — and the session it starts is
+//! written onto the item (`TodoRef`), so a second `Enter` jumps to it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -77,8 +70,6 @@ use ratatui::Frame;
 use super::{store, Child, Item, TodoFile, TodoRef};
 use crate::app::{App, Overlay};
 use crate::keymap::KeyChord;
-pub use crate::linear::LinkedIssue;
-use crate::linear::{IssueDraft, LinearTeam, TeamChoice};
 use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
@@ -117,36 +108,11 @@ fn clip_key(text: &str) -> String {
 pub enum Chip {
     /// `◐ agent` (the session's STATUS MARK): jump to the session.
     Agent,
-    /// `◑ RIP-412`: open the issue in the browser.
-    Linear,
 }
 
-/// A row of the `⌘L` menu: only the ones that apply to the item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MenuAction {
-    Create,
-    Link,
-    Browser,
-    Unlink,
-}
-
-impl MenuAction {
-    fn label(self, linked: Option<&str>) -> String {
-        match self {
-            MenuAction::Create => "Create in Triage".into(),
-            MenuAction::Link => "Link existing…".into(),
-            MenuAction::Browser => "Open in browser".into(),
-            MenuAction::Unlink => format!("Unlink {}", linked.unwrap_or("the issue")),
-        }
-    }
-}
-
-/// What the small list over the modal picks: a `⌘L` menu row, or the
-/// team **Create in Triage** files into when there are several.
+/// What the small list over the modal picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickKind {
-    Menu(Vec<MenuAction>),
-    Team(Vec<LinearTeam>),
     /// `⌘P`: the priority for these items — or for a nested group, and
     /// everything in it.
     Priority(Vec<Target>),
@@ -155,11 +121,9 @@ pub enum PickKind {
 /// The priority pick's rows, top to bottom: Linear's level for each.
 const PRIORITY_ROWS: [u8; 5] = crate::linear::PRIORITY_ORDER;
 
-/// The small list over the modal, for `item`: every key is its own while
-/// it is up.
+/// The small list over the modal: every key is its own while it is up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
-    pub item: u64,
     pub kind: PickKind,
     pub selected: usize,
     /// Where it was last drawn, its rows and the first one showing: what
@@ -170,9 +134,8 @@ pub struct Pick {
 }
 
 impl Pick {
-    fn new(item: u64, kind: PickKind) -> Self {
+    fn new(kind: PickKind) -> Self {
         Self {
-            item,
             kind,
             selected: 0,
             area: Rect::default(),
@@ -182,11 +145,7 @@ impl Pick {
     }
 
     fn len(&self) -> usize {
-        match &self.kind {
-            PickKind::Menu(rows) => rows.len(),
-            PickKind::Team(teams) => teams.len(),
-            PickKind::Priority(_) => PRIORITY_ROWS.len(),
-        }
+        PRIORITY_ROWS.len()
     }
 }
 
@@ -276,9 +235,7 @@ pub struct TodoView {
     /// A group with items in it that `⌘⌫` asked to delete: Enter (or `⌘⌫`
     /// again) does, any other key keeps it.
     pub confirm_delete: Option<u64>,
-    /// What Linear said about the linked issues, by identifier.
-    pub linked: HashMap<String, LinkedIssue>,
-    /// The `⌘L` menu or the team pick, while one is up.
+    /// The priority pick, while it is up.
     pub pick: Option<Pick>,
     /// Each drawn chip that a click acts on, with its item.
     pub chip_hits: Vec<(Rect, u64, Chip)>,
@@ -315,7 +272,6 @@ impl TodoView {
             filtering: false,
             input: None,
             confirm_delete: None,
-            linked: HashMap::new(),
             pick: None,
             chip_hits: Vec::new(),
             area: Rect::default(),
@@ -422,11 +378,7 @@ pub(crate) mod keys {
     /// there, that session.
     pub const AGENT: Key = Key::new(&["enter"], "agent");
     pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
-    /// The PULL REQUESTS MODAL's way to Linear: the item's Linear menu.
-    pub const LINEAR: Key = Key::new(&["cmd+l", "ctrl+l"], "Linear");
-    /// Ask Linear again how the linked issues stand.
-    pub const REFRESH: Key = crate::issues::keys::REFRESH;
-    /// The pick's: `⌘L`'s menu, the team, the priority.
+    /// The priority pick's.
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const CHOOSE: Key = Key::new(&["enter"], "choose");
     /// The priority pick's rows by their digit: `1` urgent to `4` low,
@@ -439,8 +391,8 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         DONE, TABS, PROJECT, JUMP, MOVE, GROUP, SELECT, NEW, NEW_GROUP, EDIT, PRIORITY, DELETE,
-        CUT, COPY, FILTER, SAVE, SAVE_MOVE, SAVE_GROUP, CONFIRM, AGENT, PRESET, LINEAR, REFRESH,
-        PICK, CHOOSE, LEVEL, SPAN, UNDO,
+        CUT, COPY, FILTER, SAVE, SAVE_MOVE, SAVE_GROUP, CONFIRM, AGENT, PRESET, PICK, CHOOSE,
+        LEVEL, SPAN, UNDO,
     ];
 }
 
@@ -520,13 +472,11 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
         keys::CUT.hint(),
         keys::COPY.hint(),
         keys::JUMP.hint(),
-        keys::LINEAR.hint(),
     ];
     hints.extend(project_hint());
     hints.extend([
         keys::NEW_GROUP.hint(),
         keys::PRESET.hint(),
-        keys::REFRESH.hint(),
         Hint::new("Esc", "close"),
     ]);
     hints
@@ -560,11 +510,8 @@ fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
     for dir in dirs {
         load_list(app, dir);
     }
-    let mut view = TodoView::new(project, name, dir);
-    view.linked = linked_from_linear(app, &view);
-    app.overlay = Some(Overlay::Todos(view));
+    app.overlay = Some(Overlay::Todos(TodoView::new(project, name, dir)));
     app.dirty = true;
-    refresh_linked(app);
 }
 
 /// `dir`'s list read in, unless it already is.
@@ -632,73 +579,29 @@ fn goto_project(app: &mut App, n: usize) {
 }
 
 /// The modal onto `project`'s tab: the one it is on parked, `project`'s
-/// back as it was left — or, first time on it, at its top. Linear is
-/// asked how its linked issues stand the first time, and again on the way
-/// back once what the chips say is older than the PULL REQUESTS MODAL's
-/// `FRESH`.
+/// back as it was left — or, first time on it, at its top.
 fn show_project(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
     if view(app).is_none_or(|v| v.project == project) {
         return;
     }
     load_list(app, dir.clone());
     let fresh = TodoView::new(project.clone(), name.clone(), dir);
-    let linked = linked_from_linear(app, &fresh);
-    let chips_fresh = app.linear_linked.fresh(&fresh.dir);
     let Some(view) = view_mut(app) else {
         return;
     };
     let mut parked = std::mem::take(&mut view.parked);
-    let back = parked.remove(&project);
-    let stale = back.is_none() || !chips_fresh;
-    let mut next = back.unwrap_or(TodoView { linked, ..fresh });
+    let mut next = parked.remove(&project).unwrap_or(fresh);
     // The name may have changed since it was parked.
     next.project_name = name;
     let left = std::mem::replace(view, next).park();
     parked.insert(left.project.clone(), left);
     view.parked = parked;
-    if stale {
-        refresh_linked(app);
-    }
-}
-
-/// Ask Linear how every linked issue stands now (`⌘R`, and on open).
-fn refresh_linked(app: &mut App) {
-    let Some(view) = view(app) else {
-        return;
-    };
-    let dir = view.dir.clone();
-    let ids = linked_ids(app, &dir);
-    crate::linear::request_linked(app, dir, ids);
-}
-
-/// Every issue `dir`'s todos link to, once each.
-pub(crate) fn linked_ids(app: &App, dir: &std::path::Path) -> Vec<String> {
-    app.todos.get(dir).map_or_else(Vec::new, |file| {
-        let mut ids: Vec<String> = file.items.iter().filter_map(|i| i.linear.clone()).collect();
-        ids.sort();
-        ids.dedup();
-        ids
-    })
 }
 
 /// Put the modal back up as it was left.
 pub(crate) fn reopen(app: &mut App, view: TodoView) {
     app.overlay = Some(Overlay::Todos(view));
     app.dirty = true;
-}
-
-/// The linked issues the LINEAR VIEW already has, so their chips draw
-/// at once.
-fn linked_from_linear(app: &App, view: &TodoView) -> HashMap<String, LinkedIssue> {
-    let (Some(file), Some(list)) = (app.todos.get(&view.dir), app.linear.get(&view.project)) else {
-        return HashMap::new();
-    };
-    file.items
-        .iter()
-        .filter_map(|i| i.linear.as_deref())
-        .filter_map(|id| list.list.iter().find(|issue| issue.identifier == id))
-        .map(|issue| (issue.identifier.clone(), LinkedIssue::of(issue)))
-        .collect()
 }
 
 pub(super) fn view(app: &App) -> Option<&TodoView> {
@@ -987,8 +890,8 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(view) = view_mut(app) else {
         return false;
     };
-    // The menu, the team pick, the delete question and the DONE page take
-    // no text.
+    // The priority pick, the delete question and the DONE page take no
+    // text.
     if view.pick.is_some() || view.confirm_delete.is_some() || view.page.is_some() {
         return true;
     }
@@ -1083,7 +986,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         return;
     }
     if view(app).is_some_and(|v| v.pick.is_some()) {
-        pick_key(app, key, out);
+        pick_key(app, key);
         return;
     }
     if let Some(group) = view(app).and_then(|v| v.confirm_delete) {
@@ -1161,8 +1064,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
             _ => {}
         },
         _ if keys::PRESET.matches(&key) => preset(app),
-        _ if keys::LINEAR.matches(&key) => open_menu(app),
-        _ if keys::REFRESH.matches(&key) => refresh_linked(app),
         _ if keys::DELETE.matches(&key) => delete(app),
         _ if keys::CUT.matches(&key) => clip(app, true),
         _ if keys::COPY.matches(&key) => clip(app, false),
@@ -1432,7 +1333,8 @@ fn clip(app: &mut App, cut: bool) {
 
 /// A paste of what `⌘X`/`⌘C` last took: the items themselves after the
 /// cursor's — a cut once moved with their ids (in the list they came
-/// from), copies after that and from `⌘C` new items, unlinked and open.
+/// from), copies after that and from `⌘C` new items, open and with no
+/// agent.
 /// False when the paste is not that text.
 fn paste_clip(app: &mut App, text: &str) -> bool {
     if view(app).is_none() {
@@ -1477,8 +1379,6 @@ fn paste_clip_at(app: &mut App, text: &str, group: Option<u64>, after: Option<u6
                     item.done = None;
                     item.created = today;
                     item.agent = None;
-                    item.linear = None;
-                    item.linear_seen = None;
                 }
                 item
             })
@@ -1859,12 +1759,12 @@ fn fold(app: &mut App, group: u64) {
 /// `⌘P`: the priority pick for the chosen items, on the cursor's own —
 /// or, on a nested group's header, for the group, on its own.
 fn open_priority(app: &mut App) {
-    let (first, targets, level) = match nested_header(app) {
+    let (targets, level) = match nested_header(app) {
         Some(group) => {
             let level = list(app)
                 .and_then(|f| f.group(group))
                 .map_or(0, |g| g.priority);
-            (group, vec![Target::Group(group)], level)
+            (vec![Target::Group(group)], level)
         }
         None => {
             let ids = chosen(app);
@@ -1874,10 +1774,10 @@ fn open_priority(app: &mut App) {
             let level = list(app)
                 .and_then(|f| f.item(first))
                 .map_or(0, |i| i.priority);
-            (first, ids.into_iter().map(Target::Item).collect(), level)
+            (ids.into_iter().map(Target::Item).collect(), level)
         }
     };
-    let mut pick = Pick::new(first, PickKind::Priority(targets));
+    let mut pick = Pick::new(PickKind::Priority(targets));
     pick.selected = PRIORITY_ROWS.iter().position(|l| *l == level).unwrap_or(0);
     if let Some(view) = view_mut(app) {
         view.pick = Some(pick);
@@ -2026,22 +1926,13 @@ fn preset(app: &mut App) {
 }
 
 /// The launch for an agent at `items`, and the task the box opens with:
-/// the item's text, the group it is in, and its Linear issue when it has
-/// one — the issue's URL the session's context too. Several items are a
-/// list, each with its group and issue.
+/// the item's text and the group it is in. Several items are a list,
+/// each with its group.
 fn launch_for(app: &App, items: &[u64]) -> Option<(QuickLaunch, String)> {
     let view = view(app)?;
     let file = app.todos.get(&view.dir)?;
     let todos: Vec<&Item> = items.iter().filter_map(|id| file.item(*id)).collect();
     let first = *todos.first()?;
-    let issue_of = |todo: &Item| {
-        todo.linear
-            .as_ref()
-            .and_then(|id| view.linked.get(id))
-            .filter(|i| !i.url.is_empty())
-            .cloned()
-    };
-    let issue = issue_of(first);
     let mut task = String::new();
     if let [todo] = todos.as_slice() {
         task.push_str(&format!(
@@ -2049,24 +1940,14 @@ fn launch_for(app: &App, items: &[u64]) -> Option<(QuickLaunch, String)> {
             todo.text,
             file.path_label(todo.group)
         ));
-        if let Some(issue) = &issue {
-            task.push_str(&format!(
-                "\nLinear issue: {} · {}",
-                issue.identifier, issue.url
-            ));
-        }
     } else {
         task.push_str("Todos:\n");
         for todo in &todos {
             task.push_str(&format!(
-                "- {} ({})",
+                "- {} ({})\n",
                 todo.text,
                 file.path_label(todo.group)
             ));
-            if let Some(issue) = issue_of(todo) {
-                task.push_str(&format!(" · Linear {} {}", issue.identifier, issue.url));
-            }
-            task.push('\n');
         }
     }
     let project = view.project.clone();
@@ -2079,42 +1960,14 @@ fn launch_for(app: &App, items: &[u64]) -> Option<(QuickLaunch, String)> {
         repo_path: view.dir.clone(),
         item: first.id,
         also: todos[1..].iter().map(|t| t.id).collect(),
-        issue_url: issue.map(|i| i.url),
     };
     let launch =
         QuickLaunch::from_config(target, &crate::config::Config::load()).with_todo(Some(todo));
     Some((launch, task))
 }
 
-// ---- Linear ----
-
-/// `⌘L` on an item: its Linear menu — **Create in Triage** and **Link
-/// existing…** for one not linked, **Open in browser** and **Unlink** for
-/// one that is.
-fn open_menu(app: &mut App) {
-    let Some(Entry::Item { id: item, .. }) = current(app) else {
-        return;
-    };
-    let Some(view) = view(app) else {
-        return;
-    };
-    let linked = list(app)
-        .and_then(|f| f.item(item))
-        .is_some_and(|i| i.linear.is_some());
-    // While its issue is being made, there is no making it again.
-    let creating = app.todo_creates.contains(&(view.dir.clone(), item));
-    let actions = match (linked, creating) {
-        (true, _) => vec![MenuAction::Browser, MenuAction::Unlink],
-        (false, true) => vec![MenuAction::Link],
-        (false, false) => vec![MenuAction::Create, MenuAction::Link],
-    };
-    if let Some(view) = view_mut(app) {
-        view.pick = Some(Pick::new(item, PickKind::Menu(actions)));
-    }
-}
-
-/// A key while the menu or the team pick is up.
-fn pick_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+/// A key while the priority pick is up.
+fn pick_key(app: &mut App, key: KeyEvent) {
     let Some(view) = view_mut(app) else {
         return;
     };
@@ -2132,379 +1985,27 @@ fn pick_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     };
     if let Some(row) = level {
         pick.selected = row;
-        choose(app, out);
+        choose(app);
         return;
     }
     match key.code {
         KeyCode::Esc => view.pick = None,
         KeyCode::Down => pick.selected = crate::app::clamp_selection(pick.selected as i64 + 1, len),
         KeyCode::Up => pick.selected = crate::app::clamp_selection(pick.selected as i64 - 1, len),
-        _ if keys::CHOOSE.matches(&key) => choose(app, out),
+        _ if keys::CHOOSE.matches(&key) => choose(app),
         _ => {}
     }
 }
 
-/// Enter in the menu or the team pick: what its row says.
-fn choose(app: &mut App, out: &mut Vec<ClientRequest>) {
+/// Enter in the priority pick: what its row says.
+fn choose(app: &mut App) {
     let Some(pick) = view_mut(app).and_then(|v| v.pick.take()) else {
         return;
     };
-    let item = pick.item;
-    match pick.kind {
-        PickKind::Menu(actions) => match actions.get(pick.selected) {
-            Some(MenuAction::Create) => create(app, item, None),
-            Some(MenuAction::Link) => {
-                let Some(Overlay::Todos(view)) = app.overlay.take() else {
-                    return;
-                };
-                crate::linear::open_link(app, item, view);
-            }
-            Some(MenuAction::Browser) => open_issue(app, item, out),
-            Some(MenuAction::Unlink) => {
-                let gone = edit(app, |file| {
-                    let todo = file.item_mut(item)?;
-                    todo.linear_seen = None;
-                    todo.linear.take()
-                })
-                .flatten();
-                if let (Some(id), Some(view)) = (gone, view_mut(app)) {
-                    view.linked.remove(&id);
-                }
-            }
-            None => {}
-        },
-        PickKind::Team(teams) => {
-            if let Some(team) = teams.get(pick.selected).cloned() {
-                // The pick is remembered: the next issue goes there too.
-                edit(app, |file| file.linear_team = Some(team.id.clone()));
-                create(app, item, Some(team));
-            }
-        }
-        PickKind::Priority(targets) => {
-            if let Some(level) = PRIORITY_ROWS.get(pick.selected) {
-                set_priority(app, &targets, *level);
-            }
-        }
+    let PickKind::Priority(targets) = pick.kind;
+    if let Some(level) = PRIORITY_ROWS.get(pick.selected) {
+        set_priority(app, &targets, *level);
     }
-}
-
-/// **Create in Triage**: the item filed in the team picked, else the one
-/// the list remembers — or the only one.
-fn create(app: &mut App, item: u64, team: Option<LinearTeam>) {
-    let Some(view) = view(app) else {
-        return;
-    };
-    let dir = view.dir.clone();
-    let Some(file) = app.todos.get(&dir) else {
-        return;
-    };
-    let Some(todo) = file.item(item) else {
-        return;
-    };
-    let draft = IssueDraft {
-        title: todo.text.clone(),
-        priority: todo.priority,
-        description: format!("From orion todos · {}", file.path_label(todo.group)),
-    };
-    let choice = match team {
-        Some(team) => TeamChoice::Picked(team),
-        None => TeamChoice::Remembered(file.linear_team.clone()),
-    };
-    crate::linear::create_for_todo(app, dir, item, draft, choice);
-}
-
-/// The item's issue in the browser — once Linear has said where it is.
-fn open_issue(app: &mut App, item: u64, out: &mut Vec<ClientRequest>) {
-    let Some(view) = view(app) else {
-        return;
-    };
-    let Some(id) = app
-        .todos
-        .get(&view.dir)
-        .and_then(|f| f.item(item))
-        .and_then(|i| i.linear.clone())
-    else {
-        return;
-    };
-    match view
-        .linked
-        .get(&id)
-        .map(|i| i.url.clone())
-        .filter(|u| !u.is_empty())
-    {
-        Some(url) => crate::event_loop::open_link(app, &url, out),
-        None => {
-            app.flash = Some(crate::flash::Flash::note(format!(
-                "Linear hasn't said where {id} is yet — {} asks again",
-                keys::REFRESH.label()
-            )))
-        }
-    }
-}
-
-/// The modal on `dir`'s list wherever it is kept: up, standing under the
-/// QUICK PROMPT an `Enter` opened over it, or waiting for the LINEAR VIEW
-/// that **Link existing…** opened to come back to it. An answer landing
-/// meanwhile is not lost on the way back.
-fn view_on<'a>(app: &'a mut App, dir: &std::path::Path) -> Option<&'a mut TodoView> {
-    let view = root_view(&mut app.overlay)?;
-    // A project the modal has moved off is answered where it is parked.
-    if view.dir == dir {
-        return Some(view);
-    }
-    view.parked.values_mut().find(|v| v.dir == dir)
-}
-
-/// The modal over `overlay` wherever it is kept ([`view_on`]), on the
-/// tab it is on.
-fn root_view(overlay: &mut Option<Overlay>) -> Option<&mut TodoView> {
-    use crate::app::PromptKind;
-    let view = match overlay.as_mut()? {
-        Overlay::Todos(view) => view,
-        Overlay::Linear(linear) => match &mut linear.mode {
-            crate::linear::LinearMode::Link { back, .. } => back.as_mut(),
-            _ => return None,
-        },
-        Overlay::Prompt(prompt) => match &mut prompt.kind {
-            PromptKind::QuickPrompt(launch) => match &mut launch.under {
-                Some(ModalUnder::Todos(view)) => view.as_mut(),
-                _ => return None,
-            },
-            _ => return None,
-        },
-        _ => return None,
-    };
-    Some(view)
-}
-
-/// A state of `issue` Linear took from a `⌘S`, asked at `asked`: the chip
-/// says it in every tab that links the issue, parked ones too — unless
-/// that tab's chip already shows a state asked later. Ticking stays
-/// [`land_linked`]'s: the next answer sees the move.
-pub(crate) fn note_linked(app: &mut App, issue: LinkedIssue, asked: std::time::Instant) {
-    let todos = &app.todos;
-    let asks = &mut app.linear_linked;
-    let Some(root) = root_view(&mut app.overlay) else {
-        return;
-    };
-    let links = |dir: &std::path::Path| {
-        todos.get(dir).is_some_and(|file| {
-            file.items
-                .iter()
-                .any(|i| i.linear.as_deref() == Some(issue.identifier.as_str()))
-        })
-    };
-    let mut note = |view: &mut TodoView| {
-        let shown = view.linked.contains_key(&issue.identifier);
-        if !shown && !links(&view.dir) {
-            return;
-        }
-        if !asks.accept(&view.dir, &issue.identifier, asked) {
-            return;
-        }
-        match view.linked.get_mut(&issue.identifier) {
-            Some(chip) => {
-                chip.state = issue.state.clone();
-                chip.state_type = issue.state_type.clone();
-                chip.state_color = issue.state_color.clone();
-            }
-            None => {
-                view.linked.insert(issue.identifier.clone(), issue.clone());
-            }
-        }
-    };
-    note(root);
-    for view in root.parked.values_mut() {
-        note(view);
-    }
-    app.dirty = true;
-}
-
-/// Linear's answer, asked at `asked`, on the linked issues — each with
-/// the identifier it was asked by: their chips say how they stand, and an
-/// issue gone to done or canceled since it was last seen ticks its todo,
-/// if it is still open. An issue whose chip already shows a state asked
-/// later is left as it is, so nothing goes back. The first answer after a
-/// todo is linked only sets what was last seen, and never ticks it. An
-/// issue a team move renamed is linked by its new identifier.
-pub(crate) fn land_linked(
-    app: &mut App,
-    dir: PathBuf,
-    asked: std::time::Instant,
-    result: Result<Vec<(String, LinkedIssue)>, String>,
-) {
-    app.dirty = true;
-    let issues = match result {
-        Ok(issues) => issues,
-        Err(err) => {
-            app.flash = Some(crate::flash::Flash::failed(format!("Linear: {err}")));
-            return;
-        }
-    };
-    app.linear_linked.answered(&dir, asked);
-    let issues: Vec<(String, LinkedIssue)> = issues
-        .into_iter()
-        .filter(|(_, issue)| app.linear_linked.accept(&dir, &issue.identifier, asked))
-        .collect();
-    let now = super::now();
-    let mut ticked = Vec::new();
-    if let Some(file) = app.todos.get_mut(&dir) {
-        let mut changed = false;
-        for item in file.items.iter_mut() {
-            let Some((_, issue)) = item
-                .linear
-                .as_ref()
-                .and_then(|id| issues.iter().find(|(asked_by, _)| asked_by == id))
-            else {
-                continue;
-            };
-            if item.linear.as_deref() != Some(issue.identifier.as_str()) {
-                item.linear = Some(issue.identifier.clone());
-                changed = true;
-            }
-            // Only the way into done ticks: an issue that was already
-            // done when last seen leaves an unticked item alone — and one
-            // not seen yet is only seen.
-            let was_finished = item
-                .linear_seen
-                .as_deref()
-                .is_none_or(crate::linear::finished_kind);
-            if issue.finished() && !was_finished && item.done.is_none() {
-                item.done = Some(now);
-                ticked.push(issue.identifier.clone());
-            }
-            if item.linear_seen.as_deref() != Some(issue.state_type.as_str()) {
-                item.linear_seen = Some(issue.state_type.clone());
-                changed = true;
-            }
-        }
-        if changed {
-            store::save(file);
-        }
-    }
-    if !ticked.is_empty() {
-        app.flash = Some(crate::flash::Flash::done(format!(
-            "ticked {} — done in Linear",
-            ticked.join(", ")
-        )));
-    }
-    if let Some(view) = view_on(app, &dir) {
-        for (asked_by, issue) in issues {
-            if asked_by != issue.identifier {
-                view.linked.remove(&asked_by);
-            }
-            view.linked.insert(issue.identifier.clone(), issue);
-        }
-    }
-}
-
-/// Several teams and none remembered: which one **Create in Triage**
-/// files `item` in is the user's to pick.
-pub(crate) fn land_teams(
-    app: &mut App,
-    dir: PathBuf,
-    item: u64,
-    result: Result<Vec<LinearTeam>, String>,
-) {
-    app.dirty = true;
-    app.todo_creates.remove(&(dir.clone(), item));
-    match result {
-        Err(err) => {
-            app.flash = Some(crate::flash::Flash::failed(format!(
-                "couldn't create the issue: {err}"
-            )))
-        }
-        Ok(teams) if teams.is_empty() => {
-            app.flash = Some(crate::flash::Flash::failed(
-                "couldn't create the issue: Linear lists no team for this key",
-            ))
-        }
-        Ok(teams) => match view_on(app, &dir) {
-            Some(view) => {
-                view.pick = Some(Pick::new(item, PickKind::Team(teams)));
-                // The wait is over; the pick says what comes next.
-                if app
-                    .flash
-                    .as_deref()
-                    .is_some_and(|f| f == crate::linear::CREATING)
-                {
-                    app.flash = None;
-                }
-            }
-            None => {
-                let again = keys::LINEAR.label();
-                let text = format!(
-                    "Linear has several teams — pick one: open the todos and {again} Create in Triage again"
-                );
-                app.flash = Some(crate::flash::Flash::setup(text));
-            }
-        },
-    }
-}
-
-/// The issue **Create in Triage** made: the item linked to it, the team
-/// remembered, and the footer saying where it went.
-pub(crate) fn land_created(
-    app: &mut App,
-    dir: PathBuf,
-    item: u64,
-    team: LinearTeam,
-    result: Result<LinkedIssue, String>,
-) {
-    app.dirty = true;
-    app.todo_creates.remove(&(dir.clone(), item));
-    let issue = match result {
-        Ok(issue) => issue,
-        Err(err) => {
-            app.flash = Some(crate::flash::Flash::failed(format!(
-                "couldn't create the issue: {err}"
-            )));
-            return;
-        }
-    };
-    if let Some(file) = app.todos.get_mut(&dir) {
-        if let Some(todo) = file.item_mut(item) {
-            link_to(todo, &issue);
-        }
-        file.linear_team = Some(team.id.clone());
-        store::save(file);
-    }
-    app.flash = Some(if team.triage_state.is_some() {
-        crate::flash::Flash::done(format!("Created {} in Triage", issue.identifier))
-    } else {
-        crate::flash::Flash::setup(format!(
-            "Linear: {} has no Triage — created {} in its default state",
-            team.name, issue.identifier
-        ))
-    });
-    if let Some(view) = view_on(app, &dir) {
-        view.linked.insert(issue.identifier.clone(), issue);
-    }
-}
-
-/// Enter in the LINEAR VIEW opened by **Link existing…**: `item` linked to
-/// `issue`, and the modal back as it was left. The LINEAR VIEW's list may
-/// be hours old, so its state is only the chip's until Linear is asked
-/// afresh: the first answer is what the todo was linked in, and only a
-/// move to done after it ticks it.
-pub(crate) fn link_issue(app: &mut App, mut back: TodoView, item: u64, issue: LinkedIssue) {
-    if let Some(file) = app.todos.get_mut(&back.dir) {
-        if let Some(todo) = file.item_mut(item) {
-            todo.linear = Some(issue.identifier.clone());
-            todo.linear_seen = None;
-        }
-        store::save(file);
-    }
-    back.linked.insert(issue.identifier.clone(), issue);
-    reopen(app, back);
-    refresh_linked(app);
-}
-
-/// `todo` linked to `issue`, in the state Linear has just said it is in:
-/// only a move to done from here on ticks it.
-fn link_to(todo: &mut Item, issue: &LinkedIssue) {
-    todo.linear = Some(issue.identifier.clone());
-    todo.linear_seen = Some(issue.state_type.clone());
 }
 
 pub(crate) fn handle_mouse(
@@ -2532,7 +2033,7 @@ pub(crate) fn handle_mouse(
     }
     if view.pick.is_some() {
         if click {
-            pick_click(app, pos, out);
+            pick_click(app, pos);
         }
         return;
     }
@@ -2543,7 +2044,6 @@ pub(crate) fn handle_mouse(
     if let Some((item, chip)) = chip {
         match chip {
             Chip::Agent => agent_or_session(app, item, out),
-            Chip::Linear => open_issue(app, item, out),
         }
         return;
     }
@@ -2562,16 +2062,16 @@ pub(crate) fn handle_mouse(
     }
 }
 
-/// A click while the menu or the team pick is up: on a row it chooses
-/// it, anywhere else it puts the pick away.
-fn pick_click(app: &mut App, pos: Position, out: &mut Vec<ClientRequest>) {
+/// A click while the priority pick is up: on a row it chooses it,
+/// anywhere else it puts the pick away.
+fn pick_click(app: &mut App, pos: Position) {
     let Some(pick) = view_mut(app).and_then(|v| v.pick.as_mut()) else {
         return;
     };
     match crate::list_hit::row_at(pick.rows, pick.start, pick.len(), pos) {
         Some(row) => {
             pick.selected = row;
-            choose(app, out);
+            choose(app);
         }
         None => {
             if let Some(view) = view_mut(app) {
@@ -2928,16 +2428,11 @@ impl Row<'_> {
     }
 }
 
-/// The `⌘L` menu or the team pick over the modal: a small box in its
-/// middle, a row per choice, the cursor's lit — scrolled to keep it in
-/// sight when the teams outnumber the rows.
+/// The priority pick over the modal: a small box in its middle, a row
+/// per choice, the cursor's lit — scrolled to keep it in sight when the
+/// rows outnumber the room.
 fn draw_pick(f: &mut Frame, area: Rect, file: &TodoFile, pick: &mut Pick, th: Theme) {
-    let linked = file.item(pick.item).and_then(|i| i.linear.clone());
     let (title, rows): (String, Vec<String>) = match &pick.kind {
-        PickKind::Menu(actions) => (
-            format!("Linear · {}", linked.as_deref().unwrap_or("not linked")),
-            actions.iter().map(|a| a.label(linked.as_deref())).collect(),
-        ),
         PickKind::Priority(targets) => (
             match targets.as_slice() {
                 [Target::Group(id)] => format!(
@@ -2950,20 +2445,6 @@ fn draw_pick(f: &mut Frame, area: Rect, file: &TodoFile, pick: &mut Pick, th: Th
             PRIORITY_ROWS
                 .iter()
                 .map(|level| format!("{level}  {}", crate::linear::priority_word(*level)))
-                .collect(),
-        ),
-        PickKind::Team(teams) => (
-            "Create in which team?".into(),
-            teams
-                .iter()
-                .map(|t| {
-                    let triage = if t.triage_state.is_some() {
-                        ""
-                    } else {
-                        "  no Triage"
-                    };
-                    format!("{}  {}{triage}", t.key, t.name)
-                })
                 .collect(),
         ),
     };
@@ -3166,7 +2647,7 @@ fn wrap_at(text: &str, first: usize, rest: usize) -> Vec<(usize, String)> {
 /// through when it was ticked today, and wrapped under its own first
 /// character when it is long — and its chips against the right edge of
 /// the first line, dropped from the right when the line is short: the
-/// agent sent at it, its Linear issue, how many days it has carried over.
+/// agent sent at it, how many days it has carried over.
 /// With the lines, the columns (from the line's start) of the chips a
 /// click acts on.
 fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
@@ -3200,9 +2681,6 @@ fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
                 Span::styled("agent", Style::default().fg(color)),
             ],
         ));
-    }
-    if let Some(id) = &item.linear {
-        parts.push((Some(Chip::Linear), linear_chip(id, view.linked.get(id), th)));
     }
     if !done && item.age(today) > 0 {
         parts.push((
@@ -3267,26 +2745,6 @@ fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
 fn live_agent<'a>(app: &'a App, item: &Item) -> Option<&'a orion_core::Agent> {
     let id = item.agent.as_deref()?;
     app.tree.agents.iter().find(|a| a.id.0 == id)
-}
-
-/// A linked issue's chip: its state's glyph in its colour, `RIP-412`,
-/// and the state's name — or a dim `·` before Linear has said.
-fn linear_chip(id: &str, issue: Option<&LinkedIssue>, th: Theme) -> Vec<Span<'static>> {
-    let (glyph, color) = match issue {
-        Some(issue) => crate::linear::state_glyph(&issue.state_type, &issue.state_color, th),
-        None => ("·", th.dim),
-    };
-    let mut chip = vec![
-        Span::styled(format!("{glyph} "), Style::default().fg(color)),
-        Span::styled(id.to_string(), Style::default().fg(th.muted)),
-    ];
-    if let Some(issue) = issue.filter(|i| !i.state.is_empty()) {
-        chip.push(Span::styled(
-            format!(" {}", issue.state),
-            Style::default().fg(th.dim),
-        ));
-    }
-    chip
 }
 
 /// Record where the open field landed in the list — its row `rect`, the
@@ -3422,7 +2880,7 @@ mod tests {
         v.anchor = Some(1);
         check(&v);
         v.anchor = None;
-        v.pick = Some(Pick::new(1, PickKind::Priority(vec![Target::Item(1)])));
+        v.pick = Some(Pick::new(PickKind::Priority(vec![Target::Item(1)])));
         check(&v);
         v.pick = None;
         v.input = Some((
@@ -3474,7 +2932,7 @@ mod tests {
             },
             TextInput::new(),
         ));
-        v.pick = Some(Pick::new(3, PickKind::Menu(vec![MenuAction::Link])));
+        v.pick = Some(Pick::new(PickKind::Priority(vec![Target::Item(3)])));
         v.confirm_delete = Some(1);
         v.anchor = Some(3);
         v.held = vec![3];

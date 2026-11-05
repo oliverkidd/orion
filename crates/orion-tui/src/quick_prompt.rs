@@ -107,8 +107,8 @@ pub struct QuickLaunch {
     pub linear: Option<crate::linear::LinearBatch>,
     /// The TODO this launch is sent at, when the box was opened from the
     /// TODOS MODAL: its Ack writes the new session onto the item
-    /// (`todos::agent_started`), and a linked Linear issue's URL is the
-    /// session's context. Kept across the box's pickers, as the issue is.
+    /// (`todos::agent_started`). Kept across the box's pickers, as the
+    /// issue is.
     pub todo: Option<crate::todos::TodoRef>,
     /// A CLAUDE CLOUD launch: `Tab` on the Claude row of the box's own
     /// `Tab` picker toggles it, as it does in the NEW AGENT PICKER, and
