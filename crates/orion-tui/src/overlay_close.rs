@@ -94,6 +94,17 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
         // The CONFLICT RESOLVER is a level inside the modal it came from,
         // as the DIFF VIEWER is; its merge stays as it was left.
         Some(Overlay::Conflicts(_)) => crate::conflicts::back(app),
+        // A TREE BROWSER opened to reveal a file goes back to what it was
+        // opened over — a DIFF VIEWER read afresh, as it is after anything
+        // that stood over it.
+        Some(Overlay::Tree(view)) if view.back.is_some() => {
+            let back = match app.overlay.take() {
+                Some(Overlay::Tree(tree)) => tree.back,
+                _ => None,
+            };
+            app.overlay = back.map(std::sync::Arc::unwrap_or_clone);
+            crate::event_loop::reread_overlay(app);
+        }
         // Nothing to unwind on the way out.
         Some(
             Overlay::Help(_)

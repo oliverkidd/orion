@@ -94,6 +94,7 @@ pub(crate) mod diff_keys {
         FOLD,
         PULLS,
         crate::hints::IN_CURSOR,
+        crate::hints::IN_TREE,
     ];
 }
 
@@ -142,6 +143,9 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
                 "tree"
             }));
             hints.push(PULLS.hint());
+            if view.file_at_line().is_some() {
+                hints.push(crate::hints::IN_TREE.hint());
+            }
             hints.push(crate::hints::in_app_hint());
         }
         DiffFocus::Diff => {
@@ -155,6 +159,9 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             hints.push(next);
             hints.push(REVIEWED.hint());
             hints.push(PULLS.hint());
+            if view.file_at_line().is_some() {
+                hints.push(crate::hints::IN_TREE.hint());
+            }
             hints.push(crate::hints::in_app_hint());
         }
     }

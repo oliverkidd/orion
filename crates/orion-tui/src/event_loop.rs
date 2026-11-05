@@ -1136,6 +1136,16 @@ fn keep_changed_files(
     app.changed_files = files
         .filter(|files| files.len() <= CHANGED_FILES_KEEP)
         .map(|files| (worktree.clone(), files));
+    // A TREE BROWSER open on the checkout keeps its marks to the poll.
+    let root = app.tree.worktrees.iter().find(|w| &w.id == worktree);
+    if let (Some(root), Some(Overlay::Tree(view))) =
+        (root.map(|w| w.path.clone()), &mut app.overlay)
+    {
+        if view.root == root {
+            let files = app.changed_files.as_ref().map_or(&[][..], |(_, f)| f);
+            view.marks = crate::tree_browser::marks_of(files);
+        }
+    }
 }
 
 /// Record a checkout's changed-file count. Stored whichever checkout it is
@@ -2996,6 +3006,14 @@ pub(crate) fn close_editor(app: &mut App) {
     if let Some(page) = &mut app.page {
         page.refresh();
     }
+    reread_overlay(app);
+}
+
+/// The open overlay read again after something stood over it — the editor,
+/// or a TREE BROWSER it was moved into — and may have changed its files:
+/// the tree's preview, the FILE TABS' file (the cursor back on the strip),
+/// the CONFLICT RESOLVER's merge, the DIFF VIEWER's diff.
+pub(crate) fn reread_overlay(app: &mut App) {
     match &mut app.overlay {
         Some(Overlay::Tree(view)) => view.load_preview(),
         Some(Overlay::FileTabs(view)) => view.editor_closed(),
@@ -5418,7 +5436,7 @@ fn open_diff_view(app: &mut App) {
         // list to open on: the files are up on this keypress and the first
         // diff is being read while the `git status` below checks them, not
         // after it. `fill_view` reconciles the two when that lands.
-        let polled = polled_changes(app);
+        let polled = polled_changes(app, &path);
         if !polled.is_empty() {
             view.replace_files(polled.to_vec());
             crate::git_diff::load_selected_diff(&mut view);
@@ -5473,7 +5491,7 @@ fn open_file_finder(app: &mut App) {
     // The modal is up on this keypress, taking what is typed; the list
     // lands when `git ls-files` answers (`land_view_answer`).
     let recents = crate::recent_files::load(&path);
-    let changed: Vec<String> = polled_changes(app)
+    let changed: Vec<String> = polled_changes(app, &path)
         .iter()
         .filter(|file| !file.is_deleted())
         .map(|file| file.path.clone())
@@ -5498,13 +5516,21 @@ fn open_file_finder(app: &mut App) {
     ));
 }
 
-/// The selected checkout's changed files as the badge's last `git status`
-/// found them — two seconds old at most (`keep_changed_files`) — or none
-/// when that poll was of another checkout, or hasn't run.
-fn polled_changes(app: &App) -> &[crate::git_diff::DiffFile] {
-    let selected = app.selected_worktree().map(|w| &w.id);
+/// The changed files of the checkout at `root` as the badge's last `git
+/// status` found them — two seconds old at most (`keep_changed_files`),
+/// and only ever of the selected checkout — or none when that poll was of
+/// another checkout, or hasn't run.
+fn polled_changes<'a>(app: &'a App, root: &std::path::Path) -> &'a [crate::git_diff::DiffFile] {
     match &app.changed_files {
-        Some((id, files)) if Some(id) == selected => files,
+        Some((id, files))
+            if app
+                .tree
+                .worktrees
+                .iter()
+                .any(|w| &w.id == id && w.path == root) =>
+        {
+            files
+        }
         _ => &[],
     }
 }
@@ -5531,19 +5557,94 @@ fn open_tree_browser(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
     };
-    // Up on this keypress; the tree lands when `git ls-files` answers.
-    if let Some(jobs) = app.view_jobs.clone() {
-        let editor = crate::config::Config::load().editor_command();
-        let ticket = request_worktree_files(&jobs, &path);
-        app.overlay = Some(Overlay::Tree(TreeBrowser::opening(
-            path, branch, editor, jobs, ticket,
-        )));
-        return;
+    if let Some(view) = tree_browser_at(app, path, branch) {
+        app.overlay = Some(Overlay::Tree(view));
     }
-    let Some((files, editor)) = load_worktree_files(app, &path) else {
+}
+
+/// A TREE BROWSER on the checkout at `root`, its rows marked with what the
+/// badge's last `git status` found changed there: up on this keypress, the
+/// tree landing when `git ls-files` answers. None — flashing why, when
+/// git failed — when there is nothing to list.
+fn tree_browser_at(app: &mut App, root: std::path::PathBuf, branch: String) -> Option<TreeBrowser> {
+    let marks = crate::tree_browser::marks_of(polled_changes(app, &root));
+    let mut view = match app.view_jobs.clone() {
+        Some(jobs) => {
+            let editor = crate::config::Config::load().editor_command();
+            let ticket = request_worktree_files(&jobs, &root);
+            TreeBrowser::opening(root, branch, editor, jobs, ticket)
+        }
+        None => {
+            let (files, editor) = load_worktree_files(app, &root)?;
+            TreeBrowser::new(root, branch, editor, files)
+        }
+    };
+    view.marks = marks;
+    Some(view)
+}
+
+/// `⌘⇧B` from the DIFF VIEWER or the editor: the TREE BROWSER on `root`
+/// with its cursor on `file` (relative to it), its folders unfolded to it.
+/// `back` is the overlay it opens over, which its Esc puts back — a tree's
+/// own `back`, not the tree, so trees never nest. False, with `back` left
+/// up, when there is no tree to show.
+pub(crate) fn tree_revealing(
+    app: &mut App,
+    root: std::path::PathBuf,
+    branch: String,
+    file: Option<&str>,
+    back: Option<Overlay>,
+) -> bool {
+    let Some(mut view) = tree_browser_at(app, root, branch) else {
+        app.overlay = back;
+        return false;
+    };
+    view.back = match back {
+        Some(Overlay::Tree(tree)) => tree.back,
+        back => back.map(std::sync::Arc::new),
+    };
+    if let Some(file) = file {
+        view.reveal(file);
+    }
+    app.overlay = Some(Overlay::Tree(view));
+    true
+}
+
+/// `⌘⇧B` in the editor: the TREE BROWSER revealing its file, and the editor
+/// moved into the tree's preview pane — unsaved work and all — so quitting
+/// it lands on the file in the tree, and the tree's Esc on whatever the
+/// editor was opened from. A MARKDOWN PAGE under it goes: the tree takes
+/// its place.
+fn reveal_editor_file(app: &mut App) {
+    let Some(vim) = &app.editor else {
         return;
     };
-    app.overlay = Some(Overlay::Tree(TreeBrowser::new(path, branch, editor, files)));
+    let root = vim.cwd.clone();
+    let file = match std::path::Path::new(&vim.file).strip_prefix(&root) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => vim.file.clone(),
+    };
+    let shown = match app.overlay.take() {
+        Some(Overlay::Tree(mut view)) if view.root == root => {
+            view.reveal(&file);
+            app.overlay = Some(Overlay::Tree(view));
+            true
+        }
+        back => {
+            let branch = app
+                .tree
+                .worktrees
+                .iter()
+                .find(|w| w.path == root)
+                .map(|w| w.branch.clone())
+                .unwrap_or_default();
+            tree_revealing(app, root, branch, Some(&file), back)
+        }
+    };
+    if shown {
+        app.page = None;
+        embed_editor(app);
+    }
 }
 
 /// Find-in-files (`F`): live `git grep` over the selected worktree; Enter
@@ -6173,10 +6274,15 @@ fn handle_editor_key(app: &mut App, key: KeyEvent) {
         close_editor(app);
         return;
     }
-    // ⌘O hands an editor's file to the app; a `claude auth` run or an
-    // installer has none.
-    if is_cmd_o(&key) && !vim.account_auth && vim.install.is_none() {
+    // ⌘O hands an editor's file to the app, and ⌘⇧B shows it in the
+    // tree; a `claude auth` run or an installer has none.
+    let has_file = !vim.account_auth && vim.install.is_none() && !vim.file.is_empty();
+    if is_cmd_o(&key) && has_file {
         open_editor_file_outside(app);
+        return;
+    }
+    if has_file && crate::hints::IN_TREE.matches(&key) {
+        reveal_editor_file(app);
         return;
     }
     // A Mac editing chord as the key this editor binds its action to
@@ -29081,6 +29187,101 @@ mod tests {
                 press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
                 assert_eq!(app.editor.as_ref().map(|e| e.line), Some(2));
             });
+        });
+    }
+
+    /// The tree marks each changed file with its `git status` letter — `U`
+    /// for one git doesn't track — and a folder with one under it with a
+    /// dot, from the badge's last poll of the checkout.
+    #[test]
+    fn the_tree_marks_changed_files_and_their_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = test_repo(&dir);
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/new.rs"), "fn x() {}\n").unwrap();
+        std::fs::write(repo.join("a.txt"), "edited\n").unwrap();
+        let mut app = App::new();
+        seed_repo_tree(&mut app, &repo);
+        let worktree = app.selected_worktree().unwrap().id.clone();
+        let files = crate::git_diff::changed_files(&repo).unwrap();
+        app.changed_files = Some((worktree.clone(), files));
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char('b'), KeyModifiers::SUPER, &mut out);
+        press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        // A row of the tree: the stretch between its panel's borders.
+        let row = |name: &str| {
+            text.lines()
+                .filter_map(|l| l.split('│').nth(1))
+                .find(|tree| tree.contains(name))
+                .unwrap_or_default()
+                .trim_end()
+                .to_string()
+        };
+        assert!(row("new.rs").ends_with('U'), "{text}");
+        assert!(row("a.txt").ends_with('M'), "{text}");
+        assert!(row("▾ src").ends_with('•'), "{text}");
+
+        // The next poll's marks, not the opening's: the tree keeps up.
+        let polled = crate::git_diff::parse_status_z(b" M a.txt\0");
+        keep_changed_files(&mut app, &worktree, Some(polled));
+        let marks = &tree_view(&app).marks;
+        assert!(marks.get("src").is_none() && marks.contains_key("a.txt"));
+    }
+
+    /// `⌘⇧B` in the editor: the tree on its checkout, the cursor on its
+    /// file, and the editor carried into the tree's preview pane — quitting
+    /// it lands on the tree, whose Esc puts back what the editor was opened
+    /// from.
+    #[test]
+    fn cmd_shift_b_in_the_editor_shows_its_file_in_the_tree() {
+        with_config_json(r#"{"close_finder_on_open": false}"#, || {
+            let dir = tempfile::tempdir().unwrap();
+            let repo = test_repo(&dir);
+            std::fs::create_dir(repo.join("src")).unwrap();
+            std::fs::write(repo.join("src/x.rs"), "fn x() {}\n").unwrap();
+            let mut app = App::new();
+            seed_repo_tree(&mut app, &repo);
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            app.editor_tx = Some(tx);
+            let mut out = Vec::new();
+            press(&mut app, KeyCode::Char('p'), KeyModifiers::SUPER, &mut out);
+            for c in "x.rs".chars() {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+            }
+            if let Some(Overlay::Files(f)) = &mut app.overlay {
+                f.editor = "/bin/sh".into();
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(app.editor.as_ref().is_some_and(|v| !v.embedded));
+
+            press(
+                &mut app,
+                KeyCode::Char('B'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                &mut out,
+            );
+            let tree = tree_view(&app);
+            assert_eq!(
+                tree.selected_node().map(|n| n.path.as_str()),
+                Some("src/x.rs")
+            );
+            assert!(matches!(tree.back.as_deref(), Some(Overlay::Files(_))));
+            assert!(
+                app.editor.as_ref().is_some_and(|v| v.embedded),
+                "in the pane"
+            );
+
+            close_editor(&mut app);
+            assert!(matches!(&app.overlay, Some(Overlay::Tree(_))));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Files(_))),
+                "back to the finder: {:?}",
+                app.overlay
+            );
         });
     }
 

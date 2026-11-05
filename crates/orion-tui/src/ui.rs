@@ -371,6 +371,9 @@ pub(crate) fn editor_hints(vim: &crate::editor_term::EditorTerm) -> Vec<crate::h
         QUIT_FORCE.hint()
     });
     hints.push(crate::hints::in_app_hint());
+    if !vim.file.is_empty() {
+        hints.push(crate::hints::IN_TREE.hint());
+    }
     hints
 }
 
@@ -2392,7 +2395,23 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 } else {
                     "  ".to_string()
                 };
-                let budget = (list_inner.width as usize).saturating_sub(indent.chars().count() + 3);
+                // A changed file's `git status` letter at the row's end —
+                // or, for a folder with one under it, a dot.
+                let mark = view.mark(node).map(|mark| {
+                    let color = match mark {
+                        crate::tree_browser::Mark::File(xy)
+                            if crate::tree_browser::is_unmerged(xy) =>
+                        {
+                            th.err
+                        }
+                        crate::tree_browser::Mark::File(xy) => change_color(xy, th),
+                        crate::tree_browser::Mark::Dir => th.muted,
+                    };
+                    (mark.letter(), color)
+                });
+                let mark_w = if mark.is_some() { 2 } else { 0 };
+                let budget =
+                    (list_inner.width as usize).saturating_sub(indent.chars().count() + 3 + mark_w);
                 let shown = truncate(&node.name, budget);
                 let positions = visible_positions(&r.positions, &shown, &node.name);
                 let mut spans = vec![
@@ -2403,6 +2422,12 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                     spans.push(Span::styled(shown, Style::default().fg(th.accent)));
                 } else {
                     spans.extend(fuzzy_highlight_spans(&shown, positions, th));
+                }
+                if let Some((letter, color)) = mark {
+                    let used: usize = spans.iter().map(|s| s.width()).sum();
+                    let pad = (list_inner.width as usize).saturating_sub(used + mark_w);
+                    spans.push(Span::raw(" ".repeat(pad)));
+                    spans.push(Span::styled(letter.to_string(), Style::default().fg(color)));
                 }
                 render_row(f, row_area, spans, i == view.selected, true, th);
             }

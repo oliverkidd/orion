@@ -254,6 +254,9 @@ pub fn copies_path(key: &KeyEvent, query: &crate::text_input::TextInput) -> bool
 }
 /// Hand the file or folder under the cursor to Cursor.
 pub const IN_CURSOR: Key = Key::new(&["cmd+o", "ctrl+o"], "open in app");
+/// The file the editor or the DIFF VIEWER is on, in the TREE BROWSER — the
+/// tree's own `⌘B` with shift: in the viewer `⌘B` folds its file list.
+pub const IN_TREE: Key = Key::new(&["cmd+shift+b"], "in file tree");
 
 /// [`IN_CURSOR`]'s hint, named after the OPEN IN APP editor it opens:
 /// `⌘O VS Code`.
