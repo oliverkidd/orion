@@ -6,6 +6,7 @@ pub mod autofix;
 pub mod base_sync;
 pub mod branch_list;
 pub mod branch_name;
+pub mod build_cache;
 pub mod claude_accounts;
 pub mod claude_catalogue;
 pub mod clean_worktrees;

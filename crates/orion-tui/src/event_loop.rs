@@ -390,6 +390,11 @@ async fn main_loop(
         app.update_tx = Some(update_tx.clone());
     }
     let mut next_update_check = tokio::time::Instant::now();
+    // The BUILD-CACHE SWEEP (`build_cache`): Cargo output no checkout has
+    // used in two weeks, deleted off the loop a few minutes after start —
+    // so every upgrade's reopen runs one — and then once a day.
+    let build_sweep_interval = crate::build_cache::interval();
+    let mut next_build_sweep = tokio::time::Instant::now() + crate::build_cache::FIRST_DELAY;
     // What Spotify is playing, asked of the app over AppleScript off the
     // loop (`spotify::interval`; macOS only, and the e2e tests turn it
     // off): every beat while a track is up, a slower one while it isn't.
@@ -709,6 +714,12 @@ async fn main_loop(
                     note_update_answer(&mut app, answer);
                     app.dirty = true;
                 }
+            }
+            _ = tokio::time::sleep_until(next_build_sweep), if build_sweep_interval.is_some() => {
+                let checkouts = app.tree.worktrees.iter().map(|w| w.path.clone()).collect();
+                crate::build_cache::spawn(checkouts);
+                next_build_sweep = tokio::time::Instant::now()
+                    + build_sweep_interval.unwrap_or(crate::build_cache::DEFAULT_INTERVAL);
             }
             _ = tokio::time::sleep_until(next_spotify),
                 if spotify_interval.is_some() && app.spotify_enabled && !app.spotify_denied =>
