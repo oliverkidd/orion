@@ -54,7 +54,7 @@ use crate::app::{clamp_selection, window_start, App, HitTarget, Overlay};
 use crate::list_filter::{FacetKey, FilterPick, PickFacet, PickValue};
 use crate::markdown::{self, Breaks};
 use crate::pr_modal::PullRequestsView;
-use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
+use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickTarget};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
@@ -415,9 +415,6 @@ pub struct WorkPick {
     pub worktrees: Vec<(PickWorktree, Vec<String>)>,
     /// A row of `worktrees`, or the one past them: **New worktree anyway**.
     pub selected: usize,
-    /// A new worktree goes by the preset pick (`⇧Tab`), not straight to
-    /// the QUICK PROMPT.
-    pub preset: bool,
 }
 
 impl WorkPick {
@@ -2988,7 +2985,6 @@ pub(crate) mod keys {
     /// From the search line to the rows, where `space` marks.
     pub const ROWS: Key = Key::new(&["down"], "to list");
     pub const CONFIRM: Key = Key::new(&["enter"], "agent on marked");
-    pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
     pub const BROWSER: Key = crate::hints::BROWSER;
     pub const REFRESH: Key = crate::hints::REFRESH;
     /// The issue's workflow state.
@@ -3021,9 +3017,8 @@ pub(crate) mod keys {
     /// The new issue's: file it, and pick its team.
     pub const FILE: Key = Key::new(&["enter"], "file in Triage");
     pub const TEAM: Key = Key::new(&["tab"], "team");
-    /// `My issues` ⇄ `Other issues`: plain or with ⇧, as the PULL
-    /// REQUESTS MODAL's tab keys are.
-    pub const TABS: Key = Key::new(&["left", "right", "shift+left", "shift+right"], "tabs").show(2);
+    /// `My issues` ⇄ `Other issues`: plain or with ⇧ ([`crate::nav::TABS`]).
+    pub const TABS: Key = crate::nav::TABS;
     /// The FILTER PICK — the PULL REQUESTS MODAL's too.
     pub const FILTER: Key = crate::list_filter::keys::FILTER;
     /// From one status's rows to the next's — the TODOS MODAL's groups'.
@@ -3037,7 +3032,7 @@ pub(crate) mod keys {
     pub const COPY: Key = crate::todos::view::keys::COPY;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        MARK, ROWS, CONFIRM, PRESET, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE,
+        MARK, ROWS, CONFIRM, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE,
         PICK, SET, LEVEL, LINK, GO, NEW, FILE, TEAM, TABS, FILTER, JUMP, SELECT, COPY,
     ];
 }
@@ -3265,7 +3260,7 @@ fn handle_pick_key(app: &mut App, key: KeyEvent) {
         return;
     }
     match key.code {
-        KeyCode::Esc => view.prop_pick = None,
+        _ if crate::nav::closes(&key) => view.prop_pick = None,
         KeyCode::Down => pick.selected = clamp_selection(pick.selected as i64 + 1, pick.rows.len()),
         KeyCode::Up => pick.selected = clamp_selection(pick.selected as i64 - 1, pick.rows.len()),
         _ if keys::SET.matches(&key) => set_prop(app),
@@ -3474,7 +3469,7 @@ fn handle_worktree_pick_key(app: &mut App, key: KeyEvent) {
     };
     let n = pick.worktrees.len();
     match key.code {
-        KeyCode::Esc => view.worktree_pick = None,
+        _ if crate::nav::closes(&key) => view.worktree_pick = None,
         KeyCode::Down => pick.selected = clamp_selection(pick.selected as i64 + 1, n),
         KeyCode::Up => pick.selected = clamp_selection(pick.selected as i64 - 1, n),
         _ if keys::LINK.matches(&key) => link_worktree(app),
@@ -3564,7 +3559,7 @@ fn new_issue_key(app: &mut App, key: KeyEvent) {
         return;
     };
     match key.code {
-        KeyCode::Esc => view.new_issue = None,
+        _ if crate::nav::closes(&key) => view.new_issue = None,
         _ if keys::TEAM.matches(&key) => form.team = (form.team + 1) % form.teams.len().max(1),
         _ if keys::FILE.matches(&key) => file_new_issue(app),
         _ => {
@@ -3702,16 +3697,16 @@ fn worked_on(
         .collect()
 }
 
-/// `Enter` (or `⇧Tab`, `preset`) while browsing: an agent on `issues` in
-/// a fresh worktree — unless a worktree is on some of them already, when
-/// the [`WorkPick`] offers it first.
-fn launch_or_go(app: &mut App, issues: Vec<LinearIssue>, preset: bool) {
+/// `Enter` while browsing: an agent on `issues` in a fresh worktree —
+/// unless a worktree is on some of them already, when the [`WorkPick`]
+/// offers it first. The QUICK PROMPT's own `⌘U` picks a preset.
+fn launch_or_go(app: &mut App, issues: Vec<LinearIssue>) {
     let Some(Overlay::Linear(view)) = &app.overlay else {
         return;
     };
     let worktrees = worked_on(app, &view.project, &issues);
     if worktrees.is_empty() {
-        launch_new(app, issues, preset);
+        open_prompt(app, issues);
         return;
     }
     if let Some(Overlay::Linear(view)) = &mut app.overlay {
@@ -3720,18 +3715,7 @@ fn launch_or_go(app: &mut App, issues: Vec<LinearIssue>, preset: bool) {
             issues,
             worktrees,
             selected: 0,
-            preset,
         });
-    }
-}
-
-/// An agent on `issues` in a fresh worktree: the QUICK PROMPT, or the
-/// preset pick in front of it.
-fn launch_new(app: &mut App, issues: Vec<LinearIssue>, preset: bool) {
-    if preset {
-        open_preset_on(app, issues);
-    } else {
-        open_prompt(app, issues);
     }
 }
 
@@ -3745,7 +3729,7 @@ fn handle_work_pick_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReques
     };
     let n = pick.worktrees.len() + 1;
     match key.code {
-        KeyCode::Esc => view.work_pick = None,
+        _ if crate::nav::closes(&key) => view.work_pick = None,
         KeyCode::Down => pick.selected = clamp_selection(pick.selected as i64 + 1, n),
         KeyCode::Up => pick.selected = clamp_selection(pick.selected as i64 - 1, n),
         _ if keys::GO.matches(&key) => {
@@ -3754,7 +3738,7 @@ fn handle_work_pick_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReques
             };
             match pick.worktrees.get(pick.selected) {
                 Some((wt, _)) => go_to_work(app, &wt.id, out),
-                None => launch_new(app, pick.issues, pick.preset),
+                None => open_prompt(app, pick.issues),
             }
         }
         _ => {}
@@ -3834,9 +3818,9 @@ fn view_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         view.anchor = None;
     }
     match key.code {
-        KeyCode::Esc if !view.query.is_empty() => clear_query(app),
-        KeyCode::Esc if !view.marked.is_empty() => view.marked.clear(),
-        KeyCode::Esc => close(app),
+        _ if crate::nav::closes(&key) && !view.query.is_empty() => clear_query(app),
+        _ if crate::nav::closes(&key) && !view.marked.is_empty() => view.marked.clear(),
+        _ if crate::nav::closes(&key) => close(app),
         _ if keys::SELECT.matches(&key) => {
             select(app, if key.code == KeyCode::Up { -1 } else { 1 })
         }
@@ -3868,7 +3852,6 @@ fn view_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         // On the search line `space` is the filter's, a word break.
         _ if on_list && keys::MARK.matches(&key) => toggle_mark(app),
         _ if keys::CONFIRM.matches(&key) => confirm(app),
-        _ if keys::PRESET.matches(&key) => open_preset(app),
         _ if keys::BROWSER.matches(&key) => open_in_browser(app, out),
         _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::STATUS.matches(&key) => open_status_pick(app),
@@ -4261,7 +4244,7 @@ fn confirm(app: &mut App) {
         return;
     };
     match &view.mode {
-        LinearMode::Browse => launch_or_go(app, issues, false),
+        LinearMode::Browse => launch_or_go(app, issues),
         LinearMode::Attach {
             pr_url, pr_number, ..
         } => {
@@ -4307,30 +4290,6 @@ fn open_prompt(app: &mut App, issues: Vec<LinearIssue>) {
     };
     let under = ModalUnder::of(app.overlay.as_ref());
     crate::quick_prompt::open_box(app, launch.with_under(under));
-}
-
-fn open_preset(app: &mut App) {
-    let Some(Overlay::Linear(view)) = &app.overlay else {
-        return;
-    };
-    if view.mode != LinearMode::Browse {
-        return;
-    }
-    let issues = picked(app);
-    if issues.is_empty() {
-        return;
-    }
-    launch_or_go(app, issues, true);
-}
-
-fn open_preset_on(app: &mut App, issues: Vec<LinearIssue>) {
-    let Some(launch) = launch_for(app, issues) else {
-        return;
-    };
-    crate::quick_prompt::open_preset_picker(
-        app,
-        QuickReturn::fresh(launch.with_under(ModalUnder::of(app.overlay.as_ref()))),
-    );
 }
 
 fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {

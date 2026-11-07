@@ -186,6 +186,10 @@ pub fn acts(keymap: &Keymap, actions: &[Action], does: &str) -> Option<Hint> {
 pub struct Key {
     pub chords: &'static [&'static str],
     pub does: &'static str,
+    /// More chords after `chords`, from another table — a shared one's
+    /// ([`Key::also`]): `nav::CLOSE.also(&["q"])`, `Key::new(&["enter"],
+    /// "done").also(nav::CLOSE.chords)`.
+    pub more: &'static [&'static str],
     /// How many of the chords the label names — the first, unless
     /// [`Key::show`] says more (`↑↓`, `Enter/y`). The rest still match.
     show: usize,
@@ -196,6 +200,7 @@ impl Key {
         Self {
             chords,
             does,
+            more: &[],
             show: 1,
         }
     }
@@ -206,18 +211,38 @@ impl Key {
         self
     }
 
+    /// The same chords doing something else: how a modal names one of the
+    /// shared moves for what it does there — `nav::PANELS.doing("diff")`
+    /// ([`crate::nav`]).
+    pub const fn doing(mut self, does: &'static str) -> Self {
+        self.does = does;
+        self
+    }
+
+    /// The same key answering to `more` chords as well, after its own: how
+    /// a table adds a key of its own to a shared one, or a shared one to
+    /// its own, without spelling the shared one again. One `also` per key.
+    pub const fn also(mut self, more: &'static [&'static str]) -> Self {
+        self.more = more;
+        self
+    }
+
     /// Its chords, parsed. A spelling that does not parse is a bug the
     /// tables' tests catch ([`Key::parses`]).
     pub fn chords(&self) -> Vec<KeyChord> {
         self.chords
             .iter()
+            .chain(self.more)
             .filter_map(|s| KeyChord::parse(s))
             .collect()
     }
 
     /// Every chord parses — what each modal's table test asserts.
     pub fn parses(&self) -> bool {
-        self.chords.iter().all(|s| KeyChord::parse(s).is_some())
+        self.chords
+            .iter()
+            .chain(self.more)
+            .all(|s| KeyChord::parse(s).is_some())
     }
 
     /// Whether `key` is one of this key's chords, however the terminal
@@ -263,8 +288,8 @@ pub const IN_TREE: Key = Key::new(&["cmd+shift+b"], "in file tree");
 pub fn in_app_hint() -> Hint {
     IN_CURSOR.hint_as(crate::outside_editor::hint_name())
 }
-/// The way out of every modal.
-pub const ESC_CLOSE: Key = Key::new(&["esc"], "close");
+/// The way out of every modal ([`crate::nav::CLOSE`]).
+pub const ESC_CLOSE: Key = crate::nav::CLOSE;
 
 // The verbs several modals over a filtered list share — the PULL
 // REQUESTS MODAL and the LINEAR VIEW both. Their letters are the

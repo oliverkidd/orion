@@ -1045,8 +1045,12 @@ pub enum DiffFocus {
     /// `↑`/`↓` walk the files; typing filters them.
     #[default]
     Files,
-    /// `↑`/`↓` scroll the diff.
+    /// `↑`/`↓` scroll the diff — or, reviewing a pull request, walk its
+    /// lines and threads (`pr_review::viewer`).
     Diff,
+    /// A pull request's review bar along the bottom: the verdict and the
+    /// summary (`pr_review::bar`).
+    Bar,
 }
 
 /// A list's viewport as last drawn: its first row, following the cursor —
@@ -1208,6 +1212,11 @@ pub struct DiffView {
     /// The files its branch conflicts in with its base, worked out locally
     /// (`diff_actions::ask`): the `U` marks and the top line's count.
     pub conflicts: crate::diff_actions::Conflicts,
+    /// A pull request's review, written here (`pr_review::viewer`): its
+    /// threads under their lines while the whole pull request is on
+    /// screen, and the bar along the bottom that sends it. None over a
+    /// checkout.
+    pub review: Option<Box<crate::pr_review::ReviewScreen>>,
 }
 
 /// The most diff text a DIFF VIEWER keeps beyond the one on screen. Two
@@ -1331,6 +1340,7 @@ impl DiffView {
             want_path: None,
             pr_review: None,
             conflicts: Default::default(),
+            review: None,
         };
         view.apply_filter();
         view
@@ -1371,14 +1381,16 @@ impl DiffView {
     /// The panel `Tab` (`forward`) or `⇧Tab` hands the keys to: reading
     /// order, round again — the COMMIT LIST only where there is one.
     pub fn next_focus(&self, forward: bool) -> DiffFocus {
-        let order: &[DiffFocus] = if self.commits.is_some() {
-            &[DiffFocus::Commits, DiffFocus::Files, DiffFocus::Diff]
-        } else {
-            &[DiffFocus::Files, DiffFocus::Diff]
-        };
-        let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
-        let step = if forward { 1 } else { order.len() - 1 };
-        order[(at + step) % order.len()]
+        let mut order = Vec::with_capacity(4);
+        if self.commits.is_some() {
+            order.push(DiffFocus::Commits);
+        }
+        order.extend([DiffFocus::Files, DiffFocus::Diff]);
+        // A pull request's review bar, last.
+        if self.review.is_some() {
+            order.push(DiffFocus::Bar);
+        }
+        crate::nav::cycle(&order, self.focus, forward)
     }
 
     /// The line of the file at the top of the diff pane — the first line of
@@ -2379,10 +2391,6 @@ pub enum Overlay {
     /// Enter on a conflicted file of a pull request: the CONFLICT
     /// RESOLVER, its merge's files to settle (`crate::conflicts`).
     Conflicts(Box<crate::conflicts::ConflictView>),
-    /// `⌘⇧R` in the PULL REQUESTS MODAL: the PR REVIEW — a pull request's
-    /// files and diff, its review threads under their lines, and the
-    /// review you write on it (`crate::pr_review`).
-    Review(Box<crate::pr_review::ReviewScreen>),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an

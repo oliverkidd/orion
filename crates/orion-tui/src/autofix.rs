@@ -1352,7 +1352,7 @@ pub fn hints(form: &AutofixForm) -> Vec<Hint> {
 pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // Esc: not now. `⌘G` asked for the form, so there is nothing to
     // remember: an unasked send is still the breakage's to make.
-    if key.code == KeyCode::Esc {
+    if crate::nav::closes(&key) {
         close(app);
         return;
     }

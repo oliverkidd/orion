@@ -906,7 +906,7 @@ pub(crate) mod keys {
 
     pub const REFRESH: Key = Key::new(&["r"], "refresh");
     pub const SIGN_IN: Key = Key::new(&["enter"], "sign in");
-    pub const CLOSE: Key = Key::new(&["esc", "q", "shift+u"], "close");
+    pub const CLOSE: Key = crate::nav::CLOSE.also(&["q", "shift+u"]);
     #[cfg(test)]
     pub const ALL: &[Key] = &[REFRESH, SIGN_IN, CLOSE];
 }

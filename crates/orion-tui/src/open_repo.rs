@@ -391,7 +391,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     let len = view.shown().len() + 1;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Esc => app.overlay = None,
+        _ if crate::nav::closes(&key) => app.overlay = None,
         KeyCode::Down => view.cursor = crate::app::clamp_selection(view.cursor as i64 + 1, len),
         KeyCode::Up => view.cursor = crate::app::clamp_selection(view.cursor as i64 - 1, len),
         _ if keys::ALL.matches(&key) => view.toggle_all(),

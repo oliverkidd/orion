@@ -152,7 +152,7 @@ pub(crate) mod keys {
     use crate::hints::Key;
     pub const NEXT: Key = Key::new(&["enter"], "next");
     pub const CLONE: Key = Key::new(&["enter"], "clone");
-    pub const BACK: Key = Key::new(&["esc"], "back");
+    pub const BACK: Key = crate::nav::CLOSE.doing("back");
 }
 
 /// The folder most projects sit in — where a new clone likely belongs —
@@ -363,8 +363,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     app.dirty = true;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match (&view.stage, key.code) {
-        (Stage::Pick, KeyCode::Esc) => crate::open_repo::start(app),
-        (Stage::Where(_), KeyCode::Esc) => {
+        (Stage::Pick, _) if crate::nav::closes(&key) => crate::open_repo::start(app),
+        (Stage::Where(_), _) if crate::nav::closes(&key) => {
             view.stage = Stage::Pick;
             view.input.clear();
         }

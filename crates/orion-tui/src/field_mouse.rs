@@ -43,7 +43,14 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         Overlay::Files(v) => vec![(Field::Only, &mut v.query)],
         Overlay::Grep(v) => vec![(Field::Only, &mut v.query)],
         Overlay::Tree(v) => vec![(Field::Only, &mut v.filter)],
-        Overlay::Diff(v) => vec![(Field::DiffFilter, &mut v.filter)],
+        // A pull request's viewer: its review's summary on the bar too.
+        Overlay::Diff(v) => {
+            let mut fields = vec![(Field::DiffFilter, &mut v.filter)];
+            if let Some(review) = &mut v.review {
+                fields.push((Field::PrReviewSummary, &mut review.summary));
+            }
+            fields
+        }
         Overlay::Hosts(v) => v.input.iter_mut().map(|i| (Field::Only, i)).collect(),
         // A SYSTEM PRESET's name is orion's: drawn, never a field.
         Overlay::AgentPresetEditor(e) => {
@@ -77,7 +84,6 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
             None => vec![(Field::PrQuery, &mut v.query)],
         },
         Overlay::Linear(v) => vec![(Field::LinearQuery, &mut v.query)],
-        Overlay::Review(v) => vec![(Field::PrReviewSummary, &mut v.summary)],
         Overlay::ProjectPicker(p) => vec![(Field::Only, &mut p.query)],
         Overlay::Autofix(form) => vec![(Field::AutofixNote, &mut form.note)],
         Overlay::WeekReview(v) => match v.mode {
@@ -138,9 +144,12 @@ fn focus(app: &mut App, field: Field) {
             view.side = crate::week_review::Side::Form;
             view.row = crate::week_review::Row::Note;
         }
-        (Some(Overlay::Review(view)), Field::PrReviewSummary) => {
-            view.focus = crate::pr_review::Focus::Bar;
-            view.bar_row = crate::pr_review::bar::BarRow::Summary;
+        (Some(Overlay::Diff(view)), Field::PrReviewSummary) => {
+            view.focus = crate::app::DiffFocus::Bar;
+            if let Some(review) = &mut view.review {
+                review.focus = crate::pr_review::Focus::Bar;
+                review.bar_row = crate::pr_review::bar::BarRow::Summary;
+            }
         }
         _ => {}
     }

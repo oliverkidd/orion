@@ -355,7 +355,7 @@ pub(crate) mod keys {
     pub const HALF: Key = Key::new(&["ctrl+d", "ctrl+u"], "half page").show(2);
     pub const EDIT: Key = Key::new(&["enter"], "edit");
     pub const SOURCE: Key = Key::new(&["m"], "source");
-    pub const BACK: Key = Key::new(&["esc", "q"], "close");
+    pub const BACK: Key = crate::nav::CLOSE.also(&["q"]);
 }
 
 /// The keys on the FILE TABS' bottom border: the strip's, the preview's,

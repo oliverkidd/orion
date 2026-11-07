@@ -244,7 +244,7 @@ pub fn handle_key(app: &mut App, key: &KeyEvent) -> bool {
             mention.hover = (mention.hover + count - 1) % count;
             true
         }
-        KeyCode::Esc => {
+        _ if crate::nav::closes(&key) => {
             mention.dismissed = mention.token.as_ref().map(|t| t.0);
             true
         }

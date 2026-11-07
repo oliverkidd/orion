@@ -242,7 +242,7 @@ impl MarkdownPage {
             _ if is_copy(key) => return PageKey::CopyPath,
             KeyCode::Tab => self.step_focus(true),
             KeyCode::BackTab => self.step_focus(false),
-            KeyCode::Esc | KeyCode::Char('q') if !ctrl => {
+            _ if (crate::nav::closes(key) || key.code == KeyCode::Char('q')) && !ctrl => {
                 if self.focus.is_some() {
                     self.focus = None;
                 } else if !self.go_back() {

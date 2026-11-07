@@ -45,8 +45,10 @@
 //! `⌘X` merges this one, `⌘;` edits it all in one form and `⌘W` closes it
 //! through that form (`pr_actions`, each form in the reading pane's
 //! place), and `⌘D` marks a draft ready for
-//! review or a ready one a draft again, and `⌘⇧R` reviews it in the PR
-//! REVIEW (`pr_review`, as Enter on the Reviews tab does). Each verb is
+//! review or a ready one a draft again. `⌘E` is the one way into its
+//! changes and its review — the DIFF VIEWER with the review in it
+//! (`pr_review::viewer`), as Enter on a file, a commit or the Reviews tab
+//! opens it, `⌘⇧R` the same with the keys on the diff. Each verb is
 //! one ⌘ chord — the
 //! grid's letter where the grid does the same thing (`⌘E` changes, `⌘R`
 //! refresh, `⌘O` open outside, `⌘N` new, `⌘W` close) — with its `^` twin
@@ -91,7 +93,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{clamp_selection, App, HitTarget, Overlay, PendingPrDetail, PromptKind};
+use crate::app::{clamp_selection, App, HitTarget, Overlay, PendingPrDetail};
 use crate::list_filter::{FacetKey, FilterPick, PickFacet, PickValue};
 use crate::pr_preview::{Nav, PrTab};
 use crate::pr_store::{PrStatus, PrStore};
@@ -269,7 +271,27 @@ pub struct PullRequestsView {
     /// The DIFF VIEWER this modal was opened over with `⌘U`: its last Esc
     /// puts it back ([`open_from_diff`]).
     pub from_diff: Option<FromDiff>,
+    /// `⌘Y`'s comment on the pull request as a whole, being written at
+    /// the foot of its Description tab. While it is up every key is its
+    /// own.
+    pub comment: Option<CommentBox>,
 }
+
+/// A comment on a pull request as a whole — not on a line of it — written
+/// at the foot of the page's Description, under the conversation it joins
+/// (`⌘Y`). Enter posts it through the COMMENT BOX's own post
+/// (`event_loop::start_pr_comment`); Esc puts it away, what was typed kept
+/// as the pull request's draft for the next `⌘Y`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentBox {
+    pub url: String,
+    pub number: u64,
+    pub label: String,
+    pub input: TextInput,
+}
+
+/// The most rows the comment shows before it scrolls.
+const COMMENT_ROWS: usize = 6;
 
 /// A DIFF VIEWER the modal stands over, as it was. The modal compares as a
 /// value and a viewer doesn't, so two are the same when they are the same
@@ -312,6 +334,7 @@ impl PullRequestsView {
             pick: None,
             prefetch: Prefetch::default(),
             from_diff: None,
+            comment: None,
         }
     }
 
@@ -849,6 +872,8 @@ fn select(app: &mut App, index: i64) {
         view.selected_url = url;
         view.scroll = 0;
         view.tabs.rewind();
+        // The comment was on the pull request the cursor left.
+        stash_comment(app);
     }
     sync_row(app);
     schedule_detail(app);
@@ -951,6 +976,10 @@ pub(crate) fn paste(app: &mut App, text: &str) -> bool {
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return false;
     };
+    if let Some(comment) = &mut view.comment {
+        comment.input.insert_str(text);
+        return true;
+    }
     view.focus = PrFocus::List;
     view.query.insert_str(text);
     query_changed(app);
@@ -1011,28 +1040,115 @@ fn open_prompt_for_selected(app: &mut App) {
     }
 }
 
-/// `⌘Y`: the COMMENT BOX for the pull request under the cursor, carrying the
-/// modal so Enter and Esc come back to it on the row. A draft a refused
-/// post left for this pull request fills the box.
+/// `⌘Y`: a comment on the pull request under the cursor, written at the
+/// foot of its Description ([`CommentBox`]) — the page stays up, scrolled
+/// to the end of its conversation, so the comment reads as the next one.
+/// A draft a refused post, or an Esc, left for this pull request fills it.
 fn open_comment_for_selected(app: &mut App) {
-    let Some(Overlay::PullRequests(view)) = &app.overlay else {
-        return;
-    };
-    let view = view.clone();
     let Some(pr) = selected_pr(app) else {
         return;
     };
     let draft = app.pr_comment_drafts.remove(&pr.url).unwrap_or_default();
-    crate::event_loop::reopen_prompt_with(
-        app,
-        PromptKind::PrComment {
-            number: pr.number,
-            label: pr.label(),
-            url: pr.url,
-            back: Some(Box::new(view)),
-        },
-        draft,
-    );
+    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+        return;
+    };
+    open_comment_box(view, pr.number, pr.url.clone(), pr.label(), draft);
+}
+
+/// The comment box up on the modal's Description tab, holding `text`.
+pub(crate) fn open_comment_box(
+    view: &mut PullRequestsView,
+    number: u64,
+    url: String,
+    label: String,
+    text: String,
+) {
+    switch_tab(view, PrTab::Description);
+    view.focus = PrFocus::Page;
+    // The end of the conversation, right over the box: the draw clamps it.
+    view.scroll = u16::MAX;
+    view.comment = Some(CommentBox {
+        url,
+        number,
+        label,
+        input: TextInput::multiline_with_text(text),
+    });
+}
+
+/// The comment box put away, what it holds kept as its pull request's
+/// draft — the next `⌘Y` on it starts from there.
+fn stash_comment(app: &mut App) {
+    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+        return;
+    };
+    if let Some(comment) = view.comment.take() {
+        if !comment.input.trim().is_empty() {
+            app.pr_comment_drafts
+                .insert(comment.url, comment.input.as_str().to_string());
+        }
+    }
+}
+
+/// A key while the comment is being written: Enter posts it, Esc puts it
+/// away, the page keys scroll the conversation over it, and everything
+/// else is the field's.
+fn comment_key(app: &mut App, key: KeyEvent) {
+    app.dirty = true;
+    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+        return;
+    };
+    let max = view.max_scroll();
+    let Some(comment) = &mut view.comment else {
+        return;
+    };
+    match key.code {
+        _ if crate::nav::closes(&key) => stash_comment(app),
+        _ if keys::POST.matches(&key) && !comment.input.takes_newline(&key) => post_comment(app),
+        KeyCode::PageDown => view.tabs.navigate(Nav::Page(1), &mut view.scroll, max),
+        KeyCode::PageUp => view.tabs.navigate(Nav::Page(-1), &mut view.scroll, max),
+        _ => {
+            comment.input.handle_key(&key);
+        }
+    }
+}
+
+/// Enter in the comment box: posted, and the box down while it goes —
+/// the page says `posting your comment…` where it will land. A post that
+/// can't go yet leaves the box up with the text; one GitHub refuses
+/// comes back into it (`event_loop::land_pr_comment`).
+fn post_comment(app: &mut App) {
+    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
+        return;
+    };
+    let Some(comment) = &view.comment else {
+        return;
+    };
+    let body = comment.input.trim().to_string();
+    if body.is_empty() {
+        view.comment = None;
+        return;
+    }
+    // A NUL would truncate the argv it crosses.
+    if body.contains('\0') {
+        app.flash = Some(crate::flash::Flash::failed(
+            "comment cannot contain NUL bytes",
+        ));
+        return;
+    }
+    let (number, url, label) = (comment.number, comment.url.clone(), comment.label.clone());
+    let busy = app.pr_comment_inflight.contains(&url);
+    if crate::event_loop::start_pr_comment(app, number, url, label, body).is_err() {
+        if busy {
+            app.flash = Some(crate::flash::Flash::note(format!(
+                "#{number}'s last comment is still posting — try again in a moment"
+            )));
+        }
+        return;
+    }
+    if let Some(Overlay::PullRequests(view)) = &mut app.overlay {
+        view.comment = None;
+        view.scroll = u16::MAX;
+    }
 }
 
 /// `⌘O`, and a click on the reading pane's `↗ open in browser` button
@@ -1109,9 +1225,9 @@ fn switch_tab(view: &mut PullRequestsView, tab: PrTab) {
 }
 
 /// Enter on the page: the row under its cursor acted on — the DIFF
-/// VIEWER at a file or a commit, a check's page — on Reviews the PR
-/// REVIEW (`⌘⇧R`), and on the Description the pull request in the
-/// browser, as Enter on the pane's page does.
+/// VIEWER at a file or a commit, a check's page — on Reviews the same
+/// viewer with the keys on its diff (`⌘⇧R`), and on the Description the
+/// pull request in the browser, as Enter on the pane's page does.
 fn act(app: &mut App, out: &mut Vec<ClientRequest>) {
     let tab = match &app.overlay {
         Some(Overlay::PullRequests(view)) => view.tabs.tab,
@@ -1140,6 +1256,9 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         crate::pr_actions::handle_key(app, key);
         return;
     }
+    if matches!(&app.overlay, Some(Overlay::PullRequests(v)) if v.comment.is_some()) {
+        return comment_key(app, key);
+    }
     // Asked only of an Enter: the rows are cloned to answer it.
     let reopen = keys::REOPEN.matches(&key) && selected_pr(app).is_some_and(|pr| pr.is_closed());
     if matches!(&app.overlay, Some(Overlay::PullRequests(v)) if v.filter_pick.is_some()) {
@@ -1154,15 +1273,15 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     let on_page = view.focus == PrFocus::Page;
     let max = view.max_scroll();
     match key.code {
-        KeyCode::Esc if on_page => view.focus = PrFocus::List,
+        _ if crate::nav::closes(&key) && on_page => view.focus = PrFocus::List,
         // Two-stage escape, like every fuzzy overlay: a typed filter is
         // cleared before the second Esc closes the modal.
-        KeyCode::Esc if !view.query.is_empty() => clear_query(app),
+        _ if crate::nav::closes(&key) && !view.query.is_empty() => clear_query(app),
         // The PR PICK's last Esc is the LINEAR VIEW's, not the panels'.
-        KeyCode::Esc if view.pick.is_some() => back_to_linear(app),
+        _ if crate::nav::closes(&key) && view.pick.is_some() => back_to_linear(app),
         // Opened over the DIFF VIEWER (`⌘U` there), it goes back to it.
-        KeyCode::Esc if view.from_diff.is_some() => back_to_diff(app),
-        KeyCode::Esc => close(app),
+        _ if crate::nav::closes(&key) && view.from_diff.is_some() => back_to_diff(app),
+        _ if crate::nav::closes(&key) => close(app),
         // Tab / ⇧Tab (a shifted Tab under the kitty protocol too): the
         // keys to the other panel.
         _ if keys::PANEL.matches(&key) => view.focus = view.focus.other(),
@@ -1445,18 +1564,21 @@ pub(crate) mod keys {
     pub const PROMPT: Key = Key::new(&["enter"], "prompt an agent");
     /// The keys to the other panel: the page from the list, the list from
     /// the page.
-    pub const PANEL: Key = Key::new(&["tab", "shift+tab"], "page");
+    pub const PANEL: Key = crate::nav::PANELS.doing("page");
     /// [`PANEL`] as the page names it: back to the list.
-    pub const BACK: Key = Key::new(&["shift+tab", "tab"], "list");
+    pub const BACK: Key = crate::nav::PREV_PANEL.doing("list");
     /// The page's own, with the keys on it.
-    pub const PAGE_TABS: Key = Key::new(&["left", "right"], "tabs").show(2);
-    pub const PAGE_ROWS: Key = Key::new(&["up", "down"], "pick").show(2);
+    pub const PAGE_TABS: Key = crate::nav::SIDEWAYS;
+    pub const PAGE_ROWS: Key = crate::nav::ROWS.doing("pick");
     pub const ACT: Key = Key::new(&["enter"], "open");
-    /// The grid's `y` (reply) as a chord.
+    /// The grid's `y` (reply) as a chord: a comment on the whole pull
+    /// request, at the foot of its Description.
     pub const COMMENT: Key = Key::new(&["cmd+y", "ctrl+y"], "comment");
+    /// The comment being written, posted.
+    pub const POST: Key = Key::new(&["enter"], "post");
     /// The grid's changes chord (`Action::GitDiff`), for the pull
-    /// request's.
-    pub const DIFF: Key = Key::new(&["cmd+e", "ctrl+e"], "diff");
+    /// request's: its DIFF VIEWER, the review in it (`pr_review::viewer`).
+    pub const DIFF: Key = Key::new(&["cmd+e", "ctrl+e"], "review changes");
     pub const BROWSER: Key = crate::hints::BROWSER;
     pub const REFRESH: Key = crate::hints::REFRESH;
     /// The reading pane, a page at a time.
@@ -1475,9 +1597,9 @@ pub(crate) mod keys {
     /// else binds, that Orion.app's Ghostty hands on (`ghostty_config`)
     /// and macOS keeps no command on.
     pub const EDIT: Key = Key::new(&["cmd+;", "ctrl+;"], "edit PR");
-    /// Review the pull request under the cursor: the PR REVIEW
-    /// (`pr_review`). ⌘R's letter, held with ⇧ — ⌘R itself is refresh
-    /// everywhere.
+    /// [`DIFF`] with the keys on the diff, ready to comment: ⌘R's letter,
+    /// held with ⇧ — the chord that submits the review once there. Not on
+    /// the footer, which names one way in.
     pub const REVIEW: Key = Key::new(&["cmd+shift+r", "ctrl+shift+r"], "review");
     /// Mark it ready for review, or a draft again.
     pub const READY: Key = Key::new(&["cmd+d", "ctrl+d"], "ready/draft");
@@ -1502,7 +1624,7 @@ pub(crate) mod keys {
     pub const JUMP: Key = crate::todos::view::keys::JUMP;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, DIFF, BROWSER, REFRESH, READ, NEW,
+        PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, POST, DIFF, BROWSER, REFRESH, READ, NEW,
         MERGE, EDIT, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, REOPEN, TABS, ROWS,
         FILTER, JUMP,
     ];
@@ -1528,10 +1650,20 @@ fn hints_on(view: &PullRequestsView, on_closed: bool) -> Vec<crate::hints::Hint>
     if view.filter_pick.is_some() {
         return crate::list_filter::hints();
     }
+    if view.comment.is_some() {
+        return vec![
+            keys::POST.hint().kept(),
+            crate::ui::task_keys::NEWLINE.hint(),
+            keys::READ.hint(),
+            Hint::new("Esc", "put away"),
+        ];
+    }
     let tab = view.tabs.tab;
+    // One way into the pull request's changes and its review, named for
+    // where it lands.
     let diff = match tab {
-        PrTab::Changes => keys::DIFF.hint_as("diff the file"),
-        PrTab::Commits => keys::DIFF.hint_as("diff the commit"),
+        PrTab::Changes => keys::DIFF.hint_as("review the file"),
+        PrTab::Commits => keys::DIFF.hint_as("review the commit"),
         _ => keys::DIFF.hint(),
     };
     let browser = if tab == PrTab::Checks {
@@ -1540,12 +1672,17 @@ fn hints_on(view: &PullRequestsView, on_closed: bool) -> Vec<crate::hints::Hint>
         keys::BROWSER.hint()
     };
     if view.focus == PrFocus::Page {
-        return vec![
+        let mut hints = vec![
             keys::ACT.hint_as(tab.act_does()).kept(),
             keys::PAGE_TABS.hint(),
             keys::PAGE_ROWS.hint_as(if tab.lists() { "pick" } else { "scroll" }),
             keys::BACK.hint(),
-            keys::REVIEW.hint(),
+        ];
+        // Enter already says it on a file or a commit.
+        if !matches!(tab, PrTab::Changes | PrTab::Commits) {
+            hints.push(diff);
+        }
+        hints.extend([
             keys::COMMENT.hint(),
             keys::MERGE.hint(),
             keys::EDIT.hint(),
@@ -1553,11 +1690,11 @@ fn hints_on(view: &PullRequestsView, on_closed: bool) -> Vec<crate::hints::Hint>
             keys::READY.hint(),
             keys::AUTOFIX.hint(),
             keys::CHECKOUT.hint(),
-            diff,
             browser,
             keys::READ.hint(),
             Hint::new("Esc", "list"),
-        ];
+        ]);
+        return hints;
     }
     // The PR PICK's Enter attaches, its `⌘L` has nowhere to go, and its
     // last Esc goes back to the LINEAR VIEW.
@@ -1580,6 +1717,8 @@ fn hints_on(view: &PullRequestsView, on_closed: bool) -> Vec<crate::hints::Hint>
         hints.push(keys::ROWS.hint());
     }
     hints.extend([
+        diff,
+        keys::COMMENT.hint(),
         keys::NEW.hint(),
         keys::MERGE.hint(),
         keys::EDIT.hint(),
@@ -1587,9 +1726,6 @@ fn hints_on(view: &PullRequestsView, on_closed: bool) -> Vec<crate::hints::Hint>
         keys::READY.hint(),
         keys::AUTOFIX.hint(),
         keys::CHECKOUT.hint(),
-        keys::REVIEW.hint(),
-        keys::COMMENT.hint(),
-        diff,
         browser,
         keys::READ.hint(),
     ]);
@@ -2078,11 +2214,23 @@ pub(crate) fn draw(
     let block = crate::ui::panel_block_spans(head, page_focused, th);
     let body_inner = block.inner(body_a);
     f.render_widget(block, body_a);
+    // `⌘Y`'s comment, at the foot of the page it is about.
+    let comment = view
+        .comment
+        .as_ref()
+        .filter(|c| current.is_some_and(|pr| pr.url == c.url));
+    let (page_a, comment_view) = match comment {
+        Some(comment) => {
+            let posting = app.pr_comment_inflight.contains(&comment.url);
+            let (page_a, at) = draw_comment(f, comment, body_inner, !backdrop, posting, th);
+            (page_a, Some(at))
+        }
+        None => (body_inner, None),
+    };
     let mut tabs = view.tabs.clone();
     let drawn = input.as_ref().map(|input| {
-        let page =
-            crate::pr_preview::page(input, &tabs, page_focused, body_inner.width as usize, th);
-        crate::pr_preview::draw(f, body_inner, &page, &mut tabs, view.scroll)
+        let page = crate::pr_preview::page(input, &tabs, page_focused, page_a.width as usize, th);
+        crate::pr_preview::draw(f, page_a, &page, &mut tabs, view.scroll)
     });
     // Where the body is read to, on the bottom border, once it scrolls.
     let (scroll, lines, body_h) = drawn.map_or((0, 0, 0), |d| (d.scroll, d.lines, d.body.height));
@@ -2132,6 +2280,10 @@ pub(crate) fn draw(
         v.view_height = body_h;
         v.body_lines = lines;
         v.tabs = tabs;
+        // ↑/↓ in the comment walk the rows it was drawn in.
+        if let (Some(comment), Some(at)) = (&mut v.comment, comment_view) {
+            comment.input.set_view(at);
+        }
         // A cursor the filter had to move (see `cursor_index`) is settled
         // onto its row, URL and all, so a refresh follows that one.
         if let Some(index) = cursor {
@@ -2145,9 +2297,65 @@ pub(crate) fn draw(
     }
 }
 
+/// The comment box along the foot of the page's `area`: a rule naming it,
+/// then the field as tall as what is typed, up to [`COMMENT_ROWS`]. The
+/// page's room over it, and the cells the field was laid out in.
+fn draw_comment(
+    f: &mut Frame,
+    comment: &CommentBox,
+    area: Rect,
+    focused: bool,
+    posting: bool,
+    th: Theme,
+) -> (Rect, crate::text_input::TextView) {
+    // Two cells in, as the page's prose is.
+    let field_w = area.width.saturating_sub(4).max(1);
+    let rows = comment
+        .input
+        .rows(usize::from(field_w))
+        .len()
+        .clamp(1, COMMENT_ROWS) as u16;
+    // A blank row over the rule, the rule, the field — and the page keeps
+    // a few rows of its own however much is typed.
+    let height = (rows + 2).min(area.height.saturating_sub(3));
+    let [page_a, box_a] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(height)]).areas(area);
+    let right = if posting {
+        vec![Span::styled(
+            "posting the last one…",
+            Style::default().fg(th.warn),
+        )]
+    } else {
+        vec![Span::styled(
+            "posts to the conversation",
+            Style::default().fg(th.dim),
+        )]
+    };
+    let name = format!("Your comment on {}", comment.label);
+    let color = if focused { th.accent } else { th.muted };
+    let rule = crate::ui::section_rule(&name, color, right, usize::from(box_a.width), th);
+    if let Some(rule_a) = row_rect(box_a, 1) {
+        f.render_widget(Paragraph::new(rule), rule_a);
+    }
+    let field = Rect {
+        x: box_a.x + 2,
+        y: box_a.y + 2.min(box_a.height),
+        width: field_w,
+        height: box_a.height.saturating_sub(2),
+    };
+    let at = if focused {
+        crate::ui::draw_multiline_input(f, &comment.input, field, th).0
+    } else {
+        crate::ui::draw_multiline_idle(f, &comment.input, field, "", th);
+        comment.input.view_for(field.width.max(1), field.height)
+    };
+    (page_a, at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::PromptKind;
     use crate::pull_request::{Checks, PrDetail, PrLaunch};
     use crate::quick_prompt::QuickTarget;
     use orion_core::WorktreeId;
@@ -2893,13 +3101,16 @@ mod tests {
         });
     }
 
-    /// `⌘⇧R` from the list — and Enter on the Reviews tab — opens the PR
-    /// REVIEW on the pull request under the cursor, a level inside the
-    /// modal, once its page is in: Esc comes back to the modal on its row.
+    /// `⌘⇧R` from the list — and Enter on the Reviews tab — opens the pull
+    /// request's DIFF VIEWER with its review in it, a level inside the
+    /// modal, once its page is in, the keys on the diff: Esc comes back to
+    /// the modal on its row. `⌘E` opens the very same viewer.
     #[test]
-    fn a_review_opens_in_orion_a_level_inside_the_modal() {
+    fn a_review_opens_in_the_diff_viewer_a_level_inside_the_modal() {
         pinned(|| {
+            let (repo, head) = crate::pr_review::tests::repo();
             let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
+            app.tree.projects[0].repo_path = repo.path().to_path_buf();
             open(&mut app);
             let mut out = Vec::new();
             let review = KeyEvent::new(
@@ -2912,18 +3123,22 @@ mod tests {
             assert!(flash.contains("#42 is still loading"), "{flash}");
 
             let mut page = detail(42, "Fix login");
-            page.head_sha = "abc123".into();
+            page.head_sha = head;
+            page.base = "main".into();
             app.pr_detail.insert(page.url.clone(), page);
             handle_key(&mut app, review, &mut out);
-            let Some(Overlay::Review(screen)) = &app.overlay else {
-                panic!("no review: {:?}", app.overlay);
+            let Some(Overlay::Diff(diff)) = &app.overlay else {
+                panic!("no viewer: {:?} {:?}", app.overlay, app.flash);
             };
+            let screen = diff.review.as_deref().expect("its review");
             assert_eq!(
                 (screen.number, screen.label.as_str()),
                 (42, "#42 Fix login")
             );
-            assert!(screen.back.is_some());
-            crate::pr_review::handle_key(&mut app, key(KeyCode::Esc));
+            assert!(diff.back.is_some());
+            assert!(diff.commits.is_some(), "its commits down the left");
+            assert_eq!(diff.focus, crate::app::DiffFocus::Diff);
+            crate::overlay_close::click_outside(&mut app, &mut out);
             assert_eq!(
                 view(&app).selected_url.as_deref(),
                 Some("https://github.com/o/r/pull/42")
@@ -2934,7 +3149,17 @@ mod tests {
                 v.tabs.switch(PrTab::Reviews);
             }
             handle_key(&mut app, key(KeyCode::Enter), &mut out);
-            assert!(matches!(app.overlay, Some(Overlay::Review(_))));
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Diff(d)) if d.review.is_some()),
+                "{:?}",
+                app.overlay
+            );
+            crate::overlay_close::click_outside(&mut app, &mut out);
+            handle_key(&mut app, cmd('e'), &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Diff(d)) if d.review.is_some()),
+                "⌘E: the same viewer, its review in it"
+            );
         });
     }
 
@@ -2965,10 +3190,12 @@ mod tests {
         assert!(flash.contains("#42 is ready for review"), "{flash}");
     }
 
-    /// `⌘Y` (`^Y` with no ⌘) opens the COMMENT BOX on the row, carrying the
-    /// modal; Esc puts the modal back on the same pull request.
+    /// `⌘Y` (`^Y` with no ⌘) puts the comment box at the foot of the
+    /// row's Description, the modal staying up on it; what is typed goes
+    /// into the box, not the filter, and Esc puts it away with the text
+    /// kept as the pull request's draft — which the next `⌘Y` starts from.
     #[test]
-    fn c_opens_the_comment_box_and_esc_comes_back_to_the_row() {
+    fn ctrl_y_writes_the_comment_on_the_description_and_esc_keeps_a_draft() {
         pinned(|| {
             let (mut app, _) = app_with(
                 vec![pr(42, "Fix login", false), pr(41, "Spike", true)],
@@ -2976,48 +3203,73 @@ mod tests {
             );
             open(&mut app);
             handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
+            handle_key(&mut app, shifted(KeyCode::Right), &mut Vec::new());
+            assert_eq!(view(&app).tabs.tab, PrTab::Changes);
             handle_key(&mut app, ctrl('y'), &mut Vec::new());
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("Ctrl+y: expected the comment box, got {:?}", app.overlay);
-            };
-            assert!(prompt.is_multiline());
-            assert_eq!(prompt.title, "Comment on #41 Spike");
-            let PromptKind::PrComment { number, back, .. } = &prompt.kind else {
-                panic!("{:?}", prompt.kind);
-            };
-            assert_eq!(*number, 41);
-            assert_eq!(back.as_ref().map(|v| v.selected), Some(1));
+            let v = view(&app);
+            let comment = v.comment.as_ref().expect("the comment box");
+            assert_eq!(comment.number, 41);
+            assert_eq!(comment.label, "#41 Spike");
+            assert_eq!(v.tabs.tab, PrTab::Description, "on the Description");
+            assert_eq!(v.focus, PrFocus::Page);
+            assert_eq!(v.selected, 1, "still on #41");
 
-            let mut out = Vec::new();
-            crate::event_loop::handle_overlay_key(&mut app, key(KeyCode::Esc), &mut out);
-            assert_eq!(view(&app).selected, 1, "back on #41");
+            for c in "lgtm".chars() {
+                handle_key(&mut app, key(KeyCode::Char(c)), &mut Vec::new());
+            }
+            let v = view(&app);
+            assert_eq!(v.comment.as_ref().unwrap().input.as_str(), "lgtm");
+            assert_eq!(v.query.as_str(), "", "not typed into the filter");
+            assert!(paste(&mut app, "!"));
+            assert_eq!(
+                view(&app).comment.as_ref().unwrap().input.as_str(),
+                "lgtm!"
+            );
+
+            handle_key(&mut app, key(KeyCode::Esc), &mut Vec::new());
+            assert!(view(&app).comment.is_none());
+            assert!(matches!(&app.overlay, Some(Overlay::PullRequests(_))));
+            let url = "https://github.com/o/r/pull/41";
+            assert_eq!(app.pr_comment_drafts.get(url).map(String::as_str), Some("lgtm!"));
+
+            handle_key(&mut app, cmd('y'), &mut Vec::new());
+            assert_eq!(
+                view(&app).comment.as_ref().unwrap().input.as_str(),
+                "lgtm!",
+                "⌘Y starts from the draft"
+            );
         });
     }
 
-    /// `⌘Y` is `^Y`: the grid's `y` (reply) as a chord, onto the same
-    /// COMMENT BOX for the same row.
+    /// The cursor leaving the pull request takes the comment down with it,
+    /// kept as that pull request's draft.
     #[test]
-    fn cmd_y_opens_the_comment_box_as_ctrl_y_does() {
+    fn moving_off_the_pull_request_keeps_its_comment_as_a_draft() {
         pinned(|| {
             let (mut app, _) = app_with(
                 vec![pr(42, "Fix login", false), pr(41, "Spike", true)],
                 true,
             );
             open(&mut app);
-            handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
             handle_key(&mut app, cmd('y'), &mut Vec::new());
-            let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("⌘Y: expected the comment box, got {:?}", app.overlay);
-            };
-            let PromptKind::PrComment { number, back, .. } = &prompt.kind else {
-                panic!("{:?}", prompt.kind);
-            };
-            assert_eq!(*number, 41);
-            assert_eq!(
-                back.as_ref().map(|v| v.query.as_str()),
-                Some(""),
-                "not typed into the filter"
-            );
+            handle_key(&mut app, key(KeyCode::Char('x')), &mut Vec::new());
+            select(&mut app, 1);
+            assert!(view(&app).comment.is_none());
+            let url = "https://github.com/o/r/pull/42";
+            assert_eq!(app.pr_comment_drafts.get(url).map(String::as_str), Some("x"));
+        });
+    }
+
+    /// The box's keys are its own: Enter posts, and Esc puts it away.
+    #[test]
+    fn the_comment_box_says_its_keys() {
+        pinned(|| {
+            let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
+            open(&mut app);
+            handle_key(&mut app, cmd('y'), &mut Vec::new());
+            let said: Vec<String> = hints(view(&app)).iter().map(|h| h.does.clone()).collect();
+            assert_eq!(said.first().map(String::as_str), Some("post"), "{said:?}");
+            assert!(said.iter().any(|d| d == "put away"), "{said:?}");
         });
     }
 
@@ -3211,7 +3463,7 @@ mod tests {
         assert!(row.contains("│▌ M  src/login.rs"), "{shot}");
         assert!(row.contains(" +2 −1 │"), "{row:?}");
         assert!(
-            hints(view(&app)).iter().any(|h| h.does == "diff the file"),
+            hints(view(&app)).iter().any(|h| h.does == "review the file"),
             "{shot}"
         );
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);

@@ -19,6 +19,8 @@ mod launcher_view;
 pub(crate) use launcher_view::{chip, session_chip, session_line, CHIP_W};
 
 pub(crate) use diff_view::diff_keys;
+#[cfg(test)]
+pub(crate) use diff_view::diff_hints;
 use footer::draw_footer;
 
 /// Outer size of the editor modal, as (width, height) percent of the frame.
@@ -74,7 +76,7 @@ pub(crate) mod task_keys {
     /// open (`clipboard_image`) — in a box bound for an agent on this
     /// machine only. `^V`, not ⌘V: Ghostty keeps ⌘V, its text paste.
     pub const IMAGE: Key = Key::new(&["ctrl+v"], "paste image");
-    pub const CANCEL: Key = Key::new(&["esc"], "cancel");
+    pub const CANCEL: Key = crate::nav::CLOSE.doing("cancel");
 
     #[cfg(test)]
     #[test]
@@ -341,7 +343,7 @@ pub(crate) mod install_keys {
     use crate::hints::Key;
 
     pub const STOP: Key = Key::new(&["ctrl+q"], "stop");
-    pub const CLOSE: Key = Key::new(&["enter", "esc", "q", "ctrl+q"], "close");
+    pub const CLOSE: Key = Key::new(&["enter", "q", "ctrl+q"], "close").also(crate::nav::CLOSE.chords);
 }
 
 /// The editor modal's bottom-border keys, for the editor it runs: its
@@ -549,7 +551,7 @@ pub(crate) mod prompt_keys {
     use crate::hints::Key;
 
     pub const OK: Key = Key::new(&["enter"], "ok");
-    pub const CANCEL: Key = Key::new(&["esc"], "cancel");
+    pub const CANCEL: Key = crate::nav::CLOSE.doing("cancel");
     /// The path prompt's listing: pick a directory, dive in, climb out,
     /// complete the typed partial.
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
@@ -594,7 +596,7 @@ pub(crate) mod confirm_keys {
     pub const NO: Key = Key::new(&["n"], "no");
     /// A removed account's config dir to the Trash as well.
     pub const TRASH: Key = Key::new(&["t"], "dir to the Trash too");
-    pub const CANCEL: Key = Key::new(&["esc", "n"], "cancel");
+    pub const CANCEL: Key = crate::nav::CLOSE.doing("cancel").also(&["n"]);
 
     #[cfg(test)]
     #[test]
@@ -2253,7 +2255,6 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Autofix(form) => crate::autofix::draw(f, app, &form, th),
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
-        Overlay::Review(view) => crate::pr_review::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
         Overlay::OpenRepo(view) => crate::open_repo::draw(f, app, &view, th),
@@ -2793,7 +2794,7 @@ pub(crate) mod hosts_keys {
     pub const CONNECT: Key = Key::new(&["enter"], "connect");
     pub const NEW: Key = Key::new(&["a", "n"], "new host");
     pub const REMOVE: Key = Key::new(&["d", "x", "backspace", "delete"], "remove");
-    pub const CANCEL: Key = Key::new(&["esc"], "cancel");
+    pub const CANCEL: Key = crate::nav::CLOSE.doing("cancel");
 }
 
 /// The SETTINGS OVERLAY's keys: one table its key handler
@@ -2802,7 +2803,7 @@ pub(crate) mod hosts_keys {
 pub(crate) mod settings_keys {
     use crate::hints::Key;
 
-    pub const CLOSE: Key = Key::new(&["esc", "q", "s"], "close");
+    pub const CLOSE: Key = crate::nav::CLOSE.also(&["q", "s"]);
     pub const NEXT_TAB: Key = Key::new(&["tab", "]"], "next tab");
     pub const PREV_TAB: Key = Key::new(&["shift+tab", "["], "previous tab");
     /// Enter on a row: toggle it, cycle it, type it.

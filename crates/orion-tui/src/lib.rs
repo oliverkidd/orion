@@ -54,6 +54,7 @@ pub(crate) mod list_hit;
 pub mod markdown;
 pub mod markdown_view;
 pub mod mention;
+pub mod nav;
 pub mod onboard;
 pub mod outside_editor;
 pub mod overlay_close;

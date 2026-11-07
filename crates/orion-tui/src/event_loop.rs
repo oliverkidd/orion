@@ -2350,13 +2350,9 @@ fn open_pr_comment(app: &mut App) {
     );
 }
 
-/// Enter in the COMMENT BOX: post `body` on pull request `number` off the
-/// loop, as the `gh` user, from the selected project's checkout — `gh pr
-/// comment` resolves the number from any checkout of the repo, as the
-/// detail fetch does. The outcome lands in `land_pr_comment`. A post that
-/// cannot even start — one already running on this pull request, no
-/// checkout on disk (which the footer names) — hands the box straight
-/// back with its text. A box that stood in for the PULL REQUESTS
+/// Enter in the COMMENT BOX: post `body` on pull request `number`
+/// ([`start_pr_comment`]). A post that cannot even start hands the box
+/// straight back with its text. A box that stood in for the PULL REQUESTS
 /// MODAL (`back`) puts the modal back on its row as the post goes out.
 fn post_pr_comment(
     app: &mut App,
@@ -2366,19 +2362,10 @@ fn post_pr_comment(
     body: String,
     back: Option<Box<crate::pr_modal::PullRequestsView>>,
 ) {
-    let dir = app.selected_project().map(|p| p.repo_path.clone());
-    let busy = app.pr_comment_inflight.contains(&url);
-    let missing = dir.as_ref().filter(|dir| !dir.is_dir());
-    // The loop installs the channel at startup, so a post without one is
-    // never in the running TUI: handing the box back beats losing the text.
-    let refused = busy || dir.is_none() || missing.is_some() || app.pr_comment_tx.is_none();
-    if refused {
-        if let Some(dir) = missing.filter(|_| !busy) {
-            app.flash = Some(crate::flash::Flash::failed(format!(
-                "repo path missing on disk: {}",
-                dir.display()
-            )));
-        }
+    if let Some(view) = &back {
+        crate::pr_modal::reopen(app, (**view).clone());
+    }
+    if let Err(body) = start_pr_comment(app, number, url.clone(), label.clone(), body) {
         reopen_prompt_with(
             app,
             PromptKind::PrComment {
@@ -2390,13 +2377,38 @@ fn post_pr_comment(
             body,
         );
         app.dirty = true;
-        return;
     }
-    if let Some(view) = back {
-        crate::pr_modal::reopen(app, *view);
+}
+
+/// Post `body` on pull request `number` off the loop, as the `gh` user,
+/// from the selected project's checkout — `gh pr comment` resolves the
+/// number from any checkout of the repo, as the detail fetch does. The
+/// outcome lands in `land_pr_comment`. The COMMENT BOX's post and the
+/// PULL REQUESTS MODAL's (`pr_modal::CommentBox`). A post that cannot even
+/// start — one already running on this pull request, no checkout on disk
+/// (which the footer names) — hands `body` back.
+pub(crate) fn start_pr_comment(
+    app: &mut App,
+    number: u64,
+    url: String,
+    label: String,
+    body: String,
+) -> Result<(), String> {
+    let dir = app.selected_project().map(|p| p.repo_path.clone());
+    let busy = app.pr_comment_inflight.contains(&url);
+    let missing = dir.as_ref().filter(|dir| !dir.is_dir());
+    if let Some(dir) = missing.filter(|_| !busy) {
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "repo path missing on disk: {}",
+            dir.display()
+        )));
     }
-    let (Some(dir), Some(tx)) = (dir, app.pr_comment_tx.clone()) else {
-        return;
+    // The loop installs the channel at startup, so a post without one is
+    // never in the running TUI: handing the text back beats losing it.
+    let (Some(dir), Some(tx), false, None) =
+        (dir.clone(), app.pr_comment_tx.clone(), busy, missing)
+    else {
+        return Err(body);
     };
     app.pr_comment_inflight.insert(url.clone());
     app.dirty = true;
@@ -2410,6 +2422,7 @@ fn post_pr_comment(
             result,
         });
     });
+    Ok(())
 }
 
 /// A `gh pr comment` landed. Posted: read the pull request again so the
@@ -2444,9 +2457,17 @@ fn land_pr_comment(app: &mut App, answer: PrCommentAnswer) {
             app.flash = Some(crate::flash::Flash::failed(format!(
                 "couldn't post the comment on #{number}: {why}"
             )));
+            // The PULL REQUESTS MODAL still on it: back into its box, at
+            // the foot of the Description.
+            if crate::pr_modal::selected_pr(app).is_some_and(|pr| pr.url == url) {
+                if let Some(Overlay::PullRequests(view)) = &mut app.overlay {
+                    crate::pr_modal::open_comment_box(view, number, url, label, body);
+                    app.dirty = true;
+                    return;
+                }
+            }
             let back = match &app.overlay {
                 None => Some(None),
-                Some(Overlay::PullRequests(view)) => Some(Some(Box::new(view.clone()))),
                 Some(_) => None,
             };
             match back {
@@ -2490,6 +2511,9 @@ pub(crate) fn request_pr_diff_for(app: &mut App, number: u64, url: String, title
 pub enum PrReviewAt {
     /// Its first file.
     Top,
+    /// Its first file, the keys on the diff to review it — `⌘⇧R`, and
+    /// Enter on the Reviews tab.
+    Review,
     /// One of its files, by path — the top when the diff has no such file.
     File(String),
     /// One of its commits, by sha.
@@ -2605,6 +2629,12 @@ fn open_local_pr_review(app: &mut App, review: &PrReview) -> Result<(), crate::f
     }
     view.pr_review = Some(review.clone());
     dress_viewer(app, &mut view, true);
+    if review.at == PrReviewAt::Review {
+        view.focus = crate::app::DiffFocus::Diff;
+    }
+    // Its review, in the same viewer: the threads under their lines and
+    // the bar along the bottom (`pr_review::viewer`).
+    crate::pr_review::attach(app, &mut view, number, &review.url, &review.title, &dir);
     app.overlay = Some(Overlay::Diff(view));
     app.dirty = true;
     let quit = std::sync::Arc::clone(&app.git_sync.quit);
@@ -3381,8 +3411,10 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         crate::week_review::paste(app, text);
         return true;
     }
-    if matches!(&app.overlay, Some(Overlay::Review(_))) {
-        return crate::pr_review::paste(app, text);
+    // A pull request's review: the comment being written, the summary.
+    if matches!(&app.overlay, Some(Overlay::Diff(_))) && crate::pr_review::viewer::paste(app, text)
+    {
+        return true;
     }
     let Some(overlay) = &mut app.overlay else {
         return false;
@@ -3577,13 +3609,13 @@ fn follow_up_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) -> 
     if !crate::key_combo::is_text_key(&chord) {
         let does = match key.code {
             KeyCode::Enter => Some("Send the follow-up"),
-            KeyCode::Esc => Some("Close the follow-up"),
+            _ if crate::nav::closes(&key) => Some("Close the follow-up"),
             _ => None,
         };
         crate::key_combo::note(app, &[chord], does);
     }
     match key.code {
-        KeyCode::Esc => {
+        _ if crate::nav::closes(&key) => {
             app.follow_up = None;
             app.dirty = true;
         }
@@ -3716,12 +3748,6 @@ pub(crate) fn run_action(app: &mut App, action: crate::keymap::Action) -> Vec<Cl
     out
 }
 
-/// The bare Esc chord.
-const ESC: crate::keymap::KeyChord = crate::keymap::KeyChord {
-    code: KeyCode::Esc,
-    mods: KeyModifiers::NONE,
-};
-
 /// The overlays Esc closes outright rather than one stage at a time:
 /// lists and viewers, where nothing typed is lost with them. A list that
 /// has a form open on it — the hosts picker's new-host row — backs that
@@ -3729,9 +3755,10 @@ const ESC: crate::keymap::KeyChord = crate::keymap::KeyChord {
 fn closes_on_esc(overlay: &Overlay) -> bool {
     match overlay {
         Overlay::Hosts(view) => view.input.is_none(),
+        // A pull request's review keeps Esc while it is writing.
+        Overlay::Diff(view) => !crate::pr_review::viewer::takes_esc(view),
         Overlay::Menu(_)
         | Overlay::Help(_)
-        | Overlay::Diff(_)
         | Overlay::Palette(_)
         | Overlay::Files(_)
         | Overlay::Grep(_)
@@ -3797,7 +3824,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         // submenu and all — the way a click outside it does, which still
         // hands back what a QUICK PROMPT's picker owes it. A box with
         // typed work in it keeps its own Esc.
-        if chord == ESC && app.overlay.as_ref().is_some_and(closes_on_esc) {
+        if crate::nav::closes(&key) && app.overlay.as_ref().is_some_and(closes_on_esc) {
             crate::key_combo::note(app, &[chord], Some("Close"));
             crate::overlay_close::click_outside(app, out);
             return;
@@ -3974,7 +4001,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         // Exited session: there is nothing to type into, so don't swallow
         // keys. Esc/Enter/q go back to the session list; everything else
         // falls through to panel navigation.
-        if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+        if crate::nav::closes(&key) || matches!(key.code, KeyCode::Enter | KeyCode::Char('q')) {
             crate::key_combo::note(app, &[chord], Some("Back to sessions"));
             leave_terminal_lock(app);
             return;
@@ -4050,7 +4077,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // (`launcher::escape`). Esc is the modal grammar's key and bound to no
     // action, so the lookup above found nothing and the `else` below would
     // drop it.
-    if action.is_none() && app.launcher_grid() && key.code == KeyCode::Esc {
+    if action.is_none() && app.launcher_grid() && crate::nav::closes(&key) {
         if app.launcher_tab_cursor.is_some() {
             crate::key_combo::note(app, &[chord], Some("Back to the grid"));
         } else if app.show_archived {
@@ -4885,7 +4912,7 @@ fn home_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         open_upgrade(app);
         return;
     }
-    if key.code == KeyCode::Esc
+    if crate::nav::closes(&key)
         || matches!(
             action,
             Some(
@@ -7651,6 +7678,13 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         app.dirty = true;
         return;
     }
+    // A pull request's review first: a comment being written, the bar,
+    // and the reading pane while it has it (`pr_review::viewer`).
+    if matches!(&app.overlay, Some(Overlay::Diff(_)))
+        && crate::pr_review::viewer::handle_key(app, &key)
+    {
+        return;
+    }
     if matches!(&app.overlay, Some(Overlay::Diff(_)))
         && crate::diff_actions::handle_key(app, &key, out)
     {
@@ -7662,10 +7696,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
     match overlay {
         Overlay::Settings(_) | Overlay::FileTabs(_) => {}
         Overlay::Help(_) => {
-            if matches!(
-                key.code,
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
-            ) {
+            if crate::nav::closes(&key)
+                || matches!(key.code, KeyCode::Char('q') | KeyCode::Char('?'))
+            {
                 app.overlay = None;
             }
         }
@@ -7673,7 +7706,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             // Typing a new destination (`a`): the input owns printable keys.
             if let Some(input) = &mut view.input {
                 match key.code {
-                    KeyCode::Esc => view.input = None,
+                    _ if crate::nav::closes(&key) => view.input = None,
                     KeyCode::Enter => {
                         let entry = crate::hosts::parse_destination(input);
                         view.input = None;
@@ -7692,7 +7725,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 return;
             }
             match key.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') => app.overlay = None,
+                _ if crate::nav::closes(&key) => app.overlay = None,
+                KeyCode::Char('q') | KeyCode::Char('h') => app.overlay = None,
                 KeyCode::Char('j') | KeyCode::Down => {
                     view.selected = clamp_selection(view.selected as i64 + (1), view.hosts.len());
                 }
@@ -7730,7 +7764,6 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
-        Overlay::Review(_) => crate::pr_review::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
         Overlay::OpenRepo(_) => crate::open_repo::handle_key(app, key, out),
@@ -7792,7 +7825,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
             _ => {}
         },
         Overlay::Prompt(prompt) => match key.code {
-            KeyCode::Esc => {
+            _ if crate::nav::closes(&key) => {
                 // A typed setting's prompt stood in for the overlay: Esc
                 // keeps the old value and puts the overlay back on its row.
                 let back_to_settings = matches!(
@@ -8037,8 +8070,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     activate::diff_tick_all(view)
                 }
                 // Tab / ⇧Tab walk the panels: commits, files, diff.
-                KeyCode::Tab => activate::diff_focus_next(view, true),
-                KeyCode::BackTab => activate::diff_focus_next(view, false),
+                _ if crate::nav::panel(&key).is_some() => {
+                    activate::diff_focus_next(view, crate::nav::panel(&key) == Some(true))
+                }
                 // ⇧←/⇧→ step the cursor's commit older / newer from wherever
                 // the keys are, with nothing ticked — beside the ⇧↑/⇧↓ that
                 // scroll the diff.
@@ -8060,13 +8094,14 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
                 KeyCode::Enter if on(DiffFocus::Commits) => activate::diff_commit_chosen(view),
                 // The diff with the keys: ↑/↓ scroll it a row, Space a
-                // page, ← goes back to the files.
+                // page. The arrows stay inside it: Tab / ⇧Tab are the
+                // way to another panel.
                 KeyCode::Down if on(DiffFocus::Diff) => view.scroll_by(1),
                 KeyCode::Up if on(DiffFocus::Diff) => view.scroll_by(-1),
                 KeyCode::Char(' ') if on(DiffFocus::Diff) && key.modifiers.is_empty() => {
                     view.scroll_by(view.page())
                 }
-                KeyCode::Left if on(DiffFocus::Diff) => view.focus = DiffFocus::Files,
+                KeyCode::Left | KeyCode::Right if on(DiffFocus::Diff) => {}
                 // The files: ↑/↓ walk them; Enter reads the file's diff,
                 // or folds a tree directory.
                 KeyCode::Down => activate::diff_file(view, view.cursor() as i64 + 1),
@@ -11523,6 +11558,13 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     // second one hands the keys to its diff; a click in the diff gives it
     // the keys; a drag on the column/diff border resizes the left column.
     // Everything else is swallowed.
+    // A pull request's review has the bar, and the reading pane while
+    // the whole pull request is on it.
+    if matches!(&app.overlay, Some(Overlay::Diff(_)))
+        && crate::pr_review::viewer::handle_mouse(app, mouse)
+    {
+        return;
+    }
     if let Some(Overlay::Diff(view)) = &mut app.overlay {
         use crate::app::DiffFocus;
         let over_commits = view
@@ -11813,10 +11855,6 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::Conflicts(_))) {
         crate::conflicts::handle_mouse(app, mouse);
-        return;
-    }
-    if matches!(&app.overlay, Some(Overlay::Review(_))) {
-        crate::pr_review::handle_mouse(app, mouse);
         return;
     }
     // Hosts picker: the wheel moves the selection, a click on a row connects
@@ -16365,6 +16403,40 @@ mod tests {
     /// next box when another modal is up; a success says so and re-reads
     /// the pull request so the pane shows the comment, the reader's place
     /// kept. An empty box is a change of mind.
+    /// A comment posted from the PULL REQUESTS MODAL that GitHub refuses
+    /// comes back into the modal's own box, on the pull request's
+    /// Description, with the text — the modal is never swapped for a box.
+    #[test]
+    fn a_refused_comment_from_the_modal_comes_back_into_its_box() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_open_prs(&mut app, &[(7, "Attach links")]);
+        app.focus = Focus::Worktrees;
+        app.set_sel_worktree(1);
+        crate::pr_modal::open(&mut app);
+        assert!(matches!(&app.overlay, Some(Overlay::PullRequests(_))));
+        land_pr_comment(
+            &mut app,
+            PrCommentAnswer {
+                number: 7,
+                url: pr_url(7),
+                label: "#7 Attach links".into(),
+                body: "Looks good".into(),
+                result: Err("not logged in".into()),
+            },
+        );
+        let Some(Overlay::PullRequests(view)) = &app.overlay else {
+            panic!("expected the modal, got {:?}", app.overlay);
+        };
+        let comment = view.comment.as_ref().expect("the box back");
+        assert_eq!(comment.input.as_str(), "Looks good");
+        assert_eq!(view.tabs.tab, crate::pr_preview::PrTab::Description);
+        assert_eq!(
+            app.flash.as_deref(),
+            Some("couldn't post the comment on #7: not logged in")
+        );
+    }
+
     #[test]
     fn the_comment_box_posts_on_enter_and_never_loses_the_text() {
         let mut app = App::new();
@@ -24769,9 +24841,9 @@ mod tests {
 
     /// `Tab` walks the panels in reading order — the commits, the files,
     /// the diff — and `↑`/`↓` are the panel's that has the keys: the files
-    /// walk, the diff scrolls. `Enter` on a file hands its diff the keys,
-    /// `←` hands them back. Ctrl+D and Ctrl+U are the filter's line
-    /// editor's, not a vim half-page.
+    /// walk, the diff scrolls. `Enter` on a file hands its diff the keys;
+    /// `←`/`→` there stay in the diff — only `Tab` / `⇧Tab` cross. Ctrl+D
+    /// and Ctrl+U are the filter's line editor's, not a vim half-page.
     #[test]
     fn tab_walks_the_panels_and_the_arrows_follow_the_keys() {
         use crate::app::DiffFocus;
@@ -24791,8 +24863,12 @@ mod tests {
         assert_eq!(state(&app), (DiffFocus::Diff, 0, 2), "the diff scrolls");
         press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
         assert_eq!(state(&app).2, 21, "Space pages it");
-        press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
-        assert_eq!(state(&app).0, DiffFocus::Files, "← back to the files");
+        for arrow in [KeyCode::Left, KeyCode::Right] {
+            press(&mut app, arrow, KeyModifiers::NONE, &mut out);
+            assert_eq!(state(&app).0, DiffFocus::Diff, "{arrow:?} stays in the diff");
+        }
+        press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
+        assert_eq!(state(&app).0, DiffFocus::Files, "⇧Tab back to the files");
         press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
         assert_eq!(state(&app).1, 1, "the files walk");
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
@@ -36663,22 +36739,6 @@ mod tests {
                 None,
             ),
             (
-                "Review",
-                |app| {
-                    seed_tree(app);
-                    app.overlay = Some(Overlay::Review(Box::new(
-                        crate::pr_review::ReviewScreen::new(
-                            "https://github.com/o/r/pull/7".into(),
-                            7,
-                            "#7 Add things".into(),
-                            "/nonexistent".into(),
-                            false,
-                        ),
-                    )));
-                },
-                None,
-            ),
-            (
                 "Hosts",
                 |app| {
                     app.overlay = Some(Overlay::Hosts(crate::app::HostsView::new(vec![
@@ -36947,7 +37007,6 @@ mod tests {
             Overlay::Autofix(_) => "Autofix",
             Overlay::WeekReview(_) => "WeekReview",
             Overlay::Conflicts(_) => "Conflicts",
-            Overlay::Review(_) => "Review",
             Overlay::Todos(_) => "Todos",
         }
     }
@@ -36977,7 +37036,7 @@ mod tests {
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 24, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 23, "a variant came or went: {seen:?}");
         });
     }
 
@@ -37801,10 +37860,11 @@ mod tests {
     }
 
     /// A tab per open project, in the projects' order, each with what is
-    /// open in it: `⇧←`/`⇧→` walk them round the ends — `Tab` too, and
-    /// `⌘2` goes straight to the second — each project's tab coming back
-    /// as it was left: its cursor, its filter. Plain `→` is the DONE
-    /// panel's, which stays as it is from tab to tab.
+    /// open in it: `←`/`→` walk them round the ends — `⇧←`/`⇧→` too, the
+    /// filter's caret taking the plain ones while it is up — and `⌘2`
+    /// goes straight to the second, each project's tab coming back as it
+    /// was left: its cursor, its filter. `Tab` is the DONE panel's way in,
+    /// and the panel stays as it is from tab to tab.
     #[test]
     fn arrows_walk_a_tab_per_project() {
         use crate::todos::view::Entry;
@@ -37828,16 +37888,25 @@ mod tests {
             assert!(text.contains("nightshift"), "{text}");
             assert!(!text.contains("Log"), "no Today/Log tabs: {text}");
 
-            // ⇧→ the moment the modal is up, and back.
+            // → the moment the modal is up, and back; ⇧→ the same.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            assert_eq!(todo_view(&app).project.0, "p2");
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            assert_eq!(todo_view(&app).project.0, "p1");
             press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
             assert_eq!(todo_view(&app).project.0, "p2");
             press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
             assert_eq!(todo_view(&app).project.0, "p1");
-            // Plain → puts the keys on the DONE panel; ← hands them back.
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            // Tab puts the keys on the DONE panel, where ←/→ are its
+            // spans' and never cross back; Tab hands them back.
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             assert_eq!(todo_view(&app).project.0, "p1");
             assert!(todo_view(&app).done.focused);
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            assert!(todo_view(&app).done.focused, "← stays on the panel");
+            assert_eq!(todo_view(&app).project.0, "p1");
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             assert!(!todo_view(&app).done.focused);
 
             // Left on an item with a filter typed: ←/→ are the filter's
@@ -37863,8 +37932,8 @@ mod tests {
             let text = buffer_text(&draw_todos(&mut app));
             assert!(!text.contains("setup resend"), "{text}");
 
-            // Tab, round the end and back on demo, as it was left.
-            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            // →, round the end and back on demo, as it was left.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             let view = todo_view(&app);
             assert_eq!(view.project.0, "p1");
             assert_eq!(view.query.trim(), "r");
@@ -37987,10 +38056,10 @@ mod tests {
             );
             assert!(buffer_text(&terminal).contains("Tue"), "when it was ticked");
 
-            // `→` into the panel; `Tab` to today, the time it was ticked;
-            // `space` puts it back; `←` back to the list.
-            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Tab, KeyModifiers::SHIFT, &mut out);
+            // `Tab` into the panel; `←` to today, the time it was ticked;
+            // `space` puts it back; `⇧Tab` back to the list.
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
             let text = buffer_text(&draw_todos(&mut app));
             assert!(text.contains("✓1 today"), "{text}");
             assert!(text.contains("10:00"), "when: {text}");
@@ -37998,7 +38067,7 @@ mod tests {
             assert!(todo_file(&app).items.iter().all(|i| i.done.is_none()));
             let text = buffer_text(&draw_todos(&mut app));
             assert!(text.contains("nothing ticked today yet"), "{text}");
-            press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
             assert!(!todo_view(&app).done.focused);
             assert_eq!(order(&app), ["run plan", "setup resend"]);
         });
@@ -38691,7 +38760,7 @@ mod tests {
 
     /// `Enter` on a todo opens the QUICK PROMPT over the TODOS MODAL, the
     /// item's text and group in the box and the launch carrying the todo;
-    /// `⇧Tab` is the AGENT PRESETS for it.
+    /// the box's own `⌘U` is the AGENT PRESETS for it.
     #[test]
     fn enter_on_a_todo_opens_the_box_over_the_modal() {
         with_seeded_presets(|| {
@@ -38725,15 +38794,22 @@ mod tests {
                     None,
                 );
                 assert_eq!(draft.todo.map(|t| t.item), Some(id));
-                // Esc goes back to the modal.
-                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-                todo_view(&app);
-
-                press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
+                // ⌘U in the box: the presets.
+                press(&mut app, KeyCode::Char('u'), KeyModifiers::SUPER, &mut out);
                 assert!(
                     matches!(app.overlay, Some(Overlay::AgentPresets(_))),
                     "the presets"
                 );
+                // Back out, and Esc goes back to the modal, where ⇧Tab is
+                // the DONE panel's way in, as Tab is.
+                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+                if matches!(app.overlay, Some(Overlay::Prompt(_))) {
+                    press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+                }
+                todo_view(&app);
+                draw_todos(&mut app);
+                press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT, &mut out);
+                assert!(todo_view(&app).done.focused, "⇧Tab: the DONE panel");
             });
         });
     }

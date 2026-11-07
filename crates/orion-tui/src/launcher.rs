@@ -454,7 +454,7 @@ pub mod pane_keys {
     /// The top and the bottom.
     pub const ENDS: Key = Key::new(&["home", "end"], "top/end").show(2);
     /// Back to the card the pane reads.
-    pub const BACK: Key = Key::new(&["esc"], "back to the grid");
+    pub const BACK: Key = crate::nav::CLOSE.doing("back to the grid");
     /// In a LOCKED PANE, the agent's own Esc: the plain key leaves the
     /// pane, so the shifted one goes down the PTY as a bare Esc.
     pub const AGENT_ESC: Key = Key::new(&["shift+esc"], "Esc to the agent");

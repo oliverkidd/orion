@@ -1826,7 +1826,7 @@ pub(crate) mod keys {
     pub const COMMIT: Key = Key::new(&["cmd+s", "ctrl+s"], "commit & push");
     pub const ABORT: Key = Key::new(&["cmd+w", "ctrl+w"], "abort merge");
     pub const OUTSIDE: Key = crate::hints::IN_CURSOR;
-    pub const BACK: Key = Key::new(&["esc"], "back");
+    pub const BACK: Key = crate::nav::CLOSE.doing("back");
 
     #[cfg(test)]
     pub const ALL: &[Key] = &[

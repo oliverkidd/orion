@@ -303,6 +303,13 @@ fn edit_at_line(app: &mut App) {
     let Some((path, line)) = view.file_at_line() else {
         return;
     };
+    edit_at(app, path, line);
+}
+
+/// The viewer's file `path` in the BUILT-IN EDITOR at `line`, in the
+/// checkout it reads ([`viewer_checkout`]) — [`edit_at_line`]'s, and a pull
+/// request's review's at the line under its cursor (`pr_review::viewer`).
+pub(crate) fn edit_at(app: &mut App, path: String, line: u64) {
     let Some(root) = viewer_checkout(app) else {
         return;
     };

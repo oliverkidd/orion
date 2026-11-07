@@ -54,14 +54,12 @@ pub(crate) mod diff_keys {
     /// Older / newer: the cursor's commit, with nothing ticked.
     pub const STEP: Key = Key::new(&["shift+left", "shift+right"], "commit").show(2);
     /// The next panel, or the one before.
-    pub const PANEL: Key = Key::new(&["tab", "shift+tab"], "files");
+    pub const PANEL: Key = crate::nav::PANELS.doing("files");
     /// The commits: on to the files. A file: read its diff.
     pub const OPEN: Key = Key::new(&["enter"], "files");
     /// The diff's own scroll, with the keys on it.
-    pub const LINES: Key = Key::new(&["up", "down"], "scroll").show(2);
+    pub const LINES: Key = crate::nav::ROWS.doing("scroll");
     pub const PAGE: Key = Key::new(&["pgup", "pgdn", "space"], "page").show(2);
-    /// The diff with the keys: back to the files.
-    pub const BACK: Key = Key::new(&["left"], "files");
     /// The diff with the keys: its file in the BUILT-IN EDITOR, at the line
     /// at the top of the diff (`diff_actions`).
     pub const EDIT: Key = Key::new(&["enter"], "edit");
@@ -70,7 +68,7 @@ pub(crate) mod diff_keys {
     pub const REVIEWED: Key = Key::new(&["cmd+r", "ctrl+r"], "reviewed");
     /// The grid's file tree chord (`Action::TreeBrowser`).
     pub const TREE: Key = Key::new(&["cmd+b", "ctrl+b"], "tree");
-    pub const FOLD: Key = Key::new(&["left", "right"], "fold").show(2);
+    pub const FOLD: Key = crate::nav::SIDEWAYS.doing("fold");
     /// The pull-requests key everywhere (`Action::PullRequests`): here, the
     /// modal on this branch's pull request, Esc coming back
     /// (`diff_actions`).
@@ -86,7 +84,6 @@ pub(crate) mod diff_keys {
         OPEN,
         LINES,
         PAGE,
-        BACK,
         EDIT,
         SCROLL,
         REVIEWED,
@@ -102,13 +99,18 @@ pub(crate) mod diff_keys {
 /// what the COMMIT LIST holds: `⇧←/⇧→ commit` while nothing is ticked.
 pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
     use diff_keys::*;
+    // A pull request's review, where it has the keys.
+    if let Some(hints) = crate::pr_review::viewer::hints(view) {
+        return hints;
+    }
     let list = view.commits.as_ref();
     let step = list.filter(|l| l.ticked.is_empty()).map(|_| STEP.hint());
-    let next = PANEL.hint_as(match view.next_focus(true) {
-        DiffFocus::Commits => "commits",
-        DiffFocus::Files => "files",
-        DiffFocus::Diff => "diff",
-    });
+    let next = PANEL.hint_as(crate::pr_review::viewer::panel_name(view.next_focus(true)));
+    // A pull request's review goes from any panel.
+    let submit = view
+        .review
+        .as_ref()
+        .map(|_| crate::pr_review::keys::SUBMIT.hint());
     let mut hints = Vec::new();
     match view.focus {
         DiffFocus::Commits => {
@@ -117,6 +119,7 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             hints.push(ALL.hint_as(if all { "none" } else { "all" }));
             hints.extend(step);
             hints.push(next);
+            hints.extend(submit.clone());
         }
         DiffFocus::Files => {
             if view.selected_dir().is_some() {
@@ -148,14 +151,14 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             }
             hints.push(crate::hints::in_app_hint());
         }
-        DiffFocus::Diff => {
+        // The bar is the review's, and says its own keys.
+        DiffFocus::Diff | DiffFocus::Bar => {
             hints.push(LINES.hint().kept());
             hints.push(PAGE.hint());
             if view.file_at_line().is_some() {
                 hints.push(EDIT.hint().kept());
             }
             hints.extend(step);
-            hints.push(BACK.hint());
             hints.push(next);
             hints.push(REVIEWED.hint());
             hints.push(PULLS.hint());
@@ -164,6 +167,10 @@ pub(crate) fn diff_hints(view: &DiffView) -> Vec<crate::hints::Hint> {
             }
             hints.push(crate::hints::in_app_hint());
         }
+    }
+    // Last, so a narrow footer lets it go first: the bar says it too.
+    if !matches!(view.focus, DiffFocus::Commits) {
+        hints.extend(submit);
     }
     hints.push(match view.back {
         Some(_) => crate::hints::ESC_CLOSE.hint_as("back to the pull request"),
@@ -184,6 +191,29 @@ fn crumb(view: &DiffView) -> Option<String> {
 /// The dim line at the diff's foot: what is on screen, and the key that
 /// changes it.
 pub(crate) fn diff_explanation(view: &DiffView) -> String {
+    let said = commits_explanation(view);
+    if view.review.is_none() {
+        return said;
+    }
+    // A pull request's: whether the review's threads are on the diff.
+    let all = diff_keys::ALL.label();
+    if !crate::pr_review::viewer::whole_pr(view) {
+        return format!("{said} Review threads sit on the whole pull request: {all} ticks every commit.");
+    }
+    match crate::pr_review::viewer::reviewing(view) {
+        true => format!(
+            "The whole pull request, its review threads under their lines. {} comments on the line under the cursor.",
+            crate::pr_review::keys::COMMENT.label()
+        ),
+        false if view.review.as_ref().is_some_and(|r| r.files.is_none()) => {
+            "The whole pull request — reading its review threads…".to_string()
+        }
+        false => said,
+    }
+}
+
+/// [`diff_explanation`] of what the COMMIT LIST has on screen.
+fn commits_explanation(view: &DiffView) -> String {
     use diff_keys::*;
     let Some(list) = &view.commits else {
         return String::new();
@@ -233,10 +263,25 @@ fn column_width(view: &DiffView, area: Rect) -> u16 {
 /// Draw the DIFF VIEWER over the screen and write back where everything
 /// went (`view` is a clone of `app.overlay`'s).
 pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
+    // A pull request's review on the file the cursor is on, here and on
+    // the viewer the write-back goes to.
+    let synced;
+    let view = match view.review {
+        Some(_) => {
+            if let Some(Overlay::Diff(v)) = &mut app.overlay {
+                crate::pr_review::viewer::sync(v);
+            }
+            let mut v = view.clone();
+            crate::pr_review::viewer::sync(&mut v);
+            synced = v;
+            &synced
+        }
+        None => view,
+    };
     let modal = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
     f.render_widget(Clear, modal);
     // The pull request it is about, on a row of its own over the panels.
-    let area = match crate::diff_actions::top_line(app, view, usize::from(modal.width), th) {
+    let framed = match crate::diff_actions::top_line(app, view, usize::from(modal.width), th) {
         Some(line) => {
             let [head, rest] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(modal);
@@ -245,6 +290,8 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
         }
         None => modal,
     };
+    // A pull request's review bar along the bottom, under both columns.
+    let (area, bar_a) = crate::pr_review::viewer::split_bar(view, framed);
     let col_w = column_width(view, area);
     let [column, diff_a] = Layout::horizontal([
         Constraint::Length(col_w),
@@ -287,12 +334,26 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
     // With no COMMIT LIST over them, the files lead with the crumb.
     let files_crumb = commit_draw.is_none().then(|| crumb(view)).flatten();
     let (list_inner, files_top) = draw_files(f, view, files_crumb, files_a, th);
-    let (diff_inner, scroll) = draw_diff(f, view, diff_a, th);
+    let (diff_inner, scroll, laid) = draw_diff(f, view, diff_a, th);
+    let bar = match (&view.review, bar_a) {
+        (Some(review), Some(bar_a)) => Some(crate::pr_review::draw::draw_bar(
+            f,
+            review,
+            bar_a,
+            view.focus == DiffFocus::Bar,
+            th,
+        )),
+        _ => None,
+    };
 
     // The viewer's keys along its bottom edge, under both columns and
-    // clear of the diff's scroll position.
-    let reserve = if view.max_scroll() > 0 { 8 } else { 0 };
-    crate::hints::draw_on_border(f, area, &diff_hints(view), reserve, th);
+    // clear of the diff's scroll position — or of the bar's foot.
+    let reserve = match &bar {
+        Some(bar) => bar.foot_w,
+        None if view.max_scroll() > 0 => 8,
+        None => 0,
+    };
+    crate::hints::draw_on_border(f, framed, &diff_hints(view), reserve, th);
 
     // Write-back (draw works on a clone): page size and wrap width for the
     // keys, the scroll re-clamped so a resize never strands it, and every
@@ -306,6 +367,15 @@ pub(super) fn draw(f: &mut Frame, app: &mut App, view: &DiffView, th: Theme) {
         v.diff_area = diff_a;
         v.area = modal;
         v.column_w = col_w;
+        if let Some(review) = &mut v.review {
+            crate::pr_review::viewer::write_back(
+                review,
+                diff_inner,
+                laid,
+                bar_a.unwrap_or_default(),
+                bar,
+            );
+        }
         if let Some(list) = &mut v.commits {
             match commit_draw {
                 Some((top, hits)) => {
@@ -589,8 +659,26 @@ fn draw_files(
     // Each file's `+A −R` pinned to the row's right edge; the path gets
     // what is left, cut at its end so it reads from its root.
     let counts = CountColumns::of(view.files.iter().map(|f| f.lines));
+    // A pull request's review threads on each file, before its counts.
+    let threads = |path: &str| {
+        view.review
+            .as_deref()
+            .map(|r| crate::pr_review::draw::thread_count(r, path, th))
+            .unwrap_or_default()
+    };
+    let threads_w = view
+        .files
+        .iter()
+        .map(|f| spans_width(&threads(&f.path)))
+        .max()
+        .unwrap_or(0);
+    let right = |file: &crate::git_diff::DiffFile| {
+        let mut spans = threads(&file.path);
+        spans.extend(counts.spans(file.lines, th));
+        spans
+    };
     let row_w = row_width(list_inner);
-    let text_w = left_room(row_w, counts.width()).saturating_sub(GUTTER_W);
+    let text_w = left_room(row_w, counts.width() + threads_w).saturating_sub(GUTTER_W);
     match &view.tree {
         None => {
             for (row, (i, m)) in view.matches.iter().enumerate().skip(start).enumerate() {
@@ -611,7 +699,7 @@ fn draw_files(
                         ));
                     }
                 }
-                let spans = pin_right(spans, counts.spans(file.lines, th), row_w);
+                let spans = pin_right(spans, right(file), row_w);
                 render_row(f, row_area, spans, i == view.selected, focused, th);
             }
         }
@@ -644,8 +732,11 @@ fn draw_files(
                     let positions = visible_positions(&r.positions, &shown, &node.name);
                     spans.extend(fuzzy_highlight_spans(&shown, positions, th));
                 }
-                let lines = file.and_then(|f| f.lines);
-                let spans = pin_right(spans, counts.spans(lines, th), row_w);
+                let tail = match file {
+                    Some(file) => right(file),
+                    None => counts.spans(None, th),
+                };
+                let spans = pin_right(spans, tail, row_w);
                 render_row(f, row_area, spans, i == tree.selected, focused, th);
             }
         }
@@ -673,8 +764,17 @@ fn reading(view: &DiffView) -> String {
 /// its foot. The file itself is the Files list's cursor; the border says
 /// what it is read as part of, and the file's `+A −R` on the right.
 /// Returns the diff's own rect and the scroll it was drawn at, clamped.
-fn draw_diff(f: &mut Frame, view: &DiffView, area: Rect, th: Theme) -> (Rect, usize) {
+fn draw_diff(
+    f: &mut Frame,
+    view: &DiffView,
+    area: Rect,
+    th: Theme,
+) -> (Rect, usize, Option<crate::pr_review::draw::Laid>) {
     let focused = view.focus == DiffFocus::Diff;
+    let review = view
+        .review
+        .as_deref()
+        .filter(|_| crate::pr_review::viewer::reviewing(view));
     let title = reading(view);
     let facts = &view.doc.facts;
     let facts_style = Style::default().fg(if focused { th.accent } else { th.muted });
@@ -713,6 +813,14 @@ fn draw_diff(f: &mut Frame, view: &DiffView, area: Rect, th: Theme) -> (Rect, us
     // The explanation at the foot, right above the keys.
     let explain = diff_explanation(view);
     let (body, explain_row) = crate::hints::explain_area(&explain, inner, 2);
+    // The review's: the diff with its threads under their lines, and the
+    // cursor on them.
+    if let Some(review) = review {
+        f.render_widget(block, area);
+        let laid = crate::pr_review::draw::draw_body(f, review, body, focused, th);
+        crate::hints::draw_explain(f, explain_row, &explain, th);
+        return (body, view.scroll, laid);
+    }
     let max_scroll = view.doc.max_scroll(body.width, body.height);
     let scroll = view.scroll.min(max_scroll);
     if let Some(pct) = (scroll * 100).checked_div(max_scroll) {
@@ -728,7 +836,7 @@ fn draw_diff(f: &mut Frame, view: &DiffView, area: Rect, th: Theme) -> (Rect, us
     let rows = view.doc.render(scroll, body.width, body.height, th);
     f.render_widget(Paragraph::new(rows), body);
     crate::hints::draw_explain(f, explain_row, &explain, th);
-    (body, scroll)
+    (body, scroll, None)
 }
 
 #[cfg(test)]

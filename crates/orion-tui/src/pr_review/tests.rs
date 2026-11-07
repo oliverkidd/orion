@@ -1,6 +1,8 @@
 use super::github::{ReviewThread, Side, ThreadComment};
 use super::*;
-use crate::git_diff::LineChanges;
+use crate::app::{DiffFocus, DiffView, Overlay};
+use crate::git_diff::{DiffFile, LineChanges};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 const URL: &str = "https://github.com/o/r/pull/7";
 
@@ -72,21 +74,35 @@ fn threads() -> Vec<ReviewThread> {
     ]
 }
 
-/// An app with the PR REVIEW up on `files` and `threads`, read.
+/// An app with a pull request's DIFF VIEWER up on `files`, its review
+/// read: `threads` on them, the keys on the diff.
 fn app_on(files: Vec<ReviewFile>, threads: Vec<ReviewThread>) -> App {
     let mut app = App::new();
-    let mut view = ReviewScreen::new(
+    let mut review = ReviewScreen::new(
         URL.into(),
         7,
         "#7 Add things".into(),
         "/nonexistent".into(),
         false,
     );
-    view.threads = threads;
-    view.reading = false;
-    view.pr_id = Some("PR_1".into());
-    view.take_files(Ok(files));
-    app.overlay = Some(Overlay::Review(Box::new(view)));
+    review.threads = threads;
+    review.reading = false;
+    review.pr_id = Some("PR_1".into());
+    let listed = files
+        .iter()
+        .map(|f| DiffFile {
+            path: f.path.clone(),
+            orig_path: None,
+            xy: [f.status, ' '],
+            lines: f.lines,
+        })
+        .collect();
+    review.take_files(Ok(files));
+    let mut diff = DiffView::new("/nonexistent".into(), "#7 Add things".into(), listed, true);
+    diff.review = Some(Box::new(review));
+    diff.focus = DiffFocus::Diff;
+    viewer::sync(&mut diff);
+    app.overlay = Some(Overlay::Diff(diff));
     app
 }
 
@@ -94,28 +110,51 @@ fn two_files() -> App {
     app_on(vec![file("a.rs", A_DIFF), file("b.rs", B_DIFF)], threads())
 }
 
-fn view(app: &App) -> &ReviewScreen {
+/// The viewer up.
+fn diff(app: &App) -> &DiffView {
     match &app.overlay {
-        Some(Overlay::Review(v)) => v,
-        other => panic!("expected the review, got {other:?}"),
+        Some(Overlay::Diff(v)) => v,
+        other => panic!("expected the viewer, got {other:?}"),
+    }
+}
+
+/// Its review.
+fn view(app: &App) -> &ReviewScreen {
+    diff(app).review.as_deref().expect("the review")
+}
+
+fn review(app: &mut App) -> &mut ReviewScreen {
+    viewer::review_mut(app).expect("the review")
+}
+
+/// The viewer's keys at the bottom edge.
+fn hints(app: &App) -> Vec<crate::hints::Hint> {
+    crate::ui::diff_hints(diff(app))
+}
+
+/// Every key the viewer's bottom edge may name.
+fn every_key() -> Vec<crate::hints::Key> {
+    let mut all = keys::ALL.to_vec();
+    all.extend_from_slice(crate::ui::diff_keys::ALL_KEYS);
+    all
+}
+
+fn key_in(app: &mut App, key: KeyEvent) {
+    crate::event_loop::handle_overlay_key(app, key, &mut Vec::new());
+    if let Some(Overlay::Diff(v)) = &mut app.overlay {
+        viewer::sync(v);
     }
 }
 
 fn press(app: &mut App, code: KeyCode) {
-    handle_key(app, KeyEvent::new(code, KeyModifiers::NONE));
+    key_in(app, KeyEvent::new(code, KeyModifiers::NONE));
 }
 
 fn screen(app: &mut App, w: u16, h: u16) -> String {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-    term.draw(|f| {
-        let Some(Overlay::Review(v)) = app.overlay.clone() else {
-            panic!("no review");
-        };
-        draw(f, app, &v, app.theme);
-    })
-    .unwrap();
+    term.draw(|f| crate::ui::draw(f, app)).unwrap();
     let buf = term.backend().buffer().clone();
     (0..h)
         .map(|y| {
@@ -138,12 +177,12 @@ fn row_of(shot: &str, text: &str) -> usize {
 fn the_files_count_their_threads_and_each_thread_sits_under_its_line() {
     let mut app = two_files();
     let shot = screen(&mut app, 140, 30);
-    assert!(shot.contains("Review #7 Add things · 2 files"), "{shot}");
+    assert!(shot.contains("Your review"), "the bar: {shot}");
     // a.rs: an open thread with a pending comment of yours in it; b.rs:
     // one, resolved.
-    let a = shot.lines().nth(row_of(&shot, "M a.rs")).unwrap();
-    assert!(a.contains("● 1"), "{a}");
-    let b = shot.lines().nth(row_of(&shot, "M b.rs")).unwrap();
+    let a = shot.lines().nth(row_of(&shot, "a.rs ")).unwrap();
+    assert!(a.contains("● ✎1"), "{a}");
+    let b = shot.lines().nth(row_of(&shot, "b.rs ")).unwrap();
     assert!(b.contains("✓1"), "{b}");
     // The thread under the line it is on, its comments in order.
     let deux = row_of(&shot, "deux");
@@ -179,14 +218,20 @@ fn the_cursor_walks_lines_and_threads_and_brackets_go_file_to_file() {
     // `[` back round the other way.
     press(&mut app, KeyCode::Char('['));
     assert_eq!(view(&app).file, 1);
+    assert_eq!(diff(&app).selected_path(), Some("b.rs"), "the viewer went too");
     // The files: ↑ picks the first, its diff from the top.
     press(&mut app, KeyCode::BackTab);
-    assert_eq!(view(&app).focus, Focus::Files);
+    assert_eq!(diff(&app).focus, DiffFocus::Files);
     press(&mut app, KeyCode::Up);
     assert_eq!(view(&app).file, 0);
     assert_eq!(view(&app).cursor, None);
-    press(&mut app, KeyCode::Enter);
-    assert_eq!(view(&app).focus, Focus::Diff);
+    // `←`/`→` never cross a panel's edge: `Tab` / `⇧Tab` do.
+    press(&mut app, KeyCode::Right);
+    assert_eq!(diff(&app).focus, DiffFocus::Files, "→ stays on the files");
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(diff(&app).focus, DiffFocus::Diff);
+    press(&mut app, KeyCode::Left);
+    assert_eq!(diff(&app).focus, DiffFocus::Diff, "← stays in the diff");
 }
 
 #[test]
@@ -228,13 +273,15 @@ fn the_page_keys_and_the_wheel_move_through_a_long_diff() {
         row: area.y + 2,
         modifiers: KeyModifiers::NONE,
     };
-    handle_mouse(&mut app, wheel);
+    assert!(viewer::handle_mouse(&mut app, wheel));
     screen(&mut app, 120, 30);
     assert_eq!(view(&app).scroll, WHEEL_LINES);
 }
 
+/// A thread on a file the pull request no longer changes: the review
+/// keeps it, but the viewer lists no such file, so `]` passes it by.
 #[test]
-fn a_thread_on_a_file_gone_from_the_diff_keeps_a_row() {
+fn a_thread_on_a_file_gone_from_the_diff_is_passed_by() {
     let mut threads = threads();
     threads.push(thread(
         "T_c",
@@ -242,20 +289,17 @@ fn a_thread_on_a_file_gone_from_the_diff_keeps_a_row() {
         4,
         vec![said("C_9", "ada", "still?", false, false)],
     ));
-    let mut app = app_on(vec![file("a.rs", A_DIFF)], threads);
+    let mut app = app_on(vec![file("a.rs", A_DIFF), file("b.rs", B_DIFF)], threads);
     let files: Vec<&str> = view(&app)
         .file_list()
         .iter()
         .map(|f| f.path.as_str())
         .collect();
     assert_eq!(files, ["a.rs", "b.rs", "gone.rs"]);
-    for _ in 0..3 {
+    for want in ["T_a", "T_b", "T_a"] {
         press(&mut app, KeyCode::Char(']'));
+        assert_eq!(view(&app).cursor, Some(Stop::Thread(want.into())));
     }
-    assert_eq!(view(&app).file, 2);
-    let shot = screen(&mut app, 140, 30);
-    assert!(shot.contains(GONE), "{shot}");
-    assert!(shot.contains("still?"), "{shot}");
 }
 
 #[test]
@@ -312,20 +356,22 @@ fn answers_land_on_the_screen_that_asked_and_say_what_failed() {
             result: Err("no history in common with main".into()),
         },
     );
-    let shot = screen(&mut app, 120, 30);
+    let flash = format!("{:?}", app.flash);
     assert!(
-        shot.contains("couldn't read the diff: no history in common with main"),
-        "{shot}"
+        flash.contains("couldn't read #7's diff for its review threads: no history in common with main"),
+        "{flash}"
     );
 }
 
+/// The review goes into a pull request's viewer once its page is in —
+/// its head and base are what the diff is read between — the page's
+/// threads at once, and GitHub asked again.
 #[test]
-fn opening_waits_for_the_page_and_seeds_its_threads() {
+fn attaching_waits_for_the_page_and_seeds_its_threads() {
     let mut app = App::new();
-    let view = ReviewScreen::new(URL.into(), 7, "#7".into(), "/nonexistent".into(), false);
-    open(&mut app, view.clone());
-    assert!(app.overlay.is_none());
-    assert!(format!("{:?}", app.flash).contains("#7 is still loading"));
+    let mut diff = DiffView::new("/nonexistent".into(), "#7".into(), Vec::new(), true);
+    attach(&app, &mut diff, 7, URL, "#7", std::path::Path::new("/nonexistent"));
+    assert!(diff.review.is_none());
     app.pr_detail.insert(
         URL.into(),
         crate::pull_request::PrDetail {
@@ -337,21 +383,16 @@ fn opening_waits_for_the_page_and_seeds_its_threads() {
             ..Default::default()
         },
     );
-    open(&mut app, view);
-    assert_eq!(
-        self::view(&app).threads.len(),
-        2,
-        "the page's threads, at once"
-    );
-    assert!(self::view(&app).reading, "and asked for again");
-    // Opened from the pane, Esc goes back to the panels.
-    press(&mut app, KeyCode::Esc);
-    assert!(app.overlay.is_none());
+    attach(&app, &mut diff, 7, URL, "#7", std::path::Path::new("/nonexistent"));
+    let review = diff.review.as_deref().expect("the review");
+    assert_eq!(review.threads.len(), 2, "the page's threads, at once");
+    assert!(review.reading, "and asked for again");
+    assert_eq!(diff.next_focus(false), DiffFocus::Bar, "⇧Tab from the files: the bar");
 }
 
 /// A repo with `a.txt` on `main` and a branch that changes it and adds
 /// `b.txt`: the branch's head.
-fn repo() -> (tempfile::TempDir, String) {
+pub(crate) fn repo() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let git = |args: &[&str]| {
         let ok = std::process::Command::new("git")
@@ -404,15 +445,16 @@ fn the_diff_is_read_from_git_from_where_the_branch_left_its_base() {
 #[test]
 fn the_hints_come_from_the_keys_table() {
     let mut app = two_files();
+    let all = every_key();
     // The diff, the bar, the files, and round to the diff.
     for _ in 0..3 {
-        crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
+        crate::hints::assert_hints_from(&hints(&app), &all);
         press(&mut app, KeyCode::Tab);
     }
     press(&mut app, KeyCode::Char(']'));
-    crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
+    crate::hints::assert_hints_from(&hints(&app), &all);
     press(&mut app, KeyCode::Char('r'));
-    crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
+    crate::hints::assert_hints_from(&hints(&app), &all);
 }
 
 // ---- writing ----
@@ -424,7 +466,7 @@ fn chars(app: &mut App, text: &str) {
 }
 
 fn shift(app: &mut App, code: KeyCode) {
-    handle_key(app, KeyEvent::new(code, KeyModifiers::SHIFT));
+    key_in(app, KeyEvent::new(code, KeyModifiers::SHIFT));
 }
 
 /// A write landing on the screen as GitHub answered it.
@@ -502,8 +544,8 @@ fn c_writes_a_comment_in_place_under_its_line_and_github_holds_it() {
     assert_eq!(v.cursor, Some(Stop::Thread("T_new".into())));
     assert!(format!("{:?}", app.flash).contains("held in your pending review"));
     let shot = screen(&mut app, 140, 30);
-    let a = shot.lines().nth(row_of(&shot, "M a.rs")).unwrap();
-    assert!(a.contains("● 2"), "{a}");
+    let a = shot.lines().nth(row_of(&shot, "a.rs ")).unwrap();
+    assert!(a.contains("● ✎2"), "{a}");
 }
 
 #[test]
@@ -512,7 +554,7 @@ fn shift_arrows_mark_a_run_of_lines_for_one_comment() {
     sent();
     shift(&mut app, KeyCode::Down);
     shift(&mut app, KeyCode::Down);
-    let marked = hints(view(&app));
+    let marked = hints(&app);
     assert!(
         marked.iter().any(|h| h.does == "comment on 3 lines"),
         "{marked:?}"
@@ -591,7 +633,7 @@ fn r_replies_x_resolves_and_backspace_drops_your_pending_comment() {
         }),
     );
     assert!(view(&app).thread_at_cursor().unwrap().resolved);
-    assert!(hints(view(&app)).iter().any(|h| h.does == "reopen"));
+    assert!(hints(&app).iter().any(|h| h.does == "reopen"));
 
     press(&mut app, KeyCode::Backspace);
     assert_eq!(
@@ -622,7 +664,7 @@ fn a_refused_write_keeps_what_was_typed_and_says_why() {
     let mut app = two_files();
     sent();
     press(&mut app, KeyCode::Char('c'));
-    assert!(paste(&mut app, "first\nsecond"));
+    assert!(viewer::paste(&mut app, "first\nsecond"));
     press(&mut app, KeyCode::Enter);
     assert_eq!(sent().len(), 1);
     wrote(&mut app, Err("GraphQL: Line could not be resolved".into()));
@@ -636,9 +678,7 @@ fn a_refused_write_keeps_what_was_typed_and_says_why() {
     );
 
     // Nothing is sent until GitHub has said which pull request this is.
-    if let Some(Overlay::Review(v)) = &mut app.overlay {
-        v.pr_id = None;
-    }
+    review(&mut app).pr_id = None;
     press(&mut app, KeyCode::Enter);
     assert!(sent().is_empty());
     assert!(format!("{:?}", app.flash).contains("still reading the pull request"));
@@ -700,11 +740,9 @@ fn sent_review(app: &mut App, verdict: github::Verdict, result: Result<(), Strin
 fn the_bar_picks_a_verdict_and_submit_sends_it_with_everything_pending() {
     let mut app = two_files();
     submitted();
-    if let Some(Overlay::Review(v)) = &mut app.overlay {
-        v.pending = Some("PRR_9".into());
-    }
+    review(&mut app).pending = Some("PRR_9".into());
     press(&mut app, KeyCode::Tab);
-    assert_eq!(view(&app).focus, Focus::Bar);
+    assert_eq!(diff(&app).focus, DiffFocus::Bar);
     let shot = screen(&mut app, 140, 30);
     assert!(shot.contains("Your review"), "{shot}");
     assert!(
@@ -720,7 +758,7 @@ fn the_bar_picks_a_verdict_and_submit_sends_it_with_everything_pending() {
     assert_eq!(view(&app).bar_row, bar::BarRow::Summary);
     let shot = screen(&mut app, 140, 30);
     assert!(shot.contains("Looks close"), "{shot}");
-    assert!(shot.contains("Enter submit"), "{shot}");
+    assert!(shot.contains("Enter submit review"), "{shot}");
     press(&mut app, KeyCode::Enter);
     assert_eq!(
         submitted(),
@@ -744,7 +782,8 @@ fn the_bar_picks_a_verdict_and_submit_sends_it_with_everything_pending() {
     // ⌘⇧R from anywhere sends it again; once GitHub takes it the screen
     // gives way to the pull request's Reviews tab, its page read again.
     press(&mut app, KeyCode::Tab);
-    handle_key(&mut app, submit_key());
+    assert_eq!(diff(&app).focus, DiffFocus::Files);
+    key_in(&mut app, submit_key());
     assert_eq!(submitted().len(), 1);
     sent_review(&mut app, github::Verdict::RequestChanges, Ok(()));
     assert!(app.overlay.is_none());
@@ -757,9 +796,7 @@ fn the_bar_picks_a_verdict_and_submit_sends_it_with_everything_pending() {
 fn on_your_own_pull_request_only_a_comment_goes() {
     let mut app = two_files();
     let ticket = view(&app).ticket;
-    if let Some(Overlay::Review(v)) = &mut app.overlay {
-        v.verdict = github::Verdict::Approve;
-    }
+    review(&mut app).verdict = github::Verdict::Approve;
     land(
         &mut app,
         Answer::Threads {
@@ -795,8 +832,9 @@ fn on_your_own_pull_request_only_a_comment_goes() {
 fn a_review_with_nothing_said_is_refused_before_github_is_asked() {
     let mut app = app_on(vec![file("a.rs", A_DIFF)], Vec::new());
     submitted();
-    handle_key(&mut app, submit_key());
+    key_in(&mut app, submit_key());
     assert!(submitted().is_empty());
+    assert_eq!(diff(&app).focus, DiffFocus::Bar);
     let v = view(&app);
     assert_eq!((v.focus, v.bar_row), (Focus::Bar, bar::BarRow::Summary));
     assert!(v
@@ -818,7 +856,7 @@ fn a_comment_still_being_written_is_finished_first() {
     let mut app = two_files();
     submitted();
     press(&mut app, KeyCode::Char('c'));
-    handle_key(&mut app, submit_key());
+    key_in(&mut app, submit_key());
     assert!(submitted().is_empty());
     assert!(format!("{:?}", app.flash).contains("finish the comment first"));
     assert!(view(&app).composer.is_some());
@@ -827,8 +865,8 @@ fn a_comment_still_being_written_is_finished_first() {
 #[test]
 fn a_review_sent_from_the_modal_lands_on_its_reviews_tab() {
     let mut app = two_files();
-    if let Some(Overlay::Review(v)) = &mut app.overlay {
-        v.back = Some(Box::new(PullRequestsView::new(
+    if let Some(Overlay::Diff(v)) = &mut app.overlay {
+        v.back = Some(Box::new(crate::pr_modal::PullRequestsView::new(
             orion_core::ProjectId("p1".into()),
             "demo".into(),
             "/nonexistent".into(),
