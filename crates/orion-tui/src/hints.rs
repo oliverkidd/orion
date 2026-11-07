@@ -19,7 +19,7 @@
 //! modal's own keys from the small [`Key`] table its key handler matches
 //! against, so a hint can never name a key the modal does not answer to.
 //! And every key label is drawn in one style, [`key_style`] — the theme's
-//! accent — whatever it sits in: the footer, a modal's border, the
+//! muted gray, a step over what the key does — whatever it sits in: the footer, a modal's border, the
 //! new-agent box's header, the COMMAND PALETTE's key column, Help, the
 //! HOTKEYS TAB, onboarding, the KEY COMBO DISPLAY. What the key does stays
 //! dim.
@@ -322,12 +322,14 @@ pub fn fit(hints: &[Hint], width: usize) -> Vec<&Hint> {
     shown
 }
 
-/// THE key label style: the theme's accent, on every key orion names on
-/// screen — so `⌘N` reads as a key in the same colour in the footer, on a
-/// modal's border, in the box's header and in every list of keys.
+/// THE key label style: the theme's muted gray, on every key orion names
+/// on screen — so `⌘N` reads as a key in the same colour in the footer, on
+/// a modal's border, in the box's header and in every list of keys. Gray,
+/// not the accent: a bar of hints in the accent is a bar of focus chrome,
+/// and the accent is for where the keys are, not for what they do.
 /// Separators and what a key does stay dim ([`does_style`]).
 pub fn key_style(th: Theme) -> Style {
-    Style::default().fg(th.accent)
+    Style::default().fg(th.muted)
 }
 
 /// What a key does, beside its [`key_style`] label: dim.
@@ -502,15 +504,15 @@ mod tests {
         pairs.iter().map(|(k, d)| Hint::new(*k, *d)).collect()
     }
 
-    /// Every key label is in the one key style — the theme's accent — and
+    /// Every key label is in the one key style — the theme's muted gray — and
     /// everything else on the line is dim, on the footer's line and a
     /// modal's border alike, in every theme.
     #[test]
-    fn keys_are_the_accent_and_the_rest_is_dim() {
+    fn keys_are_muted_and_the_rest_is_dim() {
         let line = hints(&[("⌘N", "new agent"), ("t", "terminal"), ("Esc", "close")]);
         for name in crate::theme::THEMES {
             let th = Theme::by_name(name);
-            assert_eq!(key_style(th).fg, Some(th.accent));
+            assert_eq!(key_style(th).fg, Some(th.muted));
             let keys = ["⌘N", "t", "Esc"];
             let border = border_line(&line, 80, th);
             for span in spans(&line, 80, th).iter().chain(border.spans.iter()) {
@@ -518,7 +520,7 @@ mod tests {
                     continue;
                 }
                 let want = if keys.contains(&span.content.as_ref()) {
-                    th.accent
+                    th.muted
                 } else {
                     th.dim
                 };

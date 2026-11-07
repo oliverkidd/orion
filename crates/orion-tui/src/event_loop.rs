@@ -262,6 +262,8 @@ async fn main_loop(
 ) -> Result<Exit> {
     let mut app = App::new();
     app.conn = ConnState::Connected;
+    app.round_caps =
+        std::env::var("TERM_PROGRAM").is_ok_and(|t| t.eq_ignore_ascii_case("ghostty"));
     // The repo orion was started in, for the first run's "open this
     // folder" — looked up once, off the tree the snapshot has not sent yet.
     app.launch_repo = crate::app::launch_repo();
@@ -11288,10 +11290,9 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherCrumb
                 | HitTarget::LauncherPullRequests
                 | HitTarget::LauncherWelcomePrompt
-                | HitTarget::FooterHome
-                | HitTarget::FooterUpgrade
+                | HitTarget::HomeBack
+                | HitTarget::Upgrade
                 | HitTarget::FooterSpotify(_)
-                | HitTarget::FooterCrumb(_)
         )
     });
     // The PULL REQUESTS MODAL's and the LINEAR VIEW's `↗ open in browser`
@@ -12058,17 +12059,14 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // of you, through the very function `v` runs — the click is
                 // the key's twin.
                 Some(HitTarget::LauncherPullRequests) => crate::pr_modal::open(app),
-                // The footer's nameplate: HOME, through the `toggle_home`
-                // its key runs — and from HOME, back down to the grid.
-                Some(HitTarget::FooterHome) => toggle_home(app),
-                // The `⇡ v…` beside it, and HOME's upgrade line.
-                Some(HitTarget::FooterUpgrade) => open_upgrade(app),
+                // HOME's sky: back down to the grid, through the
+                // `toggle_home` its key runs.
+                Some(HitTarget::HomeBack) => toggle_home(app),
+                // The grid header's `⇡ v…`, and HOME's upgrade line.
+                Some(HitTarget::Upgrade) => open_upgrade(app),
                 // A SPOTIFY READOUT button: its command, straight to the
                 // app, with a poll behind it.
                 Some(HitTarget::FooterSpotify(button)) => press_spotify(app, button),
-                // A part of the footer's breadcrumb: down onto the grid with
-                // the cursor on it.
-                Some(HitTarget::FooterCrumb(part)) => launcher::click_crumb(app, part, out),
                 // The CLOSE BUTTON at the strip's right end: the pane
                 // folds away through the one `toggle_pane` `^~` runs. It
                 // is only drawn on a pane that is showing, so the toggle
@@ -18437,37 +18435,29 @@ mod tests {
         }
     }
 
-    /// The footer's far left is a nameplate: which orion this is, ahead
-    /// of every cursor-driven crumb after it. It yields
-    /// the columns back to a flash that would otherwise be cut off mid
-    /// sentence — a clipped key list is still readable, a clipped message
-    /// is not.
+    /// The footer is messages, keys, Spotify and the counts — no
+    /// nameplate and no breadcrumb ahead of them — so a FLASH starts at
+    /// its left edge and a long one is never cut off for a version or a
+    /// crumb.
     #[test]
-    fn footer_shows_the_orion_version_but_never_truncates_a_flash() {
-        let stamp = concat!(" v", env!("CARGO_PKG_VERSION"));
+    fn footer_carries_no_nameplate_and_a_flash_starts_at_its_edge() {
+        let stamp = concat!("v", env!("CARGO_PKG_VERSION"));
         let mut app = App::new();
+        app.conn = ConnState::Connected;
         seed_tree(&mut app);
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(text.contains(stamp), "{stamp} missing from:\n{text}");
+        let footer = text.lines().last().unwrap_or_default().to_string();
+        assert!(!footer.contains(stamp), "no nameplate: {footer}");
+        assert!(!footer.contains("agent-1"), "no breadcrumb: {footer}");
 
-        // A flash short enough to share the bar keeps the nameplate.
-        app.flash = Some(crate::flash::Flash::done("saved"));
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(text.contains(stamp), "{stamp} missing from:\n{text}");
-        assert!(text.contains("saved"), "{text}");
-
-        // One that isn't takes the whole left edge instead.
-        let long = "the pull request link can't be deleted from here, close it on github";
+        let long = "the pull request link can't be deleted from here, close it";
         app.flash = Some(crate::flash::Flash::failed(long));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        assert!(
-            !text.contains(stamp),
-            "nameplate should have yielded:\n{text}"
-        );
+        let footer = text.lines().last().unwrap_or_default().to_string();
+        assert!(footer.starts_with(&format!(" ✕ {long}")), "{footer}");
     }
 
     /// **Upgrade orion** with no newer release known asks GitHub now: a
@@ -18551,12 +18541,11 @@ mod tests {
         }
     }
 
-    /// A newer published release rides the nameplate as `⇡ vX.Y.Z` and
-    /// yields with it — the flash rule is the nameplate's, not a second
-    /// one.
+    /// A newer published release is flagged at the head of the grid's
+    /// header, `⇡ vX.Y.Z`, as a button that asks to upgrade — and not in
+    /// the footer, which a flash can take over.
     #[test]
-    fn footer_flags_a_newer_release_beside_the_nameplate() {
-        let stamp = concat!(" v", env!("CARGO_PKG_VERSION"));
+    fn the_header_flags_a_newer_release_and_a_click_asks_to_upgrade() {
         let mut app = App::new();
         seed_tree(&mut app);
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
@@ -18566,19 +18555,14 @@ mod tests {
         app.update_available = Some("9.9.9".into());
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
-        let flagged = format!("{stamp} ⇡ v9.9.9");
-        assert!(text.contains(&flagged), "{flagged} missing from:\n{text}");
-        assert!(!text.contains("◇ "), "no workspace on the footer: {text}");
-
-        // A flash that would be clipped drops the whole plate, indicator too.
-        let long = "the pull request link can't be deleted from here, close it on github";
-        app.flash = Some(crate::flash::Flash::failed(long));
-        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
-        let text = buffer_text(&terminal);
-        assert!(
-            !text.contains(stamp) && !text.contains("⇡ v9.9.9"),
-            "plate and indicator should have yielded:\n{text}"
-        );
+        let header = text.lines().nth(1).unwrap_or_default();
+        assert!(header.contains("⇡ v9.9.9"), "{text}");
+        let footer = text.lines().last().unwrap_or_default();
+        assert!(!footer.contains('⇡'), "not in the footer: {footer}");
+        assert!(app
+            .hits
+            .iter()
+            .any(|(rect, hit)| *hit == HitTarget::Upgrade && rect.y == 1));
     }
 
     /// The footer's right edge shows live session counts and orion's
@@ -27213,7 +27197,7 @@ mod tests {
         );
     }
 
-    /// Where the ACCOUNT CHIP for `id` was last drawn, as the hit map has it.
+    /// Where the ACCOUNT MARK for `id` was last drawn, as the hit map has it.
     fn chip_at(app: &App, id: &str, below: u16) -> ratatui::layout::Rect {
         app.hits
             .iter()
@@ -27222,7 +27206,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no chip for {id} drawn below row {below}"))
     }
 
-    /// The pointer resting on a row's ACCOUNT CHIP has the FOOTER say
+    /// The pointer resting on a row's ACCOUNT MARK has the FOOTER say
     /// whose it is — the chip, the account by name and email, what is left
     /// on it and when that resets — in the hints' place, and only while it
     /// rests there; a click opens ACCOUNT USAGE with its cursor on that
@@ -27246,7 +27230,7 @@ mod tests {
 
             handle_mouse(
                 &mut app,
-                mev(MouseEventKind::Moved, chip.x + 1, chip.y),
+                mev(MouseEventKind::Moved, chip.x, chip.y),
                 &mut out,
             );
             assert_eq!(
@@ -27276,7 +27260,7 @@ mod tests {
             // The right button on it is the row's.
             handle_mouse(
                 &mut app,
-                mev(MouseEventKind::Down(MouseButton::Right), chip.x + 1, chip.y),
+                mev(MouseEventKind::Down(MouseButton::Right), chip.x, chip.y),
                 &mut out,
             );
             assert!(
@@ -27286,7 +27270,7 @@ mod tests {
             );
             app.overlay = None;
 
-            click(&mut app, chip.x + 1, chip.y, &mut out);
+            click(&mut app, chip.x, chip.y, &mut out);
             let Some(Overlay::Usage(view)) = &app.overlay else {
                 panic!("a click opens ACCOUNT USAGE, got {:?}", app.overlay);
             };
@@ -27296,8 +27280,8 @@ mod tests {
     }
 
     /// The pane's header names the account the session in it runs on:
-    /// its chip, then its name in its tint — and that chip is a chip like
-    /// the row's, the pointer on it saying the account in the footer.
+    /// its mark, then its name, both in its tint and with no fill — and
+    /// the pointer on it says the account in the footer, as on the row.
     #[test]
     fn the_panes_header_names_the_account_in_its_tint() {
         with_two_accounts(|_| {
@@ -27318,12 +27302,12 @@ mod tests {
                 .filter_map(|x| buf.cell((x, header.y)))
                 .map(|c| c.symbol().to_string())
                 .collect();
-            assert_eq!(text, " C  claude-2", "no name or email yet: its id");
+            assert_eq!(text, "C claude-2", "no name or email yet: its id");
             let tint = crate::theme::ACCOUNT_TINTS[1];
-            assert_eq!(buf.cell((header.x, header.y)).unwrap().bg, tint);
-            let name = buf
-                .cell((header.x + crate::ui::CHIP_W as u16 + 1, header.y))
-                .unwrap();
+            let mark = buf.cell((header.x, header.y)).unwrap();
+            assert_eq!(mark.fg, tint, "the mark in the account's tint");
+            assert_ne!(mark.bg, tint, "and not a filled chip");
+            let name = buf.cell((header.x + 2, header.y)).unwrap();
             assert_eq!(name.fg, tint, "the name in the account's tint");
 
             handle_mouse(
@@ -37469,13 +37453,14 @@ mod tests {
             "the row above the bar, at the far left"
         );
         assert!(
-            rows[29].contains(concat!(" v", env!("CARGO_PKG_VERSION"))),
-            "the bar itself is untouched"
+            !rows[29].contains("Move down"),
+            "the bar itself is untouched: {}",
+            rows[29]
         );
         let cell = &terminal.backend().buffer()[(2, 28)];
         assert_eq!(cell.symbol(), "↓");
         assert_eq!(cell.bg, app.theme.sel_bg, "the key sits in a keycap");
-        assert_eq!(cell.fg, app.theme.accent);
+        assert_eq!(cell.fg, crate::hints::key_style(app.theme).fg.unwrap());
 
         app.key_combo = None;
         draw_frame(&mut terminal, &mut app).unwrap();

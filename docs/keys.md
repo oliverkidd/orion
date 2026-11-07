@@ -10,11 +10,10 @@ its key, and `Enter` runs it.
 
 ## How the screen is laid out
 
-- **The FOOTER is the status bar.** Always, left to right: which orion this is (`v3.0.0` — a
-  click on it goes HOME), where you are in the grid's own marks (`demo ⎇ feat ◐ fix-login`: the
-  project, the checkout behind its SCOPE MARK, the session behind its STATUS MARK — each a link
-  back to it on the grid), then `· archived`, `· full screen` or `· home` when you are somewhere
-  other than the grid of live sessions, and at the right edge the live counts. Between them go KEY HINTS — but only while no modal is up, and
+- **The FOOTER is the status bar,** and carries four things: a message when orion has one, the
+  keys for what is under the cursor, what Spotify is playing, and at the right edge the live
+  counts. Where you are is the grid's to say (the band's `❯`, the row's `▌`); a newer orion is
+  flagged in the grid's header and on HOME. KEY HINTS show only while no modal is up, and
   then only about what the grid or the pane has under its cursor: on an empty band
   `⌘N new agent · t terminal · ⌫ delete worktree`, beside a pull request the pane can read
   `→ focus PR`. Wherever you are not on the grid, the first hint is the way back to it.
@@ -201,7 +200,7 @@ line each, and only the lines that have something to say:
 ```
  AUTOFIX   ✗ 1 failing check, 3 files conflict · ⌘G send autofix
  LINEAR    ◑ ENG-12 In Progress   ○ ENG-15 Todo
- SESSIONS  ● Ri billing   ◐ Pe docs
+ SESSIONS  ● R billing   ✻ P docs
 ```
 
 - **AUTOFIX** is the `autofix-<n>` at work on it and what it is doing (`working · 4m`, `waiting on
@@ -697,15 +696,17 @@ The TERMINAL PANE's header shows one chip at a time — the first of these that 
 | `starting…` (dim) | nothing has come off the PTY yet: the session's CLI is booting |
 | `INPUT` (accent) | the pane is locked and every key is going to the PTY; `Esc` leaves |
 
+A newer orion published on GitHub is flagged at the head of the grid's header, `⇡ v3.1.0` in a
+green shimmer — a click asks to upgrade, as `orion upgrade` does — and on HOME, which also says which
+orion this is. `ORION_UPDATE_CHECK_SECS=0` turns the check off. Over ssh the header names the
+machine too.
+
 The FOOTER carries the rest, left to right:
 
 | Readout | What it is telling you |
 |---|---|
-| `vX.Y.Z` at the far left | which orion this is — the version `orion --version` prints. A button: a click goes HOME, and from HOME back to the grid |
-| `⇡ v3.1.0` after it, in the warning color | a newer orion is published on GitHub — run `orion upgrade`. `ORION_UPDATE_CHECK_SECS=0` turns the check off |
-| `✗ disconnected` | this client has lost the DAEMON. A healthy connection says nothing |
+| `✗ disconnected` at the far left | this client has lost the DAEMON. A healthy connection says nothing |
 | key hints | what the keys do where you are, built from your live keymap — a rebind shows up here, and an unbound action drops out. None while a modal is up: its keys are on its own border |
-| `demo ⎇ feat ◐ fix-login  · archived` after it | where you are, in the marks the grid draws it with: the project, the checkout behind its SCOPE MARK (`⌂` the root, `⎇` a worktree), and the row under the cursor behind its STATUS MARK, then `· archived`, `· full screen` or `· home` when the view is not the grid of live sessions. Each part is a link: a click goes back down onto the grid there — the project's whole grid, the checkout's band, the session's row |
 | a message in place of the hints | a FLASH, until the next key, led by what kind it is: `✕` a failure in crimson, `⚠` a setting to change in gold, `✓` a result nothing else shows in green, the gold spinner over muted words for a wait, `·` a heads-up in muted |
 | `♪ Midnight City · M83  ⏮ ⏸ ⏭` before it | what Spotify is playing (macOS, the `spotify` setting), dimmed while paused. Each glyph is a button: back, play/pause, next. Gone while Spotify is closed or stopped |
 | `2 agents · 412 MB` at the right edge | the agents running and orion's whole memory footprint (this UI, the DAEMON and every session's processes, the SPARE WORKTREES' setups and CLIs among them), re-read every 5 seconds |

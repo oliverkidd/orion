@@ -103,6 +103,16 @@ pub struct Theme {
     /// Structural chrome: column rules, header underlines, dividers.
     /// Darker than `dim` so the frame recedes behind the content.
     pub edge: Color,
+    /// A box's border inside the frame that holds the keys: a modal's
+    /// input box, the editor box, a panel the keys are not in. A hairline
+    /// a step over `edge`, so the box reads as a box without competing
+    /// with the words beside it the way a border in `dim` did.
+    pub line: Color,
+    /// The dashes of the band rule the keys are on: the accent at half
+    /// strength, so the lit band still reads as lit while its `❯` — in the
+    /// full accent — is what the eye lands on. Truecolor, as `focus_tint`
+    /// is (see module docs).
+    pub lit_rule: Color,
     /// Shades for the ONE-SHOT SWEEP a session takes when it starts
     /// needing you or crashes, `[tail, mid, head]`: the whole name sits on
     /// the tail shade while a brighter two-cell band sweeps across it.
@@ -174,10 +184,13 @@ impl Theme {
         Self {
             accent,
             on_accent: Color::Black,
-            text: Color::Indexed(255),
-            muted: Color::Indexed(247),
-            dim: Color::Indexed(243),
-            faint: Color::Indexed(240),
+            // The grays sit low on the ramp so the chrome stays quiet and
+            // the statuses — the only colours left on a row at rest — are
+            // what the eye goes to.
+            text: Color::Indexed(253),
+            muted: Color::Indexed(245),
+            dim: Color::Indexed(240),
+            faint: Color::Indexed(238),
             ok: Color::Indexed(71),    // green — passing, approved
             done: done[0],             // the accent, or sky
             warn: Color::Indexed(221), // gold — working
@@ -187,9 +200,11 @@ impl Theme {
             added: Color::Indexed(108),    // sage
             removed: Color::Indexed(174),  // rose
             modified: Color::Indexed(180), // sand
-            sel_bg: Color::Indexed(237),
-            sel_bg_dim: Color::Indexed(235),
-            edge: Color::Indexed(238),
+            sel_bg: Color::Indexed(236),
+            sel_bg_dim: Color::Indexed(234),
+            edge: Color::Indexed(236),
+            line: Color::Indexed(237),
+            lit_rule: half(accent),
             err_sweep: [
                 Color::Indexed(197),
                 Color::Indexed(204),
@@ -274,12 +289,18 @@ impl Theme {
                 //
                 // A step under the accent, so a white-on-white match
                 // highlight still stands out from the text around it.
-                text: Color::Indexed(252),
+                text: Color::Indexed(251),
                 ..Self::with_accent(Color::White, Color::Indexed(245), Color::Rgb(22, 22, 22))
             },
             _ => Self::default(),
         }
     }
+}
+
+/// `c` at half its brightness, as truecolor: [`Theme::lit_rule`].
+fn half(c: Color) -> Color {
+    let (r, g, b) = rgb(c).unwrap_or((128, 128, 128));
+    shade([f32::from(r), f32::from(g), f32::from(b)], 0.5)
 }
 
 /// `c` (RGB components) at `level` of its brightness, the rest black —

@@ -1,12 +1,8 @@
-//! The FOOTER: the bar along the bottom of every screen.
+//! The FOOTER: the bar along the bottom of every screen. It carries four
+//! things and nothing else: what orion has to say (a FLASH), the keys for
+//! what is under the cursor, what Spotify is playing, and the live counts.
 //!
-//! Left to right it is always the STATUS — which orion this is, `v1.0.0`
-//! (a button: a click goes HOME), the BREADCRUMB in the grid's own marks
-//! (`orbit-api ⎇ feat/auth-tokens ◐ Token store`, each part a link back
-//! to it), `· archived`, `· full screen` or `· home` when you are somewhere
-//! other than the grid, and at the right edge the live counts, what
-//! Spotify is playing just before them ([`crate::spotify`]). Between
-//! the two go KEY HINTS, and only while no modal is up ([`hints`]): a
+//! Left to right: KEY HINTS, and only while no modal is up ([`hints`]): a
 //! modal's keys are on its own bottom border (`crate::hints::modal_block`),
 //! so the footer never repeats or contradicts them. With nothing up, the
 //! hints are about what the grid or the pane has under its cursor — and
@@ -14,10 +10,13 @@
 //! A FLASH takes the hints' place until the next key, in its kind's mark
 //! and color ([`flash_spans`]); a stop of the cursor's run holds that
 //! place while it lasts ([`stopping_line`]), and so does a start waiting
-//! on the checkout's setup ([`setup_wait_line`]).
+//! on the checkout's setup ([`setup_wait_line`]). At the right edge the
+//! live counts, what Spotify is playing just before them
+//! ([`crate::spotify`]). Where the cursor is, the grid says itself (the
+//! band's `❯`, the row's `▌`); the version and a waiting upgrade are on
+//! HOME and in the grid's header.
 
-use super::{truncate, App, ConnState, Focus, HitTarget};
-use crate::app::{CrumbPart, SessionRow};
+use super::{App, ConnState, Focus, HitTarget};
 use crate::flash::{Flash, FlashKind};
 use crate::hints::{act, acts, Hint};
 use crate::keymap::Action;
@@ -72,108 +71,6 @@ fn draw_key_combo(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), row);
 }
 
-/// One part of the BREADCRUMB: its spans, and the part of the grid a
-/// click on it goes back to — none for the words between.
-struct CrumbSeg {
-    part: Option<CrumbPart>,
-    spans: Vec<Span<'static>>,
-}
-
-/// The BREADCRUMB: where the selection is, in the marks the grid draws it
-/// with — the project, the checkout behind its SCOPE MARK (`⌂` the root,
-/// `⎇` a worktree, the merged `●`), and the session behind its STATUS MARK
-/// in its card's own colors — so the bar and the grid read as one:
-/// `orbit-api ⎇ feat/auth-tokens ◐ Token store on sqlite`. Each of the
-/// three is a link back to it on the grid ([`CrumbPart`]). Then, when the
-/// view is not the grid of live sessions, the word that says what Esc
-/// climbs out of: `· archived`, `· full screen`, `· home`.
-fn crumb(app: &App) -> Vec<CrumbSeg> {
-    let th = app.theme;
-    let mut segs = Vec::new();
-    if app.splash_showing() && !app.home {
-        return segs;
-    }
-    let Some(project) = app.selected_project() else {
-        return segs;
-    };
-    let gap = || CrumbSeg {
-        part: None,
-        spans: vec![Span::raw(" ")],
-    };
-    segs.push(CrumbSeg {
-        part: Some(CrumbPart::Project),
-        spans: vec![Span::styled(
-            truncate(&project.name, 20),
-            Style::default().fg(th.muted),
-        )],
-    });
-    if let Some(worktree) = app.selected_worktree() {
-        segs.push(gap());
-        segs.push(CrumbSeg {
-            part: Some(CrumbPart::Worktree),
-            spans: vec![
-                super::launcher_view::scope_mark(app, &worktree.id, worktree.is_main),
-                Span::styled(truncate(&worktree.branch, 24), Style::default().fg(th.text)),
-            ],
-        });
-        if let Some(session) = app.selected_session_row() {
-            // A link's crumb is its pull request's number, or its display
-            // label — never the raw URL, which would eat the bar.
-            let mut badge = None;
-            let (mark, name, style) = match &session {
-                SessionRow::Agent(a) => {
-                    let (mark, style) = super::launcher_view::session_crumb(app, a);
-                    (mark, a.name.clone(), style)
-                }
-                SessionRow::Terminal(t) => (
-                    super::launcher_view::terminal_mark(t, th),
-                    t.name.clone(),
-                    Style::default().fg(th.text),
-                ),
-                SessionRow::Link(link) => match link.pull_request() {
-                    // A pull request in `pr_row::look`'s colours, its
-                    // state word after the number as the BAND has it.
-                    Some(pr) => {
-                        let status = app.prs.status_or_open(&pr.url);
-                        let look = crate::pr_row::look(status.standing, status.trouble(), th);
-                        badge = Some(Span::styled(
-                            format!(" {}", status.word()),
-                            Style::default().fg(look.badge),
-                        ));
-                        (
-                            Span::styled("↗ ", Style::default().fg(look.glyph)),
-                            format!("#{}", pr.number),
-                            Style::default().fg(look.label),
-                        )
-                    }
-                    None => (
-                        Span::styled("↗ ", Style::default().fg(th.muted)),
-                        link.label(),
-                        Style::default().fg(th.text),
-                    ),
-                },
-            };
-            segs.push(gap());
-            let mut spans = vec![mark, Span::styled(truncate(&name, 24), style)];
-            spans.extend(badge);
-            segs.push(CrumbSeg {
-                part: Some(CrumbPart::Session),
-                spans,
-            });
-        }
-    }
-    if let Some(place) = place(app) {
-        segs.push(CrumbSeg {
-            part: None,
-            spans: vec![Span::styled(
-                format!("  · {place}"),
-                Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-            )],
-        });
-    }
-    segs
-}
-
 /// A FLASH as the bar draws it: its kind's mark, then the line, in the
 /// mark and colors `crate::flash` lists for each kind.
 fn flash_spans(app: &App, flash: &Flash) -> Vec<Span<'static>> {
@@ -190,19 +87,6 @@ fn flash_spans(app: &App, flash: &Flash) -> Vec<Span<'static>> {
         Span::styled(format!("{mark} "), Style::default().fg(mark_color)),
         Span::styled(flash.text.clone(), Style::default().fg(text_color)),
     ]
-}
-
-/// The view the screen is on, when it is not the grid of live sessions.
-fn place(app: &App) -> Option<&'static str> {
-    if app.home {
-        Some("home")
-    } else if app.launcher_active() && app.collapsed {
-        Some("full screen")
-    } else if app.launcher_grid() && app.show_archived {
-        Some("archived")
-    } else {
-        None
-    }
 }
 
 /// The footer's KEY HINTS for the screen as it stands — none at all while
@@ -557,22 +441,13 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         ..area
     };
     let th = app.theme;
-    // Quiet footer: context on the left, live stats on the right. The
-    // hostname only earns a slot when it's a remote session, and the
-    // connection state only when something is wrong.
-    let mut status = vec![Span::raw(" ")];
-    if app.is_remote {
-        status.push(Span::styled(
-            truncate(&app.hostname, 24),
-            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        ));
-        status.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
-    }
+    let mut spans = vec![Span::raw(" ")];
+    // A lost daemon is the one thing said ahead of everything else: it is
+    // why nothing else on screen is moving.
     if matches!(app.conn, ConnState::Disconnected) {
-        status.push(Span::styled("✗ disconnected", Style::default().fg(th.err)));
-        status.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
+        spans.push(Span::styled("✗ disconnected", Style::default().fg(th.err)));
+        spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
     }
-    let crumbs = crumb(app);
     // Right edge: live session/process counts and orion's total memory
     // footprint, fed by the footer metrics poll. The hints clip before the
     // readout does.
@@ -602,26 +477,8 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
             .saturating_sub(if spot.is_some() { spot_w + 2 } else { 0 }),
         ..area
     };
-    // Which orion this is, at the far left: the one thing on the bar that
-    // never moves with the cursor, so it reads as a nameplate — and a
-    // button, HOME's (`⌘G`), lit under the pointer. A newer published
-    // release rides it as `⇡ v0.22.0`, in the heads-up color. A clipped
-    // *flash* loses the end of a sentence, so the nameplate steps aside
-    // for one that would not otherwise fit.
-    let plate = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let update = app.update_available.as_ref().map(|v| format!(" ⇡ v{v}"));
-    let plate_w = plate.chars().count()
-        + update.as_ref().map_or(0, |u| u.chars().count())
-        + "  ·  ".chars().count();
-    let status_w: usize = status.iter().map(|s| s.width()).sum::<usize>()
-        + crumbs
-            .iter()
-            .flat_map(|seg| &seg.spans)
-            .map(|s| s.width())
-            .sum::<usize>();
-    // The flash, behind the four cells the crumb leaves before it. The
-    // pointer resting on an ACCOUNT CHIP has its account said there,
-    // over everything but a flash.
+    // The pointer resting on an ACCOUNT MARK has its account said in the
+    // hints' place, over everything but a flash.
     let readout = match app.flash {
         Some(_) => None,
         None => account_readout(app),
@@ -631,53 +488,6 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         (None, Some(_)) => None,
         (None, None) => stopping_line(app).or_else(|| setup_wait_line(app)),
     };
-    let flash_w = flash.as_ref().map_or(0, |f| {
-        flash_spans(app, f).iter().map(|s| s.width()).sum::<usize>() + 4
-    });
-    let show_plate = flash.is_none() || status_w + flash_w + plate_w <= left.width as usize;
-    let mut spans = status;
-    if show_plate {
-        let x = left.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
-        let width = plate.chars().count() as u16;
-        let hovered = app.hover_crumb == Some(HitTarget::FooterHome);
-        let style = footer_button_style(th, hovered);
-        push_hit(app, left, x, width, HitTarget::FooterHome);
-        spans.push(Span::styled(plate, style));
-        if let Some(update) = update {
-            // A button too: **Upgrade orion**, shimmering green so a new
-            // release is hard to miss.
-            let x = left.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
-            let width = update.chars().count() as u16;
-            push_hit(app, left, x, width, HitTarget::FooterUpgrade);
-            let mut base = Style::default().add_modifier(Modifier::BOLD);
-            if app.hover_crumb == Some(HitTarget::FooterUpgrade) {
-                base = base.add_modifier(Modifier::UNDERLINED);
-            }
-            spans.extend(upgrade_spans(app, &update, base));
-        }
-        spans.push(Span::styled("  ·  ", Style::default().fg(th.dim)));
-    }
-    if !crumbs.is_empty() {
-        let mut x = left.x + spans.iter().map(|s| s.width() as u16).sum::<u16>();
-        for seg in crumbs {
-            let width: u16 = seg.spans.iter().map(|s| s.width() as u16).sum();
-            let mut seg_spans = seg.spans;
-            if let Some(part) = seg.part {
-                let target = HitTarget::FooterCrumb(part);
-                // Under the pointer the words underline — the mark stays
-                // as it is — the way every other button on the bar lifts.
-                if app.hover_crumb.as_ref() == Some(&target) {
-                    if let Some(words) = seg_spans.last_mut() {
-                        words.style = words.style.add_modifier(Modifier::UNDERLINED);
-                    }
-                }
-                push_hit(app, left, x, width, target);
-            }
-            spans.extend(seg_spans);
-            x += width;
-        }
-        spans.push(Span::raw("    "));
-    }
     let used: usize = spans.iter().map(|s| s.width()).sum();
     let room = usize::from(left.width).saturating_sub(used + 1);
     match (&flash, readout) {
@@ -720,7 +530,7 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-/// While the pointer rests on an ACCOUNT CHIP, what the bar says in the
+/// While the pointer rests on an ACCOUNT MARK, what the bar says in the
 /// hints' place: the chip, the account by its name and email, what is
 /// left on it and when that resets, and that a click opens the rest —
 /// `R  Riplo (you@riplo.ai) · 41% left · resets in 2h 14m · click for usage`.

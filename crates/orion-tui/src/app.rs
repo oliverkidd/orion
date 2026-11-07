@@ -30,11 +30,15 @@ pub const ONE_SHOT_SWEEP: std::time::Duration = std::time::Duration::from_secs(5
 /// rule, rare enough to stay out of the way.
 pub const STACK_TRAIL_PERIOD: usize = 80;
 
-/// Frames of the WORKING SPINNER, the dot a running session wears: a
-/// quarter turn every [`SPIN_FRAMES_PER_STEP`] sweep frames.
-pub const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
-/// Sweep frames ([`SWEEP_FRAME`]) per quarter turn of the spinner.
-pub const SPIN_FRAMES_PER_STEP: usize = 2;
+/// Frames of the WORKING SPINNER, the mark a running session wears: a
+/// star that breathes — out from its full `✻` to a `·` and back — one
+/// frame every [`SPIN_FRAMES_PER_STEP`] sweep frames. Every frame is one
+/// cell and a shape no other status uses (`●` `○` `◌` `✕`), so the mark
+/// still reads with the colour gone. The first frame is the one held
+/// still with the animations off.
+pub const SPINNER: [&str; 10] = ["✻", "✽", "✻", "✶", "✳", "✢", "·", "✢", "✳", "✶"];
+/// Sweep frames ([`SWEEP_FRAME`]) per frame of the spinner.
+pub const SPIN_FRAMES_PER_STEP: usize = 1;
 
 /// The WORKING SPINNER's frame at sweep phase `phase`.
 pub fn spin_step(phase: usize) -> usize {
@@ -85,18 +89,6 @@ pub enum Focus {
     Worktrees,
     Sessions,
     Terminal,
-}
-
-/// The three parts of the FOOTER's breadcrumb, each a link back to where
-/// it is on the grid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CrumbPart {
-    /// The project: its grid, no card aimed at.
-    Project,
-    /// The checkout: the cursor on its BAND.
-    Worktree,
-    /// The session: the cursor on its card.
-    Session,
 }
 
 /// What a screen cell maps to; rebuilt on every draw for hit-testing.
@@ -182,18 +174,14 @@ pub enum HitTarget {
     /// click opens the QUICK PROMPT, through the very
     /// `event_loop::launcher::open_box` the key runs.
     LauncherWelcomePrompt,
-    /// The footer's nameplate at the far left (`v1.0.0`): a click goes
-    /// HOME, or back from it — what `⌘G` does.
-    FooterHome,
-    /// The footer's `⇡ v…` and HOME's upgrade line: **Upgrade orion**.
-    FooterUpgrade,
+    /// HOME's own sky: a click anywhere on it goes back down to the grid,
+    /// as Esc does.
+    HomeBack,
+    /// The grid header's `⇡ v…` and HOME's upgrade line: **Upgrade orion**.
+    Upgrade,
     /// One of the footer's SPOTIFY READOUT buttons (`⏮  ⏸ ⏭`): a click
     /// sends Spotify that command (`event_loop::press_spotify`).
     FooterSpotify(crate::spotify::Button),
-    /// A part of the footer's breadcrumb: a click goes back down onto the
-    /// grid with the cursor on that part
-    /// (`event_loop::launcher::click_crumb`).
-    FooterCrumb(CrumbPart),
     /// The `↗ open in browser` BUTTON on the PULL REQUESTS MODAL's and the
     /// LINEAR VIEW's reading pane, pinned right on its top border: a click
     /// opens the row under the cursor in the browser, through the very
@@ -4667,6 +4655,12 @@ pub struct App {
     /// and the splash's motion (off = fewer repaints). Mirrors the config,
     /// refreshed at startup and when the settings overlay applies a change.
     pub animations: bool,
+    /// ROUND CAPS: the terminal draws Powerline's half-circle glyphs
+    /// itself, so a short filled piece — a chip, a tab, a keycap — can
+    /// end in a round cap instead of a square edge ([`crate::ui::round_caps`]).
+    /// Ghostty does, Nerd Font or not, and Orion.app is Ghostty; anywhere
+    /// else the pieces stay square rather than risk a tofu box.
+    pub round_caps: bool,
     /// The ROWS MEMO, armed by the frame and by [`App::reading_url`].
     pub rows_memo: RowsMemo,
 }
@@ -4865,6 +4859,7 @@ impl App {
             confetti: None,
             welcome_on_screen: false,
             animations: true,
+            round_caps: false,
             rows_memo: RowsMemo::default(),
         }
     }

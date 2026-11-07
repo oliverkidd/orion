@@ -1865,34 +1865,6 @@ pub(super) fn click_band(app: &mut App, index: usize, out: &mut Vec<ClientReques
     select_band_row(app, index, out);
 }
 
-/// A click on the FOOTER's breadcrumb (`HitTarget::FooterCrumb`): back
-/// down onto the grid — out of HOME, a full screen or the pane — at the
-/// part clicked: the project's whole grid with no card aimed at, as the
-/// first Esc leaves it, the checkout's band, or the session's card.
-pub(super) fn click_crumb(
-    app: &mut App,
-    part: crate::app::CrumbPart,
-    out: &mut Vec<ClientRequest>,
-) {
-    if app.home {
-        super::leave_home(app);
-    }
-    if !app.launcher_active() {
-        return;
-    }
-    super::leave_terminal_lock(app);
-    match part {
-        crate::app::CrumbPart::Project => clear_aim(app),
-        crate::app::CrumbPart::Worktree => {
-            if let Some(worktree) = app.selected_worktree().map(|w| w.id.clone()) {
-                select_band(app, worktree, out);
-            }
-        }
-        crate::app::CrumbPart::Session => take_aim(app),
-    }
-    app.dirty = true;
-}
-
 /// A right-click's first half on a card, `select_clicked_row`'s arm: the
 /// cursor on the card at `at` and the pane open on it, as a left click
 /// leaves them. False off the grid.
@@ -5054,59 +5026,11 @@ mod tests {
         });
     }
 
-    /// The footer's BREADCRUMB names the selection in the grid's own marks
-    /// — the project, the checkout behind its SCOPE MARK, the session
-    /// behind its STATUS MARK — and each part is a link back to the grid:
-    /// from a full-screen session a click on the checkout lands on its
-    /// band with the keys on the grid, and one on the project lets the
-    /// aim go, the whole project's grid in view.
-    #[test]
-    fn the_footer_crumb_speaks_the_grids_marks_and_links_back() {
-        use crate::app::CrumbPart;
-        with_default_config(|| {
-            let mut app = two_sessions();
-            draw(&mut app);
-            to_feat(&mut app);
-            let screen = buffer_text(&draw(&mut app));
-            let footer = screen.lines().last().unwrap_or_default().to_string();
-            let plate = concat!(" v", env!("CARGO_PKG_VERSION"), "  ·  demo ⎇ feat ");
-            assert!(footer.contains(plate), "{footer}");
-
-            full_screen(&mut app);
-            assert!(app.collapsed);
-            draw(&mut app);
-            let (x, y) = crumb_cell(&app, HitTarget::FooterCrumb(CrumbPart::Worktree));
-            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
-            assert!(!app.collapsed && !app.term_locked);
-            assert_eq!(app.focus, Focus::Sessions);
-            assert_eq!(
-                app.selected_worktree().map(|w| w.branch.clone()).as_deref(),
-                Some("feat")
-            );
-
-            draw(&mut app);
-            assert!(!app.launcher_unaimed);
-            let (x, y) = crumb_cell(&app, HitTarget::FooterCrumb(CrumbPart::Project));
-            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
-            assert!(app.launcher_unaimed, "the aim let go");
-
-            // From HOME too: the crumb is drawn over the splash, and a
-            // click on it comes back down onto the grid.
-            key(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER);
-            assert!(app.home);
-            draw(&mut app);
-            let (x, y) = crumb_cell(&app, HitTarget::FooterCrumb(CrumbPart::Session));
-            mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
-            assert!(!app.home && app.launcher_active());
-            assert!(!app.launcher_unaimed, "aimed at the card again");
-        });
-    }
-
     /// HOME: `^G` (`⌘G`) puts the splash and its orion up over the grid,
     /// the footer saying the way back; Esc comes back down onto the grid
-    /// exactly as it was, and so does a click on the footer's nameplate,
-    /// which put it up too. A key that only puts a modal up does so over
-    /// HOME; a grid key does nothing under it.
+    /// exactly as it was, and so does a click on HOME's sky. A key that
+    /// only puts a modal up does so over HOME; a grid key does nothing
+    /// under it.
     #[test]
     fn home_is_the_splash_over_the_grid_and_esc_comes_back() {
         with_default_config(|| {
@@ -5118,7 +5042,6 @@ mod tests {
             let screen = buffer_text(&draw(&mut app));
             assert!(screen.contains("Esc back to the grid"), "{screen}");
             assert!(footer_text(&app).starts_with("Esc back to the grid"));
-            assert!(screen.contains("· home"), "the footer says where: {screen}");
 
             key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
             assert!(app.home, "a grid key does nothing under HOME");
@@ -5130,10 +5053,13 @@ mod tests {
                 "the grid exactly as it was"
             );
 
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER);
             draw(&mut app);
-            let (x, y) = crumb_cell(&app, HitTarget::FooterHome);
+            let (x, y) = crumb_cell(&app, HitTarget::HomeBack);
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
-            assert!(app.home, "the nameplate is HOME's button");
+            assert!(!app.home, "a click on HOME's sky comes back down");
+            key(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER);
+            assert!(app.home);
             key(&mut app, KeyCode::Char(':'), KeyModifiers::NONE);
             assert!(
                 matches!(app.overlay, Some(Overlay::Menu(_))),
@@ -7494,7 +7420,7 @@ mod tests {
             assert_eq!(app.launcher_tab_cursor, None);
             assert_eq!(
                 band_rule_look(&terminal, "⌂ main"),
-                (th.accent, true, true),
+                (th.lit_rule, true, true),
                 "the keys are on the root band"
             );
             keys(&mut app, &[KeyCode::Up, KeyCode::Up]);
@@ -7515,7 +7441,7 @@ mod tests {
             let terminal = draw(&mut app);
             assert_eq!(
                 band_rule_look(&terminal, "⌂ main"),
-                (th.accent, true, true),
+                (th.lit_rule, true, true),
                 "the keys are the band's again"
             );
 

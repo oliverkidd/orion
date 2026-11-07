@@ -287,7 +287,7 @@ share your setup with it — `CLAUDE.md`, settings, skills, agents, commands, pl
 name you gave it and the email it is signed in as, `Work (you@example.com)` — `Claude
 (you@example.com)` until it has a name — and `r` on its row renames it, the default account too,
 without moving its sessions or its dir. On a machine with more than one, every row wears its
-account's ACCOUNT CHIP and the pane's header names the account ([below](#the-grid)). A
+account's ACCOUNT MARK and the pane's header names the account ([below](#the-grid)). A
 removed account's dir stays, unless you send it to the Trash, for an account added by the same name
 to take back. A session on any account is a Claude session — the same hooks, model sync, title sync
 and resume — that keeps to its own account's config dir. See
@@ -480,13 +480,13 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   LINE, `▶ setup`, laid out the same way — the command on a `$`, `setting up…` at the right — which
   goes once the setup exits cleanly, or stays as a red `setup failed (1)` whose attach replays what it
   printed; a **Start stack** meanwhile waits for it ([Configuration](configuration.md#setup-command)).
-  A session is its status dot and name — with more than one Claude account, the ACCOUNT CHIP
-  between them, the account's letter (or the glyph you gave it) black on the account's tint, so
-  which account each session runs on reads down the grid
-  ([Configuration](configuration.md#every-setting) `account_tags`). The pointer on a chip has the
-  footer say whose it is — `R  Riplo (you@riplo.ai) · 41% left · resets in 2h 14m` — and a click
-  on it opens ACCOUNT USAGE on that account; the pane's header names the account too, after the
-  session's name, its chip and its name in its tint —
+  A session is its status dot and name, then what it runs on — with more than one Claude account
+  led by its ACCOUNT MARK, the account's letter (or the glyph you gave it) in the account's tint,
+  `R opus high`, so which account each session runs on reads down the grid without being the
+  loudest thing on the row ([Configuration](configuration.md#every-setting) `account_tags`). The
+  pointer on a mark has the footer say whose it is — `R  Riplo (you@riplo.ai) · 41% left · resets
+  in 2h 14m` — and a click on it opens ACCOUNT USAGE on that account; the pane's header names the
+  account too, after the session's name, its mark and its name in its tint. After the mark comes
   what it runs on (`opus high`: its model and the reasoning effort it was launched with — a session
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
   `›` — and, for a session sent at a todo, that todo after it, a dim `☐ text` (`☑` once ticked)

@@ -535,6 +535,13 @@ pub fn any_tags() -> bool {
     store::tags(|tags| !tags.is_empty())
 }
 
+/// Cells the widest account mark takes: 1 for a letter, 2 for most icons;
+/// 0 with no tags at all. What the grid's ACCOUNT MARK column is sized by.
+pub fn widest_mark() -> usize {
+    use unicode_width::UnicodeWidthStr;
+    store::tags(|tags| tags.values().map(|t| t.mark.width()).max().unwrap_or(0))
+}
+
 /// The sessions that run on extra account `id`, archived ones too: what
 /// a removal strands. Each stops resuming until the account is back, and
 /// its transcript lives in the account's dir, so a Trash would take it.

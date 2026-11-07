@@ -129,10 +129,9 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             | HitTarget::LauncherPullRequests
             | HitTarget::LauncherWelcomePrompt
             | HitTarget::AccountTag(_)
-            | HitTarget::FooterHome
-            | HitTarget::FooterUpgrade
+            | HitTarget::HomeBack
+            | HitTarget::Upgrade
             | HitTarget::FooterSpotify(_)
-            | HitTarget::FooterCrumb(_)
             | HitTarget::ModalBrowser,
         )
         | None => {}
