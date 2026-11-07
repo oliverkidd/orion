@@ -25,7 +25,7 @@ The whole build is run by one **orchestrator**, a top-level Claude Code session.
    ```
    The branch `needs-you` is the **integration branch**. Every builder's work lands there as its own commit.
 2. **Never push `needs-you` to `main` and never open a PR.** Every push to `main` is a release. The user decides when to ship.
-3. Before any building starts, ask the user to confirm the **kickoff decisions** in 1.6. Use one AskUserQuestion call that covers all of them.
+3. The **kickoff decisions** in 1.6 are already settled with the user. Don't ask about them again; build to them.
 4. Create `docs/2026-11-07-needs-you/build-log.md` in the integration worktree. After each step lands, add a line: the step id, the commit sha, what was verified, and any deviation from this plan.
 
 ### 1.2 Spawning builders
@@ -113,22 +113,20 @@ Then take screenshots of the wave's new screens with `make shot SCENE=<name>`, u
 - If a screen is wrong, send it back to that step's builder, or fix it yourself if the fix is small.
 - If anything fails, fix it before starting the next wave. Log the result in the build log.
 
-### 1.6 Kickoff decisions (ask the user before Wave 1)
+### 1.6 Kickoff decisions (settled with the user on 2026-11-07)
 
 1. **Keys.**
    - ⌘K becomes the Needs-you board. Typing still jumps anywhere, as today.
-   - Automations should be on ⌘J, but **⌘J is taken today by `toggle_launcher_pane`**. Proposal: Automations gets ⌘J, and `toggle_launcher_pane` moves to ⌘⇧J.
+   - Automations gets ⌘J. `toggle_launcher_pane`, which holds ⌘J today, moves to ⌘⇧J.
    - ⌘⇧Y (week review) is removed, so week in review lives only in Automations and ⌘⇧P.
    - ⌘⇧A toggles "away by hand".
-   
-   Ask the user to confirm the ⌘J swap.
-2. **Release size.**
-   - These changes touch the daemon, which makes it a minor release automatically.
-   - Removing ⌘⇧Y and moving ⌘J change how people use orion, which by `CLAUDE.md` could earn a major (4.0.0).
-   - Proposal: minor, because nothing is dropped outright (week review moves, the pane toggle moves). Ask.
-3. **Lab folder** for blue sky ideas that aren't tied to a repo. Proposal: `~/Code/orion-lab`, created as a git repo on first use and added to orion as a project. Ask for the path.
+2. **Release size: minor.**
+   - The daemon changes make it minor automatically.
+   - No major bump: nothing is dropped outright, since week review and the pane toggle only move.
+   - Leave `[workspace.package] version` in `Cargo.toml` alone.
+3. **Blue sky folder.** Blue sky ideas that aren't tied to a repo are built in `~/Code/orion-blue-sky`, created as a git repo on first use and added to orion as a project. Never call it "lab", in code, settings or the UI. Its target is spelled `blue sky`.
 
-Record the answers at the top of the build log and treat them as part of this plan.
+Copy these decisions to the top of the build log.
 
 ### 1.7 Finishing
 
@@ -415,7 +413,7 @@ Each step lists: **Builds**, **Files**, **Reuse**, **Hands to**, **Docs**, **Tes
    - SETTINGS rows from `Runner::settings()`
    - RUNNING and DONE THIS WEEK from each runner's ledger
    - keys: Space on/off, Enter open (a preset row opens it in Settings › Presets; a list row jumps to its session), ⌘U pick another preset, Esc
-   - add the action `automations` with default ⌘J; move `toggle_launcher_pane` to ⌘⇧J if the user agreed in 1.6
+   - add the action `automations` with default ⌘J; move `toggle_launcher_pane` to ⌘⇧J (1.6)
    - add the overlay to the INPUT PARITY tables and bump `the_overlay_table_covers_every_variant_exactly_once`
 5. **Extra steer.** Each runner appends `extra_steer` to its preset text with `\n\nExtra steer: <text>` when it's not empty. Do this in one helper, `automations::compose(preset, context, extra)`.
 
@@ -649,11 +647,11 @@ Each step lists: **Builds**, **Files**, **Reuse**, **Hands to**, **Docs**, **Tes
    - Its file is `<data_dir>/todos/blue-sky.json`, through `store::path_for` with a fixed key.
    - Check every place that maps a `TodoFile.repo_path` back to a project (`palette::todo_rows`, the merge-tick code, `done::lists`, `week_review::gather`), and make each handle Blue sky. Its done items do appear in DONE.
    - ⌘1 becomes Blue sky, and projects start at ⌘2.
-2. **Each idea has a target.** `w` cycles through the projects and `lab`. Store it on the item as `target: Option<String>`.
+2. **Each idea has a target.** `w` cycles through the projects and `blue sky`. Store it on the item as `target: Option<String>`.
 3. **Enter starts the Blue sky builder** on the idea:
    - The session is tagged `blue sky` and uses the BlueSky preset (its own Runs on, e.g. the Personal account).
    - A repo target runs in a new worktree on branch `proto/<slug>` with a note never to open a PR.
-   - A `lab` target runs in the lab project (1.6), in a folder `<slug>/`, created and added as a project on first use.
+   - A `blue sky` target runs in `~/Code/orion-blue-sky` (1.6), in a folder `<slug>/`. The repo is created and added as a project on first use.
    - The preset text says: first write a short brief (for whom, what, built from what, what you'll get, size) and **wait for approval** in plan mode. Then build a working prototype. A web tool may also be published as a claude.ai artifact if the agent can, and its link noted. Finish with how to try it.
    - The brief reaches Needs-you and the phone as a `Plan`.
 4. **The idea row's right column** shows: `● brief to approve` (red), `● building Nm` (yellow), `● built · <branch or link>` (green), or `not started`. `o` opens what it built.
@@ -851,10 +849,10 @@ Keys: `←→ change · Enter edit · c connect · o disconnect · Tab next tab 
 ### 5.9 Todos › Blue sky tab
 
 - **Tabs:** `Blue sky N` first, then the project tabs.
-- **Body:** normal groups and rows. Each row shows the text, where it goes (a project name or `lab`), and its state (`● brief to approve` / `● building 18m` / `● built · proto/onboard` / `not started`).
+- **Body:** normal groups and rows. Each row shows the text, where it goes (a project name or `blue sky`), and its state (`● brief to approve` / `● building 18m` / `● built · proto/onboard` / `not started`).
 - The DONE panel is as today.
 - **Explanation:** "Enter starts the Blue sky builder on the idea. Its brief comes to Needs you to approve, and its state shows here."
-- **Keys:** `⌘N new idea · w repo or lab · Enter build it · o open what it built · Space tick · Esc close`.
+- **Keys:** `⌘N new idea · w where · Enter build it · o open what it built · Space tick · Esc close`.
 
 ---
 
