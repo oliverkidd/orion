@@ -1,0 +1,25 @@
+docs/2026-11-07-needs-you/needs-you.md
+  s_84b749c044ea1e::t_3551c59c7a4e1c 416
+  s_84b749c044ea1e::t_728895dacc865a 852
+  s_84b749c044ea1e::t_fa28936dde55ff 116,120,123-127,129
+  s_84b749c044ea1e::t_fcaa8f04b65499 654
+  s_84b749c044ea1e::t_f814fb84873082 28
+  s_84b749c044ea1e::t_f41289b1b542b0 855
+  s_84b749c044ea1e::t_cf2218859c73f7 650
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5d87659a270a2555a2ddf93a9238ee7a6845da38",
+  "prompts": {},
+  "sessions": {
+    "s_84b749c044ea1e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9f835698-0d8c-425f-96dc-0bc8b3654038",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
