@@ -79,6 +79,27 @@ async fn release_with(docker: &Path, worktree: &Path, policy: WorktreeContainers
     warnings
 }
 
+/// The running compose projects started in `dir` or under it, sorted the
+/// way [`compose::started_in`] sorts them: `owned` run only from there,
+/// `shared` also from elsewhere. None when docker is not there to ask —
+/// no CLI, or an engine that is not running, which runs nothing.
+pub(crate) async fn running_in(docker: &Path, dir: &Path) -> Option<compose::StartedIn> {
+    let listed = run(docker, &compose::ps_state_args(), PS_TIMEOUT).await.ok()?;
+    let running: Vec<compose::Container> = compose::parse_ps_state(&listed)
+        .into_iter()
+        .filter_map(|(container, running)| running.then_some(container))
+        .collect();
+    Some(compose::started_in(&running, dir))
+}
+
+/// `docker compose -p <project> stop`: its containers stopped, kept.
+pub(crate) async fn stop_project(docker: &Path, project: &str) -> Result<(), String> {
+    let args = WorktreeContainers::Stop
+        .compose_args(project)
+        .unwrap_or_default();
+    run(docker, &args, COMPOSE_TIMEOUT).await.map(|_| ())
+}
+
 /// Run `docker args`: its stdout, or why it failed in one line — the last
 /// line of its stderr, which is where docker says what went wrong.
 pub(crate) async fn run<S: AsRef<std::ffi::OsStr>>(

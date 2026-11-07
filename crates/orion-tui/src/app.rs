@@ -2353,6 +2353,8 @@ pub enum Overlay {
     CleanWorktrees(crate::clean_worktrees::CleanView),
     /// The OPEN REPO modal (`crate::open_repo`).
     OpenRepo(crate::open_repo::OpenRepoView),
+    /// CLONE FROM GITHUB (`crate::clone_repo`).
+    CloneRepo(crate::clone_repo::CloneView),
     Hosts(HostsView),
     /// The AGENT PRESETS PICKER: `⌘U` in the box or over a pane, the
     /// palette's **Agent presets**, a pull request's.
@@ -4630,6 +4632,8 @@ pub struct App {
     pub clean_worktrees: crate::clean_worktrees::Shared,
     /// The OPEN REPO modal's scan and where it lands (`crate::open_repo`).
     pub open_repo: crate::open_repo::Shared,
+    /// CLONE FROM GITHUB's `gh` listing and clones (`crate::clone_repo`).
+    pub clone_repo: crate::clone_repo::Shared,
     /// BASE SYNC: each project's root fetched, and fast-forwarded on its
     /// base branch, on the **Fetch base branch** beat (`crate::base_sync`).
     pub base_sync: crate::base_sync::Shared,
@@ -4845,6 +4849,7 @@ impl App {
             git_sync: Default::default(),
             clean_worktrees: Default::default(),
             open_repo: Default::default(),
+            clone_repo: Default::default(),
             base_sync: Default::default(),
             last_metrics: None,
             client_rss_bytes: 0,

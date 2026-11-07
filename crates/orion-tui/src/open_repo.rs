@@ -219,8 +219,21 @@ impl OpenRepoView {
             .collect()
     }
 
+    /// The `rows` index the cursor is on: line 0 is CLONE FROM GITHUB,
+    /// the repos follow.
+    fn at_cursor(&self) -> Option<usize> {
+        let line = self.cursor.checked_sub(1)?;
+        self.shown().get(line).copied()
+    }
+
+    /// Back to the top of a fresh list: the first repo, or the clone row
+    /// when there is none.
+    fn home_cursor(&mut self) {
+        self.cursor = usize::from(!self.shown().is_empty());
+    }
+
     fn toggle_cursor(&mut self) {
-        if let Some(&i) = self.shown().get(self.cursor) {
+        if let Some(i) = self.at_cursor() {
             let r = &mut self.rows[i];
             if !r.added {
                 r.on = !r.on;
@@ -340,7 +353,7 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
     app.dirty = true;
     view.rows = rows;
     view.scanning = false;
-    view.cursor = 0;
+    view.home_cursor();
 }
 
 /// Tab (or a typed `/`, `~`): the open-project prompt, holding `typed`.
@@ -359,8 +372,9 @@ fn add(app: &mut App, out: &mut Vec<ClientRequest>) {
     };
     let mut paths = view.chosen();
     if paths.is_empty() {
-        match view.shown().get(view.cursor).map(|&i| &view.rows[i]) {
-            Some(r) => paths.push(r.path.clone()),
+        match view.at_cursor() {
+            Some(i) => paths.push(view.rows[i].path.clone()),
+            None if view.cursor == 0 => return crate::clone_repo::start(app),
             None => return,
         }
     }
@@ -373,7 +387,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         return;
     };
     app.dirty = true;
-    let len = view.shown().len();
+    // The clone row, then the repos.
+    let len = view.shown().len() + 1;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => app.overlay = None,
@@ -389,15 +404,15 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         }
         KeyCode::Char('u') if ctrl => {
             view.filter.clear();
-            view.cursor = 0;
+            view.home_cursor();
         }
         KeyCode::Backspace => {
             view.filter.pop();
-            view.cursor = 0;
+            view.home_cursor();
         }
         KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::SUPER) => {
             view.filter.push(c);
-            view.cursor = 0;
+            view.home_cursor();
         }
         _ => {}
     }
@@ -413,9 +428,12 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent, pos: Position) {
     }
     app.dirty = true;
     // Two lines a row: the name, the path under it.
-    let lines = view.shown().len() * 2;
+    let lines = (view.shown().len() + 1) * 2;
     if let Some(at) = crate::list_hit::row_at(view.list_area, view.first * 2, lines, pos) {
         view.cursor = at / 2;
+        if view.cursor == 0 {
+            return crate::clone_repo::start(app);
+        }
         view.toggle_cursor();
     }
 }
@@ -468,13 +486,31 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &OpenRepoView, th: Theme)
         )));
     }
     let fits = usize::from(screen.height.saturating_sub(4 + HEAD_H + FOOT_H).max(2)) / 2;
-    let cursor = view.cursor.min(shown.len().saturating_sub(1));
+    let cursor = view.cursor.min(shown.len());
     let first = view
         .first
         .min(cursor)
         .max((cursor + 1).saturating_sub(fits));
     let list_at = lines.len();
-    for (n, &i) in shown.iter().enumerate().skip(first).take(fits) {
+    for n in (first..=shown.len()).take(fits) {
+        let sel = |s: Style| {
+            if n == cursor {
+                s.bg(th.sel_bg).add_modifier(Modifier::BOLD)
+            } else {
+                s
+            }
+        };
+        let Some(&i) = n.checked_sub(1).and_then(|k| shown.get(k)) else {
+            // Line 0: CLONE FROM GITHUB.
+            let a = "  +  Clone from GitHub…";
+            let b = "     a repo you can reach, or paste a URL — cloned and added in one go";
+            for (t, st) in [(a, Style::default().fg(th.accent)), (b, dim)] {
+                let t = crate::ui::truncate(t, inner_w);
+                let pad = inner_w.saturating_sub(t.chars().count());
+                lines.push(Line::from(Span::styled(format!("{t}{}", " ".repeat(pad)), sel(st))));
+            }
+            continue;
+        };
         let r = &view.rows[i];
         let sel = |s: Style| {
             if n == cursor {
@@ -685,6 +721,18 @@ mod tests {
             return;
         };
         panic!("still the picker");
+    }
+
+    #[test]
+    fn the_top_row_clones_from_github() {
+        let mut app = opened(&["/x/a"]);
+        let mut out = Vec::new();
+        handle_key(&mut app, key(KeyCode::Up), &mut out);
+        handle_key(&mut app, key(KeyCode::Enter), &mut out);
+        assert!(matches!(app.overlay, Some(Overlay::CloneRepo(_))), "{:?}", app.overlay);
+        // Esc from its list comes back here.
+        crate::clone_repo::handle_key(&mut app, key(KeyCode::Esc), &mut out);
+        assert!(matches!(app.overlay, Some(Overlay::OpenRepo(_))));
     }
 
     #[test]

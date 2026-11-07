@@ -37,6 +37,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::Usage(v) => v.area,
         Overlay::CleanWorktrees(v) => v.area,
         Overlay::OpenRepo(v) => v.area,
+        Overlay::CloneRepo(v) => v.area,
         Overlay::Hosts(v) => v.area,
         Overlay::AgentPresets(v) => v.area,
         Overlay::AgentPresetEditor(v) => v.area,
@@ -125,6 +126,7 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
             | Overlay::Usage(_)
             | Overlay::CleanWorktrees(_)
             | Overlay::OpenRepo(_)
+            | Overlay::CloneRepo(_)
             | Overlay::Hosts(_),
         ) => app.overlay = None,
         // Confirm, Prompt, the AGENT PRESETS list and the PRESET EDITOR each

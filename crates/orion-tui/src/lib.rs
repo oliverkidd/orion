@@ -11,6 +11,7 @@ pub mod claude_accounts;
 pub mod claude_catalogue;
 pub mod clean_worktrees;
 pub mod open_repo;
+pub mod clone_repo;
 pub mod clipboard_image;
 pub mod commit_list;
 pub mod completion;

@@ -2257,6 +2257,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
         Overlay::OpenRepo(view) => crate::open_repo::draw(f, app, &view, th),
+        Overlay::CloneRepo(view) => crate::clone_repo::draw(f, app, &view, th),
         Overlay::FileTabs(mut view) => {
             // The TREE BROWSER's footprint: the editor Enter opens wants the
             // room, and the preview is a whole file.

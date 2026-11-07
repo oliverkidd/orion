@@ -129,6 +129,15 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     });
                     let _ = out_tx.send(snapshot).await;
                     let _ = out_tx.send(daemon.stacks.current()).await;
+                    let notes = std::mem::take(&mut *daemon.boot_notes.lock().unwrap());
+                    for message in notes {
+                        let _ = out_tx
+                            .send(ServerEvent::Error {
+                                req_id: None,
+                                message,
+                            })
+                            .await;
+                    }
                     let mut rx = daemon.events.subscribe();
                     // The docker poll sleeps while nobody is subscribed: a
                     // client arriving gets the last listing at once, and a

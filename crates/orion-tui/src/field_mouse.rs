@@ -100,6 +100,7 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         | Overlay::Conflicts(_)
         | Overlay::CleanWorktrees(_)
         | Overlay::OpenRepo(_)
+        | Overlay::CloneRepo(_)
         | Overlay::AgentPresets(_) => Vec::new(),
     }
 }

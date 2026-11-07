@@ -368,6 +368,9 @@ async fn main_loop(
     // The OPEN REPO modal's scan lands here.
     let (repo_tx, mut repo_rx) = tokio::sync::mpsc::unbounded_channel::<crate::open_repo::Answer>();
     app.open_repo.tx = Some(repo_tx);
+    // CLONE FROM GITHUB's listing and clones land here.
+    let (clone_tx, mut clone_rx) = tokio::sync::mpsc::unbounded_channel::<crate::clone_repo::Answer>();
+    app.clone_repo.tx = Some(clone_tx);
     // A BASE SYNC's fetch and fast-forward land here.
     let (base_tx, mut base_rx) = tokio::sync::mpsc::unbounded_channel::<crate::base_sync::Answer>();
     app.base_sync.tx = Some(base_tx);
@@ -814,6 +817,11 @@ async fn main_loop(
             answer = repo_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::open_repo::land(&mut app, answer);
+                }
+            }
+            answer = clone_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::clone_repo::land(&mut app, answer, &mut out);
                 }
             }
             answer = base_rx.recv() => {
@@ -7726,6 +7734,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
         Overlay::OpenRepo(_) => crate::open_repo::handle_key(app, key, out),
+        Overlay::CloneRepo(_) => crate::clone_repo::handle_key(app, key, out),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
             // `?` (and `s` where no filter eats letters) on a row that
@@ -9593,6 +9602,11 @@ fn detach_if_attached(app: &mut App, sref: &SessionRef, out: &mut Vec<ClientRequ
     // Archived, deleted or killed: whatever comes back under this ref is
     // a new process, so its kept screen is stale.
     app.term_cache.retain(|t| &t.sref != sref);
+}
+
+/// `~/…` expanded against the home folder.
+pub(crate) fn expand_home(path: &str) -> std::path::PathBuf {
+    shellexpand_home(path)
 }
 
 fn shellexpand_home(path: &str) -> std::path::PathBuf {
@@ -36921,6 +36935,7 @@ mod tests {
             Overlay::Usage(_) => "Usage",
             Overlay::CleanWorktrees(_) => "CleanWorktrees",
             Overlay::OpenRepo(_) => "OpenRepo",
+            Overlay::CloneRepo(_) => "CloneRepo",
             Overlay::Hosts(_) => "Hosts",
             Overlay::AgentPresets(_) => "AgentPresets",
             Overlay::AgentPresetEditor(_) => "AgentPresetEditor",

@@ -159,6 +159,10 @@ pub struct Daemon {
     /// task) can both reach for the same dead session; without this they
     /// would both miss the registry and fork two CLIs, orphaning one.
     pub(crate) spawn_gate: Mutex<()>,
+    /// What this daemon did at boot that the user should hear of (the
+    /// WORKTREE RELOCATION's report): flashed to the first client to
+    /// subscribe, then gone.
+    pub boot_notes: Mutex<Vec<String>>,
     /// The worktree prewarm sweep currently running, so a newer one can
     /// cancel it. Walking the project tabs fires a sweep per step, and
     /// only the project the cursor rests on is worth warming.
@@ -209,6 +213,7 @@ impl Daemon {
             transcripts: Mutex::new(HashMap::new()),
             pending_moves: Mutex::new(HashMap::new()),
             spawn_gate: Mutex::new(()),
+            boot_notes: Mutex::new(Vec::new()),
             prewarm_sweep: Mutex::new(None),
             resumes: Mutex::new(HashMap::new()),
             finished_runs: Mutex::new(HashMap::new()),
@@ -6425,7 +6430,7 @@ pub(crate) mod tests {
 
         let (target, _) = daemon.enter_worktree(&a1, "feat", None).await.unwrap();
         assert_eq!(target.branch, "feat");
-        assert_eq!(target.path, root.join("repo-worktrees").join("feat"));
+        assert_eq!(target.path, root.join(".orion-worktrees").join("repo").join("feat"));
         assert!(target.path.join(".git").exists(), "a real checkout");
         assert_eq!(agent_worktree(&daemon, "a1"), target.id.to_string());
         // The worktree's upsert lands first, then the agent's.
@@ -6470,7 +6475,7 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("is empty"), "{err}");
         assert!(
-            !root.join("repo-worktrees").join("feat").exists(),
+            !root.join(".orion-worktrees").join("repo").join("feat").exists(),
             "a refused spawn leaves no checkout behind"
         );
 
@@ -6479,7 +6484,7 @@ pub(crate) mod tests {
             .worktree_for_branch(&project, "feat", None)
             .await
             .unwrap();
-        assert_eq!(made.path, root.join("repo-worktrees").join("feat"));
+        assert_eq!(made.path, root.join(".orion-worktrees").join("repo").join("feat"));
         let again = daemon
             .worktree_for_branch(&project, " feat ", None)
             .await
@@ -6649,7 +6654,7 @@ pub(crate) mod tests {
 
         // The agent creates a sibling worktree and walks into it. The hook
         // lands first: no row exists yet, so nothing moves.
-        let feat = root.join("repo-worktrees").join("feat");
+        let feat = root.join(".orion-worktrees").join("repo").join("feat");
         git_in(
             &repo,
             &["worktree", "add", &feat.to_string_lossy(), "-b", "feat"],
@@ -6767,7 +6772,7 @@ pub(crate) mod tests {
         std::fs::create_dir(&repo).unwrap();
         git_in(&repo, &["init", "-b", "main"]);
         git_in(&repo, &["commit", "--allow-empty", "-m", "init"]);
-        let feat = root.join("repo-worktrees").join("gentle-narwhal-files");
+        let feat = root.join(".orion-worktrees").join("repo").join("gentle-narwhal-files");
         git_in(
             &repo,
             &[
@@ -6812,7 +6817,7 @@ pub(crate) mod tests {
         std::fs::create_dir(&repo).unwrap();
         git_in(&repo, &["init", "-b", "main"]);
         git_in(&repo, &["commit", "--allow-empty", "-m", "init"]);
-        let feat = root.join("repo-worktrees").join("feat");
+        let feat = root.join(".orion-worktrees").join("repo").join("feat");
         git_in(
             &repo,
             &["worktree", "add", &feat.to_string_lossy(), "-b", "feat"],
@@ -6839,7 +6844,7 @@ pub(crate) mod tests {
         std::fs::create_dir(&repo).unwrap();
         git_in(&repo, &["init", "-b", "main"]);
         git_in(&repo, &["commit", "--allow-empty", "-m", "init"]);
-        let feat = root.join("repo-worktrees").join("feat");
+        let feat = root.join(".orion-worktrees").join("repo").join("feat");
         git_in(
             &repo,
             &["worktree", "add", &feat.to_string_lossy(), "-b", "feat"],
@@ -6893,7 +6898,7 @@ pub(crate) mod tests {
             &daemon,
             "p",
             "ghost",
-            &root.join("repo-worktrees").join("gone").to_string_lossy(),
+            &root.join(".orion-worktrees").join("repo").join("gone").to_string_lossy(),
             true,
         );
 
@@ -7090,7 +7095,7 @@ pub(crate) mod tests {
         };
         let worktree = daemon.store.get_worktree(id).unwrap().unwrap();
         assert_eq!(worktree.branch, "teammate");
-        assert_eq!(worktree.path, root.join("repo-worktrees").join("teammate"));
+        assert_eq!(worktree.path, root.join(".orion-worktrees").join("repo").join("teammate"));
 
         let again = daemon
             .create_worktree(&project.id, "origin/teammate", None, true)
@@ -7116,7 +7121,7 @@ pub(crate) mod tests {
         std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
         git_in(&repo, &["add", ".gitignore"]);
         git_in(&repo, &["commit", "-qm", "ignore"]);
-        let wt = root.join("repo-worktrees").join("feat");
+        let wt = root.join(".orion-worktrees").join("repo").join("feat");
         git_in(
             &repo,
             &["worktree", "add", &wt.to_string_lossy(), "-b", "feat"],
@@ -7163,7 +7168,7 @@ pub(crate) mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         let repo = init_repo(&root);
-        let wt = root.join("repo-worktrees").join("feat");
+        let wt = root.join(".orion-worktrees").join("repo").join("feat");
         git_in(
             &repo,
             &["worktree", "add", &wt.to_string_lossy(), "-b", "feat"],
