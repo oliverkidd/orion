@@ -175,7 +175,64 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         confetti.draw(f.buffer_mut(), area, std::time::Instant::now(), app.theme);
     }
     let area = f.area();
+    if app.round_caps {
+        round_caps(f.buffer_mut(), area);
+    }
     draw_black_background(f.buffer_mut(), area);
+}
+
+/// The longest filled piece ROUND CAPS round: a chip, a tab, a keycap, a
+/// title chip, a short picker row. A fill wider than this is a band — a
+/// selected row across a list — and keeps its square ends.
+const ROUND_CAP_MAX: u16 = 24;
+/// The Powerline half circles, left and right.
+const CAP_LEFT: &str = "\u{e0b6}";
+const CAP_RIGHT: &str = "\u{e0b4}";
+
+/// ROUND CAPS: every short run of a solid fill on the frame whose two end
+/// cells are its padding spaces gets those spaces swapped for half-circle
+/// caps in the fill's colour, so the piece reads rounded and not one
+/// column moves. A fill counts when it is a palette colour — the
+/// selection gray, the accent, a tint — not a truecolor wash (the
+/// cursor's, a diff line's, the backdrop behind a modal), and not reverse
+/// video, which is a cursor or a selection inside a field.
+pub(crate) fn round_caps(buf: &mut ratatui::buffer::Buffer, area: Rect) {
+    let solid = |c: &ratatui::buffer::Cell| {
+        !matches!(c.bg, Color::Reset | Color::Rgb(..))
+            && !c.modifier.contains(Modifier::REVERSED)
+    };
+    for y in area.top()..area.bottom() {
+        let mut x = area.left();
+        while x < area.right() {
+            if !solid(&buf[(x, y)]) {
+                x += 1;
+                continue;
+            }
+            let bg = buf[(x, y)].bg;
+            let start = x;
+            while x < area.right() && solid(&buf[(x, y)]) && buf[(x, y)].bg == bg {
+                x += 1;
+            }
+            let end = x - 1;
+            let len = x - start;
+            if !(3..=ROUND_CAP_MAX).contains(&len)
+                || buf[(start, y)].symbol() != " "
+                || buf[(end, y)].symbol() != " "
+            {
+                continue;
+            }
+            let outside = |at: Option<u16>| at.map_or(Color::Reset, |at| buf[(at, y)].bg);
+            let left_bg = outside(start.checked_sub(1).filter(|&l| l >= area.left()));
+            let right_bg = outside(Some(end + 1).filter(|&r| r < area.right()));
+            for (at, glyph, under) in [(start, CAP_LEFT, left_bg), (end, CAP_RIGHT, right_bg)] {
+                let cell = &mut buf[(at, y)];
+                cell.set_symbol(glyph);
+                cell.fg = bg;
+                cell.bg = under;
+                cell.modifier = Modifier::empty();
+            }
+        }
+    }
 }
 
 fn draw_screen(f: &mut Frame, app: &mut App) {
@@ -285,7 +342,7 @@ fn draw_vim(f: &mut Frame, app: &mut App) {
         // The owning overlay gone under an embedded editor — fall through
         // to the modal so the session is never invisible.
     }
-    dim_backdrop(f);
+    dim_backdrop(f, None);
     let area = centered_rect_pct(f.area(), EDITOR_MODAL_PCT.0, EDITOR_MODAL_PCT.1);
     f.render_widget(Clear, area);
     let block = Block::default()
@@ -394,7 +451,7 @@ fn draw_page(f: &mut Frame, app: &mut App) {
     let Some(page) = &mut app.page else {
         return;
     };
-    dim_backdrop(f);
+    dim_backdrop(f, None);
     let area = centered_rect_pct(f.area(), EDITOR_MODAL_PCT.0, EDITOR_MODAL_PCT.1);
     f.render_widget(Clear, area);
     let mut block = Block::default()
@@ -880,7 +937,7 @@ fn draw_multiline_prompt(
         let editor_block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(th.dim));
+            .border_style(Style::default().fg(th.line));
         let editor_inner = editor_block.inner(editor_area);
         f.render_widget(editor_block, editor_area);
         // The view's box keeps a column of air inside this border too, so
@@ -919,32 +976,48 @@ fn draw_multiline_prompt(
     branch_area
 }
 
-/// Dim every cell already on the frame so an open modal reads as the
-/// only focused surface. The modal's own `Clear` restores its rectangle.
-fn dim_backdrop(f: &mut Frame) {
+/// How bright the BACKDROP behind a modal is: every cell already on the
+/// frame at this fraction of its colour.
+pub(crate) const BACKDROP_LEVEL: f32 = 0.35;
+
+/// The colour a terminal's default foreground most likely is, for a cell
+/// whose text colour is `Reset`: the backdrop has to scale something.
+const DEFAULT_FG: (u8, u8, u8) = (208, 208, 208);
+
+/// Darken every cell already on the frame — but `keep`'s — so an open
+/// modal reads as the only focused surface. orion scales each colour
+/// toward black itself ([`BACKDROP_LEVEL`]) rather than asking for the
+/// terminal's faint text, whose strength every terminal picks for itself:
+/// the backdrop is as dark in one as in another. The modal's own `Clear`
+/// restores its rectangle.
+fn dim_backdrop(f: &mut Frame, keep: Option<Rect>) {
     let area = f.area();
-    f.buffer_mut().set_style(
-        area,
-        Style::default()
-            .add_modifier(Modifier::DIM)
-            .bg(crate::theme::BLACK_BACKGROUND),
-    );
+    let buf = f.buffer_mut();
+    let scale = |c: (u8, u8, u8)| {
+        crate::theme::shade(
+            [f32::from(c.0), f32::from(c.1), f32::from(c.2)],
+            BACKDROP_LEVEL,
+        )
+    };
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if keep.is_some_and(|k| k.contains((x, y).into())) {
+                continue;
+            }
+            let cell = &mut buf[(x, y)];
+            let fg = crate::theme::rgb(cell.fg).unwrap_or(DEFAULT_FG);
+            cell.fg = scale(fg);
+            cell.bg = match crate::theme::rgb(cell.bg) {
+                Some(bg) => scale(bg),
+                None => crate::theme::BLACK_BACKGROUND,
+            };
+            cell.modifier.remove(Modifier::DIM);
+        }
+    }
 }
 
 fn draw_overlay(f: &mut Frame, app: &mut App) {
     draw_overlay_over_backdrop(f, app);
-    // The backdrop dims the footer with everything else, but a FLASH is the
-    // app saying what it is doing or how something went: it stays readable.
-    if app.overlay.is_some() && app.flash.is_some() {
-        let area = f.area();
-        let footer = Rect {
-            y: area.y + area.height.saturating_sub(FOOTER_ROWS),
-            height: FOOTER_ROWS.min(area.height),
-            ..area
-        };
-        f.buffer_mut()
-            .set_style(footer, Style::default().remove_modifier(Modifier::DIM));
-    }
 }
 
 fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
@@ -952,7 +1025,18 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
     let Some(overlay) = app.overlay.clone() else {
         return;
     };
-    dim_backdrop(f);
+    // The backdrop darkens the footer with everything else, but a FLASH is
+    // the app saying what it is doing or how something went: it stays
+    // readable.
+    let footer = app.flash.is_some().then(|| {
+        let area = f.area();
+        Rect {
+            y: area.y + area.height.saturating_sub(FOOTER_ROWS),
+            height: FOOTER_ROWS.min(area.height),
+            ..area
+        }
+    });
+    dim_backdrop(f, footer);
     // A box opened from the PULL REQUESTS MODAL (or the LINEAR VIEW, the
     // TODOS MODAL) stands on it rather than taking it away: the modal is the bottom layer, the
     // box — and any picker the box has up — is drawn over it.
@@ -3134,7 +3218,7 @@ pub(crate) fn panel_block(title: &str, focused: bool, th: Theme) -> Block<'_> {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(th.dim))
+            .border_style(Style::default().fg(th.line))
             .title(Span::styled(
                 format!(" {title} "),
                 Style::default().fg(th.muted),
@@ -3157,7 +3241,7 @@ pub(crate) fn panel_block_spans(
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(if focused { th.accent } else { th.dim }))
+        .border_style(Style::default().fg(if focused { th.accent } else { th.line }))
         .title(Line::from(spans))
 }
 
@@ -5546,14 +5630,17 @@ mod tests {
             mark(Some(AgentStatus::Disconnected), false, None).content,
             "◌ "
         );
-        assert_eq!(mark(Some(AgentStatus::Running), false, None).content, "◐ ");
         assert_eq!(
-            mark(Some(AgentStatus::Running), false, Some(1)).content,
-            "◓ "
+            mark(Some(AgentStatus::Running), false, None).content,
+            format!("{} ", crate::app::SPINNER[0])
         );
         assert_eq!(
-            mark(None, false, Some(2)).content,
-            "◑ ",
+            mark(Some(AgentStatus::Running), false, Some(1)).content,
+            format!("{} ", crate::app::SPINNER[1])
+        );
+        assert_eq!(
+            mark(None, false, Some(3)).content,
+            format!("{} ", crate::app::SPINNER[3]),
             "starting spins too"
         );
         let fg = |status, unseen| mark(status, unseen, None).style.fg;

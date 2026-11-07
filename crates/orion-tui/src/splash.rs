@@ -463,7 +463,7 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
     // on the first-run splash it lands focus on the (invisible) projects
     // panel, where Enter opens the first project.
     let hit = if app.home {
-        HitTarget::FooterHome
+        HitTarget::HomeBack
     } else {
         HitTarget::PanelBg(Focus::Projects)
     };
@@ -480,7 +480,7 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
                         height: 1,
                         ..text
                     },
-                    HitTarget::FooterUpgrade,
+                    HitTarget::Upgrade,
                 ),
             );
         }

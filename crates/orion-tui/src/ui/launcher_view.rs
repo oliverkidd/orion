@@ -719,6 +719,39 @@ fn head_count(
         .into_iter()
         .map(|s| (s, None))
         .collect();
+    // A newer published release, `⇡ v3.1.0`: a button — **Upgrade orion** —
+    // shimmering green so it is hard to miss, ahead of everything else the
+    // row says and the last of it to give way.
+    let upgrade: Part = app
+        .update_available
+        .as_ref()
+        .map(|v| {
+            let mut base = Style::default().add_modifier(Modifier::BOLD);
+            if app.hover_crumb == Some(HitTarget::Upgrade) {
+                base = base.add_modifier(Modifier::UNDERLINED);
+            }
+            crate::ui::footer::upgrade_spans(app, &format!("⇡ v{v}"), base)
+                .into_iter()
+                .map(|s| (s, Some(HitTarget::Upgrade)))
+                .chain([(Span::raw("   "), None)])
+                .collect()
+        })
+        .unwrap_or_default();
+    // Over ssh, which machine this orion is on.
+    let host: Part = if app.is_remote {
+        vec![
+            (
+                Span::styled(
+                    truncate(&app.hostname, 24),
+                    Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+                ),
+                None,
+            ),
+            (Span::styled("  ·  ", Style::default().fg(th.faint)), None),
+        ]
+    } else {
+        Vec::new()
+    };
     // Once a piece has not fitted, nothing after it is tried: a narrower
     // piece slipping into the room a wider one left would swap what the
     // row says as the window narrows, rather than only take it away.
@@ -736,10 +769,18 @@ fn head_count(
             }
         }
     };
+    let upgrade = keep(upgrade);
+    let host = keep(host);
     let mark = keep(mark);
     let badge = keep(badge);
     let words = keep(words);
-    words.into_iter().chain(badge).chain(mark).collect()
+    upgrade
+        .into_iter()
+        .chain(host)
+        .chain(words)
+        .chain(badge)
+        .chain(mark)
+        .collect()
 }
 
 /// The header's count of what the grid holds: `3 sessions · 2 terminals`
@@ -1320,7 +1361,7 @@ fn draw_list_row(
     };
     struct Entry<'a> {
         lead: Span<'static>,
-        /// The ACCOUNT CHIP, and the account it names.
+        /// The ACCOUNT MARK, and the account it names.
         tag: Option<(Span<'static>, String)>,
         name: String,
         name_style: Style,
@@ -1358,9 +1399,9 @@ fn draw_list_row(
             };
             Entry {
                 lead: look.dot,
-                tag: account_chip(a, look.quiet, th).map(|chip| {
+                tag: account_mark(a, look.quiet, th).map(|mark| {
                     let id = orion_core::harness::registry_id(a.kind, a.custom_harness.as_deref());
-                    (chip, id.to_string())
+                    (mark, id.to_string())
                 }),
                 name: a.name.clone(),
                 name_style: look.name_style,
@@ -1410,24 +1451,14 @@ fn draw_list_row(
     let mut spans = vec![mark, e.lead];
     let mut room = width.saturating_sub(usize::from(LIST_LEAD));
     let mut links = Vec::new();
-    // The ACCOUNT CHIP column, on every row while the machine has more
-    // than one Claude account — blank on a row that runs on none — so
-    // the names after it line up down the whole grid.
-    if crate::claude_accounts::any_tags() && room > CHIP_COLUMN_W + 8 {
-        match e.tag.clone() {
-            Some((chip, id)) => {
-                let x = r.x + LIST_LEAD;
-                links.push((
-                    Rect::new(x, r.y, CHIP_W as u16, 1),
-                    HitTarget::AccountTag(id),
-                ));
-                spans.push(chip);
-            }
-            None => spans.push(Span::raw(" ".repeat(CHIP_W))),
-        }
-        spans.push(Span::raw(" ".repeat(CHIP_COLUMN_W - CHIP_W)));
-        room -= CHIP_COLUMN_W;
-    }
+    // The ACCOUNT MARK column, at the head of the runs-on column on every
+    // row while the machine has more than one Claude account — blank on a
+    // row that runs on none — so what each runs on lines up down the grid.
+    let mark_col = if crate::claude_accounts::any_tags() {
+        crate::claude_accounts::widest_mark().max(1) + 1
+    } else {
+        0
+    };
     // Where the name starts: every offset below (`used`) counts from it.
     let x0 = r.x + (width - room) as u16;
     // The badge at the right end, while the name keeps a few letters.
@@ -1450,15 +1481,30 @@ fn draw_list_row(
     // each only where there is room for a few letters of it. A RUN LINE
     // has nothing in the first, and its command in the second.
     let runs_at = name_w + LIST_GAP;
-    if room >= runs_at + 6 {
-        let runs_w = runs_col.min(room - runs_at);
+    if room >= runs_at + mark_col + 6 {
+        let runs_w = runs_col.min(room - runs_at - mark_col);
+        if mark_col > 0 {
+            spans.push(Span::raw(" ".repeat(runs_at - used)));
+            used = runs_at;
+            if let Some((mark, id)) = e.tag.clone() {
+                let w = mark.width();
+                links.push((
+                    Rect::new(x0 + runs_at as u16, r.y, w as u16, 1),
+                    HitTarget::AccountTag(id),
+                ));
+                used += w;
+                spans.push(mark);
+            }
+            spans.push(Span::raw(" ".repeat(runs_at + mark_col - used)));
+            used = runs_at + mark_col;
+        }
         if !e.runs.is_empty() {
             let runs = truncate(&e.runs, runs_w);
-            spans.push(Span::raw(" ".repeat(runs_at - used)));
-            used = runs_at + runs.chars().count();
+            spans.push(Span::raw(" ".repeat(runs_at + mark_col - used)));
+            used = runs_at + mark_col + runs.chars().count();
             spans.push(Span::styled(runs, e.runs_style));
         }
-        let text_at = runs_at + runs_w + LIST_GAP;
+        let text_at = runs_at + mark_col + runs_w + LIST_GAP;
         let text_mark_w = e.text_mark.chars().count();
         if !e.text.is_empty() && room >= text_at + text_mark_w + 6 {
             // The ports keep their room — `  :3000 :5173`, two cells
@@ -1534,26 +1580,27 @@ fn draw_list_row(
 
 /// One session as a single line for a picker that lists checkouts with
 /// their sessions under them (the Linear worktree picker): the status
-/// mark, the ACCOUNT CHIP, the name as the grid draws it, what it runs on
-/// and its last prompt — the LIST row's parts, without its columns or
+/// mark, the name as the grid draws it, what it runs on behind its
+/// ACCOUNT MARK, and its last prompt — the LIST row's parts, without its columns or
 /// age, cut to `width`.
 pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Vec<Span<'static>> {
     let th = app.theme;
     let look = session_look(app, a, false, th);
     let mut spans = vec![look.dot];
     let mut used = 2;
-    if let Some(chip) = account_chip(a, look.quiet, th) {
-        used += CHIP_COLUMN_W;
-        spans.extend([chip, Span::raw(" ")]);
-    }
     let name = truncate(&a.name, width.saturating_sub(used).min(LIST_NAME_MAX));
     used += name.chars().count();
     spans.push(Span::styled(name, look.name_style));
+    let mark = account_mark(a, look.quiet, th);
+    let mark_w = mark.as_ref().map_or(0, |m| m.width() + 1);
     let runs = list_runs_line(a, &mut None);
-    if !runs.is_empty() && width > used + LIST_GAP + 6 {
-        let runs = truncate(&runs, (width - used - LIST_GAP).min(LIST_RUNS_MAX));
-        used += LIST_GAP + runs.chars().count();
+    if !runs.is_empty() && width > used + LIST_GAP + mark_w + 6 {
+        let runs = truncate(&runs, (width - used - LIST_GAP - mark_w).min(LIST_RUNS_MAX));
+        used += LIST_GAP + mark_w + runs.chars().count();
         spans.push(Span::raw(" ".repeat(LIST_GAP)));
+        if let Some(mark) = mark {
+            spans.extend([mark, Span::raw(" ")]);
+        }
         spans.push(Span::styled(runs, Style::default().fg(th.dim)));
     }
     if let Some(prompt) = crate::launcher::last_prompt(a).filter(|p| !p.trim().is_empty()) {
@@ -1568,16 +1615,38 @@ pub(crate) fn session_line(app: &App, a: &orion_core::Agent, width: usize) -> Ve
 }
 
 /// One session as a line that names several draws it (the PULL REQUEST
-/// PAGE's SESSIONS, `pr_work`): the status mark, the ACCOUNT CHIP and the
-/// name, as its grid row draws them.
+/// PAGE's SESSIONS, `pr_work`): the status mark, the ACCOUNT MARK and the
+/// name.
 pub(crate) fn session_chip(app: &App, a: &orion_core::Agent) -> Vec<Span<'static>> {
     let look = session_look(app, a, false, app.theme);
     let mut spans = vec![look.dot];
-    if let Some(chip) = account_chip(a, look.quiet, app.theme) {
-        spans.extend([chip, Span::raw(" ")]);
+    if let Some(mark) = account_mark(a, look.quiet, app.theme) {
+        spans.extend([mark, Span::raw(" ")]);
     }
     spans.push(Span::styled(a.name.clone(), look.name_style));
     spans
+}
+
+/// The ACCOUNT MARK `a` wears wherever a session is named: the account's
+/// mark — its letter, or the glyph set for it — in the account's tint,
+/// with no fill and no weight, so it says which account without being
+/// the loudest thing on the line the way a filled [`chip`] is. `quiet`
+/// on an archived row, and the theme's text in `mono`, which keeps colour
+/// for the statuses. None off a Claude account, or with only one.
+pub(crate) fn account_mark(
+    a: &orion_core::Agent,
+    quiet: Color,
+    th: Theme,
+) -> Option<Span<'static>> {
+    let tag = crate::claude_accounts::account_tag(a.kind, a.custom_harness.as_deref())?;
+    let tint = if a.archived {
+        quiet
+    } else if th.is_gray() {
+        th.text
+    } else {
+        tag.color()
+    };
+    Some(Span::styled(tag.mark.clone(), Style::default().fg(tint)))
 }
 
 /// Cells the ACCOUNT CHIP fills: its mark, with a cell of the fill
@@ -1587,18 +1656,6 @@ pub(crate) const CHIP_W: usize = 3;
 /// Columns the ACCOUNT CHIP takes on a row: the chip and the air after
 /// it, before the name.
 pub(crate) const CHIP_COLUMN_W: usize = CHIP_W + 1;
-
-/// The ACCOUNT CHIP `a` wears: [`chip`], dimmed to `quiet` on an
-/// archived row, which says nothing in colour. None off a Claude
-/// account, or with only one.
-pub(crate) fn account_chip(
-    a: &orion_core::Agent,
-    quiet: Color,
-    th: Theme,
-) -> Option<Span<'static>> {
-    let tag = crate::claude_accounts::account_tag(a.kind, a.custom_harness.as_deref())?;
-    Some(chip(&tag, a.archived.then_some(quiet), th))
-}
 
 /// An ACCOUNT CHIP: the account's mark — its letter, or the glyph set
 /// for it — black and bold, [`CHIP_W`] cells filled with the account's
@@ -1817,7 +1874,7 @@ fn draw_band_rule(
     let BandRule {
         on, lit, mut cols, ..
     } = rule;
-    let edge = if lit { th.accent } else { th.edge };
+    let edge = if lit { th.lit_rule } else { th.edge };
     let dash = |n: usize| Span::styled("─".repeat(n), Style::default().fg(edge));
 
     let merged = app.worktree_wears_merge(&band.worktree);
@@ -2152,8 +2209,8 @@ struct SessionLook {
     /// Bold and bright for a session that wants you, plain text for one
     /// working, muted for one at rest — the way an inbox reads.
     name_style: Style,
-    /// The last prompt's color: muted where the name is bright, dim where
-    /// the session is at rest.
+    /// The last prompt's color: `quiet`'s, whatever the status — the
+    /// detail of a row, in the gray its harness and age are in.
     prompt: Color,
     /// The status sweep across the name, while it animates.
     ramp: Option<[Color; 3]>,
@@ -2227,17 +2284,10 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
     } else {
         Style::default().fg(th.muted)
     };
-    let prompt = if archived {
-        quiet
-    } else if wants || working {
-        if selected {
-            th.text
-        } else {
-            th.muted
-        }
-    } else {
-        quiet
-    };
+    // The prompt is detail, not news, whatever the status: it sits in the
+    // gray the harness and the age are in, a step up on the cursor's row
+    // so the row the keys are on still reads first.
+    let prompt = quiet;
     // A session stopped on a usage limit says so where its age goes, in
     // the red its frame is: the reason it is waiting on you.
     let limit = a.limit_reached().filter(|_| !pending);
@@ -2272,14 +2322,6 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
         ago,
         ago_style,
     }
-}
-
-/// A session's STATUS MARK as its entry draws it, and its name's style on
-/// the entry the cursor is on ([`session_look`]): what the FOOTER's
-/// breadcrumb names the selected session with, so the two agree.
-pub(super) fn session_crumb(app: &App, a: &orion_core::Agent) -> (Span<'static>, Style) {
-    let look = session_look(app, a, true, app.theme);
-    (look.dot, look.name_style)
 }
 
 /// Which entry wears the cursor: the one the cursor is on, or none at all
@@ -2728,7 +2770,7 @@ fn pane_account(a: &orion_core::Agent, quiet: Color, room: usize, th: Theme) -> 
         PaneTab::plain(vec![Span::raw("  ")]),
         PaneTab {
             spans: vec![
-                chip(&tag, a.archived.then_some(quiet), th),
+                Span::styled(tag.mark.clone(), Style::default().fg(tint)),
                 Span::styled(
                     format!(" {}", truncate(&name, (room / 4).max(8))),
                     Style::default().fg(tint),
@@ -4333,11 +4375,11 @@ mod tests {
         });
     }
 
-    /// With two Claude accounts every LIST row wears its account's chip
-    /// right after the status dot — its letter in a filled chip, then air
-    /// before the name; with one, no row does.
+    /// With two Claude accounts every LIST row wears its account's MARK
+    /// at the head of its runs-on column — the letter, then what it runs
+    /// on; with one, no row does.
     #[test]
-    fn rows_wear_their_accounts_chip_with_two_accounts() {
+    fn rows_wear_their_accounts_mark_with_two_accounts() {
         with_two_accounts("rk@b.co", || {
             let mut app = a_tree();
             select(&mut app, "api");
@@ -4349,21 +4391,22 @@ mod tests {
                 .iter()
                 .find(|l| l.contains("s0"))
                 .expect("the session's line");
-            assert!(line.contains(" R  s0"), "{line:?}");
+            assert!(line.contains("s0  R claude"), "{line:?}");
         });
         let mut app = a_tree();
         select(&mut app, "api");
         let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
         let line = lines.iter().find(|l| l.contains("s0")).unwrap();
-        assert!(!line.contains(" R "), "one account, no chip: {line:?}");
+        assert!(!line.contains(" R "), "one account, no mark: {line:?}");
     }
 
-    /// The chip is the account's letter, black and bold, on three cells of
-    /// its tint, in every theme but `mono`, which keeps colour for the
-    /// statuses and draws it inverse — black on its text gray; an
-    /// archived session's chip is dimmed to the quiet it is drawn in.
+    /// The mark is the account's letter in its tint, with no fill and no
+    /// weight — the quiet way to say which account — in every theme but
+    /// `mono`, which keeps colour for the statuses and draws it in its
+    /// text gray; an archived session's mark is dimmed to the quiet it is
+    /// drawn in.
     #[test]
-    fn the_chip_is_black_on_its_tint_in_every_theme_and_inverse_in_mono() {
+    fn the_mark_is_its_tint_unfilled_in_every_theme_and_gray_in_mono() {
         with_two_accounts("rk@b.co", || {
             let body = Rect::new(0, 0, 100, 30);
             for name in crate::theme::THEMES {
@@ -4380,34 +4423,26 @@ mod tests {
                 terminal.draw(|f| draw(f, &mut app, body)).unwrap();
                 let buf = terminal.backend().buffer().clone();
                 let lines = drawn_lines(&mut app, body);
-                let row = lines.iter().position(|l| l.contains(" R  s0")).unwrap();
-                let at = lines[row].find(" R  s0").unwrap();
+                let row = lines.iter().position(|l| l.contains("R claude")).unwrap();
+                let at = lines[row].find("R claude").unwrap();
                 let x = lines[row][..at].chars().count() as u16;
                 let th = app.theme;
-                let fill = if *name == "mono" {
+                let tint = if *name == "mono" {
                     th.text
                 } else {
                     crate::theme::ACCOUNT_TINTS[1]
                 };
-                for dx in 0..CHIP_W as u16 {
-                    let cell = buf.cell((x + dx, row as u16)).unwrap();
-                    assert_eq!(cell.bg, fill, "{name}: cell {dx} of the chip");
-                }
-                let mark = buf.cell((x + 1, row as u16)).unwrap();
-                assert_eq!(mark.fg, Color::Black, "{name}");
-                assert!(mark.modifier.contains(Modifier::BOLD), "{name}");
-                let after = buf.cell((x + CHIP_W as u16, row as u16)).unwrap();
-                assert_ne!(after.bg, fill, "{name}: air between the chip and the name");
+                let mark = buf.cell((x, row as u16)).unwrap();
+                assert_eq!(mark.symbol(), "R", "{name}");
+                assert_eq!(mark.fg, tint, "{name}");
+                assert_ne!(mark.bg, tint, "{name}: no fill");
+                assert!(!mark.modifier.contains(Modifier::BOLD), "{name}");
 
                 let mut archived = app.tree.agents[0].clone();
                 archived.archived = true;
                 let spans = session_chip(&app, &archived);
-                let chip = spans.iter().find(|s| s.content == " R ").unwrap();
-                assert_eq!(
-                    chip.style.bg,
-                    Some(th.dim),
-                    "{name}: an archived chip is dim"
-                );
+                let mark = spans.iter().find(|s| s.content == "R").unwrap();
+                assert_eq!(mark.style.fg, Some(th.dim), "{name}: an archived mark is dim");
             }
         });
     }
@@ -4735,10 +4770,14 @@ mod tests {
         select(&mut app, "api");
         app.hits.clear();
         let spans = head_tabs(&mut app, r);
-        assert_eq!(row_text(&spans), " web ●1 ×   api ●1 ◐1 ×   + ");
+        let still = crate::app::SPINNER[0];
+        assert_eq!(
+            row_text(&spans),
+            format!(" web ●1 ×   api ●1 {still}1 ×   + ")
+        );
         let dots: Vec<(String, Option<Color>)> = spans
             .iter()
-            .filter(|s| s.content.contains(['●', '◐', '✕']))
+            .filter(|s| s.content.contains(['●', '✕']) || s.content.contains(still))
             .map(|s| (s.content.to_string(), s.style.fg))
             .collect();
         assert_eq!(
@@ -4746,7 +4785,7 @@ mod tests {
             vec![
                 (" ●1".to_string(), Some(th.done)),
                 (" ●1".to_string(), Some(th.err)),
-                (" ◐1".to_string(), Some(th.warn)),
+                (format!(" {still}1"), Some(th.warn)),
             ]
         );
     }

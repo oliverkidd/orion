@@ -8482,7 +8482,10 @@ pub(crate) mod tests {
 
         let screen = shot(&mut app, 220, 40);
         let row = |needle: &str| line_with(&screen, needle);
-        assert!(row("ENG-1 Ours").contains("◐ ⎇ ↗  #42 ready"), "{screen}");
+        assert!(
+            row("ENG-1 Ours").contains(&format!("{} ⎇ ↗  #42 ready", crate::app::SPINNER[0])),
+            "{screen}"
+        );
         assert!(
             row("ENG-2 Outside").contains("⇢ ↗ #305 conflicts"),
             "{screen}"
