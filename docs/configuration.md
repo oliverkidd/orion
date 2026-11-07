@@ -197,8 +197,8 @@ A system preset always has text: empty, it shows orion's built-in text greyed an
 be renamed or deleted. On it `Enter` edits and `^R` puts orion's text back. On one of yours, under
 **Yours**, `Enter` edits, `^N` makes a new one and `^D` deletes it.
 
-Presets are picked, never managed, elsewhere: `⌘U` / `^X` in the QUICK PROMPT, `⇧Tab` on a Linear
-issue or a todo, **Agent presets** in the palette, and `⌘U` over an agent's locked pane, which
+Presets are picked, never managed, elsewhere: `⌘U` / `^X` in the QUICK PROMPT — the box `Enter` opens on
+a Linear issue or a todo — **Agent presets** in the palette, and `⌘U` over an agent's locked pane, which
 pastes the text in at the caret.
 
 ## Setup command

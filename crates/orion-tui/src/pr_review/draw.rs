@@ -1,11 +1,12 @@
-//! The PR REVIEW on screen: the files on the left with their thread
-//! counts, the file's diff on the right with its threads under their
-//! lines, the keys along the bottom edge.
+//! The PR REVIEW's parts of the DIFF VIEWER's screen (`pr_review::viewer`
+//! puts them there): the file's diff with its threads under their lines,
+//! each file's thread count for the file list, and the bar along the
+//! bottom.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
@@ -14,28 +15,16 @@ use super::github;
 use super::github::{ReviewThread, ThreadComment};
 use super::layout::{self, Item, Stop};
 use super::write::{Composer, Target};
-use super::{Focus, ReviewFile, ReviewScreen};
-use crate::app::{App, Overlay};
+use super::{ReviewFile, ReviewScreen};
 use crate::markdown::Breaks;
 use crate::text_input::TextView;
 use crate::theme::Theme;
-use crate::ui::{
-    centered_rect_pct, count_style, empty_list_row, panel_block, render_row, row_rect, truncate,
-    truncate_cells, truncate_left, SPLIT_MODAL_PCT, SPLIT_PANE_LAYOUT_MIN,
-};
-
-/// The file column's share of the modal, and its floor.
-const FILES_PCT: u16 = 28;
-const MIN_FILES_W: u16 = 24;
 /// The cell left of the diff the cursor's `▌` stands in.
 const MARGIN: usize = 1;
 /// The rule a comment hangs on, and the cell after it.
 const RULE: &str = "│ ";
 /// The fewest cells a comment's text wraps in, however deep the gutter.
 const MIN_TEXT_W: usize = 16;
-/// The rows the files and the diff keep over the bar, however long the
-/// summary.
-const MIN_PANES_H: u16 = 6;
 /// The most rows the summary shows before it scrolls.
 const SUMMARY_ROWS: usize = 3;
 /// What sits between two of the bar's verdicts.
@@ -43,66 +32,33 @@ const VERDICT_GAP: &str = "   ";
 
 /// What the diff pane laid out at the last draw, for the keys and the
 /// mouse to read back.
-struct Laid {
+pub(crate) struct Laid {
     lines: Vec<Line<'static>>,
-    scroll: usize,
-    stops: Vec<(Stop, usize, usize)>,
-    cursor: Option<Stop>,
+    pub scroll: usize,
+    pub stops: Vec<(Stop, usize, usize)>,
+    pub cursor: Option<Stop>,
     /// The cells the comment being written wraps in, and its rows.
-    composer: Option<TextView>,
+    pub composer: Option<TextView>,
 }
 
-/// Draw the screen and write back where everything went (`view` is a
-/// clone of `app.overlay`'s).
-pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &ReviewScreen, th: Theme) {
-    let area = centered_rect_pct(f.area(), SPLIT_MODAL_PCT.0, SPLIT_MODAL_PCT.1);
-    f.render_widget(Clear, area);
-    let [panes, bar_a] = Layout::vertical([
-        Constraint::Min(MIN_PANES_H),
-        Constraint::Length(bar_height(view, area.width)),
-    ])
-    .areas(area);
-    let files_w = (area.width * FILES_PCT / 100)
-        .max(MIN_FILES_W)
-        .min(area.width.saturating_sub(SPLIT_PANE_LAYOUT_MIN));
-    let [files_a, diff_a] = Layout::horizontal([
-        Constraint::Length(files_w),
-        Constraint::Min(SPLIT_PANE_LAYOUT_MIN),
-    ])
-    .areas(panes);
-
-    let (files_inner, file_rects) = draw_files(f, view, files_a, th);
-    let (diff_inner, laid) = draw_diff(f, view, diff_a, th);
-    let bar = draw_bar(f, view, bar_a, th);
-    crate::hints::draw_on_border(f, area, &super::hints(view), bar.foot_w, th);
-
-    if let Some(Overlay::Review(v)) = &mut app.overlay {
-        v.area = area;
-        v.files_area = files_inner;
-        v.diff_area = diff_inner;
-        v.file_rects = file_rects;
-        v.diff_h = diff_inner.height;
-        v.bar_area = bar_a;
-        v.verdict_rects = bar.verdicts;
-        if let Some(at) = bar.summary {
-            v.summary.set_view(at);
-        }
-        if let Some(laid) = laid {
-            v.scroll = laid.scroll;
-            v.stop_rows = laid.stops;
-            v.cursor = laid.cursor;
-            v.follow = false;
-            // ↑/↓ in the comment walk the rows it was drawn in.
-            if let (Some(composer), Some(at)) = (&mut v.composer, laid.composer) {
-                composer.input.set_view(at);
-            }
-        }
-    }
+/// The file on screen's diff with its threads, drawn into `inner` — the
+/// DIFF VIEWER's reading pane, inside its border. None with no file.
+pub(crate) fn draw_body(
+    f: &mut Frame,
+    view: &ReviewScreen,
+    inner: Rect,
+    focused: bool,
+    th: Theme,
+) -> Option<Laid> {
+    let file = view.current()?;
+    let mut laid = lay_out(view, file, inner.width, inner.height, focused, th);
+    f.render_widget(Paragraph::new(std::mem::take(&mut laid.lines)), inner);
+    Some(laid)
 }
 
 /// How many threads are on `path`, and whether any is still open — the
-/// file column's count.
-fn thread_count(view: &ReviewScreen, path: &str, th: Theme) -> Vec<Span<'static>> {
+/// file list's count, right of the path.
+pub(crate) fn thread_count(view: &ReviewScreen, path: &str, th: Theme) -> Vec<Span<'static>> {
     let threads: Vec<&ReviewThread> = view.threads_on(path).collect();
     if threads.is_empty() {
         return Vec::new();
@@ -113,110 +69,17 @@ fn thread_count(view: &ReviewScreen, path: &str, th: Theme) -> Vec<Span<'static>
     if pending {
         spans.push(Span::styled("● ", Style::default().fg(th.accent)));
     }
-    spans.push(if open == 0 {
+    let word = if open == 0 {
         Span::styled(format!("✓{}", threads.len()), Style::default().fg(th.dim))
     } else {
         Span::styled(
-            threads.len().to_string(),
+            format!("✎{open}"),
             Style::default().fg(th.text).add_modifier(Modifier::BOLD),
         )
-    });
-    spans
-}
-
-/// What the panes say while there is no file to show: the diff still being
-/// read, why it couldn't be — `why` the diff pane's to say — or a pull
-/// request that changes nothing.
-fn nothing_to_show(view: &ReviewScreen, why: bool) -> Option<String> {
-    match &view.files {
-        None => Some("reading the diff…".to_string()),
-        Some(Err(err)) if why => Some(format!("couldn't read the diff: {err}")),
-        Some(Err(_)) => Some("couldn't read the diff".to_string()),
-        Some(Ok(files)) if files.is_empty() => Some("no files changed".to_string()),
-        Some(Ok(_)) => None,
-    }
-}
-
-/// The file column: each file's status, its path and its thread count.
-fn draw_files(
-    f: &mut Frame,
-    view: &ReviewScreen,
-    area: Rect,
-    th: Theme,
-) -> (Rect, Vec<(Rect, usize)>) {
-    let focused = view.focus == Focus::Files;
-    let files = view.file_list();
-    let mut title = format!("Review {}", view.label);
-    if view.reading {
-        title.push_str(" · reading threads…");
-    } else if !files.is_empty() {
-        title.push_str(&format!(" · {} files", files.len()));
-    }
-    let title = truncate(&title, usize::from(area.width.saturating_sub(4)));
-    let block = panel_block(&title, focused, th);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if let Some(say) = nothing_to_show(view, false) {
-        empty_list_row(f, inner, &say, th);
-    }
-    let height = usize::from(inner.height);
-    let top = crate::app::window_start(view.file, height);
-    let width = usize::from(inner.width).saturating_sub(1);
-    let mut rects = Vec::new();
-    for (row, (i, file)) in files.iter().enumerate().skip(top).enumerate() {
-        let Some(rect) = row_rect(inner, row) else {
-            break;
-        };
-        let count = thread_count(view, &file.path, th);
-        let count_w: usize = count.iter().map(|s| s.content.width()).sum();
-        let status = Span::styled(
-            format!("{} ", file.status),
-            Style::default().fg(crate::ui::change_color([file.status, ' '], th)),
-        );
-        let room = width.saturating_sub(2 + count_w + usize::from(count_w > 0));
-        let path = truncate_cells(&file.path, room);
-        let gap = width.saturating_sub(2 + path.width() + count_w);
-        let mut spans = vec![status, Span::raw(path), Span::raw(" ".repeat(gap))];
-        spans.extend(count);
-        render_row(f, rect, spans, i == view.file, focused, th);
-        rects.push((rect, i));
-    }
-    (inner, rects)
-}
-
-/// The diff pane: the file's diff with its threads, or what is keeping it.
-fn draw_diff(f: &mut Frame, view: &ReviewScreen, area: Rect, th: Theme) -> (Rect, Option<Laid>) {
-    let focused = view.focus == Focus::Diff;
-    let file = view.current();
-    let counts = file.and_then(|file| file.lines).map(|lines| {
-        Line::from(vec![
-            Span::styled(
-                format!(" +{}", lines.added),
-                count_style(lines.added, th.added, th),
-            ),
-            Span::styled(
-                format!(" −{} ", lines.removed),
-                count_style(lines.removed, th.removed, th),
-            ),
-        ])
-    });
-    // The path, cut from its root, clear of the counts at the right.
-    let room = usize::from(area.width).saturating_sub(8 + counts.as_ref().map_or(0, Line::width));
-    let title = file.map_or_else(String::new, |file| truncate_left(&file.path, room));
-    let mut block = panel_block(&title, focused, th);
-    if let Some(counts) = counts {
-        block = block.title_top(counts.right_aligned());
-    }
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    let Some(file) = file else {
-        let say = nothing_to_show(view, true).unwrap_or_default();
-        empty_list_row(f, inner, &say, th);
-        return (inner, None);
     };
-    let mut laid = lay_out(view, file, inner.width, inner.height, focused, th);
-    f.render_widget(Paragraph::new(std::mem::take(&mut laid.lines)), inner);
-    (inner, Some(laid))
+    spans.push(word);
+    spans.push(Span::raw(" "));
+    spans
 }
 
 /// The file's pane laid out `width` × `height`: every item's rows, the
@@ -516,7 +379,7 @@ fn thread_lines(
 
 /// The bar's rows: its borders, the verdicts, and the summary as tall as
 /// what is typed, up to [`SUMMARY_ROWS`].
-fn bar_height(view: &ReviewScreen, width: u16) -> u16 {
+pub(crate) fn bar_height(view: &ReviewScreen, width: u16) -> u16 {
     let field_w = usize::from(width.saturating_sub(2)).saturating_sub(FIELD_LEAD + 1);
     let rows = view
         .summary
@@ -530,18 +393,23 @@ fn bar_height(view: &ReviewScreen, width: u16) -> u16 {
 const FIELD_LEAD: usize = 9;
 
 /// What [`draw_bar`] left on screen, for the write-back.
-struct Bar {
+pub(crate) struct Bar {
     /// The cells its foot — why the last submit didn't go, or what is on
     /// its way — takes at the right of the bottom edge.
-    foot_w: u16,
-    verdicts: Vec<(Rect, github::Verdict)>,
-    summary: Option<TextView>,
+    pub foot_w: u16,
+    pub verdicts: Vec<(Rect, github::Verdict)>,
+    pub summary: Option<TextView>,
 }
 
 /// The bar: the verdicts — only a comment on your own pull request — and
 /// how much is pending on its first row, the summary under them.
-fn draw_bar(f: &mut Frame, view: &ReviewScreen, area: Rect, th: Theme) -> Bar {
-    let focused = view.focus == Focus::Bar;
+pub(crate) fn draw_bar(
+    f: &mut Frame,
+    view: &ReviewScreen,
+    area: Rect,
+    focused: bool,
+    th: Theme,
+) -> Bar {
     let (inner, foot_w) = crate::ui::form_frame(
         f,
         area,

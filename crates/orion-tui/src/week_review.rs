@@ -2104,13 +2104,13 @@ pub(crate) mod keys {
 
     pub const SEND: Key = Key::new(&["enter"], "write it");
     /// A choice row's other choice.
-    pub const CHOOSE: Key = Key::new(&["left", "right"], "choose").show(2);
+    pub const CHOOSE: Key = crate::nav::SIDEWAYS.doing("choose");
     pub const TICK: Key = Key::new(&["space"], "tick");
     /// From the new review to the reviews kept, and back.
-    pub const SIDE: Key = Key::new(&["tab", "shift+tab"], "reviews");
+    pub const SIDE: Key = crate::nav::PANELS.doing("reviews");
     pub const OPEN: Key = Key::new(&["enter"], "open");
-    pub const WALK: Key = Key::new(&["up", "down"], "reviews").show(2);
-    pub const SCROLL: Key = Key::new(&["up", "down"], "scroll").show(2);
+    pub const WALK: Key = crate::nav::ROWS.doing("reviews");
+    pub const SCROLL: Key = crate::nav::ROWS.doing("scroll");
     /// The TODOS MODAL's copy.
     pub const COPY: Key = Key::new(&["cmd+c", "ctrl+y"], "copy as Markdown");
     pub const FILE: Key = Key::new(&["cmd+o", "ctrl+o"], "open the file");
@@ -2118,7 +2118,7 @@ pub(crate) mod keys {
     pub const NEW: Key = Key::new(&["cmd+n", "ctrl+n"], "a new one");
     pub const STOP: Key = Key::new(&["cmd+w", "ctrl+w"], "stop");
     /// Off a review's page, back to the screen.
-    pub const BACK: Key = Key::new(&["esc"], "back");
+    pub const BACK: Key = crate::nav::CLOSE.doing("back");
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         SEND, CHOOSE, TICK, SIDE, OPEN, WALK, SCROLL, COPY, FILE, AGAIN, NEW, STOP, BACK,
@@ -2168,7 +2168,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
     app.dirty = true;
     match (view.mode, view.side) {
         (Mode::Page, _) => page_key(app, key),
-        (Mode::Screen, _) if key.code == KeyCode::Esc => app.overlay = None,
+        (Mode::Screen, _) if crate::nav::closes(&key) => app.overlay = None,
         (Mode::Screen, Side::Form) => form_key(app, key),
         (Mode::Screen, Side::Reviews) => list_key(app, key),
     }
@@ -2246,7 +2246,7 @@ fn list_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => open_page(app, at as usize),
         KeyCode::Down => view.selected = crate::app::clamp_selection(at + 1, count),
         KeyCode::Up => view.selected = crate::app::clamp_selection(at - 1, count),
-        KeyCode::Left => view.side = Side::Form,
+        // `←`/`→` stay on the list: `Tab` / `⇧Tab` are the way across.
         _ if keys::SIDE.matches(&key) || keys::NEW.matches(&key) => view.side = Side::Form,
         _ => {}
     }

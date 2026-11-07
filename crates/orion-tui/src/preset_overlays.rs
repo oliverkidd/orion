@@ -954,14 +954,14 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // Two-stage, like every type-ahead: the letters first.
-        KeyCode::Esc if !view.filter.is_empty() => view.filter.clear(),
+        _ if crate::nav::closes(&key) && !view.filter.is_empty() => view.filter.clear(),
         // Backing out of the box's own picker is a return trip, not a
         // close: the box comes back exactly as it left, text and all. A
         // picker reached with no box up (one on a pull request) closes as
         // the launcher does — it used to put up an empty box nobody asked
         // for — unless it stands on a modal the box would have, which it
         // leaves on its row.
-        KeyCode::Esc => match view.box_behind().cloned() {
+        _ if crate::nav::closes(&key) => match view.box_behind().cloned() {
             Some(back) => crate::quick_prompt::reopen(app, back.launch, &back.text),
             None => match view.quick.clone().and_then(|back| back.launch.under) {
                 Some(under) => under.reopen(app),
@@ -1092,10 +1092,10 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // Esc first clears a choice row's type-ahead, then backs out.
-        KeyCode::Esc if !editor.filter.is_empty() => editor.filter.clear(),
+        _ if crate::nav::closes(&key) && !editor.filter.is_empty() => editor.filter.clear(),
         _ if keys::RESTORE.matches(&key) => editor.restore_text(),
         // Back to the Settings → Presets row it came from, unsaved.
-        KeyCode::Esc => {
+        _ if crate::nav::closes(&key) => {
             let at = editor.settings_row;
             crate::presets_tab::reopen(app, at);
         }
@@ -1206,7 +1206,7 @@ pub(crate) mod keys {
     pub const WORKTREE: Key = Key::new(&["tab"], "new worktree");
     /// The editor: the next field, a choice row's value, save.
     pub const FIELD: Key = Key::new(&["tab", "down"], "field");
-    pub const CHOOSE: Key = Key::new(&["left", "right"], "choose").show(2);
+    pub const CHOOSE: Key = crate::nav::SIDEWAYS.doing("choose");
     pub const SAVE: Key = Key::new(&["enter"], "save");
     /// A SYSTEM PRESET's: orion's text into the box.
     pub const RESTORE: Key = Key::new(&["ctrl+r"], "orion's text");

@@ -2697,11 +2697,11 @@ pub(super) fn handle_picker_key(app: &mut App, key: KeyEvent) {
     };
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Esc if !picker.query.is_empty() => {
+        _ if crate::nav::closes(&key) && !picker.query.is_empty() => {
             picker.query = TextInput::new();
             picker.apply_filter();
         }
-        KeyCode::Esc => {
+        _ if crate::nav::closes(&key) => {
             let back = picker.back.clone();
             app.overlay = None;
             // A picker with no box under it — `p` with nothing selected —
@@ -4738,7 +4738,7 @@ mod tests {
             );
             assert!(
                 footer_text(&app).starts_with(
-                    "Esc back to the grid · Tab/⇧Tab tabs · Enter diff the file · ↑↓ pick"
+                    "Esc back to the grid · Tab/⇧Tab tabs · Enter review the file · ↑↓ pick"
                 ),
                 "{}",
                 footer_text(&app)
@@ -4825,6 +4825,11 @@ mod tests {
     fn enter_on_the_reviews_tab_reviews_the_pull_request() {
         with_default_config(|| {
             let mut app = with_a_listed_pull_request_on_the_empty_band();
+            // The viewer reads the pull request from the project's git.
+            let (repo, head) = crate::pr_review::tests::repo();
+            for project in &mut app.tree.projects {
+                project.repo_path = repo.path().to_path_buf();
+            }
             let url = pull_request(9).url;
             app.pr_detail.insert(
                 url.clone(),
@@ -4833,7 +4838,7 @@ mod tests {
                     url,
                     title: "Polish the nav".into(),
                     base: "main".into(),
-                    head_sha: "abc123".into(),
+                    head_sha: head,
                     ..Default::default()
                 },
             );
@@ -4848,9 +4853,11 @@ mod tests {
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert!(
-                matches!(&app.overlay, Some(crate::app::Overlay::Review(v)) if v.number == 9),
-                "{:?}",
-                app.overlay
+                matches!(&app.overlay, Some(crate::app::Overlay::Diff(v))
+                    if v.review.as_ref().is_some_and(|r| r.number == 9)),
+                "{:?} {:?}",
+                app.overlay,
+                app.flash
             );
         });
     }
@@ -6997,6 +7004,13 @@ mod tests {
                 key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             }
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                matches!(app.overlay, Some(Overlay::OpenRepo(_))),
+                "the row opens the OPEN REPO modal: {:?}",
+                app.overlay
+            );
+            // Tab browses: the open-project prompt.
+            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("the row opens the prompt: {:?}", app.overlay);
             };

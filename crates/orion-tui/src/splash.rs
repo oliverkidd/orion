@@ -412,6 +412,13 @@ pub fn draw_splash(f: &mut Frame, app: &mut App, area: Rect) {
             lines.push(Line::from(vec![
                 Span::styled(enter, crate::hints::key_style(th)),
                 Span::styled(" to begin", crate::hints::does_style(th)),
+                // `⌘O` here opens a repo (`event_loop::splash_open`).
+                Span::styled(" · ", crate::hints::does_style(th)),
+                Span::styled(
+                    crate::hints::key_or(&app.keymap, crate::keymap::Action::OpenOutside, "⌘O"),
+                    crate::hints::key_style(th),
+                ),
+                Span::styled(" open repo", crate::hints::does_style(th)),
             ]));
             None
         }

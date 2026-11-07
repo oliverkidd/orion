@@ -3,12 +3,13 @@
 //! GitHub has it — and an optional summary; and the submit that sends the
 //! review with everything pending in it (`⌘⇧R` anywhere, Enter on the
 //! bar). With nothing pending, the review is sent at once as a new one.
-//! Once GitHub takes it the screen gives way to the pull request's
+//! Once GitHub takes it the DIFF VIEWER gives way to the pull request's
 //! Reviews tab, its page read again.
 
 use crossterm::event::{KeyCode, KeyEvent};
 
 use super::github::{self, Verdict};
+use super::viewer::review_mut;
 use super::{Answer, Focus, ReviewScreen};
 use crate::app::{App, Overlay};
 use crate::flash::Flash;
@@ -63,12 +64,12 @@ impl ReviewScreen {
 /// summary on its first row, the summary's own keys on the second — `↑`
 /// off its top back up — and Enter sends.
 pub(super) fn bar_key(app: &mut App, key: KeyEvent) {
-    let Some(Overlay::Review(view)) = &mut app.overlay else {
+    let Some(view) = review_mut(app) else {
         return;
     };
     let newline = view.summary.takes_newline(&key);
     match (view.bar_row, key.code) {
-        (_, KeyCode::Esc) => view.focus = Focus::Diff,
+        _ if crate::nav::closes(&key) => view.focus = Focus::Diff,
         (_, KeyCode::Enter) if !newline => submit(app),
         (BarRow::Verdict, KeyCode::Left | KeyCode::Right) => {
             view.step_verdict(key.code == KeyCode::Right);
@@ -110,7 +111,7 @@ pub(super) fn paste(view: &mut ReviewScreen, text: &str) -> bool {
 /// needs a word to say.
 pub(super) fn submit(app: &mut App) {
     let tx = app.pr_review.tx.clone();
-    let Some(Overlay::Review(view)) = &mut app.overlay else {
+    let Some(view) = review_mut(app) else {
         return;
     };
     if view.composer.is_some() {
@@ -160,9 +161,9 @@ pub(super) fn submit(app: &mut App) {
     });
 }
 
-/// The review landed. Sent: the footer says so, and the screen gives way
-/// to the pull request's Reviews tab — in the modal it came from, or the
-/// pane's — its page read again. Refused: the bar says why, everything
+/// The review landed. Sent: the footer says so, and the DIFF VIEWER gives
+/// way to the pull request's Reviews tab — in the modal it came from, or
+/// the pane's — its page read again. Refused: the bar says why, everything
 /// still pending.
 pub(super) fn land_submitted(
     app: &mut App,
@@ -189,7 +190,7 @@ pub(super) fn land_submitted(
     if !on_screen {
         return;
     }
-    let Some(Overlay::Review(view)) = app.overlay.take() else {
+    let Some(Overlay::Diff(view)) = app.overlay.take() else {
         return;
     };
     match view.back {
@@ -197,12 +198,9 @@ pub(super) fn land_submitted(
         None => {
             app.pr_tabs.switch(PrTab::Reviews);
             if app.previewed_pr().is_some_and(|pr| pr.url == url) {
+                let dir = view.review.map_or(view.root, |r| r.dir);
                 app.pending_pr_detail = Some((
-                    crate::app::PendingPrDetail {
-                        url,
-                        number,
-                        dir: view.dir,
-                    },
+                    crate::app::PendingPrDetail { url, number, dir },
                     std::time::Instant::now(),
                 ));
             }

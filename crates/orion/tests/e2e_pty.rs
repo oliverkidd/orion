@@ -2251,7 +2251,7 @@ async fn add_project_get_main_worktree(c: &mut UnixStream, repo: &Path) -> orion
 
 /// The SPARE WORKTREES under `repo`'s WORKTREE DIR, by directory name.
 fn spare_dirs(repo: &Path) -> Vec<String> {
-    let dir = repo.parent().unwrap().join("repo-worktrees");
+    let dir = repo.parent().unwrap().join(".orion-worktrees").join("repo");
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|entries| {
             entries
@@ -2312,7 +2312,7 @@ async fn a_new_worktree_launch_takes_the_spare_and_types_its_task() {
     let main = add_project_get_main_worktree(&mut c, &repo).await;
 
     // Adding the project is using it: its spare is cut and its CLI boots.
-    let worktrees = repo.parent().unwrap().join("repo-worktrees");
+    let worktrees = repo.parent().unwrap().join(".orion-worktrees").join("repo");
     until("the spare's CLI booting", SPAWN_CHAIN_TIMEOUT, || {
         spare_dirs(&repo)
             .first()
@@ -3760,8 +3760,8 @@ async fn orion_worktree_cli_relocates_the_session_when_the_turn_ends() {
         })
         .expect("feat-x worktree upsert");
     assert!(
-        feat.path.ends_with("repo-worktrees/feat-x"),
-        "orion's sibling layout: {:?}",
+        feat.path.ends_with(".orion-worktrees/repo/feat-x"),
+        "orion's hidden worktrees folder: {:?}",
         feat.path
     );
     assert!(feat.path.join(".git").exists(), "a real checkout");
@@ -3785,7 +3785,7 @@ async fn orion_worktree_cli_relocates_the_session_when_the_turn_ends() {
             matches!(e, ServerEvent::EntityUpserted { entity: Entity::Agent(a) }
                 if a.id == agent_id && a.worktree_id == feat.id && a.alive)
         });
-        alive && String::from_utf8_lossy(&collected_output(evs)).contains("repo-worktrees/feat-x")
+        alive && String::from_utf8_lossy(&collected_output(evs)).contains(".orion-worktrees/repo/feat-x")
     })
     .await;
     assert!(
@@ -3819,7 +3819,7 @@ async fn orion_worktree_cli_relocates_the_session_when_the_turn_ends() {
         if b.len() >= 2 {
             assert_eq!(b.len(), 2, "one respawn, not several: {b:?}");
             assert!(
-                b[1].ends_with("repo-worktrees/feat-x"),
+                b[1].ends_with(".orion-worktrees/repo/feat-x"),
                 "respawned inside the worktree: {b:?}"
             );
             break;

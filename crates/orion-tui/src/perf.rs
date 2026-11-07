@@ -161,6 +161,8 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::FileTabs(_)) => "FileTabs",
         Some(Overlay::Usage(_)) => "Usage",
         Some(Overlay::CleanWorktrees(_)) => "CleanWorktrees",
+        Some(Overlay::OpenRepo(_)) => "OpenRepo",
+        Some(Overlay::CloneRepo(_)) => "CloneRepo",
         Some(Overlay::Hosts(_)) => "Hosts",
         Some(Overlay::AgentPresets(_)) => "AgentPresets",
         Some(Overlay::AgentPresetEditor(_)) => "AgentPresetEditor",
@@ -173,7 +175,6 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::Todos(_)) => "Todos",
         Some(Overlay::WeekReview(_)) => "WeekReview",
         Some(Overlay::Conflicts(_)) => "Conflicts",
-        Some(Overlay::Review(_)) => "Review",
     }
 }
 

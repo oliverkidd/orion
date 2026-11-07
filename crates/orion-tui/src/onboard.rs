@@ -163,7 +163,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     };
     if let Some((kind, input)) = &mut view.field {
         match key.code {
-            KeyCode::Esc => view.field = None,
+            _ if crate::nav::closes(&key) => view.field = None,
             KeyCode::Enter => {
                 let (kind, value) = (*kind, input.as_str().to_string());
                 view.field = None;
@@ -194,7 +194,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
                     format!("{}'s install page: {}", plan.program, plan.link)
                 });
             }
-            KeyCode::Esc => view.install = None,
+            _ if crate::nav::closes(&key) => view.install = None,
             _ => {}
         }
         app.dirty = true;
@@ -240,7 +240,7 @@ pub(crate) mod keys {
     pub const TOGGLE: Key = Key::new(&["space"], "toggle");
     /// The Claude CLI while it isn't on PATH: its installer.
     pub const INSTALL: Key = Key::new(&["i"], "install");
-    pub const SKIP: Key = Key::new(&["esc"], "skip");
+    pub const SKIP: Key = crate::nav::CLOSE.doing("skip");
     /// The account question's answers.
     pub const YES: Key = Key::new(&["enter", "y"], "share").show(2);
     pub const NO: Key = Key::new(&["n"], "start empty");
@@ -1140,7 +1140,7 @@ fn account_step_key(app: &mut App, key: KeyEvent) {
     let Some(Overlay::Onboard(view)) = &mut app.overlay else {
         return;
     };
-    if key.code == KeyCode::Esc {
+    if crate::nav::closes(&key) {
         view.account = AccountStep::Rows;
         return;
     }

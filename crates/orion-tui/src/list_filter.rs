@@ -514,10 +514,13 @@ pub(crate) mod keys {
 
     /// Open the picker — the same chord in every list modal.
     pub const FILTER: Key = Key::new(&["cmd+f", "ctrl+f"], "filter");
-    pub const FACET: Key = Key::new(&["left", "right"], "facet").show(2);
+    /// The facets are the pick's tabs: `←`/`→` ([`crate::nav`]).
+    pub const FACET: Key = crate::nav::SIDEWAYS.doing("facet");
     pub const VALUE: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const TOGGLE: Key = Key::new(&["space"], "toggle");
-    pub const DONE: Key = Key::new(&["enter", "esc"], "done").show(2);
+    pub const DONE: Key = Key::new(&["enter"], "done")
+        .also(crate::nav::CLOSE.chords)
+        .show(2);
     #[cfg(test)]
     pub const ALL: &[Key] = &[FILTER, FACET, VALUE, TOGGLE, DONE];
 }
@@ -583,9 +586,9 @@ pub fn handle_key(
     match key.code {
         KeyCode::Up => pick.step_value(facets, -1),
         KeyCode::Down => pick.step_value(facets, 1),
-        KeyCode::Left => pick.step_facet(facets, -1),
-        KeyCode::Right | KeyCode::Tab => pick.step_facet(facets, 1),
-        KeyCode::BackTab => pick.step_facet(facets, -1),
+        _ if keys::FACET.matches(key) => {
+            pick.step_facet(facets, crate::nav::side(key).unwrap_or(1))
+        }
         _ if keys::TOGGLE.matches(key) => return PickKey::Toggle,
         _ if keys::DONE.matches(key) || keys::FILTER.matches(key) => return PickKey::Done,
         _ => {}

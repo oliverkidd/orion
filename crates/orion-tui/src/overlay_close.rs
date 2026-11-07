@@ -36,6 +36,8 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::FileTabs(v) => v.area,
         Overlay::Usage(v) => v.area,
         Overlay::CleanWorktrees(v) => v.area,
+        Overlay::OpenRepo(v) => v.area,
+        Overlay::CloneRepo(v) => v.area,
         Overlay::Hosts(v) => v.area,
         Overlay::AgentPresets(v) => v.area,
         Overlay::AgentPresetEditor(v) => v.area,
@@ -48,7 +50,6 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::Todos(v) => v.area,
         Overlay::WeekReview(v) => v.area,
         Overlay::Conflicts(v) => v.area,
-        Overlay::Review(v) => v.area,
     }
 }
 
@@ -99,8 +100,6 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
         // The CONFLICT RESOLVER is a level inside the modal it came from,
         // as the DIFF VIEWER is; its merge stays as it was left.
         Some(Overlay::Conflicts(_)) => crate::conflicts::back(app),
-        // The PR REVIEW too; what is pending stays GitHub's.
-        Some(Overlay::Review(_)) => crate::pr_review::back(app),
         // A TREE BROWSER opened to reveal a file goes back to what it was
         // opened over — a DIFF VIEWER read afresh, as it is after anything
         // that stood over it.
@@ -123,6 +122,8 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
             | Overlay::FileTabs(_)
             | Overlay::Usage(_)
             | Overlay::CleanWorktrees(_)
+            | Overlay::OpenRepo(_)
+            | Overlay::CloneRepo(_)
             | Overlay::Hosts(_),
         ) => app.overlay = None,
         // Confirm, Prompt, the AGENT PRESETS list and the PRESET EDITOR each

@@ -82,8 +82,7 @@ stops to ask you something stays working**. The picker says so on its row, dim a
 
 If you keep starting the same kind of session with the same framing, save it as an **agent preset**,
 in **Settings → Presets** (below). Wherever a launch is, a picker lists them — **Agent presets**
-(the command palette), `⌘U` (`^X`) in the quick prompt, `⌘U` over an agent's locked pane, `⇧Tab`
-on a Linear issue or a todo — and it only picks: making, changing and deleting presets is Settings'
+(the command palette), `⌘U` (`^X`) in the quick prompt, `⌘U` over an agent's locked pane — and it only picks: making, changing and deleting presets is Settings'
 alone, so no picker offers it. From the palette the launch lands in the checkout under the cursor —
 its last row says which, and `Tab` flips it to a fresh worktree. Over the quick prompt the box's header says where instead, and its `⌘.` picks, so that row and its `Tab` are not drawn there. Type to find one by name: letters
 narrow the list to the fuzzy matches, `↑`/`↓` move, `Backspace` widens and `Esc` clears — as in the
@@ -131,7 +130,7 @@ itself:
   watch the PR until it is green and go round again.
 - **Linear Ticket** is what a Linear launch sends — following the box like any preset, so the
   launch starts on your `⌘N` account, at the model and effort it pins once its text is yours —
-  unless `⇧Tab` in the Linear view picks another: `{issues}` becomes each issue's ID, title, link and
+  unless the box's `⌘U` picks another: `{issues}` becomes each issue's ID, title, link and
   description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
   `{issues}` gets them where its `{task}` is — after its text when it names neither. orion's text: one commit per issue, one pull
   request titled `"{ids}: …"` whose description starts `Fixes {ids}`.
@@ -723,7 +722,7 @@ kept per project, so what matters there is said once.
 
 `⌘I` opens the TODOS MODAL: every open PROJECT's own todo
 list, a tab each along the top in the order of the grid's project tabs, then any project whose
-tab is closed, opened on the selected project's tab (`⇧←`/`⇧→`, `Tab` or a click for another,
+tab is closed, opened on the selected project's tab (`←`/`→`, `⇧←`/`⇧→` or a click for another,
 `⌘1`–`⌘9` straight to one; each comes back as it was left while the modal is up). Each
 list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, in
 an order that is the list's own. The list is this machine's alone — one file per checkout under orion's data folder
@@ -752,8 +751,8 @@ ticked in it and a bar chart of it: a bar a day for today and the week (Monday t
 bright, the days to come dotted) and for the month (a bar a week when the panel is too narrow for
 its days), a bar a week for the quarter, labelled with its months. Then what was ticked, a section
 per project in the tabs' order, the latest first, each with when — the time today, the day this
-week, the date further back. `→` puts the keys on the panel and `←` (or `Esc`) hands them back;
-there `↑`/`↓` walk the items, `Tab` (`⇧Tab`) turns the span — a click on one does too — and
+week, the date further back. `Tab` (or `⇧Tab`) puts the keys on the panel and hands them back,
+`Esc` too; there `↑`/`↓` walk the items, `←`/`→` turn the span — a click on one does too — and
 `Space` puts an item ticked by mistake back on its list. A window too narrow for both columns shows
 the lists alone. Days are local: a tick at 11pm is that day's.
 
@@ -796,8 +795,8 @@ item's field, they start where the field stands. A bullet (`- `, `* `, `+ `, `�
 
 **An agent on an item.** `Enter` opens the QUICK PROMPT over the modal, aimed at a fresh worktree,
 the item's text in the box with `Context: todo in <group › subgroup>` under it. Edit it
-and `Enter` sends it; `Esc` comes back to the list. `⇧Tab` picks one of your AGENT PRESETS
-instead. The session it starts is written onto the item: its row shows `● agent`, in the session's
+and `Enter` sends it; `Esc` comes back to the list. The box's `⌘U` picks one of your AGENT
+PRESETS. The session it starts is written onto the item: its row shows `● agent`, in the session's
 STATUS MARK colour, and from then on `Enter` — or a click on the chip — closes the modal and lands
 on that session. When the session is deleted the chip goes, and `Enter` sends a new one. The
 session's row on the grid names the todo after its prompt, a dim `☐ text`. And when orion sees the

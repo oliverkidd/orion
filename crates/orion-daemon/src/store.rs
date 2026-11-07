@@ -551,6 +551,25 @@ impl Store {
         Ok(())
     }
 
+    /// A checkout moved on disk (`relocate`): the row keeps its id, so its
+    /// sessions, terminals and links stay on it.
+    pub fn update_worktree_path(&self, id: &WorktreeId, path: &Path) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE worktrees SET path = ?2 WHERE id = ?1",
+            params![id.as_str(), path.to_string_lossy()],
+        )?;
+        Ok(())
+    }
+
+    /// A project rooted at a checkout that moved on disk (`relocate`).
+    pub fn update_project_repo_path(&self, id: &ProjectId, path: &Path) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE projects SET repo_path = ?2 WHERE id = ?1",
+            params![id.as_str(), path.to_string_lossy()],
+        )?;
+        Ok(())
+    }
+
     /// Root-ness is derived from git's own checkout list on every reconcile
     /// rather than frozen at insert time, so it needs to be writable.
     pub fn set_worktree_main(&self, id: &WorktreeId, is_main: bool) -> Result<()> {

@@ -354,19 +354,69 @@ fn detached_label(head: Option<&str>) -> String {
     }
 }
 
+/// The hidden folder beside the repo that holds the WORKTREES orion cuts
+/// for every repo in that folder, one subfolder per repo.
+pub const WORKTREES_FOLDER: &str = ".orion-worktrees";
+
 /// Directory a new worktree for `branch` should live in:
-/// `<repo>/../<repo-name>-worktrees/<branch>` (slashes in branch → dashes).
+/// `<repo>/../.orion-worktrees/<repo-name>/<branch>` (slashes in branch →
+/// dashes). Hidden, on the repo's own disk — a move or a cut is a rename,
+/// never a copy — and under the same parent folders the repo is, so tools
+/// that read settings from parent folders see what they see in the repo.
 pub fn worktree_dir(repo: &Path, branch: &str) -> PathBuf {
-    let repo_name = repo
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "repo".into());
     let safe_branch = branch.replace('/', "-");
+    worktrees_home(repo).join(safe_branch)
+}
+
+/// The folder every worktree of `repo` is cut into:
+/// `<repo>/../.orion-worktrees/<repo-name>`.
+pub fn worktrees_home(repo: &Path) -> PathBuf {
+    repo_parent(repo)
+        .join(WORKTREES_FOLDER)
+        .join(repo_name(repo))
+}
+
+/// Where orion cut `repo`'s worktrees before they moved into
+/// [`worktrees_home`]: `<repo>/../<repo-name>-worktrees`. Only the move
+/// at boot (`relocate`) still reads it.
+pub fn legacy_worktrees_home(repo: &Path) -> PathBuf {
+    repo_parent(repo).join(format!("{}-worktrees", repo_name(repo)))
+}
+
+fn repo_name(repo: &Path) -> String {
+    repo.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".into())
+}
+
+fn repo_parent(repo: &Path) -> PathBuf {
     repo.parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(format!("{repo_name}-worktrees"))
-        .join(safe_branch)
+}
+
+/// Every linked checkout of `repo` git lists, spares and scratch ones
+/// included, the main checkout left out: what the move at boot looks
+/// through.
+pub async fn linked_worktree_paths(repo: &Path) -> Result<Vec<PathBuf>> {
+    let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
+    Ok(parse_worktree_list(&out)
+        .into_iter()
+        .skip(1)
+        .map(|e| e.path)
+        .collect())
+}
+
+/// `git worktree move <from> <to>`: the checkout and both halves of git's
+/// record of it (its `.git` file, the repo's `worktrees/<name>/gitdir`)
+/// move together. git refuses a locked checkout and one with submodules.
+pub async fn move_worktree(repo: &Path, from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let (from, to) = (from.to_string_lossy(), to.to_string_lossy());
+    git(repo, &["worktree", "move", &from, &to]).await?;
+    Ok(())
 }
 
 /// `git worktree add <path> -b <branch> [base]`. Falls back to checking out an

@@ -13,6 +13,7 @@ pub mod pr_scope;
 pub mod prompt_history;
 pub mod pty;
 pub mod registry;
+pub mod relocate;
 pub mod server;
 pub mod session_model;
 pub mod session_title;
@@ -95,6 +96,12 @@ async fn serve() -> Result<()> {
         }
     };
 
+    // WORKTREE RELOCATION: checkouts still in an old `<repo>-worktrees`
+    // folder move into `.orion-worktrees/<repo>` now, while no session runs
+    // in them — the last daemon's died with it, and nothing respawns until
+    // the resume below.
+    let relocation_note = relocate::relocate_legacy_worktrees(&store).await;
+
     // Hook receiver: loopback HTTP endpoint the claude hook one-liners hit.
     // It shares the store to answer UserPromptSubmit hooks with the
     // auto-title instruction while a session is still untitled.
@@ -102,6 +109,10 @@ async fn serve() -> Result<()> {
     tracing::info!(port = hook_env.port, "hook receiver listening");
 
     let daemon = registry::Daemon::new(store, hook_env);
+    if let Some(note) = relocation_note {
+        tracing::info!("{note}");
+        daemon.boot_notes.lock().unwrap().push(note);
+    }
 
     // Drain hook events into the status machines; a payload that reports a
     // cwd inside another worktree of the same project re-homes the agent row.

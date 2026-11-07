@@ -269,13 +269,13 @@ impl PrTab {
     }
 
     /// What acting on the row under the cursor does here, for the key
-    /// hints: the DIFF VIEWER on a file or a commit, a check's page — on
-    /// Reviews the PR REVIEW, and on the Description the pull request in
-    /// the browser.
+    /// hints: the DIFF VIEWER — the review in it — on a file or a commit,
+    /// a check's page — on Reviews the same viewer, the keys on its diff,
+    /// and on the Description the pull request in the browser.
     pub fn act_does(self) -> &'static str {
         match self {
-            PrTab::Changes => "diff the file",
-            PrTab::Commits => "diff the commit",
+            PrTab::Changes => "review the file",
+            PrTab::Commits => "review the commit",
             PrTab::Checks => "open the check",
             PrTab::Reviews => "review",
             PrTab::Description => "open in browser",
@@ -423,7 +423,7 @@ pub(crate) mod keys {
     /// The two as one hint: `Tab/⇧Tab tabs`.
     pub const TABS: Key = Key::new(&["tab", "shift+tab"], "tabs").show(2);
     /// The modal's: `⇧←/⇧→ tabs`.
-    pub const MODAL_TABS: Key = Key::new(&["shift+left", "shift+right"], "tabs").show(2);
+    pub const MODAL_TABS: Key = crate::nav::SIDEWAYS_ANYWHERE;
     /// The modal's row cursor on a listing: `⇧↑/⇧↓ pick`.
     pub const MODAL_ROWS: Key = Key::new(&["shift+up", "shift+down"], "pick").show(2);
     #[cfg(test)]

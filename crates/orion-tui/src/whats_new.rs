@@ -177,7 +177,9 @@ pub(crate) mod keys {
     use crate::hints::Key;
 
     pub const WALK: Key = Key::new(&["up", "down"], "release").show(2);
-    pub const DONE: Key = Key::new(&["enter", "esc"], "done").show(2);
+    pub const DONE: Key = Key::new(&["enter"], "done")
+        .also(crate::nav::CLOSE.chords)
+        .show(2);
     #[cfg(test)]
     pub const ALL: &[Key] = &[WALK, DONE];
 }

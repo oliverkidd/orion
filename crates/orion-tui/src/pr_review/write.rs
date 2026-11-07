@@ -8,12 +8,12 @@
 //! the screen as GitHub answered it, and a write that failed leaves what
 //! was typed where it was, the footer saying why.
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::KeyEvent;
 
 use super::github::{self, NewThread, ReviewThread, ThreadComment};
 use super::layout::{self, ComposerAt, Stop};
 use super::{keys, Answer, ReviewFile, ReviewScreen};
-use crate::app::{App, Overlay};
+use crate::app::App;
 use crate::flash::Flash;
 use crate::text_input::TextInput;
 
@@ -211,12 +211,9 @@ impl ReviewScreen {
     }
 }
 
-/// The screen, while it is what is up.
+/// The review, while its DIFF VIEWER is what is up.
 fn screen(app: &mut App) -> Option<&mut ReviewScreen> {
-    match &mut app.overlay {
-        Some(Overlay::Review(view)) => Some(view),
-        _ => None,
-    }
+    super::viewer::review_mut(app)
 }
 
 /// `c`: a comment on the line under the cursor — or on the run of lines
@@ -303,7 +300,7 @@ pub(super) fn composer_key(app: &mut App, key: KeyEvent) {
         return;
     };
     match key.code {
-        KeyCode::Esc => view.composer = None,
+        _ if crate::nav::closes(&key) => view.composer = None,
         _ if keys::ADD.matches(&key) && !composer.input.takes_newline(&key) => send_composer(app),
         // Says to finish the comment first.
         _ if keys::SUBMIT.matches(&key) => super::bar::submit(app),

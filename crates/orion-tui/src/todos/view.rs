@@ -1,6 +1,6 @@
 //! The TODOS MODAL: every open project's list, a tab each along the top
-//! in the order of the grid's PROJECT TABS — `←`/`→` (or `Tab`) walk them,
-//! as the LINEAR VIEW walks its tabs, and `⌘1`–`⌘9` go straight to one, as
+//! in the order of the grid's PROJECT TABS — `←`/`→` walk them, as the
+//! LINEAR VIEW walks its tabs, and `⌘1`–`⌘9` go straight to one, as
 //! on the grid — opened from anywhere on the selected project's. The list is
 //! the project's groups with their open items, a nested group standing
 //! among its parent's items where it was put. A line per item
@@ -18,7 +18,9 @@
 //! its own until the group's is set again — and `⌥↑`/`⌥↓` move it; on a
 //! section's header they move the section past the one beside it. Down
 //! the right, beside the lists, is the DONE panel (`done`): what was
-//! ticked, across every project — `→` puts the keys there, `←` back.
+//! ticked, across every project — `Tab` puts the keys there and `Tab`
+//! (or `⇧Tab`, or `Esc`) back. The arrows never cross from one to the
+//! other: they move inside whichever has the keys.
 //!
 //! An item ticked stays where it stood, struck through, the cursor on
 //! it — nothing moves under it; so does a group with everything in it
@@ -67,7 +69,7 @@ use ratatui::Frame;
 use super::{store, Child, Item, TodoFile, TodoRef};
 use crate::app::{App, Overlay};
 use crate::keymap::KeyChord;
-use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickReturn, QuickTarget};
+use crate::quick_prompt::{ModalUnder, QuickLaunch, QuickTarget};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
 use crate::ui::{
@@ -303,10 +305,10 @@ pub(crate) mod keys {
     /// Tick or untick the item, or everything in a nested group; fold a
     /// section's header.
     pub const DONE: Key = Key::new(&["space"], "done");
-    /// The project tabs, as the PULL REQUESTS MODAL walks its own:
-    /// `⇧←`/`⇧→` round either end, and `Tab` on — plain `→` is the DONE
-    /// panel's way in.
-    pub const TABS: Key = Key::new(&["shift+left", "shift+right", "tab"], "projects").show(2);
+    /// The project tabs, round either end, as the LINEAR VIEW walks its
+    /// own. While the filter is up plain `←`/`→` are its caret's and
+    /// `⇧←`/`⇧→` still walk the tabs.
+    pub const TABS: Key = crate::nav::TABS.doing("projects");
     /// Straight to a project's tab — matched through the grid's own
     /// binding (`project_tab_N`), so a rebind holds here too; this is its
     /// default, for the hint and the Ghostty release.
@@ -362,23 +364,22 @@ pub(crate) mod keys {
     /// as a group of that name rather than an item — `⌥→` as on its row.
     pub const SAVE_GROUP: Key = Key::new(&["alt+right", "alt+f"], "make a group");
     pub const CONFIRM: Key = Key::new(&["enter", "cmd+backspace", "ctrl+w"], "delete");
-    /// The LINEAR VIEW's `Enter` and `⇧Tab`: an agent on the item, or
-    /// one of the AGENT PRESETS — and on an item whose session is still
-    /// there, that session.
+    /// The LINEAR VIEW's `Enter`: the QUICK PROMPT for an agent on the
+    /// item (its `⌘U` picks an AGENT PRESET) — and on an item whose
+    /// session is still there, that session.
     pub const AGENT: Key = Key::new(&["enter"], "agent");
-    pub const PRESET: Key = Key::new(&["shift+tab"], "preset");
     /// The priority pick's.
     pub const PICK: Key = Key::new(&["up", "down"], "pick").show(2);
     pub const CHOOSE: Key = Key::new(&["enter"], "choose");
     /// The priority pick's rows by their digit: `1` urgent to `4` low,
     /// `0` none.
     pub const LEVEL: Key = Key::new(&["1", "2", "3", "4", "0"], "level");
-    /// The DONE panel's way in.
+    /// The DONE panel's way in: the other panel, either way round.
     pub const INTO_DONE: Key = super::super::done::keys::INTO;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         DONE, TABS, PROJECT, JUMP, MOVE, GROUP, SELECT, NEW, NEW_GROUP, EDIT, PRIORITY, DELETE,
-        CUT, COPY, FILTER, SAVE, SAVE_MOVE, SAVE_GROUP, CONFIRM, AGENT, PRESET, PICK, CHOOSE,
+        CUT, COPY, FILTER, SAVE, SAVE_MOVE, SAVE_GROUP, CONFIRM, AGENT, PICK, CHOOSE,
         LEVEL, INTO_DONE,
     ];
 }
@@ -454,7 +455,6 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
     hints.push(project_hint());
     hints.extend([
         keys::NEW_GROUP.hint(),
-        keys::PRESET.hint(),
         Hint::new("Esc", "close"),
     ]);
     hints
@@ -1076,7 +1076,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         keys::GROUP,
         keys::PRIORITY,
         keys::AGENT,
-        keys::PRESET,
         keys::DELETE,
         keys::CUT,
         keys::COPY,
@@ -1084,21 +1083,22 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     .iter()
     .any(|k| k.matches(&key))
         || keys::DONE.matches(&key) && !filtering
-        || key.code == KeyCode::Esc;
+        || crate::nav::closes(&key);
     if selecting && !keeps_selection {
         unselect(app);
     }
     match key.code {
-        KeyCode::Esc if selecting => unselect(app),
-        KeyCode::Esc if filtering => close_filter(app),
-        KeyCode::Esc => app.overlay = None,
+        _ if crate::nav::closes(&key) && selecting => unselect(app),
+        _ if crate::nav::closes(&key) && filtering => close_filter(app),
+        _ if crate::nav::closes(&key) => app.overlay = None,
         // The filter's own while it is up: a word left or right.
         _ if keys::GROUP.matches(&key) && !filtering => {
             group_chosen(app, matches!(key.code, KeyCode::Right | KeyCode::Char('f')))
         }
-        // Plain `→` moves the filter's caret while it is up.
-        _ if keys::INTO_DONE.matches(&key) && !filtering => super::done::focus(app),
-        _ if keys::TABS.matches(&key) => {
+        _ if keys::INTO_DONE.matches(&key) => super::done::focus(app),
+        // Plain `←`/`→` move the filter's caret while it is up; `⇧←`/`⇧→`
+        // walk the tabs either way.
+        _ if keys::TABS.matches(&key) && !(filtering && key.modifiers.is_empty()) => {
             step_project(app, if key.code == KeyCode::Left { -1 } else { 1 });
         }
         _ if tab.is_some() => {
@@ -1122,7 +1122,6 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
             Some(Entry::Header { group, .. }) => fold(app, group),
             _ => {}
         },
-        _ if keys::PRESET.matches(&key) => preset(app),
         _ if keys::DELETE.matches(&key) => delete(app),
         _ if keys::CUT.matches(&key) => clip(app, true),
         _ if keys::COPY.matches(&key) => clip(app, false),
@@ -1467,7 +1466,7 @@ fn input_key(app: &mut App, key: KeyEvent) {
         && input.caret_byte() == input.as_str().len()
         && !input.trim().is_empty();
     match key.code {
-        KeyCode::Esc => {
+        _ if crate::nav::closes(&key) => {
             view.input = None;
             view.cursor = None;
             match kind {
@@ -1947,19 +1946,6 @@ fn open_box(app: &mut App, launch: QuickLaunch, task: String) {
     }
 }
 
-/// `⇧Tab` on an item: an AGENT PRESET for it, the box then opening with
-/// the item's text, as the LINEAR VIEW's does.
-fn preset(app: &mut App) {
-    let ids = chosen(app);
-    let Some((launch, task)) = launch_for(app, &ids) else {
-        return;
-    };
-    let under = ModalUnder::of(app.overlay.as_ref());
-    let mut back = QuickReturn::fresh(launch.with_under(under));
-    back.text = task;
-    crate::quick_prompt::open_preset_picker(app, back);
-}
-
 /// The launch for an agent at `items`, and the task the box opens with:
 /// the item's text and the group it is in. Several items are a list,
 /// each with its group.
@@ -2024,7 +2010,7 @@ fn pick_key(app: &mut App, key: KeyEvent) {
         return;
     }
     match key.code {
-        KeyCode::Esc => view.pick = None,
+        _ if crate::nav::closes(&key) => view.pick = None,
         KeyCode::Down => pick.selected = crate::app::clamp_selection(pick.selected as i64 + 1, len),
         KeyCode::Up => pick.selected = crate::app::clamp_selection(pick.selected as i64 - 1, len),
         _ if keys::CHOOSE.matches(&key) => choose(app),

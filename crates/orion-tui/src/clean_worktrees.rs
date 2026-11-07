@@ -305,7 +305,7 @@ pub(crate) mod keys {
     pub const ALL: Key = Key::new(&["a"], "all");
     pub const BRANCHES: Key = Key::new(&["b"], "branches");
     pub const DELETE: Key = Key::new(&["enter"], "delete");
-    pub const CLOSE: Key = Key::new(&["esc", "q"], "close");
+    pub const CLOSE: Key = crate::nav::CLOSE.also(&["q"]);
     #[cfg(test)]
     pub const EVERY: &[Key] = &[TICK, ALL, BRANCHES, DELETE, CLOSE];
 }

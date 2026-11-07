@@ -2342,7 +2342,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     let Some(form) = form(app) else {
         return;
     };
-    if key.code == KeyCode::Esc {
+    if crate::nav::closes(&key) {
         close_form(app);
     } else if form.saving() {
         // Nothing to change while it is on its way.

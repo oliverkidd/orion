@@ -7,16 +7,16 @@
 //! in the tabs' order, newest first, each with when: the time today, the
 //! day this week, the date further back.
 //!
-//! `→` from the lists puts the keys here and `←` (or Esc) hands them
-//! back; `Tab` turns the span, and `Space` puts an item ticked by mistake
-//! back on its list. The panel is one across the project tabs: turning to
+//! `Tab` from the lists puts the keys here and `Tab` / `⇧Tab` (or Esc)
+//! hand them back; `←`/`→` turn the span, and `Space` puts an item ticked
+//! by mistake back on its list. The panel is one across the project tabs: turning to
 //! another project's tab keeps it as it is.
 
 use std::cmp::Reverse;
 use std::path::Path;
 
 use chrono::{Datelike, NaiveDate};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -416,7 +416,7 @@ fn rows_now(app: &App) -> Option<(Vec<Row<'_>>, Option<usize>)> {
     Some((rows, at))
 }
 
-/// `→` from the lists: the keys onto the panel, when it is there.
+/// `Tab` from the lists: the keys onto the panel, when it is there.
 pub(crate) fn focus(app: &mut App) {
     if let Some(panel) = panel_mut(app).filter(|p| p.area.is_some()) {
         panel.focused = true;
@@ -427,15 +427,17 @@ pub(crate) fn focus(app: &mut App) {
 pub(crate) mod keys {
     use crate::hints::Key;
 
-    /// Into the panel, from the lists.
-    pub const INTO: Key = Key::new(&["right"], "done");
-    /// Back to the lists.
-    pub const BACK: Key = Key::new(&["left", "esc"], "back");
+    use crate::nav;
+
+    /// Into the panel, from the lists: the other panel, either way round.
+    pub const INTO: Key = nav::PANELS.doing("done");
+    /// Back to the lists: the other panel, either way round.
+    pub const BACK: Key = nav::PANELS.doing("lists");
     /// The span: Today, Week, Month, Quarter, round the ends.
-    pub const PERIOD: Key = Key::new(&["tab", "shift+tab"], "span");
+    pub const PERIOD: Key = nav::SIDEWAYS.doing("span");
     /// The item ticked by mistake, open again.
     pub const UNDO: Key = Key::new(&["space"], "not done");
-    pub const MOVE: Key = Key::new(&["up", "down"], "move").show(2);
+    pub const MOVE: Key = nav::ROWS;
     #[cfg(test)]
     pub const ALL: &[Key] = &[INTO, BACK, PERIOD, UNDO, MOVE];
 }
@@ -453,13 +455,13 @@ pub(crate) fn hints() -> Vec<crate::hints::Hint> {
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
     let page = panel(app).map_or(1, |p| p.list_area.height.max(1)) as i32;
     match key.code {
-        _ if keys::BACK.matches(&key) => {
+        _ if keys::BACK.matches(&key) || crate::nav::CLOSE.matches(&key) => {
             if let Some(panel) = panel_mut(app) {
                 panel.focused = false;
             }
         }
         _ if keys::PERIOD.matches(&key) => {
-            let back = key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+            let back = crate::nav::side(&key) == Some(-1);
             if let Some(panel) = panel_mut(app) {
                 panel.turn_to(panel.period.turned(back));
             }
@@ -932,27 +934,33 @@ mod tests {
             assert!(at("week review screen") < at("session rows"));
             assert!(rows[at("week review screen")].contains("Wed"));
 
-            // `→`, then `Tab`: the month, a bar a day — and the quarter, a
+            // `Tab`, then `→`: the month, a bar a day — and the quarter, a
             // bar a week under its months — the dates beside the items.
             let key = |code: KeyCode| KeyEvent::from(code);
-            super::super::view::handle_key(&mut app, key(KeyCode::Right), &mut Vec::new());
             super::super::view::handle_key(&mut app, key(KeyCode::Tab), &mut Vec::new());
+            assert!(view::view(&app).unwrap().done.focused, "Tab: the panel");
+            super::super::view::handle_key(&mut app, key(KeyCode::Right), &mut Vec::new());
             for w in [80u16, 120] {
                 let shot = screen(&mut app, w, 32).join("\n");
                 assert!(shot.contains("✓5 this month"), "{shot}");
                 assert!(shot.contains("1 Nov"), "the 1st's tick, dated: {shot}");
             }
-            super::super::view::handle_key(&mut app, key(KeyCode::Tab), &mut Vec::new());
+            super::super::view::handle_key(&mut app, key(KeyCode::Right), &mut Vec::new());
             let shot = screen(&mut app, 120, 32).join("\n");
             assert!(shot.contains("✓5 this quarter"), "{shot}");
             assert!(shot.contains("Oct") && shot.contains("Dec"), "{shot}");
-
-            // Too narrow for both: the lists alone, and `→` goes nowhere.
+            // `←` turns it back, and stays on the panel.
             super::super::view::handle_key(&mut app, key(KeyCode::Left), &mut Vec::new());
+            let shot = screen(&mut app, 120, 32).join("\n");
+            assert!(shot.contains("✓5 this month"), "{shot}");
+            assert!(view::view(&app).unwrap().done.focused, "← stays on the panel");
+
+            // Too narrow for both: the lists alone, and `Tab` goes nowhere.
+            super::super::view::handle_key(&mut app, key(KeyCode::Tab), &mut Vec::new());
+            assert!(!view::view(&app).unwrap().done.focused, "Tab: back to the lists");
             let rows = screen(&mut app, 60, 24).join("\n");
             assert!(!rows.contains("╭ Done "), "{rows}");
-            let right = KeyEvent::from(KeyCode::Right);
-            super::super::view::handle_key(&mut app, right, &mut Vec::new());
+            super::super::view::handle_key(&mut app, key(KeyCode::Tab), &mut Vec::new());
             assert!(!view::view(&app).unwrap().done.focused);
         });
     }
