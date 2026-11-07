@@ -365,6 +365,9 @@ async fn main_loop(
     let (clean_tx, mut clean_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::clean_worktrees::Answer>();
     app.clean_worktrees.tx = Some(clean_tx);
+    // The OPEN REPO modal's scan lands here.
+    let (repo_tx, mut repo_rx) = tokio::sync::mpsc::unbounded_channel::<crate::open_repo::Answer>();
+    app.open_repo.tx = Some(repo_tx);
     // A BASE SYNC's fetch and fast-forward land here.
     let (base_tx, mut base_rx) = tokio::sync::mpsc::unbounded_channel::<crate::base_sync::Answer>();
     app.base_sync.tx = Some(base_tx);
@@ -806,6 +809,11 @@ async fn main_loop(
             answer = clean_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::clean_worktrees::land(&mut app, answer);
+                }
+            }
+            answer = repo_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::open_repo::land(&mut app, answer);
                 }
             }
             answer = base_rx.recv() => {
@@ -3723,6 +3731,7 @@ fn closes_on_esc(overlay: &Overlay) -> bool {
         | Overlay::FileTabs(_)
         | Overlay::Usage(_)
         | Overlay::CleanWorktrees(_)
+        | Overlay::OpenRepo(_)
         | Overlay::ProjectPicker(_) => true,
         Overlay::Onboard(view) => !view.asking(),
         Overlay::WhatsNew(_) => true,
@@ -4065,6 +4074,7 @@ fn dispatch_action(
     // rows still selected under it, so only the keys that open a project,
     // or put up nothing but a modal, mean anything. The rest would walk or
     // attach rows nobody can see.
+    let action = splash_open(app, action);
     if app.projects_closed && !opens_from_closed_splash(action) {
         return;
     }
@@ -4366,7 +4376,7 @@ fn dispatch_action(
         Action::OpenApp => crate::stacks::open_app(app),
         // AddProject adds a project from ANY panel — unlike New it never
         // changes meaning with focus, matching the "open a repo" instinct.
-        Action::AddProject => open_prompt(app, PromptKind::AddProject),
+        Action::AddProject => crate::open_repo::start(app),
         Action::FindFile => open_file_finder(app),
         Action::Grep => open_grep_view(app),
         Action::TreeBrowser => open_tree_browser(app),
@@ -4884,7 +4894,7 @@ fn home_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         leave_home(app);
         return;
     }
-    let Some(action) = action else {
+    let Some(action) = action.map(|a| splash_open(app, a)) else {
         crate::key_combo::note(app, &[chord], None);
         return;
     };
@@ -4979,6 +4989,20 @@ pub(crate) fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec
         return;
     }
     if canon.is_dir() && !in_git_repo(&canon) {
+        // One folder too high: the repository inside is the one meant.
+        let mut inside = crate::open_repo::nested(&canon);
+        if inside.len() == 1 {
+            let repo = inside.remove(0);
+            app.flash = Some(crate::flash::Flash::note(format!(
+                "found {} inside {}",
+                repo.file_name().unwrap_or_default().to_string_lossy(),
+                path.display()
+            )));
+            return open_folder(app, repo, out);
+        }
+        if !inside.is_empty() {
+            return crate::open_repo::open_on(app, inside);
+        }
         app.overlay = Some(Overlay::Confirm(ConfirmDialog {
             title: "Not a git repository".into(),
             message: format!(
@@ -4998,6 +5022,50 @@ pub(crate) fn open_folder(app: &mut App, path: std::path::PathBuf, out: &mut Vec
             create_missing: false,
         }
     });
+}
+
+/// `⌘O` on HOME, or the splash with nothing under it: there is no
+/// checkout to open outside orion, so it opens a project instead — the
+/// OPEN REPO modal. Everywhere else it stays **Open outside orion**.
+fn splash_open(app: &App, action: crate::keymap::Action) -> crate::keymap::Action {
+    use crate::keymap::Action;
+    if action == Action::OpenOutside && app.splash_showing() {
+        Action::AddProject
+    } else {
+        action
+    }
+}
+
+/// Add each of `paths` as a project — the OPEN REPO modal's Enter. One
+/// goes the open-project prompt's way (a known one opens, the view lands
+/// on a new one); several are sent together and the view lands on the
+/// last.
+pub(crate) fn add_projects(
+    app: &mut App,
+    paths: Vec<std::path::PathBuf>,
+    out: &mut Vec<ClientRequest>,
+) {
+    let n = paths.len();
+    if n == 1 {
+        return open_folder(app, paths.into_iter().next().unwrap_or_default(), out);
+    }
+    for (i, path) in paths.into_iter().enumerate() {
+        let intent = if i + 1 == n {
+            PendingIntent::SelectCreatedProject
+        } else {
+            PendingIntent::None
+        };
+        send_with(app, out, intent, |req_id| ClientRequest::AddProject {
+            req_id,
+            path,
+            name: None,
+            create_missing: false,
+        });
+    }
+    app.flash = Some(crate::flash::Flash::working(format!(
+        "adding {}…",
+        crate::flash::plural(n, "project")
+    )));
 }
 
 /// Whether `dir` sits in a git repository — a `.git` (a directory, or the
@@ -7657,6 +7725,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Review(_) => crate::pr_review::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
+        Overlay::OpenRepo(_) => crate::open_repo::handle_key(app, key, out),
         Overlay::ProjectPicker(_) => launcher::handle_picker_key(app, key),
         Overlay::Menu(menu) => match key.code {
             // `?` (and `s` where no filter eats letters) on a row that
@@ -9475,7 +9544,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         MenuAction::PushWorktree(id) => {
             crate::git_sync::request(app, id, crate::git_sync::Op::PUSH)
         }
-        MenuAction::AddProject => open_prompt(app, PromptKind::AddProject),
+        MenuAction::AddProject => crate::open_repo::start(app),
         MenuAction::RenameProject(id) => open_prompt(app, PromptKind::RenameProject { id }),
         MenuAction::OpenProject(id) => launcher::open_project(app, &id, out),
         MenuAction::RemoveProject(id) => {
@@ -9790,7 +9859,7 @@ fn jump_to_target_inner(
         // (`launcher::open_tab`): the card it was last left on, or with no
         // session in it the empty grid and no pane.
         PaletteTarget::Project(id) => launcher::open_tab(app, &id, out),
-        PaletteTarget::AddProject => open_prompt(app, PromptKind::AddProject),
+        PaletteTarget::AddProject => crate::open_repo::start(app),
         PaletteTarget::LinearIssue { project, id } => crate::linear::open_at(app, &project, &id),
         PaletteTarget::Todo { project, item } => crate::todos::view::open_at(app, &project, item),
         PaletteTarget::Worktree(id) => {
@@ -11702,6 +11771,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::CleanWorktrees(_))) {
         crate::clean_worktrees::handle_mouse(app, mouse, mouse_pos);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::OpenRepo(_))) {
+        crate::open_repo::handle_mouse(app, mouse, mouse_pos);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
@@ -14685,6 +14758,9 @@ mod tests {
             &mut app,
             crate::keymap::Action::AddProject,
         ));
+        // The OPEN REPO modal; Tab browses.
+        assert!(matches!(app.overlay, Some(Overlay::OpenRepo(_))));
+        press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
         let Some(Overlay::Prompt(p)) = &app.overlay else {
             panic!("expected the open-project prompt, got {:?}", app.overlay);
         };
@@ -14742,14 +14818,75 @@ mod tests {
                 &mut app,
                 crate::keymap::Action::AddProject,
             ));
-            let Some(Overlay::Prompt(p)) = &app.overlay else {
-                panic!(
-                    "expected add-project prompt at {focus:?}, got {:?}",
-                    app.overlay
-                );
-            };
-            assert_eq!(p.kind, crate::app::PromptKind::AddProject);
+            assert!(
+                matches!(app.overlay, Some(Overlay::OpenRepo(_))),
+                "expected the OPEN REPO modal at {focus:?}, got {:?}",
+                app.overlay
+            );
         }
+    }
+
+    /// `⌘O` on HOME opens the OPEN REPO modal — nothing there to open
+    /// outside orion — and over the grid stays **Open outside orion**.
+    #[test]
+    fn cmd_o_on_home_opens_a_repo() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        toggle_home(&mut app);
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char('o'), KeyModifiers::SUPER, &mut out);
+        assert!(
+            matches!(app.overlay, Some(Overlay::OpenRepo(_))),
+            "{:?}",
+            app.overlay
+        );
+        app.overlay = None;
+        toggle_home(&mut app);
+        assert!(!app.home);
+        press(&mut app, KeyCode::Char('o'), KeyModifiers::SUPER, &mut out);
+        assert!(
+            !matches!(app.overlay, Some(Overlay::OpenRepo(_))),
+            "{:?}",
+            app.overlay
+        );
+    }
+
+    /// A folder in no repository with one repository inside it opens that
+    /// one — the folder was one level too high — and with several, lists
+    /// them all ticked.
+    #[test]
+    fn a_folder_one_level_too_high_opens_the_repo_inside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("one/proj/.git")).unwrap();
+        let mut app = App::new();
+        let mut out = Vec::new();
+        open_folder(&mut app, root.join("one"), &mut out);
+        assert!(
+            matches!(
+                out.as_slice(),
+                [ClientRequest::AddProject { path, .. }] if path == &root.join("one/proj")
+            ),
+            "{out:?}"
+        );
+
+        std::fs::create_dir_all(root.join("many/a/.git")).unwrap();
+        std::fs::create_dir_all(root.join("many/group/b/.git")).unwrap();
+        let mut out = Vec::new();
+        open_folder(&mut app, root.join("many"), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+        let Some(Overlay::OpenRepo(v)) = &app.overlay else {
+            panic!("{:?}", app.overlay);
+        };
+        assert_eq!(v.rows.len(), 2);
+        assert!(v.rows.iter().all(|r| r.on));
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+        assert_eq!(
+            out.iter()
+                .filter(|r| matches!(r, ClientRequest::AddProject { .. }))
+                .count(),
+            2
+        );
     }
 
     // ---- worktree links ----
@@ -36783,6 +36920,7 @@ mod tests {
             Overlay::FileTabs(_) => "FileTabs",
             Overlay::Usage(_) => "Usage",
             Overlay::CleanWorktrees(_) => "CleanWorktrees",
+            Overlay::OpenRepo(_) => "OpenRepo",
             Overlay::Hosts(_) => "Hosts",
             Overlay::AgentPresets(_) => "AgentPresets",
             Overlay::AgentPresetEditor(_) => "AgentPresetEditor",

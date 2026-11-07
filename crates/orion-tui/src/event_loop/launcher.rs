@@ -6997,6 +6997,13 @@ mod tests {
                 key(&mut app, KeyCode::Down, KeyModifiers::NONE);
             }
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(
+                matches!(app.overlay, Some(Overlay::OpenRepo(_))),
+                "the row opens the OPEN REPO modal: {:?}",
+                app.overlay
+            );
+            // Tab browses: the open-project prompt.
+            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
                 panic!("the row opens the prompt: {:?}", app.overlay);
             };

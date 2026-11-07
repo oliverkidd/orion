@@ -99,6 +99,7 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         | Overlay::Usage(_)
         | Overlay::Conflicts(_)
         | Overlay::CleanWorktrees(_)
+        | Overlay::OpenRepo(_)
         | Overlay::AgentPresets(_) => Vec::new(),
     }
 }

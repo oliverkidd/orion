@@ -2351,6 +2351,8 @@ pub enum Overlay {
     Usage(crate::usage::UsageView),
     /// **Clean unused worktrees** (`crate::clean_worktrees`).
     CleanWorktrees(crate::clean_worktrees::CleanView),
+    /// The OPEN REPO modal (`crate::open_repo`).
+    OpenRepo(crate::open_repo::OpenRepoView),
     Hosts(HostsView),
     /// The AGENT PRESETS PICKER: `⌘U` in the box or over a pane, the
     /// palette's **Agent presets**, a pull request's.
@@ -4626,6 +4628,8 @@ pub struct App {
     /// **Clean unused worktrees**' check and where it lands
     /// (`crate::clean_worktrees`).
     pub clean_worktrees: crate::clean_worktrees::Shared,
+    /// The OPEN REPO modal's scan and where it lands (`crate::open_repo`).
+    pub open_repo: crate::open_repo::Shared,
     /// BASE SYNC: each project's root fetched, and fast-forwarded on its
     /// base branch, on the **Fetch base branch** beat (`crate::base_sync`).
     pub base_sync: crate::base_sync::Shared,
@@ -4840,6 +4844,7 @@ impl App {
             branch_list: Default::default(),
             git_sync: Default::default(),
             clean_worktrees: Default::default(),
+            open_repo: Default::default(),
             base_sync: Default::default(),
             last_metrics: None,
             client_rss_bytes: 0,

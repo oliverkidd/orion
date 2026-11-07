@@ -161,6 +161,7 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::FileTabs(_)) => "FileTabs",
         Some(Overlay::Usage(_)) => "Usage",
         Some(Overlay::CleanWorktrees(_)) => "CleanWorktrees",
+        Some(Overlay::OpenRepo(_)) => "OpenRepo",
         Some(Overlay::Hosts(_)) => "Hosts",
         Some(Overlay::AgentPresets(_)) => "AgentPresets",
         Some(Overlay::AgentPresetEditor(_)) => "AgentPresetEditor",
