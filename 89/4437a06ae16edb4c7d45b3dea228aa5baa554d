@@ -1,0 +1,143 @@
+crates/orion-tui/src/needs_you/mod.rs
+  s_0fc3ca629be011::t_d82ee03fd49514 7-9,11-16,18-20,22-65,69-76,83,85,87-109,146-186,188-206,208-278,280-286,288-296
+  s_0fc3ca629be011::t_d3f4cbcab39664 287
+  s_0fc3ca629be011::t_51cc72bc6b7a5c 10,66-68,110-127,132-145
+  s_0fc3ca629be011::t_d07deea123376b 77-82,84,86,207,279
+  s_0fc3ca629be011::t_47addc9ea01f6b 128-131
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 187
+crates/orion-tui/src/event_loop/launcher.rs
+  s_0fc3ca629be011::t_66e25b097cd69a 10182-10183,10185
+crates/orion-tui/src/needs_you/agents.rs
+  s_0fc3ca629be011::t_51cc72bc6b7a5c 99,145-147,149,154-162,166,170-173,212-217,221,232
+  s_0fc3ca629be011::t_990d5287b93e2c 12,24-30,37,44-47,56-59
+  s_0fc3ca629be011::t_49086e59029633 1-11,13-23,38-42,48-55,60-83,85-98,100-144,148,150-153,174-178,238-239,248-255
+  s_0fc3ca629be011::t_ec8e37ed1efe91 179-211,222-231,233-237
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 240-247
+  s_0fc3ca629be011::t_47addc9ea01f6b 31-36,43,163-165,167-169,218-220
+  s_0fc3ca629be011::t_d07deea123376b 84
+crates/orion-tui/src/palette.rs
+  s_0fc3ca629be011::t_1851b6b500884c 168-170,188,276-279
+  s_0fc3ca629be011::t_dcdb7e33b56ae2 280
+  s_0fc3ca629be011::t_596e00a69b97b2 333
+  s_0fc3ca629be011::t_3122370d58549b 10-13
+crates/orion-tui/src/microsoft/mod.rs
+  s_0fc3ca629be011::t_1a5396ac492c89 302-308
+  s_0fc3ca629be011::t_3138cb8dcdba5a 301
+scripts/shot/scenes/needs-you-busy.keys
+  s_0fc3ca629be011::t_d4b81cc4ddbd5e 6-9,11-14,16-21,26-44
+  s_0fc3ca629be011::t_49891e8505717c 45
+  s_0fc3ca629be011::t_3169356e6ee240 1-5,10,15,22-25
+crates/orion-tui/src/needs_you/board.rs
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 127-129,429-433,523-526,600-607,671-674
+  s_0fc3ca629be011::t_1a5396ac492c89 332-342,363-375,379
+  s_0fc3ca629be011::t_3ac9327229c824 27-28
+  s_0fc3ca629be011::t_eee89e989f3962 18,469,472-474
+  s_0fc3ca629be011::t_9895e1eed0425d 387,389,391,448-451
+  s_0fc3ca629be011::t_6417a5e76bd0d1 632-642,651-653,657-666
+  s_0fc3ca629be011::t_68b65eb772aafc 1-17,19-26,29-126,130-331,343-348,350-362,376-378,380-386,388,390,392-428,434-447,452-468,470-471,475-522,527-599,608-630,667-670,675-677
+  s_0fc3ca629be011::t_d3f4cbcab39664 349
+  s_0fc3ca629be011::t_5624063302aefb 631
+  s_0fc3ca629be011::t_47addc9ea01f6b 643-650,654-656
+crates/orion-tui/src/launcher.rs
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 1270-1273
+crates/orion-tui/src/event_loop/focus_walk.rs
+  s_0fc3ca629be011::t_1680dc77cacf38 135
+crates/orion-tui/src/event_loop.rs
+  s_0fc3ca629be011::t_15a003c3db49f2 19011,19149
+  s_0fc3ca629be011::t_1680dc77cacf38 11455,12268-12269
+  s_0fc3ca629be011::t_d3f4cbcab39664 37825,37832
+  s_0fc3ca629be011::t_63d2ad4c56a06b 12826-12828
+  s_0fc3ca629be011::t_91076511ca38ab 8602
+  s_0fc3ca629be011::t_51cc72bc6b7a5c 12739,12760,12762-12763
+  s_0fc3ca629be011::t_b4142385744b07 358-368,842-851,4407,4410,8216-8234,8252,8256-8258,8858,11830-11853,12736-12738,12740,13421-13434
+  s_0fc3ca629be011::t_9895e1eed0425d 26728-26730,26783-26785
+  s_0fc3ca629be011::t_4cfd430cc730a0 26733-26742,26759-26761
+  s_0fc3ca629be011::t_5be8d7dc78a23e 26731-26732,36777
+  s_0fc3ca629be011::t_aa575f895a6ae9 36701,36720,36769
+  s_0fc3ca629be011::t_46c075435d0b3d 11854,36600-36601,36604-36606,36682-36700,36702,36716-36719,36721-36768,36770-36776
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 36703-36715
+scripts/shot/bin/gh
+  s_0fc3ca629be011::t_cf94e92579d62c 27,142-143
+crates/orion-core/src/env.rs
+  s_0fc3ca629be011::t_d60c2150eab594 69-72
+crates/orion-tui/src/ui/footer.rs
+  s_0fc3ca629be011::t_ec310b6bdb7166 148
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 457-461,549-551
+  s_0fc3ca629be011::t_1680dc77cacf38 455-456,462,466,545,547-548,552-556,559-560
+  s_0fc3ca629be011::t_15a003c3db49f2 546
+crates/orion-tui/src/config.rs
+  s_0fc3ca629be011::t_67accdc172ce43 5689-5690,5737-5740
+  s_0fc3ca629be011::t_3ac9327229c824 841
+  s_0fc3ca629be011::t_28f7dd209c53eb 431-436,833-840,842,2855-2856,3070-3075,5710,5713,5741-5743,5746
+crates/orion-tui/src/needs_you/model.rs
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 126-129,136-141
+  s_0fc3ca629be011::t_2df0bbd8796b4a 130-135,142
+crates/orion-tui/src/app.rs
+  s_0fc3ca629be011::t_1680dc77cacf38 185-187
+  s_0fc3ca629be011::t_0091c9db6117d5 4558-4560,4867
+scripts/shot/scenes/needs-you-busy.setup.sh
+  s_0fc3ca629be011::t_ea1d2cd694a131 2
+  s_0fc3ca629be011::t_a08d5e805f9589 1,3-20
+docs/configuration.md
+  s_0fc3ca629be011::t_e6743c20236a47 161-170,193
+  s_0fc3ca629be011::t_5e0dfaee3953c0 171
+  s_0fc3ca629be011::t_67accdc172ce43 121
+  s_0fc3ca629be011::t_46c4ee8d08303c 493
+crates/orion-tui/src/linear.rs
+  s_0fc3ca629be011::t_ce8d4835372fc2 6200
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 5723-5727
+  s_0fc3ca629be011::t_596e00a69b97b2 5936
+crates/orion-tui/src/needs_you/reviews.rs
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 123-125
+  s_0fc3ca629be011::t_f8fcc4e6c0ca51 1-122,126-158
+crates/orion/tests/e2e_tui.rs
+  s_0fc3ca629be011::t_d1e9d9cea28008 39,139,508-535
+  s_0fc3ca629be011::t_8c2dd423a3e0a5 536-537
+crates/orion-tui/src/event_loop/activate.rs
+  s_0fc3ca629be011::t_7fac32434c68c6 58-106
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 25-26
+crates/orion-tui/src/needs_you/linear.rs
+  s_0fc3ca629be011::t_f1b5a5d3f1ed5e 211-214
+  s_0fc3ca629be011::t_cdb0d9c7f2e278 1-97,99-210,215-216
+  s_0fc3ca629be011::t_d07deea123376b 98
+docs/keys.md
+  s_0fc3ca629be011::t_e6743c20236a47 93,268,270,274-276,279-309
+  s_0fc3ca629be011::t_0a35587dc24bf3 271-273,277-278
+crates/orion-tui/src/ui.rs
+  s_0fc3ca629be011::t_ec310b6bdb7166 1449,4224
+  s_0fc3ca629be011::t_15a003c3db49f2 1966-1972
+  s_0fc3ca629be011::t_5d25ed0c502208 1964-1965,1973,1983-1990
+  s_0fc3ca629be011::t_1a5396ac492c89 1974-1982
+docs/sessions.md
+  s_0fc3ca629be011::t_0a35587dc24bf3 84-86
+  s_0fc3ca629be011::t_75e34a4315067a 81-83,87
+crates/orion-tui/src/keymap.rs
+  s_0fc3ca629be011::t_d3f4cbcab39664 322-323
+scripts/shot/shot.sh
+  s_0fc3ca629be011::t_4cfedc5c2ff954 71
+  s_0fc3ca629be011::t_ef581c094050bf 81-82
+  s_0fc3ca629be011::t_944779ac6e6822 52-53
+  s_0fc3ca629be011::t_63111c4ca46aa8 60
+  s_0fc3ca629be011::t_cf94e92579d62c 61
+scripts/shot/scenes/needs-you-empty.keys
+  s_0fc3ca629be011::t_7df13b9dda603f 2
+  s_0fc3ca629be011::t_49891e8505717c 1,3
+scripts/perf/run.sh
+  s_0fc3ca629be011::t_63111c4ca46aa8 80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "894437a06ae16edb4c7d45b3dea228aa5baa554d",
+  "prompts": {},
+  "sessions": {
+    "s_0fc3ca629be011": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d936749-5a1d-4856-bda0-f453e2b57f37",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": null
+    }
+  }
+}
