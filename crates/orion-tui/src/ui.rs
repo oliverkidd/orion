@@ -1446,7 +1446,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         ),
                         (Slots, "open that project tab"),
                         (Act(&[CloseProjectTab]), "close the project tab"),
-                        (Act(&[Palette]), "jump to anything, add a project"),
+                        (Act(&[Palette]), "needs you; type to jump to anything"),
                         (
                             Keys(&[finder_keys::ATTACH, finder_keys::FOCUS_ROW]),
                             "jump pick: open / focus row",
@@ -1961,6 +1961,33 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             }
         }
         Overlay::Diff(view) => diff_view::draw(f, app, &view, th),
+        // Nothing typed: the NEEDS YOU BOARD, over the whole body.
+        Overlay::Palette(mut palette) if palette.on_board() => {
+            // Everything above the footer, a cell in from its edges.
+            let screen = f.area();
+            let area = Rect {
+                x: screen.x + 1,
+                y: screen.y + 1,
+                width: screen.width.saturating_sub(2),
+                height: screen.height.saturating_sub(FOOTER_ROWS + 1),
+            };
+            let meeting = crate::microsoft::next_meeting(app);
+            crate::needs_you::board::draw(
+                f,
+                &mut palette.board,
+                &palette.query,
+                meeting.as_deref(),
+                area,
+                th,
+            );
+            // Write-back (draw works on a clone): what the keys and the
+            // pointer read.
+            if let Some(Overlay::Palette(p)) = &mut app.overlay {
+                p.area = area;
+                p.board.height = palette.board.height;
+                p.board.hits = palette.board.hits;
+            }
+        }
         Overlay::Palette(palette) => {
             let area = centered_rect(f.area(), PALETTE_SIZE.0, PALETTE_SIZE.1);
             let title = if palette.query.is_empty() {
@@ -4194,7 +4221,7 @@ fn draw_terminal(f: &mut Frame, app: &mut App, area: Rect) {
                 "new agent",
             ));
             hint.push(sep());
-            hint.extend(key(&spelled(crate::keymap::Action::Palette, "⌘K"), "jump"));
+            hint.extend(key(&spelled(crate::keymap::Action::Palette, "⌘K"), "needs you"));
             hint.push(sep());
             hint.extend(key(&spelled(crate::keymap::Action::Help, "?"), "help"));
             let mut lines = vec![Line::from("")];

@@ -1267,7 +1267,10 @@ pub fn project_tally(app: &App, project: &ProjectId) -> Tally {
 
 /// `project`'s unarchived sessions, borrowed and in tree order — what a
 /// count needs, without the clone and the sort a list does.
-fn project_agents<'a>(app: &'a App, project: &ProjectId) -> impl Iterator<Item = &'a Agent> {
+pub(crate) fn project_agents<'a>(
+    app: &'a App,
+    project: &ProjectId,
+) -> impl Iterator<Item = &'a Agent> {
     // The project's checkouts once, not once per session: the tabs count
     // every open project's sessions on every frame, and a scan per agent
     // turned that into the tree squared.

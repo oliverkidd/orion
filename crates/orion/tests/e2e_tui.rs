@@ -36,6 +36,7 @@ const CTRL_A: &[u8] = &[0x01];
 /// `⌘U`, `⌘N`, `⌘E` and `⌘F` as Ghostty's kitty protocol spells them.
 const CMD_U: &[u8] = b"\x1b[117;9u";
 const CMD_N: &[u8] = b"\x1b[110;9u";
+const CMD_K: &[u8] = b"\x1b[107;9u";
 /// ⌘⇧N as the kitty protocol spells it: `n`, modifiers 1 + shift 1 + super 8.
 const CMD_SHIFT_N: &[u8] = b"\x1b[110;10u";
 const CMD_E: &[u8] = b"\x1b[101;9u";
@@ -135,6 +136,7 @@ impl TuiHarness {
         cmd.env(orion_core::env::WORKTREE_SYNC_MS, "100"); // fast external-change pickup
         cmd.env(orion_core::env::UPDATE_CHECK_SECS, "0"); // the footer must not depend on GitHub
         cmd.env(orion_core::env::SPOTIFY_POLL_SECS, "0"); // …nor on what's playing
+        cmd.env(orion_core::env::NEEDS_YOU_POLL_SECS, "0"); // …nor on Linear and GitHub's inboxes
         cmd.env(orion_core::env::USAGE, "off"); // never read the machine's logins
         cmd.env(orion_core::env::MICROSOFT_POLL_SECS, "0"); // never call Microsoft Graph
         cmd.env(orion_core::env::PROJECT_ABOUT, "off"); // a new project runs no model
@@ -501,6 +503,36 @@ fn host_working_directory_follows_project_switches_and_restores_on_exit() {
     tui.wait_for_text("Quit orion");
     tui.send(ENTER);
     tui.wait_for_working_directory(&tui._repos.path().canonicalize().unwrap());
+}
+
+/// `⌘K` with nothing typed is the NEEDS YOU board — its five sections,
+/// each saying it is empty in the same words — and typing turns it into
+/// the jump list, which Esc closes.
+#[test]
+fn tui_cmd_k_is_the_needs_you_board_until_you_type() {
+    let mut tui = TuiHarness::spawn();
+    let repo = tui.make_repo("board-demo");
+    tui.wait_for_text("to begin");
+    add_project(&mut tui, &repo, "board-demo");
+
+    tui.send(CMD_K);
+    tui.wait_for_text("Needs you");
+    for empty in [
+        "No agents waiting for you",
+        "No Linear issues waiting for you",
+        "No code reviews waiting for you",
+        "No Slack messages waiting for you",
+        "No meetings waiting for you",
+    ] {
+        tui.wait_for_text(empty);
+    }
+
+    tui.type_str("board");
+    tui.wait_for_text("Jump to (");
+    tui.wait_for_gone("No agents waiting for you");
+
+    tui.send(ESC);
+    tui.wait_for_gone("Jump to (");
 }
 
 #[test]

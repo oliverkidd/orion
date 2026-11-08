@@ -319,8 +319,8 @@ pub const ACTIONS: &[ActionSpec] = &[
     ActionSpec {
         action: Action::Palette,
         id: "palette",
-        label: "Jump to…",
-        hint: "Search every project, worktree, session and open pull request at once; Enter jumps there, and the last row adds a project",
+        label: "Needs you",
+        hint: "Everything waiting on you in one board: agents, Linear, code reviews, Slack, meetings. Type to jump to any project, worktree, session or pull request instead; the last row adds a project",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &["cmd+k"],

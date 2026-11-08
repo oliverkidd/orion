@@ -49,14 +49,16 @@ if [ -f "$HERE/scenes/$SCENE.setup.sh" ]; then DEMO="$DEMO" WORK="$WORK" RUNTIME
 # crates/orion/tests/e2e_tui.rs): a fresh one opens on the first-run wizard, which would cover every
 # scene. A setup that wrote its own config keeps it.
 mkdir -p "$WORK/data"
-[ -f "$WORK/data/config.local.json" ] || echo '{"onboarded": true}' > "$WORK/data/config.local.json"
+# Every release's notes counted seen, as the e2e harness stamps them, so WHAT'S NEW never covers a scene.
+[ -f "$WORK/data/config.local.json" ] || echo '{"onboarded": true, "seen_version": "999.0.0"}' > "$WORK/data/config.local.json"
 [ -f "$WORK/data/config.json" ] || cat > "$WORK/data/config.json" <<'JSON'
 {"claude_enabled": true, "codex_enabled": true, "cursor_enabled": true,
  "pi_enabled": true, "muse_enabled": true, "opencode_enabled": true}
 JSON
 
 export ORION_RUNTIME_DIR="$RUNTIME" ORION_DATA_DIR="$WORK/data" ORION_AGENT_CMD="${ORION_AGENT_CMD:-/bin/cat}" \
-       ORION_UPDATE_CHECK_SECS=0 ORION_SPOTIFY_POLL_SECS=0 ORION_MICROSOFT_POLL_SECS=0 ORION_PROJECT_ABOUT=off ORION_GH_FIXTURES="${ORION_GH_FIXTURES:-$HERE/fixtures}" \
+       ORION_UPDATE_CHECK_SECS=0 ORION_SPOTIFY_POLL_SECS=0 ORION_MICROSOFT_POLL_SECS=0 ORION_PROJECT_ABOUT=off \
+       ORION_NEEDS_YOU_POLL_SECS="${ORION_NEEDS_YOU_POLL_SECS:-0}" ORION_GH_FIXTURES="${ORION_GH_FIXTURES:-$HERE/fixtures}" \
        PATH="$HERE/bin:$PATH" TERM=xterm-256color
 "$BIN" add "$DEMO" >/dev/null                                # registers the PROJECT (spawns the demo daemon)
 
@@ -66,6 +68,7 @@ sleep "${SHOT_BOOT_SECS:-4}"                                 # first paint + the
 # A keys line is a tmux key name or literal text; `click <col> <row>` / `rclick <col> <row>` (1-based
 # cells) are an SGR mouse press and release typed straight into the pane, for the targets no key reaches,
 # and `drag <col> <row> <col2> <row2>` a left press, two motion reports and the release at the far end.
+# `cmd <letter>` is that letter under ⌘, as Orion.app sends it (`ESC [ <code> ; 9 u`) — `cmd k` is ⌘K.
 send() {
   case "$1" in
     click\ *|rclick\ *)
@@ -75,6 +78,8 @@ send() {
       set -- $1; mc=$(( ($2 + $4) / 2 )); mr=$(( ($3 + $5) / 2 ))
       $TMUX send-keys -l "$(printf '\033[<0;%d;%dM\033[<32;%d;%dM\033[<32;%d;%dM\033[<0;%d;%dm' \
         "$2" "$3" "$mc" "$mr" "$4" "$5" "$4" "$5")";;
+    cmd\ ?)
+      $TMUX send-keys -l "$(printf '\033[%d;9u' "'${1#cmd }")";;
     *) $TMUX send-keys "$1";;
   esac
   sleep "${SHOT_KEY_SECS:-0.6}"

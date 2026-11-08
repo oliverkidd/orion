@@ -182,6 +182,9 @@ pub enum HitTarget {
     /// One of the footer's SPOTIFY READOUT buttons (`⏮  ⏸ ⏭`): a click
     /// sends Spotify that command (`event_loop::press_spotify`).
     FooterSpotify(crate::spotify::Button),
+    /// The footer's `⌘K needs you N`: a click opens the NEEDS YOU BOARD,
+    /// through the `open_palette` its key runs.
+    FooterNeedsYou,
     /// The `↗ open in browser` BUTTON on the PULL REQUESTS MODAL's and the
     /// LINEAR VIEW's reading pane, pinned right on its top border: a click
     /// opens the row under the cursor in the browser, through the very
@@ -4552,6 +4555,9 @@ pub struct App {
     pub microsoft: crate::microsoft::State,
     /// Each project's **What it is** being written (`projects`).
     pub project_about: crate::projects::State,
+    /// NEEDS YOU: Done and Snooze, what its poll last heard, and crashed
+    /// sessions' exit codes (`crate::needs_you`).
+    pub needs_you: crate::needs_you::State,
     /// Where the PR REVIEW's reads and writes land.
     pub pr_review: crate::pr_review::State,
     /// The on-disk memory of every pull-request answer (`pr_cache`), when
@@ -4858,6 +4864,7 @@ impl App {
             week_review: Default::default(),
             microsoft: Default::default(),
             project_about: Default::default(),
+            needs_you: Default::default(),
             pr_review: Default::default(),
             pr_cache: None,
             pr_cache_dirty: false,

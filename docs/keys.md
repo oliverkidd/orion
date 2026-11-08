@@ -90,7 +90,7 @@ Ghostty config.
 | Select model | `⌘/` | a searchable model list for the QUICK PROMPT, opening the box first when it isn't up; type to narrow, `Enter` picks |
 | Cycle effort | `⌘Y`, `⌘?` (`⇧⌘/`) | step the effort (`default`, low, high, …) of the model the QUICK PROMPT is set to, shown in its header at once, and the Accounts tab default with it; with no box up, that default alone. macOS keeps `⇧⌘/` for every app's Help menu, so in Ghostty it opens Help and only `⌘Y` arrives; it stays bound for a terminal that lets it through, however that spells the press — `/` with ⇧, `?` with or without it |
 | Select worktree | `⌘.` | which checkout the next agent runs in, opening the box first; type to narrow, or **+ new worktree**, or any branch with no checkout yet — a teammate's included |
-| Jump to… | `⌘K` | fuzzy jump across every project, worktree, session, open pull request, open Linear issue and open todo (below); its last row opens a folder as a project |
+| Needs you | `⌘K` | the NEEDS YOU board: everything waiting on you — agents, Linear, code reviews, Slack, meetings — and, as soon as you type, the fuzzy jump across every project, worktree, session, open pull request, open Linear issue and open todo (below); the jump list's last row opens a folder as a project |
 | Go to file | `⌘P` | the FILE FINDER for the selected worktree |
 | Find in files | `⌘⇧F`, `⇧F` | `git grep` into the same modal |
 | File tree browser | `⌘B` | the TREE BROWSER |
@@ -265,16 +265,48 @@ Working in a project moves its tab to the far left; switching never reorders the
 right-click on a tab is the project's own menu: **New worktree**, **Start stack** / **Stop stack**, **Open**,
 **Delete worktree** for a linked one, **Rename**, **Remove from list**.
 
-## The jump list (`⌘K`)
+## Needs you (`⌘K`)
 
-Fuzzy jump across every live project, worktree and session on the machine. `↑`/`↓`
-move, `Enter` jumps — the cursor on the row and the pane reading it — and `^O` opens a session
-(attached, its pane focused). Until you type it is a recent sessions list in attention order — the
-ones waiting on you first — so `⌘K` `Enter` is the fastest way back to what needs you. `Enter` on a
-session that NEEDS FEEDBACK attaches and focuses its pane too. Typing reaches every row, projects
-and worktrees too; the query runs
-over each row's full `project/branch/session` path. Every open pull request orion has listed is a
-row too, `↗ project/#42 title`, badged `draft`, `ready for review`, or `merge conflicts` /
+`⌘K` opens on the NEEDS YOU board: everything waiting on you, over the whole screen, with
+`Needs you`, the count and the search field along the top, and on its right your next meeting
+when one is running or starts within the hour (`▸ Standup in 12m · Teams`, once Microsoft 365 is
+connected). Three columns:
+
+1. **AGENTS** — every session that wants you, of every kind, in one list: crashed first, then
+   waiting on you (the longest waiting first), then finished and unread. A card reads its name and
+   how long ago, then `agent · project · reason` — `asks a question`, `plan to approve`,
+   `needs permission for Bash`, `crashed, exit 1`, `draft PR #12 ready`, `done`.
+2. **LINEAR** — your unread Linear notifications, one card per issue (mentions, new comments on
+   issues you're in, issues given to you) — over **CODE REVIEWS**: open pull requests that ask you
+   to review them, your projects' and any other repo's.
+3. **SLACK** over **MEETINGS**.
+
+A section with more cards than fit ends on `+N more  →`; `→` on it (or a click) unfolds it over its
+column, `←` folds it back. An empty section says so — `No agents waiting for you`, `No Linear issues
+waiting for you`, and so on — and nothing else.
+
+| Key | On the board |
+|---|---|
+| typing | the jump list (below), the board back when the query is empty again |
+| `←` / `→` | the column; `→` on `+N more` unfolds it |
+| `↑` / `↓` | the cards of the column |
+| `Enter`, a click | jump to it: a session waiting on you attaches, a finished one is landed on, a Linear issue opens in the issues modal, a pull request is landed on in its project (or opens in the browser when it is no orion project's) |
+| `⌘D` | done: the card goes until it changes — the session waits again, a new comment lands — and a Linear card's notifications are marked read in Linear |
+| `⌘Z` | snooze: the card goes for an hour |
+| `Esc` | back to the grid |
+
+The footer carries `⌘K needs you N` at its right end — red while anything waits, green at zero —
+and a click on it opens the board. What the LINEAR and CODE REVIEWS sections ask for is
+Settings › Connections › GITHUB AND LINEAR's ([Configuration](configuration.md#connections)).
+
+### The jump list
+
+Typing turns the board into a fuzzy jump across every live project, worktree and session on the
+machine. `↑`/`↓` move, `Enter` jumps — the cursor on the row and the pane reading it — and `^O`
+opens a session (attached, its pane focused). `Enter` on a session that NEEDS FEEDBACK attaches and
+focuses its pane too. The query runs over each row's full `project/branch/session` path, the best
+matches first and the ones waiting on you first among equals. Every open pull request orion has
+listed is a row too, `↗ project/#42 title`, badged `draft`, `ready for review`, or `merge conflicts` /
 `checks failing` in red; `Enter` on one reads it in the pane, and `^O` opens it in the browser.
 So is each project's open Linear issues, `◇ project/ENG-12 title` — the last list read, or the one
 kept from the last run — where `Enter` opens the Linear issues modal on it, and its open todos,

@@ -123,10 +123,23 @@ impl CardKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CardTarget {
     Session(AgentId),
-    LinearIssue { project: ProjectId, id: String },
-    PullRequest { project: ProjectId, url: String },
-    SlackMessage { permalink: String },
-    Meeting { id: String },
+    LinearIssue {
+        project: ProjectId,
+        id: String,
+    },
+    /// A pull request by URL, on the orion project whose repo it is —
+    /// none for a repo orion has no project for, which opens in the
+    /// browser.
+    PullRequest {
+        project: Option<ProjectId>,
+        url: String,
+    },
+    SlackMessage {
+        permalink: String,
+    },
+    Meeting {
+        id: String,
+    },
 }
 
 /// One thing waiting on you.

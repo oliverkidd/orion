@@ -355,6 +355,17 @@ async fn main_loop(
     app.linear_tx = Some(linear_tx);
     app.linear_links =
         crate::linear::LinkStore::load(orion_core::paths::data_dir().join("linear-links.json"));
+    // NEEDS YOU: Done and Snooze from the last run, and the POLL for your
+    // Linear notifications and the reviews asked of you (`needs_you::
+    // interval`; the e2e tests turn it off), first at start.
+    crate::needs_you::load(&mut app);
+    let (needs_you_tx, mut needs_you_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::needs_you::Answer>();
+    let needs_you_interval = crate::needs_you::interval();
+    if needs_you_interval.is_some() {
+        app.needs_you.tx = Some(needs_you_tx);
+    }
+    let mut next_needs_you = tokio::time::Instant::now();
     // The WORKTREE PICKER's branch listings and their background fetch
     // land here too.
     let (branch_tx, mut branch_rx) =
@@ -826,6 +837,16 @@ async fn main_loop(
             answer = linear_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::linear::land_answer(&mut app, answer);
+                }
+            }
+            _ = tokio::time::sleep_until(next_needs_you), if needs_you_interval.is_some() => {
+                crate::needs_you::poll(&mut app);
+                next_needs_you = tokio::time::Instant::now()
+                    + needs_you_interval.unwrap_or(crate::needs_you::DEFAULT_INTERVAL);
+            }
+            answer = needs_you_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::needs_you::land(&mut app, answer);
                 }
             }
             answer = branch_rx.recv() => {
@@ -4383,15 +4404,10 @@ fn dispatch_action(
                 toggle_archived(app, out);
             }
         }
-        // Fuzzy-search palette over every project / worktree / session.
+        // NEEDS YOU, and typed, the fuzzy jump to anything.
         Action::Palette => {
             if app.focus != Focus::Terminal {
-                // Every project's todos, for their rows.
-                crate::todos::view::load_every_list(app);
-                let mut extra = crate::palette::linear_rows(&app.tree, &app.linear);
-                extra.extend(crate::palette::todo_rows(&app.tree, &app.todos));
-                let palette = Palette::new(&app.tree, &app.open_prs, &app.prs, app.hide_draft_prs);
-                app.overlay = Some(Overlay::Palette(palette.with_extra(extra)));
+                open_palette(app);
             }
         }
         // `.` / `,`: the palette's attention order as a ring, no modal —
@@ -8197,6 +8213,25 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
             }
         }
+        // Nothing typed: the NEEDS YOU BOARD's own keys. Anything else
+        // types, which turns it into the jump list.
+        Overlay::Palette(palette) if palette.on_board() => {
+            use crate::needs_you::board::keys;
+            match key.code {
+                KeyCode::Down => palette.board.step(1),
+                KeyCode::Up => palette.board.step(-1),
+                KeyCode::Left => palette.board.sideways(false),
+                KeyCode::Right => palette.board.sideways(true),
+                _ if keys::JUMP.matches(&key) => activate::needs_you_card(app, out),
+                _ if keys::DONE.matches(&key) => crate::needs_you::done(app),
+                _ if keys::SNOOZE.matches(&key) => crate::needs_you::snooze(app),
+                _ => {
+                    if palette.query.handle_key(&key).changed() {
+                        palette.apply_filter();
+                    }
+                }
+            }
+        }
         Overlay::Palette(palette) => {
             match key.code {
                 // Esc closes the palette, query and all (`closes_on_esc`).
@@ -8214,10 +8249,13 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     activate::palette_row(app, Some(Landing::FocusOnly), out)
                 }
                 // Everything else edits the query like a terminal line
-                // (see text_input).
+                // (see text_input); emptied, it is the board again.
                 _ => {
                     if palette.query.handle_key(&key).changed() {
                         palette.apply_filter();
+                        if palette.on_board() {
+                            crate::needs_you::refresh(app);
+                        }
                     }
                 }
             }
@@ -8561,8 +8599,7 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
 }
 
 /// `c` (or Enter) on a CONNECTIONS TAB status row connects it, `o`
-/// disconnects it; the overlay says how that went. A connection whose
-/// own step hasn't arrived yet is still not connected.
+/// disconnects it; the overlay says how that went.
 fn connection_cmd(app: &mut App, connection: crate::config::Connection, connect: bool) {
     use crate::config::Connection;
     let note = match (connection, connect) {
@@ -8573,7 +8610,6 @@ fn connection_cmd(app: &mut App, connection: crate::config::Connection, connect:
         // The Slack tokens' prompts, or forgetting them: each says its own.
         (Connection::Slack, true) => return crate::phone::connect(app),
         (Connection::Slack, false) => return crate::phone::disconnect(app),
-        _ => crate::config::NOT_CONNECTED.into(),
     };
     if let Some(view) = settings_mut(app) {
         view.info(note);
@@ -8819,6 +8855,7 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     }
     app.microsoft.footer = cfg.microsoft.footer_meeting;
     set_hide_draft_prs(app, cfg.hide_draft_prs);
+    app.needs_you.inbox = cfg.inbox.clone();
 }
 
 /// A Spotify poll's answer: the footer's readout follows it, repainting
@@ -11415,6 +11452,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::HomeBack
                 | HitTarget::Upgrade
                 | HitTarget::FooterSpotify(_)
+                | HitTarget::FooterNeedsYou
         )
     });
     // The PULL REQUESTS MODAL's and the LINEAR VIEW's `↗ open in browser`
@@ -11788,6 +11826,31 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
             _ => {}
         }
         return;
+    }
+    // The NEEDS YOU BOARD: the wheel walks the column, a click on a card
+    // is Enter on it, and on `+N more` unfolds it, as → does.
+    if let Some(Overlay::Palette(palette)) = &mut app.overlay {
+        if palette.on_board() {
+            let board = &mut palette.board;
+            match mouse.kind {
+                MouseEventKind::ScrollUp => board.step(-1),
+                MouseEventKind::ScrollDown => board.step(1),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let hit = board
+                        .hits
+                        .iter()
+                        .find(|(rect, _, _)| rect.contains(mouse_pos))
+                        .map(|&(_, column, row)| (column, row));
+                    if let Some((column, row)) = hit {
+                        board.select(column, row);
+                        activate::needs_you_card(app, out);
+                    }
+                }
+                _ => {}
+            }
+            app.dirty = true;
+            return;
+        }
     }
     // Palette: the wheel moves the selection, a click on a result row jumps
     // there; everything else inside the box is swallowed.
@@ -12202,6 +12265,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // A SPOTIFY READOUT button: its command, straight to the
                 // app, with a poll behind it.
                 Some(HitTarget::FooterSpotify(button)) => press_spotify(app, button),
+                // The footer's `needs you`: the board, as `⌘K` opens it.
+                Some(HitTarget::FooterNeedsYou) => open_palette(app),
                 // The CLOSE BUTTON at the strip's right end: the pane
                 // folds away through the one `toggle_pane` `^~` runs. It
                 // is only drawn on a pane that is showing, so the toggle
@@ -12668,7 +12733,11 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                 }
             }
         }
-        ServerEvent::SessionExited { session, .. } => {
+        ServerEvent::SessionExited { session, exit_code } => {
+            // A crash's code, for its NEEDS YOU card: `crashed, exit 1`.
+            if let (SessionRef::Agent(id), Some(code)) = (&session, exit_code) {
+                crate::needs_you::exited(app, id, code);
+            }
             if let Some(term) = &mut app.term {
                 if term.sref == session {
                     term.exited = true;
@@ -12688,8 +12757,10 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             status,
             changed_at,
             unseen,
-            reason: _,
+            reason,
         } => {
+            // Why it waits, for its NEEDS YOU card.
+            crate::needs_you::status_changed(app, &agent, status, reason);
             // A status flip reorders the sessions list — and, since
             // worktrees and projects sort on their sessions' stamps,
             // re-sorts those columns too.
@@ -12752,6 +12823,9 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             }
             // Nothing left any list, so this only re-seats the cursors.
             reconcile_selection_inner(app, before, out);
+            // A session that starts or stops wanting you comes or goes on
+            // an open NEEDS YOU board.
+            crate::needs_you::refresh(app);
         }
         ServerEvent::Ack { req_id, created } => {
             // False for a create the user has navigated away from since
@@ -13344,6 +13418,20 @@ fn refresh_palette(app: &mut App) {
     if let Some(Overlay::Palette(palette)) = &mut app.overlay {
         palette.rebuild(&app.tree, &app.open_prs, &app.prs, app.hide_draft_prs);
     }
+    crate::needs_you::refresh(app);
+}
+
+/// `⌘K`, and a click on the footer's `needs you`: the NEEDS YOU BOARD,
+/// over the palette whose rows typing reaches.
+pub(crate) fn open_palette(app: &mut App) {
+    // Every project's todos, for their rows.
+    crate::todos::view::load_every_list(app);
+    let mut extra = crate::palette::linear_rows(&app.tree, &app.linear);
+    extra.extend(crate::palette::todo_rows(&app.tree, &app.todos));
+    let palette = Palette::new(&app.tree, &app.open_prs, &app.prs, app.hide_draft_prs);
+    app.overlay = Some(Overlay::Palette(palette.with_extra(extra)));
+    crate::needs_you::refresh(app);
+    crate::needs_you::opened(app);
 }
 
 /// What each panel cursor pointed at, captured with `selection_snapshot`
@@ -18920,7 +19008,7 @@ mod tests {
         let row = footer_row(&terminal);
         assert!(
             row.trim_end()
-                .ends_with("♪ Midnight City · M83  ⏮  ⏸ ⏭  1 agent · 1.0 GB"),
+                .ends_with("♪ Midnight City · M83  ⏮  ⏸ ⏭  ⌘K needs you 0  1 agent · 1.0 GB"),
             "left of the usage readout:\n{row}"
         );
 
@@ -19058,7 +19146,7 @@ mod tests {
         // title keeps what is left.
         assert!(
             row.trim_end()
-                .ends_with("♪ Midnight …  ⏮  ⏸ ⏭  1 agent · 1.0 GB"),
+                .ends_with("♪ Midnight …  ⏮  ⏸ ⏭  ⌘K needs you 0  1 agent · 1.0 GB"),
             "{row}"
         );
     }
@@ -26637,15 +26725,24 @@ mod tests {
         seed_tree(&mut app);
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        // Tall enough that the sidebar's headers show past the modal.
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        // Tall enough that the sidebar's headers show past the modal, and
+        // wide enough for the board's empty states.
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        // Nothing typed: the NEEDS YOU BOARD, every section empty.
+        assert!(text.contains("Needs you"), "the board:\n{text}");
+        assert!(text.contains("type to jump to any"), "its search:\n{text}");
+        for section in crate::needs_you::model::Section::ALL {
+            assert!(text.contains(section.empty()), "{section:?}:\n{text}");
+        }
+        // Typed, the jump list.
+        for c in "agent".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+        }
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Jump to"), "palette title rendered:\n{text}");
-        assert!(
-            text.contains("type to search"),
-            "query placeholder rendered:\n{text}"
-        );
         // Palette rows carry per-kind glyphs, FLAT: the session on a line
         // of its own behind its STATUS MARK (`○`, never run), the project
         // it lives in in front of it — but not the branch, which is
@@ -26659,6 +26756,9 @@ mod tests {
             "the branch is searched, not drawn:\n{text}"
         );
         // A query reaches the worktree, ▸, its project in front of it too.
+        for _ in "agent".chars() {
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+        }
         for c in "main".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -26680,6 +26780,9 @@ mod tests {
         seed_tree(&mut app);
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
+        // Typed — a space, which narrows to the sessions — so the jump
+        // list and not the board.
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
@@ -36494,8 +36597,13 @@ mod tests {
     fn a_click_on_a_list_row_is_enter_on_it() {
         with_seeded_presets(|| {
             type Open = fn(&mut App, &mut Vec<ClientRequest>);
+            // Typed, so the jump list and not the NEEDS YOU BOARD (whose
+            // cards have a test of their own, below).
             let palette: Open = |app, out| {
                 press(app, KeyCode::Char('k'), KeyModifiers::SUPER, out);
+                for c in "agent".chars() {
+                    press(app, KeyCode::Char(c), KeyModifiers::NONE, out);
+                }
             };
             let new_session: Open = |app, _out| {
                 app.focus = Focus::Sessions;
@@ -36569,6 +36677,102 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// A click on a NEEDS YOU card is Enter with the cursor on it: a
+    /// session waiting on you attaches, a finished one is landed on — and
+    /// a click on `+N more` is → on it, the section unfolded.
+    #[test]
+    fn a_click_on_a_needs_you_card_is_enter_on_it() {
+        with_seeded_presets(|| {
+            let open = |app: &mut App, out: &mut Vec<ClientRequest>| {
+                for a in app.tree.agents.iter_mut() {
+                    match a.id.0.as_str() {
+                        "a9" => a.unseen = true,
+                        _ => a.status = orion_core::AgentStatus::NeedsFeedback,
+                    }
+                }
+                press(app, KeyCode::Char('k'), KeyModifiers::SUPER, out);
+            };
+            for row in 0..2usize {
+                let mut by_keys = parity_tree();
+                let mut keys_out = Vec::new();
+                open(&mut by_keys, &mut keys_out);
+                drawn_board_hits(&mut by_keys);
+                for _ in 0..row {
+                    press(
+                        &mut by_keys,
+                        KeyCode::Down,
+                        KeyModifiers::NONE,
+                        &mut keys_out,
+                    );
+                }
+                press(
+                    &mut by_keys,
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                    &mut keys_out,
+                );
+
+                let mut by_mouse = parity_tree();
+                let mut mouse_out = Vec::new();
+                open(&mut by_mouse, &mut mouse_out);
+                let hits = drawn_board_hits(&mut by_mouse);
+                let (rect, _, _) = hits
+                    .iter()
+                    .find(|(_, column, slot)| (*column, *slot) == (0, row))
+                    .copied()
+                    .expect("the card is drawn");
+                click(&mut by_mouse, rect.x + 2, rect.y + 1, &mut mouse_out);
+
+                assert_eq!(
+                    ui_digest(&by_mouse, &mouse_out),
+                    ui_digest(&by_keys, &keys_out),
+                    "card {row}"
+                );
+                assert!(by_keys.overlay.is_none(), "the board went: card {row}");
+            }
+
+            // `+N more`: a short screen folds the agents, and a click on
+            // the fold unfolds it as → does.
+            let mut app = parity_tree();
+            let mut out = Vec::new();
+            open(&mut app, &mut out);
+            let mut terminal = Terminal::new(TestBackend::new(160, 12)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let Some(Overlay::Palette(p)) = &app.overlay else {
+                panic!("the board is up");
+            };
+            let more = p.board.slots(0).len() - 1;
+            assert_eq!(
+                p.board.slots(0)[more],
+                crate::needs_you::board::Slot::More(crate::needs_you::model::Section::Agents)
+            );
+            let (rect, _, _) = *p
+                .board
+                .hits
+                .iter()
+                .find(|(_, column, slot)| (*column, *slot) == (0, more))
+                .unwrap();
+            click(&mut app, rect.x + 1, rect.y, &mut out);
+            let Some(Overlay::Palette(p)) = &app.overlay else {
+                panic!("the board stays");
+            };
+            assert_eq!(
+                p.board.expanded,
+                Some(crate::needs_you::model::Section::Agents)
+            );
+        });
+    }
+
+    /// Draw the open board and hand back where its slots were drawn.
+    fn drawn_board_hits(app: &mut App) -> Vec<(ratatui::layout::Rect, usize, usize)> {
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|f| ui::draw(f, app)).unwrap();
+        match &app.overlay {
+            Some(Overlay::Palette(p)) => p.board.hits.clone(),
+            other => panic!("no board in {other:?}"),
+        }
     }
 
     /// A click on a file finder row is Enter on it — the MARKDOWN PAGE for
@@ -37618,14 +37822,14 @@ mod tests {
         // The palette is a modal with a text field: what is typed into it
         // never shows, its navigation keys show bare.
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        assert_eq!(combo_text(&app).as_deref(), Some("⌘K - Jump to…"));
+        assert_eq!(combo_text(&app).as_deref(), Some("⌘K - Needs you"));
         assert!(matches!(app.overlay, Some(Overlay::Palette(_))));
         press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
         press(&mut app, KeyCode::Char('B'), KeyModifiers::SHIFT, &mut out);
         press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
         assert_eq!(
             combo_text(&app).as_deref(),
-            Some("⌘K - Jump to…"),
+            Some("⌘K - Needs you"),
             "typed text leaves the last combo standing"
         );
         press(

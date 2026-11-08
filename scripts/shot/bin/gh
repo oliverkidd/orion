@@ -24,6 +24,7 @@ real repository. Anything else is "couldn't ask" (exit 1) — exactly what orion
   gh api user --jq .login                 → fixtures/user (a login on one line), else "shot-user"
   gh issue list --state open … --json …   → fixtures/issue-list.json
   gh issue view <n> --json …              → fixtures/issue-<n>.json, else exit 1
+  gh search prs --review-requested=@me …  → fixtures/search-prs.json, else exit 1 (NEEDS YOU's code reviews)
 
 ORION_GH_DELAY=<seconds> holds every `gh pr view <n>` back that long, so a driver can see a pull
 request's page while it is still loading.
@@ -138,6 +139,8 @@ def main(argv):
     if argv[:2] == ["pr", "diff"]:
         number = next((a for a in argv[2:] if a.isdigit()), None)
         return emit("pr-%s.diff" % number) if number else 1
+    if argv[:2] == ["search", "prs"]:
+        return emit("search-prs.json")
     if argv[:2] == ["issue", "list"]:
         return emit("issue-list.json")
     if argv[:2] == ["issue", "view"]:

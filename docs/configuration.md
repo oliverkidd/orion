@@ -118,7 +118,7 @@ save. A key inside an entry this build doesn't know is kept.
 What orion reaches outside itself through, a section each: **AWAY AND PHONE**, **SLACK**,
 **MICROSOFT 365** and **GITHUB AND LINEAR**. `←→` changes a row, `Enter` edits it, `Tab` goes on
 to the next tab and `Esc` closes. SLACK and MICROSOFT 365 each have a status row: `c` (or `Enter`)
-connects it and `o` disconnects it. GITHUB AND LINEAR is still one **Status** row that reads
+connects it and `o` disconnects it. GITHUB AND LINEAR is two switches (below). A section whose rows haven't arrived yet reads
 `not connected`, and its keys below are read as they are written.
 
 **AWAY AND PHONE · Slack DM from Orion** — when you count as away, and what reaches your phone then
@@ -158,6 +158,17 @@ replies` / `off`), **Channels, every message** and **Keywords** (typed, comma-se
 orion signs in with these delegated permissions: `User.Read`, `Calendars.Read`,
 `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` and `offline_access`.
 
+**GITHUB AND LINEAR** `· through gh and project keys` says what the [Needs you board](keys.md#needs-you-k)
+lists, two switches `←`/`→` or `Enter` turn on and off:
+
+- **Code reviews asked of you** (`inbox.code_reviews`): open pull requests that ask you to review
+  them — your projects' own, as their open lists say, and every other repo's, through one
+  `gh search prs --review-requested=@me` every five minutes.
+- **Linear comments that mention you** (`inbox.linear_mentions`): your unread Linear notifications —
+  a mention, a new comment on an issue you're in, an issue given to you — asked with each project's
+  `LINEAR_API_KEY` (one ask per distinct key). Marking one done on the board marks it read in
+  Linear too.
+
 ```json
 { "away": { "screen_lock": true, "idle_minutes": 10,
             "phone": ["question", "plan", "crash"], "quiet": ["22:00", "07:00"] },
@@ -179,7 +190,7 @@ orion signs in with these delegated permissions: `User.Read`, `Calendars.Read`,
 | `slack.banner` | `"dms_and_mentions"` | Which messages bring a banner and a sound: `every`, `dms_and_mentions` or `never`. |
 | `microsoft.client_id`, `microsoft.tenant` | `""`, `"organizations"` | The Entra app orion signs in to Microsoft 365 through. Not secret, so a team can share them. |
 | `microsoft.footer_meeting`, `microsoft.takeaways` | `true` | The next meeting in the footer, and takeaways from Teams transcripts. |
-| `inbox.code_reviews`, `inbox.linear_mentions` | `true` | Code reviews asked of you, and Linear comments that mention you, show in Needs you. |
+| `inbox.code_reviews`, `inbox.linear_mentions` | `true` | Code reviews asked of you, and Linear comments that mention you, show in Needs you (GITHUB AND LINEAR's two rows). |
 
 A key left out of a section keeps its default, the others as written. Tokens are never in the
 file: orion keeps them in the macOS Keychain, under services named `dev.orion.<service>`.
@@ -479,6 +490,7 @@ Everything orion writes under its data dir:
 | `ORION_SPOTIFY_POLL_SECS` | how often to ask Spotify (default 1; `0` off) |
 | `ORION_MICROSOFT_POLL_SECS` | how often to read your Microsoft 365 calendar (default 300; `0` off) |
 | `ORION_PROJECT_ABOUT` | `off` stops orion writing a project's **What it is** (tests) |
+| `ORION_NEEDS_YOU_POLL_SECS` | how often Needs you asks Linear for your notifications and `gh` for the reviews asked of you (default 300; `0` off) |
 | `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |
 
 The DAEMON sets `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` on every agent so its hooks

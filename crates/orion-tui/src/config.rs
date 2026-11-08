@@ -428,6 +428,12 @@ pub enum SettingKind {
     Away(AwayField),
     /// A row of the CONNECTIONS TAB's SLACK (`slack`).
     Slack(SlackField),
+    /// GITHUB AND LINEAR › **Code reviews asked of you** (`inbox.code_reviews`):
+    /// NEEDS YOU lists them.
+    CodeReviews,
+    /// GITHUB AND LINEAR › **Linear comments that mention you**
+    /// (`inbox.linear_mentions`): NEEDS YOU lists your unread notifications.
+    LinearMentions,
 }
 
 /// The AWAY AND PHONE rows, top to bottom.
@@ -471,7 +477,6 @@ const PHONE_CHOICES: &[&[PhoneKind]] = &[
 pub enum Connection {
     Slack,
     Microsoft,
-    GithubAndLinear,
 }
 
 /// What a connection that is not set up says.
@@ -825,10 +830,16 @@ pub const CONNECTIONS_SETTINGS: &[SettingSpec] = &[
         group: "MICROSOFT 365",
     },
     SettingSpec {
-        kind: SettingKind::Connection(Connection::GithubAndLinear),
-        label: "Status",
-        hint: "Code reviews asked of you and Linear comments that mention you show in Needs you",
-        group: "GITHUB AND LINEAR",
+        kind: SettingKind::CodeReviews,
+        label: "Code reviews asked of you",
+        hint: "Pull requests that ask you to review them show in Needs you: your projects' own, and every other repo's through gh",
+        group: "GITHUB AND LINEAR · through gh and project keys",
+    },
+    SettingSpec {
+        kind: SettingKind::LinearMentions,
+        label: "Linear comments that mention you",
+        hint: "Your unread Linear notifications show in Needs you, asked with each project's LINEAR_API_KEY: mentions, new comments on your issues, issues given to you. Marking one done there marks it read in Linear",
+        group: "GITHUB AND LINEAR · through gh and project keys",
     },
 ];
 
@@ -2841,6 +2852,8 @@ impl Config {
             SettingKind::MicrosoftTakeaways => on_off(self.microsoft.takeaways).into(),
             SettingKind::Away(field) => self.away_value(field),
             SettingKind::Slack(field) => self.slack_value(field),
+            SettingKind::CodeReviews => on_off(self.inbox.code_reviews).into(),
+            SettingKind::LinearMentions => on_off(self.inbox.linear_mentions).into(),
         }
     }
 
@@ -3053,6 +3066,12 @@ impl Config {
                     }
                     SlackField::Channels | SlackField::Keywords => {}
                 }
+            }
+            SettingKind::CodeReviews => {
+                self.inbox.code_reviews = !self.inbox.code_reviews;
+            }
+            SettingKind::LinearMentions => {
+                self.inbox.linear_mentions = !self.inbox.linear_mentions;
             }
         }
     }
@@ -5667,8 +5686,8 @@ mod tests {
     }
 
     /// Connections is four sections in the design's order: AWAY AND PHONE
-    /// and SLACK with their rows and values (5.2), and the two still to
-    /// come a status row that says it is not connected yet.
+    /// and SLACK with their rows and values (5.2), MICROSOFT 365's status
+    /// row, and GITHUB AND LINEAR's two switches, on.
     #[test]
     fn connections_is_four_sections_in_order() {
         let tab = SETTINGS_TABS
@@ -5688,10 +5707,10 @@ mod tests {
                 "AWAY AND PHONE · Slack DM from Orion",
                 "SLACK",
                 "MICROSOFT 365",
-                "GITHUB AND LINEAR"
+                "GITHUB AND LINEAR · through gh and project keys"
             ]
         );
-        let cfg = Config::default();
+        let mut cfg = Config::default();
         let rows: Vec<(&str, String)> = CONNECTIONS_SETTINGS
             .iter()
             .filter(|spec| matches!(spec.kind, SettingKind::Away(_) | SettingKind::Slack(_)))
@@ -5715,8 +5734,16 @@ mod tests {
             if let SettingKind::Connection(_) = spec.kind {
                 assert!(spec.kind.is_status());
                 assert_eq!(cfg.value_label(spec.kind), NOT_CONNECTED);
+            } else if matches!(
+                spec.kind,
+                SettingKind::CodeReviews | SettingKind::LinearMentions
+            ) {
+                assert_eq!(cfg.value_label(spec.kind), "on");
+                cfg.cycle_kind(spec.kind, 1);
+                assert_eq!(cfg.value_label(spec.kind), "off");
             }
         }
+        assert!(!cfg.inbox.code_reviews && !cfg.inbox.linear_mentions);
     }
 
     /// MICROSOFT 365's two switches sit under its status row, on by

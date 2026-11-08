@@ -7,10 +7,10 @@
 //! The list is FLAT: one row per thing, each drawing the project it lives
 //! in dim before its own name — `demo/fix-login` — instead of a header row
 //! with its rows indented under it, and instead of a column of full
-//! `project/branch/session` paths. Before a query it is the RECENT
-//! SESSIONS list: only the sessions, the ones that want you first; typing
-//! reaches the projects, worktrees and pull requests too, on lines of
-//! their own in that same order — and under them each project's open
+//! `project/branch/session` paths. Before a query it is the NEEDS YOU
+//! BOARD ([`crate::needs_you::board`]), drawn and walked apart from these
+//! rows; typing reaches the sessions, projects, worktrees and pull
+//! requests, on lines of their own in that same order — and under them each project's open
 //! Linear issues, as the last list read (or the cache) has them, and its
 //! open todos ([`linear_rows`], [`todo_rows`]).
 
@@ -165,6 +165,9 @@ pub struct Palette {
     /// The rows that are not the tree's — Linear issues, todos — read
     /// when the palette opened and kept under the tree's on a rebuild.
     pub extra: Vec<PaletteItem>,
+    /// The NEEDS YOU BOARD, what the palette is while nothing is typed:
+    /// its cards and its own cursor, apart from `matches`.
+    pub board: crate::needs_you::board::Board,
 }
 
 impl Palette {
@@ -182,6 +185,7 @@ impl Palette {
             area: Rect::default(),
             list_area: Rect::default(),
             extra: Vec::new(),
+            board: Default::default(),
         };
         palette.apply_filter();
         palette
@@ -269,6 +273,11 @@ impl Palette {
     pub fn hits(&self) -> usize {
         self.matches.len()
     }
+
+    /// Whether the palette is the NEEDS YOU BOARD: nothing typed yet.
+    pub fn on_board(&self) -> bool {
+        self.query.is_empty()
+    }
 }
 
 impl PaletteItem {
@@ -321,7 +330,7 @@ pub fn attention_sessions(tree: &Tree) -> Vec<AgentId> {
 /// The tier a session row sorts into — its own status, read against the
 /// UNSEEN flag the DONE BADGE counts. Archived sessions never reach here:
 /// they are not rows at all.
-fn session_tier(a: &Agent) -> PaletteTier {
+pub(crate) fn session_tier(a: &Agent) -> PaletteTier {
     match a.status {
         AgentStatus::NeedsFeedback | AgentStatus::Terminated => PaletteTier::NeedsFeedback,
         AgentStatus::Running => PaletteTier::Running,

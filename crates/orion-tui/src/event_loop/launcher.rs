@@ -10179,8 +10179,10 @@ mod tests {
                 Some("1".to_string()),
                 "one red dot, carrying its count: {text}"
             );
+            // The header's row; the footer's `⌘K needs you` is the board's.
+            let header = text.lines().nth(1).unwrap_or_default();
             assert!(
-                !text.contains("needs you"),
+                !header.contains("needs you"),
                 "the dot says it; the header spends no words on it: {text}"
             );
         });

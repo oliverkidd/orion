@@ -78,6 +78,13 @@ stops to ask you something stays working**. The picker says so on its row, dim a
 (`can't show it's waiting on you`), as it does for any CLI of yours with no hook dialect
 (`status from the process only`).
 
+Whatever the harness, a session in red — waiting on you, or crashed — and one whose finish nobody
+has read is a card in the AGENTS column of the [Needs you board](keys.md#needs-you-k) (`⌘K`), every
+kind in one list: crashed first, then waiting (the longest first), then finished. Its second line
+says why, as the daemon heard it: `asks a question`, `plan to approve`, `needs permission for Bash`,
+`hit its usage limit`, `crashed, exit 1`, `draft PR #12 ready` (a finish with a draft pull request
+open on its checkout) or `done` — and `waiting for you` when orion was not running to hear why. `⌘D` there puts the card away until the session wants you again.
+
 ## AGENT PRESETS
 
 If you keep starting the same kind of session with the same framing, save it as an **agent preset**,

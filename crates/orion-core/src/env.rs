@@ -66,6 +66,10 @@ pub const MICROSOFT_POLL_SECS: &str = "ORION_MICROSOFT_POLL_SECS";
 /// `off`: a project's **What it is** line is never written by a model, as
 /// the e2e tests set it, so adding a project never runs a Claude account.
 pub const PROJECT_ABOUT: &str = "ORION_PROJECT_ABOUT";
+/// Cadence in seconds of the NEEDS YOU poll — your Linear notifications
+/// and the code reviews asked of you; `0` turns it off, as the e2e tests
+/// and the screenshots do so a board never depends on Linear or GitHub.
+pub const NEEDS_YOU_POLL_SECS: &str = "ORION_NEEDS_YOU_POLL_SECS";
 /// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
 /// run never reads the machine's logins or calls out with them.
 pub const USAGE: &str = "ORION_USAGE";

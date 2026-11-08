@@ -298,9 +298,14 @@ pub fn land(app: &mut App, answer: Answer) {
 /// The footer's meeting segment, when it is on and a meeting is within
 /// the hour.
 pub fn footer_text(app: &App) -> Option<String> {
-    if !app.microsoft.footer || app.microsoft.email.is_none() {
-        return None;
-    }
+    app.microsoft.footer.then(|| next_meeting(app)).flatten()
+}
+
+/// The meeting running or next within the hour, as the footer words it —
+/// `▸ Standup in 12m · Teams` — while signed in; what the NEEDS YOU
+/// board's header shows whatever the footer's row says.
+pub fn next_meeting(app: &App) -> Option<String> {
+    app.microsoft.email.as_ref()?;
     calendar::footer_text(&app.microsoft.events, Utc::now())
 }
 

@@ -5720,7 +5720,11 @@ async fn create_issue(
 
 /// A mutation's answer: `Ok` when `data.<field>.success` is true, else
 /// Linear's own error, else `refused`.
-fn mutation_result(json: &serde_json::Value, field: &str, refused: &str) -> Result<(), String> {
+pub(crate) fn mutation_result(
+    json: &serde_json::Value,
+    field: &str,
+    refused: &str,
+) -> Result<(), String> {
     let success = json
         .pointer(&format!("/data/{field}/success"))
         .and_then(|v| v.as_bool());
@@ -5929,7 +5933,7 @@ fn already_attached(why: &str) -> bool {
     why.to_ascii_lowercase().contains("duplicate attachment")
 }
 
-async fn graphql(
+pub(crate) async fn graphql(
     key: &str,
     query: &str,
     variables: serde_json::Value,
@@ -6193,7 +6197,7 @@ fn status_rank(issue: &LinearIssue) -> u8 {
     }
 }
 
-fn graphql_error(json: &serde_json::Value) -> Option<String> {
+pub(crate) fn graphql_error(json: &serde_json::Value) -> Option<String> {
     json.get("errors")
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.first())
