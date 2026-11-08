@@ -113,7 +113,9 @@ impl CardKey {
             CardTarget::Session(id) => format!("session:{id}"),
             CardTarget::LinearIssue { project, id } => format!("linear:{project}:{id}"),
             CardTarget::PullRequest { url, .. } => format!("pr:{url}"),
-            CardTarget::SlackMessage { permalink } => format!("slack:{permalink}"),
+            CardTarget::SlackMessage { channel, root, .. } => {
+                format!("slack:{channel}:{}", root.as_deref().unwrap_or(""))
+            }
             CardTarget::Meeting { id } => format!("meeting:{id}"),
         })
     }
@@ -134,8 +136,13 @@ pub enum CardTarget {
         project: Option<ProjectId>,
         url: String,
     },
+    /// A Slack conversation waiting on you: a DM's (`root` None), a
+    /// thread's, or one channel message's (`root` its own `ts`). Enter
+    /// opens `ts`, its newest message, by `chat.getPermalink`.
     SlackMessage {
-        permalink: String,
+        channel: String,
+        root: Option<String>,
+        ts: String,
     },
     Meeting {
         id: String,
@@ -205,6 +212,10 @@ pub struct Store {
     /// Snoozed: when each card shows again.
     #[serde(default)]
     snoozed: HashMap<CardKey, DateTime<Utc>>,
+    /// The Slack conversations waiting on you, so they outlive a restart
+    /// (`needs_you::slack`).
+    #[serde(default)]
+    pub slack: super::slack::Kept,
 }
 
 impl Store {

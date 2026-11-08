@@ -24,6 +24,21 @@ pub const SLACK_SERVICE: &str = "slack";
 /// app-level token (`xapp-…`), the bot's (`xoxb-…`), the user's (`xoxp-…`).
 pub const SLACK_ACCOUNTS: [&str; 3] = ["app", "bot", "user"];
 
+/// The saved Slack token `account` (one of [`SLACK_ACCOUNTS`]):
+/// `ORION_SLACK_TOKENS` (`app,bot,user`, the e2e tests' fake Slack) in
+/// place of the Keychain when set. None when it was never saved. Runs
+/// `security`: keep it off async workers.
+pub fn slack_token(account: &str) -> Option<String> {
+    let token = match crate::env::non_empty(crate::env::SLACK_TOKENS) {
+        Some(list) => {
+            let at = SLACK_ACCOUNTS.iter().position(|a| *a == account)?;
+            list.split(',').nth(at).map(|t| t.trim().to_string())
+        }
+        None => get(SLACK_SERVICE, account),
+    };
+    token.filter(|t| !t.is_empty())
+}
+
 /// The Keychain service orion keeps `service` under: `dev.orion.<service>`.
 pub fn service_name(service: &str) -> String {
     format!("{PREFIX}{service}")

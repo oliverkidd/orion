@@ -93,9 +93,17 @@ pub(super) fn needs_you_card(app: &mut App, out: &mut Vec<ClientRequest>) {
         {
             PaletteTarget::PullRequest { project, url }
         }
-        CardTarget::PullRequest { url, .. } | CardTarget::SlackMessage { permalink: url } => {
+        CardTarget::PullRequest { url, .. } => {
             app.overlay = None;
             open_link(app, &url, None, out);
+            return;
+        }
+        // Its link, from Slack once; it opens when Slack gives it.
+        CardTarget::SlackMessage { channel, ts, .. } => {
+            app.overlay = None;
+            if let Some(url) = crate::needs_you::slack::permalink(app, &channel, &ts) {
+                open_link(app, &url, None, out);
+            }
             return;
         }
         // Meetings have nothing to land on until their takeaways do.

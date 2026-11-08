@@ -4,7 +4,7 @@
 //!
 //! [`model`] is what the board is made of: the cards each source offers,
 //! the column and section each sits in, and what Done and Snooze hide.
-//! The sources are [`agents`], [`linear`] and [`reviews`]; [`board`] lays
+//! The sources are [`agents`], [`linear`], [`reviews`] and [`slack`]; [`board`] lays
 //! the cards out, walks them and draws them. [`State`] is what the app
 //! keeps for it between frames: the store, what the last polls heard,
 //! and why each session waits.
@@ -20,6 +20,7 @@ pub mod board;
 pub mod linear;
 pub mod model;
 pub mod reviews;
+pub mod slack;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -52,6 +53,8 @@ pub enum Answer {
     },
     /// The open pull requests asking for your review.
     Reviews(Option<Vec<reviews::Found>>),
+    /// A Slack name or link asked for (`slack::Lookup`).
+    Slack(slack::Looked),
 }
 
 /// What the app keeps for the board.
@@ -70,13 +73,20 @@ pub struct State {
     pub inbox: crate::config::InboxSettings,
     /// When the poll last asked.
     pub asked: Option<Instant>,
-    /// Where the poll's answers go.
+    /// The SLACK section: the messages heard, and Settings' rules.
+    pub slack: slack::Slack,
+    /// Where the poll's answers, and the Slack asks', go.
     pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
 }
 
 /// Every card a source offers now, hidden or not.
 fn offered(app: &App) -> Vec<Card> {
-    let sources: [&dyn CardSource; 3] = [&agents::Agents, &linear::Inbox, &reviews::Reviews];
+    let sources: [&dyn CardSource; 4] = [
+        &agents::Agents,
+        &linear::Inbox,
+        &reviews::Reviews,
+        &slack::Inbox,
+    ];
     sources.iter().flat_map(|s| s.cards(app)).collect()
 }
 
@@ -148,6 +158,7 @@ pub fn exited(app: &mut App, agent: &AgentId, code: i32) {
 /// Load the store, as the app starts.
 pub fn load(app: &mut App) {
     app.needs_you.store = Store::load(&Store::path());
+    slack::loaded(app);
 }
 
 /// One beat of the poll: ask Linear under every distinct project key,
@@ -203,6 +214,7 @@ pub fn land(app: &mut App, answer: Answer) {
                 app.needs_you.reviews = found;
             }
         }
+        Answer::Slack(looked) => slack::landed(app, looked),
     }
     let live = offered(app);
     if app.needs_you.store.prune(&live, chrono::Utc::now()) {
@@ -213,6 +225,10 @@ pub fn land(app: &mut App, answer: Answer) {
 }
 
 fn save(app: &App) {
+    // Unit tests drive the board on a bare `App`: never the real data dir.
+    if cfg!(test) {
+        return;
+    }
     let _ = app.needs_you.store.save(&Store::path());
 }
 

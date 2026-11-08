@@ -280,7 +280,12 @@ connected). Three columns:
 2. **LINEAR** — your unread Linear notifications, one card per issue (mentions, new comments on
    issues you're in, issues given to you) — over **CODE REVIEWS**: open pull requests that ask you
    to review them, your projects' and any other repo's.
-3. **SLACK** over **MEETINGS**.
+3. **SLACK** — the Slack conversations waiting on you, once Slack is connected: direct messages,
+   mentions of you, new replies in threads you've posted in, every message in the channels you
+   list, and messages with your keywords (Settings › Connections › SLACK). A card reads the
+   sender's name and the message's first line, then `direct message` or `#channel · mentions you`;
+   a conversation's later messages move its one card on. It goes by itself when you post there
+   later, in the same thread or at the top of the same DM or channel — over **MEETINGS**.
 
 A section with more cards than fit ends on `+N more  →`; `→` on it (or a click) unfolds it over its
 column, `←` folds it back. An empty section says so — `No agents waiting for you`, `No Linear issues
@@ -291,8 +296,8 @@ waiting for you`, and so on — and nothing else.
 | typing | the jump list (below), the board back when the query is empty again |
 | `←` / `→` | the column; `→` on `+N more` unfolds it |
 | `↑` / `↓` | the cards of the column |
-| `Enter`, a click | jump to it: a session waiting on you attaches, a finished one is landed on, a Linear issue opens in the issues modal, a pull request is landed on in its project (or opens in the browser when it is no orion project's) |
-| `⌘D` | done: the card goes until it changes — the session waits again, a new comment lands — and a Linear card's notifications are marked read in Linear |
+| `Enter`, a click | jump to it: a session waiting on you attaches, a finished one is landed on, a Linear issue opens in the issues modal, a pull request is landed on in its project (or opens in the browser when it is no orion project's), a Slack message opens in Slack by its link |
+| `⌘D` | done: the card goes until it changes — the session waits again, a new comment or Slack message lands — and a Linear card's notifications are marked read in Linear |
 | `⌘Z` | snooze: the card goes for an hour |
 | `Esc` | back to the grid |
 

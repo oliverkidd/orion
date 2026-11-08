@@ -29,7 +29,7 @@ use serde_json::Value;
 use crate::registry::Daemon;
 use api::{Api, As};
 
-use orion_core::secrets::{SLACK_ACCOUNTS, SLACK_SERVICE};
+use orion_core::secrets::SLACK_ACCOUNTS;
 
 /// The first wait before opening the socket again, doubled each time it
 /// fails in a row up to [`MAX_BACKOFF`].
@@ -56,19 +56,12 @@ impl Tokens {
     /// all three are there. Runs `security`: keep it off the async
     /// workers.
     pub fn load() -> Option<Tokens> {
-        let [app, bot, user] = match orion_core::env::non_empty(orion_core::env::SLACK_TOKENS) {
-            Some(list) => {
-                let mut parts = list.split(',').map(|t| t.trim().to_string());
-                [parts.next(), parts.next(), parts.next()]
-            }
-            None => SLACK_ACCOUNTS.map(|account| orion_core::secrets::get(SLACK_SERVICE, account)),
-        };
-        let tokens = Tokens {
-            app: app.filter(|t| !t.is_empty())?,
-            bot: bot.filter(|t| !t.is_empty())?,
-            user: user.filter(|t| !t.is_empty())?,
-        };
-        Some(tokens)
+        let [app, bot, user] = SLACK_ACCOUNTS.map(orion_core::secrets::slack_token);
+        Some(Tokens {
+            app: app?,
+            bot: bot?,
+            user: user?,
+        })
     }
 }
 

@@ -1,0 +1,4 @@
+# ⌘K over the stock demo with Slack messages waiting (needs-you-slack.setup.sh): the SLACK section's
+# cards, sender and first line over `direct message` or `#channel · mentions you`, the DMs and the
+# mention first, then by how long each has waited.
+cmd k

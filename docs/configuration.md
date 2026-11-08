@@ -140,7 +140,14 @@ From a manifest), install it, and create its app-level token with `connections:w
 the section is what counts as a Slack message for you in Needs you: **Direct messages** (`every
 message` / `off`), **Mentions of you** (`every channel` / `off`), **Threads you're in** (`new
 replies` / `off`), **Channels, every message** and **Keywords** (typed, comma-separated), and
-**Banner and sound** (`DMs and mentions`, `every message`, `never`).
+**Banner and sound** (`DMs and mentions`, `every message`, `never`). Those messages are the SLACK
+column's cards on the [Needs you board](keys.md#needs-you-k); turning a row off hides the cards it
+made. A thread counts as yours once you post in it, or when you started it. Channels are matched
+by name (`#eng`), which orion asks Slack for once per channel; a keyword matches anywhere in a
+message, any case. **Banner and sound** rings the feedback sound and, while orion's window is in
+the background, posts a desktop notification naming the sender. An app made from an older copy of
+the manifest lacks the `channels:read` and `groups:read` user scopes that name channels: add them
+under OAuth & Permissions and reinstall.
 
 **MICROSOFT 365.**
 - **Status:** the email you signed in as.

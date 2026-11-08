@@ -85,6 +85,14 @@ says why, as the daemon heard it: `asks a question`, `plan to approve`, `needs p
 `hit its usage limit`, `crashed, exit 1`, `draft PR #12 ready` (a finish with a draft pull request
 open on its checkout) or `done` — and `waiting for you` when orion was not running to hear why. `⌘D` there puts the card away until the session wants you again.
 
+Beside them, the board's SLACK column holds the Slack conversations waiting on you, once Slack is
+connected in Settings › Connections: a DM, a mention, a reply in a thread you've posted in, a
+message in a channel you listed or one with your keyword. One card per conversation — a DM, a
+thread, a channel message — reads `<sender>: <first line>` over `direct message` or
+`#channel · mentions you`, and goes when you post there later, from Slack or anywhere else. `Enter`
+opens the newest message in Slack; `⌘D` puts it away until someone writes there again. The cards
+outlive a restart of orion; what Slack said while orion was closed is not caught up.
+
 ## AGENT PRESETS
 
 If you keep starting the same kind of session with the same framing, save it as an **agent preset**,

@@ -41,6 +41,17 @@ impl Response {
     }
 }
 
+/// Slack's own Web API.
+pub const SLACK_API: &str = "https://slack.com/api";
+
+/// The Slack Web API's base URL: [`SLACK_API`], or `ORION_SLACK_API_URL`
+/// (a fake Slack in the e2e tests).
+pub fn slack_api_url() -> String {
+    crate::env::non_empty(crate::env::SLACK_API_URL)
+        .map(|url| url.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| SLACK_API.to_string())
+}
+
 /// How long a request may take when it names no timeout.
 const DEFAULT_TIMEOUT_SECS: u64 = 20;
 

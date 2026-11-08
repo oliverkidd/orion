@@ -357,14 +357,14 @@ async fn main_loop(
         crate::linear::LinkStore::load(orion_core::paths::data_dir().join("linear-links.json"));
     // NEEDS YOU: Done and Snooze from the last run, and the POLL for your
     // Linear notifications and the reviews asked of you (`needs_you::
-    // interval`; the e2e tests turn it off), first at start.
+    // interval`; the e2e tests turn it off), first at start. The Slack
+    // section's asks land on the same channel, poll or no poll: they
+    // follow Slack's own events.
     crate::needs_you::load(&mut app);
     let (needs_you_tx, mut needs_you_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::needs_you::Answer>();
     let needs_you_interval = crate::needs_you::interval();
-    if needs_you_interval.is_some() {
-        app.needs_you.tx = Some(needs_you_tx);
-    }
+    app.needs_you.tx = Some(needs_you_tx);
     let mut next_needs_you = tokio::time::Instant::now();
     // The WORKTREE PICKER's branch listings and their background fetch
     // land here too.
@@ -965,6 +965,22 @@ async fn main_loop(
                 app.done_sounds.rang(std::time::Instant::now());
                 if app.may_notify_desktop() {
                     alerts::notify_desktop(&alerts);
+                }
+            }
+        }
+
+        // Slack messages for you that Settings' **Banner and sound** names
+        // ring the FEEDBACK SOUND and post a desktop notification on the
+        // same terms (`needs_you::slack`).
+        let banners = crate::needs_you::slack::due_banners(&mut app);
+        if !banners.is_empty() {
+            if let Some(sound) = crate::config::Config::load().feedback_sound() {
+                alerts::play_sound(terminal.backend_mut(), sound);
+                app.done_sounds.rang(std::time::Instant::now());
+                if app.may_notify_desktop() {
+                    for (summary, body) in &banners {
+                        alerts::notify_text(summary, body);
+                    }
                 }
             }
         }
@@ -8860,6 +8876,7 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.microsoft.footer = cfg.microsoft.footer_meeting;
     set_hide_draft_prs(app, cfg.hide_draft_prs);
     app.needs_you.inbox = cfg.inbox.clone();
+    app.needs_you.slack.settings = cfg.slack.clone();
 }
 
 /// A Spotify poll's answer: the footer's readout follows it, repainting
@@ -13036,6 +13053,11 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             crate::phone::away_changed(app, away, by_hand);
         }
         ServerEvent::SlackStatus { status } => crate::phone::slack_changed(app, status),
+        event @ ServerEvent::SlackMessage { .. } => {
+            if let Some((message, json)) = crate::needs_you::slack::Message::of(event) {
+                crate::needs_you::slack::heard(app, message, &json);
+            }
+        }
         // `orion open` in a session: the user asked to see these files.
         ServerEvent::FilesOpened {
             root, paths, lines, ..

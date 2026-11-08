@@ -6,15 +6,10 @@ use serde_json::{json, Value};
 
 use super::Tokens;
 
-/// Slack's own Web API.
-pub const DEFAULT_BASE: &str = "https://slack.com/api";
-
-/// The API's base URL: [`DEFAULT_BASE`], or `ORION_SLACK_API_URL` (a fake
-/// Slack in the e2e tests).
+/// The API's base URL (`orion_core::http::slack_api_url`, which the TUI's
+/// Needs-you board calls too).
 pub fn base_url() -> String {
-    orion_core::env::non_empty(orion_core::env::SLACK_API_URL)
-        .map(|url| url.trim_end_matches('/').to_string())
-        .unwrap_or_else(|| DEFAULT_BASE.to_string())
+    orion_core::http::slack_api_url()
 }
 
 /// Which of the three tokens a call goes out with.
@@ -191,7 +186,7 @@ mod tests {
     #[ignore = "reaches slack.com"]
     fn slack_refuses_a_bogus_token() {
         let api = Api::new(
-            DEFAULT_BASE.into(),
+            orion_core::http::SLACK_API.into(),
             Tokens {
                 app: "xapp-1-bogus".into(),
                 bot: "xoxb-bogus".into(),
