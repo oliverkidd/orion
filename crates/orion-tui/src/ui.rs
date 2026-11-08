@@ -5502,6 +5502,7 @@ mod tests {
             todo: None,
             under: None,
             mode: orion_core::AgentMode::Edit,
+            automation: None,
         });
         let follow_up = PromptKind::FollowUp {
             id: orion_core::AgentId::from("a".to_string()),

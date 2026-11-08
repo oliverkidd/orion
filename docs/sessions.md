@@ -723,6 +723,38 @@ stops after 3 tries in a row that don't turn it green, saying so. On by default 
 my PRs** in Settings → General through 2.x, and a config that turned that off keeps it off). `⌘G`
 on a pull request sends one by hand whatever it says.
 
+### The bug fixer and the feature builder
+
+Both pick up Linear tickets assigned to you that carry one of their labels, plan each one, wait for
+your approval, then build it to a draft pull request. They work the same way; each has its own
+labels and its own preset (**Bug fixer**, **Feature builder**). Both are off until you turn them on.
+
+- **Labels.** The bug fixer's are `Bug · Regression · Customer bug`, the feature builder's
+  `Feature · Improvement`, until you pick others: `Enter` on **Labels** lists your Linear
+  workspace's labels, `Space` ticks one, `Enter` keeps the ticks and `Esc` leaves them as they were.
+  Case doesn't matter. A ticket with none of either's labels is left alone.
+- **Watching.** Every 2 minutes, for each Linear key your projects use, orion asks for the tickets
+  assigned to you in triage, the backlog or todo with one of the labels. A ticket is picked up once:
+  orion remembers it in `automations/linear-builder.json` in its data dir, and Needs you stops
+  showing its assignment.
+- **Which project.** A key only one project uses sends its tickets there. When several projects
+  share a key, a model reads each ticket and each project's **What it is** line and picks one.
+- **Together or apart.** When several new tickets land for one project at once, a model joins only
+  the ones that clearly share a cause or a component; the rest get a session each.
+- **The session.** One session a ticket (or group), in a fresh worktree named after it, started in
+  **plan mode** on the preset's agent. Its first prompt is the preset's text with the tickets in
+  full and, under **Related work to check**, the project's open draft pull requests and the ones
+  merged lately. As a ⌘L launch does, it moves the tickets to In Progress and attaches the draft
+  pull request to them when it opens.
+- **Your approval.** The plan waits for you like any other: in Needs you, and on your phone when
+  you're away. The default preset tells the agent to read the repo's `docs/decisions/` for the areas
+  it touches before planning, run only the e2e specs that cover the change, log new decisions you
+  make while steering, and open the draft pull request with **What and why**, **Blast radius**,
+  **Decisions**, **Reuse**, **Neighbours checked**, **UI**, **Performance** and **Check it
+  yourself** sections.
+- **The panel.** **RUNNING** lists each session: `planning`, `plan to approve`, `building`, or
+  `queued, 5 running` while the cap is full. **DONE THIS WEEK** lists the ones that finished.
+
 ## Your next meeting
 
 Signed in to Microsoft 365 (Settings › Connections), the footer shows your next meeting from an hour

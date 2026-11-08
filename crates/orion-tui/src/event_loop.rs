@@ -47,6 +47,7 @@ use host_terminal::{
     on_host_resize, reassert_modes, repaint, report_working_directory, setup_terminal,
     take_worker_panic, watch_held_key, MODE_REASSERT,
 };
+pub(crate) use quick_launch::submit_unattended;
 pub use release_watch::ReleaseWatch;
 
 /// Wheel step for the pull-request reading pane, in lines. Prose wants a
@@ -437,6 +438,12 @@ async fn main_loop(
     let (about_tx, mut about_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::projects::Answer>();
     app.project_about.tx = Some(about_tx);
+    // AUTOMATIONS' asks off the loop — Linear, the one-shot model — land
+    // here; the bug fixer's and feature builder's ledger from the last run.
+    let (automations_tx, mut automations_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::automations::Answer>();
+    app.automations.tx = Some(automations_tx);
+    crate::automations::linear_builder::load(&mut app);
     let mut next_metrics_poll = tokio::time::Instant::now();
     let mut next_splash_frame = tokio::time::Instant::now();
     let mut next_confetti_frame = tokio::time::Instant::now();
@@ -848,6 +855,11 @@ async fn main_loop(
             answer = needs_you_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::needs_you::land(&mut app, answer);
+                }
+            }
+            answer = automations_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::automations::land(&mut app, answer, &mut out);
                 }
             }
             answer = branch_rx.recv() => {
@@ -2937,18 +2949,20 @@ fn send_with(
 /// first half — the checkout it cuts for a prompt fired into another
 /// project — so the screen stays where the user left it, the same way a
 /// launch the user navigated away from is treated (`App::left_behind`).
+/// Returns the request's id.
 fn send_with_follow(
     app: &mut App,
     out: &mut Vec<ClientRequest>,
     intent: PendingIntent,
     follow: bool,
     make: impl FnOnce(u64) -> ClientRequest,
-) {
+) -> u64 {
     let req_id = app.alloc_req_id(intent);
     if !follow {
         app.left_behind.insert(req_id);
     }
     out.push(make(req_id));
+    req_id
 }
 
 fn log_server_event(ev: &ServerEvent) {
@@ -13126,7 +13140,8 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                 // The worktree the QUICK PROMPT wanted to cut first was
                 // refused (a fetch that failed, a branch that exists):
                 // both stand-in rows go, and the box comes back, its
-                // target untouched, for a retry.
+                // target untouched, for a retry. An automation's had no box:
+                // it tries again on its own.
                 Some(PendingIntent::LaunchInCreatedWorktree {
                     launch,
                     text,
@@ -13134,7 +13149,9 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                     ..
                 }) => {
                     placeholder::discard(app, &placeholder, out);
-                    reopen_prompt_with(app, PromptKind::QuickPrompt(launch), text);
+                    if launch.automation.is_none() {
+                        reopen_prompt_with(app, PromptKind::QuickPrompt(launch), text);
+                    }
                 }
                 // The NEW WORKTREE modal's checkout was refused: its
                 // stand-in row goes, and with it the FOCUS it took — the

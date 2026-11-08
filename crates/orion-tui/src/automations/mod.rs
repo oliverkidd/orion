@@ -245,6 +245,11 @@ pub struct Engine {
     pub launching: HashSet<u64>,
     /// The Automations screen's row, kept for its next open.
     pub selected: usize,
+    /// Where the runners' asks off the loop land ([`land`]).
+    pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
+    /// The bug fixer's and feature builder's shared half: the ledger of
+    /// tickets picked up, and the groups waiting for a place under the cap.
+    pub linear_builder: linear_builder::Shared,
 }
 
 impl Default for Engine {
@@ -257,10 +262,16 @@ impl Default for Engine {
             settings.of_mut(which).on = Some(false);
         }
         Self {
-            runners: vec![Box::new(pr_fixer::PrFixer)],
+            runners: vec![
+                Box::new(pr_fixer::PrFixer),
+                Box::new(linear_builder::LinearBuilder(Automation::BugFixer)),
+                Box::new(linear_builder::LinearBuilder(Automation::FeatureBuilder)),
+            ],
             settings,
             launching: HashSet::new(),
             selected: 0,
+            tx: None,
+            linear_builder: linear_builder::Shared::default(),
         }
     }
 }
@@ -372,6 +383,42 @@ pub fn launch(
     };
     crate::event_loop::create_agent(app, draft, out);
     true
+}
+
+/// Start `which`'s session in a fresh worktree, as the QUICK PROMPT's
+/// Enter does with `launch` — tagged with it, moving nothing on screen —
+/// and refused, false, at the cap, for the runner to try again on a later
+/// tick. The checkout being cut holds its place under the cap.
+pub fn launch_in_new_worktree(
+    app: &mut App,
+    which: Automation,
+    launch: crate::quick_prompt::QuickLaunch,
+    out: &mut Vec<ClientRequest>,
+) -> bool {
+    if !may_start(app) {
+        return false;
+    }
+    let launch = crate::quick_prompt::QuickLaunch {
+        automation: Some(which),
+        ..launch
+    };
+    crate::event_loop::submit_unattended(app, launch, out);
+    true
+}
+
+/// What a runner's ask off the loop brings back.
+#[derive(Debug)]
+pub enum Answer {
+    LinearBuilder(linear_builder::Answer),
+}
+
+/// An answer lands on the runner it is for — whether or not it is on, so a
+/// screen waiting on it (the labels pick) still fills.
+pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
+    match answer {
+        Answer::LinearBuilder(answer) => linear_builder::land(app, answer, out),
+    }
+    app.dirty = true;
 }
 
 /// How far back DONE THIS WEEK reaches.

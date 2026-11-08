@@ -221,7 +221,7 @@ Settings. Global, never per project.
 | `automations.per.<id>.on` | `true` for `pr_fixer`, else `false` | The automation on or off. Ids: `pr_fixer`, `bug_fixer`, `feature_builder`, `week_review`, `meeting_takeaways`, `blue_sky`. |
 | `automations.per.<id>.extra_steer` | `""` | Added to every prompt the automation sends, after a blank line, as `Extra steer: …`. |
 | `automations.per.<id>.preset` | none | The preset `⌘U` picked in place of the automation's own system preset, by name. A name no preset has falls back to the system preset. |
-| `automations.per.<id>.labels` | `[]` | The bug fixer's and the feature builder's Linear labels. |
+| `automations.per.<id>.labels` | `[]` | The Linear labels a ticket assigned to you needs for the bug fixer (`bug_fixer`) or the feature builder (`feature_builder`) to pick it up, matched in any case. Empty is each one's own: `Bug`, `Regression`, `Customer bug` for the bug fixer; `Feature`, `Improvement` for the feature builder. **Labels** on the screen picks them from your Linear workspace. |
 | `automations.per.<id>.when`, `.whose` | none, `"just_me"` | When week in review runs, and whose work it covers (`just_me` or `whole_team`). |
 
 `pr_autofix` (**Auto-fix my PRs**, through 2.x) is retired. A config that has it keeps it for the
@@ -525,6 +525,7 @@ Everything orion writes under its data dir:
 | `ORION_MICROSOFT_POLL_SECS` | how often to read your Microsoft 365 calendar (default 300; `0` off) |
 | `ORION_PROJECT_ABOUT` | `off` stops orion writing a project's **What it is** (tests) |
 | `ORION_NEEDS_YOU_POLL_SECS` | how often Needs you asks Linear for your notifications and `gh` for the reviews asked of you (default 300; `0` off) |
+| `ORION_LINEAR_BUILDER_POLL_SECS` | how often the bug fixer and feature builder look for labelled Linear tickets assigned to you (default 120; `0` off) |
 | `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |
 
 The DAEMON sets `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` on every agent so its hooks

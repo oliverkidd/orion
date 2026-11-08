@@ -70,6 +70,10 @@ pub const PROJECT_ABOUT: &str = "ORION_PROJECT_ABOUT";
 /// and the code reviews asked of you; `0` turns it off, as the e2e tests
 /// and the screenshots do so a board never depends on Linear or GitHub.
 pub const NEEDS_YOU_POLL_SECS: &str = "ORION_NEEDS_YOU_POLL_SECS";
+/// Cadence in seconds of the bug fixer's and feature builder's look for
+/// labelled Linear tickets assigned to you (default 2 minutes); `0` turns
+/// it off, as the e2e tests and the screenshots do.
+pub const LINEAR_BUILDER_POLL_SECS: &str = "ORION_LINEAR_BUILDER_POLL_SECS";
 /// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
 /// run never reads the machine's logins or calls out with them.
 pub const USAGE: &str = "ORION_USAGE";

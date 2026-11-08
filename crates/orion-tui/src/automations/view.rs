@@ -61,6 +61,8 @@ enum Hit {
     Automation(usize),
     /// A row of the panel, by its index among [`items`].
     Item(usize),
+    /// A row of the labels pick.
+    Label(usize),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -73,6 +75,8 @@ pub struct AutomationsView {
     pub row: usize,
     /// Enter on **Extra steer**: the line being written.
     pub steer: Option<TextInput>,
+    /// Enter on **Labels**: the labels pick, in the panel's place.
+    pub labels: Option<super::linear_builder::LabelPick>,
     /// A word about the last thing tried, over the explanation.
     pub notice: Option<String>,
     /// The modal's rect and its rows', written back as it draws.
@@ -115,7 +119,7 @@ pub fn open(app: &mut App) {
 }
 
 /// The config, changed by `change` and saved, then mirrored into the app.
-fn change_settings(app: &mut App, change: impl FnOnce(&mut AutomationsSettings)) {
+pub(super) fn change_settings(app: &mut App, change: impl FnOnce(&mut AutomationsSettings)) {
     let mut cfg = crate::config::Config::load();
     change(&mut cfg.automations);
     if let Err(err) = cfg.try_save() {
@@ -150,6 +154,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
         } else {
             input.handle_key(&key);
         }
+        return;
+    }
+    // Picking labels: the pick has the keys.
+    if view.labels.is_some() {
+        super::linear_builder::pick_key(app, key);
         return;
     }
     match key.code {
@@ -299,9 +308,11 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent, at: Position, out: &mut Ve
                 view.selected = i;
                 view.in_panel = false;
                 view.steer = None;
+                view.labels = None;
                 app.automations.selected = i;
             }
             Some(Hit::Item(i)) => activate(app, i, out),
+            Some(Hit::Label(i)) => super::linear_builder::pick_click(app, i),
             None => {}
         },
         _ => return,
@@ -342,8 +353,10 @@ fn value(app: &App, which: Automation, row: SettingRow) -> String {
             "off"
         }
         .into(),
-        SettingRow::Labels if own.labels.is_empty() => "none · Enter to pick from Linear".into(),
-        SettingRow::Labels => format!("{} · Enter to pick from Linear", own.labels.join(" · ")),
+        SettingRow::Labels => format!(
+            "{} · Enter to pick from Linear",
+            super::linear_builder::labels_of(&app.automations.settings, which).join(" · ")
+        ),
         SettingRow::When => own.when.map_or_else(
             || "Fri 08:30".into(),
             |w| format!("{} {}", capitalised(&w.day), w.at),
@@ -379,6 +392,13 @@ fn spread(left: Vec<Span<'static>>, right: Span<'static>, width: usize) -> Line<
 }
 
 pub fn hints(view: &AutomationsView) -> Vec<crate::hints::Hint> {
+    if view.labels.is_some() {
+        return vec![
+            Key::new(&["space"], "tick").hint().kept(),
+            Key::new(&["enter"], "save").hint().kept(),
+            crate::nav::CLOSE.doing("cancel").hint().kept(),
+        ];
+    }
     if view.steer.is_some() {
         return vec![
             Key::new(&["enter"], "save").hint().kept(),
@@ -481,6 +501,16 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &AutomationsView, th: Theme) {
         );
         f.render_widget(Paragraph::new(line), row);
         hits.push((row, Hit::Automation(i)));
+    }
+
+    // The labels pick, in the panel's place.
+    if let Some(pick) = &view.labels {
+        draw_labels(f, panel_area, pick, th, &mut hits);
+        if let Some(Overlay::Automations(live)) = &mut app.overlay {
+            live.area = area;
+            live.hits = hits;
+        }
+        return;
     }
 
     // The panel: name, description, SETTINGS, then its lists.
@@ -594,6 +624,76 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &AutomationsView, th: Theme) {
         live.area = area;
         live.hits = hits;
         live.row = row_cursor;
+    }
+}
+
+/// The labels pick: a tick box per label, the cursor's row lit, in the
+/// panel's place; each row a click target.
+fn draw_labels(
+    f: &mut Frame,
+    area: Rect,
+    pick: &super::linear_builder::LabelPick,
+    th: Theme,
+    hits: &mut Vec<(Rect, Hit)>,
+) {
+    let dim = Style::default().fg(th.dim);
+    let mut lines: Vec<(Line<'static>, Option<usize>)> = vec![
+        (
+            Line::from(Span::styled(
+                format!("{} · Labels", pick.which.name()),
+                Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+            )),
+            None,
+        ),
+        (
+            Line::from(Span::styled(
+                "A ticket assigned to you with any of these is picked up.",
+                Style::default().fg(th.muted),
+            )),
+            None,
+        ),
+        (Line::from(""), None),
+    ];
+    if let Some(notice) = pick.notice {
+        lines.push((
+            Line::from(Span::styled(notice, Style::default().fg(th.warn))),
+            None,
+        ));
+    }
+    if let Some(status) = pick.status() {
+        lines.push((Line::from(Span::styled(status, dim)), None));
+    }
+    for (i, name) in pick.rows().into_iter().enumerate() {
+        let lit = |s: Style| match i == pick.cursor {
+            true => s.bg(th.sel_bg).add_modifier(Modifier::BOLD),
+            false => s,
+        };
+        let (mark, color) = match pick.is_ticked(&name) {
+            true => ("  [x] ", th.ok),
+            false => ("  [ ] ", th.dim),
+        };
+        lines.push((
+            Line::from(vec![
+                Span::styled(mark, lit(Style::default().fg(color))),
+                Span::styled(name, lit(Style::default().fg(th.text))),
+            ]),
+            Some(i),
+        ));
+    }
+    let fits = usize::from(area.height).max(1);
+    let cursor_line = lines
+        .iter()
+        .position(|(_, at)| *at == Some(pick.cursor))
+        .unwrap_or(0);
+    let first = (cursor_line + 1).saturating_sub(fits);
+    for (n, (line, at)) in lines.into_iter().skip(first).take(fits).enumerate() {
+        let Some(rect) = crate::ui::row_rect(area, n) else {
+            break;
+        };
+        f.render_widget(Paragraph::new(line), rect);
+        if let Some(i) = at {
+            hits.push((rect, Hit::Label(i)));
+        }
     }
 }
 

@@ -2654,10 +2654,7 @@ fn start_issues(app: &mut App, launch: &QuickLaunch, issues: &[LinearIssue]) {
             None => refused = Some((starts[0].1.clone(), NO_KEY.to_string())),
             Some(key) => {
                 for (id, identifier, state_id, me) in starts {
-                    let result = match state_id {
-                        Some(state_id) => start_issue(&key, &id, &state_id, me.as_deref()).await,
-                        None => Err("its team has no started state".into()),
-                    };
+                    let result = start_issue(&key, &id, state_id.as_deref(), me.as_deref()).await;
                     match result {
                         Ok(started) => moved |= started,
                         Err(why) => {
@@ -2676,18 +2673,37 @@ fn start_issues(app: &mut App, launch: &QuickLaunch, issues: &[LinearIssue]) {
     });
 }
 
+/// The first of an issue's team's started states, by Linear's `position`.
+fn first_started(issue: &serde_json::Value) -> Option<String> {
+    let at = |s: &serde_json::Value| s.get("position").and_then(|p| p.as_f64());
+    issue
+        .pointer("/team/states/nodes")?
+        .as_array()?
+        .iter()
+        .filter(|s| s.get("type").and_then(|t| t.as_str()) == Some("started"))
+        .min_by(|a, b| {
+            at(a)
+                .partial_cmp(&at(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .and_then(|s| Some(s.get("id")?.as_str()?.to_string()))
+}
+
 /// Issue `issue_id` moved to state `state_id`, and given to `me` when
 /// nobody has it — `false` when Linear has it started already, or further
-/// on, and nothing was asked.
+/// on, and nothing was asked. With no `state_id` — issues that came from
+/// no LINEAR VIEW list, as an automation's do — its team's first started
+/// state, read with the issue ([`first_started`]).
 async fn start_issue(
     key: &str,
     issue_id: &str,
-    state_id: &str,
+    state_id: Option<&str>,
     me: Option<&str>,
 ) -> Result<bool, String> {
     let json = graphql(
         key,
-        r#"query($id: String!) { issue(id: $id) { state { type } assignee { id } } }"#,
+        r#"query($id: String!) { issue(id: $id) { state { type } assignee { id }
+          team { states { nodes { id type position } } } } }"#,
         serde_json::json!({ "id": issue_id }),
     )
     .await?;
@@ -2697,6 +2713,10 @@ async fn start_issue(
     if !unstarted_kind(&json_text(issue, "/state/type")) {
         return Ok(false);
     }
+    let state_id = match state_id {
+        Some(id) => id.to_string(),
+        None => first_started(issue).ok_or("its team has no started state")?,
+    };
     let mut input = serde_json::json!({ "stateId": state_id });
     if let (true, Some(me)) = (issue["assignee"].is_null(), me) {
         input["assigneeId"] = me.into();
@@ -5549,7 +5569,7 @@ fn comment_lines(
 /// once, under `teams` ([`lists_query`]) — and the pull requests attached
 /// to it for the work column — the same fields whoever's issues are asked
 /// for.
-const ISSUE_FIELDS: &str =
+pub(crate) const ISSUE_FIELDS: &str =
     "id identifier title url description priority createdAt updatedAt completedAt \
     state { name type color position } labels { nodes { name color } } project { name color } \
     assignee { id displayName } creator { displayName } externalUserCreator { name } \
@@ -6053,7 +6073,7 @@ fn parse_lists(json: &serde_json::Value) -> Result<LinearList, String> {
 /// name, then the latest filed first in triage, the latest finished first
 /// in the done, then priority — urgent first, none last — and the most
 /// recently touched first.
-fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
+pub(crate) fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
     if let Some(err) = graphql_error(json) {
         return Err(err);
     }
@@ -6204,6 +6224,23 @@ pub(crate) fn graphql_error(json: &serde_json::Value) -> Option<String> {
         .and_then(|err| err.get("message"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+/// Every distinct Linear key across the projects, each with the projects
+/// that read it, in project order: `(key, projects)`. Projects that share a
+/// workspace share a key, so one ask per key covers them all.
+pub(crate) fn keys_by_project(app: &App) -> Vec<(String, Vec<ProjectId>)> {
+    let mut by_key: Vec<(String, Vec<ProjectId>)> = Vec::new();
+    for project in &app.tree.projects {
+        let Some(key) = read_linear_key(&project.repo_path) else {
+            continue;
+        };
+        match by_key.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, projects)) => projects.push(project.id.clone()),
+            None => by_key.push((key, vec![project.id.clone()])),
+        }
+    }
+    by_key
 }
 
 /// `LINEAR_API_KEY` from the project's env files, then the process env.

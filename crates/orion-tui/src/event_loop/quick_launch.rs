@@ -46,16 +46,21 @@ pub(super) fn submit(
     // Unless FOLLOW NEW SESSION is on, a launch into the project on screen
     // holds just as still: the new card goes up in its band and the one
     // the user was on stays under the cursor and in the pane.
-    let stay = background || stays_put(app, &cfg);
-    // The launch lands on a card, so the GRID has an aim again whether or
-    // not it had one when the box went up (`launcher::clear_aim`).
-    super::launcher::take_aim(app);
-    if background {
-        announce_background(app, &launch.target);
-    } else if stay {
-        announce_kept(app, &launch);
-    } else {
-        reveal_pane(app);
+    // An AUTOMATION's launch has nobody at a box: it moves nothing on
+    // screen and says nothing, its card going up where it belongs.
+    let unattended = launch.automation.is_some();
+    let stay = unattended || background || stays_put(app, &cfg);
+    if !unattended {
+        // The launch lands on a card, so the GRID has an aim again whether
+        // or not it had one when the box went up (`launcher::clear_aim`).
+        super::launcher::take_aim(app);
+        if background {
+            announce_background(app, &launch.target);
+        } else if stay {
+            announce_kept(app, &launch);
+        } else {
+            reveal_pane(app);
+        }
     }
     // The box is the one launch that stays out of the way: `p`, type,
     // Enter, keep working — on the card you were on, or, with FOLLOW NEW
@@ -108,7 +113,7 @@ pub(super) fn submit(
                 effort: launch.effort.clone(),
                 mode: launch.mode,
             };
-            send_with_follow(
+            let req_id = send_with_follow(
                 app,
                 out,
                 PendingIntent::LaunchInCreatedWorktree {
@@ -126,8 +131,21 @@ pub(super) fn submit(
                     launch: Some(spec),
                 },
             );
+            // The checkout being cut holds a place under the running cap
+            // until the session's own create takes it over.
+            if unattended {
+                app.automations.launching.insert(req_id);
+            }
         }
     }
+}
+
+/// An AUTOMATION's launch, fired with nobody at a box: the QUICK PROMPT's
+/// own last step, the launch's `automation` set (`automations::
+/// launch_in_new_worktree`).
+pub(crate) fn submit_unattended(app: &mut App, launch: QuickLaunch, out: &mut Vec<ClientRequest>) {
+    debug_assert!(launch.automation.is_some());
+    submit(app, launch, String::new(), out);
 }
 
 /// What every launch the screen follows does at once: the new session is
@@ -253,7 +271,12 @@ pub(super) fn draft(
         // `CreatePrAgent`, and `worktree` only names which.
         pr: launch.pr.clone(),
         mode: launch.mode,
-        reopen_on_error: Some((PromptKind::QuickPrompt(launch), text)),
+        // An automation's launch had no box to bring back.
+        automation: launch.automation,
+        reopen_on_error: launch
+            .automation
+            .is_none()
+            .then(|| (PromptKind::QuickPrompt(launch), text)),
         focus_pane: false,
         placeholder,
         ..base

@@ -118,6 +118,10 @@ pub struct QuickLaunch {
     /// session's card being what there is to see. Kept across the box's
     /// pickers, as the pull request is.
     pub under: Option<ModalUnder>,
+    /// The AUTOMATION firing this launch with nobody at a box
+    /// (`automations::launch_in_new_worktree`): the session is tagged with
+    /// it, nothing on screen moves, and a refusal brings no box back.
+    pub automation: Option<crate::automations::Automation>,
 }
 
 /// A modal a QUICK PROMPT box stands on ([`QuickLaunch::under`]), as it
@@ -481,6 +485,7 @@ impl QuickLaunch {
             todo: None,
             under: None,
             mode: AgentMode::Edit,
+            automation: None,
         }
     }
 

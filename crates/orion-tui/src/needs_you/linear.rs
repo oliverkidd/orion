@@ -151,7 +151,13 @@ impl CardSource for Inbox {
                 .map_or("", |p| p.name.as_str());
             // One card per issue, saying its newest news.
             let mut by_issue: BTreeMap<&str, &Note> = BTreeMap::new();
-            for note in notes {
+            // An assignment the bug fixer or feature builder picked up is
+            // theirs to act on, not yours.
+            let picked_up = |n: &&Note| {
+                n.kind == "issueAssignedToYou"
+                    && crate::automations::linear_builder::picked_up(app, &n.issue_id)
+            };
+            for note in notes.iter().filter(|n| !picked_up(n)) {
                 let newest = by_issue.entry(&note.issue_id).or_insert(note);
                 if note.at > newest.at {
                     *newest = note;

@@ -170,16 +170,9 @@ pub fn poll(app: &mut App) {
     app.needs_you.asked = Some(Instant::now());
     let inbox = app.needs_you.inbox.clone();
     if inbox.linear_mentions {
-        let mut keys: Vec<String> = Vec::new();
-        for project in &app.tree.projects {
-            let Some(key) = crate::linear::read_linear_key(&project.repo_path) else {
-                continue;
-            };
-            if keys.contains(&key) {
-                continue;
-            }
-            keys.push(key.clone());
-            let (tx, project) = (tx.clone(), project.id.clone());
+        for (key, projects) in crate::linear::keys_by_project(app) {
+            // Kept under the first project with the key.
+            let (tx, project) = (tx.clone(), projects[0].clone());
             tokio::spawn(async move {
                 let notes = linear::fetch(key).await.ok();
                 let _ = tx.send(Answer::Linear { project, notes });
