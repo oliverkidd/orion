@@ -4829,6 +4829,20 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::claude_accounts::chip_icon(&cfg, id),
             )
         }
+        PromptKind::LinkBrowser { id } => {
+            let cfg = crate::config::Config::load();
+            (
+                format!(
+                    "Open links in · {}",
+                    cfg.effective_harness_by_id(id).display_label()
+                )
+                .into(),
+                "Safari, Chrome, Firefox, Arc or an app's name; a profile after Chrome or \
+                 Firefox (empty = default browser)"
+                    .into(),
+                crate::open_url::typed(cfg.link_browser(id)),
+            )
+        }
     };
     let highlight = matches!(kind, PromptKind::AddProject)
         .then(|| app.launch_repo_name())
@@ -5129,7 +5143,7 @@ fn open_repo_in_browser(app: &mut App) {
     // Not open_link: this is a repo page, never a PR row to mark read. The
     // page opening is the answer; only a page that won't says why.
     let failed = move || match crate::remote::repo_url(&root) {
-        Ok(url) if open_url(&url) => None,
+        Ok(url) if crate::open_url::open_url(&url, None) => None,
         Ok(url) => Some(format!("couldn't open {url}")),
         Err(msg) => Some(msg),
     };
@@ -5170,7 +5184,7 @@ fn open_outside_terminal_with(app: &mut App, ghostty: Option<std::path::PathBuf>
     };
     match context_dir(app) {
         Some(Ok(dir)) => {
-            if !open_in_app(&ghostty, &dir) {
+            if !crate::open_url::open_in_app(&ghostty, &dir) {
                 app.flash = Some(crate::flash::Flash::failed(format!(
                     "couldn't open a Ghostty tab in {}",
                     dir.display()
@@ -5320,16 +5334,6 @@ pub(crate) fn open_file_outside(app: &mut App, root: &std::path::Path, file: &st
     } else {
         open_file(app, &editor, root, file, line, size);
     }
-}
-
-/// `open -a <bundle> <path>`: whether LaunchServices took the hand-off.
-fn open_in_app(bundle: &std::path::Path, path: &std::path::Path) -> bool {
-    if cfg!(test) {
-        return true;
-    }
-    let mut open = std::process::Command::new("open");
-    open.arg("-a").arg(bundle).arg(path);
-    spawn_and_reap(open, "open in app")
 }
 
 /// `r` on the Worktrees panel: start the selected checkout's RUN COMMAND,
@@ -6620,7 +6624,7 @@ fn act_on_page(app: &mut App, asked: crate::markdown_view::PageKey) {
             open_file_outside(app, &root, &file, line);
         }
         PageKey::Follow(Away::Web(url)) => {
-            if !open_url(&url) {
+            if !crate::open_url::open_url(&url, None) {
                 app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
             }
         }
@@ -7191,7 +7195,10 @@ fn open_delete_marked_confirm(app: &mut App) -> bool {
 fn menu_items_for_link(row: &LinkRow) -> Vec<MenuItem> {
     let mut items = vec![MenuItem::new(
         "Open in browser",
-        MenuAction::OpenLink(row.url().to_string()),
+        MenuAction::OpenLink {
+            url: row.url().to_string(),
+            account: None,
+        },
     )];
     if row.pull_request().is_some() {
         items.push(MenuItem::new("View diff", MenuAction::ViewPrDiff));
@@ -7252,7 +7259,16 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
     // checkout's Open on a live one.
     let mut links: Vec<MenuItem> = crate::launcher::row(app, &a.id)
         .and_then(|row| row.pr)
-        .map(|pr| MenuItem::new("Open pull request", MenuAction::OpenLink(pr.url)))
+        .map(|pr| {
+            let account = Some(crate::open_url::account_of(a));
+            MenuItem::new(
+                "Open pull request",
+                MenuAction::OpenLink {
+                    url: pr.url,
+                    account,
+                },
+            )
+        })
         .into_iter()
         .collect();
     // And the Linear issue it works on, in the LINEAR VIEW.
@@ -7377,7 +7393,13 @@ fn pr_row_menu_items(app: &App, pr: &crate::pull_request::OpenPr) -> Vec<MenuIte
         ));
     }
     items.extend([
-        MenuItem::new("Open in browser", MenuAction::OpenLink(pr.url.clone())),
+        MenuItem::new(
+            "Open in browser",
+            MenuAction::OpenLink {
+                url: pr.url.clone(),
+                account: None,
+            },
+        ),
         MenuItem::new("View diff", MenuAction::ViewPrDiff),
         MenuItem::new("Comment…", MenuAction::CommentPullRequest),
     ]);
@@ -7837,6 +7859,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::AddClaudeAccount
                         | PromptKind::RenameClaudeAccount { .. }
                         | PromptKind::AccountChipMark { .. }
+                        | PromptKind::LinkBrowser { .. }
                 );
                 // The comment box stood in for the PULL REQUESTS MODAL: Esc
                 // puts the modal back on its row, the comment unposted.
@@ -8558,10 +8581,16 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
     // A CLAUDE ACCOUNTS row: Enter signs the account in, asking first for
     // the email that fills Claude's login page; ←/→ are its switch, which
     // the cycle below flips like any harness's. **Add account** asks for
-    // the new one's name.
+    // the new one's name. Enter on **Open links in** types the browser and
+    // its profile; ←/→ step the browser in the cycle below.
     if tab == crate::config::accounts_tab() {
         use crate::config::AccountRow;
-        match (crate::config::Config::load().account_row(index), delta) {
+        let cfg = crate::config::Config::load();
+        if let (Some((id, crate::config::HarnessField::Browser)), 0) = (cfg.agent_row(index), delta)
+        {
+            return open_prompt(app, PromptKind::LinkBrowser { id });
+        }
+        match (cfg.account_row(index), delta) {
             (Some(AccountRow::Account(id)), 0) => {
                 return open_prompt(app, PromptKind::ClaudeSignIn { id });
             }
@@ -9112,6 +9141,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             | PromptKind::AddClaudeAccount
             | PromptKind::RenameClaudeAccount { .. }
             | PromptKind::AccountChipMark { .. }
+            | PromptKind::LinkBrowser { .. }
             | PromptKind::QuickPrompt(_)
     );
     if value.is_empty() && !empty_is_a_default {
@@ -9248,6 +9278,18 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         PromptKind::AccountChipMark { id } => {
             let result = crate::claude_accounts::set_chip_mark(&id, &value);
             back_on_the_account(app, &id, result);
+        }
+        PromptKind::LinkBrowser { id } => {
+            let mut cfg = crate::config::Config::load();
+            cfg.set_link_browser(&id, crate::open_url::parse(&value));
+            let saved = save_config(app, &cfg);
+            reopen_settings(app);
+            if saved {
+                let shown = cfg.agent_value(&id, crate::config::HarnessField::Browser);
+                if let Some(view) = settings_mut(app) {
+                    view.info(format!("Open links in: {shown}"));
+                }
+            }
         }
     }
 }
@@ -9554,7 +9596,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             );
         }
         MenuAction::NewWorktree(project) => open_new_worktree_prompt(app, project),
-        MenuAction::OpenLink(url) => open_link(app, &url, out),
+        MenuAction::OpenLink { url, account } => open_link(app, &url, account.as_deref(), out),
         MenuAction::ViewPrDiff => request_pr_diff(app),
         MenuAction::CommentPullRequest => open_pr_comment(app),
         MenuAction::CheckOutPr { project, pr } => {
@@ -10015,7 +10057,7 @@ fn jump_to_target_inner(
             }
             app.focus = Focus::Worktrees;
             if landing == Landing::Attach {
-                open_link(app, &url, out);
+                open_link(app, &url, None, out);
             }
         }
     }
@@ -10221,7 +10263,7 @@ fn attach_selected(app: &mut App, out: &mut Vec<ClientRequest>) {
     };
     let Some(sref) = row.sref() else {
         if let Some(link) = row.as_link() {
-            open_link(app, link.url(), out);
+            open_link(app, link.url(), None, out);
         }
         return;
     };
@@ -10254,9 +10296,16 @@ fn leave_terminal_lock(app: &mut App) {
 /// browser comes up in front of the terminal on success, so a silent
 /// failure would read as "orion did nothing". A pull request is marked
 /// read on the way out: the conversation is about to be on screen, so the
-/// row's unread count starts again from here.
-pub(crate) fn open_link(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
-    if open_url(url) {
+/// row's unread count starts again from here. `account` is the session's
+/// the link belongs to, whose **Open links in** picks the browser
+/// ([`crate::open_url`]); None for the default browser.
+pub(crate) fn open_link(
+    app: &mut App,
+    url: &str,
+    account: Option<&str>,
+    out: &mut Vec<ClientRequest>,
+) {
+    if crate::open_url::open_url(url, account) {
         mark_pr_seen(app, url, out);
     } else {
         app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
@@ -11125,59 +11174,6 @@ fn copy_to_clipboard(text: &str) -> bool {
     wrote && child.wait().is_ok_and(|status| status.success())
 }
 
-/// Open a URL in the default browser via open(1) (this tool targets macOS).
-/// The scheme allowlist is defense in depth — the link scanner only ever
-/// produces http(s) URLs, but the text originates from untrusted PTY output.
-pub(crate) fn open_url(url: &str) -> bool {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return false;
-    }
-    if cfg!(test) {
-        #[cfg(test)]
-        OPENED.with(|opened| opened.borrow_mut().push(url.to_string()));
-        return true;
-    }
-    let mut open = std::process::Command::new("open");
-    open.arg(url);
-    spawn_and_reap(open, "open url")
-}
-
-#[cfg(test)]
-thread_local! {
-    static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// The URLs [`open_url`] handed the browser on this test's thread, taken.
-#[cfg(test)]
-pub(crate) fn take_opened() -> Vec<String> {
-    OPENED.with(|opened| std::mem::take(&mut *opened.borrow_mut()))
-}
-
-/// Start `command` and let it finish on its own: true once it is running.
-/// `open` spends 50 to 150 ms talking to LaunchServices before it exits,
-/// and the key that asked for a browser tab used to spend them with it —
-/// the loop frozen, the flash unpainted. Whether it then succeeds is not
-/// something the keypress can wait to learn; a failure is logged (the
-/// `spawn_open_command` rule), and the reaper thread is what keeps the
-/// child from lingering as a zombie.
-fn spawn_and_reap(mut command: std::process::Command, what: &'static str) -> bool {
-    use std::process::Stdio;
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else {
-        return false;
-    };
-    std::thread::spawn(move || match child.wait() {
-        Ok(status) if !status.success() => tracing::warn!(what, %status, "open failed"),
-        Err(err) => tracing::warn!(what, %err, "open not reaped"),
-        Ok(_) => {}
-    });
-    true
-}
-
 /// Two clicks on the same cell within this window make a double-click.
 pub(crate) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -11353,7 +11349,7 @@ fn open_link_under(app: &mut App, mouse: &MouseEvent) -> bool {
         .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
     match link {
         PaneLink::Url(url) if held => {
-            if !open_url(&url) {
+            if !crate::open_url::open_url(&url, pane_account(app).as_deref()) {
                 app.flash = Some(crate::flash::Flash::failed(format!("open failed: {url}")));
             }
         }
@@ -11364,6 +11360,19 @@ fn open_link_under(app: &mut App, mouse: &MouseEvent) -> bool {
     }
     app.dirty = true;
     true
+}
+
+/// The account of the agent the TERMINAL PANE shows, whose browser its
+/// links open in; None for a shell.
+fn pane_account(app: &App) -> Option<String> {
+    let SessionRef::Agent(id) = &app.term.as_ref()?.sref else {
+        return None;
+    };
+    app.tree
+        .agents
+        .iter()
+        .find(|agent| &agent.id == id)
+        .map(crate::open_url::account_of)
 }
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) {
@@ -13385,6 +13394,7 @@ fn reconcile_selection_inner(
 mod tests {
     use super::*;
     use crate::app::FeedbackAlert;
+    use crate::open_url::{take_opened, take_opened_as};
     use orion_core::{AgentId, LinkId, ServerEvent, SessionRef};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -22297,7 +22307,11 @@ mod tests {
             modifiers: KeyModifiers::ALT,
         };
 
-        // ⌥click on the link opens it and swallows the click entirely.
+        // ⌥click on the link opens it and swallows the click entirely, in
+        // the browser of the account the pane's session runs on.
+        let a1 = app.tree.agents.iter_mut().find(|a| a.id.0 == "a1").unwrap();
+        a1.kind = AgentKind::Claude;
+        a1.custom_harness = Some("claude-work".into());
         app.focus = Focus::Projects;
         handle_mouse(
             &mut app,
@@ -22305,9 +22319,12 @@ mod tests {
             &mut out,
         );
         assert_eq!(
-            take_opened(),
-            ["https://example.com"],
-            "the URL under the cursor is opened"
+            take_opened_as(),
+            [(
+                "https://example.com".to_string(),
+                Some("claude-work".to_string())
+            )],
+            "the URL under the cursor is opened, for its session's account"
         );
         assert!(app.flash.is_none());
         assert_eq!(app.focus, Focus::Projects, "focus is untouched");
@@ -27764,6 +27781,63 @@ mod tests {
             assert_eq!(custom().icon, None);
             assert_eq!(custom().tint, Some(2), "the tint stays");
             assert_eq!(tag().mark, "C");
+        });
+    }
+
+    /// Enter on an account's **Open links in** asks for the browser and a
+    /// profile after it, prefilled with the one it has; Enter saves it to
+    /// `harnesses.<id>.browser` and puts the overlay back on the row, and
+    /// an empty answer is the default browser again.
+    #[test]
+    fn enter_on_open_links_in_types_the_browser_and_profile() {
+        with_two_accounts(|_| {
+            use crate::config::{locate_agent, HarnessField};
+            let mut app = App::new();
+            let mut out = Vec::new();
+            let (tab, row) = locate_agent("claude-2", HarnessField::Browser).unwrap();
+            open_settings_on(&mut app, tab, &mut out);
+            while settings_view(&app).selected < row {
+                press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(140, 60)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains("Open links in"), "{text}");
+            assert!(text.contains("Enter type browser and profile"), "{text}");
+
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p))
+                    if p.kind == PromptKind::LinkBrowser { id: "claude-2".into() }
+                        && p.input.as_str().is_empty()),
+                "{:?}",
+                app.overlay
+            );
+            type_text(&mut app, "chrome Profile 1", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let stored = || {
+                crate::config::Config::load()
+                    .link_browser("claude-2")
+                    .cloned()
+            };
+            assert_eq!(
+                stored(),
+                Some(orion_core::harness::LinkBrowser {
+                    app: "Chrome".into(),
+                    profile: Some("Profile 1".into()),
+                })
+            );
+            assert_eq!(settings_view(&app).selected, row, "back on its row");
+
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Chrome Profile 1")
+            );
+            for _ in 0.."Chrome Profile 1".len() {
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(stored(), None, "empty is the default browser");
         });
     }
 

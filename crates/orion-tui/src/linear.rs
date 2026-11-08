@@ -4332,7 +4332,7 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
 fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
     let url = selected_issue(app).map(|issue| issue.url.clone());
     if let Some(url) = url {
-        crate::event_loop::open_link(app, &url, out);
+        crate::event_loop::open_link(app, &url, None, out);
     }
 }
 

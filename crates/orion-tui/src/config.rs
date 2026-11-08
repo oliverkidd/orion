@@ -415,13 +415,17 @@ pub enum SettingKind {
 
 /// One harness field row in the Accounts tab. The tab renders one section
 /// per registry entry — built-ins, Claude accounts and `harnesses` map ids
-/// alike — with an Enabled row, a Model row, and an Effort row while the
-/// harness offers effort.
+/// alike — with an Enabled row, a Model row, an Effort row while the
+/// harness offers effort, and on a Claude account an Open links in row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessField {
     Enabled,
     Model,
     Effort,
+    /// **Open links in**: the browser the account's links open in
+    /// (`harnesses.<id>.browser`, [`crate::open_url`]). ←/→ steps the
+    /// browser; Enter types it, a profile after it.
+    Browser,
 }
 
 /// One row of the Accounts tab's CLAUDE ACCOUNTS section.
@@ -440,6 +444,7 @@ impl HarnessField {
             HarnessField::Enabled => "Enabled",
             HarnessField::Model => "Model",
             HarnessField::Effort => "Effort",
+            HarnessField::Browser => "Open links in",
         }
     }
 }
@@ -1741,7 +1746,8 @@ impl Config {
 
     /// `(id, field)` rows below the Accounts head, in registry order: every
     /// entry, enabled or not, valid or not (broken rows show their reason
-    /// so they can be fixed); Effort only while the harness offers effort.
+    /// so they can be fixed); Effort only while the harness offers effort,
+    /// and Open links in only on a Claude account.
     pub fn agent_rows(&self) -> Vec<(String, HarnessField)> {
         let mut rows = Vec::new();
         for entry in self.harness_registry() {
@@ -1749,6 +1755,9 @@ impl Config {
             rows.push((entry.id.clone(), HarnessField::Model));
             if entry.effort.offered {
                 rows.push((entry.id.clone(), HarnessField::Effort));
+            }
+            if entry.is_claude_account() {
+                rows.push((entry.id.clone(), HarnessField::Browser));
             }
         }
         rows
@@ -1939,7 +1948,26 @@ impl Config {
                     descriptor.effort.default.clone()
                 }
             }
+            HarnessField::Browser => crate::open_url::label(self.link_browser(id)),
         }
+    }
+
+    /// Account `id`'s **Open links in** (`harnesses.<id>.browser`); None
+    /// is the default browser.
+    pub fn link_browser(&self, id: &str) -> Option<&orion_core::harness::LinkBrowser> {
+        self.harnesses.get(id)?.browser.as_ref()
+    }
+
+    /// Write account `id`'s **Open links in**; None puts the default back.
+    pub fn set_link_browser(
+        &mut self,
+        id: &str,
+        browser: Option<orion_core::harness::LinkBrowser>,
+    ) {
+        if browser.is_none() && !self.harnesses.contains_key(id) {
+            return;
+        }
+        self.harness_override_mut(id).browser = browser;
     }
 
     /// The hint an Accounts harness row shows: what the row edits, with the
@@ -1976,6 +2004,9 @@ impl Config {
                     format!("Reserved until the {label} CLI documents a reasoning flag (default = unset)")
                 }
             }
+            HarnessField::Browser => format!(
+                "The browser links from {label}'s sessions open in; type a profile after Chrome or Firefox (Chrome Profile 1). Other links open in the default browser"
+            ),
         };
         if let Some(problem) = descriptor.problem() {
             hint.push_str(&format!(" — broken: {problem}"));
@@ -2037,6 +2068,15 @@ impl Config {
                 }
                 let next = cycle_owned(&descriptor.effort.default, &choices, step);
                 self.set_harness_effort(id, next);
+            }
+            // A profile belongs to the browser it was typed after, so a
+            // step drops it.
+            HarnessField::Browser => {
+                let current = self
+                    .link_browser(id)
+                    .map_or(crate::open_url::DEFAULT.to_string(), |b| b.app.clone());
+                let next = cycle_owned(&current, &crate::open_url::choices(), step);
+                self.set_link_browser(id, crate::open_url::parse(&next));
             }
         }
     }
@@ -2853,7 +2893,9 @@ impl Config {
         match field {
             HarnessField::Model => self.set_harness_model(id, value.into()),
             HarnessField::Effort => self.set_harness_effort(id, value.into()),
-            HarnessField::Enabled => panic!("a default is a model or an effort"),
+            HarnessField::Enabled | HarnessField::Browser => {
+                panic!("a default is a model or an effort")
+            }
         }
     }
 
@@ -2864,7 +2906,9 @@ impl Config {
         let value = match field {
             HarnessField::Model => over.and_then(|o| o.model_default.clone()),
             HarnessField::Effort => over.and_then(|o| o.effort_default.clone()),
-            HarnessField::Enabled => panic!("a default is a model or an effort"),
+            HarnessField::Enabled | HarnessField::Browser => {
+                panic!("a default is a model or an effort")
+            }
         };
         value.unwrap_or_else(|| DEFAULT_CHOICE.into())
     }
@@ -4209,6 +4253,70 @@ mod tests {
         assert_eq!(saved["harnesses"]["grok"]["effort_default"], "high");
     }
 
+    /// **Open links in** is on every Claude account and on nothing else:
+    /// ←/→ step the browser, dropping a profile typed for the last one, and
+    /// the choice is `harnesses.<id>.browser`, round-tripped by a save.
+    #[test]
+    fn each_claude_account_picks_the_browser_its_links_open_in() {
+        let mut cfg: Config = serde_json::from_str(
+            r#"{"claude_accounts": [{"id": "claude-b", "config_dir": "~/.claude-b"}]}"#,
+        )
+        .unwrap();
+        let browsers: Vec<String> = cfg
+            .agent_rows()
+            .into_iter()
+            .filter(|(_, field)| *field == HarnessField::Browser)
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(browsers, ["claude", "claude-b"]);
+        assert_eq!(
+            cfg.agent_value("claude-b", HarnessField::Browser),
+            "default"
+        );
+        // Nothing chosen writes nothing.
+        cfg.set_link_browser("claude-b", None);
+        assert!(!cfg.harnesses.contains_key("claude-b"));
+
+        let (tab, row) = locate_in(&cfg, "claude-b", HarnessField::Browser).unwrap();
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.agent_value("claude-b", HarnessField::Browser), "Safari");
+        cfg.cycle(tab, row, -1);
+        assert_eq!(
+            cfg.agent_value("claude-b", HarnessField::Browser),
+            "default"
+        );
+        assert_eq!(cfg.harnesses["claude-b"].browser, None);
+        cfg.cycle(tab, row, -1);
+        assert_eq!(cfg.agent_value("claude-b", HarnessField::Browser), "Arc");
+
+        cfg.set_link_browser("claude-b", crate::open_url::parse("Chrome Profile 2"));
+        assert_eq!(
+            cfg.agent_value("claude-b", HarnessField::Browser),
+            "Chrome · Profile 2"
+        );
+        assert_eq!(cfg.agent_value("claude", HarnessField::Browser), "default");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["harnesses"]["claude-b"]["browser"],
+            serde_json::json!({"app": "Chrome", "profile": "Profile 2"})
+        );
+        let mut loaded = load_from(&path);
+        assert_eq!(
+            loaded.link_browser("claude-b"),
+            cfg.link_browser("claude-b")
+        );
+        // A step moves to the next browser, without Chrome's profile.
+        loaded.cycle(tab, row, 1);
+        assert_eq!(
+            loaded.agent_value("claude-b", HarnessField::Browser),
+            "Firefox"
+        );
+    }
+
     /// A second Claude account's own entry survives the Accounts tab
     /// saving its section — the map is written back typed — and the
     /// account is a place a Claude session can be carried to, and back; a
@@ -4901,7 +5009,8 @@ mod tests {
                         vec![
                             "Enabled".to_string(),
                             "Model".to_string(),
-                            "Effort".to_string()
+                            "Effort".to_string(),
+                            "Open links in".to_string()
                         ]
                     ),
                     (

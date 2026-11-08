@@ -97,7 +97,7 @@ pub(crate) fn app_port(app: &App, worktree: &WorktreeId) -> Option<u16> {
 /// A click on a run line's `:3000`: that port, in the browser.
 pub(crate) fn open_port(app: &mut App, port: u16) {
     let url = port_url(port);
-    if !crate::event_loop::open_url(&url) {
+    if !crate::open_url::open_url(&url, None) {
         app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
     }
 }

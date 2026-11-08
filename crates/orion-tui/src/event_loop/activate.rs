@@ -228,7 +228,7 @@ pub(super) fn settings_row_cmd(hotkeys: bool, selected: usize) -> SettingsCmd {
 pub(super) fn worktrees_row(app: &mut App, out: &mut Vec<ClientRequest>) {
     let link = app.selected_worktree_pr().map(|pr| pr.url.clone());
     match link {
-        Some(url) => open_link(app, &url, out),
+        Some(url) => open_link(app, &url, None, out),
         None => app.focus = Focus::Sessions,
     }
 }

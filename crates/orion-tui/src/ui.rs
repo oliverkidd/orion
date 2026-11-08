@@ -2986,6 +2986,16 @@ pub(crate) fn settings_hints(
                 hints.push(CLOSE.hint());
                 return hints;
             }
+            None if cfg
+                .as_ref()
+                .and_then(|cfg| cfg.agent_row(view.selected))
+                .is_some_and(|(_, field)| field == crate::config::HarnessField::Browser) =>
+            {
+                vec![
+                    CHOOSE.hint_as("type browser and profile").kept(),
+                    CYCLE.hint(),
+                ]
+            }
             None => vec![CHOOSE.hint().kept(), CYCLE.hint()],
         }
     };

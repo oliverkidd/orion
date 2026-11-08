@@ -188,7 +188,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             }
             _ if keys::ENTER.matches(&key) => {
                 view.install = None;
-                view.note = Some(if crate::event_loop::open_url(plan.link) {
+                view.note = Some(if crate::open_url::open_url(plan.link, None) {
                     format!("Opened {}'s install page in your browser", plan.program)
                 } else {
                     format!("{}'s install page: {}", plan.program, plan.link)

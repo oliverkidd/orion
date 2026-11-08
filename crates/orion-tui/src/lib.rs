@@ -56,6 +56,7 @@ pub mod markdown_view;
 pub mod mention;
 pub mod nav;
 pub mod onboard;
+pub mod open_url;
 pub mod outside_editor;
 pub mod overlay_close;
 pub mod palette;

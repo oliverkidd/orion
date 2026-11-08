@@ -1860,7 +1860,7 @@ pub(crate) fn run_act(
         ),
         // A check with no page of its own opens nothing.
         RowAct::Check { url, .. } if url.is_empty() => {}
-        RowAct::Check { url, .. } => crate::event_loop::open_link(app, &url, out),
+        RowAct::Check { url, .. } => crate::event_loop::open_link(app, &url, None, out),
     }
 }
 

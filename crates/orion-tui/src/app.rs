@@ -311,8 +311,12 @@ pub enum MenuAction {
     RenameTerminal(TerminalId),
     CloseTerminal(TerminalId),
     NewWorktree(ProjectId),
-    /// Hand a link row's URL to the browser.
-    OpenLink(String),
+    /// Hand a link row's URL to the browser — the one `account`'s **Open
+    /// links in** picks, for a link that belongs to a session.
+    OpenLink {
+        url: String,
+        account: Option<String>,
+    },
     /// Read the selected open pull request's diff in the diff modal. Carries
     /// no id: the row is the selection, and the fetch reads it back off the
     /// cursor the same way `g` does.
@@ -824,6 +828,13 @@ pub enum PromptKind {
     /// saves its first character — empty puts orion's letter back — and
     /// Esc keeps it; both put the overlay back on the row.
     AccountChipMark {
+        id: String,
+    },
+    /// Enter on an account's **Open links in** row: the browser, then a
+    /// profile after it (`Chrome Profile 1`), prefilled with the one it
+    /// has. Enter saves it — empty puts the default browser back — and Esc
+    /// keeps it; both put the overlay back on the row.
+    LinkBrowser {
         id: String,
     },
 }

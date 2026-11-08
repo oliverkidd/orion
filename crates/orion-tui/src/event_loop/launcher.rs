@@ -660,13 +660,18 @@ pub(super) fn follow_up(app: &mut App) {
 /// band's rule (`view::RowPr`) — in the browser, without stepping into a
 /// session or opening the PULL REQUESTS MODAL to find it. The opening is
 /// `event_loop::open_link`'s, so the pull request is marked read on the
-/// way out, as it is from every other place a PR opens.
+/// way out, as it is from every other place a PR opens. It opens in the
+/// browser the card's account picks (**Open links in**).
 ///
 /// INPUT PARITY: the menu row's `MenuAction::OpenLink` carries the URL
-/// this reads, and ends in the same `open_link`.
+/// and the account this reads, and ends in the same `open_link`.
 pub(super) fn open_pull_request(app: &mut App, out: &mut Vec<ClientRequest>) {
     if let Some(pr) = card_pull_request(app) {
-        super::open_link(app, &pr.url, out);
+        let account = match app.selected_session_row() {
+            Some(crate::app::SessionRow::Agent(agent)) => Some(crate::open_url::account_of(&agent)),
+            _ => None,
+        };
+        super::open_link(app, &pr.url, account.as_deref(), out);
     }
 }
 
@@ -2171,7 +2176,7 @@ pub(super) fn pane_key(
     if action == Some(Action::Activate) {
         crate::key_combo::note(app, &[chord], Some("Open"));
         if let Some(url) = app.reading_url() {
-            super::open_link(app, &url, out);
+            super::open_link(app, &url, None, out);
         } else {
             enter_terminal_pane(app, out);
         }
@@ -3819,7 +3824,7 @@ mod tests {
         );
 
         let before = app.selected_session_row().and_then(|r| r.sref());
-        crate::event_loop::take_opened();
+        crate::open_url::take_opened();
         mouse(
             &mut app,
             MouseEventKind::Down(MouseButton::Left),
@@ -3827,7 +3832,7 @@ mod tests {
             at.y,
         );
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             vec!["http://localhost:3000"]
         );
         assert_eq!(app.selected_session_row().and_then(|r| r.sref()), before);
@@ -3840,7 +3845,7 @@ mod tests {
             second.y,
         );
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             vec!["http://localhost:5173"]
         );
     }
@@ -3852,11 +3857,11 @@ mod tests {
     fn open_app_in_the_open_menu_opens_the_first_port() {
         let mut app = App::new();
         seed_tree(&mut app);
-        crate::event_loop::take_opened();
+        crate::open_url::take_opened();
         let act = crate::keymap::Action::OpenApp;
 
         super::super::run_action(&mut app, act);
-        assert!(crate::event_loop::take_opened().is_empty());
+        assert!(crate::open_url::take_opened().is_empty());
         assert_eq!(
             app.flash.as_deref(),
             Some("no stack running here — ⌘⇧S starts it")
@@ -3886,7 +3891,7 @@ mod tests {
         app.overlay = None;
         super::super::run_action(&mut app, act);
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             vec!["http://localhost:5173"]
         );
     }
@@ -4744,10 +4749,10 @@ mod tests {
             );
             assert_eq!(app.pr_tabs.tab, PrTab::Checks);
             draw_tall(&mut app);
-            crate::event_loop::take_opened();
+            crate::open_url::take_opened();
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(
-                crate::event_loop::take_opened(),
+                crate::open_url::take_opened(),
                 ["https://github.com/o/demo/actions/runs/1"],
                 "a check's page"
             );
@@ -9533,7 +9538,12 @@ mod tests {
             let sent =
                 crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenPullRequest);
             assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
-            assert_eq!(crate::event_loop::take_opened(), [PR_42]);
+            let opened = crate::open_url::take_opened_as();
+            assert_eq!(
+                opened,
+                [(PR_42.to_string(), Some("claude".to_string()))],
+                "in the card account's browser"
+            );
             assert_eq!(by_key.flash, None);
             assert!(
                 sent.iter()
@@ -9548,7 +9558,11 @@ mod tests {
             }
             let sent_by_menu = key(&mut by_menu, KeyCode::Enter, KeyModifiers::NONE);
             assert!(by_menu.overlay.is_none(), "{:?}", by_menu.overlay);
-            assert_eq!(crate::event_loop::take_opened(), [PR_42]);
+            assert_eq!(
+                crate::open_url::take_opened_as(),
+                opened,
+                "the menu row opens it for the same account"
+            );
             assert_eq!(by_menu.flash, by_key.flash);
             assert_eq!(format!("{sent_by_menu:?}"), format!("{sent:?}"));
             assert_eq!(by_menu.pr_seen, by_key.pr_seen);
@@ -9579,7 +9593,7 @@ mod tests {
             let sent =
                 crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
-            assert!(crate::event_loop::take_opened().is_empty());
+            assert!(crate::open_url::take_opened().is_empty());
             assert_eq!(app.flash, None);
             assert_eq!(pr_menu_row(&mut app), None);
         });
@@ -9685,7 +9699,7 @@ mod tests {
             let sent = click_at(&mut by_click, line.x + 3, line.y);
             assert!(by_click.overlay.is_none(), "{:?}", by_click.overlay);
             assert_eq!(
-                crate::event_loop::take_opened(),
+                crate::open_url::take_opened(),
                 [PR_42, PR_42],
                 "the key's, then the click's"
             );
@@ -9736,7 +9750,7 @@ mod tests {
                 "the cursor is on the band whose link was clicked"
             );
             assert_eq!(
-                crate::event_loop::take_opened(),
+                crate::open_url::take_opened(),
                 ["https://github.com/o/demo/pull/43"],
                 "and it is that band's pull request that opened"
             );

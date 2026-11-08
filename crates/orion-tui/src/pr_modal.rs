@@ -1160,7 +1160,7 @@ fn post_comment(app: &mut App) {
 /// click end in the same state.
 pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
     if let Some(url) = selected_url(app) {
-        crate::event_loop::open_link(app, &url, out);
+        crate::event_loop::open_link(app, &url, None, out);
     }
 }
 
@@ -3481,10 +3481,10 @@ mod tests {
         assert_eq!(view(&app).tabs.tab, PrTab::Checks);
         screen(&mut app, 140, 34);
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
-        crate::event_loop::take_opened();
+        crate::open_url::take_opened();
         handle_key(&mut app, ctrl('o'), &mut out);
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             ["https://github.com/o/r/actions/runs/9"]
         );
 
@@ -3671,7 +3671,7 @@ mod tests {
         let mut out = Vec::new();
         handle_key(&mut app, ctrl('o'), &mut out);
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             ["https://github.com/o/r/pull/42"]
         );
         let click = MouseEvent {
@@ -3682,7 +3682,7 @@ mod tests {
         };
         handle_mouse(&mut app, click, at, &mut out);
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             ["https://github.com/o/r/pull/42"]
         );
         assert!(
@@ -3881,7 +3881,7 @@ mod tests {
         };
 
         // The section's rule, then the rows.
-        let opened = crate::event_loop::take_opened;
+        let opened = crate::open_url::take_opened;
         click_at(&mut app, 2);
         assert_eq!(selected_pr(&app).unwrap().number, 41);
         assert!(opened().is_empty(), "one click only selects");

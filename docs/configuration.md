@@ -67,11 +67,19 @@ rests on it, so attaching is instant; this timeout is what bounds that cost.
 | `claude_accounts` | `[]` | **Claude accounts** | Claude accounts beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. See [Claude accounts](#claude-accounts). |
 | `account_tags` | `{}` | `c` / `g` on an account | The ACCOUNT MARK each account's rows wear, and its chip in Settings and Account usage, by account id (`claude` for the default): `{"claude-2": {"icon": "★", "tint": 2}}`. `icon` replaces the letter; `tint` picks one of six tints. Without an entry an account gets the first letter of its name or email no other mark uses. Marks show only with more than one account. |
 | `claude_enabled`, `codex_enabled`, `cursor_enabled`, `opencode_enabled` | `false` | **Enabled** | Whether the pickers offer that harness. Sessions that exist keep attaching and resuming. A harness whose CLI isn't installed is never offered. |
-| `harnesses` | `{"grok": {"enabled": false}}` | **Enabled**, **Model**, **Effort** | What is yours of each harness and each Claude account, by id. See [The harness registry](#the-harness-registry). |
+| `harnesses` | `{"grok": {"enabled": false}}` | **Enabled**, **Model**, **Effort**, **Open links in** | What is yours of each harness and each Claude account, by id. See [The harness registry](#the-harness-registry). |
 
 The tab opens on **New agents on**, then **Claude accounts**, then one section per harness and
-account with its **Enabled**, **Model** and **Effort** rows. `i` on a harness whose CLI is missing
-installs it.
+account with its **Enabled**, **Model** and **Effort** rows, and on each Claude account an **Open
+links in** row. `i` on a harness whose CLI is missing installs it.
+
+**Open links in** is the browser links from that account's sessions open in: a link ⌥- or ^-clicked
+in its pane, and the pull request `⇧V` or a card's menu opens from its card. `←`/`→` step `default`,
+`Safari`, `Chrome`, `Firefox`, `Arc`; `Enter` types it, with a profile after Chrome or Firefox
+(`Chrome Profile 1` opens Chrome's `--profile-directory=Profile 1`, `Firefox work` its `-P work`;
+any other app's name works too, with no profile). It is stored as `harnesses.<id>.browser`, `{"app":
+"Chrome", "profile": "Profile 1"}`. Every other link goes to the default browser, as does a URL
+⌘-clicked in the pane, which your terminal opens itself.
 
 ### Projects
 
@@ -166,6 +174,7 @@ CLI):
 | `effort_default` | the effort new sessions get (Claude `--effort`, Codex `model_reasoning_effort`, Cursor a model suffix, Grok `--effort`); `"default"` passes none |
 | `models` | the model rows its pickers offer: `[{"id": "big-1", "hint": "the big one"}]` |
 | `env` | environment variables for its CLI, exported after your login shell's profile runs; a leading `~/` is expanded, `null` clears it |
+| `browser` | a Claude account's **Open links in**: `{"app": "Chrome", "profile": "Profile 1"}`; absent is the default browser. Only orion's window reads it |
 
 An id no built-in or account holds adds a CLI by the name of its program: `"agy": {}` launches
 `agy` with `--model`, the first prompt as its last argument, and status from the process. A broken
