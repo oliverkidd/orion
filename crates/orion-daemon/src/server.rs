@@ -366,6 +366,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     auto_title,
                     starting_prompt,
                     mode,
+                    automation,
                 } => {
                     // Logged by mode only — never the prompt text.
                     let launch_mode = starting_prompt.as_ref().map(|_| "preset");
@@ -381,6 +382,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             starting_prompt,
                             pr_url: None,
                             mode,
+                            automation,
                         })
                         .await;
                     if let Some(launch_mode) = launch_mode {
@@ -419,6 +421,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     head,
                     starting_prompt,
                     mode,
+                    automation,
                 } => {
                     // A PR SESSION whose checkout does not exist yet is a
                     // fetch and a `git worktree add` before the CLI spawns
@@ -446,6 +449,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                                 head,
                                 starting_prompt,
                                 mode,
+                                automation,
                             })
                             .await;
                         match &result {

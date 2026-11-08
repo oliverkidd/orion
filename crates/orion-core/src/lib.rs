@@ -1,3 +1,4 @@
+pub mod automation;
 pub mod away;
 pub mod claude_account;
 pub mod clock;

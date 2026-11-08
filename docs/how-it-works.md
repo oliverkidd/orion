@@ -541,5 +541,21 @@ list and the git counts on the bands keep their answers by the same rules. Linea
 disk the same way (`linear-cache/issues.json`), and each project's is asked for as the project is
 selected, so `⌘L` opens on what was last read while the ask runs underneath.
 
+## Automations
+
+An automation starts its sessions the way you do — the same create request to the DAEMON, in a
+fresh or the pull request's own checkout — with one more field: `automation`, its id (`pr_fixer`,
+`bug_fixer` …). The DAEMON keeps it on the session's row (`agents.automation`), so the tag survives
+restarts and resumes, and every client reads it off the session: the grid puts the automation's
+name ahead of what the row runs on, Needs you uses it as the card's kind, and a phone message names
+it on its context line.
+
+The TUI runs the automations: each one's runner looks for work on the git tick, and none starts a
+session while `automations.max_running` tagged sessions are at work or waiting on you — creates
+still on their way to the DAEMON count too, so one tick can't overshoot. The PR fixer reads the same
+open-PR lists and pull request bodies as the grid, so it asks `gh` for nothing of its own beyond a
+watched pull request's body. Every runner's prompt is its preset's text with the task at `{task}`,
+then `Extra steer: …` when the automation has one.
+
 Settings and key overrides live in [Configuration](configuration.md). The process model, the IPC CODEC and
 the crate layout are covered in more depth in [ARCHITECTURE.md](../ARCHITECTURE.md).

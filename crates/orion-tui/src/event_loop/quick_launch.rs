@@ -348,6 +348,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -376,7 +377,11 @@ mod tests {
             let mut app = App::new();
             seed_tree(&mut app);
             draw(&mut app);
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(app.launcher_pane_hidden, "folded away to start with");
 
             let (req_id, worktree) = launch(&mut app, KeyModifiers::NONE);

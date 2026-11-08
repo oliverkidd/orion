@@ -234,6 +234,13 @@ pub struct Agent {
     /// read it through [`Agent::limit_reached`].
     #[serde(default)]
     pub usage_limit: Option<UsageLimit>,
+    /// The AUTOMATION that started this session — its id, `pr_fixer`,
+    /// `bug_fixer` … (the TUI's `automations::Automation::id`) — or None
+    /// for one you started. Set once at create and persisted with the
+    /// row; it drives the grid's badge, the Needs-you kind label and the
+    /// automations' running cap.
+    #[serde(default)]
+    pub automation: Option<String>,
 }
 
 /// A Claude session stopped on its account rather than its work: a usage

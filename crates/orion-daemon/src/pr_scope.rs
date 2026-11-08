@@ -185,6 +185,8 @@ pub(crate) struct CreatePrAgentSpec {
     pub starting_prompt: Option<String>,
     /// The mode the CLI starts in, as `CreateAgentSpec`'s.
     pub mode: orion_core::harness::AgentMode,
+    /// The AUTOMATION starting it, as `CreateAgentSpec`'s.
+    pub automation: Option<String>,
 }
 
 impl Daemon {
@@ -221,6 +223,7 @@ impl Daemon {
             head,
             starting_prompt,
             mode,
+            automation,
         } = spec;
         let pr_url = validate_pr_url(&pr_url)?;
         let number = pr_number(&pr_url)?;
@@ -237,6 +240,7 @@ impl Daemon {
             starting_prompt,
             pr_url: Some(pr_url),
             mode,
+            automation,
         })
         .await
     }

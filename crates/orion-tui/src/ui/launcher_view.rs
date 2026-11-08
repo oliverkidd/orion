@@ -2396,7 +2396,11 @@ fn list_runs_line(a: &orion_core::Agent, cfg: &mut Option<crate::config::Config>
         out.push(' ');
         out.push_str(effort);
     }
-    out
+    // A session an AUTOMATION started says which, ahead of what it runs on.
+    match crate::automations::kind_of(a) {
+        Some(which) => format!("{} · {out}", which.name()),
+        None => out,
+    }
 }
 
 /// Whether `a` runs on a CLAUDE ACCOUNT other than the default one rather
@@ -3801,6 +3805,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             })
             .collect();
         app
@@ -4442,7 +4447,11 @@ mod tests {
                 archived.archived = true;
                 let spans = session_chip(&app, &archived);
                 let mark = spans.iter().find(|s| s.content == "R").unwrap();
-                assert_eq!(mark.style.fg, Some(th.dim), "{name}: an archived mark is dim");
+                assert_eq!(
+                    mark.style.fg,
+                    Some(th.dim),
+                    "{name}: an archived mark is dim"
+                );
             }
         });
     }
@@ -5193,6 +5202,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 },
                 project: "orion".into(),
                 branch: branch.into(),
@@ -5621,6 +5631,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         let th = Theme::by_name("amber");
         let wash = |a: Agent| card_edge(&a, a.archived || crate::app::drawn_cold(&a), th);
@@ -5687,6 +5698,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             },
             project: "orion".into(),
             branch: "feat-x".into(),
@@ -5777,6 +5789,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 },
                 project: "orion".into(),
                 branch: "main".into(),

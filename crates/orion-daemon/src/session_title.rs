@@ -404,6 +404,7 @@ mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 },
                 true,
             )

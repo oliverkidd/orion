@@ -91,7 +91,7 @@ pub struct AgentPreset {
 #[serde(rename_all = "snake_case")]
 pub enum SystemPreset {
     /// The text around what broke, for the agent AUTOFIX sends to a pull
-    /// request (`crate::autofix::prompt`); its model and effort are what
+    /// request (`crate::automations::pr_fixer::prompt`); its model and effort are what
     /// that agent runs at when no session on the branch has run here to
     /// copy. It runs on the pull request's own agent.
     PrAutofix,
@@ -158,7 +158,7 @@ impl SystemPreset {
     /// none of the user's.
     pub fn builtin_text(self) -> &'static str {
         match self {
-            SystemPreset::PrAutofix => crate::autofix::PRESET_TEXT,
+            SystemPreset::PrAutofix => crate::automations::pr_fixer::PRESET_TEXT,
             SystemPreset::LinearTicket => crate::linear::TICKET_TEXT,
             SystemPreset::WeekReview => crate::week_review::brief_rules(),
             SystemPreset::BugFixer => crate::automations::linear_builder::BUG_FIXER_TEXT,

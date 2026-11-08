@@ -400,7 +400,7 @@ fn resolve(app: &mut App, path: &str, out: &mut Vec<ClientRequest>) {
     let base = view.conflicts.known.as_ref().map(|l| l.base.clone());
     if let Some(pr) = &pr {
         if autofix_on_it(app, worktree.as_ref(), pr) {
-            let fixer = crate::autofix::agent_name(pr.number);
+            let fixer = crate::automations::pr_fixer::agent_name(pr.number);
             app.flash = Some(Flash::note(format!("{fixer} is on it")));
             return;
         }
@@ -440,7 +440,9 @@ fn autofix_on_it(app: &App, worktree: Option<&orion_core::Worktree>, pr: &Viewed
             .map(|p| p.id.clone())
             .zip(app.pr_detail.get(&pr.url).map(|d| d.head.clone())),
     };
-    on.is_some_and(|(project, branch)| crate::autofix::fixing(app, &project, &branch, pr.number))
+    on.is_some_and(|(project, branch)| {
+        crate::automations::pr_fixer::fixing(app, &project, &branch, pr.number)
+    })
 }
 
 #[cfg(test)]
@@ -616,7 +618,7 @@ mod tests {
         app.tree.agents.push(orion_core::Agent {
             id: orion_core::AgentId("fixer".into()),
             worktree_id: WorktreeId("w".into()),
-            name: crate::autofix::agent_name(7),
+            name: crate::automations::pr_fixer::agent_name(7),
             status: orion_core::AgentStatus::Running,
             archived: false,
             archived_at: 0,
@@ -631,6 +633,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         });
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.flash.as_deref(), Some("autofix-7 is on it"));

@@ -1337,7 +1337,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         // A merged or closed row has no autofix left: the footer says so.
         _ if keys::AUTOFIX.matches(&key) => {
             if selected_open_pr(app).is_some() {
-                crate::autofix::open_asked(app);
+                crate::automations::pr_fixer::open_asked(app);
             }
         }
         _ if keys::CHECKOUT.matches(&key) => crate::pr_checkout::from_modal(app, out),

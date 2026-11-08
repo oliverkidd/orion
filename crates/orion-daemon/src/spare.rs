@@ -904,6 +904,7 @@ impl Daemon {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         match self.spawn_agent_session(&agent, worktree, DEFAULT_COLS, DEFAULT_ROWS) {
             Ok(_) => Some(SpareCli {
@@ -1474,6 +1475,7 @@ mod tests {
             starting_prompt: task.map(String::from),
             pr_url: None,
             mode: launch.mode,
+            automation: None,
         }
     }
 

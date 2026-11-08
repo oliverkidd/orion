@@ -402,6 +402,12 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX phone_messages_agent ON phone_messages(agent_id);
     ",
+    // 35: the AUTOMATION that started a session (`Agent::automation`) —
+    // `pr_fixer`, `bug_fixer` … Nullable: every existing row is one you
+    // started.
+    "
+    ALTER TABLE agents ADD COLUMN automation TEXT;
+    ",
 ];
 
 fn phone_kind_str(kind: orion_core::away::PhoneKind) -> &'static str {
@@ -641,8 +647,8 @@ impl Store {
         pr_url: Option<&str>,
     ) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, pr_url, custom_harness)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, pr_url, custom_harness, automation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 a.id.as_str(),
                 a.worktree_id.as_str(),
@@ -661,6 +667,7 @@ impl Store {
                 a.unseen as i64,
                 pr_url,
                 a.custom_harness,
+                a.automation,
             ],
         )?;
         Ok(())
@@ -1298,7 +1305,7 @@ const WORKTREE_COLUMNS: &str = "id, project_id, path, branch, is_main, sort_orde
 const AGENT_COLUMNS: &str = "id, worktree_id, name, status, archived, kind, \
                              claude_session_id, sort_order, status_changed_at, model, effort, \
                              archived_at, unseen, recent_prompts, custom_harness, \
-                             usage_limit";
+                             usage_limit, automation";
 const TERMINAL_COLUMNS: &str = "id, worktree_id, name, sort_order, run_command, setup";
 const LINK_COLUMNS: &str = "id, worktree_id, url, sort_order";
 
@@ -1343,6 +1350,7 @@ fn row_to_agent(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
         recent_prompts: parse_prompts(r.get::<_, Option<String>>(13)?.as_deref()),
         custom_harness: r.get(14)?,
         usage_limit: parse_usage_limit(r.get::<_, Option<String>>(15)?.as_deref()),
+        automation: r.get(16)?,
     })
 }
 
@@ -1448,6 +1456,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         let pr_url = "https://github.com/oliverkidd/orion/pull/42";
         store
@@ -1471,6 +1480,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         store.insert_agent(&codex_agent).unwrap();
         let cursor_agent = Agent {
@@ -1491,6 +1501,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         store.insert_agent(&cursor_agent).unwrap();
         let titled_agent = Agent {
@@ -1511,6 +1522,8 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            // An automation's session keeps its tag (migration 35).
+            automation: Some("bug_fixer".into()),
         };
         store
             .insert_agent_with_auto_title(&titled_agent, true)
@@ -1526,6 +1539,10 @@ mod tests {
         assert_eq!(agents[0].model.as_deref(), Some("opus"));
         assert_eq!(agents[0].effort.as_deref(), Some("high"));
         assert_eq!(agents[0].custom_harness, None, "built-ins store no id");
+        assert_eq!(agents[0].automation, None, "one you started has no tag");
+        assert!(agents
+            .iter()
+            .any(|a| a.id == titled_agent.id && a.automation.as_deref() == Some("bug_fixer")));
         assert_eq!(
             store.agent_pr_url(&agents[0].id).unwrap().as_deref(),
             Some(pr_url)
@@ -1552,6 +1569,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         store.insert_agent(&custom).unwrap();
         let (_, _, reloaded, _) = store.load_tree().unwrap();
@@ -2261,6 +2279,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
 
         // Default-named session: pending until the agent titles it, and the
@@ -2348,6 +2367,7 @@ mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 },
                 true,
             )
@@ -2529,6 +2549,7 @@ mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 })
                 .unwrap();
         }
@@ -2613,6 +2634,7 @@ mod tests {
                 alive: false,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             })
             .unwrap();
         store
@@ -2696,6 +2718,7 @@ mod tests {
                 alive: false,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             };
             store.insert_agent(&agent).unwrap();
             agent.id
@@ -2795,6 +2818,7 @@ mod tests {
                 alive: false,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             })
             .unwrap();
         let entry = |n: usize| PromptEntry {

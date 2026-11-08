@@ -97,6 +97,8 @@ pub(crate) struct CreateAgentSpec {
     pub pr_url: Option<String>,
     /// The mode the CLI starts in (plan, ask, edit). Request-only.
     pub mode: orion_core::harness::AgentMode,
+    /// The AUTOMATION starting the session (`Agent::automation`).
+    pub automation: Option<String>,
 }
 
 /// What [`Daemon::delete_worktree`] came to.
@@ -1228,6 +1230,7 @@ impl Daemon {
             starting_prompt,
             pr_url,
             mode,
+            automation,
         } = spec;
         let starting_prompt = match starting_prompt {
             Some(prompt) => Some(validate_starting_prompt(&prompt)?),
@@ -1313,6 +1316,7 @@ impl Daemon {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation,
         };
         if let Err(e) =
             self.store
@@ -5030,6 +5034,7 @@ pub(crate) mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         let claude = orion_core::harness::builtin("claude").unwrap();
         let builtin = agent(AgentKind::Claude, None);
@@ -5137,6 +5142,7 @@ pub(crate) mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         for agent in [
             row("working", AgentStatus::Running, Some("sid-1"), false),
@@ -5861,6 +5867,7 @@ pub(crate) mod tests {
     async fn pr_launch_context_is_accepted_for_every_kind() {
         let daemon = test_daemon();
         let spec = |kind: AgentKind| CreateAgentSpec {
+            automation: None,
             mode: Default::default(),
             worktree: WorktreeId("unused".into()),
             name: "pr".into(),
@@ -6005,6 +6012,7 @@ pub(crate) mod tests {
                 pr_url: "https://github.com/o/r/pull/7".into(),
                 head: "--force".into(),
                 starting_prompt: None,
+                automation: None,
             })
             .await
             .unwrap_err();
@@ -6026,6 +6034,7 @@ pub(crate) mod tests {
                 pr_url: "https://github.com/o/r/pull/7".into(),
                 head: "feat-x".into(),
                 starting_prompt: Some("fix\0auth".into()),
+                automation: None,
             })
             .await
             .unwrap_err();
@@ -6046,6 +6055,7 @@ pub(crate) mod tests {
             auto_title: true,
             starting_prompt: starting.map(String::from),
             pr_url: None,
+            automation: None,
         };
         // Validation runs before the worktree lookup, so an unknown
         // worktree is fine here and every failure is the prompt's own.
@@ -6116,6 +6126,7 @@ pub(crate) mod tests {
             auto_title: false,
             starting_prompt: task.map(String::from),
             pr_url: None,
+            automation: None,
         };
 
         let created = |mut events: broadcast::Receiver<ServerEvent>| {
@@ -6263,6 +6274,7 @@ pub(crate) mod tests {
                 alive: false,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             })
             .unwrap();
     }
@@ -6394,6 +6406,7 @@ pub(crate) mod tests {
                 auto_title: false,
                 starting_prompt: None,
                 pr_url: None,
+                automation: None,
             })
             .await
             .unwrap()
@@ -6607,6 +6620,7 @@ pub(crate) mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 },
                 true,
             )

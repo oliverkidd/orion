@@ -47,6 +47,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::Onboard(v) => v.area,
         Overlay::WhatsNew(v) => v.area,
         Overlay::Autofix(v) => v.area,
+        Overlay::Automations(v) => v.area,
         Overlay::Todos(v) => v.area,
         Overlay::WeekReview(v) => v.area,
         Overlay::Conflicts(v) => v.area,

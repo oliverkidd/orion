@@ -328,7 +328,7 @@ pub async fn rename_current_agent(title: &str, mode: RenameMode) -> Result<()> {
 
 /// CLI: `orion autofix stand-down <reason>` from inside an autofix
 /// session: name the reason on the session's row
-/// (`crate::autofix::STOOD_DOWN`, which the TUI flashes) and archive it,
+/// (`crate::automations::pr_fixer::STOOD_DOWN`, which the TUI flashes) and archive it,
 /// which ends this very process with its PTY. Never spawns a daemon.
 pub async fn stand_down_current_agent(reason: &str) -> Result<()> {
     let agent_id = current_agent_id("autofix stand-down")?;
@@ -345,7 +345,7 @@ pub async fn stand_down_current_agent(reason: &str) -> Result<()> {
     let rename = ClientRequest::RenameAgent {
         req_id: ONE_SHOT_REQ_ID,
         id: id.clone(),
-        name: format!("{}{reason}", crate::autofix::STOOD_DOWN),
+        name: format!("{}{reason}", crate::automations::pr_fixer::STOOD_DOWN),
     };
     write_frame(&mut conn.stream, &rename).await?;
     if let Reply::Error(message) = await_reply(&mut conn, ONE_SHOT_REQ_ID).await? {

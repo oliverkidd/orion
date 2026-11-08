@@ -53,6 +53,12 @@ pub fn reason_text(agent: &Agent, reason: Option<&WaitReason>, draft_pr: Option<
     }
 }
 
+/// The kind half of a card's second line: the automation that started
+/// the session (`PR fixer`, `Bug fixer` …), else `agent`.
+pub fn kind_label(agent: &Agent) -> &'static str {
+    orion_core::automation::kind_label(agent.automation.as_deref())
+}
+
 /// Why `agent` waits, as the daemon last said (`StatusChanged.reason`,
 /// or the exit code its PTY reported).
 pub fn reason_of<'a>(app: &'a App, agent: &Agent) -> Option<&'a WaitReason> {
@@ -101,7 +107,7 @@ impl CardSource for Agents {
                     Section::Agents,
                     CardTarget::Session(agent.id.clone()),
                     agent.name.clone(),
-                    format!("agent · {} · {reason}", project.name),
+                    format!("{} · {} · {reason}", kind_label(agent), project.name),
                     from_ms(agent.status_changed_at),
                     urgency,
                 ));
@@ -135,7 +141,16 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         }
+    }
+
+    #[test]
+    fn the_kind_is_the_automations_name_or_agent() {
+        let mut a = agent(AgentStatus::NeedsFeedback, false);
+        assert_eq!(kind_label(&a), "agent");
+        a.automation = Some("pr_fixer".into());
+        assert_eq!(kind_label(&a), "PR fixer");
     }
 
     #[test]

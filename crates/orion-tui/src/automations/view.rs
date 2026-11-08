@@ -1,0 +1,866 @@
+//! The AUTOMATIONS screen (`⌘J`): every automation in a list on the left,
+//! the one under the cursor on the right — its name, what it does, its
+//! SETTINGS, and its lists (what it is running, what it has done). The
+//! header says how many automation sessions are running against the cap,
+//! and `←`/`→` move the cap.
+//!
+//! The list has the keys first; `Tab` (or Enter) takes them into the
+//! panel, where Enter acts on the row: a setting is changed or edited,
+//! a list row jumps to its session. Space turns the automation under the
+//! cursor on or off from either side, and `⌘U` picks another preset for
+//! it. INPUT PARITY: a click on a list row is the arrows landing there; a
+//! click on a panel row is Enter on it ([`activate`]).
+
+use super::{config::AutomationsSettings, Automation, Dot, Engine, Panel, SettingRow, Tone};
+use crate::app::{App, Overlay};
+use crate::hints::Key;
+use crate::text_input::TextInput;
+use crate::theme::Theme;
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use orion_core::{AgentId, ClientRequest};
+use ratatui::layout::{Position, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+
+pub(crate) mod keys {
+    use crate::hints::Key;
+
+    pub const TOGGLE: Key = Key::new(&["space"], "on / off");
+    pub const OPEN: Key = Key::new(&["enter"], "open");
+    pub const PRESET: Key = Key::new(&["cmd+u", "ctrl+x"], "pick another preset");
+    pub const CAP: Key = crate::nav::SIDEWAYS.doing("cap");
+    pub const SIDE: Key = crate::nav::PANELS;
+    pub const BACK: Key = crate::nav::CLOSE.doing("back");
+    #[cfg(test)]
+    pub const ALL: &[Key] = &[TOGGLE, OPEN, PRESET, CAP, SIDE, BACK];
+}
+
+/// What the dim line above the keys says.
+const EXPLAIN: &str =
+    "The preset says what the agent is told and what it runs on. Enter opens it in Settings › Presets.";
+
+/// The widest the screen gets, and the list column's width.
+const WIDEST: u16 = 112;
+const LIST_W: u16 = 34;
+/// The panel's label column (`Extra steer  `).
+const LABEL_W: usize = 13;
+
+/// A row of the panel the keys can stand on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Item {
+    Setting(SettingRow),
+    Session(AgentId),
+}
+
+/// What a click lands on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Hit {
+    /// A row of the list, by [`Automation::ALL`] index.
+    Automation(usize),
+    /// A row of the panel, by its index among [`items`].
+    Item(usize),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AutomationsView {
+    /// The automation under the cursor, an index into [`Automation::ALL`].
+    pub selected: usize,
+    /// The keys are on the panel, not the list.
+    pub in_panel: bool,
+    /// The panel row under the cursor, an index into [`items`].
+    pub row: usize,
+    /// Enter on **Extra steer**: the line being written.
+    pub steer: Option<TextInput>,
+    /// A word about the last thing tried, over the explanation.
+    pub notice: Option<String>,
+    /// The modal's rect and its rows', written back as it draws.
+    pub area: Rect,
+    hits: Vec<(Rect, Hit)>,
+}
+
+impl AutomationsView {
+    pub fn automation(&self) -> Automation {
+        Automation::ALL[self.selected.min(Automation::ALL.len() - 1)]
+    }
+}
+
+/// The panel rows the keys can stand on: the SETTINGS rows, then every
+/// list row with a session to jump to.
+pub fn items(app: &App, which: Automation, panel: &Panel) -> Vec<Item> {
+    let mut items: Vec<Item> = app
+        .automations
+        .settings_of(which)
+        .iter()
+        .map(|row| Item::Setting(*row))
+        .collect();
+    for list in &panel.lists {
+        items.extend(
+            list.rows
+                .iter()
+                .filter_map(|row| row.session.clone().map(Item::Session)),
+        );
+    }
+    items
+}
+
+/// `⌘J`: the screen, on the automation it was last left on.
+pub fn open(app: &mut App) {
+    app.overlay = Some(Overlay::Automations(AutomationsView {
+        selected: app.automations.selected,
+        ..AutomationsView::default()
+    }));
+    app.dirty = true;
+}
+
+/// The config, changed by `change` and saved, then mirrored into the app.
+fn change_settings(app: &mut App, change: impl FnOnce(&mut AutomationsSettings)) {
+    let mut cfg = crate::config::Config::load();
+    change(&mut cfg.automations);
+    if let Err(err) = cfg.try_save() {
+        app.flash = Some(crate::flash::Flash::failed(format!(
+            "couldn't save the automations: {err}"
+        )));
+    }
+    app.automations.settings = cfg.automations;
+}
+
+/// Space: the automation under the cursor on or off.
+fn toggle(app: &mut App, which: Automation) {
+    let on = !app.automations.is_on(which);
+    change_settings(app, |s| s.of_mut(which).on = Some(on));
+}
+
+pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    let Some(Overlay::Automations(view)) = &mut app.overlay else {
+        return;
+    };
+    app.dirty = true;
+    view.notice = None;
+    let which = view.automation();
+    // Writing the extra steer: the field has the keys.
+    if let Some(input) = &mut view.steer {
+        if crate::nav::closes(&key) {
+            view.steer = None;
+        } else if key.code == KeyCode::Enter {
+            let text = input.as_str().trim().to_string();
+            view.steer = None;
+            change_settings(app, |s| s.of_mut(which).extra_steer = text);
+        } else {
+            input.handle_key(&key);
+        }
+        return;
+    }
+    match key.code {
+        _ if keys::BACK.matches(&key) => {
+            if view.in_panel {
+                view.in_panel = false;
+            } else {
+                close(app);
+            }
+        }
+        _ if keys::TOGGLE.matches(&key) => toggle(app, which),
+        _ if keys::PRESET.matches(&key) => pick_preset(app, which),
+        _ if keys::SIDE.matches(&key) => {
+            view.in_panel = !view.in_panel;
+            view.row = 0;
+        }
+        _ if keys::CAP.matches(&key) => {
+            let step = if key.code == KeyCode::Left { -1 } else { 1 };
+            change_settings(app, |s| s.step_cap(step));
+        }
+        KeyCode::Up | KeyCode::Down => {
+            let down = key.code == KeyCode::Down;
+            if view.in_panel {
+                let panel = Engine::panel(app, which);
+                let n = items(app, which, &panel).len();
+                if let Some(Overlay::Automations(view)) = &mut app.overlay {
+                    view.row = step(view.row, down, n);
+                }
+            } else {
+                view.selected = step(view.selected, down, Automation::ALL.len());
+                app.automations.selected = view.selected;
+            }
+        }
+        _ if keys::OPEN.matches(&key) => {
+            if view.in_panel {
+                let row = view.row;
+                activate(app, row, out);
+            } else {
+                view.in_panel = true;
+                view.row = 0;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `at` a step up or down a list of `n`, kept on it.
+fn step(at: usize, down: bool, n: usize) -> usize {
+    match down {
+        true => (at + 1).min(n.saturating_sub(1)),
+        false => at.saturating_sub(1),
+    }
+}
+
+/// Close the screen, remembering where it was.
+fn close(app: &mut App) {
+    if let Some(Overlay::Automations(view)) = &app.overlay {
+        app.automations.selected = view.selected;
+    }
+    app.overlay = None;
+}
+
+/// Panel row `index` chosen — Enter on it, or a click: a setting changes
+/// or opens, a list row jumps to its session.
+pub fn activate(app: &mut App, index: usize, out: &mut Vec<ClientRequest>) {
+    let Some(Overlay::Automations(view)) = &mut app.overlay else {
+        return;
+    };
+    let which = view.automation();
+    view.in_panel = true;
+    view.row = index;
+    let panel = Engine::panel(app, which);
+    let Some(item) = items(app, which, &panel).into_iter().nth(index) else {
+        return;
+    };
+    match item {
+        Item::Setting(SettingRow::On) => toggle(app, which),
+        Item::Setting(SettingRow::Preset) => open_preset(app, which),
+        Item::Setting(SettingRow::ExtraSteer) => {
+            let text = app.automations.settings.of(which).extra_steer;
+            if let Some(Overlay::Automations(view)) = &mut app.overlay {
+                view.steer = Some(TextInput::from(text.as_str()));
+            }
+        }
+        Item::Setting(row) => {
+            let done = super::with_runner(app, which, |runner, app| runner.edit(app, row));
+            if done != Some(true) {
+                if let Some(Overlay::Automations(view)) = &mut app.overlay {
+                    view.notice = Some(format!("{} can't be changed here yet", row.label()));
+                }
+            }
+        }
+        Item::Session(id) => {
+            close(app);
+            crate::event_loop::jump_to_session(app, id, out);
+        }
+    }
+}
+
+/// Enter on **Preset**: Settings › Presets, on the preset it is told by.
+fn open_preset(app: &mut App, which: Automation) {
+    let preset = super::preset_of(&app.automations.settings, which);
+    let presets = crate::agent_presets::load_seeded();
+    let at = presets
+        .iter()
+        .position(|p| p.name == preset.name)
+        .and_then(|index| crate::presets_tab::Screen::of(presets).row_of(index));
+    close(app);
+    crate::presets_tab::reopen(app, at.unwrap_or(0));
+}
+
+/// `⌘U`: the AGENT PRESETS PICKER, its pick becoming the preset `which`
+/// is told by; Esc there comes back here unchanged.
+fn pick_preset(app: &mut App, which: Automation) {
+    close(app);
+    crate::preset_overlays::open_for_automation(app, which);
+}
+
+/// The picker's Enter: `name` is the preset `which` is told by now — its
+/// own SYSTEM PRESET's name puts it back on that one — and the screen
+/// comes back on it.
+pub fn picked(app: &mut App, which: Automation, name: Option<String>) {
+    if let Some(name) = name {
+        let own = name.trim().eq_ignore_ascii_case(which.preset().name());
+        change_settings(app, |s| s.of_mut(which).preset = (!own).then_some(name));
+    }
+    open(app);
+}
+
+pub fn handle_mouse(app: &mut App, mouse: MouseEvent, at: Position, out: &mut Vec<ClientRequest>) {
+    let Some(Overlay::Automations(view)) = &mut app.overlay else {
+        return;
+    };
+    let hit = view
+        .hits
+        .iter()
+        .find(|(rect, _)| rect.contains(at))
+        .map(|(_, hit)| hit.clone());
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let down = matches!(mouse.kind, MouseEventKind::ScrollDown);
+            view.selected = step(view.selected, down, Automation::ALL.len());
+            app.automations.selected = view.selected;
+        }
+        MouseEventKind::Down(MouseButton::Left) => match hit {
+            Some(Hit::Automation(i)) => {
+                view.selected = i;
+                view.in_panel = false;
+                view.steer = None;
+                app.automations.selected = i;
+            }
+            Some(Hit::Item(i)) => activate(app, i, out),
+            None => {}
+        },
+        _ => return,
+    }
+    app.dirty = true;
+}
+
+// ---- drawing ----
+
+/// `● ` in the dot's colour: red waiting on you, yellow working, grey
+/// idle, a hollow `○` off.
+fn dot(dot: Dot, th: Theme) -> Span<'static> {
+    let (glyph, color) = match dot {
+        Dot::Working => ("● ", th.warn),
+        Dot::Waiting => ("● ", th.err),
+        Dot::Idle => ("● ", th.dim),
+        Dot::Off => ("○ ", th.faint),
+    };
+    Span::styled(glyph, Style::default().fg(color))
+}
+
+fn tone(tone: Tone, th: Theme) -> Style {
+    Style::default().fg(match tone {
+        Tone::Working => th.warn,
+        Tone::Waiting => th.err,
+        Tone::Done => th.ok,
+        Tone::Quiet => th.dim,
+    })
+}
+
+/// A setting's value as its row shows it.
+fn value(app: &App, which: Automation, row: SettingRow) -> String {
+    let own = app.automations.settings.of(which);
+    match row {
+        SettingRow::On => if app.automations.is_on(which) {
+            "on"
+        } else {
+            "off"
+        }
+        .into(),
+        SettingRow::Labels if own.labels.is_empty() => "none · Enter to pick from Linear".into(),
+        SettingRow::Labels => format!("{} · Enter to pick from Linear", own.labels.join(" · ")),
+        SettingRow::When => own.when.map_or_else(
+            || "Fri 08:30".into(),
+            |w| format!("{} {}", capitalised(&w.day), w.at),
+        ),
+        SettingRow::Whose => own.whose.label().into(),
+        SettingRow::Preset => {
+            let preset = super::preset_of(&app.automations.settings, which);
+            format!("{} · {}", preset.name, preset.spec_label())
+        }
+        SettingRow::ExtraSteer if own.extra_steer.trim().is_empty() => "none".into(),
+        SettingRow::ExtraSteer => own.extra_steer,
+    }
+}
+
+fn capitalised(word: &str) -> String {
+    let mut chars = word.trim().chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// `left` and `right` across `width` cells, `right` against the edge.
+fn spread(left: Vec<Span<'static>>, right: Span<'static>, width: usize) -> Line<'static> {
+    let used: usize = left.iter().map(|s| s.content.chars().count()).sum();
+    let room = width.saturating_sub(used + 1);
+    let right_text = crate::ui::truncate(&right.content, room);
+    let pad = width.saturating_sub(used + right_text.chars().count());
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(right_text, right.style));
+    Line::from(spans)
+}
+
+pub fn hints(view: &AutomationsView) -> Vec<crate::hints::Hint> {
+    if view.steer.is_some() {
+        return vec![
+            Key::new(&["enter"], "save").hint().kept(),
+            crate::nav::CLOSE.doing("cancel").hint().kept(),
+        ];
+    }
+    vec![
+        keys::TOGGLE.hint(),
+        keys::OPEN.hint().kept(),
+        keys::PRESET.hint(),
+        keys::BACK.hint().kept(),
+    ]
+}
+
+pub fn draw(f: &mut Frame, app: &mut App, view: &AutomationsView, th: Theme) {
+    let screen = f.area();
+    let width = screen.width.saturating_sub(4).min(WIDEST);
+    let height = screen.height.saturating_sub(2).min(32);
+    let area = crate::ui::centered_rect(screen, width, height);
+    let inner = crate::ui::render_modal_frame(f, area, " Automations ", &hints(view), th);
+    let explain = view.notice.as_deref().unwrap_or(EXPLAIN);
+    let (body, explain_row) = crate::hints::explain_area(explain, inner, 2);
+    match &view.notice {
+        Some(_) => {
+            crate::hints::draw_explain_as(f, explain_row, explain, Style::default().fg(th.warn))
+        }
+        None => crate::hints::draw_explain(f, explain_row, explain, th),
+    }
+    let mut hits = Vec::new();
+    let dim = Style::default().fg(th.dim);
+
+    // The header: what is running against the cap.
+    let header = format!(
+        "{} of at most {} agents running ",
+        super::running(app),
+        app.automations.settings.cap()
+    );
+    if let Some(row) = crate::ui::row_rect(body, 0) {
+        let line = spread(
+            Vec::new(),
+            Span::styled(header, Style::default().fg(th.muted)),
+            usize::from(row.width).saturating_sub(3),
+        );
+        let mut spans = line.spans;
+        spans.push(Span::styled("←→", Style::default().fg(th.accent)));
+        f.render_widget(Paragraph::new(Line::from(spans)), row);
+    }
+    let cols = Rect {
+        y: body.y + 2,
+        height: body.height.saturating_sub(2),
+        ..body
+    };
+    let list_w = LIST_W.min(cols.width / 2);
+    let list = Rect {
+        width: list_w,
+        ..cols
+    };
+    let panel_area = Rect {
+        x: cols.x + list_w + 2,
+        width: cols.width.saturating_sub(list_w + 2),
+        ..cols
+    };
+    // The rule between them.
+    for y in cols.y..cols.y + cols.height {
+        f.render_widget(
+            Paragraph::new(Span::styled("│", Style::default().fg(th.edge))),
+            Rect::new(cols.x + list_w, y, 1, 1),
+        );
+    }
+
+    // The list: one row per automation, its dot, name and state.
+    let selected = view.selected.min(Automation::ALL.len() - 1);
+    for (i, which) in Automation::ALL.into_iter().enumerate() {
+        let Some(row) = crate::ui::row_rect(list, i) else {
+            break;
+        };
+        let panel = Engine::panel(app, which);
+        let lit = i == selected;
+        let fill = |s: Style| match (lit, view.in_panel) {
+            (true, false) => s.bg(th.sel_bg).add_modifier(Modifier::BOLD),
+            (true, true) => s.bg(th.sel_bg_dim),
+            _ => s,
+        };
+        let mut left = vec![Span::raw(" "), dot(panel.dot, th)];
+        left.push(Span::styled(which.name(), Style::default().fg(th.text)));
+        let mut line = spread(
+            left,
+            Span::styled(panel.state, dim),
+            usize::from(row.width) - 1,
+        );
+        line.spans.push(Span::raw(" "));
+        let line = Line::from(
+            line.spans
+                .into_iter()
+                .map(|s| {
+                    let style = fill(s.style);
+                    Span::styled(s.content, style)
+                })
+                .collect::<Vec<_>>(),
+        );
+        f.render_widget(Paragraph::new(line), row);
+        hits.push((row, Hit::Automation(i)));
+    }
+
+    // The panel: name, description, SETTINGS, then its lists.
+    let which = Automation::ALL[selected];
+    let panel = Engine::panel(app, which);
+    let item_rows = items(app, which, &panel);
+    let row_cursor = view.row.min(item_rows.len().saturating_sub(1));
+    let pw = usize::from(panel_area.width);
+    let mut lines: Vec<(Line<'static>, Option<usize>)> = vec![(
+        Line::from(Span::styled(
+            which.name(),
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+        )),
+        None,
+    )];
+    for l in crate::pr_preview::wrap(which.description(), pw.max(1)) {
+        lines.push((
+            Line::from(Span::styled(l, Style::default().fg(th.muted))),
+            None,
+        ));
+    }
+    lines.push((Line::from(""), None));
+    lines.push((Line::from(Span::styled("SETTINGS", dim)), None));
+    let mut index = 0;
+    let lit = |i: usize, s: Style| {
+        if view.in_panel && i == row_cursor {
+            s.bg(th.sel_bg).add_modifier(Modifier::BOLD)
+        } else {
+            s
+        }
+    };
+    let mut steer_at = None;
+    for row in app.automations.settings_of(which) {
+        let label = format!("  {:<LABEL_W$}", row.label());
+        let value = value(app, which, *row);
+        let value_style = match row {
+            SettingRow::On if app.automations.is_on(which) => Style::default().fg(th.ok),
+            SettingRow::ExtraSteer if value == "none" => dim,
+            _ => Style::default().fg(th.text),
+        };
+        let budget = pw.saturating_sub(LABEL_W + 2);
+        if *row == SettingRow::ExtraSteer && view.steer.is_some() {
+            steer_at = Some(lines.len());
+        }
+        lines.push((
+            Line::from(vec![
+                Span::styled(label, lit(index, Style::default().fg(th.muted))),
+                Span::styled(crate::ui::truncate(&value, budget), lit(index, value_style)),
+            ]),
+            Some(index),
+        ));
+        index += 1;
+    }
+    for list in &panel.lists {
+        lines.push((Line::from(""), None));
+        lines.push((Line::from(Span::styled(list.title, dim)), None));
+        if list.rows.is_empty() {
+            lines.push((
+                Line::from(Span::styled(format!("  {}", list.empty), dim)),
+                None,
+            ));
+        }
+        for row in &list.rows {
+            let at = row.session.as_ref().map(|_| {
+                index += 1;
+                index - 1
+            });
+            let style = |s: Style| at.map_or(s, |i| lit(i, s));
+            let line = spread(
+                vec![Span::styled(
+                    format!("  {}", row.text),
+                    style(Style::default().fg(th.text)),
+                )],
+                Span::styled(row.state.clone(), style(tone(row.tone, th))),
+                pw,
+            );
+            lines.push((line, at));
+        }
+    }
+    // Keep the cursor's row in view.
+    let fits = usize::from(panel_area.height).max(1);
+    let cursor_line = lines
+        .iter()
+        .position(|(_, at)| view.in_panel && *at == Some(row_cursor))
+        .unwrap_or(0);
+    let first = (cursor_line + 1).saturating_sub(fits);
+    for (n, (line, at)) in lines.into_iter().skip(first).take(fits).enumerate() {
+        let Some(rect) = crate::ui::row_rect(panel_area, n) else {
+            break;
+        };
+        let line = match (steer_at, &view.steer) {
+            (Some(s), Some(input)) if s == n + first => {
+                let label = Span::styled(
+                    format!("  {:<LABEL_W$}", SettingRow::ExtraSteer.label()),
+                    Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
+                );
+                let field = crate::ui::field_after(rect, LABEL_W + 2);
+                let mut spans = vec![label];
+                spans.extend(crate::ui::input_spans(input, field, th.accent, th));
+                Line::from(spans)
+            }
+            _ => line,
+        };
+        f.render_widget(Paragraph::new(line), rect);
+        if let Some(i) = at {
+            hits.push((rect, Hit::Item(i)));
+        }
+    }
+
+    if let Some(Overlay::Automations(live)) = &mut app.overlay {
+        live.area = area;
+        live.hits = hits;
+        live.row = row_cursor;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn press(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Vec<ClientRequest> {
+        let mut out = Vec::new();
+        handle_key(app, KeyEvent::new(code, mods), &mut out);
+        out
+    }
+
+    fn view(app: &App) -> &AutomationsView {
+        match &app.overlay {
+            Some(Overlay::Automations(v)) => v,
+            other => panic!("not the automations screen: {other:?}"),
+        }
+    }
+
+    fn screen(app: &mut App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|f| {
+                let Some(Overlay::Automations(v)) = app.overlay.clone() else {
+                    unreachable!()
+                };
+                draw(f, app, &v, crate::theme::Theme::default());
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn in_config<T>(f: impl FnOnce() -> T) -> T {
+        let dir = tempfile::tempdir().unwrap();
+        crate::agent_presets::with_presets_path(dir.path().join("agent_presets.json"), || {
+            crate::config::with_config_path(dir.path().join("config.json"), f)
+        })
+    }
+
+    #[test]
+    fn every_key_parses() {
+        assert!(keys::ALL.iter().all(Key::parses));
+    }
+
+    #[test]
+    fn the_screen_lists_every_automation_and_the_selected_ones_panel() {
+        in_config(|| {
+            let mut app = App::new();
+            open(&mut app);
+            let text = screen(&mut app);
+            for which in Automation::ALL {
+                assert!(text.contains(which.name()), "{}:\n{text}", which.name());
+            }
+            assert!(text.contains("0 of at most 5 agents running"), "{text}");
+            assert!(text.contains("SETTINGS"));
+            assert!(text.contains("PR autofix · the PR's own agent"), "{text}");
+            assert!(text.contains("YOUR OPEN PRS"));
+            assert!(text.contains("DONE THIS WEEK"));
+            assert!(text.contains("Enter opens it in Settings › Presets"));
+        });
+    }
+
+    #[test]
+    fn space_turns_the_automation_on_and_off_and_saves_it() {
+        in_config(|| {
+            let mut app = App::new();
+            open(&mut app);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            assert_eq!(view(&app).automation(), Automation::BugFixer);
+            assert!(!app.automations.is_on(Automation::BugFixer));
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+            assert!(app.automations.is_on(Automation::BugFixer));
+            let saved = crate::config::Config::load();
+            assert!(saved.automations.is_on(Automation::BugFixer), "saved");
+            press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+            assert!(!app.automations.is_on(Automation::BugFixer));
+        });
+    }
+
+    #[test]
+    fn arrows_sideways_move_the_cap() {
+        in_config(|| {
+            let mut app = App::new();
+            app.automations.settings.max_running = 5;
+            open(&mut app);
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+            assert_eq!(app.automations.settings.max_running, 6);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Left, KeyModifiers::NONE);
+            assert_eq!(crate::config::Config::load().automations.max_running, 4);
+        });
+    }
+
+    #[test]
+    fn the_extra_steer_is_written_on_its_row() {
+        in_config(|| {
+            let mut app = App::new();
+            open(&mut app);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(view(&app).in_panel, "Enter takes the keys to the panel");
+            // On, Preset, Extra steer.
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(view(&app).steer.is_some());
+            for c in "Be brief".chars() {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(view(&app).steer.is_none());
+            assert_eq!(
+                app.automations.settings.of(Automation::PrFixer).extra_steer,
+                "Be brief"
+            );
+            assert!(screen(&mut app).contains("Be brief"));
+            // Esc while writing drops the edit, not the screen.
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(view(&app).steer.is_none());
+            assert_eq!(
+                app.automations.settings.of(Automation::PrFixer).extra_steer,
+                "Be brief"
+            );
+            // Esc on the panel is back to the list; on the list it closes.
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(!view(&app).in_panel);
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+            assert!(app.overlay.is_none());
+        });
+    }
+
+    #[test]
+    fn enter_on_preset_opens_it_in_settings_presets() {
+        in_config(|| {
+            let mut app = App::new();
+            open(&mut app);
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            match &app.overlay {
+                Some(Overlay::Settings(v)) => {
+                    assert_eq!(v.tab, crate::config::presets_tab())
+                }
+                other => panic!("expected Settings › Presets, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn command_u_picks_another_preset_and_comes_back() {
+        in_config(|| {
+            let mut presets = crate::agent_presets::load_seeded();
+            presets.insert(
+                0,
+                crate::agent_presets::AgentPreset {
+                    name: "Careful".into(),
+                    text: "Go slowly.\n\n{task}".into(),
+                    system: None,
+                    ..crate::agent_presets::SystemPreset::PrAutofix.default_preset()
+                },
+            );
+            crate::agent_presets::save(&presets).unwrap();
+            let mut app = App::new();
+            open(&mut app);
+            press(&mut app, KeyCode::Char('u'), KeyModifiers::SUPER);
+            assert!(matches!(&app.overlay, Some(Overlay::AgentPresets(_))));
+            // Esc there comes back unchanged.
+            crate::preset_overlays::handle_list_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+                &mut Vec::new(),
+            );
+            assert!(matches!(&app.overlay, Some(Overlay::Automations(_))));
+            assert_eq!(
+                app.automations.settings.of(Automation::PrFixer).preset,
+                None
+            );
+            // The picker opens on the preset it is told by now; Enter on
+            // "Careful" makes that the PR fixer's.
+            press(&mut app, KeyCode::Char('u'), KeyModifiers::SUPER);
+            let Some(Overlay::AgentPresets(picker)) = &app.overlay else {
+                unreachable!()
+            };
+            assert_eq!(picker.presets[picker.selected].name, "PR autofix");
+            for code in [KeyCode::Char('c'), KeyCode::Char('a'), KeyCode::Enter] {
+                crate::preset_overlays::handle_list_key(
+                    &mut app,
+                    KeyEvent::new(code, KeyModifiers::NONE),
+                    &mut Vec::new(),
+                );
+            }
+            assert!(matches!(&app.overlay, Some(Overlay::Automations(_))));
+            assert_eq!(
+                app.automations
+                    .settings
+                    .of(Automation::PrFixer)
+                    .preset
+                    .as_deref(),
+                Some("Careful")
+            );
+            let preset = super::super::preset_of(&app.automations.settings, Automation::PrFixer);
+            assert_eq!(preset.name, "Careful");
+            assert!(screen(&mut app).contains("Careful · "));
+        });
+    }
+
+    /// INPUT PARITY: a click on a list row is the arrows landing there; a
+    /// click on a panel row is Enter on it.
+    #[test]
+    fn a_click_is_the_keys_choice() {
+        let click = |app: &mut App, hit: Hit| {
+            screen(app);
+            let rect = view(app)
+                .hits
+                .iter()
+                .find(|(_, h)| *h == hit)
+                .map(|(r, _)| *r)
+                .unwrap();
+            let at = Position::new(rect.x + 2, rect.y);
+            let mouse = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: at.x,
+                row: at.y,
+                modifiers: KeyModifiers::NONE,
+            };
+            handle_mouse(app, mouse, at, &mut Vec::new());
+        };
+        // Where each lands: the row, which side has the keys, and whether
+        // the feature builder is on.
+        let landed = |app: &App| {
+            let v = view(app);
+            let on = app.automations.is_on(Automation::FeatureBuilder);
+            (v.selected, v.in_panel, v.row, on)
+        };
+        let by_key = in_config(|| {
+            let mut app = App::new();
+            open(&mut app);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            let moved = landed(&app);
+            // Into the panel, then Enter on its On row.
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            (moved, landed(&app))
+        });
+        let by_click = in_config(|| {
+            let mut app = App::new();
+            open(&mut app);
+            click(&mut app, Hit::Automation(2));
+            let moved = landed(&app);
+            click(&mut app, Hit::Item(0));
+            (moved, landed(&app))
+        });
+        assert_eq!(by_key, by_click);
+        assert!(by_key.1 .3, "the feature builder is on");
+    }
+}

@@ -1754,6 +1754,7 @@ mod tests {
                 reason: orion_core::LimitReason::RateLimit,
                 message: None,
             }),
+            automation: None,
         });
         let limited = limited_harnesses(&app);
         assert!(claude[1].limit_hit(&limited), "the second account's limit");

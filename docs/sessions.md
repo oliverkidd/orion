@@ -128,7 +128,7 @@ orion's, `^R` puts back orion's text (once you confirm); on one of yours, `^N` m
 Three presets are **system presets**, on every list and tagged `orion` — the agents orion starts
 itself:
 
-- **PR autofix** wraps what broke for the agent **Auto-fix my PRs** sends to a broken pull request.
+- **PR autofix** wraps what broke for the agent the **PR fixer** sends to a broken pull request.
   Its **Runs on** row starts on **the PR's own agent** — the session that did the work on its
   branch — and, with none, your default agent at this preset's model and effort; pin a harness
   there and the agent runs on that instead, at this preset's model and effort, while it is on. orion's text: fix only what is
@@ -671,6 +671,49 @@ frame — opens it in the browser and marks it read on the way out (on the Check
 a check, the check's own page), and `Esc` closes the
 modal (twice, with a filter typed). The hotkey is
 rebindable (`pull_requests`).
+
+## Automations
+
+`⌘J` opens AUTOMATIONS: the agents orion starts on its own, in a list on the left with what each
+is doing, and the one under the cursor on the right.
+
+```
+Automations                                      1 of at most 5 agents running ←→
+● PR fixer        fixing #407  │ PR fixer
+○ Bug fixer               off  │ When one of your PRs hits conflicts or failing checks, …
+○ Feature builder         off  │ SETTINGS
+○ Week in review          off  │   On           on
+○ Meeting takeaways       off  │   Preset       PR autofix · the PR's own agent
+○ Blue sky builder        off  │   Extra steer  none
+                               │ YOUR OPEN PRS
+                               │   #407 Fix the login redirect   fixing checks, try 2 of 3
+```
+
+- **Each one** has **On**, its **Preset** and an **Extra steer**, and the bug fixer, the feature
+  builder and week in review have a row or two more (**Labels**, **When**, **Whose**). The preset
+  says what the agent is told and what it runs on: `Enter` on the row opens it in
+  Settings › Presets, and `⌘U` picks another of your presets in its place. The extra steer is one
+  line added after the preset's text, as `Extra steer: …`, on every prompt that automation sends.
+- **Its lists** say what it is running and what it has done: the PR fixer's **YOUR OPEN PRS**
+  (fixing checks, try 2 of 3 / green / gave up, needs you) and **DONE THIS WEEK**. `Enter` on a row
+  with a session jumps to it.
+- **A cap.** No automation starts a session while `automations.max_running` of them — 5 unless you
+  change it with `←`/`→` in the header — are at work or waiting on you. A breakage the PR fixer
+  sees meanwhile waits, watched, for a place.
+- **Tagged sessions.** Every session an automation starts is an ordinary row on the grid, its
+  automation's name ahead of what it runs on (`PR fixer · opus high`), and Needs you labels it the
+  same way. orion keeps the tag with the session, across restarts.
+- Settings are global, never per project. See [Configuration](configuration.md#automations).
+
+### The PR fixer
+
+When one of your pull requests hits merge conflicts or failing checks, the PR fixer sends an
+`autofix-<n>` session to it at once, nothing to confirm: on the agent, account, model and effort
+of the session that did the work on its branch — your default agent with none — told the
+**PR autofix** preset's text with what broke. It watches the pull request until it is green, and
+stops after 3 tries in a row that don't turn it green, saying so. On by default (it was **Auto-fix
+my PRs** in Settings → General through 2.x, and a config that turned that off keeps it off). `⌘G`
+on a pull request sends one by hand whatever it says.
 
 ## Your next meeting
 

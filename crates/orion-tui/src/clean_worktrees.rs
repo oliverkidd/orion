@@ -764,6 +764,7 @@ mod tests {
             alive: !archived,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         }
     }
 

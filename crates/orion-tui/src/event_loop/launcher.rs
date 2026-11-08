@@ -2822,6 +2822,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -2861,6 +2862,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -2912,6 +2914,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -4096,8 +4099,16 @@ mod tests {
 
             let mut by_key = locked();
             draw(&mut by_key);
-            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::SUPER);
-            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut by_key,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
+            key(
+                &mut by_key,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
 
             for app in [&by_click, &by_key] {
                 assert!(app.launcher_pane_hidden, "the pane folded away");
@@ -5456,7 +5467,11 @@ mod tests {
         with_default_config(|| {
             let mut app = three_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(app.launcher_pane_hidden, "the pane is folded away");
 
             let mut sent = Vec::new();
@@ -6683,7 +6698,11 @@ mod tests {
                 super::open_project(&mut app, &ProjectId("p3".into()), &mut out);
                 assert_eq!(reading(&app), None, "nothing of demo's left attached");
 
-                key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+                key(
+                    &mut app,
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                );
                 let text = buffer_text(&draw(&mut app));
                 assert!(
                     super::has_pane(&app),
@@ -7990,7 +8009,10 @@ mod tests {
             for back_down in [
                 (KeyCode::Char('f'), KeyModifiers::SUPER),
                 (KeyCode::Char('q'), KeyModifiers::CONTROL),
-                (KeyCode::Char('j'), KeyModifiers::SUPER),
+                (
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                ),
             ] {
                 let out = ctrl_f(&mut app);
                 assert!(
@@ -8612,7 +8634,11 @@ mod tests {
         with_default_config(|| {
             let mut by_key = two_sessions();
             draw(&mut by_key);
-            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut by_key,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(by_key.launcher_pane_hidden, "^~ folded the pane away");
             to_feat(&mut by_key);
             assert!(
@@ -8629,7 +8655,11 @@ mod tests {
 
             let mut by_click = two_sessions();
             draw(&mut by_click);
-            key(&mut by_click, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut by_click,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(by_click.launcher_pane_hidden);
             key(&mut by_click, KeyCode::Esc, KeyModifiers::NONE);
             draw(&mut by_click);
@@ -8686,7 +8716,11 @@ mod tests {
             let mut by_right = two_sessions();
             for app in [&mut by_left, &mut by_right] {
                 draw(app);
-                key(app, KeyCode::Char('j'), KeyModifiers::SUPER);
+                key(
+                    app,
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                );
                 keys(app, &[KeyCode::Esc, KeyCode::Down]);
                 assert!(
                     app.launcher_pane_hidden,
@@ -9046,6 +9080,7 @@ mod tests {
                         alive: true,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
+                        automation: None,
                     }),
                 },
             );
@@ -10633,7 +10668,7 @@ mod tests {
         });
     }
 
-    /// ⌘J folds the PANE away and takes the selection with it: no pane
+    /// ⌘⇧J folds the PANE away and takes the selection with it: no pane
     /// is drawn under the cards, no card wears the cursor, and the edge
     /// the pane gave the pointer to drag is gone with it. The same key
     /// brings all three back. ^J is its twin, for the terminals that
@@ -10665,8 +10700,12 @@ mod tests {
             let (was_pane, grid_was) = (has_pane(&app), cards_h(&app));
             assert!(was_pane && !app.launcher_unaimed);
 
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
-            assert!(app.launcher_pane_hidden, "⌘J folded the pane away");
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
+            assert!(app.launcher_pane_hidden, "⌘⇧J folded the pane away");
             assert!(
                 app.launcher_unaimed,
                 "folding the pane away let the card under the cursor go"
@@ -10684,7 +10723,11 @@ mod tests {
 
             // The same key back: the pane returns, reading the card it is
             // aimed at again.
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(!app.launcher_pane_hidden);
             assert!(
                 !app.launcher_unaimed,
@@ -10696,8 +10739,14 @@ mod tests {
 
             // Both ways again.
             for chord in [
-                (KeyCode::Char('j'), KeyModifiers::SUPER),
-                (KeyCode::Char('j'), KeyModifiers::SUPER),
+                (
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                ),
+                (
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                ),
             ] {
                 let folded = app.launcher_pane_hidden;
                 key(&mut app, chord.0, chord.1);
@@ -10710,12 +10759,12 @@ mod tests {
         });
     }
 
-    /// ⌘J from inside the pane hands the keys back to the card first —
+    /// ⌘⇧J from inside the pane hands the keys back to the card first —
     /// the pane still up, the card still selected — and only a second
     /// press folds the pane; a third brings it back. ^J is the agent's in
     /// there (a newline to most of them).
     #[test]
-    fn cmd_j_steps_out_to_the_card_then_folds_the_pane() {
+    fn cmd_shift_j_steps_out_to_the_card_then_folds_the_pane() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
@@ -10732,11 +10781,15 @@ mod tests {
             assert!(!app.launcher_pane_hidden && app.term_locked);
 
             let card = crate::launcher::cursor(&app, &crate::launcher::bands(&app));
-            let out = key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
-            assert!(!typed(&out), "⌘J never reaches the session: {out:?}");
+            let out = key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
+            assert!(!typed(&out), "⌘⇧J never reaches the session: {out:?}");
             assert_eq!(app.focus, Focus::Sessions, "the keys are the grid's");
             assert!(!app.term_locked);
-            assert!(!app.launcher_pane_hidden, "the first ⌘J left the pane up");
+            assert!(!app.launcher_pane_hidden, "the first ⌘⇧J left the pane up");
             assert!(!app.launcher_unaimed, "and the card it reads selected");
             assert_eq!(
                 crate::launcher::cursor(&app, &crate::launcher::bands(&app)),
@@ -10747,13 +10800,21 @@ mod tests {
             assert_eq!(app.focus, Focus::Sessions);
 
             // Again, from the cards: the pane folds away.
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
-            assert!(app.launcher_pane_hidden, "the second ⌘J folded the pane");
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
+            assert!(app.launcher_pane_hidden, "the second ⌘⇧J folded the pane");
             assert_eq!(app.focus, Focus::Sessions);
             draw(&mut app);
 
             // And once more brings it back.
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(!app.launcher_pane_hidden);
         });
     }
@@ -11633,6 +11694,7 @@ mod tests {
                         alive: false,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
+                        automation: None,
                     }),
                 },
             );

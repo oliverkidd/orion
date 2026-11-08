@@ -48,8 +48,8 @@ pub const SENT: &str = "✓ Sent · working again";
 pub const ANSWERED_IN_ORION: &str = "Answered in Orion";
 /// The ephemeral hint `Something else…` and the reply button give.
 pub const REPLY_HINT: &str = "Reply in this thread";
-/// What a session is called on its context line until automations name
-/// their own kinds.
+/// What a session no automation started is called on its context line;
+/// one an automation started goes by the automation's name.
 const AGENT_KIND: &str = "Agent";
 
 /// The `action_id`s on a message's buttons.
@@ -96,6 +96,8 @@ pub struct Ask<'a> {
     /// Local `HH:MM`.
     pub time: &'a str,
     pub session: &'a str,
+    /// The AUTOMATION that started the session (`Agent::automation`).
+    pub automation: Option<&'a str>,
     /// The session's last response, whole.
     pub said: Option<&'a str>,
     pub reason: Option<&'a WaitReason>,
@@ -115,7 +117,9 @@ pub struct Built {
 pub fn build(ask: &Ask) -> Built {
     let mut head = vec![
         json!({"type": "context", "elements": [{"type": "mrkdwn",
-            "text": format!("● {AGENT_KIND} · {} · {}", escape(ask.project), ask.time)}]}),
+            "text": format!("● {} · {} · {}",
+                ask.automation.and_then(orion_core::automation::name).unwrap_or(AGENT_KIND),
+                escape(ask.project), ask.time)}]}),
         json!({"type": "header", "text": {"type": "plain_text", "emoji": true,
             "text": clip(ask.session, HEADER_CHARS)}}),
     ];
@@ -496,6 +500,7 @@ impl Daemon {
             project: &project,
             time: &time,
             session: &row.name,
+            automation: row.automation.as_deref(),
             said: said.as_deref(),
             reason: reason.as_ref(),
             kind,
@@ -616,6 +621,7 @@ mod tests {
             project: "web",
             time: "10:42",
             session: "Fix the login redirect",
+            automation: None,
             said,
             reason,
             kind: kind_of(AgentStatus::NeedsFeedback, reason).unwrap(),
@@ -640,6 +646,19 @@ mod tests {
                 _ => b["text"]["text"].as_str().unwrap().to_string(),
             })
             .collect()
+    }
+
+    #[test]
+    fn an_automations_session_goes_by_the_automations_name() {
+        let reason = question();
+        let tagged = Ask {
+            automation: Some("bug_fixer"),
+            ..ask(None, Some(&reason))
+        };
+        assert_eq!(
+            texts(&build(&tagged).blocks)[0],
+            "● Bug fixer · web · 10:42"
+        );
     }
 
     #[test]

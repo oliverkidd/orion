@@ -1699,6 +1699,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         }
     }
 

@@ -24,13 +24,6 @@ use std::path::{Path, PathBuf};
 /// is reaped).
 pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1h"];
 
-/// The **Auto-fix my PRs** words (Settings → General), off and on, in the
-/// order the row cycles them (`crate::autofix::Mode`).
-pub const AUTOFIX_MODES: &[&str] = &[
-    crate::autofix::Mode::Off.as_str(),
-    crate::autofix::Mode::Auto.as_str(),
-];
-
 /// Values the settings overlay cycles through for `done_sound` (what rings
 /// when a turn nobody watched reaches FINISHED) and `feedback_sound` (what
 /// rings when one stops at NEEDS FEEDBACK, or dies mid-turn). `off` is
@@ -389,7 +382,6 @@ pub struct SettingsTab {
 pub enum SettingKind {
     FollowNewSession,
     SessionIdleTimeout,
-    PrAutofix,
     OutsideEditor,
     DoneSound,
     FeedbackSound,
@@ -630,12 +622,6 @@ pub const GENERAL_SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::SessionIdleTimeout,
         label: "Idle session timeout",
         hint: "Kill idle sessions in unviewed worktrees (busy ones spared; off disables)",
-        group: "Launching",
-    },
-    SettingSpec {
-        kind: SettingKind::PrAutofix,
-        label: "Auto-fix my PRs",
-        hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work — with none, your default agent at the PR autofix preset's model and effort — unless that preset's Runs on row pins a harness. It is told that preset's text. ^G in the pull requests modal sends one whatever this says",
         group: "Launching",
     },
     SettingSpec {
@@ -1207,12 +1193,13 @@ pub struct Config {
     /// opened on.
     #[serde(skip_serializing)]
     pub pr_merge_method: Option<String>,
-    /// **Auto-fix my PRs** (Settings → General): when one of your pull
-    /// requests hits merge conflicts or failing checks, send an agent to
-    /// fix it at once — `auto`, the default — or not, `off`. An older
-    /// orion's `ask` is rewritten to `auto` on load ([`Config::migrate`]).
-    /// See `crate::autofix`.
-    pub pr_autofix: String,
+    /// RETIRED: **Auto-fix my PRs**, through 2.x — `off`, or anything else
+    /// (`auto`, an older `ask`) for on. Read, never written, and left in
+    /// the file for the older builds that read it: its value seeds the
+    /// PR fixer's `automations.per.pr_fixer.on` once
+    /// ([`Config::migrate`]).
+    #[serde(skip_serializing)]
+    pub pr_autofix: Option<String>,
     /// MOVED to the **PR autofix** SYSTEM PRESET's model and effort:
     /// through 2.x the autofix agent's fallback model and effort. Read,
     /// never written; [`Config::move_into_presets`] carries them across as
@@ -1338,6 +1325,9 @@ pub struct Config {
     pub microsoft: MicrosoftSettings,
     /// Settings → Connections › GITHUB AND LINEAR: what Needs you lists.
     pub inbox: InboxSettings,
+    /// AUTOMATIONS (`⌘J`): the running cap, and each automation's own
+    /// settings (`crate::automations::config`).
+    pub automations: crate::automations::config::AutomationsSettings,
     /// Keys the files held that this build could not read; they loaded as
     /// defaults. Never written: [`Config::save`] reads it to leave those
     /// stored values alone — most likely a newer orion's — unless the
@@ -1536,7 +1526,7 @@ impl Default for Config {
             hide_draft_prs: false,
             diff_tree_view: true,
             pr_merge_method: None,
-            pr_autofix: crate::autofix::Mode::Auto.as_str().into(),
+            pr_autofix: None,
             autofix_model: None,
             autofix_effort: None,
             review_account: None,
@@ -1565,6 +1555,7 @@ impl Default for Config {
             slack: SlackSettings::default(),
             microsoft: MicrosoftSettings::default(),
             inbox: InboxSettings::default(),
+            automations: Default::default(),
             skipped: BTreeSet::new(),
         }
     }
@@ -2565,11 +2556,6 @@ impl Config {
         out
     }
 
-    /// **Auto-fix my PRs**, read: anything but `off` is on.
-    pub fn autofix_mode(&self) -> crate::autofix::Mode {
-        crate::autofix::Mode::parse(&self.pr_autofix)
-    }
-
     /// What the AUTOFIX agent launches on when it does not run on the pull
     /// request's own agent: the harness the **PR autofix** SYSTEM PRESET
     /// pins, while that is on, else the default agent
@@ -2811,9 +2797,6 @@ impl Config {
         match kind {
             SettingKind::FollowNewSession => on_off(self.follow_new_session).into(),
             SettingKind::SessionIdleTimeout => self.session_idle_timeout.clone(),
-            SettingKind::PrAutofix => {
-                on_off(self.autofix_mode() == crate::autofix::Mode::Auto).into()
-            }
             SettingKind::OutsideEditor => crate::outside_editor::row_label(&self.outside_editor),
             SettingKind::DoneSound => self.done_sound.clone(),
             SettingKind::FeedbackSound => self.feedback_sound.clone(),
@@ -2976,10 +2959,6 @@ impl Config {
             SettingKind::SessionIdleTimeout => {
                 self.session_idle_timeout =
                     cycle_choice(&self.session_idle_timeout, SESSION_IDLE_TIMEOUTS, step).into();
-            }
-            SettingKind::PrAutofix => {
-                let on = self.autofix_mode() == crate::autofix::Mode::Auto;
-                self.pr_autofix = AUTOFIX_MODES[usize::from(!on)].into();
             }
             SettingKind::OutsideEditor => {
                 let current = crate::outside_editor::Choice::parse(&self.outside_editor);
@@ -3221,12 +3200,15 @@ fn load_layers(path: &Path, local: &Path) -> Config {
 
 impl Config {
     /// What an older release stored, in the words this one keeps, so the
-    /// next save writes it once and nothing reads the old word after: a
-    /// `pr_autofix` of `ask` — from when autofix asked before it sent —
-    /// is `auto`.
+    /// next save writes it once: the retired `pr_autofix` — `off`, or on
+    /// in any other word — is the PR fixer's on/off, unless the PR fixer
+    /// already says.
     fn migrate(&mut self) {
-        if self.pr_autofix.trim().eq_ignore_ascii_case("ask") {
-            self.pr_autofix = crate::autofix::Mode::Auto.as_str().into();
+        use crate::automations::Automation;
+        if let Some(old) = &self.pr_autofix {
+            let on = !old.trim().eq_ignore_ascii_case("off");
+            let fixer = self.automations.of_mut(Automation::PrFixer);
+            fixer.on.get_or_insert(on);
         }
         self.move_harness_keys();
     }
@@ -3481,17 +3463,66 @@ mod tests {
     }
     use crate::keymap::Keymap;
 
-    /// An older orion's `pr_autofix: "ask"` is `auto` once loaded, and a
-    /// save writes `auto` back in its place.
+    /// The retired `pr_autofix` loads as nothing a setting reads and
+    /// survives a save as written; its value seeds the PR fixer's on/off
+    /// once — `off` off, any other word on — and the PR fixer's own entry
+    /// wins after that.
     #[test]
-    fn an_old_autofix_ask_is_rewritten_to_auto() {
+    fn the_retired_pr_autofix_seeds_the_pr_fixer_once() {
+        use crate::automations::Automation;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"pr_autofix": "ask"}"#).unwrap();
-        let cfg = load_from(&path);
-        assert_eq!(cfg.pr_autofix, "auto");
+        for (word, on) in [
+            ("off", false),
+            (" Off ", false),
+            ("auto", true),
+            ("ask", true),
+        ] {
+            std::fs::write(&path, format!(r#"{{"pr_autofix": "{word}"}}"#)).unwrap();
+            let cfg = load_from(&path);
+            assert_eq!(cfg.automations.is_on(Automation::PrFixer), on, "{word}");
+            cfg.save_to(&path).unwrap();
+            let saved = read_json_file(&path);
+            assert_eq!(saved["pr_autofix"], word, "survives a save");
+            assert_eq!(saved["automations"]["per"]["pr_fixer"]["on"], on);
+        }
+        // Seeded once: the PR fixer's own word stands from then on.
+        std::fs::write(
+            &path,
+            r#"{"pr_autofix": "off", "automations": {"per": {"pr_fixer": {"on": true}}}}"#,
+        )
+        .unwrap();
+        assert!(load_from(&path).automations.is_on(Automation::PrFixer));
+        // A config with neither has it on.
+        let none: Config = serde_json::from_str("{}").unwrap();
+        assert!(none.automations.is_on(Automation::PrFixer));
+        assert_eq!(none.automations.max_running, 5);
+    }
+
+    /// The `automations` keys round-trip through a save.
+    #[test]
+    fn automations_settings_round_trip() {
+        use crate::automations::config::{Schedule, Whose};
+        use crate::automations::Automation;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = Config::default();
+        cfg.automations.max_running = 3;
+        let bug = cfg.automations.of_mut(Automation::BugFixer);
+        bug.on = Some(true);
+        bug.extra_steer = "Keep it small.".into();
+        bug.labels = vec!["Bug".into(), "Regression".into()];
+        bug.preset = Some("Careful".into());
+        let review = cfg.automations.of_mut(Automation::WeekReview);
+        review.when = Some(Schedule {
+            day: "fri".into(),
+            at: "08:30".into(),
+        });
+        review.whose = Whose::WholeTeam;
         cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["pr_autofix"], "auto");
+        let loaded = load_from(&path);
+        assert!(loaded.skipped.is_empty(), "{:?}", loaded.skipped);
+        assert_eq!(loaded.automations, cfg.automations);
     }
 
     /// The config file the newest release wrote, every key off its
@@ -4166,21 +4197,12 @@ mod tests {
         assert!(cfg.animations);
     }
 
-    /// **Auto-fix my PRs** is on by default, toggling off and back on; with
-    /// no session to copy, the agent runs on the default agent at the PR
-    /// autofix preset's model — one that harness no longer offers falls
-    /// back to its own default.
+    /// With no session to copy, the autofix agent runs on the default
+    /// agent at the PR autofix preset's model — one that harness no longer
+    /// offers falls back to its own default.
     #[test]
-    fn autofix_toggles_and_falls_back_to_the_presets_model() {
+    fn autofix_falls_back_to_the_presets_model() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.value_label(SettingKind::PrAutofix), "on");
-        cfg.cycle_kind(SettingKind::PrAutofix, 1);
-        assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Off);
-        assert_eq!(cfg.value_label(SettingKind::PrAutofix), "off");
-        cfg.cycle_kind(SettingKind::PrAutofix, 1);
-        assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Auto);
-        let missing: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(missing.autofix_mode(), crate::autofix::Mode::Auto);
 
         let preset = crate::agent_presets::SystemPreset::PrAutofix.default_preset();
         let defaults = cfg.autofix_launch(&preset);
@@ -4871,6 +4893,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         assert_eq!(
             loaded.continue_targets(&agent(AgentKind::Claude, None)),
@@ -5460,7 +5483,6 @@ mod tests {
             [
                 ("Launching", "Follow new session"),
                 ("Launching", "Idle session timeout"),
-                ("Launching", "Auto-fix my PRs"),
                 ("Launching", "Open files in"),
                 ("Sounds", "Turn finished"),
                 ("Sounds", "Needs you"),

@@ -604,6 +604,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         store
             .insert_agent_with_auto_title(&agent("pending"), true)

@@ -86,6 +86,8 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         Overlay::Linear(v) => vec![(Field::LinearQuery, &mut v.query)],
         Overlay::ProjectPicker(p) => vec![(Field::Only, &mut p.query)],
         Overlay::Autofix(form) => vec![(Field::AutofixNote, &mut form.note)],
+        // The extra steer, while it is being written.
+        Overlay::Automations(v) => v.steer.iter_mut().map(|i| (Field::Only, i)).collect(),
         Overlay::WeekReview(v) => match v.mode {
             crate::week_review::Mode::Screen => vec![(Field::ReviewNote, &mut v.note)],
             crate::week_review::Mode::Page => Vec::new(),
@@ -138,7 +140,7 @@ fn focus(app: &mut App, field: Field) {
             v.focus = crate::app::DiffFocus::Files;
         }
         (Some(Overlay::Autofix(form)), Field::AutofixNote) => {
-            form.row = crate::autofix::Row::Note;
+            form.row = crate::automations::pr_fixer::Row::Note;
         }
         (Some(Overlay::WeekReview(view)), Field::ReviewNote) => {
             view.side = crate::week_review::Side::Form;

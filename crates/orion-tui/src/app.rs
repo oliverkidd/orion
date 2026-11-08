@@ -2392,7 +2392,10 @@ pub enum Overlay {
     ProjectPicker(crate::launcher::ProjectPicker),
     /// The AUTOFIX MODAL: one of your pull requests broke (or `⌘G` in the
     /// PULL REQUESTS MODAL) — what to send the agent to fix.
-    Autofix(Box<crate::autofix::AutofixForm>),
+    Autofix(Box<crate::automations::pr_fixer::AutofixForm>),
+    /// `⌘J`: AUTOMATIONS — each one's on/off, preset, extra steer, and
+    /// what it is running and has done (`crate::automations::view`).
+    Automations(crate::automations::view::AutomationsView),
     /// `⌘I`: the TODOS MODAL — the selected project's own todo list.
     Todos(crate::todos::TodoView),
     /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
@@ -2479,6 +2482,10 @@ pub struct AgentLaunchDraft {
     /// The TODO this launch was sent at: `create_agent` keeps it by the
     /// request (`App::todo_pending`) for the Ack to write the session onto.
     pub todo: Option<crate::todos::TodoRef>,
+    /// The AUTOMATION starting this session: the tag the DAEMON keeps on
+    /// the row (`Agent::automation`). Set through
+    /// `crate::automations::launch`, which minds the running cap.
+    pub automation: Option<crate::automations::Automation>,
 }
 
 impl AgentLaunchDraft {
@@ -2511,6 +2518,7 @@ impl AgentLaunchDraft {
             follow: true,
             mode: orion_core::AgentMode::Edit,
             todo: None,
+            automation: None,
         }
     }
 }
@@ -4569,10 +4577,11 @@ pub struct App {
     pub pr_cache: Option<crate::pr_cache::PrCache>,
     pub pr_cache_dirty: bool,
     /// AUTOFIX: the ledger, the watched pull requests and the queued asks
-    /// (`crate::autofix`).
-    pub autofix: crate::autofix::State,
-    /// **Auto-fix my PRs** (Settings → General), mirrored.
-    pub autofix_mode: crate::autofix::Mode,
+    /// (`crate::automations::pr_fixer`).
+    pub autofix: crate::automations::pr_fixer::State,
+    /// AUTOMATIONS: their runners, their settings mirrored, and the
+    /// creates still on their way (`crate::automations`).
+    pub automations: crate::automations::Engine,
     /// Where a file dropped onto a prompt box bound for an agent is copied
     /// before macOS deletes it (`dropped_files`), and where `^V` keeps the
     /// clipboard's image (`clipboard_image`): the main loop installs the
@@ -4868,8 +4877,8 @@ impl App {
             pr_review: Default::default(),
             pr_cache: None,
             pr_cache_dirty: false,
-            autofix: crate::autofix::State::default(),
-            autofix_mode: crate::autofix::Mode::Off,
+            autofix: crate::automations::pr_fixer::State::default(),
+            automations: Default::default(),
             attachments_dir: None,
             pr_detail_stale: std::collections::HashSet::new(),
             pr_detail_unsaved: std::collections::HashSet::new(),
@@ -6775,6 +6784,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             })
             .collect();
         app
@@ -7062,6 +7072,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         });
         app.tree.agents.push(Agent {
             id: AgentId("a2".into()),
@@ -7296,6 +7307,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             });
         }
 

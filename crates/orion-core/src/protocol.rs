@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 53;
+pub const PROTOCOL_VERSION: u32 = 54;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -145,6 +145,10 @@ pub enum ClientRequest {
         /// and a mode the harness does not have is dropped.
         #[serde(default)]
         mode: crate::harness::AgentMode,
+        /// The AUTOMATION starting this session (`Agent::automation`), or
+        /// None for a launch of yours. Persisted with the row.
+        #[serde(default)]
+        automation: Option<String>,
     },
     /// Create a local AGENT of any kind from an OPEN PRS row — a PR
     /// SESSION. It never runs in the ROOT WORKTREE: the daemon finds the
@@ -193,6 +197,9 @@ pub enum ClientRequest {
         /// The mode the CLI starts in, under `CreateAgent`'s rules.
         #[serde(default)]
         mode: crate::harness::AgentMode,
+        /// The AUTOMATION starting it, under `CreateAgent`'s rules.
+        #[serde(default)]
+        automation: Option<String>,
     },
     /// CHECK OUT A PULL REQUEST: the PROJECT's checkout of the pull
     /// request's head branch — found, or cut exactly as a PR SESSION's is

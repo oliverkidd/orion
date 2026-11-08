@@ -99,6 +99,7 @@ impl Daemon {
             auto_title: true,
             starting_prompt: Some(starting_prompt.to_string()),
             pr_url: None,
+            automation: None,
         })
     }
 
@@ -194,6 +195,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         }
     }
 

@@ -70,7 +70,7 @@ pub fn of(app: &App, project: &ProjectId, url: &str, number: u64) -> Work {
     let head = head_branch(app, project, url);
     let fixer = head
         .as_deref()
-        .and_then(|head| crate::autofix::fixer(app, project, head, number));
+        .and_then(|head| crate::automations::pr_fixer::fixer(app, project, head, number));
     let lines = [
         autofix_line(app, url, fixer),
         linear_line(app, project, url, head.as_deref()),
@@ -84,7 +84,7 @@ pub fn of(app: &App, project: &ProjectId, url: &str, number: u64) -> Work {
 /// The branch the pull request comes from: its page's word, else its row
 /// in the project's open list.
 fn head_branch(app: &App, project: &ProjectId, url: &str) -> Option<String> {
-    let row = || crate::autofix::open_pr(app, project, url).map(|pr| pr.head.clone());
+    let row = || crate::automations::pr_fixer::open_pr(app, project, url).map(|pr| pr.head.clone());
     app.pr_detail
         .get(url)
         .map(|d| d.head.clone())
@@ -243,7 +243,7 @@ fn sessions_line(
         .agents
         .iter()
         .filter(|a| !a.archived && Some(&a.id) != fixer.map(|f| &f.id))
-        .filter(|a| crate::autofix::on_branch(app, a, project, head))
+        .filter(|a| crate::automations::pr_fixer::on_branch(app, a, project, head))
         .collect();
     agents.sort_by_key(|a| crate::app::recency_key(a));
     let items: Vec<Item> = agents
@@ -297,7 +297,7 @@ pub(crate) fn click(app: &mut App, hit: WorkHit, out: &mut Vec<ClientRequest>) {
     match hit {
         WorkHit::Session(id) => crate::event_loop::jump_to_session(app, id, out),
         WorkHit::Issue { project, id } => crate::linear::open_at(app, &project, &id),
-        WorkHit::SendAutofix => crate::autofix::open_asked(app),
+        WorkHit::SendAutofix => crate::automations::pr_fixer::open_asked(app),
     }
 }
 
@@ -439,6 +439,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         });
         id
     }

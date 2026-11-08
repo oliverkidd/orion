@@ -236,6 +236,10 @@ pub enum Action {
     /// so a key bound to it stays bound.
     OpenInCursor,
     Quit,
+    /// `⌘J`: AUTOMATIONS — every automation orion runs on its own, each
+    /// one's on/off, preset and extra steer, and what it is running and
+    /// has done (`crate::automations::view`).
+    Automations,
 }
 
 /// One rebindable row: what it does, where it's live, and what it starts as.
@@ -840,9 +844,9 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Fold the pane away — which also unselects the row it was reading — or bring it back. {toggle_launcher_pane} works from inside the pane too",
         group: "GENERAL",
         scope: Scope::Global,
-        // ⌘J, as in Cursor, reaches orion from inside the pane as well —
-        // no one types a ⌘ chord as text.
-        defaults: &["cmd+j"],
+        // ⌘⇧J — ⌘J is Automations — reaches orion from inside the pane
+        // as well: no one types a ⌘ chord as text.
+        defaults: &["cmd+shift+j"],
     },
     ActionSpec {
         action: Action::ToggleFullScreen,
@@ -1028,6 +1032,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         scope: Scope::Global,
         // Not a bare `q`: a stray letter must not ask to quit.
         defaults: &["ctrl+c"],
+    },
+    ActionSpec {
+        action: Action::Automations,
+        id: "automations",
+        label: "Automations",
+        hint: "What orion runs on its own — the PR fixer, the bug fixer, week in review and the rest: turn each on or off, pick its preset, give it an extra steer, see what it is running",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &["cmd+j"],
     },
 ];
 

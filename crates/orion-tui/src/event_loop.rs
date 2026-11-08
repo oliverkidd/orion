@@ -518,11 +518,12 @@ async fn main_loop(
                 // AUTOFIX: the checks of each broken pull request it is
                 // watching, when their turn has come — and a queued ask
                 // onto a free screen.
-                for (url, number, dir) in crate::autofix::due_fetches(&mut app) {
+                for (url, number, dir) in crate::automations::pr_fixer::due_fetches(&mut app) {
                     spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
                 }
-                crate::autofix::send_waiting(&mut app, &mut out);
-                crate::autofix::note_stand_downs(&mut app);
+                // AUTOMATIONS: each runner's turn — the PR fixer's queued
+                // asks among them.
+                crate::automations::tick(&mut app, &mut out);
                 // BASE SYNC: the most overdue project's root fetched, and
                 // fast-forwarded when it sits on the base branch.
                 crate::base_sync::tick(&mut app);
@@ -1905,7 +1906,7 @@ fn note_open_prs_answer_at(
     // AUTOFIX watches the user's pull requests that broke — on a real
     // answer, not the old list kept over a failed one.
     if !failed {
-        crate::autofix::note_list(app, &project, &list);
+        crate::automations::pr_fixer::note_list(app, &project, &list);
     }
     let project_id = project.clone();
     app.open_prs.insert(
@@ -2337,7 +2338,7 @@ fn land_pr_detail(
         );
     }
     // A watched pull request's checks, for AUTOFIX.
-    crate::autofix::land_detail(app, &url, detail.as_ref(), out);
+    crate::automations::pr_fixer::land_detail(app, &url, detail.as_ref(), out);
     match detail {
         Some(detail) => {
             let retired = !app.prs.status_or_open(&url).is_open();
@@ -3354,7 +3355,7 @@ fn typing_into_pane(app: &App) -> bool {
             .is_some_and(|t| !t.exited && t.scroll_offset() == 0)
 }
 
-/// Is `chord` one of the pane fold's (`⌘J`, whatever `keybindings` binds
+/// Is `chord` one of the pane fold's (`⌘⇧J`, whatever `keybindings` binds
 /// to it) that a LOCKED PANE lets through rather than forwards — a ⌘
 /// chord only: `^J` is the agent's newline.
 fn folds_launcher_pane(app: &App, chord: &crate::keymap::KeyChord) -> bool {
@@ -3460,7 +3461,7 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         return crate::todos::paste(app, text);
     }
     if matches!(&app.overlay, Some(Overlay::Autofix(_))) {
-        crate::autofix::paste(app, text);
+        crate::automations::pr_fixer::paste(app, text);
         return true;
     }
     if matches!(&app.overlay, Some(Overlay::WeekReview(_))) {
@@ -3967,7 +3968,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             leave_terminal_lock(app);
             return;
         }
-        // `⌘J` is the way out of the LAUNCHER PANE: the first press
+        // `⌘⇧J` is the way out of the LAUNCHER PANE: the first press
         // hands the keys back to the card the pane reads, and the same
         // chord from the cards then folds the pane away
         // (`launcher::fold_key`). Only the pane under the cards (a
@@ -4231,6 +4232,7 @@ fn dispatch_action(
         Action::CopyLinearIssues => crate::linear::copy_worktree_issues(app),
         Action::Todos => crate::todos::open(app),
         Action::WeekReview => crate::week_review::open(app),
+        Action::Automations => crate::automations::view::open(app),
         Action::PullWorktree => {
             if let Some(id) = crate::git_sync::target(app) {
                 crate::git_sync::request(app, id, crate::git_sync::Op::Pull);
@@ -5053,6 +5055,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::Hosts
             | Action::AgentPresets
             | Action::OpenSkillsFolder
+            | Action::Automations
     )
 }
 
@@ -7841,7 +7844,8 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Todos(_) => crate::todos::handle_key(app, key, out),
         Overlay::Onboard(_) => crate::onboard::handle_key(app, key, out),
         Overlay::WhatsNew(_) => crate::whats_new::handle_key(app, key),
-        Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
+        Overlay::Autofix(_) => crate::automations::pr_fixer::handle_key(app, key, out),
+        Overlay::Automations(_) => crate::automations::view::handle_key(app, key, out),
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
@@ -8847,7 +8851,7 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.theme = cfg.theme();
     app.animations = cfg.animations;
     app.diff_tree = cfg.diff_tree_view;
-    app.autofix_mode = cfg.autofix_mode();
+    app.automations.settings = cfg.automations.clone();
     // Turned off, the readout goes at once; the poll stops with it.
     app.spotify_enabled = cfg.spotify;
     if !cfg.spotify && app.spotify.take().is_some() {
@@ -10780,7 +10784,9 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         follow,
         mode,
         todo,
+        automation,
     } = draft;
+    let automation = automation.map(|a| a.id().to_string());
     // A PR SESSION is addressed to the PROJECT, not to a checkout: the
     // DAEMON runs it in the PR head branch's own worktree, creating that
     // checkout the first time. `worktree` here only names which project.
@@ -10869,6 +10875,9 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
     if let Some(todo) = todo {
         app.todo_pending.insert(req_id, todo);
     }
+    if automation.is_some() {
+        app.automations.launching.insert(req_id);
+    }
     // The second half of a launch the user already navigated away from:
     // its Ack leaves the cursors where they are, as the first half's did.
     if !follow {
@@ -10888,6 +10897,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             head: pr.head,
             starting_prompt,
             mode,
+            automation,
         },
         None => ClientRequest::CreateAgent {
             req_id,
@@ -10900,6 +10910,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             auto_title,
             starting_prompt,
             mode,
+            automation,
         },
     });
 }
@@ -12045,7 +12056,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         return;
     }
     if matches!(&app.overlay, Some(Overlay::Autofix(_))) {
-        crate::autofix::handle_mouse(app, mouse);
+        crate::automations::pr_fixer::handle_mouse(app, mouse);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Automations(_))) {
+        crate::automations::view::handle_mouse(app, mouse, mouse_pos, out);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::WeekReview(_))) {
@@ -12833,6 +12848,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             // real ones, and nothing below moves a cursor, the pane or
             // FOCUS back to them.
             let follow = !app.left_behind.remove(&req_id);
+            app.automations.launching.remove(&req_id);
             // A session sent at a TODO is written onto the item.
             if let Some(todo) = app.todo_pending.remove(&req_id) {
                 if let Some(EntityId::Agent(id)) = &created {
@@ -13049,6 +13065,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             if let Some(id) = &req_id {
                 app.left_behind.remove(id);
                 app.todo_pending.remove(id);
+                app.automations.launching.remove(id);
             }
             match req_id.and_then(|id| app.pending.remove(&id)) {
                 Some(PendingIntent::DeleteWorktree(rollback)) => {
@@ -13656,6 +13673,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -13684,6 +13702,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -14583,6 +14602,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -19181,6 +19201,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             }
         };
@@ -19235,6 +19256,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             }),
         };
         // A long-running turn outranks a more recent finish, because a
@@ -19317,6 +19339,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             }),
         };
         hse(
@@ -19376,6 +19399,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -19444,6 +19468,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -21260,6 +21285,7 @@ mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -21784,6 +21810,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         })
     }
 
@@ -23373,6 +23400,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
 
         // a1 is the selected session; its upsert lands under w2.
@@ -23563,6 +23591,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         })
     }
 
@@ -26055,6 +26084,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -26079,6 +26109,7 @@ mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -26358,6 +26389,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         for a in [
             agent("ask", "w2", AgentStatus::NeedsFeedback, false),
@@ -26804,6 +26836,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -31579,6 +31612,7 @@ mod tests {
                         alive: true,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
+                        automation: None,
                     }),
                 },
             );
@@ -31654,6 +31688,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         })
     }
 
@@ -32295,6 +32330,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -32361,6 +32397,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -33981,6 +34018,7 @@ mod tests {
                         alive: true,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
+                        automation: None,
                     }),
                 },
             );
@@ -36431,6 +36469,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -37255,7 +37294,9 @@ mod tests {
             (
                 "Autofix",
                 |app| {
-                    app.overlay = Some(Overlay::Autofix(Box::new(crate::autofix::sample_form())));
+                    app.overlay = Some(Overlay::Autofix(Box::new(
+                        crate::automations::pr_fixer::sample_form(),
+                    )));
                 },
                 None,
             ),
@@ -37279,6 +37320,13 @@ mod tests {
                     );
                 },
                 Some("Prompt"),
+            ),
+            (
+                "Automations",
+                |app| {
+                    run_action(app, crate::keymap::Action::Automations);
+                },
+                None,
             ),
         ]
     }
@@ -37481,6 +37529,7 @@ mod tests {
             Overlay::WeekReview(_) => "WeekReview",
             Overlay::Conflicts(_) => "Conflicts",
             Overlay::Todos(_) => "Todos",
+            Overlay::Automations(_) => "Automations",
         }
     }
 
@@ -37509,7 +37558,7 @@ mod tests {
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 23, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 24, "a variant came or went: {seen:?}");
         });
     }
 

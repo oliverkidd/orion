@@ -97,7 +97,7 @@ pub struct Store {
     /// AUTOFIX's ledger, by pull request URL: the breakage last sent or
     /// dismissed, so a relaunch does not ask about it again.
     #[serde(default)]
-    pub autofix: HashMap<String, crate::autofix::Record>,
+    pub autofix: HashMap<String, crate::automations::pr_fixer::Record>,
 }
 
 /// Where this instance keeps its cache. Cheap to clone: it is a path.
@@ -548,8 +548,8 @@ mod tests {
             details: [(detail(7).url.clone(), detail(7))].into_iter().collect(),
             autofix: [(
                 open(7).url,
-                crate::autofix::Record {
-                    handled: Some(crate::autofix::Fingerprint {
+                crate::automations::pr_fixer::Record {
+                    handled: Some(crate::automations::pr_fixer::Fingerprint {
                         sha: "abc".into(),
                         conflicts: true,
                         checks: vec!["unit".into()],

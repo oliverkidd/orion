@@ -172,6 +172,7 @@ fn overlay_name(app: &App) -> &'static str {
         Some(Overlay::Onboard(_)) => "Onboard",
         Some(Overlay::WhatsNew(_)) => "WhatsNew",
         Some(Overlay::Autofix(_)) => "Autofix",
+        Some(Overlay::Automations(_)) => "Automations",
         Some(Overlay::Todos(_)) => "Todos",
         Some(Overlay::WeekReview(_)) => "WeekReview",
         Some(Overlay::Conflicts(_)) => "Conflicts",

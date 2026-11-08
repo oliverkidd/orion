@@ -38,7 +38,6 @@ The DAEMON reads `session_idle_timeout`, `harnesses`, `claude_accounts`, `quick_
 |---|---|---|---|
 | `follow_new_session` | `true` | Launching → **Follow new session** | A QUICK PROMPT launch puts the cursor on the new session's row and the pane on it, without entering it. Off, the cursor stays where it was and the footer names where the session went. |
 | `session_idle_timeout` | `"5m"` | **Idle session timeout** | How long a session in a worktree no client is viewing may sit idle before the IDLE REAPER kills its PTY. See [below](#idle-timeout). |
-| `pr_autofix` | `"auto"` | **Auto-fix my PRs** | `auto` or `off`. When one of your pull requests hits conflicts or failing checks, an `autofix-<n>` session starts on it with the **PR autofix** preset's text, on the PR's own agent (see [Presets](#presets)). It stops after 3 sends in a row that didn't turn the PR green. `⌘G` on a pull request sends one by hand either way. |
 | `outside_editor` | `"auto"` | **Open files in** | The app `⌘O` opens a file or checkout in: `auto`, `cursor`, `vscode` or `sublime`. `auto` is the first installed of Cursor, VS Code and Sublime Text, else macOS's `open`. `i` on the row installs a missing app (`brew install --cask cursor`, `visual-studio-code`, `sublime-text`). Over ssh a file opens in the BUILT-IN EDITOR. |
 | `done_sound` | `"Glass"` | Sounds → **Turn finished** | Rung when a turn you haven't seen finishes: `off`, `bell`, or a macOS system sound (`Glass`, `Ping`, `Pop`, `Hero`, …). `←` / `→` play each. While the window is in the background the finish is also a desktop notification; `off` silences both. |
 | `feedback_sound` | `"Sosumi"` | Sounds → **Needs you** | The same, for a turn that stops to ask you or a CLI that dies mid-turn. Never rung for the pane you are typing in. |
@@ -195,6 +194,33 @@ lists, two switches `←`/`→` or `Enter` turn on and off:
 A key left out of a section keeps its default, the others as written. Tokens are never in the
 file: orion keeps them in the macOS Keychain, under services named `dev.orion.<service>`.
 
+### Automations
+
+Set on the AUTOMATIONS screen (`⌘J`, see [Automations](sessions.md#automations)), not in
+Settings. Global, never per project.
+
+```json
+{ "automations": {
+    "max_running": 5,
+    "per": {
+      "pr_fixer": { "on": true, "extra_steer": "" },
+      "bug_fixer": { "on": false, "labels": ["Bug"], "preset": "Careful" },
+      "week_review": { "when": { "day": "fri", "at": "08:30" }, "whose": "just_me" } } } }
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `automations.max_running` | `5` | No automation starts a session while this many automation sessions are running (at work or waiting on you). `←` / `→` on the screen change it, 1 to 20. |
+| `automations.per.<id>.on` | `true` for `pr_fixer`, else `false` | The automation on or off. Ids: `pr_fixer`, `bug_fixer`, `feature_builder`, `week_review`, `meeting_takeaways`, `blue_sky`. |
+| `automations.per.<id>.extra_steer` | `""` | Added to every prompt the automation sends, after a blank line, as `Extra steer: …`. |
+| `automations.per.<id>.preset` | none | The preset `⌘U` picked in place of the automation's own system preset, by name. A name no preset has falls back to the system preset. |
+| `automations.per.<id>.labels` | `[]` | The bug fixer's and the feature builder's Linear labels. |
+| `automations.per.<id>.when`, `.whose` | none, `"just_me"` | When week in review runs, and whose work it covers (`just_me` or `whole_team`). |
+
+`pr_autofix` (**Auto-fix my PRs**, through 2.x) is retired. A config that has it keeps it for the
+older builds that read it, and its value turns the PR fixer on (`auto`, `ask`) or off (`off`) once,
+until `automations.per.pr_fixer.on` says otherwise.
+
 ### Hand-edited
 
 These have no row.
@@ -287,7 +313,7 @@ of what the agent will get.
 
 | Preset | Used for | Runs on |
 |---|---|---|
-| **PR autofix** | the text round what broke, for every autofix agent | the PR's own agent (the session that worked on its branch), else your default |
+| **PR autofix** | the text round what broke, for every agent the PR fixer sends | the PR's own agent (the session that worked on its branch), else your default |
 | **Linear Ticket** | wraps every `⌘L` launch; `{issues}`, `{ids}` and `{first_id}` are filled in | the box's agent |
 | **Week review** | the rules the week in review is written by | your default agent's account, at sonnet · medium |
 | **Bug fixer** | what the bug fixer tells the agent it starts on a labelled Linear bug | the box's agent |
@@ -300,8 +326,9 @@ be renamed or deleted. On it `Enter` edits and `^R` puts orion's text back. On o
 **Yours**, `Enter` edits, `^N` makes a new one and `^D` deletes it.
 
 Presets are picked, never managed, elsewhere: `⌘U` / `^X` in the QUICK PROMPT — the box `Enter` opens on
-a Linear issue or a todo — **Agent presets** in the palette, and `⌘U` over an agent's locked pane, which
-pastes the text in at the caret.
+a Linear issue or a todo — **Agent presets** in the palette, `⌘U` over an agent's locked pane, which
+pastes the text in at the caret, and `⌘U` on the AUTOMATIONS screen, which picks the preset an
+automation is told by in place of its system preset.
 
 ## Setup command
 

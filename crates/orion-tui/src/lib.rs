@@ -2,7 +2,6 @@ pub mod agent_picker;
 pub mod agent_presets;
 pub mod app;
 pub mod app_bundle;
-pub mod autofix;
 pub mod automations;
 pub mod base_sync;
 pub mod branch_list;
