@@ -149,7 +149,7 @@ itself:
   description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
   `{issues}` gets them where its `{task}` is — after its text when it names neither. orion's text: one commit per issue, one pull
   request titled `"{ids}: …"` whose description starts `Fixes {ids}`.
-- **Week review** holds the rules a WEEK IN REVIEW (`⌘⇧Y`) is written by — what earns a line, Show
+- **Week review** holds the rules a [week in review](#week-in-review) is written by — what earns a line, Show
   and Say, how a point is written — and the Claude account, model and effort that write it: sonnet ·
   medium unless you change them. Its **Runs on** row starts on **your default agent**: it is
   written through that agent's account; an account it pins that is off falls back to that.
@@ -755,6 +755,79 @@ labels and its own preset (**Bug fixer**, **Feature builder**). Both are off unt
 - **The panel.** **RUNNING** lists each session: `planning`, `plan to approve`, `building`, or
   `queued, 5 running` while the cap is full. **DONE THIS WEEK** lists the ones that finished.
 
+### Week in review
+
+Week in review writes up what was finished in the last 7 days — the pull requests merged, the
+Linear issues done, the todos ticked — as a review to read aloud with the product on screen: by
+product area, each point numbered, with what to **Show** and what to **Say** under the ones worth a
+demo. It writes one review for each project that had changes, so it's ready before the meeting.
+
+It runs three ways: on its **When** while it is on (Fridays 08:30 unless you change it), by `r` on
+its panel in Automations (`⌘J`, the `r run now` at the panel's top right), and by **Run week in
+review now** in the command palette (`⌘⇧P`), which also opens Automations on it to watch it go.
+
+```
+Week in review                          r run now
+Writes up the week from everything merged, done and ticked, …
+SETTINGS
+  On           on
+  When         Fri 08:30
+  Whose        just me
+  Preset       Week review · sonnet medium
+  Extra steer  none
+REVIEWS
+  Week 45                   Fri 08:30 · 9 points · new
+  Week 44                   Fri 08:31 · 12 points
+```
+
+- **When** is a day and a time: `Enter` on it and write one, `Fri 08:30` or `mon 9`. orion looks
+  once a minute while it runs. A time missed while the laptop was asleep runs on the first look after
+  it, once; turning week in review on after this week's time waits for next week's.
+- **Whose** is *just me* (the pull requests you opened, the issues assigned to you, your todos) or
+  *whole team*, where each point names its owner by initials — from their GitHub name, else their
+  login — and each area lists who contributed to it. `Enter` switches.
+- **Preset** is the **Week review** system preset, which holds the rules a review is written by and
+  the Claude account, model and effort that write it (sonnet · medium unless you change them).
+  **Extra steer** is added after those rules. A note a project kept for its reviews in an older
+  release becomes the extra steer once.
+- **REVIEWS** lists the runs kept, newest first, each named for the week it ends in, with when it
+  was written, how many points it makes, and `new` until read. While one is being written it heads
+  the list (`writing 2 of 4`), and the row's state says the same.
+
+`Enter` (or a click) on a review opens it on a page of its own, **a tab per project** it wrote up:
+`[`/`]`, `←`/`→` or `⇧←`/`⇧→` move between tabs (a click on one goes there), `↑`/`↓` and
+`PgUp`/`PgDn` scroll, `⌘C` copies the tab's review as Markdown, `⌘O` opens its file, and `Esc` goes
+back to Automations. The run being written opens on the same page, each tab showing its review being
+written and what went in until it lands; `⌘W` there stops what is still being written and keeps what
+came back.
+
+orion gathers; a model writes. A run fetches every project's pull requests merged in the week with
+their descriptions (a page of 100 at a time until the week is covered), and reads the done issues
+and ticked todos from the lists in hand. A project with none of the three is left out. A project
+GitHub could not be asked about is not written up from the rest, and its tab says why. Each project
+is one prompt, sent through a Claude account's print mode with no tools — text in, text out — three
+at a time. No session starts, nothing runs in a checkout, and there is nothing to tidy up after.
+
+The account is one orion runs sessions on, never whatever a bare `claude` would sign in as: the one
+the preset runs on (see [Agent presets](#agent-presets)), else your default agent's when that is a
+Claude account, and otherwise the first Claude account that is switched on. It runs as that
+account's own CLI with that account's config dir, so the ask lands on that sign-in and that
+account's usage. A run refuses to start, saying why in the footer, when no Claude account is on or
+its CLI is not on your PATH. A very large pull request — a feature branch merged in one go — sends
+far more of its description than an ordinary one, since its commit list is all the description it
+has; one that only moves a standing branch into `main` is marked a release and left out.
+
+The model is asked to list only what a person outside the team that built it would want to know or
+see, and never to count. What it sends back is held to its shape without a model: every pull
+request it names was in the week, every owner is the author of the point's first pull request. A
+reply that strays is still shown, with a line under its title saying how. The last line — how many
+were merged and not listed — is orion's own subtraction, so it is exact.
+
+Runs are kept under the DATA DIR as `reviews/all/<last day>/<project>.md`, one file a project, with
+a `meta.json` beside them saying what each was written from; the last 12 runs are kept, and a second
+run on the same day takes the first's place. Reviews kept by older releases stay on disk and are not
+listed.
+
 ## Your next meeting
 
 Signed in to Microsoft 365 (Settings › Connections), the footer shows your next meeting from an hour
@@ -763,59 +836,6 @@ before it starts: `▸ Standup in 12m · Teams`. While the meeting runs, `now` r
 
 orion reads your calendar for the next twelve hours every five minutes. Turn the segment off with
 **Next meeting in the footer**.
-
-## The WEEK IN REVIEW
-
-`⌘⇧Y` (`⇧W`) writes up what was finished in the selected PROJECT in the last 7 days — or 2 weeks,
-or a month — the pull requests merged, the Linear issues done, the todos ticked — as a review to
-read aloud with the product on screen: by product area, each point numbered, with what to **Show**
-and what to **Say** under the ones worth a demo.
-
-It is a screen of its own. Down the left, **New review**: its options — Whose, Where, the Range, the
-sources and the Note — and under them exactly what would be sent. Down the right, **Reviews**: the
-one being written, then the ones kept, newest first, each named for the week it ends in (`Week 45`,
-`Weeks 43–45` for two, `Month to 5 Nov`) and whose it is, `new` until it has been read. `Tab` moves
-between the two. `Enter` on the new review writes it and turns to a fresh page that shows it being
-written and what went in; when it lands, that page is the review. `Enter` (or a click) on a review
-in the list opens it on its page, and `Esc` comes back to the screen. Closed while one is being
-written, the modal opens next time on that review's page.
-
-orion gathers; a model writes. Opening the modal fetches every pull request merged in the range with
-its description (the PULL REQUESTS MODAL's merged list carries titles, and a review is written from
-what a pull request says it does), a page of 100 at a time until the range is covered; a longer
-range is a fetch of its own, asked for as it is picked. The done issues and ticked todos come from
-the lists already in hand — Linear's holds the last 7 days of done issues, so a longer range has
-that week of them, as its row says. `Enter` then puts all of it in one prompt and sends it through
-a Claude account's print mode with no tools: text in, text out. No session starts, nothing runs in
-a checkout, and there is nothing to tidy up after.
-
-The account is one orion runs sessions on, never whatever a bare `claude` would sign in as: the one
-the **Week review** system preset runs on (see [Agent presets](#agent-presets); a new list puts it
-on your default agent's account), else your default agent's when that is a Claude account, and
-otherwise the first Claude account that is switched on. The model and effort are the preset's too,
-sonnet · medium unless you change them. It runs as that account's own CLI with that account's config dir, so the ask lands on
-that sign-in and that account's usage. The new review says which on its **Via** line, as Claude accounts
-names it — `Work (a@b.co)`, or `Work (not signed in)` — and refuses to send, saying why, when no
-Claude account is on or its CLI is not on your PATH. An account that reads as not signed in is still
-tried: that record only knows a browser sign-in, and one on an API key answers all the same; one that
-cannot answer says so itself, and the new review shows what it said. A very large
-pull request — a feature branch merged in one go — sends far more of its description than an
-ordinary one, since its commit list is all the description it has; one that only moves a standing
-branch into `main` is marked a release and left out.
-
-**Whose** is *Just mine* (the pull requests you opened, the issues assigned to you) or *Everyone*,
-where each point names its owner by initials — from their GitHub name, else their login — and each
-area lists who contributed to it. **Where** is this project or all of them.
-
-The model is asked to list only what a person outside the team that built it would want to know or
-see, and never to count. What it sends back is held to its shape without a model: every pull
-request it names was in the range, every owner is the author of the point's first pull request. A
-reply that strays is still shown, with a line under its title saying how. The last line — how many
-were merged and not listed — is orion's own subtraction, so it is exact.
-
-Reviews are kept as Markdown under the DATA DIR (`reviews/`), the last 12 per project (and 12 of
-all projects), with what each was written from beside it. The **Note** typed on the new review is
-kept per project, so what matters there is said once.
 
 ## TODOS
 

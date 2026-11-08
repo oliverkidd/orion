@@ -346,7 +346,10 @@ async fn main_loop(
     let (week_review_tx, mut week_review_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::week_review::Answer>();
     app.week_review.tx = Some(week_review_tx);
-    app.week_review.root = Some(orion_core::paths::data_dir().join("reviews"));
+    let reviews = orion_core::paths::data_dir().join("reviews");
+    crate::automations::week_review::migrate_notes(&mut app, &reviews);
+    app.week_review.root = Some(reviews);
+    crate::week_review::reload(&mut app);
     // The PR REVIEW's threads, diff and writes.
     let (review_tx, mut review_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::pr_review::Answer>();
@@ -3494,10 +3497,6 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         crate::automations::pr_fixer::paste(app, text);
         return true;
     }
-    if matches!(&app.overlay, Some(Overlay::WeekReview(_))) {
-        crate::week_review::paste(app, text);
-        return true;
-    }
     // A pull request's review: the comment being written, the summary.
     if matches!(&app.overlay, Some(Overlay::Diff(_))) && crate::pr_review::viewer::paste(app, text)
     {
@@ -4261,7 +4260,7 @@ fn dispatch_action(
         Action::Linear => crate::linear::open(app),
         Action::CopyLinearIssues => crate::linear::copy_worktree_issues(app),
         Action::Todos => crate::todos::open(app),
-        Action::WeekReview => crate::week_review::open(app),
+        Action::WeekReview => crate::automations::week_review::run_now(app),
         Action::Automations => crate::automations::view::open(app),
         Action::PullWorktree => {
             if let Some(id) = crate::git_sync::target(app) {
@@ -37270,7 +37269,7 @@ mod tests {
                 "WeekReview",
                 |app| {
                     seed_tree(app);
-                    run_action(app, crate::keymap::Action::WeekReview);
+                    app.overlay = Some(Overlay::WeekReview(Box::default()));
                 },
                 None,
             ),

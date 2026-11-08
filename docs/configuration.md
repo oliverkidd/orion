@@ -222,7 +222,7 @@ Settings. Global, never per project.
 | `automations.per.<id>.extra_steer` | `""` | Added to every prompt the automation sends, after a blank line, as `Extra steer: …`. |
 | `automations.per.<id>.preset` | none | The preset `⌘U` picked in place of the automation's own system preset, by name. A name no preset has falls back to the system preset. |
 | `automations.per.<id>.labels` | `[]` | The Linear labels a ticket assigned to you needs for the bug fixer (`bug_fixer`) or the feature builder (`feature_builder`) to pick it up, matched in any case. Empty is each one's own: `Bug`, `Regression`, `Customer bug` for the bug fixer; `Feature`, `Improvement` for the feature builder. **Labels** on the screen picks them from your Linear workspace. |
-| `automations.per.<id>.when`, `.whose` | none, `"just_me"` | When week in review runs, and whose work it covers (`just_me` or `whole_team`). |
+| `automations.per.<id>.when`, `.whose` | none (Fridays 08:30), `"just_me"` | When week in review runs — a day and a time, `{"day": "fri", "at": "08:30"}` — and whose work it covers (`just_me` or `whole_team`). |
 
 `pr_autofix` (**Auto-fix my PRs**, through 2.x) is retired. A config that has it keeps it for the
 older builds that read it, and its value turns the PR fixer on (`auto`, `ask`) or off (`off`) once,
@@ -492,7 +492,7 @@ Everything orion writes under its data dir:
 | `agent_presets.json` | presets | — |
 | `ssh_hosts.json` | ssh destinations | the 20 newest |
 | `todos/` | each project's todo list | ticked items: 120 days |
-| `reviews/` | week in review write-ups | the last 12 per project, and 12 across projects |
+| `reviews/` | week in review runs, `all/<last day>/<project>.md` and a `meta.json` each | the last 12 runs |
 | `pr-cache/` | the last pull request lists and pages | 100 open per project, the last 7 days' merges, the last 30 days' closes; pages while their PR is on a row |
 | `linear-cache/issues.json` | each project's last Linear lists and comments | rewritten on each fetch |
 | `linear-links.json` | which branch was cut for which Linear issue | 90 days after the last link, once nothing is on the branch |
@@ -526,6 +526,7 @@ Everything orion writes under its data dir:
 | `ORION_PROJECT_ABOUT` | `off` stops orion writing a project's **What it is** (tests) |
 | `ORION_NEEDS_YOU_POLL_SECS` | how often Needs you asks Linear for your notifications and `gh` for the reviews asked of you (default 300; `0` off) |
 | `ORION_LINEAR_BUILDER_POLL_SECS` | how often the bug fixer and feature builder look for labelled Linear tickets assigned to you (default 120; `0` off) |
+| `ORION_WEEK_REVIEW_CHECK_SECS` | how often week in review looks whether its **When** has come round (default 60; `0` off, so it never runs on its own) |
 | `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |
 
 The DAEMON sets `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` on every agent so its hooks

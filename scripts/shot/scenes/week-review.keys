@@ -1,6 +1,7 @@
-# The WEEK IN REVIEW on Compose: Esc skips WHAT'S NEW, `⇧W` opens it, and
-# → turns Whose to Everyone — the week's merged pull requests
-# (fixtures/pr-merged.json) listed on the right as what would be sent.
-Escape
-W
-Right
+# AUTOMATIONS on week in review: `r run now` at the panel's top right, its SETTINGS (On, When
+# `Fri 08:30`, Whose `just me`, Preset, Extra steer) and REVIEWS — two runs kept, the newest
+# `Fri 08:30 · 5 points · new`.
+cmd j
+Down
+Down
+Down

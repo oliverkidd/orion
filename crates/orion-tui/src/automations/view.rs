@@ -52,6 +52,9 @@ const LABEL_W: usize = 13;
 pub enum Item {
     Setting(SettingRow),
     Session(AgentId),
+    /// A list row with no session, of a runner whose rows open
+    /// ([`super::Runner::open_row`]): its index among those rows.
+    Row(usize),
 }
 
 /// What a click lands on.
@@ -73,10 +76,13 @@ pub struct AutomationsView {
     pub in_panel: bool,
     /// The panel row under the cursor, an index into [`items`].
     pub row: usize,
-    /// Enter on **Extra steer**: the line being written.
+    /// Enter on **Extra steer**, or on a row the runner has written as a
+    /// line ([`super::Runner::text_of`]): the line being written.
     pub steer: Option<TextInput>,
     /// Enter on **Labels**: the labels pick, in the panel's place.
     pub labels: Option<super::linear_builder::LabelPick>,
+    /// The row [`Self::steer`] writes, when it is not **Extra steer**.
+    pub editing: Option<SettingRow>,
     /// A word about the last thing tried, over the explanation.
     pub notice: Option<String>,
     /// The modal's rect and its rows', written back as it draws.
@@ -90,8 +96,16 @@ impl AutomationsView {
     }
 }
 
+/// Whether `which`'s runner opens its list rows that have no session.
+fn opens_rows(app: &App, which: Automation) -> bool {
+    app.automations
+        .runner(which)
+        .is_some_and(|r| r.opens_rows())
+}
+
 /// The panel rows the keys can stand on: the SETTINGS rows, then every
-/// list row with a session to jump to.
+/// list row with a session to jump to — or, where the runner opens them,
+/// with none.
 pub fn items(app: &App, which: Automation, panel: &Panel) -> Vec<Item> {
     let mut items: Vec<Item> = app
         .automations
@@ -99,12 +113,17 @@ pub fn items(app: &App, which: Automation, panel: &Panel) -> Vec<Item> {
         .iter()
         .map(|row| Item::Setting(*row))
         .collect();
-    for list in &panel.lists {
-        items.extend(
-            list.rows
-                .iter()
-                .filter_map(|row| row.session.clone().map(Item::Session)),
-        );
+    let opens = opens_rows(app, which);
+    let mut plain = 0;
+    for row in panel.lists.iter().flat_map(|list| &list.rows) {
+        match &row.session {
+            Some(id) => items.push(Item::Session(id.clone())),
+            None if opens => {
+                items.push(Item::Row(plain));
+                plain += 1;
+            }
+            None => {}
+        }
     }
     items
 }
@@ -119,7 +138,7 @@ pub fn open(app: &mut App) {
 }
 
 /// The config, changed by `change` and saved, then mirrored into the app.
-pub(super) fn change_settings(app: &mut App, change: impl FnOnce(&mut AutomationsSettings)) {
+pub(crate) fn change_settings(app: &mut App, change: impl FnOnce(&mut AutomationsSettings)) {
     let mut cfg = crate::config::Config::load();
     change(&mut cfg.automations);
     if let Err(err) = cfg.try_save() {
@@ -143,14 +162,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     app.dirty = true;
     view.notice = None;
     let which = view.automation();
-    // Writing the extra steer: the field has the keys.
+    // Writing the extra steer, or a runner's line: the field has the keys.
     if let Some(input) = &mut view.steer {
         if crate::nav::closes(&key) {
             view.steer = None;
         } else if key.code == KeyCode::Enter {
             let text = input.as_str().trim().to_string();
             view.steer = None;
-            change_settings(app, |s| s.of_mut(which).extra_steer = text);
+            match view.editing.take() {
+                None => change_settings(app, |s| s.of_mut(which).extra_steer = text),
+                Some(row) => {
+                    let kept = super::with_runner(app, which, |r, app| r.set_text(app, row, &text));
+                    if let (Some(Err(why)), Some(Overlay::Automations(view))) =
+                        (kept, &mut app.overlay)
+                    {
+                        view.notice = Some(why);
+                    }
+                }
+            }
         } else {
             input.handle_key(&key);
         }
@@ -159,6 +188,15 @@ pub fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // Picking labels: the pick has the keys.
     if view.labels.is_some() {
         super::linear_builder::pick_key(app, key);
+        return;
+    }
+    // The runner's own key (week in review's `r`).
+    let own = app.automations.runner(which).and_then(|r| r.hotkey());
+    if own.is_some_and(|k| k.matches(&key)) {
+        let done = super::with_runner(app, which, |r, app| r.hotkey_pressed(app));
+        if let (Some(Err(why)), Some(Overlay::Automations(view))) = (done, &mut app.overlay) {
+            view.notice = Some(why);
+        }
         return;
     }
     match key.code {
@@ -241,9 +279,22 @@ pub fn activate(app: &mut App, index: usize, out: &mut Vec<ClientRequest>) {
             let text = app.automations.settings.of(which).extra_steer;
             if let Some(Overlay::Automations(view)) = &mut app.overlay {
                 view.steer = Some(TextInput::from(text.as_str()));
+                view.editing = None;
             }
         }
         Item::Setting(row) => {
+            // A row the runner has as a line of text is written in place.
+            if let Some(text) = app
+                .automations
+                .runner(which)
+                .and_then(|r| r.text_of(app, row))
+            {
+                if let Some(Overlay::Automations(view)) = &mut app.overlay {
+                    view.steer = Some(TextInput::from(text.as_str()));
+                    view.editing = Some(row);
+                }
+                return;
+            }
             let done = super::with_runner(app, which, |runner, app| runner.edit(app, row));
             if done != Some(true) {
                 if let Some(Overlay::Automations(view)) = &mut app.overlay {
@@ -254,6 +305,10 @@ pub fn activate(app: &mut App, index: usize, out: &mut Vec<ClientRequest>) {
         Item::Session(id) => {
             close(app);
             crate::event_loop::jump_to_session(app, id, out);
+        }
+        Item::Row(index) => {
+            close(app);
+            super::with_runner(app, which, |r, app| r.open_row(app, index));
         }
     }
 }
@@ -309,6 +364,7 @@ pub fn handle_mouse(app: &mut App, mouse: MouseEvent, at: Position, out: &mut Ve
                 view.in_panel = false;
                 view.steer = None;
                 view.labels = None;
+                view.editing = None;
                 app.automations.selected = i;
             }
             Some(Hit::Item(i)) => activate(app, i, out),
@@ -519,13 +575,26 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &AutomationsView, th: Theme) {
     let item_rows = items(app, which, &panel);
     let row_cursor = view.row.min(item_rows.len().saturating_sub(1));
     let pw = usize::from(panel_area.width);
-    let mut lines: Vec<(Line<'static>, Option<usize>)> = vec![(
-        Line::from(Span::styled(
-            which.name(),
-            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
-        )),
-        None,
-    )];
+    let name = Span::styled(
+        which.name(),
+        Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+    );
+    // The runner's own key, at the right of its name.
+    let name = match app.automations.runner(which).and_then(|r| r.hotkey()) {
+        Some(own) => {
+            let hint = own.hint();
+            let used = which.name().chars().count() + hint.key.chars().count() + 1;
+            Line::from(vec![
+                name,
+                Span::raw(" ".repeat(pw.saturating_sub(used + hint.does.chars().count()))),
+                Span::styled(hint.key, Style::default().fg(th.accent)),
+                Span::raw(" "),
+                Span::styled(hint.does, dim),
+            ])
+        }
+        None => Line::from(name),
+    };
+    let mut lines: Vec<(Line<'static>, Option<usize>)> = vec![(name, None)];
     for l in crate::pr_preview::wrap(which.description(), pw.max(1)) {
         lines.push((
             Line::from(Span::styled(l, Style::default().fg(th.muted))),
@@ -552,7 +621,7 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &AutomationsView, th: Theme) {
             _ => Style::default().fg(th.text),
         };
         let budget = pw.saturating_sub(LABEL_W + 2);
-        if *row == SettingRow::ExtraSteer && view.steer.is_some() {
+        if *row == view.editing.unwrap_or(SettingRow::ExtraSteer) && view.steer.is_some() {
             steer_at = Some(lines.len());
         }
         lines.push((
@@ -564,6 +633,7 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &AutomationsView, th: Theme) {
         ));
         index += 1;
     }
+    let opens = opens_rows(app, which);
     for list in &panel.lists {
         lines.push((Line::from(""), None));
         lines.push((Line::from(Span::styled(list.title, dim)), None));
@@ -574,7 +644,7 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &AutomationsView, th: Theme) {
             ));
         }
         for row in &list.rows {
-            let at = row.session.as_ref().map(|_| {
+            let at = (row.session.is_some() || opens).then(|| {
                 index += 1;
                 index - 1
             });
@@ -604,7 +674,10 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &AutomationsView, th: Theme) {
         let line = match (steer_at, &view.steer) {
             (Some(s), Some(input)) if s == n + first => {
                 let label = Span::styled(
-                    format!("  {:<LABEL_W$}", SettingRow::ExtraSteer.label()),
+                    format!(
+                        "  {:<LABEL_W$}",
+                        view.editing.unwrap_or(SettingRow::ExtraSteer).label()
+                    ),
                     Style::default().fg(th.accent).add_modifier(Modifier::BOLD),
                 );
                 let field = crate::ui::field_after(rect, LABEL_W + 2);
@@ -910,6 +983,106 @@ mod tests {
             let preset = super::super::preset_of(&app.automations.settings, Automation::PrFixer);
             assert_eq!(preset.name, "Careful");
             assert!(screen(&mut app).contains("Careful · "));
+        });
+    }
+
+    /// Week in review's panel: `r run now` at its top right, Whose
+    /// switched by Enter, When written as a line, and Enter on a REVIEWS
+    /// row opens that run, Esc coming back here.
+    #[test]
+    fn week_in_review_runs_now_and_opens_its_reviews() {
+        in_config(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let run = dir.path().join("all").join("2026-11-06");
+            std::fs::create_dir_all(&run).unwrap();
+            let meta = crate::week_review::Meta {
+                from: "2026-10-31".into(),
+                to: "2026-11-06".into(),
+                reviews: vec![crate::week_review::Kept {
+                    project: "demo".into(),
+                    slug: "demo".into(),
+                    points: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            crate::pr_cache::write_json_atomic(&run.join("meta.json"), &meta).unwrap();
+            std::fs::write(
+                run.join("demo.md"),
+                "# Week in review\n\n## Grid\n1. Rows fold · #4\n",
+            )
+            .unwrap();
+            let mut app = App::new();
+            app.week_review.root = Some(dir.path().to_path_buf());
+            crate::week_review::reload(&mut app);
+            app.automations.selected = 3;
+            open(&mut app);
+            assert_eq!(view(&app).automation(), Automation::WeekReview);
+            let text = screen(&mut app);
+            assert!(text.contains("r run now"), "{text}");
+            assert!(text.contains("REVIEWS"), "{text}");
+            assert!(text.contains("Week 45"), "{text}");
+            assert!(text.contains("1 point · new"), "{text}");
+
+            // On, When, Whose, Preset, Extra steer, then the review.
+            press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(view(&app).editing, Some(SettingRow::When));
+            for _ in 0..9 {
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE);
+            }
+            for c in "mon 9:15".chars() {
+                press(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            let own = app.automations.settings.of(Automation::WeekReview);
+            assert_eq!(
+                own.when.map(|w| (w.day, w.at)),
+                Some(("mon".into(), "09:15".into()))
+            );
+            assert!(screen(&mut app).contains("Mon 09:15"));
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(view(&app)
+                .notice
+                .as_deref()
+                .is_some_and(|n| n.contains("isn't a day")));
+            press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            assert_eq!(
+                app.automations.settings.of(Automation::WeekReview).whose,
+                crate::automations::config::Whose::WholeTeam
+            );
+
+            for _ in 0..3 {
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            let Some(Overlay::WeekReview(page)) = &app.overlay else {
+                panic!("the run's page: {:?}", app.overlay)
+            };
+            assert_eq!(page.dir.as_ref(), Some(&run));
+            assert!(page.texts[0].contains("Rows fold"));
+            assert!(app.week_review.kept[0].meta.read);
+            crate::week_review::handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            );
+            assert_eq!(
+                view(&app).automation(),
+                Automation::WeekReview,
+                "back on ⌘J"
+            );
+
+            // `r`: nothing finished anywhere, so the run ends at once.
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+            assert!(app.week_review.run.is_none());
+            assert!(app
+                .flash
+                .as_deref()
+                .is_some_and(|f| f.contains("nothing finished")));
         });
     }
 

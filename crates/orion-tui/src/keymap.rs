@@ -97,8 +97,8 @@ pub enum Action {
     CopyLinearIssues,
     /// `⌘I`: the TODOS MODAL — every project's todo list, a tab each.
     Todos,
-    /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
-    /// days, written up by product area with what to show and say.
+    /// "Run week in review now": the WEEK IN REVIEW automation, run at
+    /// once. Unbound: the COMMAND PALETTE runs it.
     WeekReview,
     /// `p`: PULL the selected checkout — fetch, then fast-forward onto its
     /// upstream, never a merge or a rebase (`crate::git_sync`).
@@ -503,15 +503,13 @@ pub const ACTIONS: &[ActionSpec] = &[
     },
     ActionSpec {
         action: Action::WeekReview,
-        id: "week_review",
-        label: "My week in review",
-        hint: "What was merged and done in the last 7 days, written up by product area with what to show and what to say; just yours or everyone's",
+        id: "run_week_review",
+        label: "Run week in review now",
+        hint: "The week in review automation, now: every project that had changes in the last 7 days written up by product area, with what to show and what to say",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        // ⌘⇧W would read better, and Ghostty keeps it for good. Every `^`
-        // letter is spoken for, so its twin for a terminal that sends no
-        // ⌘ is the grid's `⇧W`, for week.
-        defaults: &["cmd+shift+y", "shift+w"],
+        // No key: it runs on its own schedule, and from `r` on ⌘J.
+        defaults: &[],
     },
     ActionSpec {
         action: Action::PullWorktree,

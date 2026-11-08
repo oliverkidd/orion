@@ -25,6 +25,7 @@ pub mod linear_builder;
 pub mod meeting_takeaways;
 pub mod pr_fixer;
 pub mod view;
+pub mod week_review;
 
 use crate::agent_presets::{AgentPreset, SystemPreset};
 use crate::app::{AgentLaunchDraft, App};
@@ -231,6 +232,32 @@ pub trait Runner {
     fn edit(&mut self, _app: &mut App, _row: SettingRow) -> bool {
         false
     }
+    /// A SETTINGS row Enter edits as a line of text (week in review's
+    /// **When**): the line as it stands. None for every other row.
+    fn text_of(&self, _app: &App, _row: SettingRow) -> Option<String> {
+        None
+    }
+    /// That line written: kept, or why not.
+    fn set_text(&mut self, _app: &mut App, row: SettingRow, _text: &str) -> Result<(), String> {
+        Err(format!("{} can't be written here", row.label()))
+    }
+    /// Whether its list rows with no session take the keys, Enter on one
+    /// being [`Runner::open_row`] (week in review's REVIEWS).
+    fn opens_rows(&self) -> bool {
+        false
+    }
+    /// Enter on the `index`th of its list rows with no session, counted
+    /// across its lists.
+    fn open_row(&mut self, _app: &mut App, _index: usize) {}
+    /// A key of its own on its panel, shown at the panel's top right
+    /// (week in review's `r` run now).
+    fn hotkey(&self) -> Option<crate::hints::Key> {
+        None
+    }
+    /// That key pressed: done, or why not.
+    fn hotkey_pressed(&mut self, _app: &mut App) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// The app's automations (`App::automations`).
@@ -266,6 +293,7 @@ impl Default for Engine {
                 Box::new(pr_fixer::PrFixer),
                 Box::new(linear_builder::LinearBuilder(Automation::BugFixer)),
                 Box::new(linear_builder::LinearBuilder(Automation::FeatureBuilder)),
+                Box::new(week_review::WeekReview::default()),
             ],
             settings,
             launching: HashSet::new(),

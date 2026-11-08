@@ -74,6 +74,9 @@ pub const NEEDS_YOU_POLL_SECS: &str = "ORION_NEEDS_YOU_POLL_SECS";
 /// labelled Linear tickets assigned to you (default 2 minutes); `0` turns
 /// it off, as the e2e tests and the screenshots do.
 pub const LINEAR_BUILDER_POLL_SECS: &str = "ORION_LINEAR_BUILDER_POLL_SECS";
+/// Cadence in seconds of the check for the WEEK IN REVIEW's scheduled
+/// time (default a minute); `0` turns it off, so no run starts on its own.
+pub const WEEK_REVIEW_CHECK_SECS: &str = "ORION_WEEK_REVIEW_CHECK_SECS";
 /// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
 /// run never reads the machine's logins or calls out with them.
 pub const USAGE: &str = "ORION_USAGE";

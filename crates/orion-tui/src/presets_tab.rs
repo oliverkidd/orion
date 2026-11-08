@@ -325,7 +325,7 @@ fn explain_purpose(which: SystemPreset) -> &'static str {
     match which {
         SystemPreset::PrAutofix => "What orion's autofix agent is told when a PR of yours breaks",
         SystemPreset::LinearTicket => "What every {linear} launch sends, its issues filled in",
-        SystemPreset::WeekReview => "The rules your week in review ({week_review}) is written by",
+        SystemPreset::WeekReview => "The rules your week in review ({automations}) is written by",
         SystemPreset::BugFixer => {
             "What the bug fixer tells the agent it starts on a labelled Linear bug"
         }

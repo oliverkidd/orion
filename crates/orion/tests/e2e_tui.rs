@@ -138,6 +138,7 @@ impl TuiHarness {
         cmd.env(orion_core::env::SPOTIFY_POLL_SECS, "0"); // …nor on what's playing
         cmd.env(orion_core::env::NEEDS_YOU_POLL_SECS, "0"); // …nor on Linear and GitHub's inboxes
         cmd.env(orion_core::env::LINEAR_BUILDER_POLL_SECS, "0"); // …nor pick Linear tickets up
+        cmd.env(orion_core::env::WEEK_REVIEW_CHECK_SECS, "0"); // …nor writes a week in review on its own
         cmd.env(orion_core::env::USAGE, "off"); // never read the machine's logins
         cmd.env(orion_core::env::MICROSOFT_POLL_SECS, "0"); // never call Microsoft Graph
         cmd.env(orion_core::env::PROJECT_ABOUT, "off"); // a new project runs no model
