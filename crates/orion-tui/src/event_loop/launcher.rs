@@ -10109,6 +10109,7 @@ mod tests {
                     status: AgentStatus::NeedsFeedback,
                     changed_at: crate::app::now_ms(),
                     unseen: false,
+                    reason: None,
                 },
             );
             assert_eq!(app.pending_feedback.len(), 1);

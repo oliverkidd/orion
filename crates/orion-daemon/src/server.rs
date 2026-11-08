@@ -589,6 +589,36 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     let result = daemon.send_turn(&id, &text, cols, rows);
                     reply_done(&out_tx, req_id, result).await;
                 }
+                // Off the request loop: the dialog's keystrokes go in a
+                // beat apart, and this connection's own typing must not
+                // wait on them.
+                ClientRequest::Answer { req_id, id, answer } => {
+                    let daemon = daemon.clone();
+                    let out_tx = out_tx.clone();
+                    tokio::spawn(async move {
+                        let result = daemon.answer(&id, answer).await;
+                        reply_done(&out_tx, req_id, result).await;
+                    });
+                }
+                // A transcript tail runs to a megabyte: read off the
+                // async workers.
+                ClientRequest::LastResponse { req_id, id } => {
+                    let daemon = daemon.clone();
+                    let out_tx = out_tx.clone();
+                    tokio::spawn(async move {
+                        let (text, reason) =
+                            tokio::task::spawn_blocking(move || daemon.last_response(&id))
+                                .await
+                                .unwrap_or_default();
+                        let _ = out_tx
+                            .send(ServerEvent::LastResponse {
+                                req_id,
+                                text,
+                                reason,
+                            })
+                            .await;
+                    });
+                }
                 ClientRequest::ContinueAgentOn {
                     req_id,
                     id,

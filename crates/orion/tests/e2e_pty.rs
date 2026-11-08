@@ -966,6 +966,140 @@ async fn hook_post_from_agent_pty_drives_status() {
     wait_for_exit(&mut daemon2);
 }
 
+/// WAITING REASONS and ANSWERS end to end: a stand-in CLI posts the
+/// `PreToolUse` hook Claude fires for an `AskUserQuestion`, `tool_input`
+/// and all, then reads lines off its terminal. The `StatusChanged` into
+/// red carries the question, `LastResponse` repeats it, and an
+/// `Answer::Text` reaches the CLI as the question dialog's keystrokes: the
+/// digit of its "Type something" row (one past the options), the words,
+/// Enter.
+#[tokio::test]
+async fn a_question_hook_carries_its_reason_and_an_answer_types_into_the_dialog() {
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let payload = env.tmp.path().join("ask.json");
+    std::fs::write(
+        &payload,
+        serde_json::json!({
+            "session_id": "sess-1",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{
+                "question": "Which color do you like?",
+                "header": "Color",
+                "multiSelect": false,
+                "options": [
+                    {"label": "Red", "description": "Red"},
+                    {"label": "Green", "description": "Green"}
+                ]
+            }]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let script = env.tmp.path().join("agent.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncurl -sS -m 3 -X POST -H \"Authorization: Bearer $ORION_API_TOKEN\" \
+             -H 'Content-Type: application/json' --data-binary @'{}' \
+             \"$ORION_API_URL/api/hooks/claude?agentId=$ORION_AGENT_ID&hookEvent=PreToolUse\" \
+             >/dev/null\nwhile read line; do echo \"GOT:$line\"; done\n",
+            payload.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&script);
+    let mut daemon = env.spawn_daemon_with_agent_cmd(script.to_str().unwrap());
+
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    let agent_id = create_agent_get_id(&mut c, &worktree.id, "asker", 2).await;
+    let sref = SessionRef::Agent(agent_id.clone());
+    write_frame(
+        &mut c,
+        &ClientRequest::Attach {
+            session: sref.clone(),
+            from_seq: None,
+            cols: 120,
+            rows: 30,
+        },
+    )
+    .await
+    .unwrap();
+
+    let question = orion_core::WaitReason::Question {
+        question: "Which color do you like?".into(),
+        options: vec!["Red".into(), "Green".into()],
+        multi: false,
+    };
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        evs.iter().any(|e| {
+            matches!(e, ServerEvent::StatusChanged {
+                agent, status: orion_core::AgentStatus::NeedsFeedback, ..
+            } if *agent == agent_id)
+        })
+    })
+    .await;
+    let reason = events.iter().find_map(|e| match e {
+        ServerEvent::StatusChanged {
+            status: orion_core::AgentStatus::NeedsFeedback,
+            reason,
+            ..
+        } => Some(reason.clone()),
+        _ => None,
+    });
+    assert_eq!(reason, Some(Some(question.clone())));
+
+    // The same reason on request; no transcript, so nothing said.
+    write_frame(
+        &mut c,
+        &ClientRequest::LastResponse {
+            req_id: 3,
+            id: agent_id.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::LastResponse { req_id: 3, .. }))
+    })
+    .await;
+    let Some(ServerEvent::LastResponse { text, reason, .. }) = events
+        .iter()
+        .find(|e| matches!(e, ServerEvent::LastResponse { .. }))
+    else {
+        unreachable!()
+    };
+    assert_eq!((text, reason), (&None, &Some(question)));
+
+    write_frame(
+        &mut c,
+        &ClientRequest::Answer {
+            req_id: 4,
+            id: agent_id.clone(),
+            answer: orion_core::Answer::Text("purple".into()),
+        },
+    )
+    .await
+    .unwrap();
+    let mut seen = Vec::new();
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        seen = collected_output(evs);
+        find_ack(evs, 4).is_some() && String::from_utf8_lossy(&seen).contains("GOT:3purple")
+    })
+    .await;
+    assert!(
+        matches!(find_ack(&events, 4), Some(ServerEvent::Ack { .. })),
+        "{events:#?}"
+    );
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
 /// cwd-based re-homing end to end: an agent created in the main checkout
 /// posts a hook whose payload reports a cwd inside another worktree of the
 /// same project (claude entered a worktree it created mid-conversation) —
@@ -3785,7 +3919,9 @@ async fn orion_worktree_cli_relocates_the_session_when_the_turn_ends() {
             matches!(e, ServerEvent::EntityUpserted { entity: Entity::Agent(a) }
                 if a.id == agent_id && a.worktree_id == feat.id && a.alive)
         });
-        alive && String::from_utf8_lossy(&collected_output(evs)).contains(".orion-worktrees/repo/feat-x")
+        alive
+            && String::from_utf8_lossy(&collected_output(evs))
+                .contains(".orion-worktrees/repo/feat-x")
     })
     .await;
     assert!(

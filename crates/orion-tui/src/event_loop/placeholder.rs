@@ -2240,6 +2240,7 @@ mod tests {
                     status: AgentStatus::Running,
                     changed_at: crate::app::now_ms(),
                     unseen: false,
+                    reason: None,
                 },
             );
             assert_eq!(project_names(&app), ["demo", "two"]);

@@ -77,7 +77,11 @@ const CLAUDE_EVENTS: &[(&str, Option<&str>)] = &[
     // your input") as well as `permission_prompt` — it is the only signal
     // that arrives when a turn ends without a Stop. See status.rs.
     ("Notification", None),
-    ("PreToolUse", Some("AskUserQuestion")),
+    // The two tools whose call puts a dialog on screen: a question, and a
+    // plan waiting for approval. Their `tool_input` carries the question
+    // or the plan (`WaitReason`). A plan's `PermissionRequest` carries it
+    // too, but its `PreToolUse` is the first word.
+    ("PreToolUse", Some("AskUserQuestion|ExitPlanMode")),
     // Every tool's end, unmatched. Three signals ride it: the answer to an
     // `AskUserQuestion` (the row leaves red); the approval of a permission
     // prompt, which fires no hook of its own — the gated tool simply runs,
@@ -730,7 +734,7 @@ mod tests {
         let notification = &settings["hooks"]["Notification"];
         assert!(notification[0].get("matcher").is_none());
         let pre = &settings["hooks"]["PreToolUse"];
-        assert_eq!(pre[0]["matcher"], json!("AskUserQuestion"));
+        assert_eq!(pre[0]["matcher"], json!("AskUserQuestion|ExitPlanMode"));
         // StopFailure carries none either: every API error ends the turn,
         // and a usage limit is one of them.
         let failure = &settings["hooks"]["StopFailure"];

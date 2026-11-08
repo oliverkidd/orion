@@ -1,6 +1,7 @@
 use crate::compose::Stack;
 use crate::entities::{
-    Agent, AgentKind, AgentStatus, Entity, EntityId, Link, Project, TerminalTab, Worktree,
+    Agent, AgentKind, AgentStatus, Entity, EntityId, Link, Project, TerminalTab, WaitReason,
+    Worktree,
 };
 use crate::ids::{AgentId, LinkId, ProjectId, TerminalId, WorktreeId};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 51;
+pub const PROTOCOL_VERSION: u32 = 52;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -326,6 +327,23 @@ pub enum ClientRequest {
         cols: u16,
         rows: u16,
     },
+    /// What a session last said and why it is waiting, if it is: the
+    /// text of the last assistant message in its transcript. Answered by
+    /// `ServerEvent::LastResponse` with the same req_id (not an Ack).
+    LastResponse {
+        req_id: u64,
+        id: AgentId,
+    },
+    /// Answer a session that is waiting on you (`WaitReason`): the
+    /// keystrokes its question or plan dialog takes, typed into the live
+    /// CLI. A session with no dialog open — it is not running, or the
+    /// daemon restarted since it asked — gets the answer as its next turn,
+    /// in words (`SendTurn`). Answered with `Ack`.
+    Answer {
+        req_id: u64,
+        id: AgentId,
+        answer: Answer,
+    },
     CreateTerminal {
         req_id: u64,
         worktree: WorktreeId,
@@ -407,6 +425,21 @@ pub enum ClientRequest {
     },
 
     Shutdown,
+}
+
+/// A reply to a session waiting on you ([`ClientRequest::Answer`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Answer {
+    /// Pick this option (0-based) of the question, or of the plan or
+    /// permission dialog.
+    Option(usize),
+    /// Answer the question in your own words.
+    Text(String),
+    /// Approve the plan.
+    ApprovePlan,
+    /// Keep planning, with this feedback; on a question, the same as
+    /// `Text`.
+    Steer(String),
 }
 
 /// What a new session launches as — its harness (a Claude account is
@@ -537,6 +570,11 @@ pub enum ServerEvent {
         /// turn just finished, cleared when it left `finished`.
         #[serde(default)]
         unseen: bool,
+        /// Why it is waiting on you, when the change is into
+        /// `needs_feedback` (a question, a plan, a permission prompt) or
+        /// `terminated` (a crash) and the daemon knows. None otherwise.
+        #[serde(default)]
+        reason: Option<WaitReason>,
     },
 
     /// `orion open` from an agent session: the files the user asked to
@@ -589,6 +627,15 @@ pub enum ServerEvent {
     Metrics {
         req_id: u64,
         snapshot: MetricsSnapshot,
+    },
+
+    /// Reply to `ClientRequest::LastResponse`: the text of the session's
+    /// last assistant message (None when there is no transcript, or no
+    /// text in it), and why it is waiting on you, if it is.
+    LastResponse {
+        req_id: u64,
+        text: Option<String>,
+        reason: Option<WaitReason>,
     },
 }
 

@@ -1,3 +1,4 @@
+pub mod answer;
 pub mod attach;
 pub mod claude_bg;
 pub mod config;
@@ -22,6 +23,7 @@ pub mod spare;
 pub mod stacks;
 pub mod status;
 pub mod store;
+pub mod transcript;
 
 use anyhow::{bail, Context, Result};
 use orion_core::{env, paths};
@@ -135,12 +137,13 @@ async fn serve() -> Result<()> {
                     cwd,
                     transcript,
                     prompt,
+                    reason,
                 }) = delivery
                 else {
                     break;
                 };
                 let captures_session = event.captures_session();
-                daemon.apply_hook_event(&agent_id, event.clone(), session_id.clone());
+                daemon.apply_hook_event_with(&agent_id, event.clone(), session_id.clone(), reason);
                 // The prompt itself, for the row's RECENT PROMPTS. After
                 // the status step so the row it upserts already reads
                 // `running`.

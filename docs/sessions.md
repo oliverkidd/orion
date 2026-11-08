@@ -51,7 +51,7 @@ harness with that in mind, especially in the ROOT WORKTREE.
 
 The same choice reaches the STATUS DOT, because an AGENT can only report what its hook set can see.
 Claude installs the full set — `UserPromptSubmit`, `Stop`, `SessionStart`, `PermissionRequest`,
-`Notification` (which is where the idle prompt comes from), `PreToolUse` on `AskUserQuestion`, an
+`Notification` (which is where the idle prompt comes from), `PreToolUse` on `AskUserQuestion` and `ExitPlanMode`, an
 unmatched `PostToolUse` and `StopFailure` (a turn that ends on an API error, a usage limit among
 them — see [below](#usage-limits-and-a-second-account)) — so a Claude row walks the whole range of
 states, red NEEDS FEEDBACK included, and leaves red the moment you answer: a question's answer is its

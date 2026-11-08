@@ -426,6 +426,7 @@ mod tests {
                     status: AgentStatus::Running,
                     changed_at: 1,
                     unseen: false,
+                    reason: None,
                 },
             );
             let card = on_card(&mut app);
@@ -460,6 +461,7 @@ mod tests {
                     status: AgentStatus::Running,
                     changed_at: crate::app::now_ms(),
                     unseen: false,
+                    reason: None,
                 },
             );
             assert_eq!(cursor(&app), Some(AgentId("a1".into())), "its first turn");

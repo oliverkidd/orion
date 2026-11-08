@@ -262,8 +262,7 @@ async fn main_loop(
 ) -> Result<Exit> {
     let mut app = App::new();
     app.conn = ConnState::Connected;
-    app.round_caps =
-        std::env::var("TERM_PROGRAM").is_ok_and(|t| t.eq_ignore_ascii_case("ghostty"));
+    app.round_caps = std::env::var("TERM_PROGRAM").is_ok_and(|t| t.eq_ignore_ascii_case("ghostty"));
     // The repo orion was started in, for the first run's "open this
     // folder" — looked up once, off the tree the snapshot has not sent yet.
     app.launch_repo = crate::app::launch_repo();
@@ -371,7 +370,8 @@ async fn main_loop(
     let (repo_tx, mut repo_rx) = tokio::sync::mpsc::unbounded_channel::<crate::open_repo::Answer>();
     app.open_repo.tx = Some(repo_tx);
     // CLONE FROM GITHUB's listing and clones land here.
-    let (clone_tx, mut clone_rx) = tokio::sync::mpsc::unbounded_channel::<crate::clone_repo::Answer>();
+    let (clone_tx, mut clone_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::clone_repo::Answer>();
     app.clone_repo.tx = Some(clone_tx);
     // A BASE SYNC's fetch and fast-forward land here.
     let (base_tx, mut base_rx) = tokio::sync::mpsc::unbounded_channel::<crate::base_sync::Answer>();
@@ -12568,6 +12568,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             status,
             changed_at,
             unseen,
+            reason: _,
         } => {
             // A status flip reorders the sessions list — and, since
             // worktrees and projects sort on their sessions' stamps,
@@ -13500,6 +13501,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: true,
+                reason: None,
             },
         );
         assert_eq!(app.worktree_unseen(&w1), 1, "one terminal to go read");
@@ -13541,6 +13543,7 @@ mod tests {
             status,
             changed_at: crate::app::now_ms(),
             unseen: status == orion_core::AgentStatus::Finished,
+            reason: None,
         }
     }
 
@@ -13858,6 +13861,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: true,
+                reason: None,
             },
             &mut out,
         );
@@ -13887,6 +13891,7 @@ mod tests {
             status,
             changed_at: crate::app::now_ms(),
             unseen: status == AgentStatus::Finished,
+            reason: None,
         };
 
         hse(&mut app, flip("a2", AgentStatus::NeedsFeedback));
@@ -14056,6 +14061,7 @@ mod tests {
             status,
             changed_at: crate::app::now_ms(),
             unseen: false,
+            reason: None,
         };
         app.term = Some(AttachedTerm::new(SessionRef::Agent(a2.clone()), 40, 10));
         app.focus = Focus::Terminal;
@@ -14160,6 +14166,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: true,
+                reason: None,
             },
         );
         let (fg, row) = dot(&mut app);
@@ -19040,6 +19047,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: now,
                 unseen: false,
+                reason: None,
             },
         );
         let rows = app.visible_sessions();
@@ -19156,6 +19164,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: false,
+                reason: None,
             },
         );
         let rows = app.visible_sessions();
@@ -23385,6 +23394,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: now - 60_000,
                 unseen: false,
+                reason: None,
             },
         );
         assert_eq!(names(&app), ["two", "demo"]);
@@ -23404,6 +23414,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: now,
                 unseen: false,
+                reason: None,
             },
         );
         assert_eq!(names(&app), ["demo", "two"]);
@@ -23448,6 +23459,7 @@ mod tests {
             status,
             changed_at,
             unseen: false,
+            reason: None,
         };
         // Both mid-turn; the user is in "demo".
         hse(&mut app, flip("a1", AgentStatus::Running, now - 60_000));
@@ -23540,6 +23552,7 @@ mod tests {
                     status,
                     changed_at: crate::app::now_ms(),
                     unseen: false,
+                    reason: None,
                 },
             );
             assert_eq!(branches(&app), ["main", "feat", "older"]);
@@ -24872,7 +24885,11 @@ mod tests {
         assert_eq!(state(&app).2, 21, "Space pages it");
         for arrow in [KeyCode::Left, KeyCode::Right] {
             press(&mut app, arrow, KeyModifiers::NONE, &mut out);
-            assert_eq!(state(&app).0, DiffFocus::Diff, "{arrow:?} stays in the diff");
+            assert_eq!(
+                state(&app).0,
+                DiffFocus::Diff,
+                "{arrow:?} stays in the diff"
+            );
         }
         press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
         assert_eq!(state(&app).0, DiffFocus::Files, "⇧Tab back to the files");
@@ -25992,6 +26009,7 @@ mod tests {
                 status: orion_core::AgentStatus::NeedsFeedback,
                 changed_at: crate::app::now_ms(),
                 unseen: false,
+                reason: None,
             },
         );
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
@@ -26021,6 +26039,7 @@ mod tests {
                 status: orion_core::AgentStatus::NeedsFeedback,
                 changed_at: crate::app::now_ms(),
                 unseen: false,
+                reason: None,
             },
         );
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
@@ -26338,6 +26357,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: true,
+                reason: None,
             },
         );
         assert_eq!(app.worktree_unseen(&w1), 1, "one terminal to go read");

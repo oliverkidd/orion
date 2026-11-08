@@ -287,10 +287,23 @@
   question dialog sends the same type — so one can land just *after* the answer that closed the
   dialog. Inside 5 s of the row leaving red that notification is taken as the echo it is and
   ignored; a genuinely new dialog announces itself through `PermissionRequest` or `PreToolUse`
-  first, never through that notification alone.
+  first, never through that notification alone. A plan is the other dialog a `PreToolUse` opens:
+  Claude's `ExitPlanMode` turns the row red as it puts the plan up for approval. It is answered
+  like a permission prompt, by the next tool event of its origin. Sent back with feedback, it fires
+  no `PostToolUse` at all, and Claude goes straight on revising the plan.
+- **Red says why.** The hook that turns a row red carries the reason with it, and the status
+  change sends it on as a WAITING REASON: the question and its options (from the
+  `AskUserQuestion` call's `tool_input`), the plan (from `ExitPlanMode`'s), the tool a permission
+  prompt is for, or a crash's exit code. The daemon holds the newest one per session in memory and
+  drops it as soon as the row leaves red. A daemon that restarted rebuilds a red row's reason from
+  the dialog its transcript ends on. Answering from outside the session types the keys Claude's own
+  dialog takes: a digit for an option, the row after the options for your own words, `1` to approve
+  a plan, the plan's last row ("Tell Claude what to change") for feedback, Esc and then your words to
+  refuse a permission prompt. A session with no dialog open (stopped, or asked before a restart)
+  gets the answer as its next turn instead, in words.
 - **Which of those signals you get depends on the harness.** Claude is installed with all ten hook
   groups — `UserPromptSubmit`, `Stop`, `SessionStart`, `PermissionRequest`, `Notification`, a
-  `PreToolUse` on `AskUserQuestion`, an unmatched `PostToolUse` (the question's answer, a permission
+  `PreToolUse` on `AskUserQuestion` and `ExitPlanMode`, an unmatched `PostToolUse` (the question's answer, a permission
   prompt's approval, and the cwd probe that re-homes a session that moves seconds later instead of
   at the turn's `Stop`), `SubagentStart` and `SubagentStop`, plus `StopFailure` (the USAGE LIMIT).
   Codex gets six of them: no `Notification`, no `StopFailure` and neither `*ToolUse` group, because
