@@ -1459,3 +1459,56 @@ fn tui_cmd_u_pastes_a_preset_into_the_running_agent() {
     tui.type_str("still here");
     tui.wait_for_text("still here");
 }
+
+/// The BLUE SKY BUILDER, end to end: `Enter` on an idea for `blue sky` in
+/// Todos › Blue sky makes the Blue sky folder (a scratch one here, never
+/// `~/Code/orion-blue-sky`) a git repository, adds it as a project, and
+/// starts a session tagged `Blue sky builder` in its checkout, with the
+/// idea's own `<slug>/` folder made and written onto the idea.
+#[test]
+fn tui_blue_sky_builder_makes_its_folder_a_project_and_starts_there() {
+    const CMD_I: &[u8] = b"\x1b[105;9u";
+    let scratch = tempfile::tempdir().unwrap();
+    let folder = scratch.path().join("orion-blue-sky");
+    let mut tui = TuiHarness::spawn_with_env(&[(
+        orion_core::env::BLUE_SKY_DIR,
+        folder.to_string_lossy().into_owned(),
+    )]);
+    tui.wait_for_text("to begin");
+    let list = tui.data_dir.join("todos/blue-sky.json");
+
+    // No projects yet: ⌘I opens on Blue sky's tab, where ⌘N writes an idea.
+    tui.send(CMD_I);
+    tui.wait_for_text("Enter starts the Blue sky builder");
+    tui.send(CMD_N);
+    tui.type_str("A tiny habit tracker");
+    tui.send(ENTER);
+    tui.send(ESC);
+    tui.wait_for_text("Blue sky 1");
+    tui.wait_for_text("blue sky · not started");
+    tui.send(DOWN);
+    tui.wait_for_selected("A tiny habit tracker");
+    tui.send(ENTER);
+
+    // The folder is a repository and a project, and the session starts in
+    // it, its folder made.
+    tui.wait_for("the Blue sky folder added as a project", |s| {
+        screen_to_text(s).contains("orion-blue-sky")
+    });
+    assert!(folder.join(".git").exists(), "git init'd");
+    tui.wait_for("the idea's session written onto it", |_| {
+        std::fs::read_to_string(&list).is_ok_and(|raw| raw.contains("\"agent\""))
+    });
+    let raw = std::fs::read_to_string(&list).unwrap();
+    assert!(
+        raw.contains("\"built_in\": \"a-tiny-habit-tracker/\""),
+        "{raw}"
+    );
+    assert!(folder.join("a-tiny-habit-tracker").is_dir());
+    tui.wait_for_gone("not started");
+
+    // On the grid, the session is the Blue sky builder's.
+    tui.send(ESC);
+    tui.wait_for_gone("Enter starts the Blue sky builder");
+    tui.wait_for_text("Blue sky builder");
+}

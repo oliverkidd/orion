@@ -518,18 +518,24 @@ pub fn gather(
         }
         if picks[Source::Todos.index()] && mine {
             let items = app.todos.get(&dir).map(|file| file.items.as_slice());
-            for item in items.into_iter().flatten() {
-                let Some(done_at) = item.done.map(|at| at.timestamp()) else {
-                    continue;
-                };
-                if done_at >= since {
-                    material.todos.push(DoneTodo {
-                        text: item.text.clone(),
-                        done_at,
-                    });
-                }
-            }
+            push_ticked(&mut material, items.into_iter().flatten(), since);
         }
+    }
+    // Blue sky's ideas ticked: every one in a review of all projects, and
+    // in one project's, those built there.
+    if picks[Source::Todos.index()] && mine {
+        let ideas = app
+            .todos
+            .get(&crate::todos::store::blue_sky_key())
+            .map(|file| file.items.as_slice());
+        let ours = |item: &&crate::todos::Item| {
+            scope.wher == Where::All || item.target.as_deref() == Some(project.0.as_str())
+        };
+        push_ticked(
+            &mut material,
+            ideas.into_iter().flatten().filter(ours),
+            since,
+        );
     }
     material.prs.sort_by(|a, b| b.merged_at.cmp(&a.merged_at));
     material.issues.sort_by(|a, b| b.done_at.cmp(&a.done_at));
@@ -1449,6 +1455,25 @@ fn request_fetch(app: &mut App, project: &ProjectId, name: &str, dir: &Path, day
     });
 }
 
+/// The todos in `items` ticked since `since` (secs), into `material`.
+fn push_ticked<'a>(
+    material: &mut Material,
+    items: impl Iterator<Item = &'a crate::todos::Item>,
+    since: i64,
+) {
+    for item in items {
+        let Some(done_at) = item.done.map(|at| at.timestamp()) else {
+            continue;
+        };
+        if done_at >= since {
+            material.todos.push(DoneTodo {
+                text: item.text.clone(),
+                done_at,
+            });
+        }
+    }
+}
+
 /// Ask for every project's week: its merged pull requests, and the lists
 /// a review reads beside them — Linear's, where the project has a key, and
 /// its todos. A fetch gone stale is let go first: descriptions are heavy.
@@ -1456,6 +1481,7 @@ fn request_all(app: &mut App) {
     app.week_review
         .fetched
         .retain(|_, fetched| fetched.at.elapsed() < FRESH);
+    crate::todos::view::load_list(app, crate::todos::store::blue_sky_key());
     let projects = every_project(app);
     for (id, name, dir) in projects {
         request_fetch(app, &id, &name, &dir, DAYS);

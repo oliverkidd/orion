@@ -96,9 +96,11 @@ impl Automation {
     }
 
     /// Whether it is on in a config that says nothing about it. The PR
-    /// fixer is, as **Auto-fix my PRs** was; the rest wait to be asked.
+    /// fixer is, as **Auto-fix my PRs** was, and the blue sky builder,
+    /// which starts nothing until Enter on an idea asks it to; the rest
+    /// wait to be asked.
     pub const fn on_by_default(self) -> bool {
-        matches!(self, Automation::PrFixer)
+        matches!(self, Automation::PrFixer | Automation::BlueSky)
     }
 
     /// The SETTINGS rows its panel shows, in order (5.5).
@@ -294,6 +296,7 @@ impl Default for Engine {
                 Box::new(linear_builder::LinearBuilder(Automation::BugFixer)),
                 Box::new(linear_builder::LinearBuilder(Automation::FeatureBuilder)),
                 Box::new(week_review::WeekReview::default()),
+                Box::new(blue_sky::BlueSkyBuilder::default()),
             ],
             settings,
             launching: HashSet::new(),
@@ -413,14 +416,16 @@ pub fn launch(
     true
 }
 
-/// Start `which`'s session in a fresh worktree, as the QUICK PROMPT's
-/// Enter does with `launch` — tagged with it, moving nothing on screen —
-/// and refused, false, at the cap, for the runner to try again on a later
-/// tick. The checkout being cut holds its place under the cap.
+/// Start `which`'s session in a fresh worktree — or in the checkout
+/// `launch` names — as the QUICK PROMPT's Enter does with `launch` and
+/// `text` typed, tagged with it, moving nothing on screen; refused, false,
+/// at the cap, for the runner to try again on a later tick. The checkout
+/// being cut holds its place under the cap.
 pub fn launch_in_new_worktree(
     app: &mut App,
     which: Automation,
     launch: crate::quick_prompt::QuickLaunch,
+    text: String,
     out: &mut Vec<ClientRequest>,
 ) -> bool {
     if !may_start(app) {
@@ -430,7 +435,7 @@ pub fn launch_in_new_worktree(
         automation: Some(which),
         ..launch
     };
-    crate::event_loop::submit_unattended(app, launch, out);
+    crate::event_loop::submit_unattended(app, launch, text, out);
     true
 }
 
@@ -616,12 +621,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_pr_fixer_is_on_out_of_the_box() {
+    fn only_the_pr_fixer_and_blue_sky_are_on_out_of_the_box() {
         let s = config::AutomationsSettings::default();
         let on: Vec<Automation> = Automation::ALL
             .into_iter()
             .filter(|a| s.is_on(*a))
             .collect();
-        assert_eq!(on, [Automation::PrFixer]);
+        assert_eq!(on, [Automation::PrFixer, Automation::BlueSky]);
     }
 }

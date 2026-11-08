@@ -184,14 +184,13 @@ impl Row<'_> {
     }
 }
 
-/// Every project's list, in the tabs' order, with its name.
+/// Every tab's list — Blue sky's first, then each project's — in the
+/// tabs' order, with its name.
 fn lists(app: &App) -> impl Iterator<Item = (String, &Path, &TodoFile)> {
-    view::projects(app)
-        .into_iter()
-        .filter_map(|(_, name, dir)| {
-            let (dir, file) = app.todos.get_key_value(&dir)?;
-            Some((name, dir.as_path(), file))
-        })
+    view::tabs(app).into_iter().filter_map(|(_, name, dir)| {
+        let (dir, file) = app.todos.get_key_value(&dir)?;
+        Some((name, dir.as_path(), file))
+    })
 }
 
 /// The list's rows: each project with something ticked in the span, in
@@ -1030,5 +1029,20 @@ mod tests {
             [0, 1, 1, 1, 0, 0, 0],
             "Sunday's is last week's"
         );
+
+        // A Blue sky idea ticked is in DONE too, its section first, as its
+        // tab is.
+        let key = store::blue_sky_key();
+        let mut ideas = super::super::TodoFile::new(&key);
+        let g = ideas.inbox();
+        let idea = ideas.add_item(g, "habit tracker", day(11, 1));
+        ideas.toggle(idea, at(5, 9));
+        app.todos.insert(key, ideas);
+        let shaped = shape(rows(&app, Period::Week, day(11, 5)));
+        assert_eq!(
+            shaped[..2],
+            ["Blue sky 1".to_string(), format!("blue sky {idea}")]
+        );
+        assert_eq!(shaped.len(), 7);
     }
 }

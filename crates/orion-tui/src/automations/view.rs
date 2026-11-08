@@ -302,6 +302,11 @@ pub fn activate(app: &mut App, index: usize, out: &mut Vec<ClientRequest>) {
                 }
             }
         }
+        // Blue sky's IDEAS jump to the idea, whose row has its session.
+        Item::Session(id) if which == Automation::BlueSky => {
+            close(app);
+            super::blue_sky::open_idea(app, &id);
+        }
         Item::Session(id) => {
             close(app);
             crate::event_loop::jump_to_session(app, id, out);
@@ -390,7 +395,7 @@ fn dot(dot: Dot, th: Theme) -> Span<'static> {
     Span::styled(glyph, Style::default().fg(color))
 }
 
-fn tone(tone: Tone, th: Theme) -> Style {
+pub(crate) fn tone(tone: Tone, th: Theme) -> Style {
     Style::default().fg(match tone {
         Tone::Working => th.warn,
         Tone::Waiting => th.err,

@@ -541,7 +541,7 @@ fn launch(app: &mut App, group: Group, out: &mut Vec<ClientRequest>) -> Result<(
     let launch = launch
         .with_linear(Some(batch))
         .with_mode(AgentMode::Plan, &cfg);
-    if !super::launch_in_new_worktree(app, which, launch, out) {
+    if !super::launch_in_new_worktree(app, which, launch, String::new(), out) {
         return Err(group);
     }
     let now = crate::app::now_ms();

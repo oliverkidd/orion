@@ -77,6 +77,10 @@ pub const LINEAR_BUILDER_POLL_SECS: &str = "ORION_LINEAR_BUILDER_POLL_SECS";
 /// Cadence in seconds of the check for the WEEK IN REVIEW's scheduled
 /// time (default a minute); `0` turns it off, so no run starts on its own.
 pub const WEEK_REVIEW_CHECK_SECS: &str = "ORION_WEEK_REVIEW_CHECK_SECS";
+/// The folder the BLUE SKY BUILDER builds ideas tied to no project in
+/// (default `~/Code/orion-blue-sky`): the e2e tests point it at a scratch
+/// directory, so a run never makes the real one.
+pub const BLUE_SKY_DIR: &str = "ORION_BLUE_SKY_DIR";
 /// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
 /// run never reads the machine's logins or calls out with them.
 pub const USAGE: &str = "ORION_USAGE";

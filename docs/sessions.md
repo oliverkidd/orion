@@ -692,7 +692,7 @@ Automations                                      1 of at most 5 agents running �
 ○ Feature builder         off  │ SETTINGS
 ○ Week in review          off  │   On           on
 ○ Meeting takeaways       off  │   Preset       PR autofix · the PR's own agent
-○ Blue sky builder        off  │   Extra steer  none
+○ Blue sky builder       idle  │   Extra steer  none
                                │ YOUR OPEN PRS
                                │   #407 Fix the login redirect   fixing checks, try 2 of 3
 ```
@@ -839,10 +839,11 @@ orion reads your calendar for the next twelve hours every five minutes. Turn the
 
 ## TODOS
 
-`⌘I` opens the TODOS MODAL: every open PROJECT's own todo
-list, a tab each along the top in the order of the grid's project tabs, then any project whose
-tab is closed, opened on the selected project's tab (`←`/`→`, `⇧←`/`⇧→` or a click for another,
-`⌘1`–`⌘9` straight to one; each comes back as it was left while the modal is up). Each
+`⌘I` opens the TODOS MODAL: the **Blue sky** tab first ([below](#the-blue-sky-tab)), then every
+open PROJECT's own todo list, a tab each along the top in the order of the grid's project tabs,
+then any project whose tab is closed, opened on the selected project's tab — Blue sky's when there
+are no projects (`←`/`→`, `⇧←`/`⇧→` or a click for another, `⌘1`–`⌘9` straight to one: `⌘1` is
+Blue sky, and the projects start at `⌘2`; each comes back as it was left while the modal is up). Each
 list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, in
 an order that is the list's own. The list is this machine's alone — one file per checkout under orion's data folder
 (`~/Library/Application Support/dev.orion.orion/todos/` on macOS), named by a hash of the
@@ -923,3 +924,48 @@ pull request on that session's worktree merge, the item is ticked — every item
 at, the session deleted since or not, since the item keeps its worktree too — and the footer says so (`done: <text> — its pull request merged`); with the modal up it
 strikes through where it stands, as a tick by hand does. A pull request found already merged (a
 first lookup) ticks nothing, so an item put back on its list stays there.
+
+### The Blue sky tab
+
+The first tab, `Blue sky N`, is your list of ideas: groups and rows as any other tab, kept in
+`blue-sky.json` beside the projects' lists, its ticked ideas in the DONE panel under **Blue sky**.
+Each row shows the idea, where it goes — a project's name, or `blue sky` for one tied to no
+project — and how its build stands:
+
+```
+Blue sky 2   web 3   api
+Enter starts the Blue sky builder on the idea. Its brief comes to Needs you to approve, and its state shows here.
+▾ PRODUCT ───────────────────────────────────────────── · 2 open
+  ☐ · onboarding tour                        web · ● brief to approve
+  ☐ · a tiny habit tracker              blue sky · not started
+```
+
+- `w` on an idea steps where it goes: `blue sky`, then each project in the tabs' order.
+- `Enter` starts the **Blue sky builder** on it ([below](#the-blue-sky-builder)); once its session
+  is up, `Enter` (or a click on the state) jumps to it.
+- `o` opens what it built: its folder in the Blue sky folder, or its `proto/` checkout.
+- The state is `not started`, `● starting`, `● brief to approve` (red), `● building 18m` (yellow) or
+  `● built · proto/onboard` (green).
+- `⌘N` is a new idea and `Space` ticks one, as on any tab. On an idea `w` and `o` are keys, so
+  `⌫` opens its text to edit; every other letter types onto it as usual.
+
+## The BLUE SKY BUILDER
+
+`Enter` on an idea in Todos › Blue sky starts the Blue sky builder on it: a session tagged
+`Blue sky builder`, in plan mode, on the **Blue sky builder** preset (its own Runs on, so it can
+run on another account), told the idea and where to build it.
+
+- **For a project**, it runs in a new worktree on the branch `proto/<slug>`, told never to open a
+  pull request.
+- **For `blue sky`**, it runs in `~/Code/orion-blue-sky`, in a folder `<slug>/` of its own. The
+  first idea that goes there makes the folder a git repository and adds it to orion as a project.
+- **The brief first.** It writes a short brief — who it is for, what it is, what it is built from,
+  what you'll get and how big it is — and waits for you to approve it. The brief comes to Needs you
+  as `brief to approve`, and to your phone while you're away, as any plan does.
+- **Then the prototype.** Approved, it builds a working prototype — a web tool may also be published
+  as a claude.ai artifact, its link noted — and finishes with how to try it.
+- It counts against the automations' cap: with that many running, the idea waits (`● starting`)
+  and starts when one finishes.
+- In Automations (`⌘J`) it has **On** (on unless you turn it off), **Preset** and **Extra steer**,
+  and its **IDEAS** list: each idea it started, `brief to approve` / `building` / `built`; `Enter`
+  on one opens it in Todos › Blue sky.

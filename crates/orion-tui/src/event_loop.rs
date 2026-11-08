@@ -2931,7 +2931,11 @@ fn land_client_rss(app: &mut App, bytes: u64) {
 }
 
 /// Queue a request that wants no follow-up when its Ack lands.
-fn send(app: &mut App, out: &mut Vec<ClientRequest>, make: impl FnOnce(u64) -> ClientRequest) {
+pub(crate) fn send(
+    app: &mut App,
+    out: &mut Vec<ClientRequest>,
+    make: impl FnOnce(u64) -> ClientRequest,
+) {
     send_with(app, out, PendingIntent::None, make);
 }
 
@@ -10151,7 +10155,7 @@ fn jump_to_target_inner(
         PaletteTarget::Project(id) => launcher::open_tab(app, &id, out),
         PaletteTarget::AddProject => crate::open_repo::start(app),
         PaletteTarget::LinearIssue { project, id } => crate::linear::open_at(app, &project, &id),
-        PaletteTarget::Todo { project, item } => crate::todos::view::open_at(app, &project, item),
+        PaletteTarget::Todo { tab, item } => crate::todos::view::open_at(app, &tab, item),
         PaletteTarget::Worktree(id) => {
             if app.selected_worktree().is_some_and(|w| w.id == id) {
                 app.focus = Focus::Sessions;
@@ -38341,6 +38345,14 @@ mod tests {
         }
     }
 
+    /// The tab the todos modal is on: its project's id, or `blue sky`.
+    fn todo_tab(app: &App) -> &str {
+        todo_view(app)
+            .tab
+            .project()
+            .map_or("blue sky", |p| p.0.as_str())
+    }
+
     fn todo_file(app: &App) -> &crate::todos::TodoFile {
         &app.todos[std::path::Path::new("/tmp/demo")]
     }
@@ -38412,7 +38424,7 @@ mod tests {
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('i'), KeyModifiers::SUPER, &mut out);
         let view = todo_view(&app);
-        assert_eq!(view.project.0, "p1");
+        assert_eq!(view.tab.project().unwrap().0, "p1");
         assert_eq!(view.dir, std::path::PathBuf::from("/tmp/demo"));
         assert!(app.todos.contains_key(std::path::Path::new("/tmp/demo")));
         app.overlay = None;
@@ -38420,12 +38432,13 @@ mod tests {
         todo_view(&app);
     }
 
-    /// A tab per open project, in the projects' order, each with what is
-    /// open in it: `←`/`→` walk them round the ends — `⇧←`/`⇧→` too, the
-    /// filter's caret taking the plain ones while it is up — and `⌘2`
-    /// goes straight to the second, each project's tab coming back as it
-    /// was left: its cursor, its filter. `Tab` is the DONE panel's way in,
-    /// and the panel stays as it is from tab to tab.
+    /// Blue sky's tab, then one per open project in the projects' order,
+    /// each with what is open in it: `←`/`→` walk them round the ends —
+    /// `⇧←`/`⇧→` too, the filter's caret taking the plain ones while it is
+    /// up — and `⌘1` goes straight to Blue sky's, `⌘2` on to the projects',
+    /// each tab coming back as it was left: its cursor, its filter. `Tab`
+    /// is the DONE panel's way in, and the panel stays as it is from tab
+    /// to tab.
     #[test]
     fn arrows_walk_a_tab_per_project() {
         use crate::todos::view::Entry;
@@ -38445,27 +38458,32 @@ mod tests {
             );
             let text = buffer_text(&draw_todos(&mut app));
             assert!(text.contains("demo 3"), "{text}");
-            assert!(text.contains("projects"), "{text}");
+            assert!(text.contains("Blue sky"), "{text}");
+            assert!(
+                text.find("Blue sky") < text.find("demo 3"),
+                "Blue sky's tab first: {text}"
+            );
+            assert!(text.contains("tabs"), "{text}");
             assert!(text.contains("nightshift"), "{text}");
             assert!(!text.contains("Log"), "no Today/Log tabs: {text}");
 
             // → the moment the modal is up, and back; ⇧→ the same.
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p2");
+            assert_eq!(todo_tab(&app), "p2");
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
             press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p2");
+            assert_eq!(todo_tab(&app), "p2");
             press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
             // Tab puts the keys on the DONE panel, where ←/→ are its
             // spans' and never cross back; Tab hands them back.
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
             assert!(todo_view(&app).done.focused);
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
             assert!(todo_view(&app).done.focused, "← stays on the panel");
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             assert!(!todo_view(&app).done.focused);
@@ -38483,30 +38501,103 @@ mod tests {
             let cursor = todo_view(&app).cursor;
             assert!(matches!(cursor, Some(Entry::Item { .. })));
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
 
             press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
             let view = todo_view(&app);
-            assert_eq!(view.project.0, "p2");
+            assert_eq!(view.tab.project().unwrap().0, "p2");
             assert_eq!(view.dir, std::path::PathBuf::from("/tmp/nightshift"));
             assert!(view.query.is_empty());
             let text = buffer_text(&draw_todos(&mut app));
             assert!(!text.contains("setup resend"), "{text}");
 
-            // →, round the end and back on demo, as it was left.
+            // →, round the end onto Blue sky's, then back on demo, as it
+            // was left.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            assert_eq!(todo_tab(&app), "blue sky");
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             let view = todo_view(&app);
-            assert_eq!(view.project.0, "p1");
+            assert_eq!(view.tab.project().unwrap().0, "p1");
             assert_eq!(view.query.trim(), "r");
             assert_eq!(view.cursor, cursor);
 
-            // ⌘2: the second tab; ⌘9, with no ninth, nothing.
-            press(&mut app, KeyCode::Char('2'), KeyModifiers::SUPER, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p2");
+            // ⌘3: the third tab, the second project's; ⌘9, with no ninth,
+            // nothing; ⌘1 Blue sky's, ⌘2 the first project's.
+            press(&mut app, KeyCode::Char('3'), KeyModifiers::SUPER, &mut out);
+            assert_eq!(todo_tab(&app), "p2");
             press(&mut app, KeyCode::Char('9'), KeyModifiers::SUPER, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p2");
+            assert_eq!(todo_tab(&app), "p2");
             press(&mut app, KeyCode::Char('1'), KeyModifiers::SUPER, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "blue sky");
+            press(&mut app, KeyCode::Char('2'), KeyModifiers::SUPER, &mut out);
+            assert_eq!(todo_tab(&app), "p1");
+        });
+    }
+
+    /// Blue sky's tab: a click on its label lands there as `⌘1` does
+    /// (INPUT PARITY), under the line saying what Enter does. On an idea
+    /// `w` steps where it goes — `blue sky`, then each project — and its
+    /// row says so beside how its build stands; any other letter still
+    /// types onto it. `Enter` starts the BLUE SKY BUILDER: the first idea
+    /// for `blue sky` makes the Blue sky folder and adds it as a project.
+    #[test]
+    fn blue_sky_ideas_go_where_w_says_and_enter_builds_them() {
+        let folder = tempfile::tempdir().unwrap();
+        let folder = folder.path().join("orion-blue-sky");
+        crate::automations::blue_sky::with_folder(folder.clone(), || {
+            crate::todos::with_now(todo_clock(6), || {
+                let mut out = Vec::new();
+                let mut app = todos_with(TWO_EMAILS);
+                app.automations
+                    .settings
+                    .of_mut(crate::automations::Automation::BlueSky)
+                    .on = Some(true);
+                let key = crate::todos::store::blue_sky_key();
+                let mut ideas = crate::todos::TodoFile::new(&key);
+                let inbox = ideas.inbox();
+                let idea = ideas.add_item(inbox, "habit tracker", crate::todos::today());
+                app.todos.insert(key.clone(), ideas);
+                draw_todos(&mut app);
+                let (x, _) = todo_view(&app).project_hits[0];
+                let y = todo_view(&app).project_row.y;
+                click(&mut app, x, y, &mut out);
+                assert_eq!(todo_tab(&app), "blue sky");
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+                let text = buffer_text(&draw_todos(&mut app));
+                assert!(text.contains("Enter starts the Blue sky builder"), "{text}");
+                assert!(text.contains("blue sky · not started"), "{text}");
+                assert!(text.contains("w where"), "{text}");
+
+                let target = |app: &App| app.todos[&key].item(idea).unwrap().target.clone();
+                press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE, &mut out);
+                assert_eq!(target(&app).as_deref(), Some("p1"));
+                let text = buffer_text(&draw_todos(&mut app));
+                assert!(text.contains("demo · not started"), "{text}");
+                press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE, &mut out);
+                assert_eq!(target(&app), None, "round to blue sky");
+                press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE, &mut out);
+                assert!(todo_view(&app).input.is_some(), "x types onto the row");
+                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+                out.clear();
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(
+                    out.iter().any(|r| matches!(
+                        r,
+                        ClientRequest::AddProject {
+                            create_missing: true,
+                            ..
+                        }
+                    )),
+                    "{out:?}"
+                );
+                assert!(folder.is_dir());
+                assert!(app.todos[&key].item(idea).unwrap().queued);
+                assert!(
+                    matches!(app.overlay, Some(Overlay::Todos(_))),
+                    "the modal stays"
+                );
+            });
         });
     }
 

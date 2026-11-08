@@ -1015,6 +1015,9 @@ impl TodoFile {
             done: None,
             agent: None,
             worktree: None,
+            target: None,
+            built_in: None,
+            queued: false,
         });
         id
     }

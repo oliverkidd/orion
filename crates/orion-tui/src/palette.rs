@@ -49,10 +49,10 @@ pub enum PaletteTarget {
         project: ProjectId,
         id: String,
     },
-    /// An open todo on `project`'s list, by its id: picking it opens the
-    /// TODOS MODAL on it.
+    /// An open todo on a tab's list — a project's, or Blue sky's — by its
+    /// id: picking it opens the TODOS MODAL on it.
     Todo {
-        project: ProjectId,
+        tab: crate::todos::view::Tab,
         item: u64,
     },
 }
@@ -478,12 +478,17 @@ fn build_palette_items(
 /// A row under project `p` that is neither the tree's nor a pull
 /// request: no status, no stamp, in the attention order's last tier.
 fn row_in(p: &Project, target: PaletteTarget, label: &str) -> PaletteItem {
-    let under = format!("{}/", p.name);
+    row_under(&p.name, target, label)
+}
+
+/// A row named `label` under the crumb `crumb`.
+fn row_under(crumb: &str, target: PaletteTarget, label: &str) -> PaletteItem {
+    let under = format!("{crumb}/");
     PaletteItem {
         target,
         text: format!("{under}{label}"),
         label_at: under.chars().count(),
-        crumb: Some((0, p.name.chars().count())),
+        crumb: Some((0, crumb.chars().count())),
         stamped: 0,
         status: None,
         unseen: false,
@@ -524,22 +529,39 @@ pub fn linear_rows(
     rows
 }
 
-/// Each project's open todos, as `todos` has its list (by checkout).
+/// Each project's open todos, as `todos` has its list (by checkout), and
+/// the Blue sky list's open ideas, under `Blue sky`.
 pub fn todo_rows(
     tree: &Tree,
     todos: &HashMap<std::path::PathBuf, crate::todos::TodoFile>,
 ) -> Vec<PaletteItem> {
+    use crate::todos::view::{Tab, BLUE_SKY_TAB};
+    let lists = tree
+        .projects
+        .iter()
+        .map(|p| {
+            (
+                Tab::Project(p.id.clone()),
+                p.name.as_str(),
+                p.repo_path.clone(),
+            )
+        })
+        .chain([(
+            Tab::BlueSky,
+            BLUE_SKY_TAB,
+            crate::todos::store::blue_sky_key(),
+        )]);
     let mut rows = Vec::new();
-    for p in &tree.projects {
-        let Some(file) = todos.get(&p.repo_path) else {
+    for (tab, name, dir) in lists {
+        let Some(file) = todos.get(&dir) else {
             continue;
         };
         for item in file.items.iter().filter(|i| i.done.is_none()) {
             let target = PaletteTarget::Todo {
-                project: p.id.clone(),
+                tab: tab.clone(),
                 item: item.id,
             };
-            rows.push(row_in(p, target, item.text.trim()));
+            rows.push(row_under(name, target, item.text.trim()));
         }
     }
     rows
@@ -1007,7 +1029,7 @@ mod tests {
         palette.apply_filter();
         assert!(matches!(
             palette.selected_target(),
-            Some(PaletteTarget::Todo { project, .. }) if project.0 == "p1"
+            Some(PaletteTarget::Todo { tab: crate::todos::view::Tab::Project(project), .. }) if project.0 == "p1"
         ));
         palette.rebuild(&tree, &HashMap::new(), &PrStore::default(), false);
         assert!(

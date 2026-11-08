@@ -86,6 +86,20 @@ pub struct Item {
     /// request merging ticks the item, the session deleted or not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
+    /// A Blue sky idea's target, `w` on its row: the project (by id) it
+    /// is built in, or None for `blue sky`, the Blue sky folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Where the BLUE SKY BUILDER builds the idea, once Enter started it:
+    /// its `proto/<slug>` branch, or its `<slug>` folder in the Blue sky
+    /// folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub built_in: Option<String>,
+    /// Enter asked for the builder and its session is not on its way yet:
+    /// it waits on the Blue sky folder's project, or for a place under the
+    /// automations' cap. This run only.
+    #[serde(skip)]
+    pub queued: bool,
 }
 
 impl TodoFile {
@@ -99,14 +113,33 @@ impl TodoFile {
     }
 }
 
-/// Where `repo`'s list lives. None in the unit tests unless one names a
-/// folder ([`with_dir`]): the many that open the modal must never write
-/// to the real data dir.
+/// The key the Blue sky list is kept under in place of a checkout, on
+/// `App::todos` and as its file's `repo_path`. Every checkout is an
+/// absolute path, so this is never a project's.
+pub const BLUE_SKY_KEY: &str = "blue sky";
+
+/// The Blue sky list's key ([`BLUE_SKY_KEY`]).
+pub fn blue_sky_key() -> PathBuf {
+    PathBuf::from(BLUE_SKY_KEY)
+}
+
+/// Whether `repo` is the Blue sky list's key.
+pub fn is_blue_sky(repo: &Path) -> bool {
+    repo == Path::new(BLUE_SKY_KEY)
+}
+
+/// Where `repo`'s list lives, the Blue sky list in `blue-sky.json`. None
+/// in the unit tests unless one names a folder ([`with_dir`]): the many
+/// that open the modal must never write to the real data dir.
 pub fn path_for(repo: &Path) -> Option<PathBuf> {
-    let name = format!(
-        "{:016x}.json",
-        crate::review::fingerprint(&repo.to_string_lossy())
-    );
+    let name = if is_blue_sky(repo) {
+        "blue-sky.json".to_string()
+    } else {
+        format!(
+            "{:016x}.json",
+            crate::review::fingerprint(&repo.to_string_lossy())
+        )
+    };
     Some(dir()?.join(name))
 }
 
@@ -339,6 +372,9 @@ mod tests {
             done: Some(Local.with_ymd_and_hms(2026, 10, 6, 23, 30, 0).unwrap()),
             agent: None,
             worktree: None,
+            target: None,
+            built_in: None,
+            queued: false,
         });
         file
     }
@@ -441,6 +477,22 @@ mod tests {
         assert!(!loaded.file.read_only, "afresh, and saved as usual");
         assert!(!path.exists());
         assert_eq!(std::fs::read_to_string(&aside).unwrap(), "{ not json");
+    }
+
+    /// The Blue sky list keeps a file of its own, by name, and reads back
+    /// each idea's target.
+    #[test]
+    fn the_blue_sky_list_has_its_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        with_dir(dir.path().to_path_buf(), || {
+            let path = path_for(&blue_sky_key()).unwrap();
+            assert_eq!(path, dir.path().join("blue-sky.json"));
+            let mut file = sample(&blue_sky_key());
+            file.items[0].target = Some("p1".into());
+            file.items[0].done = None;
+            save(&file);
+            assert_eq!(load(&blue_sky_key()).file, file);
+        });
     }
 
     /// Different checkouts keep different files.

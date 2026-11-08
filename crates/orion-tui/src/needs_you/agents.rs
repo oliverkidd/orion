@@ -41,6 +41,13 @@ pub fn reason_text(agent: &Agent, reason: Option<&WaitReason>, draft_pr: Option<
             "hit its usage limit".into()
         }
         (AgentStatus::NeedsFeedback, Some(WaitReason::Question { .. })) => "asks a question".into(),
+        // The blue sky builder's plan is the brief it wrote for the idea.
+        (AgentStatus::NeedsFeedback, Some(WaitReason::Plan { .. }))
+            if crate::automations::kind_of(agent)
+                == Some(crate::automations::Automation::BlueSky) =>
+        {
+            "brief to approve".into()
+        }
         (AgentStatus::NeedsFeedback, Some(WaitReason::Plan { .. })) => "plan to approve".into(),
         (AgentStatus::NeedsFeedback, Some(WaitReason::Permission { tool })) => {
             format!("needs permission for {tool}")
@@ -179,6 +186,15 @@ mod tests {
             plan: "1. …".into(),
         };
         assert_eq!(reason_text(&waiting, Some(&plan), None), "plan to approve");
+        let blue_sky = Agent {
+            automation: Some("blue_sky".into()),
+            ..waiting.clone()
+        };
+        assert_eq!(
+            reason_text(&blue_sky, Some(&plan), None),
+            "brief to approve",
+            "a blue sky idea's plan is its brief"
+        );
         let permission = WaitReason::Permission {
             tool: "Bash".into(),
         };

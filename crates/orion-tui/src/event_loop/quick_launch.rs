@@ -142,10 +142,15 @@ pub(super) fn submit(
 
 /// An AUTOMATION's launch, fired with nobody at a box: the QUICK PROMPT's
 /// own last step, the launch's `automation` set (`automations::
-/// launch_in_new_worktree`).
-pub(crate) fn submit_unattended(app: &mut App, launch: QuickLaunch, out: &mut Vec<ClientRequest>) {
+/// launch_in_new_worktree`), `text` its task as a box's typed text is.
+pub(crate) fn submit_unattended(
+    app: &mut App,
+    launch: QuickLaunch,
+    text: String,
+    out: &mut Vec<ClientRequest>,
+) {
     debug_assert!(launch.automation.is_some());
-    submit(app, launch, String::new(), out);
+    submit(app, launch, text, out);
 }
 
 /// What every launch the screen follows does at once: the new session is
