@@ -1,0 +1,14 @@
+docs/2026-11-07-needs-you/build-log.md
+  h_460e25644b9301 33-34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "024ed04b90eab48147138a9b06f8505cca8c60e3",
+  "prompts": {},
+  "humans": {
+    "h_460e25644b9301": {
+      "author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
