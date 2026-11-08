@@ -1,0 +1,75 @@
+crates/orion-tui/src/microsoft/mod.rs
+  s_0fc3ca629be011::t_6cb27d5c9cbba6 359-362
+  s_0fc3ca629be011::t_1e5a34c6a9c6a7 1-78,83-84,89-150,152-224,242-244,246-276,279-300,302-358,363-384
+  s_0fc3ca629be011::t_437ff04ee9f352 81-82,301
+  s_0fc3ca629be011::t_8c3a8dd5878f9b 79-80,85-88,151,225-241,245,277-278
+crates/orion-tui/src/ui/footer.rs
+  s_0fc3ca629be011::t_88a6c5c0c959c3 473-480,485-486,508-516
+crates/orion-tui/src/app.rs
+  s_0fc3ca629be011::t_db856b6dd6cd3b 4838-4839
+  s_0fc3ca629be011::t_696d45f6dc11c9 4533-4537
+docs/keys.md
+  s_0fc3ca629be011::t_6e876fbb0582f0 713
+  s_0fc3ca629be011::t_c771e8691d0095 653-654
+crates/orion-tui/src/microsoft/graph.rs
+  s_0fc3ca629be011::t_a57fa222569432 1-84,91-102
+  s_0fc3ca629be011::t_6cb27d5c9cbba6 85-90
+crates/orion-tui/src/projects.rs
+  s_0fc3ca629be011::t_c356aa387718cf 1-188,199-211,221-236,241-312
+  s_0fc3ca629be011::t_6cb27d5c9cbba6 189-198,212-220
+  s_0fc3ca629be011::t_2542f41ff351dd 237-240
+crates/orion-tui/src/oneshot.rs
+  s_0fc3ca629be011::t_9227c93de80488 76-87
+scripts/perf/run.sh
+  s_0fc3ca629be011::t_58f643e3a32fdc 80
+crates/orion-core/src/env.rs
+  s_0fc3ca629be011::t_fd5cc2c4b772d4 49-55
+crates/orion-tui/src/microsoft/auth.rs
+  s_0fc3ca629be011::t_2bad7399806215 1-233,237-343,347-436
+  s_0fc3ca629be011::t_6cb27d5c9cbba6 234-236,344-346
+crates/orion-tui/src/microsoft/calendar.rs
+  s_0fc3ca629be011::t_918c4968539ca3 1-115,118-150,156-231,237-260,266-301
+  s_0fc3ca629be011::t_6cb27d5c9cbba6 116-117,151-155,232-236,261-265
+crates/orion-tui/src/lib.rs
+  s_0fc3ca629be011::t_5c62861ed1611f 58,80
+crates/orion-tui/src/config.rs
+  s_0fc3ca629be011::t_01b50681c67c77 5497-5504
+  s_0fc3ca629be011::t_d1da40f82f5ce0 5450-5451,5476-5479,5483-5496,5505-5553
+  s_0fc3ca629be011::t_7b564b4bf83308 4321-4322,5243-5245
+  s_0fc3ca629be011::t_77731cb19ea377 417-426,489,515-516,673-684,687-689,708-720,1238,1285-1293,1302-1321,1333-1334,1354,1368,1379-1382,2742-2744,2746-2747,2827-2829,2832-2837
+  s_0fc3ca629be011::t_004457fac28302 5554
+scripts/shot/shot.sh
+  s_0fc3ca629be011::t_58f643e3a32fdc 59
+crates/orion/tests/e2e_tui.rs
+  s_0fc3ca629be011::t_58f643e3a32fdc 139-140
+crates/orion-tui/src/event_loop.rs
+  s_0fc3ca629be011::t_e09b7d1ec1394b 27066-27075,27077-27084,27089-27091,27096-27108
+  s_0fc3ca629be011::t_fd915e46c3769f 271,416-425,428,767-783,8795,12849-12858,12861-12863
+  s_0fc3ca629be011::t_f88e701d183035 8382-8395,8435-8438,8522-8529,8553-8569,8632-8635,8716,8718-8719
+  s_0fc3ca629be011::t_5642b0baaf91b5 426-427,8521,27076,27085-27088,27092-27095
+crates/orion-tui/src/ui.rs
+  s_0fc3ca629be011::t_b3e8081f3d4b5a 1845-1854,2920-2924,2931,2964-2965,2975
+docs/configuration.md
+  s_0fc3ca629be011::t_e94ba721c676d5 457-458
+  s_0fc3ca629be011::t_3bc7d46a167ab1 105-111
+  s_0fc3ca629be011::t_73dd310ad14f1a 119-136
+docs/sessions.md
+  s_0fc3ca629be011::t_736bf2dc8d8f27 668-674,676
+  s_0fc3ca629be011::t_cf21678fb4f6bd 675
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bb7c6fc3e27aa9d9394d42796c41632113de1e7d",
+  "prompts": {},
+  "sessions": {
+    "s_0fc3ca629be011": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d936749-5a1d-4856-bda0-f453e2b57f37",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
