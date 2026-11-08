@@ -14,6 +14,7 @@ crates/orion-tui/src/automations/blue_sky.rs
   s_0fc3ca629be011::t_c286b3c41d5691 221-223,409-410,443-444,446,448-450,594-598,619-623,637-639,658-663,669-672,707-710
   s_0fc3ca629be011::t_9305e998c6ce32 2-29,33,35-37,40-220,235-237,239-269,279-408,413-418,420-438,441-442,451-460,465-466,468,470-474,476-477,479-484,486-489,499-593,599-618,624-636,640-657,664-668,673-706,711-724
   s_0fc3ca629be011::t_7559326147fe12 270-278
+  s_0fc3ca629be011::t_7bbf8af54048d2 490-493
 crates/orion/tests/e2e_tui.rs
   s_0fc3ca629be011::t_6f655b00192fa5 1502-1505
   s_0fc3ca629be011::t_9ebf4479c08a50 1511
@@ -31,6 +32,7 @@ crates/orion-tui/src/automations/mod.rs
   s_0fc3ca629be011::t_3e644ef4122dc5 267-268,271-272
   s_0fc3ca629be011::t_df43b7dbbb468f 596,602
   s_0fc3ca629be011::t_2c5dae376c701b 98-100,102
+  s_0fc3ca629be011::t_f00352c9e79299 391-395,400,410
 crates/orion-tui/src/palette.rs
   s_0fc3ca629be011::t_c286b3c41d5691 542-553
   s_0fc3ca629be011::t_5a823d1ed94c3d 52-53,55,481-486,491,532-533,538-541,555-556,561,564,1032
@@ -60,6 +62,7 @@ crates/orion-tui/src/needs_you/agents.rs
   s_0fc3ca629be011::t_690492a16057b2 44-50
 crates/orion-tui/src/event_loop/quick_launch.rs
   s_0fc3ca629be011::t_907eafac34bd78 279,281-284
+  s_0fc3ca629be011::t_a1fc3f48fb7b63 145-151,153
 crates/orion-tui/src/agent_picker.rs
   s_0fc3ca629be011::t_6c5bd2aa9b5a53 481,561
 docs/sessions.md
@@ -94,6 +97,8 @@ crates/orion-tui/src/quick_prompt.rs
   s_0fc3ca629be011::t_48d2a04b6ddc1a 488
 docs/keys.md
   s_0fc3ca629be011::t_c587044010e604 97,336,368
+crates/orion-tui/src/automations/linear_builder.rs
+  s_0fc3ca629be011::t_1bb71ed6922de3 544
 ---
 {
   "schema_version": "authorship/3.0.0",
