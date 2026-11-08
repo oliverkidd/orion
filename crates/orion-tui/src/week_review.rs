@@ -13,9 +13,9 @@
 //!   issues and the ticked todos come from the lists the app already
 //!   holds ([`gather`]).
 //! * **Writing is a model's, in one ask.** [`prompt`] puts everything in
-//!   one text and [`write`] sends it through the print mode of a Claude
+//!   one text and [`write`] sends it, as one [`oneshot::run`], through a Claude
 //!   account orion runs — the **Week review** SYSTEM PRESET's, else the
-//!   default agent's ([`account_through`]) — with no tools: nothing runs in a checkout, no
+//!   default agent's ([`oneshot::account_for`]) — with no tools: nothing runs in a checkout, no
 //!   session appears on the grid, and there is nothing to tidy up after. Measured on a week
 //!   of 162 pull requests: under a minute, where an agent session that
 //!   fetched for itself took over two.
@@ -48,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::{App, Overlay};
 use crate::flash::Flash;
 use crate::hints::Hint;
+use crate::oneshot::{self, Account, Reply};
 use crate::pull_request::{bool_at, rfc3339_secs, str_at, u64_at};
 use crate::text_input::TextInput;
 use crate::theme::Theme;
@@ -928,57 +929,10 @@ fn period_label(from: NaiveDate, to: NaiveDate, long: bool) -> String {
 /// The one line the model is given in the system prompt's place.
 const SYSTEM: &str = "You are a careful writer. Output exactly what is asked for and nothing else: no preamble, no code fences, no closing remarks.";
 
-/// What [`write`] got back.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Reply {
-    pub text: String,
-    /// What the ask cost, in US dollars, when the command said.
-    pub cost: Option<f64>,
-}
-
-/// The Claude account a review is written through, as [`write`] runs it:
-/// one of the accounts orion runs sessions on — its own program, with the
-/// config dir that pins it — run directly, as the sign-in modal runs
-/// `claude auth`. A shell alias for the program is not followed.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Account {
-    /// The account's own CLI: `claude`, or what its `harnesses` row names.
-    pub program: String,
-    /// Its environment on top of orion's — the `CLAUDE_CONFIG_DIR` that
-    /// pins an extra account to its own sign-in.
-    pub env: Vec<(String, String)>,
-    /// `Work (a@b.co)`, or `Work (not signed in)`: what Compose and the
-    /// Writing panel call it. Being signed out is said, never refused on:
-    /// the record only knows a browser sign-in, and an account on an API
-    /// key answers all the same. One that cannot answer says so itself.
-    pub label: String,
-}
-
 /// The **Week review** SYSTEM PRESET: the rules a review is written by,
 /// and the Claude account, model and effort that write it.
 fn preset() -> crate::agent_presets::AgentPreset {
     crate::agent_presets::system(crate::agent_presets::SystemPreset::WeekReview)
-}
-
-/// The account `cfg` writes reviews through: the one `preset` — the
-/// **Week review** preset — runs on (`Config::review_account`); None with
-/// no Claude account switched on.
-fn account_through(
-    cfg: &crate::config::Config,
-    preset: &crate::agent_presets::AgentPreset,
-) -> Option<Account> {
-    // A preset that follows the box names no account: the default
-    // agent's, as `review_account` reads an empty one.
-    let pinned = match preset.follows_box() {
-        true => "",
-        false => orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref()),
-    };
-    let entry = cfg.review_account(pinned)?;
-    Some(Account {
-        program: entry.program.trim().to_string(),
-        env: entry.launch_env(),
-        label: entry.display_label().to_string(),
-    })
 }
 
 /// The model and effort `preset` writes reviews at — sonnet · medium
@@ -993,54 +947,23 @@ fn launch_of(preset: &crate::agent_presets::AgentPreset) -> (String, String) {
     )
 }
 
-/// Send `prompt` to `model` at `effort` through `account`'s CLI in print
-/// mode, with no tools: text in, text out, under that account's sign-in.
-/// The failure is the one line worth showing — the command missing, not
-/// signed in, timed out.
+/// Send `prompt` to `model` at `effort` through `account`, as one
+/// [`oneshot::run`] under the review's system prompt.
 pub async fn write(
     prompt: String,
     model: String,
     effort: String,
     account: Account,
 ) -> Result<Reply, String> {
-    let mut cmd = tokio::process::Command::new(&account.program);
-    cmd.envs(account.env.iter().map(|(name, value)| (name, value)));
-    cmd.args([
-        "-p",
-        "--model",
-        model.as_str(),
-        "--effort",
-        effort.as_str(),
-        "--tools",
-        "",
-        "--system-prompt",
-        SYSTEM,
-        "--no-session-persistence",
-        "--output-format",
-        "json",
-    ]);
-    let out = crate::pull_request::run_piped(cmd, &prompt, WRITE_TIMEOUT).await?;
-    parse_reply(&out)
-}
-
-/// `claude -p --output-format json`'s answer: the text under `result`,
-/// unless it says it is an error.
-fn parse_reply(json: &str) -> Result<Reply, String> {
-    let answer: serde_json::Value =
-        serde_json::from_str(json).map_err(|_| "claude answered something that was not JSON")?;
-    let text = answer
-        .get("result")
-        .and_then(|r| r.as_str())
-        .unwrap_or_default()
-        .trim();
-    if answer.get("is_error").and_then(|e| e.as_bool()) == Some(true) || text.is_empty() {
-        let why = text.lines().next().unwrap_or("claude wrote nothing");
-        return Err(truncate(why, WHY_CUT));
-    }
-    Ok(Reply {
-        text: text.to_string(),
-        cost: answer.get("total_cost_usd").and_then(|c| c.as_f64()),
+    oneshot::run(oneshot::Ask {
+        prompt,
+        system: SYSTEM.to_string(),
+        account,
+        model,
+        effort,
+        timeout: WRITE_TIMEOUT,
     })
+    .await
 }
 
 // ---- checking ----
@@ -1048,8 +971,6 @@ fn parse_reply(json: &str) -> Result<Reply, String> {
 /// How many points one pull request may sit on: a feature-branch merge
 /// is the one kind the brief lets repeat.
 const POINTS_A_PR: usize = 3;
-/// How much of a failure's first line is worth showing.
-const WHY_CUT: usize = 120;
 
 /// One numbered line of a review, taken apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1986,7 +1907,7 @@ fn submit(app: &mut App) {
     // review preset's. A unit test starts nothing, so it needs none.
     let cfg = crate::config::Config::load();
     let preset = preset();
-    let through = account_through(&cfg, &preset);
+    let through = oneshot::account_for(&cfg, &preset);
     if app.week_review.tx.is_some() {
         if orion_core::env::non_empty(orion_core::env::AGENT_CMD).is_some() {
             return notice(app, "off while ORION_AGENT_CMD stands in for the agents");
@@ -2846,7 +2767,7 @@ fn draw_form(
             Span::styled(format!("{effort} effort"), Style::default().fg(th.text)),
         ]),
     ));
-    let through = match account_through(&cfg, &preset) {
+    let through = match oneshot::account_for(&cfg, &preset) {
         Some(through) => Span::styled(
             truncate(&through.label, width.saturating_sub(2 + 7 + 1)),
             Style::default().fg(th.text),
@@ -3687,29 +3608,29 @@ AL Ada L · GR Grace
                     .map(|(_, dir)| dir.clone())
             };
             let mut cfg = crate::config::Config::load();
-            let through = account_through(&cfg, &gone).expect("the default agent's account");
+            let through = oneshot::account_for(&cfg, &gone).expect("the default agent's account");
             assert_eq!(through.program, "claude");
             assert_eq!(pinned(&through), Some(work.display().to_string()));
             assert!(through.label.starts_with("Work"), "{}", through.label);
 
             let claude = on(orion_core::AgentKind::Claude, None);
-            let through = account_through(&cfg, &claude).expect("the one pinned");
+            let through = oneshot::account_for(&cfg, &claude).expect("the one pinned");
             assert_eq!(pinned(&through), None, "built-in Claude, its own sign-in");
             let work_on = on(orion_core::AgentKind::Claude, Some("claude-work"));
-            assert!(pinned(&account_through(&cfg, &work_on).unwrap()).is_some());
+            assert!(pinned(&oneshot::account_for(&cfg, &work_on).unwrap()).is_some());
             // Following the box, it is written through the default agent's.
             let follows = AgentPreset {
                 follow_box: Some(true),
                 ..claude.clone()
             };
             assert_eq!(
-                pinned(&account_through(&cfg, &follows).unwrap()),
+                pinned(&oneshot::account_for(&cfg, &follows).unwrap()),
                 Some(work.display().to_string())
             );
 
             cfg.quick_prompt_kind = "codex".into();
             assert_eq!(
-                account_through(&cfg, &gone)
+                oneshot::account_for(&cfg, &gone)
                     .expect("a Claude account that is on")
                     .program,
                 "claude"
@@ -4379,7 +4300,7 @@ AL Ada L · GR Grace
         if let Some(id) = orion_core::env::non_empty("ORION_WEEK_REVIEW_ACCOUNT") {
             (preset.kind, preset.custom_harness) = (orion_core::AgentKind::Custom, Some(id));
         }
-        let through = account_through(&cfg, &preset).expect("a Claude account is on");
+        let through = oneshot::account_for(&cfg, &preset).expect("a Claude account is on");
         println!("through {} ({})", through.label, through.program);
         let reply = write(
             text.clone(),

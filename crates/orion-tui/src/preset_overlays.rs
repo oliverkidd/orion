@@ -1746,6 +1746,10 @@ fn draw_preview_box(f: &mut Frame, editor: &AgentPresetEditor, area: Rect, th: T
 
 /// The task the PREVIEW fills a preset of the user's in with.
 const SAMPLE_TASK: &str = "fix the login redirect loop";
+/// The ticket a bug fixer or feature builder preview shows at its `{task}`.
+const SAMPLE_TICKET: &str = "ENG-412 Login redirects loop after a password reset";
+/// The idea a blue sky builder preview shows at its `{task}`.
+const SAMPLE_IDEA: &str = "a dashboard of which agents are waiting on whom";
 
 /// One run of the PREVIEW: text the preset sends as it stands, or what
 /// orion puts in its place — a sample task, sample issues, what broke, a
@@ -1793,6 +1797,19 @@ fn preview(editor: &AgentPresetEditor) -> Vec<PreviewPart> {
             ),
         ],
         Some(SystemPreset::PrAutofix) => with_sample(&preset, &crate::autofix::sample_task()),
+        Some(SystemPreset::BugFixer | SystemPreset::FeatureBuilder) => {
+            with_sample(&preset, SAMPLE_TICKET)
+        }
+        Some(SystemPreset::MeetingTakeaways) => vec![
+            PreviewPart::own(format!(
+                "{}
+
+",
+                preset.compose("")
+            )),
+            PreviewPart::sample("… the meeting's transcript …"),
+        ],
+        Some(SystemPreset::BlueSky) => with_sample(&preset, SAMPLE_IDEA),
         None if preset.skip_task && !preset.has_text() => {
             vec![PreviewPart::sample(
                 "nothing: the CLI starts with no first prompt",
@@ -1930,6 +1947,11 @@ fn text_title(system: Option<SystemPreset>) -> &'static str {
         Some(SystemPreset::PrAutofix) => " Text — {task} is where what broke goes ",
         Some(SystemPreset::LinearTicket) => " Text — {issues} is where the issues go ",
         Some(SystemPreset::WeekReview) => " Text — the rules your review is written by ",
+        Some(SystemPreset::BugFixer | SystemPreset::FeatureBuilder) => {
+            " Text — {task} is where the ticket goes "
+        }
+        Some(SystemPreset::MeetingTakeaways) => " Text — what is asked of a transcript ",
+        Some(SystemPreset::BlueSky) => " Text — {task} is where the idea goes ",
     }
 }
 

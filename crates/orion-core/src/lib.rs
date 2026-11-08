@@ -8,11 +8,13 @@ pub mod env;
 pub mod env_files;
 pub mod harness;
 pub mod host;
+pub mod http;
 pub mod ids;
 pub mod kitty;
 pub mod mem;
 pub mod paths;
 pub mod protocol;
+pub mod secrets;
 pub mod settings;
 pub mod shell;
 

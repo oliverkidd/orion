@@ -67,8 +67,6 @@ const LIST_PCT: u16 = crate::pr_modal::LIST_PCT;
 const MIN_LIST_W: u16 = crate::pr_modal::MIN_LIST_W;
 const WHEEL_LINES: i32 = crate::pr_modal::WHEEL_LINES;
 #[cfg(not(test))]
-const TIMEOUT_SECS: &str = "20";
-#[cfg(not(test))]
 const LINEAR_URL: &str = "https://api.linear.app/graphql";
 const KEY_NAME: &str = "LINEAR_API_KEY";
 const ENV_FILES: &[&str] = &[".env.local", ".env"];
@@ -5985,8 +5983,8 @@ pub(crate) fn with_graphql_stub<T>(stub: GraphqlStub, f: impl FnOnce() -> T) -> 
     out.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-/// One GraphQL request to Linear through `curl`, the key on its stdin
-/// config and the body in a temp file, never on argv.
+/// One GraphQL request to Linear through [`orion_core::http`]: the key
+/// on curl's stdin config and the body in a temp file, never on argv.
 #[cfg(not(test))]
 async fn curl_graphql(
     key: &str,
@@ -5994,51 +5992,23 @@ async fn curl_graphql(
     variables: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
-    // Body stays off argv (and off the key's stdin config). std, not the
-    // `tempfile` crate: that one is a test-only dep of this crate.
-    let body_path = std::env::temp_dir().join(format!(
-        "orion-linear-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&body_path, body.as_bytes()).map_err(|e| e.to_string())?;
-    let _cleanup = DeleteOnDrop(body_path.clone());
-    let config =
-        format!("header = \"Authorization: {key}\"\nheader = \"Content-Type: application/json\"\n");
-    let mut cmd = tokio::process::Command::new("curl");
-    cmd.args([
-        "-sS",
-        "--max-time",
-        TIMEOUT_SECS,
-        "--config",
-        "-",
-        "-X",
-        "POST",
-        LINEAR_URL,
-        "--data-binary",
-        &format!("@{}", body_path.display()),
-    ])
-    .stdin(std::process::Stdio::piped())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| format!("couldn't run curl: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(config.as_bytes()).await;
-    }
-    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Linear request failed: {}",
-            err.lines().next().unwrap_or("curl error")
-        ));
-    }
-    serde_json::from_slice(&output.stdout)
+    let headers = vec![
+        format!("Authorization: {key}"),
+        "Content-Type: application/json".to_string(),
+    ];
+    let response = tokio::task::spawn_blocking(move || {
+        orion_core::http::request(&orion_core::http::Request {
+            method: "POST",
+            url: LINEAR_URL,
+            headers: &headers,
+            body: Some(body.as_bytes()),
+            ..Default::default()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|why| format!("Linear request failed: {why}"))?;
+    serde_json::from_slice(&response.body)
         .map_err(|_| "Linear returned something that wasn't JSON".into())
 }
 
@@ -6220,16 +6190,6 @@ fn status_rank(issue: &LinearIssue) -> u8 {
         "completed" => 4,
         "canceled" => 6,
         _ => 7,
-    }
-}
-
-#[cfg(not(test))]
-struct DeleteOnDrop(PathBuf);
-
-#[cfg(not(test))]
-impl Drop for DeleteOnDrop {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
     }
 }
 

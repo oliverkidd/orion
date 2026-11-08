@@ -326,6 +326,16 @@ fn explain_purpose(which: SystemPreset) -> &'static str {
         SystemPreset::PrAutofix => "What orion's autofix agent is told when a PR of yours breaks",
         SystemPreset::LinearTicket => "What every {linear} launch sends, its issues filled in",
         SystemPreset::WeekReview => "The rules your week in review ({week_review}) is written by",
+        SystemPreset::BugFixer => {
+            "What the bug fixer tells the agent it starts on a labelled Linear bug"
+        }
+        SystemPreset::FeatureBuilder => {
+            "What the feature builder tells the agent it starts on a labelled Linear feature"
+        }
+        SystemPreset::MeetingTakeaways => {
+            "How meeting takeaways are pulled from a Teams transcript"
+        }
+        SystemPreset::BlueSky => "What the blue sky builder tells the agent it starts on an idea",
     }
 }
 
@@ -545,6 +555,9 @@ mod tests {
         table
     }
 
+    /// The first row of the user's own: after every one of orion's.
+    const MINE: usize = SystemPreset::ALL.len();
+
     /// orion's presets lead in their own order whatever the file's, the
     /// user's follow in theirs, and + New preset closes the list.
     #[test]
@@ -563,6 +576,10 @@ mod tests {
                 "PR autofix",
                 "Linear Ticket",
                 "Week review",
+                "Bug fixer",
+                "Feature builder",
+                "Meeting takeaways",
+                "Blue sky builder",
                 "Subagent Delegation",
                 NEW_PRESET
             ]
@@ -574,10 +591,14 @@ mod tests {
                 SettingsRow::Setting(0),
                 SettingsRow::Setting(1),
                 SettingsRow::Setting(2),
-                SettingsRow::Blank,
-                SettingsRow::Header(YOURS.into()),
                 SettingsRow::Setting(3),
                 SettingsRow::Setting(4),
+                SettingsRow::Setting(5),
+                SettingsRow::Setting(6),
+                SettingsRow::Blank,
+                SettingsRow::Header(YOURS.into()),
+                SettingsRow::Setting(MINE),
+                SettingsRow::Setting(MINE + 1),
             ]
         );
     }
@@ -596,7 +617,7 @@ mod tests {
                 .map(|h| format!("{} {}", h.key, h.does))
                 .collect()
         };
-        for at in 0..3 {
+        for at in 0..MINE {
             crate::hints::assert_hints_from(&screen.hints(at), &table());
             let text = words(at).join(" · ");
             assert!(text.starts_with("Enter edit"), "{text}");
@@ -617,15 +638,16 @@ mod tests {
         assert_eq!(words(2), ["Enter edit"]);
         assert_eq!(screen.key_cmd(2, &ctrl('r')), None);
 
-        crate::hints::assert_hints_from(&screen.hints(3), &table());
-        assert_eq!(words(3), ["Enter edit", "^N new", "^D delete"]);
-        assert_eq!(screen.key_cmd(3, &ctrl('n')), Some(Cmd::New(3)));
-        assert_eq!(screen.key_cmd(3, &ctrl('d')), Some(Cmd::Delete(3)));
-        assert_eq!(screen.key_cmd(3, &ctrl('r')), None);
+        crate::hints::assert_hints_from(&screen.hints(MINE), &table());
+        assert_eq!(words(MINE), ["Enter edit", "^N new", "^D delete"]);
+        assert_eq!(screen.key_cmd(MINE, &ctrl('n')), Some(Cmd::New(MINE)));
+        assert_eq!(screen.key_cmd(MINE, &ctrl('d')), Some(Cmd::Delete(MINE)));
+        assert_eq!(screen.key_cmd(MINE, &ctrl('r')), None);
 
-        assert_eq!(words(4), ["Enter new preset"]);
-        assert_eq!(screen.key_cmd(4, &ctrl('d')), None);
-        assert_eq!(screen.key_cmd(4, &ctrl('n')), None, "Enter is its new");
+        let new = MINE + 1;
+        assert_eq!(words(new), ["Enter new preset"]);
+        assert_eq!(screen.key_cmd(new, &ctrl('d')), None);
+        assert_eq!(screen.key_cmd(new, &ctrl('n')), None, "Enter is its new");
     }
 
     /// What the line under the rows says: what a system preset is for,
@@ -638,9 +660,9 @@ mod tests {
         assert!(autofix.contains("Its text is yours"), "{autofix}");
         assert!(autofix.contains("can't be deleted or renamed"), "{autofix}");
         assert!(screen.explain(2).contains("Its text is orion's"));
-        let mine = screen.explain(3);
+        let mine = screen.explain(MINE);
         assert!(mine.contains("Sends: Please review it."), "{mine}");
-        assert!(screen.explain(4).contains("A launch you make often"));
+        assert!(screen.explain(MINE + 1).contains("A launch you make often"));
     }
 
     /// The settings overlay on the Presets tab, `width` cells wide, the
@@ -702,7 +724,7 @@ mod tests {
         let wide = draw(100, 0);
         assert!(wide.contains("sent when one of your PRs breaks"), "{wide}");
         assert!(wide.contains("writes your week review"), "{wide}");
-        let on_mine = draw(100, 3);
+        let on_mine = draw(100, MINE);
         assert!(on_mine.contains("^D delete"), "{on_mine}");
         assert!(on_mine.contains("^N new"), "{on_mine}");
     }

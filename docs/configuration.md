@@ -21,8 +21,8 @@ default and stays in the file as written), and a malformed file is logged and ig
 
 ## Every setting
 
-The overlay has five tabs: **General · Accounts · Projects · Presets · Keys**. `Tab` / `⇧Tab`,
-`[` / `]` or `1`–`5` change tab; `Enter` or `Space` toggles a row, `←` / `→` cycle it, and a typed
+The overlay has six tabs: **General · Accounts · Projects · Presets · Connections · Keys**.
+`Tab` / `⇧Tab`, `[` / `]` or `1`–`6` change tab; `Enter` or `Space` toggles a row, `←` / `→` cycle it, and a typed
 row opens a prompt prefilled with its value (empty puts the default back). `⇧R` puts every setting
 back to its default, after a confirm, and removes `config.local.json`. **Presets** is the
 [presets screen](#presets), kept in its own file; **Keys** lists every action and its chords and
@@ -105,6 +105,38 @@ One block per project in the tree, each row reading and writing that project's e
 
 A project with no entry reads as the defaults, and an entry that only repeats them is dropped on
 save. A key inside an entry this build doesn't know is kept.
+
+### Connections
+
+What orion reaches outside itself through, a section each: **AWAY AND PHONE**, **SLACK**,
+**MICROSOFT 365** and **GITHUB AND LINEAR**. For now each section is one **Status** row that reads
+`not connected`; the keys below are read as they are written, and have no rows yet.
+
+```json
+{ "away": { "screen_lock": true, "idle_minutes": 10,
+            "phone": ["question", "plan", "crash"], "quiet": ["22:00", "07:00"] },
+  "slack": { "dms": true, "mentions": true, "threads": true,
+             "channels": [], "keywords": [], "banner": "dms_and_mentions" },
+  "microsoft": { "client_id": "", "tenant": "organizations",
+                 "footer_meeting": true, "takeaways": true },
+  "inbox": { "code_reviews": true, "linear_mentions": true } }
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `away.screen_lock` | `true` | The screen locking counts as away. |
+| `away.idle_minutes` | `10` | Minutes with no keys or mouse before you count as away. |
+| `away.phone` | `["question", "plan", "crash"]` | What goes to your phone while you are away. |
+| `away.quiet` | `["22:00", "07:00"]` | Quiet hours: nothing goes to your phone between them. `null` is none. |
+| `slack.dms`, `slack.mentions`, `slack.threads` | `true` | Direct messages, mentions of you, and new replies in threads you're in count as messages for you. |
+| `slack.channels`, `slack.keywords` | `[]` | Channels whose every message counts, and words that make a message count anywhere. |
+| `slack.banner` | `"dms_and_mentions"` | Which messages bring a banner and a sound: `every`, `dms_and_mentions` or `never`. |
+| `microsoft.client_id`, `microsoft.tenant` | `""`, `"organizations"` | The Entra app orion signs in to Microsoft 365 through. Not secret, so a team can share them. |
+| `microsoft.footer_meeting`, `microsoft.takeaways` | `true` | The next meeting in the footer, and takeaways from Teams transcripts. |
+| `inbox.code_reviews`, `inbox.linear_mentions` | `true` | Code reviews asked of you, and Linear comments that mention you, show in Needs you. |
+
+A key left out of a section keeps its default, the others as written. Tokens are never in the
+file: orion keeps them in the macOS Keychain, under services named `dev.orion.<service>`.
 
 ### Hand-edited
 
@@ -194,13 +226,17 @@ task goes (after the text, past a blank line, when it names none). Its **Task** 
 optional task is asked for) or `skip` (it launches on its text alone). The editor shows a preview
 of what the agent will get.
 
-**Used by orion** lists the three SYSTEM PRESETS, each tagged `orion`:
+**Used by orion** lists the seven SYSTEM PRESETS, each tagged `orion`:
 
 | Preset | Used for | Runs on |
 |---|---|---|
 | **PR autofix** | the text round what broke, for every autofix agent | the PR's own agent (the session that worked on its branch), else your default |
 | **Linear Ticket** | wraps every `⌘L` launch; `{issues}`, `{ids}` and `{first_id}` are filled in | the box's agent |
 | **Week review** | the rules the week in review is written by | your default agent's account, at sonnet · medium |
+| **Bug fixer** | what the bug fixer tells the agent it starts on a labelled Linear bug | the box's agent |
+| **Feature builder** | what the feature builder tells the agent it starts on a labelled Linear feature | the box's agent |
+| **Meeting takeaways** | how takeaways are pulled from a Teams meeting's transcript | your default agent's account, at sonnet · medium |
+| **Blue sky builder** | what the blue sky builder tells the agent it starts on an idea | the box's agent |
 
 A system preset always has text: empty, it shows orion's built-in text greyed and uses it. It can't
 be renamed or deleted. On it `Enter` edits and `^R` puts orion's text back. On one of yours, under
@@ -373,6 +409,7 @@ Everything orion writes under its data dir:
 | `cursor_models.json` | Cursor's model list | refreshed after 24 h |
 | `recent_files.json` | Go to file's recent files | 20 per checkout |
 | `reviewed.json` | the diff viewer's reviewed marks | until the checkout's HEAD moves |
+| `needs-you.json` | which Needs you cards are done or snoozed | a done card until no source offers it; a snooze for its hour |
 | `quick_prompt_drafts.json` | unsent QUICK PROMPT text | until it is sent or cleared |
 | `attachments/` | files dropped or pasted into a prompt | 7 days |
 | `fresh/config.json` | fresh's config | — |

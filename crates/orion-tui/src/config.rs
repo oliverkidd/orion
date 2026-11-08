@@ -411,7 +411,22 @@ pub enum SettingKind {
     /// found, if anywhere, and what the last test said
     /// (`linear::key_status`); Enter asks Linear whose key it is.
     LinearKey,
+    /// A CONNECTIONS TAB section's status row: whether that connection is
+    /// set up. Nothing in the file behind it.
+    Connection(Connection),
 }
+
+/// One section of the CONNECTIONS TAB, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connection {
+    AwayAndPhone,
+    Slack,
+    Microsoft,
+    GithubAndLinear,
+}
+
+/// What a connection that is not set up says.
+pub const NOT_CONNECTED: &str = "not connected";
 
 /// One harness field row in the Accounts tab. The tab renders one section
 /// per registry entry — built-ins, Claude accounts and `harnesses` map ids
@@ -468,7 +483,7 @@ impl SettingKind {
     /// nothing in the file behind it, nothing to cycle. Its value is the
     /// app's to tell (`linear::key_status`), and Enter is its one verb.
     pub fn is_status(self) -> bool {
-        matches!(self, SettingKind::LinearKey)
+        matches!(self, SettingKind::LinearKey | SettingKind::Connection(_))
     }
 
     /// A row on the PROJECTS TAB: its value is that project's, kept in
@@ -530,6 +545,12 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
     SettingsTab {
         title: "Presets",
         body: TabBody::Presets,
+    },
+    // What orion reaches outside itself through: away and the phone,
+    // Slack, Microsoft 365, GitHub and Linear.
+    SettingsTab {
+        title: "Connections",
+        body: TabBody::Values(CONNECTIONS_SETTINGS),
     },
     SettingsTab {
         title: "Keys",
@@ -635,6 +656,35 @@ pub const PROJECT_SETTINGS: &[SettingSpec] = &[
         label: "Linear key",
         hint: "Where this project's LINEAR_API_KEY comes from — its .env.local, then its .env, then orion's own environment — never the key itself. Enter asks Linear whose key it is",
         group: "",
+    },
+];
+
+/// The CONNECTIONS TAB's rows, a section each: a status row until the
+/// connection's own rows arrive.
+pub const CONNECTIONS_SETTINGS: &[SettingSpec] = &[
+    SettingSpec {
+        kind: SettingKind::Connection(Connection::AwayAndPhone),
+        label: "Status",
+        hint: "When you are away, an agent that starts waiting or crashes goes to your phone as a Slack DM from Orion",
+        group: "AWAY AND PHONE",
+    },
+    SettingSpec {
+        kind: SettingKind::Connection(Connection::Slack),
+        label: "Status",
+        hint: "Slack messages waiting for you show in Needs you",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Connection(Connection::Microsoft),
+        label: "Status",
+        hint: "Your next meeting in the footer, and takeaways from Teams transcripts",
+        group: "MICROSOFT 365",
+    },
+    SettingSpec {
+        kind: SettingKind::Connection(Connection::GithubAndLinear),
+        label: "Status",
+        hint: "Code reviews asked of you and Linear comments that mention you show in Needs you",
+        group: "GITHUB AND LINEAR",
     },
 ];
 
@@ -1124,6 +1174,15 @@ pub struct Config {
     /// written, so the file stays small and new defaults reach existing
     /// installs. See [`crate::keymap`].
     pub keybindings: BTreeMap<String, String>,
+    /// Settings → Connections › AWAY AND PHONE.
+    pub away: AwaySettings,
+    /// Settings → Connections › SLACK: what counts as a message for you.
+    pub slack: SlackSettings,
+    /// Settings → Connections › MICROSOFT 365: the Entra app orion signs
+    /// in through, and what it reads.
+    pub microsoft: MicrosoftSettings,
+    /// Settings → Connections › GITHUB AND LINEAR: what Needs you lists.
+    pub inbox: InboxSettings,
     /// Keys the files held that this build could not read; they loaded as
     /// defaults. Never written: [`Config::save`] reads it to leave those
     /// stored values alone — most likely a newer orion's — unless the
@@ -1310,7 +1369,130 @@ impl Default for Config {
             quick_prompt_kind: AgentKind::Claude.as_str().into(),
             follow_new_session: true,
             keybindings: BTreeMap::new(),
+            away: AwaySettings::default(),
+            slack: SlackSettings::default(),
+            microsoft: MicrosoftSettings::default(),
+            inbox: InboxSettings::default(),
             skipped: BTreeSet::new(),
+        }
+    }
+}
+
+/// What may go to your phone while you are away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhoneKind {
+    Question,
+    Plan,
+    Crash,
+}
+
+/// `away` in the config file: when you count as away, and what reaches
+/// your phone then.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct AwaySettings {
+    /// The screen locking counts as away.
+    pub screen_lock: bool,
+    /// Minutes with no keys or mouse before you count as away.
+    pub idle_minutes: u32,
+    /// What goes to your phone while away.
+    pub phone: Vec<PhoneKind>,
+    /// `("22:00", "07:00")`: nothing goes to the phone between them.
+    /// `null` is no quiet hours.
+    pub quiet: Option<(String, String)>,
+}
+
+impl Default for AwaySettings {
+    fn default() -> Self {
+        Self {
+            screen_lock: true,
+            idle_minutes: 10,
+            phone: vec![PhoneKind::Question, PhoneKind::Plan, PhoneKind::Crash],
+            quiet: Some(("22:00".into(), "07:00".into())),
+        }
+    }
+}
+
+/// Which Slack messages bring a banner and a sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BannerWhen {
+    Every,
+    #[default]
+    DmsAndMentions,
+    Never,
+}
+
+/// `slack` in the config file: which messages are for you.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SlackSettings {
+    /// Every direct message.
+    pub dms: bool,
+    /// Mentions of you, in every channel.
+    pub mentions: bool,
+    /// New replies in threads you're in.
+    pub threads: bool,
+    /// Channels whose every message counts, by name.
+    pub channels: Vec<String>,
+    /// Words that make a message count wherever it is.
+    pub keywords: Vec<String>,
+    pub banner: BannerWhen,
+}
+
+impl Default for SlackSettings {
+    fn default() -> Self {
+        Self {
+            dms: true,
+            mentions: true,
+            threads: true,
+            channels: Vec::new(),
+            keywords: Vec::new(),
+            banner: BannerWhen::default(),
+        }
+    }
+}
+
+/// `microsoft` in the config file. The client and tenant ids are not
+/// secret, so a team shares one Entra app.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MicrosoftSettings {
+    pub client_id: String,
+    pub tenant: String,
+    /// The next meeting in the footer.
+    pub footer_meeting: bool,
+    /// Takeaways from Teams transcripts.
+    pub takeaways: bool,
+}
+
+impl Default for MicrosoftSettings {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            tenant: "organizations".into(),
+            footer_meeting: true,
+            takeaways: true,
+        }
+    }
+}
+
+/// `inbox` in the config file: what GitHub and Linear put in Needs you.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct InboxSettings {
+    /// Code reviews asked of you.
+    pub code_reviews: bool,
+    /// Linear comments that mention you.
+    pub linear_mentions: bool,
+}
+
+impl Default for InboxSettings {
+    fn default() -> Self {
+        Self {
+            code_reviews: true,
+            linear_mentions: true,
         }
     }
 }
@@ -2481,6 +2663,7 @@ impl Config {
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
             | SettingKind::LinearKey => ProjectSettings::default().value_label(kind),
+            SettingKind::Connection(_) => NOT_CONNECTED.into(),
         }
     }
 
@@ -2561,6 +2744,8 @@ impl Config {
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
             | SettingKind::LinearKey => {}
+            // Says how a connection stands; nothing to step.
+            SettingKind::Connection(_) => {}
         }
     }
 }
@@ -4921,14 +5106,21 @@ mod tests {
         });
     }
 
-    /// Settings is five tabs, and General holds what is left of orion's
+    /// Settings is six tabs, and General holds what is left of orion's
     /// own switches under three groups.
     #[test]
-    fn settings_is_five_tabs_and_general_has_three_groups() {
+    fn settings_is_six_tabs_and_general_has_three_groups() {
         let titles: Vec<&str> = SETTINGS_TABS.iter().map(|t| t.title).collect();
         assert_eq!(
             titles,
-            ["General", "Accounts", "Projects", "Presets", "Keys"]
+            [
+                "General",
+                "Accounts",
+                "Projects",
+                "Presets",
+                "Connections",
+                "Keys"
+            ]
         );
         let general: Vec<(&str, &str)> = GENERAL_SETTINGS
             .iter()
@@ -5160,6 +5352,99 @@ mod tests {
             old.keymap().label(crate::keymap::Action::Quit),
             Keymap::default().label(crate::keymap::Action::Quit)
         );
+    }
+
+    /// Connections is four sections, each a status row that says it is
+    /// not connected yet.
+    #[test]
+    fn connections_is_four_sections_not_connected() {
+        let tab = SETTINGS_TABS
+            .iter()
+            .position(|t| t.title == "Connections")
+            .unwrap();
+        let headers: Vec<String> = settings_rows(tab, 1)
+            .into_iter()
+            .filter_map(|row| match row {
+                SettingsRow::Header(title) => Some(title),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                "AWAY AND PHONE",
+                "SLACK",
+                "MICROSOFT 365",
+                "GITHUB AND LINEAR"
+            ]
+        );
+        let cfg = Config::default();
+        for spec in CONNECTIONS_SETTINGS {
+            assert!(spec.kind.is_status());
+            assert_eq!(cfg.value_label(spec.kind), NOT_CONNECTED);
+        }
+    }
+
+    /// The Connections keys default as the design says, a file without
+    /// them loads those defaults, and a file with them round-trips.
+    #[test]
+    fn connections_keys_default_and_round_trip() {
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.away, AwaySettings::default());
+        assert!(old.away.screen_lock);
+        assert_eq!(old.away.idle_minutes, 10);
+        assert_eq!(
+            old.away.phone,
+            [PhoneKind::Question, PhoneKind::Plan, PhoneKind::Crash]
+        );
+        assert_eq!(
+            old.away.quiet,
+            Some(("22:00".to_string(), "07:00".to_string()))
+        );
+        assert!(old.slack.dms && old.slack.mentions && old.slack.threads);
+        assert_eq!(old.slack.banner, BannerWhen::DmsAndMentions);
+        assert_eq!(old.microsoft.tenant, "organizations");
+        assert!(old.microsoft.client_id.is_empty());
+        assert!(old.microsoft.footer_meeting && old.microsoft.takeaways);
+        assert!(old.inbox.code_reviews && old.inbox.linear_mentions);
+
+        // One key set inside a section leaves the rest on their defaults.
+        let partial: Config = serde_json::from_str(
+            r##"{"away": {"idle_minutes": 5}, "slack": {"channels": ["#eng"]}}"##,
+        )
+        .unwrap();
+        assert_eq!(partial.away.idle_minutes, 5);
+        assert!(partial.away.screen_lock);
+        assert_eq!(partial.slack.channels, ["#eng"]);
+        assert!(partial.slack.dms);
+
+        let mut cfg = Config {
+            away: AwaySettings {
+                screen_lock: false,
+                idle_minutes: 30,
+                phone: vec![PhoneKind::Crash],
+                quiet: None,
+            },
+            ..Config::default()
+        };
+        cfg.slack.keywords = vec!["deploy".into()];
+        cfg.slack.banner = BannerWhen::Never;
+        cfg.microsoft.client_id = "abc".into();
+        cfg.microsoft.tenant = "t-1".into();
+        cfg.inbox.linear_mentions = false;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        assert_eq!(saved["away"]["quiet"], serde_json::Value::Null);
+        assert_eq!(saved["slack"]["banner"], "never");
+        assert_eq!(saved["away"]["phone"], serde_json::json!(["crash"]));
+        let reloaded = load_from(&path);
+        assert!(reloaded.skipped.is_empty(), "{:?}", reloaded.skipped);
+        assert_eq!(reloaded.away, cfg.away);
+        assert_eq!(reloaded.slack, cfg.slack);
+        assert_eq!(reloaded.microsoft, cfg.microsoft);
+        assert_eq!(reloaded.inbox, cfg.inbox);
     }
 
     #[test]

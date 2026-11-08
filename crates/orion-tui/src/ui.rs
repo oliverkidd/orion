@@ -2954,6 +2954,9 @@ pub(crate) fn settings_hints(
         hints.push(NEXT_TAB.hint());
         hints.extend(tail);
         return hints;
+    } else if matches!(kind, Some(crate::config::SettingKind::Connection(_))) {
+        // Nothing to do on a connection's status row yet.
+        Vec::new()
     } else if kind.is_some_and(|k| k.is_status()) {
         vec![CHOOSE.hint_as("test the connection").kept()]
     } else {

@@ -8634,6 +8634,12 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         // nothing to cycle.
         if spec.kind.is_status() {
             match (delta, project) {
+                // A CONNECTIONS TAB section with nothing to set up yet.
+                _ if matches!(spec.kind, crate::config::SettingKind::Connection(_)) => {
+                    if let Some(view) = settings_mut(app) {
+                        view.info(crate::config::NOT_CONNECTED);
+                    }
+                }
                 (0, Some(dir)) => crate::linear::test_connection(app, dir),
                 _ => {
                     if let Some(view) = settings_mut(app) {
@@ -28086,6 +28092,10 @@ mod tests {
                     "PR autofix",
                     "Linear Ticket",
                     "Week review",
+                    "Bug fixer",
+                    "Feature builder",
+                    "Meeting takeaways",
+                    "Blue sky builder",
                     "reviewer",
                     "scratch",
                     "+ New"
@@ -28138,7 +28148,8 @@ mod tests {
             );
 
             // One of the user's: ^N makes a preset, the save lands on it.
-            for _ in 0..2 {
+            let systems = crate::agent_presets::SystemPreset::ALL.len();
+            for _ in 1..systems {
                 press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
             press(
@@ -28169,11 +28180,11 @@ mod tests {
             );
             assert!(matches!(
                 &app.overlay,
-                Some(Overlay::Confirm(c)) if c.action == PendingAction::DeletePreset { index: 5 }
+                Some(Overlay::Confirm(c)) if c.action == PendingAction::DeletePreset { index: systems + 2 }
             ));
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert_eq!(settings_view(&app).selected, at, "back on the row");
-            assert_eq!(crate::agent_presets::load_seeded().len(), 6);
+            assert_eq!(crate::agent_presets::load_seeded().len(), systems + 3);
             press(
                 &mut app,
                 KeyCode::Char('d'),
