@@ -17,3 +17,6 @@
 
 Each line: step id · commit sha · what was verified · deviations from the plan.
 
+- **baseline** · 1e68748 · e2e_tui 14/14 and clippy `-D warnings` clean on needs-you · five e2e_tui tests and one clippy lint were already broken on `main` by #42 (selection fill 236/234, ✶ spinner, no "Review #N" heading; `mention.rs` needless borrow). Fixed here. `cargo fmt --check` also fails on `main` under rustc 1.99's rustfmt in files no step touches; the wave gates check fmt only on files each step changed, and 5A formats the workspace once.
+- **2E** · cfade52 · unit tests for every browser and profile command line, the grep test that `open_url.rs` is the only `open` caller, config round trip; `open -a` run by hand for Safari, Chrome (+profile) and Firefox (+profile) · Arc not installed, so untested. `-na … --args` is used for profiles (the plan said `open -a`), because `--args` reaches only a newly launched app.
+- **1A** · 8fdd987 · unit tests for oneshot, secrets (a real Keychain round trip), http, the needs-you store and the config round trip; orion-tui builds with 2E · `secrets::set` changed in review to send the command to `security -i` on stdin, so a token never appears in `ps`. `oneshot::account_for` returns `Option<Account>`.
