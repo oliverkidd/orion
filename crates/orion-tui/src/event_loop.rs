@@ -268,6 +268,7 @@ async fn main_loop(
     app.launch_repo = crate::app::launch_repo();
     let cfg = crate::config::Config::load();
     apply_config(&mut app, &cfg);
+    crate::microsoft::load(&mut app, &cfg.microsoft);
     app.keymap = cfg.keymap();
     // The SYSTEM PRESETS (PR autofix, Linear Ticket, Week review) on every
     // list, so the presets list shows them and their text can be edited there.
@@ -412,6 +413,19 @@ async fn main_loop(
     app.spotify_tx = Some(spotify_tx.clone());
     let spotify_interval = crate::spotify::interval();
     let mut next_spotify = tokio::time::Instant::now();
+    // MICROSOFT 365: a sign-in's steps and the calendar reads land here;
+    // while signed in, a minute's tick repaints the footer's countdown and
+    // reads the calendar when due (`microsoft::calendar::interval`; the
+    // e2e tests turn it off).
+    let (microsoft_tx, mut microsoft_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::microsoft::Answer>();
+    app.microsoft.tx = Some(microsoft_tx);
+    let calendar_interval = crate::microsoft::calendar::interval();
+    let mut next_microsoft = tokio::time::Instant::now();
+    // A project's **What it is**, written off the loop (`projects`).
+    let (about_tx, mut about_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::projects::Answer>();
+    app.project_about.tx = Some(about_tx);
     let mut next_metrics_poll = tokio::time::Instant::now();
     let mut next_splash_frame = tokio::time::Instant::now();
     let mut next_confetti_frame = tokio::time::Instant::now();
@@ -748,6 +762,23 @@ async fn main_loop(
                 // Never None: `spotify_tx` lives as long as the loop.
                 if let Some(answer) = answer {
                     land_spotify(&mut app, answer);
+                }
+            }
+            _ = tokio::time::sleep_until(next_microsoft),
+                if calendar_interval.is_some() && app.microsoft.email.is_some() =>
+            {
+                let every = calendar_interval.unwrap_or(crate::microsoft::calendar::DEFAULT_INTERVAL);
+                crate::microsoft::tick(&mut app, every);
+                next_microsoft = tokio::time::Instant::now() + crate::microsoft::TICK;
+            }
+            answer = microsoft_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::microsoft::land(&mut app, answer);
+                }
+            }
+            answer = about_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::projects::land(&mut app, answer);
                 }
             }
             // The hover debounce: the cursor has rested on a pull request
@@ -8348,6 +8379,20 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
             .flatten()
     };
     let account = || matches!(account_row(), Some(crate::config::AccountRow::Account(_)));
+    // The list row's kind, for the verbs only some rows have.
+    let row_kind = (!on_tabs)
+        .then(|| crate::config::setting_at(tab, selected).map(|spec| spec.kind))
+        .flatten();
+    // A CONNECTIONS TAB status row's own verbs: `c` connects, `o`
+    // disconnects.
+    if let Some(crate::config::SettingKind::Connection(c)) = row_kind {
+        use crate::ui::settings_keys as keys;
+        for (key_of, connect) in [(keys::CONNECT, true), (keys::DISCONNECT, false)] {
+            if key_of.matches(&key) {
+                return run_settings_cmd(app, SettingsCmd::Connection(c, connect));
+            }
+        }
+    }
 
     use crate::ui::settings_keys as keys;
     let cmd = match key.code {
@@ -8386,6 +8431,10 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
                 Some(cmd) => SettingsCmd::Preset(cmd),
                 None => return,
             }
+        }
+        // A project's **What it is**: written again.
+        _ if keys::REWRITE.matches(&key) && row_kind == Some(crate::config::SettingKind::About) => {
+            SettingsCmd::RewriteAbout(selected)
         }
         _ if keys::INSTALL.matches(&key) && !hotkeys => SettingsCmd::Install(selected),
         _ if keys::RENAME.matches(&key) && account() => SettingsCmd::RenameAccount(selected),
@@ -8469,6 +8518,15 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
             }
         }
         SettingsCmd::Preset(cmd) => crate::presets_tab::run(app, cmd),
+        SettingsCmd::Connection(connection, connect) => connection_cmd(app, connection, connect),
+        SettingsCmd::RewriteAbout(i) => {
+            if let Some(repo) = app.settings_project(tab, i).map(|p| p.repo_path.clone()) {
+                let note = crate::projects::rewrite(app, &repo);
+                if let Some(view) = settings_mut(app) {
+                    view.info(note);
+                }
+            }
+        }
         SettingsCmd::Nudge => {
             if let Some(view) = settings_mut(app) {
                 view.info(HOTKEYS_ARE_HAND_EDITED);
@@ -8489,6 +8547,23 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
                 area: ratatui::layout::Rect::default(),
             }));
         }
+    }
+}
+
+/// `c` (or Enter) on a CONNECTIONS TAB status row connects it, `o`
+/// disconnects it; the overlay says how that went. A connection whose
+/// own step hasn't arrived yet is still not connected.
+fn connection_cmd(app: &mut App, connection: crate::config::Connection, connect: bool) {
+    use crate::config::Connection;
+    let note = match (connection, connect) {
+        (Connection::Microsoft, true) => {
+            crate::microsoft::connect(app, &crate::config::Config::load().microsoft)
+        }
+        (Connection::Microsoft, false) => crate::microsoft::disconnect(app),
+        _ => crate::config::NOT_CONNECTED.into(),
+    };
+    if let Some(view) = settings_mut(app) {
+        view.info(note);
     }
 }
 
@@ -8554,6 +8629,10 @@ enum SettingsCmd {
     ChipMark(usize),
     /// A key on a Settings → Presets row.
     Preset(crate::presets_tab::Cmd),
+    /// `c` (true) or `o` (false) on a CONNECTIONS TAB status row.
+    Connection(crate::config::Connection, bool),
+    /// `^R` on a project's **What it is**.
+    RewriteAbout(usize),
     /// A HOTKEYS row: nothing to change here, so say where it changes.
     Nudge,
     ResetAll,
@@ -8634,10 +8713,10 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         // nothing to cycle.
         if spec.kind.is_status() {
             match (delta, project) {
-                // A CONNECTIONS TAB section with nothing to set up yet.
+                // A CONNECTIONS TAB status row: Enter connects, as `c` does.
                 _ if matches!(spec.kind, crate::config::SettingKind::Connection(_)) => {
-                    if let Some(view) = settings_mut(app) {
-                        view.info(crate::config::NOT_CONNECTED);
+                    if let crate::config::SettingKind::Connection(c) = spec.kind {
+                        connection_cmd(app, c, true);
                     }
                 }
                 (0, Some(dir)) => crate::linear::test_connection(app, dir),
@@ -8713,6 +8792,7 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     if !cfg.spotify && app.spotify.take().is_some() {
         app.dirty = true;
     }
+    app.microsoft.footer = cfg.microsoft.footer_meeting;
     set_hide_draft_prs(app, cfg.hide_draft_prs);
 }
 
@@ -12766,8 +12846,21 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             if let orion_core::Entity::Worktree(w) = &entity {
                 placeholder::adopt_worktree(app, w);
             }
+            // A project the tree didn't have is one just added: its
+            // **What it is** gets written.
+            let added = match &entity {
+                orion_core::Entity::Project(p)
+                    if !app.tree.projects.iter().any(|known| known.id == p.id) =>
+                {
+                    Some(p.repo_path.clone())
+                }
+                _ => None,
+            };
             let before = selection_snapshot(app);
             apply_upsert(app, entity);
+            if let Some(repo) = added {
+                crate::projects::added(app, &repo);
+            }
             // Cursors follow the row they were on across re-sorts and
             // re-homes; a row that left its list (archived away,
             // moved elsewhere) hands the cursor — and the terminal pane —
@@ -26967,6 +27060,49 @@ mod tests {
                 crate::linear::key_status(&app, repo.path()),
                 "found in .env.local · ✓ Ada · ada@x.dev"
             );
+        });
+    }
+
+    /// MICROSOFT 365's status row: with no app id in the config, `c` and
+    /// Enter both say what is missing and start nothing; `o` with nobody
+    /// signed in says so. Off the row, `c` is not a connect.
+    #[test]
+    fn the_microsoft_row_asks_for_the_app_id_before_signing_in() {
+        use crate::config::{Connection, SettingKind};
+        let config = tempfile::tempdir().unwrap();
+        crate::config::with_config_path(config.path().join("config.json"), || {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            let notice = |app: &App| settings_view(app).notice.as_ref().map(|(t, _)| t.clone());
+            let (tab, row) =
+                crate::config::locate(SettingKind::Connection(Connection::Microsoft)).unwrap();
+            assert_eq!(crate::config::SETTINGS_TABS[tab].title, "Connections");
+            open_settings_on(&mut app, tab, &mut out);
+            for _ in 0..row {
+                press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                notice(&app).as_deref(),
+                Some(crate::microsoft::NEEDS_APP_ID)
+            );
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            assert_eq!(notice(&app).as_deref(), Some("not connected"));
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                notice(&app).as_deref(),
+                Some(crate::microsoft::NEEDS_APP_ID)
+            );
+            assert_eq!(app.microsoft.sign_in, crate::microsoft::SignIn::Idle);
+
+            // **Next meeting in the footer**, a row down: `c` does nothing
+            // there, and Enter switches it off.
+            press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            assert!(crate::config::Config::load().microsoft.footer_meeting);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(!crate::config::Config::load().microsoft.footer_meeting);
+            assert!(!app.microsoft.footer, "the app follows the config");
         });
     }
 

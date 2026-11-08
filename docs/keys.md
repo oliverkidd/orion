@@ -650,6 +650,8 @@ Accounts tab's **Claude accounts** rows, `Enter` signs the account in (asking fo
 `r` renames it, `o` signs it out, `c` steps its ACCOUNT CHIP's colour, `g` gives the chip a letter
 or glyph of your own, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter`
 on **Add account** names a new one ([Configuration](configuration.md#claude-accounts)). On the
+Connections tab's **Status** rows, `c` (or `Enter`) connects and `o` disconnects. On a project's
+**What it is**, `Enter` edits the line and `^R` writes it again. On the
 Presets tab the keys follow the row, and the frame names only the ones that work there: on one of
 orion's presets (**Used by orion**) `Enter` edits it and `^R` puts back orion's text while it holds
 yours, after a confirmation — it can't be deleted or renamed, so its row has neither; on one of
@@ -708,6 +710,7 @@ The FOOTER carries the rest, left to right:
 | `✗ disconnected` at the far left | this client has lost the DAEMON. A healthy connection says nothing |
 | key hints | what the keys do where you are, built from your live keymap — a rebind shows up here, and an unbound action drops out. None while a modal is up: its keys are on its own border |
 | a message in place of the hints | a FLASH, until the next key, led by what kind it is: `✕` a failure in crimson, `⚠` a setting to change in gold, `✓` a result nothing else shows in green, the gold spinner over muted words for a wait, `·` a heads-up in muted |
+| `▸ Standup in 12m · Teams` | your next Microsoft 365 meeting, from an hour before it starts; `now` while it runs. See [Your next meeting](sessions.md#your-next-meeting) |
 | `♪ Midnight City · M83  ⏮ ⏸ ⏭` before it | what Spotify is playing (macOS, the `spotify` setting), dimmed while paused. Each glyph is a button: back, play/pause, next. Gone while Spotify is closed or stopped |
 | `2 agents · 412 MB` at the right edge | the agents running and orion's whole memory footprint (this UI, the DAEMON and every session's processes, the SPARE WORKTREES' setups and CLIs among them), re-read every 5 seconds |
 | `↓ - Move down` on the row above the bar | the KEY COMBO DISPLAY: the key you just pressed and what it did, for anyone watching a screen share. Keys typed into a LOCKED PANE never show |

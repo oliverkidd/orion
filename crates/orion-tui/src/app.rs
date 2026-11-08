@@ -4530,6 +4530,11 @@ pub struct App {
     /// The WEEK IN REVIEW's fetches and the review being written: on the
     /// app, not its modal, so closing the modal loses neither.
     pub week_review: crate::week_review::State,
+    /// MICROSOFT 365: the sign-in, and the calendar behind the footer's
+    /// next meeting.
+    pub microsoft: crate::microsoft::State,
+    /// Each project's **What it is** being written (`projects`).
+    pub project_about: crate::projects::State,
     /// Where the PR REVIEW's reads and writes land.
     pub pr_review: crate::pr_review::State,
     /// The on-disk memory of every pull-request answer (`pr_cache`), when
@@ -4830,6 +4835,8 @@ impl App {
             pr_comment_tx: None,
             pr_actions_tx: None,
             week_review: Default::default(),
+            microsoft: Default::default(),
+            project_about: Default::default(),
             pr_review: Default::default(),
             pr_cache: None,
             pr_cache_dirty: false,

@@ -1842,6 +1842,16 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                                 Some(p) if spec.kind.is_status() => {
                                     crate::linear::key_status(app, &p.repo_path)
                                 }
+                                Some(p) if spec.kind == crate::config::SettingKind::About => {
+                                    crate::projects::label(app, &cfg, &p.repo_path)
+                                }
+                                None if spec.kind
+                                    == crate::config::SettingKind::Connection(
+                                        crate::config::Connection::Microsoft,
+                                    ) =>
+                                {
+                                    crate::microsoft::status(app, &cfg.microsoft)
+                                }
                                 Some(p) => cfg.project(&p.repo_path).value_label(spec.kind),
                                 None if spec.kind.is_project() => "n/a".into(),
                                 None => cfg.value_label(spec.kind),
@@ -2907,13 +2917,18 @@ pub(crate) mod settings_keys {
     /// the Enter that runs its installer once asked.
     pub const INSTALL: Key = Key::new(&["i"], "install");
     pub const RUN: Key = Key::new(&["enter"], "run it here");
+    /// A CONNECTIONS TAB status row.
+    pub const CONNECT: Key = Key::new(&["c"], "connect");
+    pub const DISCONNECT: Key = Key::new(&["o"], "disconnect");
+    /// A project's **What it is**: written again.
+    pub const REWRITE: Key = Key::new(&["ctrl+r"], "write it again");
 
     #[cfg(test)]
     #[test]
     fn every_settings_key_parses() {
         for key in [
             CLOSE, NEXT_TAB, PREV_TAB, CHOOSE, CYCLE, RESET_ALL, RENAME, SIGN_OUT, REMOVE,
-            CHIP_TINT, CHIP_MARK, INSTALL, RUN,
+            CHIP_TINT, CHIP_MARK, INSTALL, RUN, CONNECT, DISCONNECT, REWRITE,
         ] {
             assert!(key.parses(), "{:?}", key.chords);
         }
@@ -2946,6 +2961,8 @@ pub(crate) fn settings_hints(
         vec![CYCLE.hint_as("tab"), Hint::new(digits, "jump")]
     } else if view.is_hotkeys() {
         Vec::new()
+    } else if kind == Some(crate::config::SettingKind::About) {
+        vec![CHOOSE.hint_as("edit").kept(), REWRITE.hint()]
     } else if kind.is_some_and(|k| k.is_text()) {
         vec![CHOOSE.hint_as("type a value (empty = default)").kept()]
     } else if let Some(screen) = presets {
@@ -2955,8 +2972,7 @@ pub(crate) fn settings_hints(
         hints.extend(tail);
         return hints;
     } else if matches!(kind, Some(crate::config::SettingKind::Connection(_))) {
-        // Nothing to do on a connection's status row yet.
-        Vec::new()
+        vec![CONNECT.hint().kept(), DISCONNECT.hint()]
     } else if kind.is_some_and(|k| k.is_status()) {
         vec![CHOOSE.hint_as("test the connection").kept()]
     } else {

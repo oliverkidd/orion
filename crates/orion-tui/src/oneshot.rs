@@ -73,6 +73,18 @@ pub fn account_for(cfg: &Config, preset: &AgentPreset) -> Option<Account> {
         true => "",
         false => orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref()),
     };
+    through(cfg, pinned)
+}
+
+/// The default agent's Claude account — what an ask with no preset of its
+/// own goes through (a project's **What it is**). None with no Claude
+/// account switched on.
+pub fn default_account(cfg: &Config) -> Option<Account> {
+    through(cfg, "")
+}
+
+/// The Claude account `pinned` names, else the default agent's.
+fn through(cfg: &Config, pinned: &str) -> Option<Account> {
     let entry = cfg.review_account(pinned)?;
     Some(Account {
         program: entry.program.trim().to_string(),

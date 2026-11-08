@@ -414,6 +414,16 @@ pub enum SettingKind {
     /// A CONNECTIONS TAB section's status row: whether that connection is
     /// set up. Nothing in the file behind it.
     Connection(Connection),
+    /// MICROSOFT 365 › **Next meeting in the footer** (`microsoft.footer_meeting`).
+    MicrosoftFooterMeeting,
+    /// MICROSOFT 365 › **Takeaways from Teams transcripts** (`microsoft.takeaways`).
+    MicrosoftTakeaways,
+    /// A project's **Link to meeting takeaways**
+    /// (`projects.<repo>.takeaways`): whether takeaways may land in it.
+    TakeawaysLink,
+    /// A project's **What it is** (`projects.<repo>.about`): the one line
+    /// routing reads ([`crate::projects::about`]).
+    About,
 }
 
 /// One section of the CONNECTIONS TAB, top to bottom.
@@ -476,6 +486,7 @@ impl SettingKind {
                 | SettingKind::SetupCommand
                 | SettingKind::RunCommand
                 | SettingKind::OpenCommand
+                | SettingKind::About
         )
     }
 
@@ -501,6 +512,8 @@ impl SettingKind {
                 | SettingKind::OpenCommand
                 | SettingKind::WorktreeContainers
                 | SettingKind::LinearKey
+                | SettingKind::TakeawaysLink
+                | SettingKind::About
         )
     }
 }
@@ -657,7 +670,22 @@ pub const PROJECT_SETTINGS: &[SettingSpec] = &[
         hint: "Where this project's LINEAR_API_KEY comes from — its .env.local, then its .env, then orion's own environment — never the key itself. Enter asks Linear whose key it is",
         group: "",
     },
+    SettingSpec {
+        kind: SettingKind::TakeawaysLink,
+        label: "Link to meeting takeaways",
+        hint: "Whether takeaways from your meetings can be placed in this project's todos",
+        group: "",
+    },
+    SettingSpec {
+        kind: SettingKind::About,
+        label: "What it is",
+        hint: ABOUT_HINT,
+        group: "",
+    },
 ];
+
+/// **What it is**'s explanation.
+pub const ABOUT_HINT: &str = "Orion writes \"What it is\" when you add a project, from its README and recent PRs. Edit it if takeaways land in the wrong place. Enter edits it; ^R writes it again";
 
 /// The CONNECTIONS TAB's rows, a section each: a status row until the
 /// connection's own rows arrive.
@@ -677,7 +705,19 @@ pub const CONNECTIONS_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::Connection(Connection::Microsoft),
         label: "Status",
-        hint: "Your next meeting in the footer, and takeaways from Teams transcripts",
+        hint: "c signs in to Microsoft 365 in the browser, o signs out. Needs microsoft.client_id in config.json (see setup)",
+        group: "MICROSOFT 365",
+    },
+    SettingSpec {
+        kind: SettingKind::MicrosoftFooterMeeting,
+        label: "Next meeting in the footer",
+        hint: "Show your next meeting in the footer from an hour before it starts",
+        group: "MICROSOFT 365",
+    },
+    SettingSpec {
+        kind: SettingKind::MicrosoftTakeaways,
+        label: "Takeaways from Teams transcripts",
+        hint: "When a Teams meeting's transcript lands, pull out the takeaways for you to place in your todos",
         group: "MICROSOFT 365",
     },
     SettingSpec {
@@ -1195,7 +1235,7 @@ pub struct Config {
 /// project's repo path in [`Config::projects`]. Read through
 /// [`Config::project`], which supplies the defaults for a project with no
 /// entry; written through [`Config::set_project`].
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ProjectSettings {
     /// The branch this project's new WORKTREES start from when nobody
@@ -1242,12 +1282,41 @@ pub struct ProjectSettings {
     /// Empty is squash.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub merge_method: String,
+    /// **Link to meeting takeaways**: whether meeting takeaways may be
+    /// placed in this project's todos. On by default, and left out of the
+    /// file while on.
+    #[serde(skip_serializing_if = "is_true")]
+    pub takeaways: bool,
+    /// **What it is**: one line saying what the project is, which routing
+    /// reads (`projects::about`). orion writes it; the user may edit it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub about: String,
     /// Keys in the entry this build doesn't know — a newer orion's, most
     /// likely, or the retired `hide_root_worktree` an older one wrote —
     /// carried through a save untouched, as the file's top-level keys
     /// are. An entry holding one is never dropped as "all default".
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for ProjectSettings {
+    fn default() -> Self {
+        Self {
+            base_branch: String::new(),
+            setup_command: String::new(),
+            run_command: String::new(),
+            open_command: String::new(),
+            worktree_containers: String::new(),
+            merge_method: String::new(),
+            takeaways: true,
+            about: String::new(),
+            other: BTreeMap::new(),
+        }
+    }
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl ProjectSettings {
@@ -1261,6 +1330,8 @@ impl ProjectSettings {
             SettingKind::RunCommand => blank_as(&self.run_command, NO_COMMAND),
             SettingKind::OpenCommand => blank_as(&self.open_command, NO_COMMAND),
             SettingKind::WorktreeContainers => self.containers().as_str().into(),
+            SettingKind::TakeawaysLink => on_off(self.takeaways).into(),
+            SettingKind::About => blank_as(&self.about, crate::projects::NOT_WRITTEN),
             _ => String::new(),
         }
     }
@@ -1280,6 +1351,7 @@ impl ProjectSettings {
             SettingKind::SetupCommand => self.setup_command.clone(),
             SettingKind::RunCommand => self.run_command.clone(),
             SettingKind::OpenCommand => self.open_command.clone(),
+            SettingKind::About => self.about.clone(),
             _ => String::new(),
         }
     }
@@ -1293,6 +1365,7 @@ impl ProjectSettings {
             SettingKind::SetupCommand => &mut self.setup_command,
             SettingKind::RunCommand => &mut self.run_command,
             SettingKind::OpenCommand => &mut self.open_command,
+            SettingKind::About => &mut self.about,
             _ => return false,
         };
         *field = value.trim().to_string();
@@ -1303,6 +1376,10 @@ impl ProjectSettings {
     /// stored as nothing, so a project back on the defaults leaves no
     /// entry.
     pub fn cycle(&mut self, kind: SettingKind, delta: i32) -> bool {
+        if kind == SettingKind::TakeawaysLink {
+            self.takeaways = !self.takeaways;
+            return true;
+        }
         if kind != SettingKind::WorktreeContainers {
             return false;
         }
@@ -2662,8 +2739,12 @@ impl Config {
             | SettingKind::RunCommand
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
-            | SettingKind::LinearKey => ProjectSettings::default().value_label(kind),
+            | SettingKind::LinearKey
+            | SettingKind::TakeawaysLink
+            | SettingKind::About => ProjectSettings::default().value_label(kind),
             SettingKind::Connection(_) => NOT_CONNECTED.into(),
+            SettingKind::MicrosoftFooterMeeting => on_off(self.microsoft.footer_meeting).into(),
+            SettingKind::MicrosoftTakeaways => on_off(self.microsoft.takeaways).into(),
         }
     }
 
@@ -2743,9 +2824,17 @@ impl Config {
             | SettingKind::RunCommand
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
-            | SettingKind::LinearKey => {}
+            | SettingKind::LinearKey
+            | SettingKind::TakeawaysLink
+            | SettingKind::About => {}
             // Says how a connection stands; nothing to step.
             SettingKind::Connection(_) => {}
+            SettingKind::MicrosoftFooterMeeting => {
+                self.microsoft.footer_meeting = !self.microsoft.footer_meeting;
+            }
+            SettingKind::MicrosoftTakeaways => {
+                self.microsoft.takeaways = !self.microsoft.takeaways;
+            }
         }
     }
 }
@@ -4229,6 +4318,8 @@ mod tests {
                 SettingKind::OpenCommand,
                 SettingKind::WorktreeContainers,
                 SettingKind::LinearKey,
+                SettingKind::TakeawaysLink,
+                SettingKind::About,
             ]
         );
         assert_eq!(kind(n + 1), Some(SettingKind::SetupCommand));
@@ -5149,7 +5240,9 @@ mod tests {
                 "Run command",
                 "Open command",
                 "On worktree delete",
-                "Linear key"
+                "Linear key",
+                "Link to meeting takeaways",
+                "What it is"
             ]
         );
     }
@@ -5354,8 +5447,8 @@ mod tests {
         );
     }
 
-    /// Connections is four sections, each a status row that says it is
-    /// not connected yet.
+    /// Connections is four sections, each led by a status row that says
+    /// it is not connected yet.
     #[test]
     fn connections_is_four_sections_not_connected() {
         let tab = SETTINGS_TABS
@@ -5380,9 +5473,83 @@ mod tests {
         );
         let cfg = Config::default();
         for spec in CONNECTIONS_SETTINGS {
-            assert!(spec.kind.is_status());
-            assert_eq!(cfg.value_label(spec.kind), NOT_CONNECTED);
+            if let SettingKind::Connection(_) = spec.kind {
+                assert!(spec.kind.is_status());
+                assert_eq!(cfg.value_label(spec.kind), NOT_CONNECTED);
+            }
         }
+    }
+
+    /// MICROSOFT 365's two switches sit under its status row, on by
+    /// default, and step `microsoft.footer_meeting` and
+    /// `microsoft.takeaways`.
+    #[test]
+    fn microsoft_rows_switch_their_keys() {
+        let rows: Vec<(&str, SettingKind)> = CONNECTIONS_SETTINGS
+            .iter()
+            .filter(|spec| spec.group == "MICROSOFT 365")
+            .map(|spec| (spec.label, spec.kind))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Status", SettingKind::Connection(Connection::Microsoft)),
+                (
+                    "Next meeting in the footer",
+                    SettingKind::MicrosoftFooterMeeting
+                ),
+                (
+                    "Takeaways from Teams transcripts",
+                    SettingKind::MicrosoftTakeaways
+                ),
+            ]
+        );
+        let mut cfg = Config::default();
+        assert_eq!(cfg.value_label(SettingKind::MicrosoftFooterMeeting), "on");
+        cfg.cycle_kind(SettingKind::MicrosoftFooterMeeting, 1);
+        assert!(!cfg.microsoft.footer_meeting);
+        assert_eq!(cfg.value_label(SettingKind::MicrosoftFooterMeeting), "off");
+        cfg.cycle_kind(SettingKind::MicrosoftTakeaways, 0);
+        assert!(!cfg.microsoft.takeaways);
+    }
+
+    /// A project's **Link to meeting takeaways** is on until switched off,
+    /// and its **What it is** is typed; neither leaves an entry while on
+    /// its default, and both round-trip.
+    #[test]
+    fn project_takeaways_and_about_round_trip() {
+        let repo = Path::new("/code/web");
+        let fresh = ProjectSettings::default();
+        assert!(fresh.takeaways);
+        assert_eq!(fresh.value_label(SettingKind::TakeawaysLink), "on");
+        assert_eq!(
+            fresh.value_label(SettingKind::About),
+            crate::projects::NOT_WRITTEN
+        );
+        assert!(SettingKind::About.is_text() && SettingKind::About.is_project());
+        assert!(SettingKind::TakeawaysLink.is_project());
+
+        let mut cfg = Config::default();
+        assert!(cfg.cycle_project(repo, SettingKind::TakeawaysLink, 1));
+        assert!(cfg.set_project_text(repo, SettingKind::About, "  The web app.  "));
+        let web = cfg.project(repo);
+        assert!(!web.takeaways);
+        assert_eq!(web.about, "The web app.");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        assert_eq!(
+            saved["projects"]["/code/web"],
+            serde_json::json!({"takeaways": false, "about": "The web app."})
+        );
+        assert_eq!(load_from(&path).project(repo), web);
+
+        // Back on the defaults, the entry goes.
+        cfg.cycle_project(repo, SettingKind::TakeawaysLink, 1);
+        cfg.set_project_text(repo, SettingKind::About, "");
+        assert!(cfg.projects.is_empty());
     }
 
     /// The Connections keys default as the design says, a file without

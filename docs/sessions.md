@@ -665,6 +665,15 @@ a check, the check's own page), and `Esc` closes the
 modal (twice, with a filter typed). The hotkey is
 rebindable (`pull_requests`).
 
+## Your next meeting
+
+Signed in to Microsoft 365 (Settings › Connections), the footer shows your next meeting from an hour
+before it starts: `▸ Standup in 12m · Teams`. While the meeting runs, `now` replaces the countdown.
+`· Teams` marks an online meeting. All-day and cancelled events never show.
+
+orion reads your calendar for the next twelve hours every five minutes. Turn the segment off with
+**Next meeting in the footer**.
+
 ## The WEEK IN REVIEW
 
 `⌘⇧Y` (`⇧W`) writes up what was finished in the selected PROJECT in the last 7 days — or 2 weeks,

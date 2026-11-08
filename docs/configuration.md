@@ -102,6 +102,13 @@ One block per project in the tree, each row reading and writing that project's e
 | `worktree_containers` | `""` (`off`) | **On worktree delete** | What deleting a worktree does to the docker compose projects started in it. See [Worktree containers](#worktree-containers). |
 | `merge_method` | `""` (squash) | — | The method the project's last merge took; its next merge form opens on it. |
 | — | — | **Linear key** | Not a setting: where the project's `LINEAR_API_KEY` was found. See [Linear](#linear). |
+| `takeaways` | `true` | **Link to meeting takeaways** | Whether takeaways from your meetings can be placed in this project's todos. |
+| `about` | `""` | **What it is** | One line saying what the project is. Meeting takeaways and tickets are routed by it. |
+
+orion writes **What it is** when you add a project, from its README and its last 20 merged PRs. It
+asks the default Claude account once, at haiku and low effort. A project added before this release
+gets its line the first time something needs it. `Enter` edits the line and `^R` writes it again.
+Edit it if takeaways land in the wrong place.
 
 A project with no entry reads as the defaults, and an entry that only repeats them is dropped on
 save. A key inside an entry this build doesn't know is kept.
@@ -109,8 +116,24 @@ save. A key inside an entry this build doesn't know is kept.
 ### Connections
 
 What orion reaches outside itself through, a section each: **AWAY AND PHONE**, **SLACK**,
-**MICROSOFT 365** and **GITHUB AND LINEAR**. For now each section is one **Status** row that reads
-`not connected`; the keys below are read as they are written, and have no rows yet.
+**MICROSOFT 365** and **GITHUB AND LINEAR**. Each section starts with a **Status** row: `c` (or
+`Enter`) connects it and `o` disconnects it. A section whose rows haven't arrived yet reads
+`not connected`, and its keys below are read as they are written.
+
+**MICROSOFT 365.**
+- **Status:** the email you signed in as.
+  - It reads `needs your organisation's app id (see setup)` until `microsoft.client_id` is set.
+  - `c` asks Microsoft for a sign-in code, copies it, and opens microsoft.com/devicelogin in your
+    default browser. Paste the code there and sign in. The row reads `enter <code> in the browser`
+    until you do.
+  - orion keeps the refresh token and your email in the Keychain, under `dev.orion.microsoft`.
+  - `o` signs out, and stops a sign-in that is still waiting.
+- **Next meeting in the footer** (`microsoft.footer_meeting`): see
+  [Your next meeting](sessions.md#your-next-meeting).
+- **Takeaways from Teams transcripts** (`microsoft.takeaways`).
+
+orion signs in with these delegated permissions: `User.Read`, `Calendars.Read`,
+`OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` and `offline_access`.
 
 ```json
 { "away": { "screen_lock": true, "idle_minutes": 10,
@@ -431,6 +454,8 @@ Everything orion writes under its data dir:
 | `ORION_USAGE` | `off` stops usage reads |
 | `ORION_UPDATE_CHECK_SECS` | how often to check for a new release (default 3600; `0` off) |
 | `ORION_SPOTIFY_POLL_SECS` | how often to ask Spotify (default 1; `0` off) |
+| `ORION_MICROSOFT_POLL_SECS` | how often to read your Microsoft 365 calendar (default 300; `0` off) |
+| `ORION_PROJECT_ABOUT` | `off` stops orion writing a project's **What it is** (tests) |
 | `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |
 
 The DAEMON sets `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` on every agent so its hooks

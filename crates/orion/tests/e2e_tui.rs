@@ -136,6 +136,8 @@ impl TuiHarness {
         cmd.env(orion_core::env::UPDATE_CHECK_SECS, "0"); // the footer must not depend on GitHub
         cmd.env(orion_core::env::SPOTIFY_POLL_SECS, "0"); // …nor on what's playing
         cmd.env(orion_core::env::USAGE, "off"); // never read the machine's logins
+        cmd.env(orion_core::env::MICROSOFT_POLL_SECS, "0"); // never call Microsoft Graph
+        cmd.env(orion_core::env::PROJECT_ABOUT, "off"); // a new project runs no model
         cmd.env(orion_core::env::LOG, "debug");
         cmd.env("SHELL", "/bin/sh");
         cmd.env("TERM", "xterm-256color");

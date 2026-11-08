@@ -46,6 +46,13 @@ pub const UPDATE_CHECK_SECS: &str = "ORION_UPDATE_CHECK_SECS";
 /// Cadence in seconds of the footer's Spotify poll; `0` turns it off, as the
 /// e2e tests do so their footers never depend on what's playing.
 pub const SPOTIFY_POLL_SECS: &str = "ORION_SPOTIFY_POLL_SECS";
+/// Cadence in seconds of the Microsoft 365 calendar poll behind the
+/// footer's next meeting (default 5 minutes); `0` turns it off, as the e2e
+/// tests do so a run never calls Microsoft Graph.
+pub const MICROSOFT_POLL_SECS: &str = "ORION_MICROSOFT_POLL_SECS";
+/// `off`: a project's **What it is** line is never written by a model, as
+/// the e2e tests set it, so adding a project never runs a Claude account.
+pub const PROJECT_ABOUT: &str = "ORION_PROJECT_ABOUT";
 /// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
 /// run never reads the machine's logins or calls out with them.
 pub const USAGE: &str = "ORION_USAGE";

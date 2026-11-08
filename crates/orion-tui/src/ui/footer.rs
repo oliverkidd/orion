@@ -470,11 +470,20 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         crate::spotify::readout(np, usize::from(spot_max), th, spotify_hover, spot_sweep)
     });
     let spot_w = spot.as_ref().map_or(0, |r| r.width);
+    let spot_room = if spot.is_some() { spot_w + 2 } else { 0 };
+    // Left of those, the next meeting within the hour (`crate::microsoft`),
+    // while the hints keep at least half the bar.
+    let meeting = crate::microsoft::footer_text(app).filter(|text| {
+        let w = text.chars().count() as u16 + 2;
+        right_w + spot_room + w <= area.width / 2
+    });
+    let meeting_w = meeting.as_ref().map_or(0, |t| t.chars().count() as u16 + 2);
     let left = Rect {
         width: area
             .width
             .saturating_sub(right_w)
-            .saturating_sub(if spot.is_some() { spot_w + 2 } else { 0 }),
+            .saturating_sub(spot_room)
+            .saturating_sub(meeting_w),
         ..area
     };
     // The pointer resting on an ACCOUNT MARK has its account said in the
@@ -496,6 +505,15 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         (None, None) => spans.extend(crate::hints::spans(&hints(app), room, th)),
     }
     f.render_widget(Paragraph::new(Line::from(spans)), left);
+    if let Some(meeting) = meeting {
+        let rect = Rect {
+            x: left.x + left.width,
+            width: meeting_w,
+            ..area
+        };
+        let span = Span::styled(meeting, Style::default().fg(th.muted));
+        f.render_widget(Paragraph::new(Line::from(span)), rect);
+    }
     if let Some(spot) = spot {
         let rect = Rect {
             x: area.x + area.width.saturating_sub(right_w + spot_w),
