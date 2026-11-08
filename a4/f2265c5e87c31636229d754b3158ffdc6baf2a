@@ -53,6 +53,7 @@ docs/configuration.md
   s_0fc3ca629be011::t_5e0dfaee3953c0 171
   s_0fc3ca629be011::t_e6743c20236a47 161-170,193
   s_0fc3ca629be011::t_46c4ee8d08303c 493
+  s_0fc3ca629be011::t_67accdc172ce43 121
 crates/orion-tui/src/event_loop/launcher.rs
   s_0fc3ca629be011::t_66e25b097cd69a 10182-10183,10185
 scripts/shot/bin/gh
@@ -82,6 +83,7 @@ crates/orion-tui/src/keymap.rs
 crates/orion-tui/src/config.rs
   s_0fc3ca629be011::t_3ac9327229c824 841
   s_0fc3ca629be011::t_28f7dd209c53eb 431-436,833-840,842,2855-2856,3070-3075,5710,5713,5741-5743,5746
+  s_0fc3ca629be011::t_67accdc172ce43 5689-5690,5737-5740
 crates/orion-tui/src/needs_you/reviews.rs
   s_0fc3ca629be011::t_f1b5a5d3f1ed5e 123-125
   s_0fc3ca629be011::t_f8fcc4e6c0ca51 1-122,126-158
