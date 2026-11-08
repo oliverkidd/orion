@@ -356,8 +356,8 @@ fn row_is_selected(screen: &vt100::Screen, needle: &str) -> bool {
             }
         }
         if let Some(at) = line.find(needle) {
-            // Selection paints the row with the raised fill: indexed 237 in
-            // the focused panel, 235 in unfocused ones (theme sel_bg /
+            // Selection paints the row with the raised fill: indexed 236 in
+            // the focused panel, 234 in unfocused ones (theme sel_bg /
             // sel_bg_dim). Only the needle's own panel band counts — the
             // panels share screen lines, and a selected pill in the next
             // column over used to pass this check for a row it had nothing
@@ -375,7 +375,7 @@ fn row_is_selected(screen: &vt100::Screen, needle: &str) -> bool {
             let filled = (band_start..band_end).any(|col| {
                 matches!(
                     screen.cell(row, col as u16).map(|c| c.bgcolor()),
-                    Some(vt100::Color::Idx(237)) | Some(vt100::Color::Idx(235))
+                    Some(vt100::Color::Idx(236)) | Some(vt100::Color::Idx(234))
                 )
             });
             if filled {
@@ -885,11 +885,11 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
         let parser = tui.parser.lock().unwrap();
         let screen = parser.screen();
         // The session's mark is the WORKING SPINNER while it runs, on
-        // whichever quarter turn the frame caught.
-        let (header_row, _) = ["◐", "◓", "◑", "◒", "●"]
+        // whichever frame the screen caught.
+        let (header_row, _) = ["✻", "✽", "✶", "✳", "✢", "·", "●"]
             .iter()
             .find_map(|mark| find_text(screen, &format!("{mark} agent-1  ⌂")))
-            .expect("the pane header");
+            .unwrap_or_else(|| panic!("the pane header:\n{}", screen_to_text(screen)));
         let (row58, col58) = find_text(screen, "row 58").expect("row 58 on screen");
         (header_row, header_row + 2, row58, col58)
     };
@@ -1246,7 +1246,7 @@ fn tui_pr_review_comments_on_a_line_and_sends_the_review() {
     tui.send(SHIFT_RIGHT);
     tui.wait_for_text("a.txt");
     tui.send(CMD_SHIFT_R);
-    tui.wait_for_text("Review #7 Add things");
+    tui.wait_for_text("Your review");
     tui.wait_for_text("Looks off");
     tui.wait_for("the diff, ada's thread under deux", |s| {
         let text = screen_to_text(s);
