@@ -18,7 +18,7 @@
 atlas
 Enter
 F12
-p
+cmd n
 Migrate the checkout page to the new design tokens
 Enter
 F12
@@ -27,7 +27,7 @@ drag 95 33 95 24
 relay
 Enter
 F12
-p
+cmd n
 Add a --json flag to every list command
 Enter
 F12
@@ -35,7 +35,7 @@ F12
 orbit
 Enter
 F12
-p
+cmd n
 C-t
 auth
 Enter
@@ -46,11 +46,11 @@ Down
 Enter
 Enter
 F12
-p
+cmd n
 Move the token store from a JSON file to sqlite
 Enter
 F12
-p
+cmd n
 C-t
 Up
 Enter
@@ -58,7 +58,7 @@ F12
 Profile the daemon's startup and find what takes 400ms
 Enter
 F12
-p
+cmd n
 Sort the changelog entries by date, newest first
 Tab
 Down
