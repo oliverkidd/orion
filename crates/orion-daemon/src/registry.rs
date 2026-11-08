@@ -196,6 +196,10 @@ pub struct Daemon {
     /// SPARE WORKTREES: the warm next worktree of each project in use
     /// (`spare`).
     pub(crate) spares: crate::spare::SpareBook,
+    /// AWAY: whether you are at the desk, for the phone bridge (`away`).
+    pub away: crate::away::AwayWatch,
+    /// The SLACK BRIDGE's connection and status (`slack`).
+    pub slack: crate::slack::SlackBridge,
 }
 
 impl Daemon {
@@ -227,6 +231,8 @@ impl Daemon {
             queued_runs: Mutex::new(HashMap::new()),
             stacks: crate::stacks::StackWatch::default(),
             spares: Default::default(),
+            away: Default::default(),
+            slack: Default::default(),
         })
     }
 

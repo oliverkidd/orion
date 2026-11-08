@@ -1,3 +1,4 @@
+pub mod away;
 pub mod claude_account;
 pub mod clock;
 pub mod codec;

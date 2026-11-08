@@ -33,6 +33,19 @@ pub const SPARE_TICK_MS: &str = "ORION_SPARE_TICK_MS";
 /// STACK STATUS poll period in ms (default 5s): how often the daemon asks
 /// docker which compose stacks exist and run.
 pub const STACK_POLL_MS: &str = "ORION_STACK_POLL_MS";
+/// How often (ms, default 5 s) the DAEMON reads whether you are away —
+/// the screen lock and the time since the last key — for the phone
+/// bridge. `0` turns the reading off, as the e2e tests do: then only the
+/// hand flag (⌘⇧A) makes you away. It runs only while Slack is connected.
+pub const AWAY_POLL_MS: &str = "ORION_AWAY_POLL_MS";
+/// The Slack Web API's base URL (default `https://slack.com/api`); the
+/// e2e tests point it at a fake Slack. Socket Mode's websocket is
+/// wherever that API's `apps.connections.open` says it is.
+pub const SLACK_API_URL: &str = "ORION_SLACK_API_URL";
+/// The three Slack tokens as `<app>,<bot>,<user>`, read in place of the
+/// Keychain's `dev.orion.slack` items: the e2e tests' fake Slack, never a
+/// real workspace's.
+pub const SLACK_TOKENS: &str = "ORION_SLACK_TOKENS";
 /// `RUST_LOG`-style tracing filter for both the daemon and the TUI.
 pub const LOG: &str = "ORION_LOG";
 /// Overrides the install script URL `orion upgrade` / `orion ssh` fetch.

@@ -116,9 +116,32 @@ save. A key inside an entry this build doesn't know is kept.
 ### Connections
 
 What orion reaches outside itself through, a section each: **AWAY AND PHONE**, **SLACK**,
-**MICROSOFT 365** and **GITHUB AND LINEAR**. Each section starts with a **Status** row: `c` (or
-`Enter`) connects it and `o` disconnects it. A section whose rows haven't arrived yet reads
+**MICROSOFT 365** and **GITHUB AND LINEAR**. `←→` changes a row, `Enter` edits it, `Tab` goes on
+to the next tab and `Esc` closes. SLACK and MICROSOFT 365 each have a status row: `c` (or `Enter`)
+connects it and `o` disconnects it. GITHUB AND LINEAR is still one **Status** row that reads
 `not connected`, and its keys below are read as they are written.
+
+**AWAY AND PHONE · Slack DM from Orion** — when you count as away, and what reaches your phone then
+(see [How it works](how-it-works.md#phone-bridge)):
+
+| Row | Default | What it does |
+|---|---|---|
+| Away when the screen locks | `on` | The screen locking counts as away. |
+| Away after no keys or mouse | `10m` | `never`, `5m`, `10m`, `15m`, `30m` or `60m` with no keys or mouse. |
+| Away by hand | `⌘⇧A` | Says which key does it; `Enter` here does it too. Your next key, in any orion, clears it. |
+| Send to your phone while away | `questions, plans, crashes` | `←→` steps through every mix of the three, down to `nothing`. |
+| Quiet hours | `22:00 to 07:00` | Nothing goes to your phone between them. `Enter` types them (`22:00 to 07:00`, `22:00-07:00`); empty is `off`. |
+
+**SLACK** — the **Workspace** row says which workspace orion is signed in to, `connecting…`, what
+is wrong, or `not connected`. `c` on it asks for the three tokens of the Orion Slack app in turn —
+the app-level token (`xapp-…`), the bot token (`xoxb-…`) and the user token (`xoxp-…`) — and saves
+them in the Keychain as `dev.orion.slack` / `app`, `bot` and `user`; `o` forgets them. Make the
+app once from `docs/2026-11-07-needs-you/slack-manifest.json` (api.slack.com/apps › Create New App ›
+From a manifest), install it, and create its app-level token with `connections:write`. The rest of
+the section is what counts as a Slack message for you in Needs you: **Direct messages** (`every
+message` / `off`), **Mentions of you** (`every channel` / `off`), **Threads you're in** (`new
+replies` / `off`), **Channels, every message** and **Keywords** (typed, comma-separated), and
+**Banner and sound** (`DMs and mentions`, `every message`, `never`).
 
 **MICROSOFT 365.**
 - **Status:** the email you signed in as.

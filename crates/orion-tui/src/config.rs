@@ -424,12 +424,51 @@ pub enum SettingKind {
     /// A project's **What it is** (`projects.<repo>.about`): the one line
     /// routing reads ([`crate::projects::about`]).
     About,
+    /// A row of the CONNECTIONS TAB's AWAY AND PHONE (`away`).
+    Away(AwayField),
+    /// A row of the CONNECTIONS TAB's SLACK (`slack`).
+    Slack(SlackField),
 }
 
-/// One section of the CONNECTIONS TAB, top to bottom.
+/// The AWAY AND PHONE rows, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AwayField {
+    ScreenLock,
+    Idle,
+    /// Says which key toggles it; Enter toggles it too.
+    ByHand,
+    Phone,
+    Quiet,
+}
+
+/// The SLACK rows under its status row, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlackField {
+    Dms,
+    Mentions,
+    Threads,
+    Channels,
+    Keywords,
+    Banner,
+}
+
+/// The idle times **Away after no keys or mouse** steps through, in
+/// minutes; 0 is never.
+pub const AWAY_IDLE_MINUTES: &[u32] = &[0, 5, 10, 15, 30, 60];
+
+/// Every choice of what goes to the phone, in the order ←/→ steps them.
+const PHONE_CHOICES: &[&[PhoneKind]] = &[
+    &[PhoneKind::Question, PhoneKind::Plan, PhoneKind::Crash],
+    &[PhoneKind::Question, PhoneKind::Plan],
+    &[PhoneKind::Question],
+    &[PhoneKind::Plan],
+    &[PhoneKind::Crash],
+    &[],
+];
+
+/// One section of the CONNECTIONS TAB with a status row, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connection {
-    AwayAndPhone,
     Slack,
     Microsoft,
     GithubAndLinear,
@@ -487,6 +526,8 @@ impl SettingKind {
                 | SettingKind::RunCommand
                 | SettingKind::OpenCommand
                 | SettingKind::About
+                | SettingKind::Away(AwayField::Quiet)
+                | SettingKind::Slack(SlackField::Channels | SlackField::Keywords)
         )
     }
 
@@ -687,19 +728,82 @@ pub const PROJECT_SETTINGS: &[SettingSpec] = &[
 /// **What it is**'s explanation.
 pub const ABOUT_HINT: &str = "Orion writes \"What it is\" when you add a project, from its README and recent PRs. Edit it if takeaways land in the wrong place. Enter edits it; ^R writes it again";
 
-/// The CONNECTIONS TAB's rows, a section each: a status row until the
-/// connection's own rows arrive.
+/// What every AWAY AND PHONE row explains (design 5.2).
+const AWAY_EXPLAINED: &str = "The screen locking counts as away. An agent that starts waiting then goes to your phone straight away.";
+
+/// The CONNECTIONS TAB's rows, a section each: its own rows, or a status
+/// row until they arrive.
 pub const CONNECTIONS_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
-        kind: SettingKind::Connection(Connection::AwayAndPhone),
-        label: "Status",
-        hint: "When you are away, an agent that starts waiting or crashes goes to your phone as a Slack DM from Orion",
-        group: "AWAY AND PHONE",
+        kind: SettingKind::Away(AwayField::ScreenLock),
+        label: "Away when the screen locks",
+        hint: AWAY_EXPLAINED,
+        group: "AWAY AND PHONE · Slack DM from Orion",
+    },
+    SettingSpec {
+        kind: SettingKind::Away(AwayField::Idle),
+        label: "Away after no keys or mouse",
+        hint: AWAY_EXPLAINED,
+        group: "AWAY AND PHONE · Slack DM from Orion",
+    },
+    SettingSpec {
+        kind: SettingKind::Away(AwayField::ByHand),
+        label: "Away by hand",
+        hint: "{away_toggle} anywhere says you are away until your next key; Enter here does too. Being in a meeting is never away",
+        group: "AWAY AND PHONE · Slack DM from Orion",
+    },
+    SettingSpec {
+        kind: SettingKind::Away(AwayField::Phone),
+        label: "Send to your phone while away",
+        hint: AWAY_EXPLAINED,
+        group: "AWAY AND PHONE · Slack DM from Orion",
+    },
+    SettingSpec {
+        kind: SettingKind::Away(AwayField::Quiet),
+        label: "Quiet hours",
+        hint: "Nothing goes to your phone between these times; Enter types them, like 22:00 to 07:00 (empty = off)",
+        group: "AWAY AND PHONE · Slack DM from Orion",
     },
     SettingSpec {
         kind: SettingKind::Connection(Connection::Slack),
-        label: "Status",
+        label: "Workspace",
+        hint: "c pastes the Orion app's three tokens (docs/2026-11-07-needs-you/slack-manifest.json makes the app); o forgets them",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Dms),
+        label: "Direct messages",
         hint: "Slack messages waiting for you show in Needs you",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Mentions),
+        label: "Mentions of you",
+        hint: "Slack messages waiting for you show in Needs you",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Threads),
+        label: "Threads you're in",
+        hint: "Slack messages waiting for you show in Needs you",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Channels),
+        label: "Channels, every message",
+        hint: "Channels whose every message shows in Needs you; Enter types them, like #eng, #deploys (empty = none)",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Keywords),
+        label: "Keywords",
+        hint: "Words that put a message in Needs you wherever it is; Enter types them, comma-separated (empty = none)",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Banner),
+        label: "Banner and sound",
+        hint: "Which Slack messages ring and show a banner as they arrive",
         group: "SLACK",
     },
     SettingSpec {
@@ -1455,41 +1559,9 @@ impl Default for Config {
     }
 }
 
-/// What may go to your phone while you are away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PhoneKind {
-    Question,
-    Plan,
-    Crash,
-}
-
-/// `away` in the config file: when you count as away, and what reaches
-/// your phone then.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(default)]
-pub struct AwaySettings {
-    /// The screen locking counts as away.
-    pub screen_lock: bool,
-    /// Minutes with no keys or mouse before you count as away.
-    pub idle_minutes: u32,
-    /// What goes to your phone while away.
-    pub phone: Vec<PhoneKind>,
-    /// `("22:00", "07:00")`: nothing goes to the phone between them.
-    /// `null` is no quiet hours.
-    pub quiet: Option<(String, String)>,
-}
-
-impl Default for AwaySettings {
-    fn default() -> Self {
-        Self {
-            screen_lock: true,
-            idle_minutes: 10,
-            phone: vec![PhoneKind::Question, PhoneKind::Plan, PhoneKind::Crash],
-            quiet: Some(("22:00".into(), "07:00".into())),
-        }
-    }
-}
+/// `away` in the config file, and what may go to your phone then: shared
+/// with the daemon, which acts on them (`orion_core::away`).
+pub use orion_core::away::{AwaySettings, PhoneKind};
 
 /// Which Slack messages bring a banner and a sound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -1499,6 +1571,28 @@ pub enum BannerWhen {
     #[default]
     DmsAndMentions,
     Never,
+}
+
+impl BannerWhen {
+    /// In the order **Banner and sound** steps them.
+    pub const ALL: [BannerWhen; 3] = [
+        BannerWhen::DmsAndMentions,
+        BannerWhen::Every,
+        BannerWhen::Never,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BannerWhen::Every => "every message",
+            BannerWhen::DmsAndMentions => "DMs and mentions",
+            BannerWhen::Never => "never",
+        }
+    }
+}
+
+/// `at` stepped by `step` (±1) round a list of `len`.
+fn step_index(at: usize, len: usize, step: i32) -> usize {
+    (at as i64 + i64::from(step)).rem_euclid(len as i64) as usize
 }
 
 /// `slack` in the config file: which messages are for you.
@@ -2745,7 +2839,89 @@ impl Config {
             SettingKind::Connection(_) => NOT_CONNECTED.into(),
             SettingKind::MicrosoftFooterMeeting => on_off(self.microsoft.footer_meeting).into(),
             SettingKind::MicrosoftTakeaways => on_off(self.microsoft.takeaways).into(),
+            SettingKind::Away(field) => self.away_value(field),
+            SettingKind::Slack(field) => self.slack_value(field),
         }
+    }
+
+    /// An AWAY AND PHONE row's value.
+    fn away_value(&self, field: AwayField) -> String {
+        let away = &self.away;
+        match field {
+            AwayField::ScreenLock => on_off(away.screen_lock).into(),
+            AwayField::Idle => match away.idle_minutes {
+                0 => "never".into(),
+                m => format!("{m}m"),
+            },
+            AwayField::ByHand => crate::keymap::Keymap::from_overrides(&self.keybindings)
+                .first(crate::keymap::Action::AwayToggle)
+                .map_or_else(|| "unbound".into(), |chord| chord.display()),
+            AwayField::Phone => away.phone_label(),
+            AwayField::Quiet => away.quiet_label(),
+        }
+    }
+
+    /// A SLACK row's value.
+    fn slack_value(&self, field: SlackField) -> String {
+        let slack = &self.slack;
+        let list = |items: &[String]| match items.is_empty() {
+            true => "none".to_string(),
+            false => items.join(", "),
+        };
+        match field {
+            SlackField::Dms => if slack.dms { "every message" } else { "off" }.into(),
+            SlackField::Mentions => if slack.mentions {
+                "every channel"
+            } else {
+                "off"
+            }
+            .into(),
+            SlackField::Threads => if slack.threads { "new replies" } else { "off" }.into(),
+            SlackField::Channels => list(&slack.channels),
+            SlackField::Keywords => list(&slack.keywords),
+            SlackField::Banner => slack.banner.label().into(),
+        }
+    }
+
+    /// A typed top-level row's value as its prompt opens on it: what the
+    /// file holds, not its display label.
+    pub fn text_value(&self, kind: SettingKind) -> String {
+        match kind {
+            SettingKind::Away(AwayField::Quiet) => match &self.away.quiet {
+                Some(_) => self.away.quiet_label(),
+                None => String::new(),
+            },
+            SettingKind::Slack(SlackField::Channels) => self.slack.channels.join(", "),
+            SettingKind::Slack(SlackField::Keywords) => self.slack.keywords.join(", "),
+            _ => String::new(),
+        }
+    }
+
+    /// Write a typed top-level row (`SettingKind::is_text`, not a
+    /// project's). The error is the line to show; nothing changed then.
+    pub fn set_text(&mut self, kind: SettingKind, value: &str) -> Result<(), String> {
+        let items = || -> Vec<String> {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        match kind {
+            SettingKind::Away(AwayField::Quiet) => {
+                self.away.quiet = orion_core::away::parse_quiet(value)?;
+            }
+            SettingKind::Slack(SlackField::Channels) => {
+                self.slack.channels = items()
+                    .into_iter()
+                    .map(|c| format!("#{}", c.trim_start_matches('#')))
+                    .collect();
+            }
+            SettingKind::Slack(SlackField::Keywords) => self.slack.keywords = items(),
+            _ => {}
+        }
+        Ok(())
     }
 
     /// `delta == 0` means activate (toggle a bool, cycle a choice forward).
@@ -2834,6 +3010,49 @@ impl Config {
             }
             SettingKind::MicrosoftTakeaways => {
                 self.microsoft.takeaways = !self.microsoft.takeaways;
+            }
+            SettingKind::Away(field) => {
+                let away = &mut self.away;
+                match field {
+                    AwayField::ScreenLock => away.screen_lock = !away.screen_lock,
+                    AwayField::Idle => {
+                        let at = AWAY_IDLE_MINUTES
+                            .iter()
+                            .position(|m| *m == away.idle_minutes)
+                            .unwrap_or(2);
+                        away.idle_minutes =
+                            AWAY_IDLE_MINUTES[step_index(at, AWAY_IDLE_MINUTES.len(), step)];
+                    }
+                    AwayField::Phone => {
+                        let at = PHONE_CHOICES
+                            .iter()
+                            .position(|c| {
+                                c.len() == away.phone.len()
+                                    && c.iter().all(|k| away.phone.contains(k))
+                            })
+                            .unwrap_or(0);
+                        away.phone =
+                            PHONE_CHOICES[step_index(at, PHONE_CHOICES.len(), step)].to_vec();
+                    }
+                    // Typed (`set_text`), or a toggle the app makes.
+                    AwayField::ByHand | AwayField::Quiet => {}
+                }
+            }
+            SettingKind::Slack(field) => {
+                let slack = &mut self.slack;
+                match field {
+                    SlackField::Dms => slack.dms = !slack.dms,
+                    SlackField::Mentions => slack.mentions = !slack.mentions,
+                    SlackField::Threads => slack.threads = !slack.threads,
+                    SlackField::Banner => {
+                        let at = BannerWhen::ALL
+                            .iter()
+                            .position(|b| *b == slack.banner)
+                            .unwrap_or(0);
+                        slack.banner = BannerWhen::ALL[step_index(at, BannerWhen::ALL.len(), step)];
+                    }
+                    SlackField::Channels | SlackField::Keywords => {}
+                }
             }
         }
     }
@@ -5447,10 +5666,11 @@ mod tests {
         );
     }
 
-    /// Connections is four sections, each led by a status row that says
-    /// it is not connected yet.
+    /// Connections is four sections in the design's order: AWAY AND PHONE
+    /// and SLACK with their rows and values (5.2), and the two still to
+    /// come a status row that says it is not connected yet.
     #[test]
-    fn connections_is_four_sections_not_connected() {
+    fn connections_is_four_sections_in_order() {
         let tab = SETTINGS_TABS
             .iter()
             .position(|t| t.title == "Connections")
@@ -5465,13 +5685,32 @@ mod tests {
         assert_eq!(
             headers,
             [
-                "AWAY AND PHONE",
+                "AWAY AND PHONE · Slack DM from Orion",
                 "SLACK",
                 "MICROSOFT 365",
                 "GITHUB AND LINEAR"
             ]
         );
         let cfg = Config::default();
+        let rows: Vec<(&str, String)> = CONNECTIONS_SETTINGS
+            .iter()
+            .filter(|spec| matches!(spec.kind, SettingKind::Away(_) | SettingKind::Slack(_)))
+            .map(|spec| (spec.label, cfg.value_label(spec.kind)))
+            .collect();
+        let want = [
+            ("Away when the screen locks", "on"),
+            ("Away after no keys or mouse", "10m"),
+            ("Away by hand", "⌘⇧A"),
+            ("Send to your phone while away", "questions, plans, crashes"),
+            ("Quiet hours", "22:00 to 07:00"),
+            ("Direct messages", "every message"),
+            ("Mentions of you", "every channel"),
+            ("Threads you're in", "new replies"),
+            ("Channels, every message", "none"),
+            ("Keywords", "none"),
+            ("Banner and sound", "DMs and mentions"),
+        ];
+        assert_eq!(rows, want.map(|(l, v)| (l, v.to_string())).to_vec());
         for spec in CONNECTIONS_SETTINGS {
             if let SettingKind::Connection(_) = spec.kind {
                 assert!(spec.kind.is_status());
@@ -5550,6 +5789,42 @@ mod tests {
         cfg.cycle_project(repo, SettingKind::TakeawaysLink, 1);
         cfg.set_project_text(repo, SettingKind::About, "");
         assert!(cfg.projects.is_empty());
+    }
+
+    /// The AWAY AND PHONE and SLACK rows step and type as their values say.
+    #[test]
+    fn away_and_slack_rows_step_and_type() {
+        let mut cfg = Config::default();
+        cfg.cycle_kind(SettingKind::Away(AwayField::Idle), 1);
+        assert_eq!(cfg.away.idle_minutes, 15);
+        cfg.cycle_kind(SettingKind::Away(AwayField::Idle), -1);
+        cfg.cycle_kind(SettingKind::Away(AwayField::Idle), -1);
+        cfg.cycle_kind(SettingKind::Away(AwayField::Idle), -1);
+        assert_eq!(cfg.value_label(SettingKind::Away(AwayField::Idle)), "never");
+        cfg.cycle_kind(SettingKind::Away(AwayField::Phone), 1);
+        assert_eq!(cfg.away.phone_label(), "questions, plans");
+        cfg.cycle_kind(SettingKind::Away(AwayField::Phone), -1);
+        cfg.cycle_kind(SettingKind::Away(AwayField::Phone), -1);
+        assert_eq!(cfg.away.phone_label(), "nothing");
+        cfg.cycle_kind(SettingKind::Away(AwayField::ScreenLock), 0);
+        assert!(!cfg.away.screen_lock);
+        cfg.cycle_kind(SettingKind::Slack(SlackField::Banner), 1);
+        assert_eq!(cfg.slack.banner, BannerWhen::Every);
+        cfg.cycle_kind(SettingKind::Slack(SlackField::Dms), 0);
+        assert_eq!(cfg.value_label(SettingKind::Slack(SlackField::Dms)), "off");
+
+        let quiet = SettingKind::Away(AwayField::Quiet);
+        assert!(quiet.is_text() && !quiet.is_project());
+        cfg.set_text(quiet, "23:00-6:30").unwrap();
+        assert_eq!(cfg.value_label(quiet), "23:00 to 06:30");
+        assert_eq!(cfg.text_value(quiet), "23:00 to 06:30");
+        assert!(cfg.set_text(quiet, "late").is_err());
+        cfg.set_text(quiet, "").unwrap();
+        assert_eq!(cfg.value_label(quiet), "off");
+        let channels = SettingKind::Slack(SlackField::Channels);
+        cfg.set_text(channels, "eng, #deploys,,").unwrap();
+        assert_eq!(cfg.slack.channels, ["#eng", "#deploys"]);
+        assert_eq!(cfg.text_value(channels), "#eng, #deploys");
     }
 
     /// The Connections keys default as the design says, a file without

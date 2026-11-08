@@ -979,6 +979,8 @@ async fn main_loop(
         // round's requests fail through `connection_lost` instead, so a
         // launch typed after the DAEMON went comes back with its text.
         let mut lost = false;
+        // What a handler with no request list of its own queued.
+        out.append(&mut app.outbox);
         for req in out.drain(..) {
             if !matches!(app.conn, ConnState::Connected) || channels.tx.send(req).await.is_err() {
                 lost = true;
@@ -3812,6 +3814,8 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // must never reach an Esc arm as one: the new-agent box would close
     // under its own **Select worktree** key.
     let key = crate::keymap::untangle_cmd_period(key);
+    // Back at the desk: the first key after AWAY BY HAND clears it.
+    crate::phone::note_key(app, &key);
     // `⌘W` closes the agent or terminal in the pane, never a modal: over
     // the editor, a markdown page or any overlay it does nothing at all,
     // rather than reach the editor as its `^W` or a list as a `w` — except
@@ -4168,6 +4172,7 @@ fn dispatch_action(
         Action::Home => toggle_home(app),
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
         Action::Settings => open_settings(app),
+        Action::AwayToggle => crate::phone::toggle_away(app),
         Action::ClaudeAccounts => open_claude_accounts(app, None),
         Action::Usage => crate::usage::open(app),
         Action::StopAllStacks => crate::stacks::stop_all(app, out),
@@ -4789,7 +4794,7 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             };
             let value = match project {
                 Some(path) => cfg.project_text_value(path, *kind),
-                None => String::new(),
+                None => cfg.text_value(*kind),
             };
             (title.into(), hint.into(), value)
         }
@@ -4859,6 +4864,10 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 format!("the letter or glyph its chip shows, one character{letter}").into(),
                 crate::claude_accounts::chip_icon(&cfg, id),
             )
+        }
+        PromptKind::SlackToken { step, .. } => {
+            let (title, label) = crate::phone::prompt_text(*step);
+            (title.into(), label.into(), String::new())
         }
         PromptKind::LinkBrowser { id } => {
             let cfg = crate::config::Config::load();
@@ -7891,6 +7900,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::RenameClaudeAccount { .. }
                         | PromptKind::AccountChipMark { .. }
                         | PromptKind::LinkBrowser { .. }
+                        | PromptKind::SlackToken { .. }
                 );
                 // The comment box stood in for the PULL REQUESTS MODAL: Esc
                 // puts the modal back on its row, the comment unposted.
@@ -8560,6 +8570,9 @@ fn connection_cmd(app: &mut App, connection: crate::config::Connection, connect:
             crate::microsoft::connect(app, &crate::config::Config::load().microsoft)
         }
         (Connection::Microsoft, false) => crate::microsoft::disconnect(app),
+        // The Slack tokens' prompts, or forgetting them: each says its own.
+        (Connection::Slack, true) => return crate::phone::connect(app),
+        (Connection::Slack, false) => return crate::phone::disconnect(app),
         _ => crate::config::NOT_CONNECTED.into(),
     };
     if let Some(view) = settings_mut(app) {
@@ -8723,6 +8736,18 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
                 _ => {
                     if let Some(view) = settings_mut(app) {
                         view.info("Enter: test the connection");
+                    }
+                }
+            }
+            return;
+        }
+        // **Away by hand**: Enter is ⌘⇧A; there is nothing to cycle.
+        if spec.kind == crate::config::SettingKind::Away(crate::config::AwayField::ByHand) {
+            match delta {
+                0 => crate::phone::toggle_away(app),
+                _ => {
+                    if let Some(view) = settings_mut(app) {
+                        view.info("Enter: away until your next key");
                     }
                 }
             }
@@ -9228,6 +9253,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             | PromptKind::RenameClaudeAccount { .. }
             | PromptKind::AccountChipMark { .. }
             | PromptKind::LinkBrowser { .. }
+            | PromptKind::SlackToken { .. }
             | PromptKind::QuickPrompt(_)
     );
     if value.is_empty() && !empty_is_a_default {
@@ -9325,8 +9351,19 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             // row's value goes into the entry of the project the prompt
             // was opened on, and the notice reads that entry back.
             let mut cfg = crate::config::Config::load();
-            if let Some(path) = &project {
-                cfg.set_project_text(path, kind, &value);
+            let typed = match &project {
+                Some(path) => {
+                    cfg.set_project_text(path, kind, &value);
+                    Ok(())
+                }
+                None => cfg.set_text(kind, &value),
+            };
+            if let Err(why) = typed {
+                reopen_settings(app);
+                if let Some(view) = settings_mut(app) {
+                    view.warn(why);
+                }
+                return;
             }
             let saved = save_config(app, &cfg);
             if saved {
@@ -9345,6 +9382,9 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                     view.info(format!("{label}: {shown}"));
                 }
             }
+        }
+        PromptKind::SlackToken { step, tokens } => {
+            crate::phone::submit_token(app, step, tokens, &value);
         }
         PromptKind::EditLink { id } => {
             send(app, out, |req_id| ClientRequest::UpdateLink {
@@ -12902,6 +12942,10 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
         ServerEvent::StacksChanged { stacks, .. } => {
             crate::stacks::listed(app, stacks);
         }
+        ServerEvent::AwayChanged { away, by_hand } => {
+            crate::phone::away_changed(app, away, by_hand);
+        }
+        ServerEvent::SlackStatus { status } => crate::phone::slack_changed(app, status),
         // `orion open` in a session: the user asked to see these files.
         ServerEvent::FilesOpened {
             root, paths, lines, ..
@@ -31534,7 +31578,7 @@ mod tests {
         // `^A` asks first; Enter on the confirm is the archive.
         press(
             &mut app,
-            KeyCode::Char('A'),
+            KeyCode::Char('X'),
             KeyModifiers::SUPER | KeyModifiers::SHIFT,
             &mut out,
         );
@@ -31599,7 +31643,7 @@ mod tests {
 
             press(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
                 &mut out,
             );
@@ -31635,7 +31679,7 @@ mod tests {
             // Enter goes through, exactly as the bare key would have.
             press(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
                 &mut out,
             );

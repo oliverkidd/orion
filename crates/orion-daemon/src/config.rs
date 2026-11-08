@@ -49,6 +49,9 @@ pub struct Config {
     /// The default Claude account's switch, where `harnesses.claude` says
     /// nothing (the TUI's Accounts tab). Off, no SPARE WORKTREE boots it.
     pub claude_enabled: bool,
+    /// AWAY AND PHONE (`away`, the TUI's Connections tab): when you count
+    /// as away, and what the phone bridge sends then.
+    pub away: orion_core::away::AwaySettings,
 }
 
 /// One project's entry under `projects` — the rows of the TUI's Projects
@@ -90,6 +93,7 @@ impl Default for Config {
             projects: BTreeMap::new(),
             quick_prompt_kind: AgentKind::Claude.as_str().into(),
             claude_enabled: false,
+            away: Default::default(),
         }
     }
 }

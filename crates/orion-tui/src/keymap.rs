@@ -190,6 +190,10 @@ pub enum Action {
     Home,
     Hosts,
     Settings,
+    /// `⌘⇧A`: AWAY BY HAND — you count as away until your next key, so a
+    /// session that starts waiting goes to your phone (Settings ›
+    /// Connections).
+    AwayToggle,
     /// The settings overlay on the Accounts tab's CLAUDE ACCOUNTS: who each
     /// Claude Code login is, signing one in or out, adding another.
     ClaudeAccounts,
@@ -578,8 +582,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "SESSIONS",
         scope: Scope::Global,
         // Never a bare letter: a stray `a` aimed at a prompt that lands on
-        // the grid must not file a session away.
-        defaults: &["cmd+shift+a"],
+        // the grid must not file a session away. ⌘⇧A is away by hand.
+        defaults: &["cmd+shift+x"],
     },
     ActionSpec {
         action: Action::Unarchive,
@@ -884,6 +888,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["s", "cmd+,"],
+    },
+    ActionSpec {
+        action: Action::AwayToggle,
+        id: "away_toggle",
+        label: "Away by hand",
+        hint: "Say you are away until your next key: a session that starts waiting or crashes goes to your phone as a Slack DM (Settings › Connections)",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &["cmd+shift+a"],
     },
     ActionSpec {
         action: Action::ClaudeAccounts,

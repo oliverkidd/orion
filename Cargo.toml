@@ -34,6 +34,11 @@ directories = "6"
 portable-pty = "0.9"
 vt100 = "0.16"
 tempfile = "3"
+# Slack's Socket Mode: a websocket over rustls, on ring (no cmake for
+# aws-lc), with Mozilla's roots compiled in.
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 # Dependencies at full optimisation in dev builds too. The terminal
 # emulation (vt100, tui-term, ratatui) is the TUI's hot path: unoptimised,

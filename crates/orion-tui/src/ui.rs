@@ -1854,6 +1854,13 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                                 }
                                 Some(p) => cfg.project(&p.repo_path).value_label(spec.kind),
                                 None if spec.kind.is_project() => "n/a".into(),
+                                None if spec.kind
+                                    == crate::config::SettingKind::Connection(
+                                        crate::config::Connection::Slack,
+                                    ) =>
+                                {
+                                    crate::phone::status_label(&app.slack_status)
+                                }
                                 None => cfg.value_label(spec.kind),
                             };
                             (spec.label.to_string(), value, None)
@@ -2973,6 +2980,12 @@ pub(crate) fn settings_hints(
         return hints;
     } else if matches!(kind, Some(crate::config::SettingKind::Connection(_))) {
         vec![CONNECT.hint().kept(), DISCONNECT.hint()]
+    } else if kind
+        == Some(crate::config::SettingKind::Away(
+            crate::config::AwayField::ByHand,
+        ))
+    {
+        vec![CHOOSE.hint_as("away until your next key").kept()]
     } else if kind.is_some_and(|k| k.is_status()) {
         vec![CHOOSE.hint_as("test the connection").kept()]
     } else {

@@ -301,6 +301,25 @@
   a plan, the plan's last row ("Tell Claude what to change") for feedback, Esc and then your words to
   refuse a permission prompt. A session with no dialog open (stopped, or asked before a restart)
   gets the answer as its next turn instead, in words.
+- **Phone bridge.** <a id="phone-bridge"></a>While you are away, a session that starts waiting on you
+  — a question, a plan, a permission prompt — or crashes goes to your phone at once, as a Slack DM
+  from the Orion app's bot; there is never a delay. You are away when the screen is locked (macOS's
+  `IOConsoleLocked`, read with `ioreg` every 5 s), after the set minutes with no keys or mouse
+  (`HIDIdleTime`), or by hand with `⌘⇧A` until your next key in any orion. Being in a meeting is never
+  away. Quiet hours and **Send to your phone while away** (Settings › Connections) hold messages
+  back. The DM reads `● Agent · <project> · <HH:MM>`, then the session's name, then its whole last
+  response from the transcript (never summarised; split into Slack's 3000-character sections, and
+  continued in the thread past Slack's 50 blocks), then the question in bold with a button per
+  option and `Something else…`, or the plan with `Approve` and a reply button. A button answers
+  through the same keys an answer from orion types; `Something else…` and the reply button say
+  "Reply in this thread". A reply in a message's thread answers that session in words (feedback, for
+  a plan), a plain DM answers the newest message still waiting, and only the user who installed the
+  app is listened to. Each answer gets `✓ Sent · working again` in its thread. A session answered
+  at the desk instead has its DM updated to say "Answered in Orion", its buttons gone. The daemon
+  holds one Socket Mode websocket to Slack (reopened with backoff when it drops), keeps which message
+  is which session's in its database so a reply finds its session after a restart, and forwards
+  every message event your user token sees to the TUIs, unfiltered, for Needs you. With no tokens
+  saved nothing connects and nothing polls.
 - **Which of those signals you get depends on the harness.** Claude is installed with all ten hook
   groups — `UserPromptSubmit`, `Stop`, `SessionStart`, `PermissionRequest`, `Notification`, a
   `PreToolUse` on `AskUserQuestion` and `ExitPlanMode`, an unmatched `PostToolUse` (the question's answer, a permission

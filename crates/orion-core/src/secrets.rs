@@ -17,6 +17,13 @@ const SECURITY: &str = "/usr/bin/security";
 /// What every one of orion's own services starts with.
 pub const PREFIX: &str = "dev.orion.";
 
+/// The Slack app's tokens (`dev.orion.slack`): the Connections tab saves
+/// them, the daemon's Slack bridge reads them.
+pub const SLACK_SERVICE: &str = "slack";
+/// Their accounts, in the order the Connections tab asks for them: the
+/// app-level token (`xapp-…`), the bot's (`xoxb-…`), the user's (`xoxp-…`).
+pub const SLACK_ACCOUNTS: [&str; 3] = ["app", "bot", "user"];
+
 /// The Keychain service orion keeps `service` under: `dev.orion.<service>`.
 pub fn service_name(service: &str) -> String {
     format!("{PREFIX}{service}")

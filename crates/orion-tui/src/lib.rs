@@ -66,6 +66,7 @@ pub mod overlay_close;
 pub mod palette;
 pub mod paths_util;
 pub mod perf;
+pub mod phone;
 pub mod pr_actions;
 pub mod pr_cache;
 pub mod pr_checkout;

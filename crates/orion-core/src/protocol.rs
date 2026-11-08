@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 52;
+pub const PROTOCOL_VERSION: u32 = 53;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -417,6 +417,19 @@ pub enum ClientRequest {
         id: AgentId,
     },
 
+    /// Fire-and-forget: AWAY BY HAND (⌘⇧A) on or off. Off is also what a
+    /// TUI sends on its first key after the flag went on — you are back.
+    /// Every subscriber hears `AwayChanged`.
+    SetAway {
+        on: bool,
+    },
+
+    /// Fire-and-forget: the Slack tokens in the Keychain changed (the
+    /// Connections tab saved or deleted them). The daemon's Slack bridge
+    /// reads them again and reconnects, and every subscriber hears the
+    /// new `SlackStatus`.
+    SlackReconnect,
+
     /// One point-in-time memory reading — the daemon plus every live
     /// session's process subtree. Answered by `ServerEvent::Metrics` with
     /// the same req_id (not an Ack).
@@ -440,6 +453,25 @@ pub enum Answer {
     /// Keep planning, with this feedback; on a question, the same as
     /// `Text`.
     Steer(String),
+}
+
+/// How orion's Slack connection stands (`ServerEvent::SlackStatus`).
+/// All None with `configured` false: no tokens saved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlackStatus {
+    /// The three tokens are saved.
+    pub configured: bool,
+    /// Signed in and listening: the workspace's name (`auth.test`'s
+    /// `team`).
+    pub workspace: Option<String>,
+    /// The installing user's Slack id (`U…`): whose DMs and mentions the
+    /// inbox reads, and who the phone messages go to.
+    pub user_id: Option<String>,
+    /// The DM channel orion's bot posts phone messages in (`D…`). Its
+    /// messages are the phone's, not the inbox's.
+    pub phone_channel: Option<String>,
+    /// Why it is not connected, as one line to show.
+    pub problem: Option<String>,
 }
 
 /// What a new session launches as — its harness (a Claude account is
@@ -627,6 +659,44 @@ pub enum ServerEvent {
     Metrics {
         req_id: u64,
         snapshot: MetricsSnapshot,
+    },
+
+    /// AWAY changed (`orion_core::away`): you count as away, or are back.
+    /// `by_hand` is the ⌘⇧A flag, which the next key in any TUI clears.
+    /// Sent right after `Snapshot` too.
+    AwayChanged {
+        away: bool,
+        by_hand: bool,
+    },
+
+    /// How the Slack connection stands, when it changes and right after
+    /// `Snapshot`.
+    SlackStatus {
+        status: SlackStatus,
+    },
+
+    /// A Slack message event from the installing user's token — a DM, a
+    /// group DM, a channel or a private channel message they can see
+    /// (`message.im`, `message.mpim`, `message.channels`,
+    /// `message.groups`) — forwarded as it came, unfiltered: the TUI
+    /// decides what is for you.
+    SlackMessage {
+        /// The conversation (`C…`, `G…`, `D…`).
+        channel: String,
+        /// `im`, `mpim`, `channel` or `group`.
+        channel_type: String,
+        /// The sender's user id; None for a bot or a system message.
+        user: Option<String>,
+        text: String,
+        /// The message's own timestamp, its id in the conversation.
+        ts: String,
+        /// The thread it is a reply in (the parent's `ts`), if it is one.
+        thread_ts: Option<String>,
+        /// `message_changed`, `bot_message`, … — None for a plain message.
+        subtype: Option<String>,
+        /// The whole Slack event as JSON, for anything the fields above
+        /// leave out.
+        event_json: String,
     },
 
     /// Reply to `ClientRequest::LastResponse`: the text of the session's

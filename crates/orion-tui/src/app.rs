@@ -837,6 +837,14 @@ pub enum PromptKind {
     LinkBrowser {
         id: String,
     },
+    /// `c` on Settings › Connections › SLACK: token `step` of the three
+    /// (`phone::TOKENS`), the ones typed before it carried along. Enter
+    /// asks for the next, and after the third saves all three; Esc and an
+    /// empty box put the overlay back with nothing saved.
+    SlackToken {
+        step: usize,
+        tokens: Vec<String>,
+    },
 }
 
 impl PromptKind {
@@ -3993,6 +4001,15 @@ pub struct App {
     /// startup and when the settings overlay applies a change; off here
     /// until startup applies it.
     pub spotify_enabled: bool,
+    /// AWAY, as the daemon last said (`ServerEvent::AwayChanged`).
+    pub away: bool,
+    /// AWAY BY HAND (⌘⇧A) is on: the next key sends `SetAway { on: false }`.
+    pub away_by_hand: bool,
+    /// How the daemon's Slack connection stands (`ServerEvent::SlackStatus`).
+    pub slack_status: orion_core::SlackStatus,
+    /// Requests queued by a handler that has no request list to hand —
+    /// the settings overlay's — sent with the loop's own on its next turn.
+    pub outbox: Vec<orion_core::ClientRequest>,
     /// Where the Spotify polls and commands answer — the loop's channel,
     /// held here so a click on one of the readout's buttons can reach it.
     pub spotify_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::spotify::Answer>>,
@@ -4721,6 +4738,10 @@ impl App {
             spotify_seq: 0,
             spotify_denied: false,
             spotify_enabled: false,
+            away: false,
+            away_by_hand: false,
+            slack_status: Default::default(),
+            outbox: Vec::new(),
             spotify_tx: None,
             edge_tap: None,
             release_watch: None,

@@ -129,6 +129,8 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     });
                     let _ = out_tx.send(snapshot).await;
                     let _ = out_tx.send(daemon.stacks.current()).await;
+                    let _ = out_tx.send(daemon.away.current()).await;
+                    let _ = out_tx.send(daemon.slack.current()).await;
                     let notes = std::mem::take(&mut *daemon.boot_notes.lock().unwrap());
                     for message in notes {
                         let _ = out_tx
@@ -261,6 +263,8 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         tracing::warn!(error = %e, "mark agent seen failed");
                     }
                 }
+                ClientRequest::SetAway { on } => daemon.set_away_by_hand(on),
+                ClientRequest::SlackReconnect => daemon.slack.reconnect(),
                 ClientRequest::GetMetrics { req_id } => {
                     // A machine-wide `ps` sweep takes tens of ms; keep it off
                     // the request loop so Input/Attach frames keep flowing.

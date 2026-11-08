@@ -4849,3 +4849,472 @@ async fn both_accounts_run_at_once_and_resume_after_a_restart() {
     write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
     wait_for_exit(&mut daemon);
 }
+
+/// A stand-in Slack for the PHONE BRIDGE: the Web API on a local axum
+/// server (`ORION_SLACK_API_URL`), whose `apps.connections.open` hands out
+/// a local websocket playing Socket Mode. Every Web API call is recorded;
+/// the test pushes envelopes down the socket and reads the acks back.
+struct FakeSlack {
+    base_url: String,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value, String)>>>,
+    acks: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    envelopes: tokio::sync::mpsc::UnboundedSender<String>,
+    connected: std::sync::Arc<tokio::sync::Notify>,
+}
+
+const FAKE_TOKENS: &str = "xapp-fake,xoxb-fake,xoxp-fake";
+
+impl FakeSlack {
+    async fn start() -> FakeSlack {
+        use axum::extract::{Path as UrlPath, State};
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::{Arc, Mutex};
+
+        let ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ws_url = format!("ws://{}/socket", ws.local_addr().unwrap());
+        let (envelopes, mut queued) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let acks = Arc::new(Mutex::new(Vec::new()));
+        let connected = Arc::new(tokio::sync::Notify::new());
+        {
+            let (acks, connected) = (acks.clone(), connected.clone());
+            tokio::spawn(async move {
+                let (stream, _) = ws.accept().await.unwrap();
+                let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let (mut tx, mut rx) = socket.split();
+                use tokio_tungstenite::tungstenite::Message;
+                tx.send(Message::Text(r#"{"type":"hello"}"#.into()))
+                    .await
+                    .unwrap();
+                connected.notify_one();
+                loop {
+                    tokio::select! {
+                        Some(frame) = queued.recv() => {
+                            if tx.send(Message::Text(frame.into())).await.is_err() {
+                                return;
+                            }
+                        }
+                        frame = rx.next() => match frame {
+                            Some(Ok(Message::Text(text))) => {
+                                acks.lock().unwrap().push(text.to_string())
+                            }
+                            Some(Ok(_)) => {}
+                            _ => return,
+                        },
+                    }
+                }
+            });
+        }
+
+        type Calls = Arc<Mutex<Vec<(String, serde_json::Value, String)>>>;
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        let next_ts = Arc::new(std::sync::atomic::AtomicU64::new(1000));
+        let app = axum::Router::new()
+            .route(
+                "/{method}",
+                axum::routing::post(
+                    |State((calls, next_ts, ws_url)): State<(
+                        Calls,
+                        Arc<std::sync::atomic::AtomicU64>,
+                        String,
+                    )>,
+                     UrlPath(method): UrlPath<String>,
+                     headers: axum::http::HeaderMap,
+                     body: axum::body::Bytes| async move {
+                        let bearer = headers
+                            .get("authorization")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("")
+                            .trim_start_matches("Bearer ")
+                            .to_string();
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&body).unwrap_or_default();
+                        calls
+                            .lock()
+                            .unwrap()
+                            .push((method.clone(), body, bearer.clone()));
+                        let reply = match method.as_str() {
+                            "auth.test" if bearer == "xoxp-fake" => {
+                                serde_json::json!({"ok": true, "user_id": "UME", "team": "Acme"})
+                            }
+                            "auth.test" if bearer == "xoxb-fake" => {
+                                serde_json::json!({"ok": true, "user_id": "UBOT", "team": "Acme"})
+                            }
+                            "conversations.open" => {
+                                serde_json::json!({"ok": true, "channel": {"id": "DPHONE"}})
+                            }
+                            "apps.connections.open" if bearer == "xapp-fake" => {
+                                serde_json::json!({"ok": true, "url": ws_url})
+                            }
+                            "chat.postMessage" => {
+                                let n = next_ts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                serde_json::json!({"ok": true, "ts": format!("{n}.000100")})
+                            }
+                            "chat.update" | "chat.postEphemeral" => serde_json::json!({"ok": true}),
+                            _ => serde_json::json!({"ok": false, "error": "invalid_auth"}),
+                        };
+                        axum::Json(reply)
+                    },
+                ),
+            )
+            .with_state((calls.clone(), next_ts, ws_url));
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", http.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(http, app).await.unwrap() });
+        FakeSlack {
+            base_url,
+            calls,
+            acks,
+            envelopes,
+            connected,
+        }
+    }
+
+    /// The `chat.*` calls so far, as (method, body).
+    fn chats(&self) -> Vec<(String, serde_json::Value)> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _, _)| m.starts_with("chat."))
+            .map(|(m, b, _)| (m.clone(), b.clone()))
+            .collect()
+    }
+
+    /// The phone messages posted so far: `chat.postMessage` with no thread.
+    fn posted(&self) -> Vec<serde_json::Value> {
+        self.chats()
+            .into_iter()
+            .filter(|(m, b)| m == "chat.postMessage" && b["thread_ts"].is_null())
+            .map(|(_, b)| b)
+            .collect()
+    }
+
+    /// Wait for `pred` over the `chat.*` calls.
+    async fn wait_for(
+        &self,
+        what: &str,
+        mut pred: impl FnMut(&[(String, serde_json::Value)]) -> bool,
+    ) {
+        let deadline = tokio::time::Instant::now() + SLOW_TIMEOUT;
+        while !pred(&self.chats()) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "fake Slack never saw {what}; calls: {:#?}",
+                self.chats()
+            );
+            tokio::time::sleep(POLL_STEP).await;
+        }
+    }
+
+    fn send(&self, envelope: serde_json::Value) {
+        self.envelopes.send(envelope.to_string()).unwrap();
+    }
+}
+
+/// The text of each block, as the phone shows it: buttons as `[a|b]`.
+fn block_texts(blocks: &serde_json::Value) -> Vec<String> {
+    blocks
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| match b["type"].as_str().unwrap() {
+            "actions" => format!(
+                "[{}]",
+                b["elements"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e["text"]["text"].as_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ),
+            "context" => b["elements"][0]["text"].as_str().unwrap().to_string(),
+            _ => b["text"]["text"].as_str().unwrap().to_string(),
+        })
+        .collect()
+}
+
+/// THE PHONE BRIDGE end to end, against a fake Slack. Away by hand, a
+/// session that asks a question posts one DM in the 5.4 layout — its
+/// whole last response, the question, a button per option and `Something
+/// else…`. A button press comes back down Socket Mode and its digit
+/// reaches the PTY; the thread hears `✓ Sent · working again`. The next
+/// question is answered by a thread reply, which reaches the PTY as the
+/// question's own-words keystrokes and the TUI as a `SlackMessage`. The
+/// third is answered at the desk, and its DM is updated to say "Answered
+/// in Orion", its buttons gone.
+#[tokio::test]
+async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
+    let slack = FakeSlack::start().await;
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    // No quiet hours: the test runs at any time of day.
+    env.write_config(r#"{"away": {"quiet": null}}"#);
+    let transcript = env.tmp.path().join("transcript.jsonl");
+    std::fs::write(
+        &transcript,
+        serde_json::json!({"type": "assistant", "message": {"id": "m1", "role": "assistant",
+            "content": [{"type": "text", "text": "I checked **both** palettes.\n\nRed is louder."}]}})
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let ask = env.tmp.path().join("ask.json");
+    std::fs::write(
+        &ask,
+        serde_json::json!({
+            "session_id": "sess-1",
+            "hook_event_name": "PreToolUse",
+            "transcript_path": transcript,
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{
+                "question": "Which color do you like?",
+                "multiSelect": false,
+                "options": [{"label": "Red"}, {"label": "Green"}]
+            }]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let answered = env.tmp.path().join("answered.json");
+    std::fs::write(
+        &answered,
+        r#"{"session_id":"sess-1","hook_event_name":"PostToolUse","tool_name":"AskUserQuestion"}"#,
+    )
+    .unwrap();
+    // Asks, reads one key (the button's digit), asks again and reads a
+    // line (the thread reply), asks a third time and reads a line (the
+    // desk's answer); each answer ends its wait.
+    let script = env.tmp.path().join("agent.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             hook() {{ curl -sS -m 3 -X POST -H \"Authorization: Bearer $ORION_API_TOKEN\" \
+             -H 'Content-Type: application/json' --data-binary @\"$1\" \
+             \"$ORION_API_URL/api/hooks/claude?agentId=$ORION_AGENT_ID&hookEvent=$2\" >/dev/null; }}\n\
+             stty -icanon min 1\n\
+             hook '{ask}' PreToolUse\n\
+             c=$(dd bs=1 count=1 2>/dev/null); echo \"PICKED:$c\"\n\
+             hook '{answered}' PostToolUse\n\
+             stty icanon\n\
+             hook '{ask}' PreToolUse\n\
+             read line; echo \"GOT:$line\"\n\
+             hook '{answered}' PostToolUse\n\
+             hook '{ask}' PreToolUse\n\
+             read line; echo \"DESK:$line\"\n\
+             hook '{answered}' PostToolUse\n\
+             sleep 30\n",
+            ask = ask.display(),
+            answered = answered.display(),
+        ),
+    )
+    .unwrap();
+    make_executable(&script);
+    let mut daemon = env.spawn_daemon_with(
+        script.to_str().unwrap(),
+        &[
+            (env::SLACK_API_URL, &slack.base_url),
+            (env::SLACK_TOKENS, FAKE_TOKENS),
+            (env::AWAY_POLL_MS, "0"),
+        ],
+    );
+
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    // Signed in, and Socket Mode open.
+    tokio::time::timeout(SLOW_TIMEOUT, slack.connected.notified())
+        .await
+        .expect("the daemon never opened Socket Mode");
+    write_frame(&mut c, &ClientRequest::SetAway { on: true })
+        .await
+        .unwrap();
+    read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter().any(|e| {
+            matches!(
+                e,
+                ServerEvent::AwayChanged {
+                    away: true,
+                    by_hand: true
+                }
+            )
+        })
+    })
+    .await;
+
+    let agent_id = create_agent_get_id(&mut c, &worktree.id, "pick a colour", 2).await;
+    write_frame(
+        &mut c,
+        &ClientRequest::Attach {
+            session: SessionRef::Agent(agent_id.clone()),
+            from_seq: None,
+            cols: 120,
+            rows: 30,
+        },
+    )
+    .await
+    .unwrap();
+
+    // ---- one DM, in the 5.4 layout ----
+    slack
+        .wait_for("the first phone message", |calls| {
+            calls.iter().any(|(m, _)| m == "chat.postMessage")
+        })
+        .await;
+    let first = slack.posted();
+    assert_eq!(first.len(), 1, "one message: {first:#?}");
+    let first = &first[0];
+    assert_eq!(first["channel"], "DPHONE");
+    let texts = block_texts(&first["blocks"]);
+    assert!(
+        texts[0].starts_with("● Agent · repo · ")
+            && texts[0].len() == "● Agent · repo · 10:42".len(),
+        "{texts:?}"
+    );
+    assert_eq!(
+        texts[1..],
+        [
+            "pick a colour",
+            "I checked *both* palettes.\n\nRed is louder.",
+            "*Which color do you like?*",
+            "[Red|Green|Something else…]",
+        ]
+    );
+    let first_ts = slack
+        .chats()
+        .iter()
+        .position(|(m, _)| m == "chat.postMessage")
+        .map(|n| format!("{}.000100", 1000 + n))
+        .unwrap();
+
+    // ---- a button press reaches the PTY ----
+    slack.send(serde_json::json!({
+        "envelope_id": "env-1",
+        "type": "interactive",
+        "payload": {
+            "type": "block_actions",
+            "user": {"id": "UME"},
+            "container": {"type": "message", "message_ts": first_ts, "channel_id": "DPHONE"},
+            "actions": [{"action_id": "orion_option_1", "value": "1"}]
+        }
+    }));
+    let mut seen = Vec::new();
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        seen = collected_output(evs);
+        String::from_utf8_lossy(&seen).contains("PICKED:2")
+    })
+    .await;
+    slack
+        .wait_for("✓ Sent in the first thread", |calls| {
+            calls.iter().any(|(m, b)| {
+                m == "chat.postMessage"
+                    && b["thread_ts"] == first_ts.as_str()
+                    && b["text"] == "✓ Sent · working again"
+            })
+        })
+        .await;
+
+    // ---- the next question, answered by a thread reply ----
+    slack
+        .wait_for("the second phone message", |_| slack.posted().len() == 2)
+        .await;
+    let second_ts = slack
+        .chats()
+        .iter()
+        .filter(|(m, _)| m == "chat.postMessage")
+        .count();
+    let second_ts = format!("{}.000100", 1000 + second_ts - 1);
+    slack.send(serde_json::json!({
+        "envelope_id": "env-2",
+        "type": "events_api",
+        "payload": {
+            "type": "event_callback",
+            "event_id": "Ev2",
+            "event": {
+                "type": "message", "channel": "DPHONE", "channel_type": "im",
+                "user": "UME", "text": "purple", "ts": "1999.000200",
+                "thread_ts": second_ts
+            }
+        }
+    }));
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        seen = collected_output(evs);
+        String::from_utf8_lossy(&seen).contains("GOT:3purple")
+    })
+    .await;
+    assert!(
+        events.iter().any(|e| matches!(e,
+            ServerEvent::SlackMessage { channel, text, thread_ts: Some(thread), .. }
+                if channel == "DPHONE" && text == "purple" && *thread == second_ts)),
+        "the reply also reaches the TUI as a SlackMessage"
+    );
+    slack
+        .wait_for("✓ Sent in the second thread", |calls| {
+            calls.iter().any(|(m, b)| {
+                m == "chat.postMessage"
+                    && b["thread_ts"] == second_ts.as_str()
+                    && b["text"] == "✓ Sent · working again"
+            })
+        })
+        .await;
+
+    // ---- the third, answered at the desk ----
+    slack
+        .wait_for("the third phone message", |_| slack.posted().len() == 3)
+        .await;
+    let third_ts = slack
+        .chats()
+        .iter()
+        .filter(|(m, _)| m == "chat.postMessage")
+        .count();
+    let third_ts = format!("{}.000100", 1000 + third_ts - 1);
+    write_frame(
+        &mut c,
+        &ClientRequest::Answer {
+            req_id: 9,
+            id: agent_id.clone(),
+            answer: orion_core::Answer::Text("desk".into()),
+        },
+    )
+    .await
+    .unwrap();
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        seen = collected_output(evs);
+        String::from_utf8_lossy(&seen).contains("DESK:3desk")
+    })
+    .await;
+    slack
+        .wait_for("Answered in Orion on the third", |calls| {
+            calls
+                .iter()
+                .any(|(m, b)| m == "chat.update" && b["ts"] == third_ts.as_str())
+        })
+        .await;
+    let chats = slack.chats();
+    let (_, update) = chats.iter().find(|(m, _)| m == "chat.update").unwrap();
+    let texts = block_texts(&update["blocks"]);
+    assert_eq!(texts.last().unwrap(), "✓ Answered in Orion");
+    assert!(
+        texts.iter().all(|t| !t.starts_with('[')),
+        "no buttons: {texts:?}"
+    );
+    assert_eq!(
+        chats.iter().filter(|(m, _)| m == "chat.update").count(),
+        1,
+        "only the desk's answer updates a message"
+    );
+    // Every envelope was acknowledged by its id.
+    let acks = slack.acks.lock().unwrap().clone();
+    assert!(
+        acks.contains(&r#"{"envelope_id":"env-1"}"#.to_string()),
+        "{acks:?}"
+    );
+    assert!(
+        acks.contains(&r#"{"envelope_id":"env-2"}"#.to_string()),
+        "{acks:?}"
+    );
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}

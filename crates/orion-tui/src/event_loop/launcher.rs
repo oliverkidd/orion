@@ -8132,7 +8132,7 @@ mod tests {
 
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             assert!(
@@ -8199,7 +8199,7 @@ mod tests {
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the last card");
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             assert_eq!(cards(&app), ["a9", "a2"], "the press unarchives one");
@@ -8217,7 +8217,7 @@ mod tests {
             );
             key_kind(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
                 Repeat,
             );
@@ -8259,7 +8259,7 @@ mod tests {
             let before = archived(&app);
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             assert_eq!(archived(&app), before - 1, "the press unarchives one");
@@ -8267,7 +8267,7 @@ mod tests {
             for _ in 0..5 {
                 key_kind(
                     &mut app,
-                    KeyCode::Char('A'),
+                    KeyCode::Char('X'),
                     KeyModifiers::SUPER | KeyModifiers::SHIFT,
                     Repeat,
                 );
@@ -8293,7 +8293,7 @@ mod tests {
 
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -8366,7 +8366,7 @@ mod tests {
 
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -8401,7 +8401,7 @@ mod tests {
             );
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -8501,7 +8501,7 @@ mod tests {
 
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -8520,7 +8520,7 @@ mod tests {
             for keys in [
                 &[
                     (
-                        KeyCode::Char('A'),
+                        KeyCode::Char('X'),
                         KeyModifiers::SUPER | KeyModifiers::SHIFT,
                     ),
                     (KeyCode::Char('y'), KeyModifiers::NONE),
@@ -9254,7 +9254,7 @@ mod tests {
             // `u` unarchives the card under the cursor where it stands.
             let out = key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             assert!(
@@ -11285,7 +11285,7 @@ mod tests {
             super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
