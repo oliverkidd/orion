@@ -1,0 +1,113 @@
+crates/orion-core/src/env.rs
+  s_0fc3ca629be011::t_14b800fc597db7 77-80
+crates/orion-tui/src/todos/store.rs
+  s_0fc3ca629be011::t_11b56be5699740 482-497
+  s_0fc3ca629be011::t_4888c0d09d9800 375-377
+  s_0fc3ca629be011::t_5e08b84e8ca2f3 116-133,135-142
+  s_0fc3ca629be011::t_c044dbd49cb521 89-102
+docs/configuration.md
+  s_0fc3ca629be011::t_131fee11da5dd8 221
+  s_0fc3ca629be011::t_c587044010e604 527
+crates/orion-tui/src/automations/blue_sky.rs
+  s_0fc3ca629be011::t_84f0856ea495bc 224-234,238
+  s_0fc3ca629be011::t_6f655b00192fa5 411-412,419,439-440,445,447,461-464,467,469,475,478,485,494,495-498
+  s_0fc3ca629be011::t_c286b3c41d5691 221-223,409-410,443-444,446,448-450,594-598,619-623,637-639,658-663,669-672,707-710
+  s_0fc3ca629be011::t_9305e998c6ce32 2-29,33,35-37,40-220,235-237,239-269,279-408,413-418,420-438,441-442,451-460,465-466,468,470-474,476-477,479-484,486-489,499-593,599-618,624-636,640-657,664-668,673-706,711-724
+  s_0fc3ca629be011::t_7559326147fe12 270-278
+crates/orion/tests/e2e_tui.rs
+  s_0fc3ca629be011::t_6f655b00192fa5 1502-1505
+  s_0fc3ca629be011::t_9ebf4479c08a50 1511
+  s_0fc3ca629be011::t_2045c74d0a6245 1477,1479,1481-1485,1489
+  s_0fc3ca629be011::t_e17b68439a7821 1488
+  s_0fc3ca629be011::t_ea2e889156bea1 1461-1476,1478,1480,1486-1487,1490-1501,1506-1510,1512-1513
+crates/orion-tui/src/automations/view.rs
+  s_0fc3ca629be011::t_bfacac8287f534 254-258
+  s_0fc3ca629be011::t_9102299d64cc4f 342
+crates/orion-tui/src/branch_name.rs
+  s_0fc3ca629be011::t_45f3f1086a108b 40,81
+scripts/shot/scenes/todos-blue-sky.keys
+  s_0fc3ca629be011::t_357a3429a7c3a5 1-8
+crates/orion-tui/src/automations/mod.rs
+  s_0fc3ca629be011::t_3e644ef4122dc5 267-268,271-272
+  s_0fc3ca629be011::t_df43b7dbbb468f 596,602
+  s_0fc3ca629be011::t_2c5dae376c701b 98-100,102
+crates/orion-tui/src/palette.rs
+  s_0fc3ca629be011::t_c286b3c41d5691 542-553
+  s_0fc3ca629be011::t_5a823d1ed94c3d 52-53,55,481-486,491,532-533,538-541,555-556,561,564,1032
+crates/orion-tui/src/todos/mod.rs
+  s_0fc3ca629be011::t_0340660fedc556 1018-1020
+crates/orion-tui/src/todos/view.rs
+  s_0fc3ca629be011::t_784673eb1139c9 3018-3044,3049-3050
+  s_0fc3ca629be011::t_bd4f64d5acfd6c 336-340,345,347-354
+  s_0fc3ca629be011::t_2541d217de4b8f 3067
+  s_0fc3ca629be011::t_9102299d64cc4f 179-181,2368-2369,2371-2381,2785-2805,2815
+  s_0fc3ca629be011::t_4936b3a7d06270 283,285-286
+  s_0fc3ca629be011::t_4f4021484c5336 278-279
+  s_0fc3ca629be011::t_3dccfd7a4c9c19 3058
+  s_0fc3ca629be011::t_f69990e1860590 3064-3066,3072-3073
+  s_0fc3ca629be011::t_4a2cc70a0fc26c 557-558,560
+  s_0fc3ca629be011::t_a695db73cda516 158-178
+  s_0fc3ca629be011::t_b96004d487781d 421,423
+  s_0fc3ca629be011::t_db7c915b73adb9 1122-1123,1136,1157,1161,1176,1200-1201,1965-2007,2075,2179-2180,2342-2344,2357
+  s_0fc3ca629be011::t_588817bafd8269 509-510,512,515-516,519-523,526,528,531-534,536
+  s_0fc3ca629be011::t_f60d630ed781ea 234-237
+  s_0fc3ca629be011::t_c286b3c41d5691 416-417,504,598-602,2963-2967,3045-3048,3068-3071
+  s_0fc3ca629be011::t_d24438d5502f0e 472-491
+  s_0fc3ca629be011::t_eddcb4db3163ed 595-597,603-614,618,622-623,626-627,636-640,644-647,651,656,658-659,662
+  s_0fc3ca629be011::t_4260dd2ed84af8 503
+crates/orion-tui/src/needs_you/agents.rs
+  s_0fc3ca629be011::t_4860b60ab7d6a7 189-197
+  s_0fc3ca629be011::t_690492a16057b2 44-50
+crates/orion-tui/src/event_loop/quick_launch.rs
+  s_0fc3ca629be011::t_907eafac34bd78 279,281-284
+crates/orion-tui/src/agent_picker.rs
+  s_0fc3ca629be011::t_6c5bd2aa9b5a53 481,561
+docs/sessions.md
+  s_0fc3ca629be011::t_80cd0d1321ea93 907-951
+  s_0fc3ca629be011::t_eee5bc8c5127c4 695
+  s_0fc3ca629be011::t_f16ed8af6bdae8 822-826
+scripts/shot/scenes/todos-blue-sky.setup.sh
+  s_0fc3ca629be011::t_6630b20e2de7ba 1-16
+crates/orion-tui/src/todos/done.rs
+  s_0fc3ca629be011::t_c286b3c41d5691 190-193,1042-1045
+  s_0fc3ca629be011::t_6ef46582b844df 1032-1041,1046
+  s_0fc3ca629be011::t_cedcfb9e3cfe6f 187-188
+crates/orion-tui/src/ui.rs
+  s_0fc3ca629be011::t_97d9e64f6800be 5505
+crates/orion-tui/src/event_loop.rs
+  s_0fc3ca629be011::t_c286b3c41d5691 38588-38591,38597-38600
+  s_0fc3ca629be011::t_f7c185a1498d3f 38462-38467
+  s_0fc3ca629be011::t_64d7a5495371c3 38428,38473,38475,38477,38479,38483,38487,38505,38509,38521,38528,38530,38534
+  s_0fc3ca629be011::t_08b0901bb0c43f 38349-38356,38536
+  s_0fc3ca629be011::t_2680e2894f01ad 10159
+  s_0fc3ca629be011::t_1d06ad1ab3f638 38436-38442
+  s_0fc3ca629be011::t_506dc62d583d80 38515-38518,38525-38527,38532-38533
+  s_0fc3ca629be011::t_068facedb813e7 38538-38568,38570-38575,38577-38587,38592-38596,38601
+  s_0fc3ca629be011::t_291214110255bf 38569,38576
+  s_0fc3ca629be011::t_3b549ee67c53f0 2931-2935
+  s_0fc3ca629be011::t_f12d2aaceedf25 38535,38537
+crates/orion-tui/src/week_review.rs
+  s_0fc3ca629be011::t_c286b3c41d5691 587-591
+  s_0fc3ca629be011::t_d7ab498a5fd95b 574,577-586,592,1430-1448,1463
+crates/orion-tui/src/quick_prompt.rs
+  s_0fc3ca629be011::t_96063927ee5f29 124
+  s_0fc3ca629be011::t_48d2a04b6ddc1a 488
+docs/keys.md
+  s_0fc3ca629be011::t_c587044010e604 97,336,368
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c61a3d902861e385962e217c0d3d778e618ec5b7",
+  "prompts": {},
+  "sessions": {
+    "s_0fc3ca629be011": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d936749-5a1d-4856-bda0-f453e2b57f37",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
