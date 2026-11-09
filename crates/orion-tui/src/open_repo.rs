@@ -264,9 +264,10 @@ fn rows_of(app: &App, found: Vec<PathBuf>, on: bool) -> Vec<Row> {
         .map(|path| {
             let added = app.tree.project_at_path(&path).is_some();
             Row {
-                name: path
-                    .file_name()
-                    .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into()),
+                name: path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |n| n.to_string_lossy().into(),
+                ),
                 added,
                 on: on && !added,
                 path,
@@ -320,7 +321,10 @@ pub(crate) fn start(app: &mut App) {
     let home = orion_core::env::home_dir();
     let roots = roots(app, home.as_deref());
     tokio::task::spawn_blocking(move || {
-        let found = scan(&roots, SCAN_DEPTH).into_iter().map(|f| f.path).collect();
+        let found = scan(&roots, SCAN_DEPTH)
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
         let _ = tx.send(Answer { generation, found });
     });
 }
@@ -507,7 +511,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &OpenRepoView, th: Theme)
             for (t, st) in [(a, Style::default().fg(th.accent)), (b, dim)] {
                 let t = crate::ui::truncate(t, inner_w);
                 let pad = inner_w.saturating_sub(t.chars().count());
-                lines.push(Line::from(Span::styled(format!("{t}{}", " ".repeat(pad)), sel(st))));
+                lines.push(Line::from(Span::styled(
+                    format!("{t}{}", " ".repeat(pad)),
+                    sel(st),
+                )));
             }
             continue;
         };
@@ -729,7 +736,11 @@ mod tests {
         let mut out = Vec::new();
         handle_key(&mut app, key(KeyCode::Up), &mut out);
         handle_key(&mut app, key(KeyCode::Enter), &mut out);
-        assert!(matches!(app.overlay, Some(Overlay::CloneRepo(_))), "{:?}", app.overlay);
+        assert!(
+            matches!(app.overlay, Some(Overlay::CloneRepo(_))),
+            "{:?}",
+            app.overlay
+        );
         // Esc from its list comes back here.
         crate::clone_repo::handle_key(&mut app, key(KeyCode::Esc), &mut out);
         assert!(matches!(app.overlay, Some(Overlay::OpenRepo(_))));

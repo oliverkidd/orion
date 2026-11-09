@@ -218,7 +218,11 @@ fn the_cursor_walks_lines_and_threads_and_brackets_go_file_to_file() {
     // `[` back round the other way.
     press(&mut app, KeyCode::Char('['));
     assert_eq!(view(&app).file, 1);
-    assert_eq!(diff(&app).selected_path(), Some("b.rs"), "the viewer went too");
+    assert_eq!(
+        diff(&app).selected_path(),
+        Some("b.rs"),
+        "the viewer went too"
+    );
     // The files: ↑ picks the first, its diff from the top.
     press(&mut app, KeyCode::BackTab);
     assert_eq!(diff(&app).focus, DiffFocus::Files);
@@ -358,7 +362,9 @@ fn answers_land_on_the_screen_that_asked_and_say_what_failed() {
     );
     let flash = format!("{:?}", app.flash);
     assert!(
-        flash.contains("couldn't read #7's diff for its review threads: no history in common with main"),
+        flash.contains(
+            "couldn't read #7's diff for its review threads: no history in common with main"
+        ),
         "{flash}"
     );
 }
@@ -370,7 +376,14 @@ fn answers_land_on_the_screen_that_asked_and_say_what_failed() {
 fn attaching_waits_for_the_page_and_seeds_its_threads() {
     let mut app = App::new();
     let mut diff = DiffView::new("/nonexistent".into(), "#7".into(), Vec::new(), true);
-    attach(&app, &mut diff, 7, URL, "#7", std::path::Path::new("/nonexistent"));
+    attach(
+        &app,
+        &mut diff,
+        7,
+        URL,
+        "#7",
+        std::path::Path::new("/nonexistent"),
+    );
     assert!(diff.review.is_none());
     app.pr_detail.insert(
         URL.into(),
@@ -383,11 +396,22 @@ fn attaching_waits_for_the_page_and_seeds_its_threads() {
             ..Default::default()
         },
     );
-    attach(&app, &mut diff, 7, URL, "#7", std::path::Path::new("/nonexistent"));
+    attach(
+        &app,
+        &mut diff,
+        7,
+        URL,
+        "#7",
+        std::path::Path::new("/nonexistent"),
+    );
     let review = diff.review.as_deref().expect("the review");
     assert_eq!(review.threads.len(), 2, "the page's threads, at once");
     assert!(review.reading, "and asked for again");
-    assert_eq!(diff.next_focus(false), DiffFocus::Bar, "⇧Tab from the files: the bar");
+    assert_eq!(
+        diff.next_focus(false),
+        DiffFocus::Bar,
+        "⇧Tab from the files: the bar"
+    );
 }
 
 /// A repo with `a.txt` on `main` and a branch that changes it and adds

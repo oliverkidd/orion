@@ -952,11 +952,17 @@ mod tests {
             super::super::view::handle_key(&mut app, key(KeyCode::Left), &mut Vec::new());
             let shot = screen(&mut app, 120, 32).join("\n");
             assert!(shot.contains("✓5 this month"), "{shot}");
-            assert!(view::view(&app).unwrap().done.focused, "← stays on the panel");
+            assert!(
+                view::view(&app).unwrap().done.focused,
+                "← stays on the panel"
+            );
 
             // Too narrow for both: the lists alone, and `Tab` goes nowhere.
             super::super::view::handle_key(&mut app, key(KeyCode::Tab), &mut Vec::new());
-            assert!(!view::view(&app).unwrap().done.focused, "Tab: back to the lists");
+            assert!(
+                !view::view(&app).unwrap().done.focused,
+                "Tab: back to the lists"
+            );
             let rows = screen(&mut app, 60, 24).join("\n");
             assert!(!rows.contains("╭ Done "), "{rows}");
             super::super::view::handle_key(&mut app, key(KeyCode::Tab), &mut Vec::new());

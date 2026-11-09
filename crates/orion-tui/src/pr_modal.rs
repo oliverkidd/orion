@@ -1624,9 +1624,9 @@ pub(crate) mod keys {
     pub const JUMP: Key = crate::todos::view::keys::JUMP;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, POST, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, EDIT, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, REOPEN, TABS, ROWS,
-        FILTER, JUMP,
+        PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, POST, DIFF, BROWSER, REFRESH,
+        READ, NEW, MERGE, EDIT, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, REOPEN,
+        TABS, ROWS, FILTER, JUMP,
     ];
 }
 
@@ -3221,16 +3221,16 @@ mod tests {
             assert_eq!(v.comment.as_ref().unwrap().input.as_str(), "lgtm");
             assert_eq!(v.query.as_str(), "", "not typed into the filter");
             assert!(paste(&mut app, "!"));
-            assert_eq!(
-                view(&app).comment.as_ref().unwrap().input.as_str(),
-                "lgtm!"
-            );
+            assert_eq!(view(&app).comment.as_ref().unwrap().input.as_str(), "lgtm!");
 
             handle_key(&mut app, key(KeyCode::Esc), &mut Vec::new());
             assert!(view(&app).comment.is_none());
             assert!(matches!(&app.overlay, Some(Overlay::PullRequests(_))));
             let url = "https://github.com/o/r/pull/41";
-            assert_eq!(app.pr_comment_drafts.get(url).map(String::as_str), Some("lgtm!"));
+            assert_eq!(
+                app.pr_comment_drafts.get(url).map(String::as_str),
+                Some("lgtm!")
+            );
 
             handle_key(&mut app, cmd('y'), &mut Vec::new());
             assert_eq!(
@@ -3256,7 +3256,10 @@ mod tests {
             select(&mut app, 1);
             assert!(view(&app).comment.is_none());
             let url = "https://github.com/o/r/pull/42";
-            assert_eq!(app.pr_comment_drafts.get(url).map(String::as_str), Some("x"));
+            assert_eq!(
+                app.pr_comment_drafts.get(url).map(String::as_str),
+                Some("x")
+            );
         });
     }
 
@@ -3463,7 +3466,9 @@ mod tests {
         assert!(row.contains("│▌ M  src/login.rs"), "{shot}");
         assert!(row.contains(" +2 −1 │"), "{row:?}");
         assert!(
-            hints(view(&app)).iter().any(|h| h.does == "review the file"),
+            hints(view(&app))
+                .iter()
+                .any(|h| h.does == "review the file"),
             "{shot}"
         );
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);

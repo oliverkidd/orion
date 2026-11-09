@@ -125,7 +125,9 @@ fn run(app: &mut App, act: impl FnOnce(&mut App)) {
 /// the bar — rather than the viewer's way out.
 pub(crate) fn takes_esc(view: &DiffView) -> bool {
     view.review.as_deref().is_some_and(|r| {
-        r.composer.is_some() || view.focus == DiffFocus::Bar || (r.anchor.is_some() && reviewing(view))
+        r.composer.is_some()
+            || view.focus == DiffFocus::Bar
+            || (r.anchor.is_some() && reviewing(view))
     })
 }
 
@@ -301,7 +303,8 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> bool {
             true
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(&(_, verdict)) = review.verdict_rects.iter().find(|(r, _)| r.contains(pos)) {
+            if let Some(&(_, verdict)) = review.verdict_rects.iter().find(|(r, _)| r.contains(pos))
+            {
                 review.focus = Focus::Bar;
                 review.bar_row = bar::BarRow::Verdict;
                 review.verdict = verdict;
