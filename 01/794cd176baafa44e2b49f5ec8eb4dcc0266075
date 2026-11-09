@@ -1,0 +1,49 @@
+docs/configuration.md
+  s_0fc3ca629be011::t_f9646288cbe9e9 155-162,167-168
+crates/orion-tui/src/event_loop.rs
+  s_0fc3ca629be011::t_8b1247e843dd44 27383-27388,27404-27407,27414-27416,27433-27436
+  s_0fc3ca629be011::t_5ead23ba84a9f4 4925-4928
+  s_0fc3ca629be011::t_e994e0a6eabbbc 9358
+  s_0fc3ca629be011::t_8259b184e33754 7965
+  s_0fc3ca629be011::t_3be777f7b5caa2 8652,8654-8661
+  s_0fc3ca629be011::t_9c85ca2a0a6115 27322-27328,27330,27332-27333,27335-27337,27341-27350,27358-27374,27376-27382,27389-27403,27410-27413,27418-27420,27422-27430,27432,27437-27440,27443,27445-27447
+  s_0fc3ca629be011::t_d67d13b5748d8d 9491-9493
+docs/2026-11-07-needs-you/build-log.md
+  s_0fc3ca629be011::t_f522780c00746a 43
+docs/keys.md
+  s_0fc3ca629be011::t_5e8a0a4f608eee 696-698
+crates/orion-tui/src/config.rs
+  s_0fc3ca629be011::t_28c2990140b124 803
+crates/orion-tui/src/microsoft/auth.rs
+  s_0fc3ca629be011::t_c874477aeb2fe7 21
+  s_0fc3ca629be011::t_f8ce7496f18cf7 298-301,303
+  s_0fc3ca629be011::t_3b9ea0a6253cfd 302
+  s_0fc3ca629be011::t_0a576bf43ac023 231,349,354,442
+crates/orion-tui/src/microsoft/mod.rs
+  s_0fc3ca629be011::t_e121ed43e9233f 151-154,156-159
+  s_0fc3ca629be011::t_181f7aafa6c17d 37-41
+  s_0fc3ca629be011::t_679a6bb9aeb1c6 172-301
+  s_0fc3ca629be011::t_9d1b2ce0864058 513-516,521-554,563-566,571-582
+  s_0fc3ca629be011::t_232e6564cf08c2 166
+  s_0fc3ca629be011::t_6b422e7583da52 11-12
+  s_0fc3ca629be011::t_8b1247e843dd44 517-520,555-562,567-570
+  s_0fc3ca629be011::t_c95a268e8d129f 26
+crates/orion-tui/src/app.rs
+  s_0fc3ca629be011::t_315a67206d4019 851-859
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "01794cd176baafa44e2b49f5ec8eb4dcc0266075",
+  "prompts": {},
+  "sessions": {
+    "s_0fc3ca629be011": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5d936749-5a1d-4856-bda0-f453e2b57f37",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
