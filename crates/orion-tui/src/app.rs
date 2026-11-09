@@ -2404,6 +2404,9 @@ pub enum Overlay {
     /// Enter on a conflicted file of a pull request: the CONFLICT
     /// RESOLVER, its merge's files to settle (`crate::conflicts`).
     Conflicts(Box<crate::conflicts::ConflictView>),
+    /// A meeting's TAKEAWAYS SCREEN, from its Needs you card or its row
+    /// on the Automations screen (`crate::takeaways_view`).
+    Takeaways(Box<crate::takeaways_view::TakeawaysView>),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an

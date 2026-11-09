@@ -441,7 +441,11 @@ fn capitalised(word: &str) -> String {
 }
 
 /// `left` and `right` across `width` cells, `right` against the edge.
-fn spread(left: Vec<Span<'static>>, right: Span<'static>, width: usize) -> Line<'static> {
+pub(crate) fn spread(
+    left: Vec<Span<'static>>,
+    right: Span<'static>,
+    width: usize,
+) -> Line<'static> {
     let used: usize = left.iter().map(|s| s.content.chars().count()).sum();
     let room = width.saturating_sub(used + 1);
     let right_text = crate::ui::truncate(&right.content, room);

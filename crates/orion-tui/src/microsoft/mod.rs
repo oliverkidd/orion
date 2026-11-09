@@ -4,6 +4,7 @@
 //! - [`auth`]: the device-code sign-in and the access token after it.
 //! - [`graph`]: GETs of Microsoft Graph under that token.
 //! - [`calendar`]: the next twelve hours of meetings, polled.
+//! - [`transcripts`]: a finished Teams meeting's transcript, as text.
 //!
 //! Sign-in needs the organisation's Entra app: `microsoft.client_id` (and
 //! `tenant`) in `config.json`. Until it is there the status row says so
@@ -16,6 +17,7 @@
 pub mod auth;
 pub mod calendar;
 pub mod graph;
+pub mod transcripts;
 
 use chrono::Utc;
 use tokio::sync::mpsc::UnboundedSender;

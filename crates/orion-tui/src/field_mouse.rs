@@ -85,6 +85,12 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
         Overlay::Linear(v) => vec![(Field::LinearQuery, &mut v.query)],
         Overlay::ProjectPicker(p) => vec![(Field::Only, &mut p.query)],
         Overlay::Autofix(form) => vec![(Field::AutofixNote, &mut form.note)],
+        // The move picker's filter, while it is up.
+        Overlay::Takeaways(v) => v
+            .picker
+            .iter_mut()
+            .map(|p| (Field::Only, &mut p.filter))
+            .collect(),
         // The extra steer, while it is being written.
         Overlay::Automations(v) => v.steer.iter_mut().map(|i| (Field::Only, i)).collect(),
         // An open item field has every key, the filter's too.

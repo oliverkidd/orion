@@ -828,6 +828,54 @@ a `meta.json` beside them saying what each was written from; the last 12 runs ar
 run on the same day takes the first's place. Reviews kept by older releases stay on disk and are not
 listed.
 
+### Meeting takeaways
+
+When a Teams meeting on your calendar ends, meeting takeaways waits for its transcript, reads it for
+what was agreed, and puts the takeaways in front of you to place in your todos. It needs Microsoft 365
+signed in, and **Takeaways from Teams transcripts** on (Settings › Connections); it is on in `⌘J`
+out of the box.
+
+- **The transcript.** orion finds the meeting by its join link and looks for that sitting's
+  transcript every 2 minutes, for up to an hour after the meeting ends. No transcript by then reads
+  `no transcript`. Teams writes one only when transcription was on for the meeting.
+- **The read.** One ask of a model, told by the **Meeting takeaways** preset and its extra steer, with
+  the transcript, who you are, and every project with **Link to meeting takeaways** on (Settings ›
+  Projects): its **What it is**, its todo groups and its open Linear tickets. Blue sky's groups are
+  in it too. Each takeaway comes back with its owner, the project (or Blue sky) and group it belongs
+  in, a priority and, where it is about one, an open ticket. The ones that name you start accepted.
+- **Needs you › MEETINGS** shows `Standup` / `3 takeaways for you to place`. A read that failed
+  shows why, and Enter reads it again.
+- The panel's **MEETINGS** list says where each meeting is: `3 to place`, `2 added`, `nothing for
+  you`, `no transcript`. Enter on one opens it.
+
+Enter on the card or the row opens the TAKEAWAYS SCREEN:
+
+```
+Standup · Thu 10:00 to 10:32 · Teams
+2 of 3 takeaways are yours and already accepted. Check where they go, then Enter.
+
+FROM THE MEETING                         │ WHERE THEY GO IN YOUR TODOS
+✓ Fix the empty address 500          AL  │ billing-api
+✗ Update the release notes           GH  │ ── BUGS ───────────────────────────
+✓ A habit tracker                    AL  │     · Invoices round to the cent
+                                         │   + H Fix the empty address 500  ENG-412
+                                         │ Blue sky
+                                         │ ── PRODUCT ────────────────────────
+```
+
+- **Left:** every takeaway, `✓` going into your todos or `✗` left out, and its owner's initials.
+  `Space` flips the one under the cursor; `⌘P` steps its priority.
+- **Right:** each list an accepted takeaway goes in, its groups under rules, what is already there
+  dim and what comes in green with its ticket id. A group that isn't there yet says `new group`.
+- **`m` moves** the selected takeaway: the MOVE PICKER takes the right side — a filter, then every
+  linked project's groups and Blue sky's, `where it is now` beside its current one, and
+  `+ new group "<filter>"` last. `↑`/`↓` pick, `Enter` puts it there, `Esc` leaves it where it was.
+- **`Enter` adds** the accepted ones to their groups, at their priority, a ticket's id after the text
+  (`Fix the empty address 500 (ENG-412)`). One with nowhere to go opens the picker on it first.
+- **`Esc`** leaves them for later, as you left them.
+
+The meetings are kept for two weeks in `automations/meeting-takeaways.json` in orion's data dir.
+
 ## Your next meeting
 
 Signed in to Microsoft 365 (Settings › Connections), the footer shows your next meeting from an hour

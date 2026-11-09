@@ -96,11 +96,15 @@ impl Automation {
     }
 
     /// Whether it is on in a config that says nothing about it. The PR
-    /// fixer is, as **Auto-fix my PRs** was, and the blue sky builder,
-    /// which starts nothing until Enter on an idea asks it to; the rest
-    /// wait to be asked.
+    /// fixer is, as **Auto-fix my PRs** was; so are the blue sky builder,
+    /// which starts nothing until Enter on an idea asks it to, and meeting
+    /// takeaways, which asks nothing until Microsoft 365 is signed in and
+    /// only ever puts takeaways in front of you. The rest wait to be asked.
     pub const fn on_by_default(self) -> bool {
-        matches!(self, Automation::PrFixer | Automation::BlueSky)
+        matches!(
+            self,
+            Automation::PrFixer | Automation::MeetingTakeaways | Automation::BlueSky
+        )
     }
 
     /// The SETTINGS rows its panel shows, in order (5.5).
@@ -279,6 +283,8 @@ pub struct Engine {
     /// The bug fixer's and feature builder's shared half: the ledger of
     /// tickets picked up, and the groups waiting for a place under the cap.
     pub linear_builder: linear_builder::Shared,
+    /// Meeting takeaways' meetings, and its looks and reads under way.
+    pub meetings: meeting_takeaways::Shared,
 }
 
 impl Default for Engine {
@@ -297,12 +303,14 @@ impl Default for Engine {
                 Box::new(linear_builder::LinearBuilder(Automation::FeatureBuilder)),
                 Box::new(week_review::WeekReview::default()),
                 Box::new(blue_sky::BlueSkyBuilder::default()),
+                Box::new(meeting_takeaways::MeetingTakeaways),
             ],
             settings,
             launching: HashSet::new(),
             selected: 0,
             tx: None,
             linear_builder: linear_builder::Shared::default(),
+            meetings: meeting_takeaways::Shared::default(),
         }
     }
 }
@@ -443,6 +451,7 @@ pub fn launch_in_new_worktree(
 #[derive(Debug)]
 pub enum Answer {
     LinearBuilder(linear_builder::Answer),
+    MeetingTakeaways(meeting_takeaways::Answer),
 }
 
 /// An answer lands on the runner it is for — whether or not it is on, so a
@@ -450,6 +459,7 @@ pub enum Answer {
 pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
     match answer {
         Answer::LinearBuilder(answer) => linear_builder::land(app, answer, out),
+        Answer::MeetingTakeaways(answer) => meeting_takeaways::land(app, answer),
     }
     app.dirty = true;
 }
@@ -621,12 +631,19 @@ mod tests {
     }
 
     #[test]
-    fn only_the_pr_fixer_and_blue_sky_are_on_out_of_the_box() {
+    fn only_the_pr_fixer_meeting_takeaways_and_blue_sky_are_on_out_of_the_box() {
         let s = config::AutomationsSettings::default();
         let on: Vec<Automation> = Automation::ALL
             .into_iter()
             .filter(|a| s.is_on(*a))
             .collect();
-        assert_eq!(on, [Automation::PrFixer, Automation::BlueSky]);
+        assert_eq!(
+            on,
+            [
+                Automation::PrFixer,
+                Automation::MeetingTakeaways,
+                Automation::BlueSky
+            ]
+        );
     }
 }

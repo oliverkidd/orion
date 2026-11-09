@@ -159,7 +159,8 @@ under OAuth & Permissions and reinstall.
   - `o` signs out, and stops a sign-in that is still waiting.
 - **Next meeting in the footer** (`microsoft.footer_meeting`): see
   [Your next meeting](sessions.md#your-next-meeting).
-- **Takeaways from Teams transcripts** (`microsoft.takeaways`).
+- **Takeaways from Teams transcripts** (`microsoft.takeaways`): off, [meeting takeaways](sessions.md#meeting-takeaways)
+  never asks Microsoft for a transcript, whatever its own **On** says.
 
 orion signs in with these delegated permissions: `User.Read`, `Calendars.Read`,
 `OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` and `offline_access`.
@@ -218,7 +219,7 @@ Settings. Global, never per project.
 | Key | Default | What it does |
 |---|---|---|
 | `automations.max_running` | `5` | No automation starts a session while this many automation sessions are running (at work or waiting on you). `←` / `→` on the screen change it, 1 to 20. |
-| `automations.per.<id>.on` | `true` for `pr_fixer` and `blue_sky`, else `false` | The automation on or off. Ids: `pr_fixer`, `bug_fixer`, `feature_builder`, `week_review`, `meeting_takeaways`, `blue_sky`. |
+| `automations.per.<id>.on` | `true` for `pr_fixer`, `meeting_takeaways` and `blue_sky`, else `false` | The automation on or off. Ids: `pr_fixer`, `bug_fixer`, `feature_builder`, `week_review`, `meeting_takeaways`, `blue_sky`. |
 | `automations.per.<id>.extra_steer` | `""` | Added to every prompt the automation sends, after a blank line, as `Extra steer: …`. |
 | `automations.per.<id>.preset` | none | The preset `⌘U` picked in place of the automation's own system preset, by name. A name no preset has falls back to the system preset. |
 | `automations.per.<id>.labels` | `[]` | The Linear labels a ticket assigned to you needs for the bug fixer (`bug_fixer`) or the feature builder (`feature_builder`) to pick it up, matched in any case. Empty is each one's own: `Bug`, `Regression`, `Customer bug` for the bug fixer; `Feature`, `Improvement` for the feature builder. **Labels** on the screen picks them from your Linear workspace. |
@@ -523,6 +524,8 @@ Everything orion writes under its data dir:
 | `ORION_UPDATE_CHECK_SECS` | how often to check for a new release (default 3600; `0` off) |
 | `ORION_SPOTIFY_POLL_SECS` | how often to ask Spotify (default 1; `0` off) |
 | `ORION_MICROSOFT_POLL_SECS` | how often to read your Microsoft 365 calendar (default 300; `0` off) |
+| `ORION_MEETING_TAKEAWAYS_POLL_SECS` | how often meeting takeaways looks for a finished Teams meeting's transcript, for up to an hour after it ends (default 120; `0` off) |
+| `ORION_MICROSOFT_GRAPH_URL`, `ORION_MICROSOFT_TOKEN` | a Microsoft Graph base URL and access token used instead of `https://graph.microsoft.com/v1.0` and your sign-in (tests: a fake Graph) |
 | `ORION_PROJECT_ABOUT` | `off` stops orion writing a project's **What it is** (tests) |
 | `ORION_BLUE_SKY_DIR` | the folder the Blue sky builder builds ideas tied to no project in (default `~/Code/orion-blue-sky`) |
 | `ORION_NEEDS_YOU_POLL_SECS` | how often Needs you asks Linear for your notifications and `gh` for the reviews asked of you (default 300; `0` off) |

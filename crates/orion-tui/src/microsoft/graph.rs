@@ -1,4 +1,5 @@
 //! MICROSOFT GRAPH reads: a GET of `https://graph.microsoft.com/v1.0/…`
+//! ([`root`]: `ORION_MICROSOFT_GRAPH_URL` points the tests at a fake one)
 //! under the signed-in user's access token ([`super::auth`]), through
 //! [`orion_core::http`]. A 401 — the token went stale early — is asked
 //! again once with a fresh one.
@@ -13,10 +14,18 @@ use crate::config::MicrosoftSettings;
 /// Graph's root.
 pub const ROOT: &str = "https://graph.microsoft.com/v1.0";
 
-/// GET `path` (`/me/calendarView?…`, from [`ROOT`]) with `headers`
+/// Where Graph is asked: [`ROOT`], or `ORION_MICROSOFT_GRAPH_URL` (a fake
+/// Graph in the tests).
+pub fn root() -> String {
+    orion_core::env::non_empty(orion_core::env::MICROSOFT_GRAPH_URL)
+        .map(|url| url.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| ROOT.to_string())
+}
+
+/// GET `path` (`/me/calendarView?…`, from [`root`]) with `headers`
 /// besides the token; the body of a 2xx, else the error in words.
 pub fn get(ms: &MicrosoftSettings, path: &str, headers: &[String]) -> Result<Vec<u8>, String> {
-    let url = format!("{ROOT}{path}");
+    let url = format!("{}{path}", root());
     let mut fresh = false;
     loop {
         let token = auth::access_token(ms, fresh)?;
@@ -63,6 +72,17 @@ fn error_text(status: u16, body: &[u8]) -> String {
 pub fn email(ms: &MicrosoftSettings) -> Result<String, String> {
     let me: serde_json::Value = get_json(ms, "/me?$select=mail,userPrincipalName", &[])?;
     parse_email(&me).ok_or_else(|| "Microsoft Graph didn't say who you are".to_string())
+}
+
+/// The signed-in user's display name, for the takeaways that name them.
+pub fn display_name(ms: &MicrosoftSettings) -> Result<String, String> {
+    let me: serde_json::Value = get_json(ms, "/me?$select=displayName", &[])?;
+    Ok(me
+        .get("displayName")
+        .and_then(|n| n.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string())
 }
 
 fn parse_email(me: &serde_json::Value) -> Option<String> {

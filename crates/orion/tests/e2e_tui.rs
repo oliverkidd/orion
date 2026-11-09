@@ -141,6 +141,7 @@ impl TuiHarness {
         cmd.env(orion_core::env::WEEK_REVIEW_CHECK_SECS, "0"); // …nor writes a week in review on its own
         cmd.env(orion_core::env::USAGE, "off"); // never read the machine's logins
         cmd.env(orion_core::env::MICROSOFT_POLL_SECS, "0"); // never call Microsoft Graph
+        cmd.env(orion_core::env::MEETING_TAKEAWAYS_POLL_SECS, "0"); // …nor look for a meeting's transcript
         cmd.env(orion_core::env::PROJECT_ABOUT, "off"); // a new project runs no model
         cmd.env(orion_core::env::LOG, "debug");
         cmd.env("SHELL", "/bin/sh");

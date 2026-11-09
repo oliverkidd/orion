@@ -1,0 +1,13 @@
+# Meeting takeaways (5.8), from a stored read (takeaways.setup.sh): ⌘J, down to Meeting takeaways,
+# Tab into its panel, down past On, Preset and Extra steer to the Standup row, and Enter opens the
+# TAKEAWAYS SCREEN — the takeaways on the left, where the accepted ones go on the right.
+cmd j
+Down
+Down
+Down
+Down
+Tab
+Down
+Down
+Down
+Enter

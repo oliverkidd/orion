@@ -63,6 +63,17 @@ pub const SPOTIFY_POLL_SECS: &str = "ORION_SPOTIFY_POLL_SECS";
 /// footer's next meeting (default 5 minutes); `0` turns it off, as the e2e
 /// tests do so a run never calls Microsoft Graph.
 pub const MICROSOFT_POLL_SECS: &str = "ORION_MICROSOFT_POLL_SECS";
+/// Cadence in seconds of MEETING TAKEAWAYS' look for a finished Teams
+/// meeting's transcript (default 2 minutes, for up to an hour after the
+/// meeting ends); `0` turns it off, as the e2e tests and the screenshots
+/// do, so a run never asks Microsoft Graph for a transcript.
+pub const MEETING_TAKEAWAYS_POLL_SECS: &str = "ORION_MEETING_TAKEAWAYS_POLL_SECS";
+/// Microsoft Graph's base URL (default `https://graph.microsoft.com/v1.0`);
+/// the tests point it at a fake Graph serving canned JSON and VTT.
+pub const MICROSOFT_GRAPH_URL: &str = "ORION_MICROSOFT_GRAPH_URL";
+/// A Graph access token read in place of the Keychain's sign-in: the
+/// tests' fake Graph, never a real tenant's.
+pub const MICROSOFT_TOKEN: &str = "ORION_MICROSOFT_TOKEN";
 /// `off`: a project's **What it is** line is never written by a model, as
 /// the e2e tests set it, so adding a project never runs a Claude account.
 pub const PROJECT_ABOUT: &str = "ORION_PROJECT_ABOUT";

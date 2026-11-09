@@ -270,7 +270,11 @@ pub fn keep(tokens: &Tokens) -> Result<(), String> {
 /// A Graph access token (blocking): the one in memory while it is good,
 /// else a fresh one for the refresh token in the Keychain. `fresh` drops
 /// the one in memory first — what a Graph 401 asks for.
+/// `ORION_MICROSOFT_TOKEN` stands in for all of it in the tests.
 pub fn access_token(ms: &MicrosoftSettings, fresh: bool) -> Result<String, String> {
+    if let Some(token) = orion_core::env::non_empty(orion_core::env::MICROSOFT_TOKEN) {
+        return Ok(token);
+    }
     if let Ok(mut access) = ACCESS.lock() {
         if fresh {
             *access = None;

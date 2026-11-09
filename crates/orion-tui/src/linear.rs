@@ -3050,8 +3050,8 @@ pub(crate) mod keys {
     pub const COPY: Key = crate::todos::view::keys::COPY;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        MARK, ROWS, CONFIRM, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE,
-        PICK, SET, LEVEL, LINK, GO, NEW, FILE, TEAM, TABS, FILTER, JUMP, SELECT, COPY,
+        MARK, ROWS, CONFIRM, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE, PICK,
+        SET, LEVEL, LINK, GO, NEW, FILE, TEAM, TABS, FILTER, JUMP, SELECT, COPY,
     ];
 }
 
@@ -4770,7 +4770,7 @@ pub(crate) fn priority_mark(priority: u8, th: Theme) -> Span<'static> {
 
 /// A priority as one letter on a row — `U`rgent, `H`igh, `M`edium,
 /// `L`ow — louder the higher it is; a faint `·` for none.
-fn priority_letter(priority: u8, th: Theme) -> (&'static str, Style) {
+pub(crate) fn priority_letter(priority: u8, th: Theme) -> (&'static str, Style) {
     match priority {
         1 => (
             "U",

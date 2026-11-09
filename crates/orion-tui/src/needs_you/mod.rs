@@ -4,7 +4,8 @@
 //!
 //! [`model`] is what the board is made of: the cards each source offers,
 //! the column and section each sits in, and what Done and Snooze hide.
-//! The sources are [`agents`], [`linear`], [`reviews`] and [`slack`]; [`board`] lays
+//! The sources are [`agents`], [`linear`], [`reviews`], [`slack`] and
+//! [`meetings`]; [`board`] lays
 //! the cards out, walks them and draws them. [`State`] is what the app
 //! keeps for it between frames: the store, what the last polls heard,
 //! and why each session waits.
@@ -18,6 +19,7 @@
 pub mod agents;
 pub mod board;
 pub mod linear;
+pub mod meetings;
 pub mod model;
 pub mod reviews;
 pub mod slack;
@@ -81,11 +83,12 @@ pub struct State {
 
 /// Every card a source offers now, hidden or not.
 fn offered(app: &App) -> Vec<Card> {
-    let sources: [&dyn CardSource; 4] = [
+    let sources: [&dyn CardSource; 5] = [
         &agents::Agents,
         &linear::Inbox,
         &reviews::Reviews,
         &slack::Inbox,
+        &meetings::Meetings,
     ];
     sources.iter().flat_map(|s| s.cards(app)).collect()
 }

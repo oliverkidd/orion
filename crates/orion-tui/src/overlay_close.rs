@@ -51,6 +51,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::Todos(v) => v.area,
         Overlay::WeekReview(v) => v.area,
         Overlay::Conflicts(v) => v.area,
+        Overlay::Takeaways(v) => v.area,
     }
 }
 

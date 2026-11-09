@@ -106,8 +106,12 @@ pub(super) fn needs_you_card(app: &mut App, out: &mut Vec<ClientRequest>) {
             }
             return;
         }
-        // Meetings have nothing to land on until their takeaways do.
-        CardTarget::Meeting { .. } => return,
+        // A meeting's TAKEAWAYS SCREEN, or — couldn't be read — a read again.
+        CardTarget::Meeting { id } => {
+            app.overlay = None;
+            crate::automations::meeting_takeaways::open(app, &id, false);
+            return;
+        }
     };
     let landing = Landing::for_enter_on(app, &jump);
     app.overlay = None;

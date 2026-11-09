@@ -447,6 +447,7 @@ async fn main_loop(
         tokio::sync::mpsc::unbounded_channel::<crate::automations::Answer>();
     app.automations.tx = Some(automations_tx);
     crate::automations::linear_builder::load(&mut app);
+    crate::automations::meeting_takeaways::load(&mut app);
     let mut next_metrics_poll = tokio::time::Instant::now();
     let mut next_splash_frame = tokio::time::Instant::now();
     let mut next_confetti_frame = tokio::time::Instant::now();
@@ -7881,6 +7882,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Automations(_) => crate::automations::view::handle_key(app, key, out),
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
+        Overlay::Takeaways(_) => crate::takeaways_view::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
         Overlay::OpenRepo(_) => crate::open_repo::handle_key(app, key, out),
@@ -12103,6 +12105,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::Conflicts(_))) {
         crate::conflicts::handle_mouse(app, mouse);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Takeaways(_))) {
+        crate::takeaways_view::handle_mouse(app, mouse, mouse_pos);
         return;
     }
     // Hosts picker: the wheel moves the selection, a click on a row connects
@@ -37370,6 +37376,15 @@ mod tests {
                 },
                 None,
             ),
+            (
+                // Its move picker is a mode of it, its Esc the picker's
+                // own (`takeaways_view`'s tests).
+                "Takeaways",
+                |app| {
+                    app.overlay = Some(Overlay::Takeaways(Box::default()));
+                },
+                None,
+            ),
         ]
     }
 
@@ -37572,6 +37587,7 @@ mod tests {
             Overlay::Conflicts(_) => "Conflicts",
             Overlay::Todos(_) => "Todos",
             Overlay::Automations(_) => "Automations",
+            Overlay::Takeaways(_) => "Takeaways",
         }
     }
 
@@ -37600,7 +37616,7 @@ mod tests {
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 24, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 25, "a variant came or went: {seen:?}");
         });
     }
 

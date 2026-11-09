@@ -18,9 +18,9 @@ mod grep_view;
 mod launcher_view;
 pub(crate) use launcher_view::{chip, session_chip, session_line, CHIP_W};
 
-pub(crate) use diff_view::diff_keys;
 #[cfg(test)]
 pub(crate) use diff_view::diff_hints;
+pub(crate) use diff_view::diff_keys;
 use footer::draw_footer;
 
 /// Outer size of the editor modal, as (width, height) percent of the frame.
@@ -198,8 +198,7 @@ const CAP_RIGHT: &str = "\u{e0b4}";
 /// video, which is a cursor or a selection inside a field.
 pub(crate) fn round_caps(buf: &mut ratatui::buffer::Buffer, area: Rect) {
     let solid = |c: &ratatui::buffer::Cell| {
-        !matches!(c.bg, Color::Reset | Color::Rgb(..))
-            && !c.modifier.contains(Modifier::REVERSED)
+        !matches!(c.bg, Color::Reset | Color::Rgb(..)) && !c.modifier.contains(Modifier::REVERSED)
     };
     for y in area.top()..area.bottom() {
         let mut x = area.left();
@@ -400,7 +399,8 @@ pub(crate) mod install_keys {
     use crate::hints::Key;
 
     pub const STOP: Key = Key::new(&["ctrl+q"], "stop");
-    pub const CLOSE: Key = Key::new(&["enter", "q", "ctrl+q"], "close").also(crate::nav::CLOSE.chords);
+    pub const CLOSE: Key =
+        Key::new(&["enter", "q", "ctrl+q"], "close").also(crate::nav::CLOSE.chords);
 }
 
 /// The editor modal's bottom-border keys, for the editor it runs: its
@@ -2384,6 +2384,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Automations(view) => crate::automations::view::draw(f, app, &view, th),
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
+        Overlay::Takeaways(view) => crate::takeaways_view::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
         Overlay::OpenRepo(view) => crate::open_repo::draw(f, app, &view, th),
@@ -4222,7 +4223,10 @@ fn draw_terminal(f: &mut Frame, app: &mut App, area: Rect) {
                 "new agent",
             ));
             hint.push(sep());
-            hint.extend(key(&spelled(crate::keymap::Action::Palette, "⌘K"), "needs you"));
+            hint.extend(key(
+                &spelled(crate::keymap::Action::Palette, "⌘K"),
+                "needs you",
+            ));
             hint.push(sep());
             hint.extend(key(&spelled(crate::keymap::Action::Help, "?"), "help"));
             let mut lines = vec![Line::from("")];
