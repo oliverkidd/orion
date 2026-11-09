@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
-use super::{encode, EMAIL, REFRESH, SERVICE};
+use super::{encode, REFRESH, SERVICE};
 use crate::config::MicrosoftSettings;
 
 /// What orion asks for: the user, their calendar, their online meetings
@@ -228,7 +228,7 @@ fn explain(err: &OauthError) -> String {
     match code {
         // Not an app id; no such app; no tenant to find it in.
         "700038" | "700016" | "50059" | "90002" => {
-            "Microsoft doesn't know microsoft.client_id in config.json (see setup)".into()
+            "Microsoft doesn't know these app IDs · o clears them, then c to add them again".into()
         }
         // "Allow public client flows" is off on the app.
         "7000218" => {
@@ -295,8 +295,12 @@ pub fn access_token(ms: &MicrosoftSettings, fresh: bool) -> Result<String, Strin
 /// Forget the sign-in: the Keychain's refresh token and email, and the
 /// access token in memory.
 pub fn forget() {
-    orion_core::secrets::delete(SERVICE, REFRESH);
-    orion_core::secrets::delete(SERVICE, EMAIL);
+    // A test's `o` must not sign the developer's own orion out.
+    #[cfg(not(test))]
+    {
+        orion_core::secrets::delete(SERVICE, REFRESH);
+        orion_core::secrets::delete(SERVICE, super::EMAIL);
+    }
     if let Ok(mut access) = ACCESS.lock() {
         *access = None;
     }
@@ -342,12 +346,12 @@ mod tests {
         let why = parse_device_code(400, body).unwrap_err();
         assert_eq!(
             why,
-            "Microsoft doesn't know microsoft.client_id in config.json (see setup)"
+            "Microsoft doesn't know these app IDs · o clears them, then c to add them again"
         );
         let body = br#"{"error":"invalid_request","error_description":"AADSTS50059: No tenant-identifying information found in either the request or implied by any provided credentials. Trace ID: 8f0e Correlation ID: 6cca Timestamp: 2026-11-08 17:05:53Z","error_codes":[50059]}"#;
         assert!(parse_device_code(400, body)
             .unwrap_err()
-            .contains("client_id"));
+            .contains("app IDs"));
     }
 
     #[test]
@@ -435,6 +439,6 @@ mod tests {
         };
         let why = request_code(&ms).unwrap_err();
         eprintln!("{why}");
-        assert!(why.contains("microsoft.client_id"), "{why}");
+        assert!(why.contains("app IDs"), "{why}");
     }
 }

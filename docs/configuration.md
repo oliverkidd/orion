@@ -152,12 +152,20 @@ under OAuth & Permissions and reinstall.
 
 **MICROSOFT 365.**
 - **Status:** the email you signed in as.
-  - It reads `needs your organisation's app id (see setup)` until `microsoft.client_id` is set.
+  - It reads `needs your organisation's app id · c to add it` until the Entra app's two IDs are
+    set. `c` (or `Enter`) then asks for the **Application (client) ID** and then the **Directory
+    (tenant) ID**, both on the app's Overview page in Entra (your admin can send them). Both
+    pasted on one line, apart by a space, comma or line break, skip the second box. Each must be
+    a GUID (`8-4-4-4-12` hex digits, either case); anything else keeps the box up and says so.
+    `Esc` or an empty box saves nothing. After the second, both are saved to `config.json` as
+    `microsoft.client_id` and `microsoft.tenant`, and the sign-in starts. Writing them into
+    `config.json` by hand works too.
   - `c` asks Microsoft for a sign-in code, copies it, and opens microsoft.com/devicelogin in your
     default browser. Paste the code there and sign in. The row reads `enter <code> in the browser`
     until you do.
   - orion keeps the refresh token and your email in the Keychain, under `dev.orion.microsoft`.
-  - `o` signs out, and stops a sign-in that is still waiting.
+  - `o` signs out, and stops a sign-in that is still waiting. It leaves the two IDs alone; `o`
+    again, with nobody signed in, clears them from `config.json`, so `c` asks for them again.
 - **Next meeting in the footer** (`microsoft.footer_meeting`): see
   [Your next meeting](sessions.md#your-next-meeting).
 - **Takeaways from Teams transcripts** (`microsoft.takeaways`): off, [meeting takeaways](sessions.md#meeting-takeaways)

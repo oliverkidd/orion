@@ -8,7 +8,8 @@
 //!
 //! Sign-in needs the organisation's Entra app: `microsoft.client_id` (and
 //! `tenant`) in `config.json`. Until it is there the status row says so
-//! ([`NEEDS_APP_ID`]) and nothing calls Microsoft. Signed in, the refresh
+//! ([`NEEDS_APP_ID`]), nothing calls Microsoft, and `c` asks for the two
+//! IDs ([`ask_app_id`]) and saves them there. Signed in, the refresh
 //! token and the email sit in the Keychain under `dev.orion.microsoft`.
 //!
 //! Everything that touches the network runs off the loop and lands as an
@@ -22,7 +23,7 @@ pub mod transcripts;
 use chrono::Utc;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::app::App;
+use crate::app::{App, Overlay, PromptKind};
 use crate::config::MicrosoftSettings;
 
 /// The Keychain service: `dev.orion.microsoft`.
@@ -33,7 +34,11 @@ pub const REFRESH: &str = "refresh";
 pub const EMAIL: &str = "email";
 
 /// The status row with no Entra app to sign in through.
-pub const NEEDS_APP_ID: &str = "needs your organisation's app id (see setup)";
+pub const NEEDS_APP_ID: &str = "needs your organisation's app id · c to add it";
+
+/// The two IDs `c` asks for with no app, in order: the Entra app's
+/// Overview page lists both.
+pub const APP_IDS: [&str; 2] = ["Application (client) ID", "Directory (tenant) ID"];
 
 /// Where a sign-in is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,19 +148,154 @@ pub fn connect(app: &mut App, ms: &MicrosoftSettings) -> String {
     "asking Microsoft for a sign-in code…".into()
 }
 
-/// `o` on the status row: sign out — or stop a sign-in under way.
-pub fn disconnect(app: &mut App) -> String {
-    let was = app.microsoft.email.take();
+/// `o` on the status row: sign out — or stop a sign-in under way. With
+/// nobody signed in and nothing under way, the app's IDs go from the
+/// config instead, so `c` asks for them again.
+pub fn disconnect(app: &mut App, ms: &MicrosoftSettings) -> String {
     let signing_in = !matches!(app.microsoft.sign_in, SignIn::Idle | SignIn::Failed(_));
+    if app.microsoft.email.is_none() && !signing_in && has_app(ms) {
+        return forget_app(app);
+    }
+    let was = app.microsoft.email.take();
     stop_sign_in(app);
     app.microsoft.sign_in = SignIn::Idle;
     app.microsoft.events.clear();
     app.microsoft.next_read = None;
     std::thread::spawn(auth::forget);
     match (was, signing_in) {
-        (Some(email), _) => format!("signed out {email}"),
+        (Some(email), _) => format!("signed out {email} · o again clears the app IDs"),
         (None, true) => "sign-in stopped".into(),
         (None, false) => crate::config::NOT_CONNECTED.into(),
+    }
+}
+
+/// A second `o`: `microsoft.client_id` and `tenant` back to their
+/// defaults in the config, the last failed sign-in forgotten.
+fn forget_app(app: &mut App) -> String {
+    app.microsoft.sign_in = SignIn::Idle;
+    let defaults = MicrosoftSettings::default();
+    match save_app(&defaults.client_id, &defaults.tenant) {
+        Ok(_) => "app IDs cleared · c adds them again".into(),
+        Err(why) => format!("the app IDs were not cleared: {why}"),
+    }
+}
+
+/// The client and tenant ids written into the config through its save
+/// path, every other key kept; the settings they make.
+fn save_app(client_id: &str, tenant: &str) -> std::io::Result<MicrosoftSettings> {
+    let mut cfg = crate::config::Config::load();
+    cfg.microsoft.client_id = client_id.into();
+    cfg.microsoft.tenant = tenant.into();
+    cfg.save()?;
+    Ok(cfg.microsoft)
+}
+
+/// `text` as a GUID — `8-4-4-4-12` hex digits, spaces around it trimmed —
+/// in lower case; None when it is not one.
+pub fn guid(text: &str) -> Option<String> {
+    let text = text.trim();
+    let groups: Vec<&str> = text.split('-').collect();
+    let shaped = groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(g, len)| g.len() == len && g.bytes().all(|b| b.is_ascii_hexdigit()));
+    shaped.then(|| text.to_ascii_lowercase())
+}
+
+/// What a typed app-id box holds.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Typed {
+    /// Nothing: nothing is saved.
+    Cancel,
+    /// The client id alone: the tenant is asked for next.
+    Client(String),
+    /// Both, ready to save.
+    Both { client_id: String, tenant: String },
+    /// Not what was asked for; the box stays up with this.
+    Bad(&'static str),
+}
+
+const NOT_A_GUID: &str = "that is not an ID (8-4-4-4-12 hex digits)";
+
+/// The box's `value`, `client_id` being what the first box gave (None
+/// while it is the first). The first box also takes both IDs at once —
+/// a line pasted from a teammate — apart by a space, comma or newline.
+pub fn read_ids(client_id: Option<&str>, value: &str) -> Typed {
+    let parts: Vec<&str> = value
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|p| !p.is_empty())
+        .collect();
+    match (client_id, parts.as_slice()) {
+        (_, []) => Typed::Cancel,
+        (None, [one]) => guid(one).map_or(Typed::Bad(NOT_A_GUID), Typed::Client),
+        (None, [client, tenant]) => match (guid(client), guid(tenant)) {
+            (Some(client_id), Some(tenant)) => Typed::Both { client_id, tenant },
+            _ => Typed::Bad("those are not two IDs (8-4-4-4-12 hex digits each)"),
+        },
+        (Some(client_id), [one]) => {
+            guid(one).map_or(Typed::Bad(NOT_A_GUID), |tenant| Typed::Both {
+                client_id: client_id.into(),
+                tenant,
+            })
+        }
+        (None, _) => Typed::Bad("two IDs at most: the client ID, then the tenant ID"),
+        (Some(_), _) => Typed::Bad("just the Directory (tenant) ID here"),
+    }
+}
+
+/// `c` (or Enter) on the status row with no app: the first ID's box.
+pub fn ask_app_id(app: &mut App) {
+    crate::event_loop::open_prompt(app, PromptKind::MicrosoftAppId { client_id: None });
+}
+
+/// The app-id box's title and label, `client_id` being the first box's
+/// answer once there is one.
+pub fn app_id_prompt_text(client_id: Option<&str>) -> (String, String) {
+    let step = usize::from(client_id.is_some());
+    let label = match step {
+        0 => format!(
+            "{} from the Entra app's Overview, or both IDs on one line (empty = cancel)",
+            APP_IDS[0]
+        ),
+        _ => format!("{} from the same Overview (empty = cancel)", APP_IDS[1]),
+    };
+    (
+        format!("Connect Microsoft 365 · {} of {}", step + 1, APP_IDS.len()),
+        label,
+    )
+}
+
+/// Enter in the app-id box: the tenant's box next, or — both in hand —
+/// both saved to the config and the sign-in started. Something that is
+/// not an ID keeps the box up, as typed, with why; empty saves nothing.
+pub fn submit_app_id(app: &mut App, client_id: Option<String>, value: &str) {
+    let note = match read_ids(client_id.as_deref(), value) {
+        Typed::Cancel => return crate::event_loop::reopen_settings(app),
+        Typed::Bad(why) => {
+            app.flash = Some(crate::flash::Flash::failed(why));
+            crate::event_loop::open_prompt(app, PromptKind::MicrosoftAppId { client_id });
+            if let Some(Overlay::Prompt(prompt)) = &mut app.overlay {
+                prompt.input = crate::text_input::TextInput::with_text(value);
+            }
+            return;
+        }
+        Typed::Client(client_id) => {
+            return crate::event_loop::open_prompt(
+                app,
+                PromptKind::MicrosoftAppId {
+                    client_id: Some(client_id),
+                },
+            );
+        }
+        Typed::Both { client_id, tenant } => match save_app(&client_id, &tenant) {
+            Ok(ms) => connect(app, &ms),
+            Err(why) => format!("the IDs were not saved: {why}"),
+        },
+    };
+    crate::event_loop::reopen_settings(app);
+    if let Some(Overlay::Settings(view)) = &mut app.overlay {
+        view.info(note);
     }
 }
 
@@ -368,6 +508,76 @@ mod tests {
             NEEDS_APP_ID
         );
         assert_eq!(app.microsoft.sign_in, SignIn::Idle);
+    }
+
+    #[test]
+    fn an_id_is_a_guid_in_either_case_spaces_trimmed() {
+        const ID: &str = "3f1c2a7e-9b4d-4e21-8c55-1a2b3c4d5e6f";
+        assert_eq!(guid(ID).as_deref(), Some(ID));
+        assert_eq!(
+            guid(&format!("  {}\t", ID.to_uppercase())).as_deref(),
+            Some(ID)
+        );
+        for bad in [
+            "",
+            "organizations",
+            "3f1c2a7e9b4d4e218c551a2b3c4d5e6f",
+            "3f1c2a7e-9b4d-4e21-8c55-1a2b3c4d5e6",
+            "3f1c2a7e-9b4d-4e21-8c55-1a2b3c4d5e6f0",
+            "3f1c2a7g-9b4d-4e21-8c55-1a2b3c4d5e6f",
+            "3f1c2a7e-9b4d-4e21-8c55-1a2b-3c4d5e6f",
+            "{3f1c2a7e-9b4d-4e21-8c55-1a2b3c4d5e6f}",
+        ] {
+            assert_eq!(guid(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_first_box_takes_one_id_or_both_on_a_line() {
+        const C: &str = "3f1c2a7e-9b4d-4e21-8c55-1a2b3c4d5e6f";
+        const T: &str = "72f988bf-86f1-41af-91ab-2d7cd011db47";
+        let both = Typed::Both {
+            client_id: C.into(),
+            tenant: T.into(),
+        };
+        assert_eq!(read_ids(None, "   "), Typed::Cancel);
+        assert_eq!(read_ids(None, C), Typed::Client(C.into()));
+        for line in [
+            format!("{C} {T}"),
+            format!("{C},{T}"),
+            format!("{C}, {T}"),
+            format!("{C}\n{T}\n"),
+            format!(" {} \r\n {} ", C.to_uppercase(), T.to_uppercase()),
+        ] {
+            assert_eq!(read_ids(None, &line), both, "{line:?}");
+        }
+        assert!(matches!(read_ids(None, "nope"), Typed::Bad(_)));
+        assert!(matches!(
+            read_ids(None, &format!("{C} nope")),
+            Typed::Bad(_)
+        ));
+        assert!(matches!(
+            read_ids(None, &format!("{C} {T} {C}")),
+            Typed::Bad(_)
+        ));
+        // The second box: the tenant alone.
+        assert_eq!(read_ids(Some(C), T), both);
+        assert_eq!(read_ids(Some(C), ""), Typed::Cancel);
+        assert!(matches!(read_ids(Some(C), "organizations"), Typed::Bad(_)));
+        assert!(matches!(
+            read_ids(Some(C), &format!("{C} {T}")),
+            Typed::Bad(_)
+        ));
+    }
+
+    #[test]
+    fn the_boxes_name_each_id_in_turn() {
+        let (title, label) = app_id_prompt_text(None);
+        assert_eq!(title, "Connect Microsoft 365 · 1 of 2");
+        assert!(label.starts_with("Application (client) ID"));
+        let (title, label) = app_id_prompt_text(Some("x"));
+        assert_eq!(title, "Connect Microsoft 365 · 2 of 2");
+        assert!(label.starts_with("Directory (tenant) ID"));
     }
 
     #[test]

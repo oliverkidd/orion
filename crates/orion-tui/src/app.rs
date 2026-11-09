@@ -848,6 +848,15 @@ pub enum PromptKind {
         step: usize,
         tokens: Vec<String>,
     },
+    /// `c` on Settings › Connections › MICROSOFT 365 with no app in the
+    /// config: the Application (client) ID, then — `client_id` carried
+    /// along — the Directory (tenant) ID; both on one line skip the
+    /// second. After both, they are saved to the config and the sign-in
+    /// starts; Esc and an empty box put the overlay back with nothing
+    /// saved (`microsoft::submit_app_id`).
+    MicrosoftAppId {
+        client_id: Option<String>,
+    },
 }
 
 impl PromptKind {

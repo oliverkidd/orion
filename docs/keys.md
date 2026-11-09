@@ -693,7 +693,9 @@ Accounts tab's **Claude accounts** rows, `Enter` signs the account in (asking fo
 `r` renames it, `o` signs it out, `c` steps its ACCOUNT CHIP's colour, `g` gives the chip a letter
 or glyph of your own, `←`/`→` switch it on or off and `⌫` removes an added one; `Enter`
 on **Add account** names a new one ([Configuration](configuration.md#claude-accounts)). On the
-Connections tab's **Status** rows, `c` (or `Enter`) connects and `o` disconnects. On a project's
+Connections tab's **Status** rows, `c` (or `Enter`) connects and `o` disconnects; MICROSOFT 365's
+`c` first asks for the organisation's client and tenant IDs when it has none, and a second `o`,
+signed out, clears them ([Configuration](configuration.md#connections)). On a project's
 **What it is**, `Enter` edits the line and `^R` writes it again. On the
 Presets tab the keys follow the row, and the frame names only the ones that work there: on one of
 orion's presets (**Used by orion**) `Enter` edits it and `^R` puts back orion's text while it holds

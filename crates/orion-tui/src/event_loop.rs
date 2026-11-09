@@ -4922,6 +4922,10 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             let (title, label) = crate::phone::prompt_text(*step);
             (title.into(), label.into(), String::new())
         }
+        PromptKind::MicrosoftAppId { client_id } => {
+            let (title, label) = crate::microsoft::app_id_prompt_text(client_id.as_deref());
+            (title.into(), label.into(), String::new())
+        }
         PromptKind::LinkBrowser { id } => {
             let cfg = crate::config::Config::load();
             (
@@ -7958,6 +7962,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::AccountChipMark { .. }
                         | PromptKind::LinkBrowser { .. }
                         | PromptKind::SlackToken { .. }
+                        | PromptKind::MicrosoftAppId { .. }
                 );
                 // The comment box stood in for the PULL REQUESTS MODAL: Esc
                 // puts the modal back on its row, the comment unposted.
@@ -8644,10 +8649,17 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
 fn connection_cmd(app: &mut App, connection: crate::config::Connection, connect: bool) {
     use crate::config::Connection;
     let note = match (connection, connect) {
+        // No app to sign in through yet: its two IDs' prompts first.
         (Connection::Microsoft, true) => {
-            crate::microsoft::connect(app, &crate::config::Config::load().microsoft)
+            let ms = crate::config::Config::load().microsoft;
+            if !crate::microsoft::has_app(&ms) {
+                return crate::microsoft::ask_app_id(app);
+            }
+            crate::microsoft::connect(app, &ms)
         }
-        (Connection::Microsoft, false) => crate::microsoft::disconnect(app),
+        (Connection::Microsoft, false) => {
+            crate::microsoft::disconnect(app, &crate::config::Config::load().microsoft)
+        }
         // The Slack tokens' prompts, or forgetting them: each says its own.
         (Connection::Slack, true) => return crate::phone::connect(app),
         (Connection::Slack, false) => return crate::phone::disconnect(app),
@@ -9343,6 +9355,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             | PromptKind::AccountChipMark { .. }
             | PromptKind::LinkBrowser { .. }
             | PromptKind::SlackToken { .. }
+            | PromptKind::MicrosoftAppId { .. }
             | PromptKind::QuickPrompt(_)
     );
     if value.is_empty() && !empty_is_a_default {
@@ -9474,6 +9487,9 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         }
         PromptKind::SlackToken { step, tokens } => {
             crate::phone::submit_token(app, step, tokens, &value);
+        }
+        PromptKind::MicrosoftAppId { client_id } => {
+            crate::microsoft::submit_app_id(app, client_id, &value);
         }
         PromptKind::EditLink { id } => {
             send(app, out, |req_id| ClientRequest::UpdateLink {
@@ -27303,17 +27319,35 @@ mod tests {
         });
     }
 
-    /// MICROSOFT 365's status row: with no app id in the config, `c` and
-    /// Enter both say what is missing and start nothing; `o` with nobody
-    /// signed in says so. Off the row, `c` is not a connect.
+    /// MICROSOFT 365's status row with no app id in the config: `c` and
+    /// Enter both ask for the two IDs, Esc and an empty box save nothing,
+    /// a value that is not an ID keeps the box up as typed, and the second
+    /// ID saves both into the config — its other keys kept — and starts
+    /// the sign-in. Both pasted on one line skip the second box. `o` with
+    /// nobody signed in clears the IDs again. Off the row, `c` is not a
+    /// connect.
     #[test]
-    fn the_microsoft_row_asks_for_the_app_id_before_signing_in() {
+    fn the_microsoft_row_asks_for_the_app_ids_and_saves_them() {
         use crate::config::{Connection, SettingKind};
+        const CLIENT: &str = "3f1c2a7e-9b4d-4e21-8c55-1a2b3c4d5e6f";
+        const TENANT: &str = "72f988bf-86f1-41af-91ab-2d7cd011db47";
         let config = tempfile::tempdir().unwrap();
-        crate::config::with_config_path(config.path().join("config.json"), || {
+        let path = config.path().join("config.json");
+        std::fs::write(&path, r#"{ "from_a_newer_orion": { "kept": true } }"#).unwrap();
+        crate::config::with_config_path(path.clone(), || {
             let mut app = App::new();
             let mut out = Vec::new();
             let notice = |app: &App| settings_view(app).notice.as_ref().map(|(t, _)| t.clone());
+            let asking = |app: &App| match &app.overlay {
+                Some(Overlay::Prompt(p)) => match &p.kind {
+                    PromptKind::MicrosoftAppId { client_id } => {
+                        Some((client_id.clone(), p.input.as_str().to_string()))
+                    }
+                    other => panic!("another box is up: {other:?}"),
+                },
+                _ => None,
+            };
+            let ms = || crate::config::Config::load().microsoft;
             let (tab, row) =
                 crate::config::locate(SettingKind::Connection(Connection::Microsoft)).unwrap();
             assert_eq!(crate::config::SETTINGS_TABS[tab].title, "Connections");
@@ -27321,18 +27355,96 @@ mod tests {
             for _ in 0..row {
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
-            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
-            assert_eq!(
-                notice(&app).as_deref(),
-                Some(crate::microsoft::NEEDS_APP_ID)
-            );
             press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
             assert_eq!(notice(&app).as_deref(), Some("not connected"));
+
+            // `c`, then Esc: nothing saved, back on the row.
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            assert_eq!(asking(&app), Some((None, String::new())));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(settings_view(&app).selected, row);
+            // Enter is `c`; an empty box is Esc.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(asking(&app), Some((None, String::new())));
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(ms(), crate::config::MicrosoftSettings::default());
+
+            // Not an ID: the box stays, as typed, and says why.
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            type_text(&mut app, "nope", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(asking(&app), Some((None, "nope".into())));
+            assert!(app.flash.as_ref().unwrap().text.contains("not an ID"));
+
+            // The client id, in capitals with spaces round it, then Esc on
+            // the second box: still nothing saved.
+            press(
+                &mut app,
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            type_text(&mut app, &format!(" {} ", CLIENT.to_uppercase()), &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(asking(&app), Some((Some(CLIENT.into()), String::new())));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(ms(), crate::config::MicrosoftSettings::default());
+
+            // Both, one box after the other: saved, and the sign-in starts
+            // (with no loop to run it on here, it says it can't).
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            type_text(&mut app, CLIENT, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            type_text(&mut app, TENANT, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(
+                (ms().client_id, ms().tenant),
+                (CLIENT.into(), TENANT.into())
+            );
             assert_eq!(
                 notice(&app).as_deref(),
-                Some(crate::microsoft::NEEDS_APP_ID)
+                Some("Microsoft 365 can't be reached from here")
             );
+            let file: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                file["from_a_newer_orion"]["kept"], true,
+                "unknown keys survive"
+            );
+            assert_eq!(file["microsoft"]["client_id"], CLIENT);
+
+            // `o`, nobody signed in: the IDs go.
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                notice(&app).as_deref(),
+                Some("app IDs cleared · c adds them again")
+            );
+            assert_eq!(ms(), crate::config::MicrosoftSettings::default());
+
+            // Both pasted on one line: no second box.
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            assert!(paste_into_overlay(&mut app, &format!("{CLIENT}\n{TENANT}")));
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(
+                (ms().client_id, ms().tenant),
+                (CLIENT.into(), TENANT.into())
+            );
+
+            // Signed in, `o` signs out and keeps the IDs; a second clears.
+            app.microsoft.email = Some("ada@riplo.ai".into());
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                notice(&app).as_deref(),
+                Some("signed out ada@riplo.ai · o again clears the app IDs")
+            );
+            assert_eq!(ms().client_id, CLIENT);
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            assert_eq!(ms().client_id, "");
             assert_eq!(app.microsoft.sign_in, crate::microsoft::SignIn::Idle);
 
             // **Next meeting in the footer**, a row down: `c` does nothing

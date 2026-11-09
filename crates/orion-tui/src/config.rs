@@ -800,7 +800,7 @@ pub const CONNECTIONS_SETTINGS: &[SettingSpec] = &[
     SettingSpec {
         kind: SettingKind::Connection(Connection::Microsoft),
         label: "Status",
-        hint: "c signs in to Microsoft 365 in the browser, o signs out. Needs microsoft.client_id in config.json (see setup)",
+        hint: "c signs in to Microsoft 365 in the browser, first asking for your organisation's client and tenant IDs; o signs out, and o again clears the IDs",
         group: "MICROSOFT 365",
     },
     SettingSpec {
