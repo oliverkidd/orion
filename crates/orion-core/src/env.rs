@@ -33,6 +33,19 @@ pub const SPARE_TICK_MS: &str = "ORION_SPARE_TICK_MS";
 /// STACK STATUS poll period in ms (default 5s): how often the daemon asks
 /// docker which compose stacks exist and run.
 pub const STACK_POLL_MS: &str = "ORION_STACK_POLL_MS";
+/// How often (ms, default 5 s) the DAEMON reads whether you are away —
+/// the screen lock and the time since the last key — for the phone
+/// bridge. `0` turns the reading off, as the e2e tests do: then only the
+/// hand flag (⌘⇧A) makes you away. It runs only while Slack is connected.
+pub const AWAY_POLL_MS: &str = "ORION_AWAY_POLL_MS";
+/// The Slack Web API's base URL (default `https://slack.com/api`); the
+/// e2e tests point it at a fake Slack. Socket Mode's websocket is
+/// wherever that API's `apps.connections.open` says it is.
+pub const SLACK_API_URL: &str = "ORION_SLACK_API_URL";
+/// The three Slack tokens as `<app>,<bot>,<user>`, read in place of the
+/// Keychain's `dev.orion.slack` items: the e2e tests' fake Slack, never a
+/// real workspace's.
+pub const SLACK_TOKENS: &str = "ORION_SLACK_TOKENS";
 /// `RUST_LOG`-style tracing filter for both the daemon and the TUI.
 pub const LOG: &str = "ORION_LOG";
 /// Overrides the install script URL `orion upgrade` / `orion ssh` fetch.
@@ -46,6 +59,39 @@ pub const UPDATE_CHECK_SECS: &str = "ORION_UPDATE_CHECK_SECS";
 /// Cadence in seconds of the footer's Spotify poll; `0` turns it off, as the
 /// e2e tests do so their footers never depend on what's playing.
 pub const SPOTIFY_POLL_SECS: &str = "ORION_SPOTIFY_POLL_SECS";
+/// Cadence in seconds of the Microsoft 365 calendar poll behind the
+/// footer's next meeting (default 5 minutes); `0` turns it off, as the e2e
+/// tests do so a run never calls Microsoft Graph.
+pub const MICROSOFT_POLL_SECS: &str = "ORION_MICROSOFT_POLL_SECS";
+/// Cadence in seconds of MEETING TAKEAWAYS' look for a finished Teams
+/// meeting's transcript (default 2 minutes, for up to an hour after the
+/// meeting ends); `0` turns it off, as the e2e tests and the screenshots
+/// do, so a run never asks Microsoft Graph for a transcript.
+pub const MEETING_TAKEAWAYS_POLL_SECS: &str = "ORION_MEETING_TAKEAWAYS_POLL_SECS";
+/// Microsoft Graph's base URL (default `https://graph.microsoft.com/v1.0`);
+/// the tests point it at a fake Graph serving canned JSON and VTT.
+pub const MICROSOFT_GRAPH_URL: &str = "ORION_MICROSOFT_GRAPH_URL";
+/// A Graph access token read in place of the Keychain's sign-in: the
+/// tests' fake Graph, never a real tenant's.
+pub const MICROSOFT_TOKEN: &str = "ORION_MICROSOFT_TOKEN";
+/// `off`: a project's **What it is** line is never written by a model, as
+/// the e2e tests set it, so adding a project never runs a Claude account.
+pub const PROJECT_ABOUT: &str = "ORION_PROJECT_ABOUT";
+/// Cadence in seconds of the NEEDS YOU poll — your Linear notifications
+/// and the code reviews asked of you; `0` turns it off, as the e2e tests
+/// and the screenshots do so a board never depends on Linear or GitHub.
+pub const NEEDS_YOU_POLL_SECS: &str = "ORION_NEEDS_YOU_POLL_SECS";
+/// Cadence in seconds of the bug fixer's and feature builder's look for
+/// labelled Linear tickets assigned to you (default 2 minutes); `0` turns
+/// it off, as the e2e tests and the screenshots do.
+pub const LINEAR_BUILDER_POLL_SECS: &str = "ORION_LINEAR_BUILDER_POLL_SECS";
+/// Cadence in seconds of the check for the WEEK IN REVIEW's scheduled
+/// time (default a minute); `0` turns it off, so no run starts on its own.
+pub const WEEK_REVIEW_CHECK_SECS: &str = "ORION_WEEK_REVIEW_CHECK_SECS";
+/// The folder the BLUE SKY BUILDER builds ideas tied to no project in
+/// (default `~/Code/orion-blue-sky`): the e2e tests point it at a scratch
+/// directory, so a run never makes the real one.
+pub const BLUE_SKY_DIR: &str = "ORION_BLUE_SKY_DIR";
 /// `off`: ACCOUNT USAGE asks no provider — as the e2e tests set it, so a
 /// run never reads the machine's logins or calls out with them.
 pub const USAGE: &str = "ORION_USAGE";

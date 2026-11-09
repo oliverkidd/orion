@@ -84,7 +84,9 @@ async fn release_with(docker: &Path, worktree: &Path, policy: WorktreeContainers
 /// `shared` also from elsewhere. None when docker is not there to ask —
 /// no CLI, or an engine that is not running, which runs nothing.
 pub(crate) async fn running_in(docker: &Path, dir: &Path) -> Option<compose::StartedIn> {
-    let listed = run(docker, &compose::ps_state_args(), PS_TIMEOUT).await.ok()?;
+    let listed = run(docker, &compose::ps_state_args(), PS_TIMEOUT)
+        .await
+        .ok()?;
     let running: Vec<compose::Container> = compose::parse_ps_state(&listed)
         .into_iter()
         .filter_map(|(container, running)| running.then_some(container))

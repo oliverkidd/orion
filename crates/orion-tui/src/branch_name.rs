@@ -37,7 +37,7 @@ pub fn linear_name(identifier: &str, title: &str, taken: &[String]) -> String {
 
 /// `title` lowercased and reduced to hyphenated ASCII words, capped so a
 /// long title stays a usable ref.
-fn title_slug(title: &str) -> String {
+pub(crate) fn title_slug(title: &str) -> String {
     const MAX_SLUG: usize = 40;
     // Whole words only up to the cap: a slug cut mid-word
     // (`…-when-the-pre`) reads worse than a shorter one.
@@ -78,7 +78,7 @@ fn prefixed(head: &str, slug: &str) -> String {
 }
 
 /// `base`, or the first `base-2`, `base-3`, … not in `taken`.
-fn unused(base: &str, taken: &[String]) -> String {
+pub(crate) fn unused(base: &str, taken: &[String]) -> String {
     if !taken.iter().any(|t| t == base) {
         return base.to_string();
     }

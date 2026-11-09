@@ -170,7 +170,9 @@ pub fn suggested_parent(app: &App, home: Option<&Path>) -> PathBuf {
     {
         return best.to_path_buf();
     }
-    let home = home.map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("/"));
+    let home = home
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/"));
     ["Code", "Developer", "Projects", "dev", "src"]
         .iter()
         .map(|d| home.join(d))
@@ -179,7 +181,9 @@ pub fn suggested_parent(app: &App, home: Option<&Path>) -> PathBuf {
 }
 
 fn tilde(path: &Path) -> String {
-    match orion_core::env::home_dir().and_then(|h| path.strip_prefix(&h).ok().map(Path::to_path_buf)) {
+    match orion_core::env::home_dir()
+        .and_then(|h| path.strip_prefix(&h).ok().map(Path::to_path_buf))
+    {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
     }
@@ -220,7 +224,10 @@ fn list() -> Result<Vec<GhRepo>, String> {
         .map_err(|_| "gh isn't installed — paste a URL instead".to_string())?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        let line = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("gh failed");
+        let line = err
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("gh failed");
         return Err(format!("{} — paste a URL instead", line.trim()));
     }
     Ok(parse_list(&String::from_utf8_lossy(&out.stdout)))
@@ -242,9 +249,7 @@ fn parse_list(text: &str) -> Vec<GhRepo> {
 
 /// `source` cloned into `dest` — the repository's files straight in it.
 fn clone(source: &Source, dest: &Path) -> Result<(), String> {
-    if dest.exists()
-        && std::fs::read_dir(dest).map_or(true, |mut d| d.next().is_some())
-    {
+    if dest.exists() && std::fs::read_dir(dest).map_or(true, |mut d| d.next().is_some()) {
         return Err(format!("{} already exists and isn't empty", tilde(dest)));
     }
     if let Some(parent) = dest.parent() {
@@ -273,7 +278,9 @@ fn clone(source: &Source, dest: &Path) -> Result<(), String> {
             cmd.pre_exec(crate::ipc::own_session);
         }
     }
-    let out = cmd.output().map_err(|e| format!("couldn't run the clone: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("couldn't run the clone: {e}"))?;
     if out.status.success() {
         Ok(())
     } else {
@@ -352,7 +359,14 @@ fn go(app: &mut App, out: &mut Vec<ClientRequest>) {
             });
         }
         // The unit tests: nothing is cloned, the folder is added as given.
-        None => land(app, Answer::Cloned { dest, result: Ok(()) }, out),
+        None => land(
+            app,
+            Answer::Cloned {
+                dest,
+                result: Ok(()),
+            },
+            out,
+        ),
     }
 }
 
@@ -418,7 +432,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &CloneView, th: Theme) {
             lines.push(Line::from(vec![
                 Span::styled(" ⌕ ", Style::default().fg(th.muted)),
                 if view.input.is_empty() {
-                    Span::styled("filter your repos, or paste a URL / git@… / owner/name", dim)
+                    Span::styled(
+                        "filter your repos, or paste a URL / git@… / owner/name",
+                        dim,
+                    )
                 } else {
                     Span::styled(view.input.clone(), text)
                 },
@@ -431,9 +448,15 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &CloneView, th: Theme) {
                     Span::styled(src.label().to_string(), text.add_modifier(Modifier::BOLD)),
                 ]));
             } else if view.repos.is_none() {
-                lines.push(Line::from(Span::styled(" Asking GitHub for your repositories…", dim)));
+                lines.push(Line::from(Span::styled(
+                    " Asking GitHub for your repositories…",
+                    dim,
+                )));
             } else if let Some(why) = &view.error {
-                lines.push(Line::from(Span::styled(format!(" {why}"), Style::default().fg(th.warn))));
+                lines.push(Line::from(Span::styled(
+                    format!(" {why}"),
+                    Style::default().fg(th.warn),
+                )));
             } else if shown.is_empty() {
                 lines.push(Line::from(Span::styled(" Nothing matches.", dim)));
             }
@@ -450,7 +473,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &CloneView, th: Theme) {
                         }
                     };
                     let tag = if r.private { "private" } else { "" };
-                    let name = crate::ui::truncate(&r.full_name, inner_w.saturating_sub(3 + tag.len() + 1));
+                    let name = crate::ui::truncate(
+                        &r.full_name,
+                        inner_w.saturating_sub(3 + tag.len() + 1),
+                    );
                     let pad = inner_w.saturating_sub(1 + name.chars().count() + tag.len());
                     lines.push(Line::from(vec![
                         Span::styled(format!(" {name}"), sel(text)),
@@ -472,10 +498,16 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &CloneView, th: Theme) {
         Stage::Where(source) => {
             lines.push(Line::from(vec![
                 Span::styled(" Cloning ", dim),
-                Span::styled(source.label().to_string(), text.add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    source.label().to_string(),
+                    text.add_modifier(Modifier::BOLD),
+                ),
             ]));
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(" Into this folder (its files go straight in):", dim)));
+            lines.push(Line::from(Span::styled(
+                " Into this folder (its files go straight in):",
+                dim,
+            )));
             lines.push(Line::from(vec![
                 Span::styled(" › ", Style::default().fg(th.muted)),
                 Span::styled(view.input.clone(), text),
@@ -506,8 +538,14 @@ mod tests {
     fn addresses_parse() {
         let gh = |s: &str| Some(Source::Github(s.into()));
         assert_eq!(Source::parse("acme/widget"), gh("acme/widget"));
-        assert_eq!(Source::parse("https://github.com/acme/widget.git"), gh("acme/widget"));
-        assert_eq!(Source::parse("https://github.com/acme/widget/tree/main"), gh("acme/widget"));
+        assert_eq!(
+            Source::parse("https://github.com/acme/widget.git"),
+            gh("acme/widget")
+        );
+        assert_eq!(
+            Source::parse("https://github.com/acme/widget/tree/main"),
+            gh("acme/widget")
+        );
         assert_eq!(
             Source::parse("git@github.com:acme/widget.git"),
             Some(Source::Url("git@github.com:acme/widget.git".into()))
@@ -568,6 +606,10 @@ mod tests {
         // Somewhere that doesn't exist: the add asks to create it.
         v.input = "/nonexistent/orion-test/widget".into();
         handle_key(&mut app, k(KeyCode::Enter), &mut out);
-        assert!(matches!(app.overlay, Some(Overlay::Confirm(_))), "{:?}", app.overlay);
+        assert!(
+            matches!(app.overlay, Some(Overlay::Confirm(_))),
+            "{:?}",
+            app.overlay
+        );
     }
 }

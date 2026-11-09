@@ -1860,7 +1860,7 @@ pub(crate) fn run_act(
         ),
         // A check with no page of its own opens nothing.
         RowAct::Check { url, .. } if url.is_empty() => {}
-        RowAct::Check { url, .. } => crate::event_loop::open_link(app, &url, out),
+        RowAct::Check { url, .. } => crate::event_loop::open_link(app, &url, None, out),
     }
 }
 
@@ -1886,8 +1886,8 @@ pub(crate) fn pane_key(
     use crossterm::event::KeyCode;
     let (pr, detail) = pane_pr(app)?;
     if crate::pr_modal::keys::AUTOFIX.matches(key) {
-        crate::autofix::open_asked(app);
-        return Some("Autofix");
+        crate::automations::pr_fixer::open_asked(app);
+        return Some("PR fixer");
     }
     if keys::NEXT_TAB.matches(key) || keys::PREV_TAB.matches(key) {
         let delta = if keys::NEXT_TAB.matches(key) { 1 } else { -1 };

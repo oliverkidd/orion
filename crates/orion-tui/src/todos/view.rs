@@ -155,6 +155,30 @@ pub enum Target {
     Item(u64),
 }
 
+/// A tab along the modal's top: the Blue sky list's, always first, then
+/// a project's each ([`tabs`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Tab {
+    BlueSky,
+    Project(ProjectId),
+}
+
+impl Tab {
+    /// The project whose list it is, unless it is Blue sky's.
+    pub fn project(&self) -> Option<&ProjectId> {
+        match self {
+            Tab::BlueSky => None,
+            Tab::Project(id) => Some(id),
+        }
+    }
+}
+
+/// Blue sky's tab, as the strip names it.
+pub const BLUE_SKY_TAB: &str = "Blue sky";
+
+/// The line under Blue sky's tabs (5.9).
+const BLUE_SKY_EXPLAINER: &str = "Enter starts the Blue sky builder on the idea. Its brief comes to Needs you to approve, and its state shows here.";
+
 /// What the field in the list is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputKind {
@@ -207,9 +231,10 @@ impl Entry {
 /// The modal's own state. The list lives on [`App::todos`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TodoView {
-    pub project: ProjectId,
-    pub project_name: String,
-    /// The project's checkout: whose list this is.
+    pub tab: Tab,
+    /// The tab's name: the project's, or Blue sky's.
+    pub name: String,
+    /// The project's checkout, or the Blue sky key: whose list this is.
     pub dir: PathBuf,
     /// The DONE panel down the right: one across the tabs, handed on to
     /// the tab turned to.
@@ -250,15 +275,15 @@ pub struct TodoView {
     /// click.
     pub project_hits: Vec<(u16, u16)>,
     pub project_row: Rect,
-    /// The other projects' tabs as they were left, by project.
-    pub parked: HashMap<ProjectId, TodoView>,
+    /// The other tabs as they were left.
+    pub parked: HashMap<Tab, TodoView>,
 }
 
 impl TodoView {
-    pub fn new(project: ProjectId, project_name: String, dir: PathBuf) -> Self {
+    pub fn new(tab: Tab, name: String, dir: PathBuf) -> Self {
         Self {
-            project,
-            project_name,
+            tab,
+            name,
             dir,
             done: Default::default(),
             selected: 0,
@@ -308,16 +333,25 @@ pub(crate) mod keys {
     /// The project tabs, round either end, as the LINEAR VIEW walks its
     /// own. While the filter is up plain `←`/`→` are its caret's and
     /// `⇧←`/`⇧→` still walk the tabs.
-    pub const TABS: Key = crate::nav::TABS.doing("projects");
-    /// Straight to a project's tab — matched through the grid's own
-    /// binding (`project_tab_N`), so a rebind holds here too; this is its
-    /// default, for the hint and the Ghostty release.
+    pub const TABS: Key = crate::nav::TABS.doing("tabs");
+    /// Straight to a tab — `⌘1` Blue sky's, `⌘2` on the projects' —
+    /// matched through the grid's own binding (`project_tab_N`), so a
+    /// rebind holds here too; this is its default, for the hint and the
+    /// Ghostty release.
     pub const PROJECT: Key = Key::new(
         &[
             "cmd+1", "cmd+2", "cmd+3", "cmd+4", "cmd+5", "cmd+6", "cmd+7", "cmd+8", "cmd+9",
         ],
-        "project",
+        "tab",
     );
+    /// Blue sky's: where the idea is built, round the projects and `blue
+    /// sky`.
+    pub const WHERE: Key = Key::new(&["w"], "where");
+    /// Blue sky's `Enter`: the BLUE SKY BUILDER on the idea — and on one
+    /// whose session is still there, that session.
+    pub const BUILD: Key = Key::new(&["enter"], "build it");
+    /// Blue sky's: the folder or checkout the idea was built in.
+    pub const OPEN_BUILT: Key = Key::new(&["o"], "open what it built");
     /// The previous or next group's header, nested ones included.
     pub const JUMP: Key = Key::new(&["cmd+up", "cmd+down"], "groups").show(2);
     /// The item — or the selection, or a group from its header — a place
@@ -379,14 +413,14 @@ pub(crate) mod keys {
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         DONE, TABS, PROJECT, JUMP, MOVE, GROUP, SELECT, NEW, NEW_GROUP, EDIT, PRIORITY, DELETE,
-        CUT, COPY, FILTER, SAVE, SAVE_MOVE, SAVE_GROUP, CONFIRM, AGENT, PICK, CHOOSE,
-        LEVEL, INTO_DONE,
+        CUT, COPY, FILTER, SAVE, SAVE_MOVE, SAVE_GROUP, CONFIRM, AGENT, PICK, CHOOSE, LEVEL,
+        INTO_DONE, WHERE, BUILD, OPEN_BUILT,
     ];
 }
 
-/// `⌘1-9 project`.
+/// `⌘1-9 tab`.
 fn project_hint() -> crate::hints::Hint {
-    crate::hints::Hint::new(format!("{}-9", keys::PROJECT.label()), "project")
+    crate::hints::Hint::new(format!("{}-9", keys::PROJECT.label()), keys::PROJECT.does)
 }
 
 /// The keys along the modal's bottom edge while the lists have them (the
@@ -435,12 +469,26 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
             Hint::new("Esc", "clear"),
         ];
     }
-    let mut hints = vec![
-        keys::DONE.hint().kept(),
-        keys::AGENT.hint().kept(),
-        keys::TABS.hint(),
-        keys::INTO_DONE.hint(),
-        keys::NEW.hint(),
+    let mut hints = if view.tab == Tab::BlueSky {
+        vec![
+            keys::NEW.hint_as("new idea").kept(),
+            keys::WHERE.hint().kept(),
+            keys::BUILD.hint().kept(),
+            keys::OPEN_BUILT.hint(),
+            keys::DONE.hint_as("tick"),
+            keys::TABS.hint(),
+            keys::INTO_DONE.hint(),
+        ]
+    } else {
+        vec![
+            keys::DONE.hint().kept(),
+            keys::AGENT.hint().kept(),
+            keys::TABS.hint(),
+            keys::INTO_DONE.hint(),
+            keys::NEW.hint(),
+        ]
+    };
+    hints.extend([
         keys::EDIT.hint(),
         keys::PRIORITY.hint(),
         keys::DELETE.hint(),
@@ -451,46 +499,41 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
         keys::CUT.hint(),
         keys::COPY.hint(),
         keys::JUMP.hint(),
-    ];
-    hints.push(project_hint());
-    hints.extend([
-        keys::NEW_GROUP.hint(),
-        Hint::new("Esc", "close"),
     ]);
+    hints.push(project_hint());
+    hints.extend([keys::NEW_GROUP.hint(), Hint::new("Esc", "close")]);
     hints
 }
 
 /// `⌘I`, from anywhere: the modal on the selected project's tab — or,
-/// with none selected, the first project's.
+/// with none selected, the first project's, and with no projects at all,
+/// Blue sky's.
 pub(crate) fn open(app: &mut App) {
-    let project = app
+    let tab = app
         .selected_project()
         .or_else(|| app.tree.projects.first())
-        .cloned();
-    let Some(project) = project else {
-        app.flash = Some(crate::flash::Flash::note(
-            "no projects yet — add one to keep todos for it",
-        ));
-        return;
-    };
-    open_on(app, project.id, project.name, project.repo_path);
+        .map_or(Tab::BlueSky, |p| Tab::Project(p.id.clone()));
+    open_on(app, &tab);
 }
 
-fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
+/// The modal up on `tab`, when there is one.
+fn open_on(app: &mut App, tab: &Tab) -> bool {
+    let Some((tab, name, dir)) = tabs(app).into_iter().find(|(t, ..)| t == tab) else {
+        return false;
+    };
     // Every tab's list, for the counts on the strip.
     load_every_list(app);
-    load_list(app, dir.clone());
-    app.overlay = Some(Overlay::Todos(TodoView::new(project, name, dir)));
+    app.overlay = Some(Overlay::Todos(TodoView::new(tab, name, dir)));
     app.dirty = true;
+    true
 }
 
-/// A `⌘K` row's todo: the modal on `project`'s tab with the cursor on
-/// item `item`, the groups it is in unfolded.
-pub(crate) fn open_at(app: &mut App, project: &ProjectId, item: u64) {
-    let Some(p) = app.tree.projects.iter().find(|p| &p.id == project).cloned() else {
+/// A `⌘K` row's todo: the modal on `tab` with the cursor on item `item`,
+/// the groups it is in unfolded.
+pub(crate) fn open_at(app: &mut App, tab: &Tab, item: u64) {
+    if !open_on(app, tab) {
         return;
-    };
-    open_on(app, p.id, p.name, p.repo_path);
+    }
     let group = list(app).and_then(|f| f.item(item)).map(|i| i.group);
     let folded = group.is_some_and(|group| {
         list(app).is_some_and(|f| {
@@ -511,16 +554,10 @@ pub(crate) fn open_at(app: &mut App, project: &ProjectId, item: u64) {
     }
 }
 
-/// Every project's list read in — the modal's tabs, the `⌘K` palette's
-/// todo rows — those read already left as they are.
+/// Every tab's list read in, Blue sky's too — the modal's tabs, the `⌘K`
+/// palette's todo rows — those read already left as they are.
 pub(crate) fn load_every_list(app: &mut App) {
-    let dirs: Vec<PathBuf> = app
-        .tree
-        .projects
-        .iter()
-        .map(|p| p.repo_path.clone())
-        .collect();
-    for dir in dirs {
+    for (_, _, dir) in tabs(app) {
         load_list(app, dir);
     }
 }
@@ -555,25 +592,39 @@ pub(super) fn projects(app: &App) -> Vec<(ProjectId, String, PathBuf)> {
         .collect()
 }
 
-/// `⇧←`/`⇧→`: the project `delta` tabs over, round the ends.
-fn step_project(app: &mut App, delta: i32) {
-    let tabs = projects(app);
+/// Every tab, in the strip's order: Blue sky's first, then the projects'
+/// ([`projects`]) — each with its name and its list's key.
+pub(crate) fn tabs(app: &App) -> Vec<(Tab, String, PathBuf)> {
+    let blue_sky = (
+        Tab::BlueSky,
+        BLUE_SKY_TAB.to_string(),
+        store::blue_sky_key(),
+    );
+    std::iter::once(blue_sky)
+        .chain(
+            projects(app)
+                .into_iter()
+                .map(|(id, name, dir)| (Tab::Project(id), name, dir)),
+        )
+        .collect()
+}
+
+/// `⇧←`/`⇧→`: the tab `delta` over, round the ends.
+fn step_tab(app: &mut App, delta: i32) {
+    let tabs = tabs(app);
     let Some(view) = view(app) else {
         return;
     };
-    if tabs.is_empty() {
-        return;
-    }
-    let next = match tabs.iter().position(|(id, ..)| *id == view.project) {
+    let next = match tabs.iter().position(|(tab, ..)| *tab == view.tab) {
         Some(at) => (at as i32 + delta).rem_euclid(tabs.len() as i32) as usize,
         None => 0,
     };
-    let (id, name, dir) = tabs[next].clone();
-    show_project(app, id, name, dir);
+    let (tab, name, dir) = tabs[next].clone();
+    show_tab(app, tab, name, dir);
 }
 
-/// The project tab `key` is bound to on the grid (`project_tab_N`, `⌘1`–
-/// `⌘9` unless rebound), from 1.
+/// The tab `key` is bound to on the grid (`project_tab_N`, `⌘1`–`⌘9`
+/// unless rebound), from 1.
 fn project_tab(app: &App, key: &KeyEvent) -> Option<u8> {
     let chord = KeyChord::from_event(key);
     match app.keymap.lookup(crate::keymap::Scope::Global, &chord)? {
@@ -582,32 +633,33 @@ fn project_tab(app: &App, key: &KeyEvent) -> Option<u8> {
     }
 }
 
-/// `⌘1`–`⌘9`: the `n`th project's tab (from 0), when there is one.
-fn goto_project(app: &mut App, n: usize) {
-    if let Some((id, name, dir)) = projects(app).get(n).cloned() {
-        show_project(app, id, name, dir);
+/// `⌘1`–`⌘9`: the `n`th tab (from 0) — Blue sky's the first — when there
+/// is one.
+fn goto_tab(app: &mut App, n: usize) {
+    if let Some((tab, name, dir)) = tabs(app).get(n).cloned() {
+        show_tab(app, tab, name, dir);
     }
 }
 
-/// The modal onto `project`'s tab: the one it is on parked, `project`'s
-/// back as it was left — or, first time on it, at its top.
-fn show_project(app: &mut App, project: ProjectId, name: String, dir: PathBuf) {
-    if view(app).is_none_or(|v| v.project == project) {
+/// The modal onto `tab`: the one it is on parked, `tab` back as it was
+/// left — or, first time on it, at its top.
+fn show_tab(app: &mut App, tab: Tab, name: String, dir: PathBuf) {
+    if view(app).is_none_or(|v| v.tab == tab) {
         return;
     }
     load_list(app, dir.clone());
-    let fresh = TodoView::new(project.clone(), name.clone(), dir);
+    let fresh = TodoView::new(tab.clone(), name.clone(), dir);
     let Some(view) = view_mut(app) else {
         return;
     };
     let mut parked = std::mem::take(&mut view.parked);
-    let mut next = parked.remove(&project).unwrap_or(fresh);
+    let mut next = parked.remove(&tab).unwrap_or(fresh);
     // The name may have changed since it was parked.
-    next.project_name = name;
-    // The DONE panel is every project's: it stays as it is.
+    next.name = name;
+    // The DONE panel is every tab's: it stays as it is.
     next.done = view.done.clone();
     let left = std::mem::replace(view, next).park();
-    parked.insert(left.project.clone(), left);
+    parked.insert(left.tab.clone(), left);
     view.parked = parked;
 }
 
@@ -1067,6 +1119,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
     let filtering = view.filtering;
     let selecting = view.anchor.is_some();
     let page = view.list_area.height.max(1) as i32;
+    // Blue sky's own keys, on an idea's row.
+    let on_idea = view.tab == Tab::BlueSky && matches!(current(app), Some(Entry::Item { .. }));
     let tab = project_tab(app, &key);
     // Whatever moves the cursor on its own lets a selection go; what acts
     // on the items keeps it.
@@ -1079,6 +1133,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         keys::DELETE,
         keys::CUT,
         keys::COPY,
+        keys::WHERE,
     ]
     .iter()
     .any(|k| k.matches(&key))
@@ -1099,11 +1154,11 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         // Plain `←`/`→` move the filter's caret while it is up; `⇧←`/`⇧→`
         // walk the tabs either way.
         _ if keys::TABS.matches(&key) && !(filtering && key.modifiers.is_empty()) => {
-            step_project(app, if key.code == KeyCode::Left { -1 } else { 1 });
+            step_tab(app, if key.code == KeyCode::Left { -1 } else { 1 });
         }
         _ if tab.is_some() => {
             let n = tab.unwrap_or(1);
-            goto_project(app, usize::from(n.saturating_sub(1)));
+            goto_tab(app, usize::from(n.saturating_sub(1)));
         }
         _ if keys::JUMP.matches(&key) => jump(app, key.code == KeyCode::Down),
         _ if keys::MOVE.matches(&key) => move_chosen(app, key.code == KeyCode::Up),
@@ -1118,6 +1173,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         KeyCode::End => step(app, i32::MAX / 2),
         KeyCode::Enter => match current(app) {
             Some(Entry::AddRow) => start_item(app),
+            Some(Entry::Item { .. }) if on_idea => build(app, out),
             Some(Entry::Item { .. }) => agent(app, out),
             Some(Entry::Header { group, .. }) => fold(app, group),
             _ => {}
@@ -1141,6 +1197,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
                 query_changed(app);
             }
         }
+        _ if on_idea && keys::WHERE.matches(&key) => cycle_where(app),
+        _ if on_idea && keys::OPEN_BUILT.matches(&key) => open_built(app),
         _ if keys::DONE.matches(&key) => done(app),
         _ if keys::EDIT.matches(&key) => start_edit(app, None),
         KeyCode::Char(c) if crate::key_combo::is_text_key(&KeyChord::from_event(&key)) => {
@@ -1904,6 +1962,49 @@ fn agent(app: &mut App, out: &mut Vec<ClientRequest>) {
     open_box(app, launch, task);
 }
 
+/// Blue sky's `Enter` on an idea: the session building it, while there
+/// is one — the modal goes and the panels land on it — else the BLUE SKY
+/// BUILDER started on it. On a selection, on every idea in it.
+fn build(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let ids = chosen(app);
+    let live = match ids.as_slice() {
+        [item] => list(app)
+            .and_then(|file| file.item(*item))
+            .and_then(|i| live_agent(app, i))
+            .map(|a| a.id.clone()),
+        _ => None,
+    };
+    match live {
+        Some(id) => crate::event_loop::jump_to_session(app, id, out),
+        None => crate::automations::blue_sky::start(app, &ids, out),
+    }
+}
+
+/// Blue sky's `w`: the ideas' target a step round — `blue sky`, then each
+/// project in the tabs' order — from where the first of them goes.
+fn cycle_where(app: &mut App) {
+    let ids = chosen(app);
+    let Some(first) = ids.first().and_then(|id| list(app)?.item(*id)) else {
+        return;
+    };
+    let next = crate::automations::blue_sky::next_target(app, first.target.as_deref());
+    edit(app, |file| {
+        for id in &ids {
+            if let Some(item) = file.item_mut(*id) {
+                item.target.clone_from(&next);
+            }
+        }
+    });
+}
+
+/// Blue sky's `o`: what the idea under the cursor was built in.
+fn open_built(app: &mut App) {
+    let item = cursor_open_item(app).and_then(|id| list(app)?.item(id).cloned());
+    if let Some(item) = item {
+        crate::automations::blue_sky::open_built(app, &item);
+    }
+}
+
 /// A click on an item's agent chip, or `Enter` on one item.
 fn agent_or_session(app: &mut App, item: u64, out: &mut Vec<ClientRequest>) {
     let live = list(app)
@@ -1971,7 +2072,7 @@ fn launch_for(app: &App, items: &[u64]) -> Option<(QuickLaunch, String)> {
             ));
         }
     }
-    let project = view.project.clone();
+    let project = view.tab.project()?.clone();
     let target = QuickTarget::NewWorktree {
         branch: crate::branch_name::random_name(&app.project_branches(&project)),
         project,
@@ -2075,8 +2176,8 @@ pub(crate) fn handle_mouse(
         MouseEventKind::ScrollUp if list.contains(pos) => step(app, -1),
         MouseEventKind::Down(MouseButton::Left) if view.project_row.contains(pos) => {
             let hit = crate::ui::tab_hit(&view.project_hits, pos.x);
-            if let Some((id, name, dir)) = hit.and_then(|i| projects(app).get(i).cloned()) {
-                show_project(app, id, name, dir);
+            if let Some((tab, name, dir)) = hit.and_then(|i| tabs(app).get(i).cloned()) {
+                show_tab(app, tab, name, dir);
             }
         }
         MouseEventKind::Down(MouseButton::Left) if list.contains(pos) => click_row(app, pos),
@@ -2238,8 +2339,9 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
     let inner = block.inner(lists_area);
     f.render_widget(block, lists_area);
 
-    // A tab per project on the first line, each with what is open in it.
-    let tabs = projects(app);
+    // A tab each on the first line, Blue sky's first, each with what is
+    // open in it.
+    let tabs = tabs(app);
     let project_row = row_rect(inner, 0).unwrap_or_default();
     let labels: Vec<String> = tabs
         .iter()
@@ -2252,7 +2354,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         .collect();
     let active = tabs
         .iter()
-        .position(|(id, ..)| *id == view.project)
+        .position(|(tab, ..)| *tab == view.tab)
         .unwrap_or(usize::MAX);
     let (strip, project_hits) = crate::ui::tab_strip(
         project_row.x,
@@ -2263,10 +2365,20 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &TodoView, th: Theme, bac
         th,
     );
     f.render_widget(Paragraph::new(Line::from(strip)), project_row);
-    // Under the tabs the filter while `⌘F` has it up, else a blank row.
+    // Under the tabs the filter while `⌘F` has it up, else a blank row —
+    // on Blue sky's, what Enter does there.
     let below_tabs = crate::ui::below_first_row(inner);
-    if let Some(query_area) = row_rect(below_tabs, 0).filter(|_| view.filtering) {
-        let line = search_line(&view.query, "type to filter…", query_area, th);
+    if let Some(query_area) = row_rect(below_tabs, 0) {
+        let line = if view.filtering {
+            search_line(&view.query, "type to filter…", query_area, th)
+        } else if view.tab == Tab::BlueSky {
+            Line::from(Span::styled(
+                truncate(BLUE_SKY_EXPLAINER, query_area.width as usize),
+                Style::default().fg(th.dim),
+            ))
+        } else {
+            Line::default()
+        };
         f.render_widget(Paragraph::new(line), query_area);
     }
     let rows_area = crate::ui::below_first_row(below_tabs);
@@ -2670,9 +2782,27 @@ fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
     left.push(Span::raw(" "));
 
     let mut parts: Vec<(Option<Chip>, Vec<Span<'static>>)> = Vec::new();
-    // The session's STATUS MARK, turning while it works, as on every
-    // other row that names a session.
-    if let Some(agent) = live_agent(app, item) {
+    if view.tab == Tab::BlueSky {
+        // An idea: where it goes, and how its build stands — the state a
+        // click on which jumps to its session, while there is one.
+        let blue_sky = crate::automations::blue_sky::Idea::of(app, item);
+        parts.push((
+            None,
+            vec![Span::styled(
+                blue_sky.target_label,
+                Style::default().fg(th.dim),
+            )],
+        ));
+        parts.push((
+            live_agent(app, item).map(|_| Chip::Agent),
+            vec![Span::styled(
+                blue_sky.state,
+                crate::automations::view::tone(blue_sky.tone, th),
+            )],
+        ));
+    } else if let Some(agent) = live_agent(app, item) {
+        // The session's STATUS MARK, turning while it works, as on every
+        // other row that names a session.
         let color = crate::ui::status_color(Some(agent.status), agent.unseen, th);
         parts.push((
             Some(Chip::Agent),
@@ -2682,7 +2812,7 @@ fn item_lines(row: &Row, item: &Item, depth: u16) -> RowLines {
             ],
         ));
     }
-    if !done && item.age(today) > 0 {
+    if !done && item.age(today) > 0 && view.tab != Tab::BlueSky {
         parts.push((
             None,
             vec![Span::styled(
@@ -2830,7 +2960,11 @@ mod tests {
     }
 
     fn view() -> TodoView {
-        TodoView::new(ProjectId("p1".into()), "demo".into(), PathBuf::from("/r"))
+        TodoView::new(
+            Tab::Project(ProjectId("p1".into())),
+            "demo".into(),
+            PathBuf::from("/r"),
+        )
     }
 
     /// Lines pasted in are an item each, with or without a bullet, and
@@ -2881,6 +3015,39 @@ mod tests {
         assert_eq!(names(&app), ["web", "docs", "api", "site"], "after a drag");
     }
 
+    /// Blue sky's tab stands first, its list under the Blue sky key, then
+    /// the projects' in their order — so `⌘1` is Blue sky's and the
+    /// projects start at `⌘2`.
+    #[test]
+    fn blue_sky_is_the_first_tab() {
+        let mut app = App::new();
+        app.tree.projects = ["api", "web"]
+            .iter()
+            .enumerate()
+            .map(|(i, name)| orion_core::Project {
+                id: ProjectId(format!("p{i}")),
+                name: (*name).into(),
+                repo_path: format!("/tmp/{name}").into(),
+                sort_order: 0,
+            })
+            .collect();
+        let all = tabs(&app);
+        let names: Vec<&str> = all.iter().map(|(_, name, _)| name.as_str()).collect();
+        assert_eq!(names, ["Blue sky", "api", "web"]);
+        assert_eq!(all[0].0, Tab::BlueSky);
+        assert_eq!(all[0].2, store::blue_sky_key());
+        assert_eq!(all[1].0, Tab::Project(ProjectId("p0".into())));
+        assert_eq!(projects(&app).len(), 2, "projects() stays the projects'");
+
+        // With no projects at all, ⌘I opens on Blue sky's.
+        let mut empty = App::new();
+        open(&mut empty);
+        assert_eq!(
+            super::view(&empty).map(|v| v.tab.clone()),
+            Some(Tab::BlueSky)
+        );
+    }
+
     /// Every hint the modal draws names a key in its table — the priority
     /// keys drawn as one, `⌘1-4`.
     #[test]
@@ -2888,12 +3055,22 @@ mod tests {
         let check = |view: &TodoView| {
             let hints: Vec<_> = hints(view)
                 .into_iter()
-                .filter(|h| h.does != "project" && h.does != keys::LEVEL.does)
+                .filter(|h| h.does != keys::PROJECT.does && h.does != keys::LEVEL.does)
                 .collect();
             crate::hints::assert_hints_from(&hints, keys::ALL);
         };
         let mut v = view();
         check(&v);
+        // Blue sky's own: new idea, where, build it, open what it built.
+        let mut blue = TodoView::new(Tab::BlueSky, BLUE_SKY_TAB.into(), store::blue_sky_key());
+        check(&blue);
+        let does: Vec<String> = hints(&blue).into_iter().map(|h| h.does).collect();
+        assert_eq!(
+            does[..4],
+            ["new idea", "where", "build it", "open what it built"]
+        );
+        blue.filtering = true;
+        check(&blue);
         v.anchor = Some(1);
         check(&v);
         v.anchor = None;

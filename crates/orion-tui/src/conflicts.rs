@@ -610,7 +610,7 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
             head_sha,
             base,
             files,
-        } => crate::autofix::land_conflicts(app, &url, &head_sha, &base, files),
+        } => crate::automations::pr_fixer::land_conflicts(app, &url, &head_sha, &base, files),
     }
     app.dirty = true;
 }

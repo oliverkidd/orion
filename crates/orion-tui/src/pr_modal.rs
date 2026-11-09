@@ -1160,7 +1160,7 @@ fn post_comment(app: &mut App) {
 /// click end in the same state.
 pub(crate) fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
     if let Some(url) = selected_url(app) {
-        crate::event_loop::open_link(app, &url, out);
+        crate::event_loop::open_link(app, &url, None, out);
     }
 }
 
@@ -1337,7 +1337,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         // A merged or closed row has no autofix left: the footer says so.
         _ if keys::AUTOFIX.matches(&key) => {
             if selected_open_pr(app).is_some() {
-                crate::autofix::open_asked(app);
+                crate::automations::pr_fixer::open_asked(app);
             }
         }
         _ if keys::CHECKOUT.matches(&key) => crate::pr_checkout::from_modal(app, out),
@@ -1607,7 +1607,7 @@ pub(crate) mod keys {
     pub const LINEAR: Key = Key::new(&["cmd+l", "ctrl+l"], "Linear");
     /// The AUTOFIX form: an agent sent at the pull request's conflicts and
     /// failing checks (`crate::autofix`).
-    pub const AUTOFIX: Key = Key::new(&["cmd+g", "ctrl+g"], "autofix");
+    pub const AUTOFIX: Key = Key::new(&["cmd+g", "ctrl+g"], "PR fixer");
     /// The pull request's checkout, found or cut (`pr_checkout`): the
     /// row menu's **Check out**. ⌘B for its branch.
     pub const CHECKOUT: Key = Key::new(&["cmd+b", "ctrl+b"], "check out");
@@ -1624,9 +1624,9 @@ pub(crate) mod keys {
     pub const JUMP: Key = crate::todos::view::keys::JUMP;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, POST, DIFF, BROWSER, REFRESH, READ, NEW,
-        MERGE, EDIT, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, REOPEN, TABS, ROWS,
-        FILTER, JUMP,
+        PROMPT, PANEL, BACK, PAGE_TABS, PAGE_ROWS, ACT, COMMENT, POST, DIFF, BROWSER, REFRESH,
+        READ, NEW, MERGE, EDIT, CLOSE, READY, REVIEW, LINEAR, AUTOFIX, CHECKOUT, ATTACH, REOPEN,
+        TABS, ROWS, FILTER, JUMP,
     ];
 }
 
@@ -3221,16 +3221,16 @@ mod tests {
             assert_eq!(v.comment.as_ref().unwrap().input.as_str(), "lgtm");
             assert_eq!(v.query.as_str(), "", "not typed into the filter");
             assert!(paste(&mut app, "!"));
-            assert_eq!(
-                view(&app).comment.as_ref().unwrap().input.as_str(),
-                "lgtm!"
-            );
+            assert_eq!(view(&app).comment.as_ref().unwrap().input.as_str(), "lgtm!");
 
             handle_key(&mut app, key(KeyCode::Esc), &mut Vec::new());
             assert!(view(&app).comment.is_none());
             assert!(matches!(&app.overlay, Some(Overlay::PullRequests(_))));
             let url = "https://github.com/o/r/pull/41";
-            assert_eq!(app.pr_comment_drafts.get(url).map(String::as_str), Some("lgtm!"));
+            assert_eq!(
+                app.pr_comment_drafts.get(url).map(String::as_str),
+                Some("lgtm!")
+            );
 
             handle_key(&mut app, cmd('y'), &mut Vec::new());
             assert_eq!(
@@ -3256,7 +3256,10 @@ mod tests {
             select(&mut app, 1);
             assert!(view(&app).comment.is_none());
             let url = "https://github.com/o/r/pull/42";
-            assert_eq!(app.pr_comment_drafts.get(url).map(String::as_str), Some("x"));
+            assert_eq!(
+                app.pr_comment_drafts.get(url).map(String::as_str),
+                Some("x")
+            );
         });
     }
 
@@ -3463,7 +3466,9 @@ mod tests {
         assert!(row.contains("│▌ M  src/login.rs"), "{shot}");
         assert!(row.contains(" +2 −1 │"), "{row:?}");
         assert!(
-            hints(view(&app)).iter().any(|h| h.does == "review the file"),
+            hints(view(&app))
+                .iter()
+                .any(|h| h.does == "review the file"),
             "{shot}"
         );
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
@@ -3481,10 +3486,10 @@ mod tests {
         assert_eq!(view(&app).tabs.tab, PrTab::Checks);
         screen(&mut app, 140, 34);
         crate::hints::assert_hints_from(&hints(view(&app)), keys::ALL);
-        crate::event_loop::take_opened();
+        crate::open_url::take_opened();
         handle_key(&mut app, ctrl('o'), &mut out);
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             ["https://github.com/o/r/actions/runs/9"]
         );
 
@@ -3671,7 +3676,7 @@ mod tests {
         let mut out = Vec::new();
         handle_key(&mut app, ctrl('o'), &mut out);
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             ["https://github.com/o/r/pull/42"]
         );
         let click = MouseEvent {
@@ -3682,7 +3687,7 @@ mod tests {
         };
         handle_mouse(&mut app, click, at, &mut out);
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             ["https://github.com/o/r/pull/42"]
         );
         assert!(
@@ -3881,7 +3886,7 @@ mod tests {
         };
 
         // The section's rule, then the rows.
-        let opened = crate::event_loop::take_opened;
+        let opened = crate::open_url::take_opened;
         click_at(&mut app, 2);
         assert_eq!(selected_pr(&app).unwrap().number, 41);
         assert!(opened().is_empty(), "one click only selects");

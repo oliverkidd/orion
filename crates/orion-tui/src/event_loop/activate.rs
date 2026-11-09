@@ -22,7 +22,8 @@
 
 use super::{attach_now, jump_to_target, open_link, run_menu_action, Landing, SettingsCmd};
 use crate::app::{
-    App, ConfirmDialog, DiffFocus, DiffView, Focus, FollowUp, Overlay, PendingAction, SessionRow,
+    App, ConfirmDialog, DiffFocus, DiffView, Focus, FollowUp, Overlay, PaletteTarget,
+    PendingAction, SessionRow,
 };
 use orion_core::{AgentId, ClientRequest, SessionRef, WorktreeId};
 
@@ -54,6 +55,67 @@ pub(super) fn palette_row(app: &mut App, landing: Option<Landing>, out: &mut Vec
     let landing = landing.unwrap_or_else(|| Landing::for_enter_on(app, &target));
     app.overlay = None;
     jump_to_target(app, target, landing, out);
+}
+
+/// The NEEDS YOU BOARD's card under the cursor — Enter, a click on it:
+/// the palette goes and orion lands on what the card stands for, the way
+/// a `⌘K` jump to it does — a session waiting on you attached, a Linear
+/// issue open in the issues modal, a pull request on its row — and a pull
+/// request of a repo orion has no project for, or a Slack message, in
+/// the browser. On `+N more` it unfolds the section, as → does.
+pub(super) fn needs_you_card(app: &mut App, out: &mut Vec<ClientRequest>) {
+    use crate::needs_you::board::Slot;
+    use crate::needs_you::model::CardTarget;
+    let Some(Overlay::Palette(palette)) = &mut app.overlay else {
+        return;
+    };
+    let card = match palette.board.selected_slot() {
+        Some(Slot::More(section)) => {
+            palette.board.expand(section);
+            return;
+        }
+        Some(Slot::Card(_)) => palette.board.selected().cloned(),
+        None => None,
+    };
+    let Some(card) = card else {
+        return;
+    };
+    let jump = match card.target {
+        CardTarget::Session(id) => PaletteTarget::Session(id),
+        CardTarget::LinearIssue { project, id } => PaletteTarget::LinearIssue { project, id },
+        CardTarget::PullRequest {
+            project: Some(project),
+            url,
+        } if app
+            .open_prs
+            .get(&project)
+            .is_some_and(|open| open.list.iter().any(|pr| pr.url == url)) =>
+        {
+            PaletteTarget::PullRequest { project, url }
+        }
+        CardTarget::PullRequest { url, .. } => {
+            app.overlay = None;
+            open_link(app, &url, None, out);
+            return;
+        }
+        // Its link, from Slack once; it opens when Slack gives it.
+        CardTarget::SlackMessage { channel, ts, .. } => {
+            app.overlay = None;
+            if let Some(url) = crate::needs_you::slack::permalink(app, &channel, &ts) {
+                open_link(app, &url, None, out);
+            }
+            return;
+        }
+        // A meeting's TAKEAWAYS SCREEN, or — couldn't be read — a read again.
+        CardTarget::Meeting { id } => {
+            app.overlay = None;
+            crate::automations::meeting_takeaways::open(app, &id, false);
+            return;
+        }
+    };
+    let landing = Landing::for_enter_on(app, &jump);
+    app.overlay = None;
+    jump_to_target(app, jump, landing, out);
 }
 
 /// A destination of the HOSTS PICKER — Enter on a row, a click on one,
@@ -228,7 +290,7 @@ pub(super) fn settings_row_cmd(hotkeys: bool, selected: usize) -> SettingsCmd {
 pub(super) fn worktrees_row(app: &mut App, out: &mut Vec<ClientRequest>) {
     let link = app.selected_worktree_pr().map(|pr| pr.url.clone());
     match link {
-        Some(url) => open_link(app, &url, out),
+        Some(url) => open_link(app, &url, None, out),
         None => app.focus = Focus::Sessions,
     }
 }

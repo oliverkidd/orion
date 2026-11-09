@@ -897,9 +897,25 @@ pub struct HarnessOverride {
     /// clears it.
     #[serde(default, skip_serializing_if = "Clearable::is_keep")]
     pub env: Clearable<BTreeMap<String, String>>,
+    /// The browser links from this account's sessions open in (Settings →
+    /// Accounts' **Open links in**); None is the system's default browser.
+    /// Only the TUI reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<LinkBrowser>,
     /// What an older release read here and this one does not.
     #[serde(flatten)]
     pub retired: BTreeMap<String, serde_json::Value>,
+}
+
+/// `harnesses.<id>.browser`: the app a link opens in, by the name the
+/// **Open links in** row shows (`Safari`, `Chrome`, `Firefox`, `Arc`, or
+/// any app `open -a` finds), and the browser profile to open it in, where
+/// the browser takes one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkBrowser {
+    pub app: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 impl HarnessDescriptor {

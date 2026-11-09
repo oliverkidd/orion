@@ -97,8 +97,8 @@ pub enum Action {
     CopyLinearIssues,
     /// `⌘I`: the TODOS MODAL — every project's todo list, a tab each.
     Todos,
-    /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
-    /// days, written up by product area with what to show and say.
+    /// "Run week in review now": the WEEK IN REVIEW automation, run at
+    /// once. Unbound: the COMMAND PALETTE runs it.
     WeekReview,
     /// `p`: PULL the selected checkout — fetch, then fast-forward onto its
     /// upstream, never a merge or a rebase (`crate::git_sync`).
@@ -190,9 +190,16 @@ pub enum Action {
     Home,
     Hosts,
     Settings,
+    /// `⌘⇧A`: AWAY BY HAND — you count as away until your next key, so a
+    /// session that starts waiting goes to your phone (Settings ›
+    /// Connections).
+    AwayToggle,
     /// The settings overlay on the Accounts tab's CLAUDE ACCOUNTS: who each
     /// Claude Code login is, signing one in or out, adding another.
     ClaudeAccounts,
+    /// The settings overlay on its Connections tab: away and the phone,
+    /// Slack, Microsoft 365, GitHub and Linear.
+    Connections,
     /// `⇧U`: ACCOUNT USAGE — how much is left on each Claude and Cursor
     /// account, window by window.
     Usage,
@@ -232,6 +239,10 @@ pub enum Action {
     /// so a key bound to it stays bound.
     OpenInCursor,
     Quit,
+    /// `⌘J`: AUTOMATIONS — every automation orion runs on its own, each
+    /// one's on/off, preset and extra steer, and what it is running and
+    /// has done (`crate::automations::view`).
+    Automations,
 }
 
 /// One rebindable row: what it does, where it's live, and what it starts as.
@@ -315,8 +326,8 @@ pub const ACTIONS: &[ActionSpec] = &[
     ActionSpec {
         action: Action::Palette,
         id: "palette",
-        label: "Jump to…",
-        hint: "Search every project, worktree, session and open pull request at once; Enter jumps there, and the last row adds a project",
+        label: "Needs you",
+        hint: "Everything waiting on you in one board: agents, Linear, code reviews, Slack, meetings. Type to jump to any project, worktree, session or pull request instead; the last row adds a project",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &["cmd+k"],
@@ -325,7 +336,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::NextAttention,
         id: "next_attention",
         label: "Next session needing you",
-        hint: "Jump to the next session in the palette's attention order (needs you or crashed, finished unread, running, then recency) in any project, wrapping",
+        hint: "Jump to the next session in attention order (needs you or crashed, finished unread, running, then recency) in any project, wrapping",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &["."],
@@ -334,7 +345,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::PrevAttention,
         id: "prev_attention",
         label: "Prev session needing you",
-        hint: "The same walk backwards: the session before this one in the palette's attention order, wrapping at the top",
+        hint: "The same walk backwards: the session before this one in attention order, wrapping at the top",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &[","],
@@ -495,15 +506,13 @@ pub const ACTIONS: &[ActionSpec] = &[
     },
     ActionSpec {
         action: Action::WeekReview,
-        id: "week_review",
-        label: "My week in review",
-        hint: "What was merged and done in the last 7 days, written up by product area with what to show and what to say; just yours or everyone's",
+        id: "run_week_review",
+        label: "Run week in review now",
+        hint: "The week in review automation, now: every project that had changes in the last 7 days written up by product area, with what to show and what to say",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        // ⌘⇧W would read better, and Ghostty keeps it for good. Every `^`
-        // letter is spoken for, so its twin for a terminal that sends no
-        // ⌘ is the grid's `⇧W`, for week.
-        defaults: &["cmd+shift+y", "shift+w"],
+        // No key: it runs on its own schedule, and from `r` on ⌘J.
+        defaults: &[],
     },
     ActionSpec {
         action: Action::PullWorktree,
@@ -578,8 +587,8 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "SESSIONS",
         scope: Scope::Global,
         // Never a bare letter: a stray `a` aimed at a prompt that lands on
-        // the grid must not file a session away.
-        defaults: &["cmd+shift+a"],
+        // the grid must not file a session away. ⌘⇧A is away by hand.
+        defaults: &["cmd+shift+x"],
     },
     ActionSpec {
         action: Action::Unarchive,
@@ -836,9 +845,9 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Fold the pane away — which also unselects the row it was reading — or bring it back. {toggle_launcher_pane} works from inside the pane too",
         group: "GENERAL",
         scope: Scope::Global,
-        // ⌘J, as in Cursor, reaches orion from inside the pane as well —
-        // no one types a ⌘ chord as text.
-        defaults: &["cmd+j"],
+        // ⌘⇧J — ⌘J is Automations — reaches orion from inside the pane
+        // as well: no one types a ⌘ chord as text.
+        defaults: &["cmd+shift+j"],
     },
     ActionSpec {
         action: Action::ToggleFullScreen,
@@ -886,12 +895,31 @@ pub const ACTIONS: &[ActionSpec] = &[
         defaults: &["s", "cmd+,"],
     },
     ActionSpec {
+        action: Action::AwayToggle,
+        id: "away_toggle",
+        label: "Away by hand",
+        hint: "Say you are away until your next key: a session that starts waiting or crashes goes to your phone as a Slack DM (Settings › Connections)",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &["cmd+shift+a"],
+    },
+    ActionSpec {
         action: Action::ClaudeAccounts,
         id: "claude_accounts",
         label: "Claude accounts",
         hint: "Settings → Accounts → Claude accounts: who each Claude Code login is signed in as, sign one in or out, add another",
         group: "GENERAL",
         scope: Scope::Global,
+        defaults: &[],
+    },
+    ActionSpec {
+        action: Action::Connections,
+        id: "connections",
+        label: "Connections",
+        hint: "Settings → Connections: when you count as away and what reaches your phone, Slack, Microsoft 365, GitHub and Linear",
+        group: "GENERAL",
+        scope: Scope::Global,
+        // No key: Settings (⌘,) and this palette row reach it.
         defaults: &[],
     },
     ActionSpec {
@@ -1015,6 +1043,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         scope: Scope::Global,
         // Not a bare `q`: a stray letter must not ask to quit.
         defaults: &["ctrl+c"],
+    },
+    ActionSpec {
+        action: Action::Automations,
+        id: "automations",
+        label: "Automations",
+        hint: "What orion runs on its own — the PR fixer, the bug fixer, week in review and the rest: turn each on or off, pick its preset, give it an extra steer, see what it is running",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &["cmd+j"],
     },
 ];
 

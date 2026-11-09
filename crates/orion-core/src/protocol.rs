@@ -1,6 +1,7 @@
 use crate::compose::Stack;
 use crate::entities::{
-    Agent, AgentKind, AgentStatus, Entity, EntityId, Link, Project, TerminalTab, Worktree,
+    Agent, AgentKind, AgentStatus, Entity, EntityId, Link, Project, TerminalTab, WaitReason,
+    Worktree,
 };
 use crate::ids::{AgentId, LinkId, ProjectId, TerminalId, WorktreeId};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 51;
+pub const PROTOCOL_VERSION: u32 = 54;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -144,6 +145,10 @@ pub enum ClientRequest {
         /// and a mode the harness does not have is dropped.
         #[serde(default)]
         mode: crate::harness::AgentMode,
+        /// The AUTOMATION starting this session (`Agent::automation`), or
+        /// None for a launch of yours. Persisted with the row.
+        #[serde(default)]
+        automation: Option<String>,
     },
     /// Create a local AGENT of any kind from an OPEN PRS row — a PR
     /// SESSION. It never runs in the ROOT WORKTREE: the daemon finds the
@@ -192,6 +197,9 @@ pub enum ClientRequest {
         /// The mode the CLI starts in, under `CreateAgent`'s rules.
         #[serde(default)]
         mode: crate::harness::AgentMode,
+        /// The AUTOMATION starting it, under `CreateAgent`'s rules.
+        #[serde(default)]
+        automation: Option<String>,
     },
     /// CHECK OUT A PULL REQUEST: the PROJECT's checkout of the pull
     /// request's head branch — found, or cut exactly as a PR SESSION's is
@@ -326,6 +334,23 @@ pub enum ClientRequest {
         cols: u16,
         rows: u16,
     },
+    /// What a session last said and why it is waiting, if it is: the
+    /// text of the last assistant message in its transcript. Answered by
+    /// `ServerEvent::LastResponse` with the same req_id (not an Ack).
+    LastResponse {
+        req_id: u64,
+        id: AgentId,
+    },
+    /// Answer a session that is waiting on you (`WaitReason`): the
+    /// keystrokes its question or plan dialog takes, typed into the live
+    /// CLI. A session with no dialog open — it is not running, or the
+    /// daemon restarted since it asked — gets the answer as its next turn,
+    /// in words (`SendTurn`). Answered with `Ack`.
+    Answer {
+        req_id: u64,
+        id: AgentId,
+        answer: Answer,
+    },
     CreateTerminal {
         req_id: u64,
         worktree: WorktreeId,
@@ -399,6 +424,19 @@ pub enum ClientRequest {
         id: AgentId,
     },
 
+    /// Fire-and-forget: AWAY BY HAND (⌘⇧A) on or off. Off is also what a
+    /// TUI sends on its first key after the flag went on — you are back.
+    /// Every subscriber hears `AwayChanged`.
+    SetAway {
+        on: bool,
+    },
+
+    /// Fire-and-forget: the Slack tokens in the Keychain changed (the
+    /// Connections tab saved or deleted them). The daemon's Slack bridge
+    /// reads them again and reconnects, and every subscriber hears the
+    /// new `SlackStatus`.
+    SlackReconnect,
+
     /// One point-in-time memory reading — the daemon plus every live
     /// session's process subtree. Answered by `ServerEvent::Metrics` with
     /// the same req_id (not an Ack).
@@ -407,6 +445,40 @@ pub enum ClientRequest {
     },
 
     Shutdown,
+}
+
+/// A reply to a session waiting on you ([`ClientRequest::Answer`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Answer {
+    /// Pick this option (0-based) of the question, or of the plan or
+    /// permission dialog.
+    Option(usize),
+    /// Answer the question in your own words.
+    Text(String),
+    /// Approve the plan.
+    ApprovePlan,
+    /// Keep planning, with this feedback; on a question, the same as
+    /// `Text`.
+    Steer(String),
+}
+
+/// How orion's Slack connection stands (`ServerEvent::SlackStatus`).
+/// All None with `configured` false: no tokens saved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlackStatus {
+    /// The three tokens are saved.
+    pub configured: bool,
+    /// Signed in and listening: the workspace's name (`auth.test`'s
+    /// `team`).
+    pub workspace: Option<String>,
+    /// The installing user's Slack id (`U…`): whose DMs and mentions the
+    /// inbox reads, and who the phone messages go to.
+    pub user_id: Option<String>,
+    /// The DM channel orion's bot posts phone messages in (`D…`). Its
+    /// messages are the phone's, not the inbox's.
+    pub phone_channel: Option<String>,
+    /// Why it is not connected, as one line to show.
+    pub problem: Option<String>,
 }
 
 /// What a new session launches as — its harness (a Claude account is
@@ -537,6 +609,11 @@ pub enum ServerEvent {
         /// turn just finished, cleared when it left `finished`.
         #[serde(default)]
         unseen: bool,
+        /// Why it is waiting on you, when the change is into
+        /// `needs_feedback` (a question, a plan, a permission prompt) or
+        /// `terminated` (a crash) and the daemon knows. None otherwise.
+        #[serde(default)]
+        reason: Option<WaitReason>,
     },
 
     /// `orion open` from an agent session: the files the user asked to
@@ -589,6 +666,53 @@ pub enum ServerEvent {
     Metrics {
         req_id: u64,
         snapshot: MetricsSnapshot,
+    },
+
+    /// AWAY changed (`orion_core::away`): you count as away, or are back.
+    /// `by_hand` is the ⌘⇧A flag, which the next key in any TUI clears.
+    /// Sent right after `Snapshot` too.
+    AwayChanged {
+        away: bool,
+        by_hand: bool,
+    },
+
+    /// How the Slack connection stands, when it changes and right after
+    /// `Snapshot`.
+    SlackStatus {
+        status: SlackStatus,
+    },
+
+    /// A Slack message event from the installing user's token — a DM, a
+    /// group DM, a channel or a private channel message they can see
+    /// (`message.im`, `message.mpim`, `message.channels`,
+    /// `message.groups`) — forwarded as it came, unfiltered: the TUI
+    /// decides what is for you.
+    SlackMessage {
+        /// The conversation (`C…`, `G…`, `D…`).
+        channel: String,
+        /// `im`, `mpim`, `channel` or `group`.
+        channel_type: String,
+        /// The sender's user id; None for a bot or a system message.
+        user: Option<String>,
+        text: String,
+        /// The message's own timestamp, its id in the conversation.
+        ts: String,
+        /// The thread it is a reply in (the parent's `ts`), if it is one.
+        thread_ts: Option<String>,
+        /// `message_changed`, `bot_message`, … — None for a plain message.
+        subtype: Option<String>,
+        /// The whole Slack event as JSON, for anything the fields above
+        /// leave out.
+        event_json: String,
+    },
+
+    /// Reply to `ClientRequest::LastResponse`: the text of the session's
+    /// last assistant message (None when there is no transcript, or no
+    /// text in it), and why it is waiting on you, if it is.
+    LastResponse {
+        req_id: u64,
+        text: Option<String>,
+        reason: Option<WaitReason>,
     },
 }
 

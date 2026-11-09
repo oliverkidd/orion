@@ -91,7 +91,7 @@ pub struct AgentPreset {
 #[serde(rename_all = "snake_case")]
 pub enum SystemPreset {
     /// The text around what broke, for the agent AUTOFIX sends to a pull
-    /// request (`crate::autofix::prompt`); its model and effort are what
+    /// request (`crate::automations::pr_fixer::prompt`); its model and effort are what
     /// that agent runs at when no session on the branch has run here to
     /// copy. It runs on the pull request's own agent.
     PrAutofix,
@@ -100,13 +100,29 @@ pub enum SystemPreset {
     /// The rules a WEEK REVIEW is written by (`crate::week_review`), and
     /// the Claude account, model and effort that write it.
     WeekReview,
+    /// What the BUG FIXER tells the agent it starts on a labelled Linear
+    /// bug (`crate::automations::linear_builder`).
+    BugFixer,
+    /// What the FEATURE BUILDER tells the agent it starts on a labelled
+    /// Linear feature (`crate::automations::linear_builder`).
+    FeatureBuilder,
+    /// What MEETING TAKEAWAYS asks of a meeting's transcript
+    /// (`crate::automations::meeting_takeaways`), and what answers it.
+    MeetingTakeaways,
+    /// What the BLUE SKY BUILDER tells the agent it starts on an idea
+    /// (`crate::automations::blue_sky`).
+    BlueSky,
 }
 
 impl SystemPreset {
-    pub const ALL: [SystemPreset; 3] = [
+    pub const ALL: [SystemPreset; 7] = [
         SystemPreset::PrAutofix,
         SystemPreset::LinearTicket,
         SystemPreset::WeekReview,
+        SystemPreset::BugFixer,
+        SystemPreset::FeatureBuilder,
+        SystemPreset::MeetingTakeaways,
+        SystemPreset::BlueSky,
     ];
 
     /// The name the preset is listed under, and the name an older list's
@@ -116,6 +132,10 @@ impl SystemPreset {
             SystemPreset::PrAutofix => "PR autofix",
             SystemPreset::LinearTicket => "Linear Ticket",
             SystemPreset::WeekReview => "Week review",
+            SystemPreset::BugFixer => "Bug fixer",
+            SystemPreset::FeatureBuilder => "Feature builder",
+            SystemPreset::MeetingTakeaways => "Meeting takeaways",
+            SystemPreset::BlueSky => "Blue sky builder",
         }
     }
 
@@ -127,6 +147,10 @@ impl SystemPreset {
             SystemPreset::PrAutofix => "sent when one of your PRs breaks",
             SystemPreset::LinearTicket => "wraps every {linear} launch",
             SystemPreset::WeekReview => "writes your week review",
+            SystemPreset::BugFixer => "fixes your labelled Linear bugs",
+            SystemPreset::FeatureBuilder => "builds your labelled Linear features",
+            SystemPreset::MeetingTakeaways => "pulls takeaways from your meetings",
+            SystemPreset::BlueSky => "builds your blue sky ideas",
         }
     }
 
@@ -134,17 +158,24 @@ impl SystemPreset {
     /// none of the user's.
     pub fn builtin_text(self) -> &'static str {
         match self {
-            SystemPreset::PrAutofix => crate::autofix::PRESET_TEXT,
+            SystemPreset::PrAutofix => crate::automations::pr_fixer::PRESET_TEXT,
             SystemPreset::LinearTicket => crate::linear::TICKET_TEXT,
             SystemPreset::WeekReview => crate::week_review::brief_rules(),
+            SystemPreset::BugFixer => crate::automations::linear_builder::BUG_FIXER_TEXT,
+            SystemPreset::FeatureBuilder => {
+                crate::automations::linear_builder::FEATURE_BUILDER_TEXT
+            }
+            SystemPreset::MeetingTakeaways => crate::automations::meeting_takeaways::PRESET_TEXT,
+            SystemPreset::BlueSky => crate::automations::blue_sky::PRESET_TEXT,
         }
     }
 
     /// The preset as a list that never had one gets it: orion's text, and
-    /// — the week review's — Claude at sonnet · medium.
+    /// — the one-shot asks', the week review's and meeting takeaways' —
+    /// Claude at sonnet · medium.
     pub fn default_preset(self) -> AgentPreset {
         let (model, effort) = match self {
-            SystemPreset::WeekReview => (
+            SystemPreset::WeekReview | SystemPreset::MeetingTakeaways => (
                 Some(crate::week_review::DEFAULT_MODEL.into()),
                 Some(crate::week_review::DEFAULT_EFFORT.into()),
             ),
@@ -348,8 +379,14 @@ impl AgentPreset {
 pub fn follow_label(system: Option<SystemPreset>) -> &'static str {
     match system {
         Some(SystemPreset::PrAutofix) => FOLLOW_PR,
-        Some(SystemPreset::WeekReview) => FOLLOW_DEFAULT,
-        Some(SystemPreset::LinearTicket) | None => FOLLOW_BOX,
+        Some(SystemPreset::WeekReview | SystemPreset::MeetingTakeaways) => FOLLOW_DEFAULT,
+        Some(
+            SystemPreset::LinearTicket
+            | SystemPreset::BugFixer
+            | SystemPreset::FeatureBuilder
+            | SystemPreset::BlueSky,
+        )
+        | None => FOLLOW_BOX,
     }
 }
 
@@ -586,7 +623,16 @@ mod tests {
         let names: Vec<&str> = presets.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
-            ["pr AUTOFIX", "reviewer", "Linear Ticket", "Week review"]
+            [
+                "pr AUTOFIX",
+                "reviewer",
+                "Linear Ticket",
+                "Week review",
+                "Bug fixer",
+                "Feature builder",
+                "Meeting takeaways",
+                "Blue sky builder"
+            ]
         );
         assert_eq!(presets[0].system, Some(SystemPreset::PrAutofix));
         assert_eq!(presets[0].text, "Fix it my way.", "the user's text kept");
@@ -909,7 +955,11 @@ mod tests {
                         "Linear Ticket",
                         "PR autofix",
                         "Subagent Delegation",
-                        "Week review"
+                        "Week review",
+                        "Bug fixer",
+                        "Feature builder",
+                        "Meeting takeaways",
+                        "Blue sky builder"
                     ]
                 );
                 assert_eq!(presets[0].text, format!("{ticket}\n\n{TASK}"));

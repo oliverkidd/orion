@@ -51,7 +51,7 @@ harness with that in mind, especially in the ROOT WORKTREE.
 
 The same choice reaches the STATUS DOT, because an AGENT can only report what its hook set can see.
 Claude installs the full set — `UserPromptSubmit`, `Stop`, `SessionStart`, `PermissionRequest`,
-`Notification` (which is where the idle prompt comes from), `PreToolUse` on `AskUserQuestion`, an
+`Notification` (which is where the idle prompt comes from), `PreToolUse` on `AskUserQuestion` and `ExitPlanMode`, an
 unmatched `PostToolUse` and `StopFailure` (a turn that ends on an API error, a usage limit among
 them — see [below](#usage-limits-and-a-second-account)) — so a Claude row walks the whole range of
 states, red NEEDS FEEDBACK included, and leaves red the moment you answer: a question's answer is its
@@ -77,6 +77,21 @@ conversation after a restart — but Grok has no permission-request hook, so **a
 stops to ask you something stays working**. The picker says so on its row, dim at the right edge
 (`can't show it's waiting on you`), as it does for any CLI of yours with no hook dialect
 (`status from the process only`).
+
+Whatever the harness, a session in red — waiting on you, or crashed — and one whose finish nobody
+has read is a card in the AGENTS column of the [Needs you board](keys.md#needs-you-k) (`⌘K`), every
+kind in one list: crashed first, then waiting (the longest first), then finished. Its second line
+says why, as the daemon heard it: `asks a question`, `plan to approve`, `needs permission for Bash`,
+`hit its usage limit`, `crashed, exit 1`, `draft PR #12 ready` (a finish with a draft pull request
+open on its checkout) or `done` — and `waiting for you` when orion was not running to hear why. `⌘D` there puts the card away until the session wants you again.
+
+Beside them, the board's SLACK column holds the Slack conversations waiting on you, once Slack is
+connected in Settings › Connections: a DM, a mention, a reply in a thread you've posted in, a
+message in a channel you listed or one with your keyword. One card per conversation — a DM, a
+thread, a channel message — reads `<sender>: <first line>` over `direct message` or
+`#channel · mentions you`, and goes when you post there later, from Slack or anywhere else. `Enter`
+opens the newest message in Slack; `⌘D` puts it away until someone writes there again. The cards
+outlive a restart of orion; what Slack said while orion was closed is not caught up.
 
 ## AGENT PRESETS
 
@@ -118,10 +133,13 @@ follow the row, and the frame names only those that work on it: `Enter` edits an
 orion's, `^R` puts back orion's text (once you confirm); on one of yours, `^N` makes a new one and
 `^D` deletes it (once you confirm). The editor comes back to the row it was opened on.
 
-Three presets are **system presets**, on every list and tagged `orion` — the agents orion starts
-itself:
+Seven presets are **system presets**, on every list and tagged `orion` — the agents orion starts
+itself. Four belong to one automation each and are described with it: **Bug fixer** and
+**Feature builder** ([below](#the-bug-fixer-and-the-feature-builder)), **Meeting takeaways**
+([below](#meeting-takeaways)) and **Blue sky builder** ([below](#the-blue-sky-builder)). The other
+three:
 
-- **PR autofix** wraps what broke for the agent **Auto-fix my PRs** sends to a broken pull request.
+- **PR autofix** wraps what broke for the agent the **PR fixer** sends to a broken pull request.
   Its **Runs on** row starts on **the PR's own agent** — the session that did the work on its
   branch — and, with none, your default agent at this preset's model and effort; pin a harness
   there and the agent runs on that instead, at this preset's model and effort, while it is on. orion's text: fix only what is
@@ -134,7 +152,7 @@ itself:
   description, `{ids}` the IDs comma-separated and `{first_id}` the first one, and text that names no
   `{issues}` gets them where its `{task}` is — after its text when it names neither. orion's text: one commit per issue, one pull
   request titled `"{ids}: …"` whose description starts `Fixes {ids}`.
-- **Week review** holds the rules a WEEK IN REVIEW (`⌘⇧Y`) is written by — what earns a line, Show
+- **Week review** holds the rules a [week in review](#week-in-review) is written by — what earns a line, Show
   and Say, how a point is written — and the Claude account, model and effort that write it: sonnet ·
   medium unless you change them. Its **Runs on** row starts on **your default agent**: it is
   written through that agent's account; an account it pins that is off falls back to that.
@@ -187,7 +205,7 @@ A click outside the box closes it, as it closes any modal.
 Nothing about the PANE moves when you use it. It is not unfolded, not swapped onto the row, not
 attached to and not focused, and the turn goes down the session's PTY where it stands: prompting a
 session is not opening it. So the loop is click a row, `Space`, type a line, `Enter`, move to the next
-row — over a folded pane (`⌘J`) if you walk the rows with the keys, since a click on a row always
+row — over a folded pane (`⌘⇧J`) if you walk the rows with the keys, since a click on a row always
 brings the pane back — never once stepping into a session or waiting for one to attach. A pane already open is left on whatever it was reading, a terminal included.
 
 Only a live local agent takes one. An archived session's turn is over, a shell
@@ -390,7 +408,7 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   opening a shell or a worktree there, sending a follow-up, or typing into one of its sessions in the
   pane moves its tab to the front, so the header reads from the project you last worked in, left to
   right. Only switching to a tab moves none of them, so `[` / `]` walk a row that holds still.
-  A click on a tab, `[` / `]` for the tab to the left / right (stopping at either end), or a digit `1`–`9` for
+  A click on a tab, `[` / `]` for the tab to the left / right (stopping at either end), or `⌘1`–`⌘9` for
   the Nth from the left opens that project's sessions, on the row you last left it on — its session
   back in the pane — or its first row on a first visit. A project with no sessions yet — a folder
   just opened, or any other — opens on its EMPTY BANDS with the pane folded away, however it was
@@ -431,7 +449,7 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   without one closes once it is lit), then whole tabs, from the right, into the MORE CHIP after the
   last one drawn: `2 more ▾`, carrying their STATUS DOTS between them and sweeping as a tab's name
   does, so a project the row had no room for still says it wants you. A click on the chip (either
-  button) lists just those projects under it, and the pick opens one; `[` / `]`, the digits and the
+  button) lists just those projects under it, and the pick opens one; `[` / `]`, `⌘1`–`⌘9` and the
   header's cursor reach them too, each drawn in the lit tab's place. The lit tab is always drawn,
   its name whole wherever there is room for it. A tab's name, its `×`, the chip and the `+` all mark
   themselves while the pointer rests on them. The rows are grouped
@@ -530,13 +548,13 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   puts its shell there the same way. It is the selected session, so
   it comes and goes with the selection: clicking a row opens the pane on it — reading only, the keys
   stay on the grid, so a clicked row stays a
-  preview under its rule — and letting the row go (`Esc`, or `⌘J`) collapses
+  preview under its rule — and letting the row go (`Esc`, or `⌘⇧J`) collapses
   the pane and gives the grid the whole body back. A click on the air between the rows does not: a
   miss with the pointer leaves the pane exactly where it is. It takes a second click, or Enter, to type into it. It is the same pane
   a full-screen session has — the same attach, the same scrollback and wheel, and the session it shows is marked read
   the moment it lands there, so a `done` badge comes down as you arrive rather than when you open it.
   A click into the pane types into that session where it stands, with the grid still up beside it, and
-  `Esc` hands the keys back to the grid; `⌘J` folds the pane away. The edge facing the grid is
+  `Esc` hands the keys back to the grid; `⌘⇧J` folds the pane away. The edge facing the grid is
   draggable — a short `┃` grip marks it — and pulling it sideways trades columns between the grid
   and the session, stopping against the pane's own minimum one way and the grid's narrowest the
   other. Laid along the bottom, it is the pane's top edge that drags, under a short `━` grip,
@@ -553,7 +571,7 @@ already — so a new agent in a new worktree is that one chord, the task and `En
 - **Stepping into one** is Enter on a row (or a double-click): the keys cross
   into the pane beside the grid, where that session is already running, with its input locked and
   the grid still up beside it — the same place a click into the pane lands. `Esc` hands the keys
-  back to the grid (`⇧Esc` sends the agent its Esc), and `⌘J` folds the pane away.
+  back to the grid (`⇧Esc` sends the agent its Esc), and `⌘⇧J` folds the pane away.
 - **Full-screen** is `⌘F` in the pane (or on a row), or the `⤢` in the pane's header: the grid and
   its header give way to the session, the keys still in it. `⌘F` again, `Esc`, `^Q` or the `⤡` at
   the right end of the full-screen header brings it back down into the pane beside the grid.
@@ -570,15 +588,15 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   behind a confirm, which leaves the clone on disk alone. There is nothing above the bands to walk
   out to: `Esc` lets the row go, a second does nothing, and `↑` on the first band stays put.
 
-Every other key acts on the session under the cursor — `⌘⇧A` archives, `Backspace` deletes, `⌘E` opens its
-diff, `⌘K` jumps, `s` opens Settings. `⌘⇧A` asks first, always: a CONFIRM DIALOG names
+Every other key acts on the session under the cursor — `⌘⇧X` archives, `Backspace` deletes, `⌘E` opens its
+diff, `⌘K` jumps, `s` opens Settings. `⌘⇧X` asks first, always: a CONFIRM DIALOG names
 the session, `Enter` or `y` archives it and `Esc` or `n` keeps it, so a letter aimed at an agent
 that lands on the grid archives nothing — and saying yes is cheap, since `⌘⇧U` brings it back. The
 cursor lands on the row after the one archived in its band — the one that slides up into its
 place — or, when the band's last row went, on the one before it; a band's only session leaving leaves
 the band, empty, under the cursor. `Backspace` lands the same way, and its confirm is the session's
 own: deleting a worktree's last session never asks about the worktree, which stays as an empty band
-until its own `Backspace`. A held `⌘⇧A` opens one dialog and
+until its own `Backspace`. A held `⌘⇧X` opens one dialog and
 archives nothing by itself; a held `⌘⇧U` in the ARCHIVED VIEW unarchives one session, and the next needs
 the key let go and pressed again (on a terminal with the kitty keyboard protocol, which is what
 tells a held key's repeats from a fresh press; without it a long hold still walks the row).
@@ -629,9 +647,9 @@ Under the open rows sits **Merged**: the pull requests that landed in the last 7
 merge first, each in the merged purple with how long ago it merged — so the list reads as a lineage,
 not only as what is left to do. They ride the same query as the open list (the first page of 100
 merged pull requests, most recently touched first), and only the modal lists them:
-the grid's counts, the `⌘K` jump list and AUTOFIX see open pull requests alone. A merged row is read,
+the grid's counts, the `⌘K` jump list and the PR fixer see open pull requests alone. A merged row is read,
 diffed, commented on and opened in the browser like any other; the verbs that need an open pull
-request — `Enter`'s agent, merge, edit, close, ready/draft, autofix — say it has merged and do nothing.
+request — `Enter`'s agent, merge, edit, close, ready/draft, the PR fixer — say it has merged and do nothing.
 `is:merged` in the filter shows them alone. After them comes **Closed**: the pull requests closed
 without merging in the last 30 days, each saying why where GitHub does, and `Enter` on one opens
 **Edit pull request** at its reopen ([Keys](keys.md#views)); `is:closed` shows them alone.
@@ -665,65 +683,218 @@ a check, the check's own page), and `Esc` closes the
 modal (twice, with a filter typed). The hotkey is
 rebindable (`pull_requests`).
 
-## The WEEK IN REVIEW
+## Automations
 
-`⌘⇧Y` (`⇧W`) writes up what was finished in the selected PROJECT in the last 7 days — or 2 weeks,
-or a month — the pull requests merged, the Linear issues done, the todos ticked — as a review to
-read aloud with the product on screen: by product area, each point numbered, with what to **Show**
-and what to **Say** under the ones worth a demo.
+`⌘J` opens AUTOMATIONS: the agents orion starts on its own, in a list on the left with what each
+is doing, and the one under the cursor on the right.
 
-It is a screen of its own. Down the left, **New review**: its options — Whose, Where, the Range, the
-sources and the Note — and under them exactly what would be sent. Down the right, **Reviews**: the
-one being written, then the ones kept, newest first, each named for the week it ends in (`Week 45`,
-`Weeks 43–45` for two, `Month to 5 Nov`) and whose it is, `new` until it has been read. `Tab` moves
-between the two. `Enter` on the new review writes it and turns to a fresh page that shows it being
-written and what went in; when it lands, that page is the review. `Enter` (or a click) on a review
-in the list opens it on its page, and `Esc` comes back to the screen. Closed while one is being
-written, the modal opens next time on that review's page.
+```
+Automations                                      1 of at most 5 agents running ←→
+● PR fixer        fixing #407  │ PR fixer
+○ Bug fixer               off  │ When one of your PRs hits conflicts or failing checks, …
+○ Feature builder         off  │ SETTINGS
+○ Week in review          off  │   On           on
+○ Meeting takeaways       off  │   Preset       PR autofix · the PR's own agent
+○ Blue sky builder       idle  │   Extra steer  none
+                               │ YOUR OPEN PRS
+                               │   #407 Fix the login redirect   fixing checks, try 2 of 3
+```
 
-orion gathers; a model writes. Opening the modal fetches every pull request merged in the range with
-its description (the PULL REQUESTS MODAL's merged list carries titles, and a review is written from
-what a pull request says it does), a page of 100 at a time until the range is covered; a longer
-range is a fetch of its own, asked for as it is picked. The done issues and ticked todos come from
-the lists already in hand — Linear's holds the last 7 days of done issues, so a longer range has
-that week of them, as its row says. `Enter` then puts all of it in one prompt and sends it through
-a Claude account's print mode with no tools: text in, text out. No session starts, nothing runs in
-a checkout, and there is nothing to tidy up after.
+- **Each one** has **On**, its **Preset** and an **Extra steer**, and the bug fixer, the feature
+  builder and week in review have a row or two more (**Labels**, **When**, **Whose**). The preset
+  says what the agent is told and what it runs on: `Enter` on the row opens it in
+  Settings › Presets, and `⌘U` picks another of your presets in its place. The extra steer is one
+  line added after the preset's text, as `Extra steer: …`, on every prompt that automation sends.
+- **Its lists** say what it is running and what it has done: the PR fixer's **YOUR OPEN PRS**
+  (fixing checks, try 2 of 3 / green / gave up, needs you) and **DONE THIS WEEK**. `Enter` on a row
+  with a session jumps to it.
+- **A cap.** No automation starts a session while `automations.max_running` of them — 5 unless you
+  change it with `←`/`→` in the header — are at work or waiting on you. A breakage the PR fixer
+  sees meanwhile waits, watched, for a place.
+- **Tagged sessions.** Every session an automation starts is an ordinary row on the grid, its
+  automation's name ahead of what it runs on (`PR fixer · opus high`), and Needs you labels it the
+  same way. orion keeps the tag with the session, across restarts.
+- Settings are global, never per project. See [Configuration](configuration.md#automations).
+
+### The PR fixer
+
+When one of your pull requests hits merge conflicts or failing checks, the PR fixer sends an
+`autofix-<n>` session to it at once, nothing to confirm: on the agent, account, model and effort
+of the session that did the work on its branch — your default agent with none — told the
+**PR autofix** preset's text with what broke. It watches the pull request until it is green, and
+stops after 3 tries in a row that don't turn it green, saying so. On by default (it was **Auto-fix
+my PRs** in Settings → General through 2.x, and a config that turned that off keeps it off). `⌘G`
+on a pull request sends one by hand whatever it says.
+
+### The bug fixer and the feature builder
+
+Both pick up Linear tickets assigned to you that carry one of their labels, plan each one, wait for
+your approval, then build it to a draft pull request. They work the same way; each has its own
+labels and its own preset (**Bug fixer**, **Feature builder**). Both are off until you turn them on.
+
+- **Labels.** The bug fixer's are `Bug · Regression · Customer bug`, the feature builder's
+  `Feature · Improvement`, until you pick others: `Enter` on **Labels** lists your Linear
+  workspace's labels, `Space` ticks one, `Enter` keeps the ticks and `Esc` leaves them as they were.
+  Case doesn't matter. A ticket with none of either's labels is left alone.
+- **Watching.** Every 2 minutes, for each Linear key your projects use, orion asks for the tickets
+  assigned to you in triage, the backlog or todo with one of the labels. A ticket is picked up once:
+  orion remembers it in `automations/linear-builder.json` in its data dir, and Needs you stops
+  showing its assignment.
+- **Which project.** A key only one project uses sends its tickets there. When several projects
+  share a key, a model reads each ticket and each project's **What it is** line and picks one.
+- **Together or apart.** When several new tickets land for one project at once, a model joins only
+  the ones that clearly share a cause or a component; the rest get a session each.
+- **The session.** One session a ticket (or group), in a fresh worktree named after it, started in
+  **plan mode** on the preset's agent. Its first prompt is the preset's text with the tickets in
+  full and, under **Related work to check**, the project's open draft pull requests and the ones
+  merged lately. As a ⌘L launch does, it moves the tickets to In Progress and attaches the draft
+  pull request to them when it opens.
+- **Your approval.** The plan waits for you like any other: in Needs you, and on your phone when
+  you're away. The default preset tells the agent to read the repo's `docs/decisions/` for the areas
+  it touches before planning, run only the e2e specs that cover the change, log new decisions you
+  make while steering, and open the draft pull request with **What and why**, **Blast radius**,
+  **Decisions**, **Reuse**, **Neighbours checked**, **UI**, **Performance** and **Check it
+  yourself** sections.
+- **The panel.** **RUNNING** lists each session: `planning`, `plan to approve`, `building`, or
+  `queued, 5 running` while the cap is full. **DONE THIS WEEK** lists the ones that finished.
+
+### Week in review
+
+Week in review writes up what was finished in the last 7 days — the pull requests merged, the
+Linear issues done, the todos ticked — as a review to read aloud with the product on screen: by
+product area, each point numbered, with what to **Show** and what to **Say** under the ones worth a
+demo. It writes one review for each project that had changes, so it's ready before the meeting.
+
+It runs three ways: on its **When** while it is on (Fridays 08:30 unless you change it), by `r` on
+its panel in Automations (`⌘J`, the `r run now` at the panel's top right), and by **Run week in
+review now** in the command palette (`⌘⇧P`), which also opens Automations on it to watch it go.
+
+```
+Week in review                          r run now
+Writes up the week from everything merged, done and ticked, …
+SETTINGS
+  On           on
+  When         Fri 08:30
+  Whose        just me
+  Preset       Week review · sonnet medium
+  Extra steer  none
+REVIEWS
+  Week 45                   Fri 08:30 · 9 points · new
+  Week 44                   Fri 08:31 · 12 points
+```
+
+- **When** is a day and a time: `Enter` on it and write one, `Fri 08:30` or `mon 9`. orion looks
+  once a minute while it runs. A time missed while the laptop was asleep runs on the first look after
+  it, once; turning week in review on after this week's time waits for next week's.
+- **Whose** is *just me* (the pull requests you opened, the issues assigned to you, your todos) or
+  *whole team*, where each point names its owner by initials — from their GitHub name, else their
+  login — and each area lists who contributed to it. `Enter` switches.
+- **Preset** is the **Week review** system preset, which holds the rules a review is written by and
+  the Claude account, model and effort that write it (sonnet · medium unless you change them).
+  **Extra steer** is added after those rules. A note a project kept for its reviews in an older
+  release becomes the extra steer once.
+- **REVIEWS** lists the runs kept, newest first, each named for the week it ends in, with when it
+  was written, how many points it makes, and `new` until read. While one is being written it heads
+  the list (`writing 2 of 4`), and the row's state says the same.
+
+`Enter` (or a click) on a review opens it on a page of its own, **a tab per project** it wrote up:
+`[`/`]`, `←`/`→` or `⇧←`/`⇧→` move between tabs (a click on one goes there), `↑`/`↓` and
+`PgUp`/`PgDn` scroll, `⌘C` copies the tab's review as Markdown, `⌘O` opens its file, and `Esc` goes
+back to Automations. The run being written opens on the same page, each tab showing its review being
+written and what went in until it lands; `⌘W` there stops what is still being written and keeps what
+came back.
+
+orion gathers; a model writes. A run fetches every project's pull requests merged in the week with
+their descriptions (a page of 100 at a time until the week is covered), and reads the done issues
+and ticked todos from the lists in hand. A project with none of the three is left out. A project
+GitHub could not be asked about is not written up from the rest, and its tab says why. Each project
+is one prompt, sent through a Claude account's print mode with no tools — text in, text out — three
+at a time. No session starts, nothing runs in a checkout, and there is nothing to tidy up after.
 
 The account is one orion runs sessions on, never whatever a bare `claude` would sign in as: the one
-the **Week review** system preset runs on (see [Agent presets](#agent-presets); a new list puts it
-on your default agent's account), else your default agent's when that is a Claude account, and
-otherwise the first Claude account that is switched on. The model and effort are the preset's too,
-sonnet · medium unless you change them. It runs as that account's own CLI with that account's config dir, so the ask lands on
-that sign-in and that account's usage. The new review says which on its **Via** line, as Claude accounts
-names it — `Work (a@b.co)`, or `Work (not signed in)` — and refuses to send, saying why, when no
-Claude account is on or its CLI is not on your PATH. An account that reads as not signed in is still
-tried: that record only knows a browser sign-in, and one on an API key answers all the same; one that
-cannot answer says so itself, and the new review shows what it said. A very large
-pull request — a feature branch merged in one go — sends far more of its description than an
-ordinary one, since its commit list is all the description it has; one that only moves a standing
-branch into `main` is marked a release and left out.
-
-**Whose** is *Just mine* (the pull requests you opened, the issues assigned to you) or *Everyone*,
-where each point names its owner by initials — from their GitHub name, else their login — and each
-area lists who contributed to it. **Where** is this project or all of them.
+the preset runs on (see [Agent presets](#agent-presets)), else your default agent's when that is a
+Claude account, and otherwise the first Claude account that is switched on. It runs as that
+account's own CLI with that account's config dir, so the ask lands on that sign-in and that
+account's usage. A run refuses to start, saying why in the footer, when no Claude account is on or
+its CLI is not on your PATH. A very large pull request — a feature branch merged in one go — sends
+far more of its description than an ordinary one, since its commit list is all the description it
+has; one that only moves a standing branch into `main` is marked a release and left out.
 
 The model is asked to list only what a person outside the team that built it would want to know or
 see, and never to count. What it sends back is held to its shape without a model: every pull
-request it names was in the range, every owner is the author of the point's first pull request. A
+request it names was in the week, every owner is the author of the point's first pull request. A
 reply that strays is still shown, with a line under its title saying how. The last line — how many
 were merged and not listed — is orion's own subtraction, so it is exact.
 
-Reviews are kept as Markdown under the DATA DIR (`reviews/`), the last 12 per project (and 12 of
-all projects), with what each was written from beside it. The **Note** typed on the new review is
-kept per project, so what matters there is said once.
+Runs are kept under the DATA DIR as `reviews/all/<last day>/<project>.md`, one file a project, with
+a `meta.json` beside them saying what each was written from; the last 12 runs are kept, and a second
+run on the same day takes the first's place. Reviews kept by older releases stay on disk and are not
+listed.
+
+### Meeting takeaways
+
+When a Teams meeting on your calendar ends, meeting takeaways waits for its transcript, reads it for
+what was agreed, and puts the takeaways in front of you to place in your todos. It needs Microsoft 365
+signed in, and **Takeaways from Teams transcripts** on (Settings › Connections); it is on in `⌘J`
+out of the box.
+
+- **The transcript.** orion finds the meeting by its join link and looks for that sitting's
+  transcript every 2 minutes, for up to an hour after the meeting ends. No transcript by then reads
+  `no transcript`. Teams writes one only when transcription was on for the meeting.
+- **The read.** One ask of a model, told by the **Meeting takeaways** preset and its extra steer, with
+  the transcript, who you are, and every project with **Link to meeting takeaways** on (Settings ›
+  Projects): its **What it is**, its todo groups and its open Linear tickets. Blue sky's groups are
+  in it too. Each takeaway comes back with its owner, the project (or Blue sky) and group it belongs
+  in, a priority and, where it is about one, an open ticket. The ones that name you start accepted.
+- **Needs you › MEETINGS** shows `Standup` / `3 takeaways for you to place`. A read that failed
+  shows why, and Enter reads it again.
+- The panel's **MEETINGS** list says where each meeting is: `3 to place`, `2 added`, `nothing for
+  you`, `no transcript`. Enter on one opens it.
+
+Enter on the card or the row opens the TAKEAWAYS SCREEN:
+
+```
+Standup · Thu 10:00 to 10:32 · Teams
+2 of 3 takeaways are yours and already accepted. Check where they go, then Enter.
+
+FROM THE MEETING                         │ WHERE THEY GO IN YOUR TODOS
+✓ Fix the empty address 500          AL  │ billing-api
+✗ Update the release notes           GH  │ ── BUGS ───────────────────────────
+✓ A habit tracker                    AL  │     · Invoices round to the cent
+                                         │   + H Fix the empty address 500  ENG-412
+                                         │ Blue sky
+                                         │ ── PRODUCT ────────────────────────
+```
+
+- **Left:** every takeaway, `✓` going into your todos or `✗` left out, and its owner's initials.
+  `Space` flips the one under the cursor; `⌘P` steps its priority.
+- **Right:** each list an accepted takeaway goes in, its groups under rules, what is already there
+  dim and what comes in green with its ticket id. A group that isn't there yet says `new group`.
+- **`m` moves** the selected takeaway: the MOVE PICKER takes the right side — a filter, then every
+  linked project's groups and Blue sky's, `where it is now` beside its current one, and
+  `+ new group "<filter>"` last. `↑`/`↓` pick, `Enter` puts it there, `Esc` leaves it where it was.
+- **`Enter` adds** the accepted ones to their groups, at their priority, a ticket's id after the text
+  (`Fix the empty address 500 (ENG-412)`). One with nowhere to go opens the picker on it first.
+- **`Esc`** leaves them for later, as you left them.
+
+The meetings are kept for two weeks in `automations/meeting-takeaways.json` in orion's data dir.
+
+## Your next meeting
+
+Signed in to Microsoft 365 (Settings › Connections), the footer shows your next meeting from an hour
+before it starts: `▸ Standup in 12m · Teams`. While the meeting runs, `now` replaces the countdown.
+`· Teams` marks an online meeting. All-day and cancelled events never show.
+
+orion reads your calendar for the next twelve hours every five minutes. Turn the segment off with
+**Next meeting in the footer**.
 
 ## TODOS
 
-`⌘I` opens the TODOS MODAL: every open PROJECT's own todo
-list, a tab each along the top in the order of the grid's project tabs, then any project whose
-tab is closed, opened on the selected project's tab (`←`/`→`, `⇧←`/`⇧→` or a click for another,
-`⌘1`–`⌘9` straight to one; each comes back as it was left while the modal is up). Each
+`⌘I` opens the TODOS MODAL: the **Blue sky** tab first ([below](#the-blue-sky-tab)), then every
+open PROJECT's own todo list, a tab each along the top in the order of the grid's project tabs,
+then any project whose tab is closed, opened on the selected project's tab — Blue sky's when there
+are no projects (`←`/`→`, `⇧←`/`⇧→` or a click for another, `⌘1`–`⌘9` straight to one: `⌘1` is
+Blue sky, and the projects start at `⌘2`; each comes back as it was left while the modal is up). Each
 list is modelled on a daily todo: groups that nest and fold, each item with Linear's priority, in
 an order that is the list's own. The list is this machine's alone — one file per checkout under orion's data folder
 (`~/Library/Application Support/dev.orion.orion/todos/` on macOS), named by a hash of the
@@ -804,3 +975,48 @@ pull request on that session's worktree merge, the item is ticked — every item
 at, the session deleted since or not, since the item keeps its worktree too — and the footer says so (`done: <text> — its pull request merged`); with the modal up it
 strikes through where it stands, as a tick by hand does. A pull request found already merged (a
 first lookup) ticks nothing, so an item put back on its list stays there.
+
+### The Blue sky tab
+
+The first tab, `Blue sky N`, is your list of ideas: groups and rows as any other tab, kept in
+`blue-sky.json` beside the projects' lists, its ticked ideas in the DONE panel under **Blue sky**.
+Each row shows the idea, where it goes — a project's name, or `blue sky` for one tied to no
+project — and how its build stands:
+
+```
+Blue sky 2   web 3   api
+Enter starts the Blue sky builder on the idea. Its brief comes to Needs you to approve, and its state shows here.
+▾ PRODUCT ───────────────────────────────────────────── · 2 open
+  ☐ · onboarding tour                        web · ● brief to approve
+  ☐ · a tiny habit tracker              blue sky · not started
+```
+
+- `w` on an idea steps where it goes: `blue sky`, then each project in the tabs' order.
+- `Enter` starts the **Blue sky builder** on it ([below](#the-blue-sky-builder)); once its session
+  is up, `Enter` (or a click on the state) jumps to it.
+- `o` opens what it built: its folder in the Blue sky folder, or its `proto/` checkout.
+- The state is `not started`, `● starting`, `● brief to approve` (red), `● building 18m` (yellow) or
+  `● built · proto/onboard` (green).
+- `⌘N` is a new idea and `Space` ticks one, as on any tab. On an idea `w` and `o` are keys, so
+  `⌫` opens its text to edit; every other letter types onto it as usual.
+
+## The BLUE SKY BUILDER
+
+`Enter` on an idea in Todos › Blue sky starts the Blue sky builder on it: a session tagged
+`Blue sky builder`, in plan mode, on the **Blue sky builder** preset (its own Runs on, so it can
+run on another account), told the idea and where to build it.
+
+- **For a project**, it runs in a new worktree on the branch `proto/<slug>`, told never to open a
+  pull request.
+- **For `blue sky`**, it runs in `~/Code/orion-blue-sky`, in a folder `<slug>/` of its own. The
+  first idea that goes there makes the folder a git repository and adds it to orion as a project.
+- **The brief first.** It writes a short brief — who it is for, what it is, what it is built from,
+  what you'll get and how big it is — and waits for you to approve it. The brief comes to Needs you
+  as `brief to approve`, and to your phone while you're away, as any plan does.
+- **Then the prototype.** Approved, it builds a working prototype — a web tool may also be published
+  as a claude.ai artifact, its link noted — and finishes with how to try it.
+- It counts against the automations' cap: with that many running, the idea waits (`● starting`)
+  and starts when one finishes.
+- In Automations (`⌘J`) it has **On** (on unless you turn it off), **Preset** and **Extra steer**,
+  and its **IDEAS** list: each idea it started, `brief to approve` / `building` / `built`; `Enter`
+  on one opens it in Todos › Blue sky.

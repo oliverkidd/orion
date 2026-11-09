@@ -150,6 +150,22 @@ fn asks_user(tool_name: Option<&str>) -> bool {
     matches!(tool_name, Some("AskUserQuestion" | "question"))
 }
 
+/// Claude's `ExitPlanMode`: its call puts the plan on screen for approval,
+/// so the turn waits on you from its `PreToolUse` on. Unlike a question it
+/// is answered like a permission prompt — by the next tool event of its
+/// origin — because a plan sent back with feedback fires no `PostToolUse`
+/// of its own: Claude goes straight on revising the plan (`Write`, then
+/// `ExitPlanMode` again), verified on Claude Code 2.1.319.
+fn awaits_plan_approval(tool_name: Option<&str>) -> bool {
+    tool_name == Some(orion_core::EXIT_PLAN_MODE_TOOL)
+}
+
+/// The tools whose `PreToolUse` puts a dialog on screen: a question, or a
+/// plan to approve.
+pub(crate) fn opens_dialog(tool_name: Option<&str>) -> bool {
+    asks_user(tool_name) || awaits_plan_approval(tool_name)
+}
+
 impl HookEvent {
     /// Events that (re)establish which Claude session id owns this agent.
     pub fn captures_session(&self) -> bool {
@@ -351,6 +367,20 @@ impl AgentStatusMachine {
         self.relocating = relocating;
     }
 
+    /// Whether `event` comes from another Claude session than the one
+    /// this agent runs — one in the same cwd — and so must not drive it.
+    /// The events that establish the session never are; nor is the PTY
+    /// dying, which is this agent's whatever the payload says.
+    pub fn is_foreign(&self, event: &HookEvent, payload_session_id: Option<&str>) -> bool {
+        if event.captures_session() || matches!(event, HookEvent::SessionEnded { .. }) {
+            return false;
+        }
+        matches!(
+            (self.session_id.as_deref(), payload_session_id),
+            (Some(mine), Some(theirs)) if mine != theirs
+        )
+    }
+
     pub fn handle(
         &mut self,
         event: HookEvent,
@@ -360,6 +390,9 @@ impl AgentStatusMachine {
         let mut effects = Vec::new();
 
         // ---- session reconciliation ----
+        if self.is_foreign(&event, payload_session_id) {
+            return effects; // foreign session — ignore entirely
+        }
         if event.captures_session() {
             if let Some(sid) = payload_session_id {
                 if self.session_id.as_deref() != Some(sid) {
@@ -370,12 +403,6 @@ impl AgentStatusMachine {
                     self.stop_held = false;
                     self.drain_idle_since = None;
                     self.subagent_alive_at = None;
-                }
-            }
-        } else if !matches!(event, HookEvent::SessionEnded { .. }) {
-            if let (Some(mine), Some(theirs)) = (self.session_id.as_deref(), payload_session_id) {
-                if mine != theirs {
-                    return effects; // foreign session — ignore entirely
                 }
             }
         }
@@ -473,12 +500,15 @@ impl AgentStatusMachine {
                 if subagent_id.is_some() {
                     self.note_subagent_alive(now);
                 }
+                let origin = Origin::of(subagent_id.as_deref());
                 if asks_user(tool_name.as_deref()) {
-                    self.wait_on(Origin::of(subagent_id.as_deref()), true, &mut effects);
+                    self.wait_on(origin, true, &mut effects);
+                } else if awaits_plan_approval(tool_name.as_deref()) {
+                    self.wait_on(origin, false, &mut effects);
                 } else {
                     // The next call is being made: whatever prompt this
                     // origin was waiting on has been answered.
-                    self.dialog_closed(Origin::of(subagent_id.as_deref()), &mut effects);
+                    self.dialog_closed(origin, &mut effects);
                 }
             }
             HookEvent::PostToolUse {
@@ -1026,6 +1056,39 @@ mod tests {
         // A question opening is not an answer, whichever hook carries it.
         let fx = m.handle(tool("AskUserQuestion", None, false), Some("s1"), now);
         assert_eq!(status_of(&fx), Some(AgentStatus::NeedsFeedback));
+    }
+
+    /// The hook order Claude Code 2.1.319 fires around a plan, observed in
+    /// a PTY: `PreToolUse ExitPlanMode` (red), its `PermissionRequest`;
+    /// sent back with feedback, no `PostToolUse` at all — the revision's
+    /// `Write` is the answer; approved, the `PostToolUse ExitPlanMode`.
+    #[test]
+    fn a_plan_waits_on_you_until_its_origin_moves_on() {
+        let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
+        let now = t0();
+        m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        let plan = || tool(orion_core::EXIT_PLAN_MODE_TOOL, None, false);
+        let fx = m.handle(plan(), Some("s1"), now);
+        assert_eq!(status_of(&fx), Some(AgentStatus::NeedsFeedback));
+        m.handle(
+            HookEvent::PermissionRequest { subagent_id: None },
+            Some("s1"),
+            now,
+        );
+        assert_eq!(m.status(), AgentStatus::NeedsFeedback);
+        // "Tell Claude what to change": it revises the plan file.
+        let fx = m.handle(tool("Write", None, false), Some("s1"), now);
+        assert_eq!(status_of(&fx), Some(AgentStatus::Running));
+        m.handle(tool("Write", None, true), Some("s1"), now);
+        m.handle(plan(), Some("s1"), now);
+        assert_eq!(m.status(), AgentStatus::NeedsFeedback);
+        // Approved.
+        let fx = m.handle(
+            tool(orion_core::EXIT_PLAN_MODE_TOOL, None, true),
+            Some("s1"),
+            now,
+        );
+        assert_eq!(status_of(&fx), Some(AgentStatus::Running));
     }
 
     #[test]

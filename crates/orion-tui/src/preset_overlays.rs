@@ -96,6 +96,10 @@ pub struct AgentPresetsView {
     /// Screen rect of the NEW WORKTREE row, written back during draw so a
     /// click there flips it as `Tab` does.
     pub toggle_area: Rect,
+    /// Opened by `⌘U` on the AUTOMATIONS screen: Enter makes the row the
+    /// preset this automation is told by, and Esc goes back to the screen
+    /// unchanged. Nothing is launched.
+    pub for_automation: Option<crate::automations::Automation>,
 }
 
 impl AgentPresetsView {
@@ -115,6 +119,7 @@ impl AgentPresetsView {
             quick: None,
             aim: None,
             toggle_area: Rect::default(),
+            for_automation: None,
         }
     }
 
@@ -166,7 +171,7 @@ impl AgentPresetsView {
     /// (`⌘.`) has a fresh worktree as its first row: a second toggle for the
     /// same choice under the box was the clutter the box lost its own for.
     pub fn has_worktree_row(&self) -> bool {
-        self.box_behind().is_none() && self.pane_target().is_none()
+        self.box_behind().is_none() && self.pane_target().is_none() && self.for_automation.is_none()
     }
 
     /// The rows `filter` leaves, top to bottom: indices into `presets`,
@@ -762,6 +767,23 @@ pub(crate) fn open_agent_presets(app: &mut App) {
     open_launcher(app, worktree);
 }
 
+/// `⌘U` on the AUTOMATIONS screen: the list as a pick of the preset
+/// `which` is told by, on the one it is told by now.
+pub(crate) fn open_for_automation(app: &mut App, which: crate::automations::Automation) {
+    let current = crate::automations::preset_of(&app.automations.settings, which);
+    let mut view = AgentPresetsView::new(
+        WorktreeId(String::new()),
+        crate::agent_presets::load_seeded(),
+    );
+    view.selected = view
+        .presets
+        .iter()
+        .position(|p| p.name == current.name)
+        .unwrap_or(0);
+    view.for_automation = Some(which);
+    app.overlay = Some(Overlay::AgentPresets(view));
+}
+
 /// The PICKER as the launcher for `worktree`, read from the store.
 pub(crate) fn open_launcher(app: &mut App, worktree: WorktreeId) {
     let view = AgentPresetsView::new(worktree, crate::agent_presets::load());
@@ -961,9 +983,11 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
         // the launcher does — it used to put up an empty box nobody asked
         // for — unless it stands on a modal the box would have, which it
         // leaves on its row.
-        _ if crate::nav::closes(&key) => match view.box_behind().cloned() {
-            Some(back) => crate::quick_prompt::reopen(app, back.launch, &back.text),
-            None => match view.quick.clone().and_then(|back| back.launch.under) {
+        // One opened for an automation goes back to its screen.
+        _ if crate::nav::closes(&key) => match (view.for_automation, view.box_behind().cloned()) {
+            (Some(which), _) => crate::automations::view::picked(app, which, None),
+            (None, Some(back)) => crate::quick_prompt::reopen(app, back.launch, &back.text),
+            (None, None) => match view.quick.clone().and_then(|back| back.launch.under) {
                 Some(under) => under.reopen(app),
                 None => app.overlay = None,
             },
@@ -1003,6 +1027,11 @@ fn activate_selected(app: &mut App, out: &mut Vec<ClientRequest>) {
         return;
     };
     let view = view.clone();
+    if let Some(which) = view.for_automation {
+        let name = view.presets.get(view.selected).map(|p| p.name.clone());
+        crate::automations::view::picked(app, which, name);
+        return;
+    }
     if let Some(session) = view.pane_target() {
         if let Some(preset) = view.presets.get(view.selected) {
             insert_preset_into_pane(app, preset, session, out);
@@ -1221,6 +1250,8 @@ pub(crate) mod keys {
 pub(crate) fn list_hints(view: &AgentPresetsView) -> Vec<crate::hints::Hint> {
     let enter = if view.pane_target().is_some() {
         "insert"
+    } else if view.for_automation.is_some() {
+        "use for it"
     } else if view.is_picker() {
         "use"
     } else {
@@ -1230,6 +1261,8 @@ pub(crate) fn list_hints(view: &AgentPresetsView) -> Vec<crate::hints::Hint> {
         "clear"
     } else if view.box_behind().is_some() {
         "back to the prompt"
+    } else if view.for_automation.is_some() {
+        "back"
     } else {
         "close"
     };
@@ -1284,6 +1317,8 @@ pub(crate) fn draw_list(f: &mut Frame, app: &mut App, view: &AgentPresetsView, t
     // presets ⌕ rev`, the bare ⌕ while nothing is typed yet.
     let title = if view.pane_target().is_some() {
         "Insert preset"
+    } else if let Some(which) = view.for_automation {
+        which.name()
     } else if view.is_picker() {
         "Use preset"
     } else {
@@ -1746,6 +1781,10 @@ fn draw_preview_box(f: &mut Frame, editor: &AgentPresetEditor, area: Rect, th: T
 
 /// The task the PREVIEW fills a preset of the user's in with.
 const SAMPLE_TASK: &str = "fix the login redirect loop";
+/// The ticket a bug fixer or feature builder preview shows at its `{task}`.
+const SAMPLE_TICKET: &str = "ENG-412 Login redirects loop after a password reset";
+/// The idea a blue sky builder preview shows at its `{task}`.
+const SAMPLE_IDEA: &str = "a dashboard of which agents are waiting on whom";
 
 /// One run of the PREVIEW: text the preset sends as it stands, or what
 /// orion puts in its place — a sample task, sample issues, what broke, a
@@ -1792,7 +1831,22 @@ fn preview(editor: &AgentPresetEditor) -> Vec<PreviewPart> {
                 "… the shape to write in, then the period's pull requests, issues and todos …",
             ),
         ],
-        Some(SystemPreset::PrAutofix) => with_sample(&preset, &crate::autofix::sample_task()),
+        Some(SystemPreset::PrAutofix) => {
+            with_sample(&preset, &crate::automations::pr_fixer::sample_task())
+        }
+        Some(SystemPreset::BugFixer | SystemPreset::FeatureBuilder) => {
+            with_sample(&preset, SAMPLE_TICKET)
+        }
+        Some(SystemPreset::MeetingTakeaways) => vec![
+            PreviewPart::own(format!(
+                "{}
+
+",
+                preset.compose("")
+            )),
+            PreviewPart::sample("… the meeting's transcript …"),
+        ],
+        Some(SystemPreset::BlueSky) => with_sample(&preset, SAMPLE_IDEA),
         None if preset.skip_task && !preset.has_text() => {
             vec![PreviewPart::sample(
                 "nothing: the CLI starts with no first prompt",
@@ -1930,6 +1984,11 @@ fn text_title(system: Option<SystemPreset>) -> &'static str {
         Some(SystemPreset::PrAutofix) => " Text — {task} is where what broke goes ",
         Some(SystemPreset::LinearTicket) => " Text — {issues} is where the issues go ",
         Some(SystemPreset::WeekReview) => " Text — the rules your review is written by ",
+        Some(SystemPreset::BugFixer | SystemPreset::FeatureBuilder) => {
+            " Text — {task} is where the ticket goes "
+        }
+        Some(SystemPreset::MeetingTakeaways) => " Text — what is asked of a transcript ",
+        Some(SystemPreset::BlueSky) => " Text — {task} is where the idea goes ",
     }
 }
 

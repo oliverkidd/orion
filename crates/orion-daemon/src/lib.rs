@@ -1,4 +1,6 @@
+pub mod answer;
 pub mod attach;
+pub mod away;
 pub mod claude_bg;
 pub mod config;
 pub mod containers;
@@ -9,6 +11,7 @@ pub mod hooks;
 pub mod lifecycle;
 pub mod metrics;
 pub mod open_files;
+pub mod phone;
 pub mod pr_scope;
 pub mod prompt_history;
 pub mod pty;
@@ -18,10 +21,12 @@ pub mod server;
 pub mod session_model;
 pub mod session_title;
 pub mod sibling;
+pub mod slack;
 pub mod spare;
 pub mod stacks;
 pub mod status;
 pub mod store;
+pub mod transcript;
 
 use anyhow::{bail, Context, Result};
 use orion_core::{env, paths};
@@ -135,12 +140,19 @@ async fn serve() -> Result<()> {
                     cwd,
                     transcript,
                     prompt,
+                    reason,
                 }) = delivery
                 else {
                     break;
                 };
                 let captures_session = event.captures_session();
-                daemon.apply_hook_event(&agent_id, event.clone(), session_id.clone());
+                // Where the transcript is, before the status it may turn
+                // red: the phone bridge reads the last response off it the
+                // moment that `StatusChanged` goes out.
+                if let Some(transcript) = &transcript {
+                    daemon.note_transcript(&agent_id, transcript.clone());
+                }
+                daemon.apply_hook_event_with(&agent_id, event.clone(), session_id.clone(), reason);
                 // The prompt itself, for the row's RECENT PROMPTS. After
                 // the status step so the row it upserts already reads
                 // `running`.
@@ -150,8 +162,7 @@ async fn serve() -> Result<()> {
                 // Claude's own session name (`/rename`) rides no hook, but
                 // every payload says where it is persisted: remember that
                 // for the window-title path and read it now.
-                if let Some(transcript) = transcript {
-                    daemon.note_transcript(&agent_id, transcript);
+                if transcript.is_some() {
                     daemon.sync_claude_title(&agent_id);
                 }
                 if let Some(cwd) = &cwd {
@@ -308,6 +319,13 @@ async fn serve() -> Result<()> {
             }
         });
     }
+
+    // PHONE BRIDGE: Slack's socket (`slack`), whether you are away
+    // (`away`), and the DMs a waiting session sends while you are
+    // (`phone`). With no Slack tokens saved, nothing polls.
+    tokio::spawn(slack::run(daemon.clone()));
+    tokio::spawn(away::watch(daemon.clone(), away::period()));
+    tokio::spawn(phone::watch(daemon.clone()));
 
     // Keep the pidfile and buildstamp from aging out of a /tmp runtime dir
     // (see `PidfileLock::refresh`).

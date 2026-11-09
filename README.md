@@ -38,13 +38,17 @@ The first launch walks you through setup: Claude Code (one key installs it if it
 - **Review without leaving.** Read the diff, find a file, search the code and open an editor on any checkout.
 - **Pull requests and Linear.** See each checkout's pull request and checks, and start an agent straight from a Linear issue.
 - **It tells you when to look.** A sound and a notification when an agent finishes, crashes or needs an answer.
+- **Needs you.** One board for everything waiting on you: agents with a question or a plan, Linear issues, code reviews, Slack messages and meeting takeaways.
+- **Your phone while you're away.** Lock the screen and an agent that starts waiting messages you on Slack, with its full last reply; your answer there goes straight back to it.
+- **Automations.** A PR fixer, a bug fixer and a feature builder that pick up labelled Linear tickets and wait for your plan approval, a Friday week in review, Teams meeting takeaways placed in your todos, and a Blue sky builder that prototypes an idea.
 
 | Key | Does |
 |---|---|
 | `⌘N` | New agent: type the task, `Enter` |
 | `⌘⇧N` | New agent in a new worktree, the same way |
 | `↑` `↓` · `Enter` · `Esc` | Walk the grid · step into a session · back out |
-| `⌘K` | Jump to any project, worktree or session |
+| `⌘K` | Needs you; type to jump to any project, worktree or session |
+| `⌘J` | Automations |
 | `⌘E` · `⌘P` · `⌘⇧F` | Diff · find file · search |
 | `⌘L` | Linear issues |
 | `⌘,` | Settings |

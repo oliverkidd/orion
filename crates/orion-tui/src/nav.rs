@@ -44,8 +44,7 @@ pub const SIDEWAYS_ANYWHERE: Key = Key::new(&["shift+left", "shift+right"], "tab
 /// A modal's tabs over a filtered list: `←`/`→`, and `⇧←`/`⇧→` while the
 /// filter's caret has the plain arrows — the LINEAR VIEW's and the TODOS
 /// MODAL's.
-pub const TABS: Key =
-    Key::new(&["left", "right", "shift+left", "shift+right"], "tabs").show(2);
+pub const TABS: Key = Key::new(&["left", "right", "shift+left", "shift+right"], "tabs").show(2);
 /// The rows of the panel with the keys.
 pub const ROWS: Key = Key::new(&["up", "down"], "move").show(2);
 /// A page up or down.
@@ -108,7 +107,11 @@ pub fn cycle<T: Copy + PartialEq>(order: &[T], at: T, forward: bool) -> T {
         return first;
     };
     let n = order.len();
-    order[if forward { (i + 1) % n } else { (i + n - 1) % n }]
+    order[if forward {
+        (i + 1) % n
+    } else {
+        (i + n - 1) % n
+    }]
 }
 
 #[cfg(test)]
@@ -178,39 +181,111 @@ mod tests {
     const OWN_KEYS: &[(&str, &str, &str)] = &[
         // The QUICK PROMPT is a text box: Tab and ⇧Tab are Claude Code's
         // own (the harness, the mode), as in the CLIs it launches.
-        ("ui.rs", "AGENT", "the quick prompt's harness, as in Claude Code"),
-        ("ui.rs", "MODE", "the quick prompt's mode, as in Claude Code"),
+        (
+            "ui.rs",
+            "AGENT",
+            "the quick prompt's harness, as in Claude Code",
+        ),
+        (
+            "ui.rs",
+            "MODE",
+            "the quick prompt's mode, as in Claude Code",
+        ),
         // A page of prose: Tab walks its links, as a browser does.
-        ("ui.rs", "LINK", "the markdown page's links, as in a browser"),
+        (
+            "ui.rs",
+            "LINK",
+            "the markdown page's links, as in a browser",
+        ),
         // A path being typed: a shell's completion and directory walk.
         ("ui.rs", "DIVE", "the path prompt's directory walk"),
         ("ui.rs", "ASCEND", "the path prompt's directory walk"),
-        ("ui.rs", "COMPLETE", "the path prompt's completion, as in a shell"),
-        ("open_repo.rs", "BROWSE", "the open-project prompt's path browser"),
+        (
+            "ui.rs",
+            "COMPLETE",
+            "the path prompt's completion, as in a shell",
+        ),
+        (
+            "open_repo.rs",
+            "BROWSE",
+            "the open-project prompt's path browser",
+        ),
         // A menu's submenu is the same list a level down, not a panel.
         ("ui.rs", "INTO", "a menu's submenu"),
         ("ui.rs", "BACK", "a menu's submenu"),
         // One panel under a tab strip: Tab is the big move, the next tab,
         // and ←/→ the row's value or the strip's own.
         ("ui.rs", "FOLD", "the settings overlay: one panel, ←/→ fold"),
-        ("ui.rs", "NEXT_TAB", "the settings overlay: one panel, Tab the next tab"),
-        ("ui.rs", "PREV_TAB", "the settings overlay: one panel, ⇧Tab the tab before"),
-        ("ui.rs", "CYCLE", "the settings overlay: one panel, ←/→ the row's value"),
-        ("file_tabs.rs", "SWITCH", "the file tabs: one panel under its strip"),
-        ("conflicts.rs", "FILE", "the conflict resolver: one panel, Tab the next file"),
-        ("onboard.rs", "NEXT_PAGE", "first-run setup's pages, a wizard"),
-        ("onboard.rs", "PREV_PAGE", "first-run setup's pages, a wizard"),
+        (
+            "ui.rs",
+            "NEXT_TAB",
+            "the settings overlay: one panel, Tab the next tab",
+        ),
+        (
+            "ui.rs",
+            "PREV_TAB",
+            "the settings overlay: one panel, ⇧Tab the tab before",
+        ),
+        (
+            "ui.rs",
+            "CYCLE",
+            "the settings overlay: one panel, ←/→ the row's value",
+        ),
+        (
+            "file_tabs.rs",
+            "SWITCH",
+            "the file tabs: one panel under its strip",
+        ),
+        (
+            "conflicts.rs",
+            "FILE",
+            "the conflict resolver: one panel, Tab the next file",
+        ),
+        (
+            "onboard.rs",
+            "NEXT_PAGE",
+            "first-run setup's pages, a wizard",
+        ),
+        (
+            "onboard.rs",
+            "PREV_PAGE",
+            "first-run setup's pages, a wizard",
+        ),
         // The grid's session pane, not a modal: the grid has the arrows.
-        ("pr_preview.rs", "NEXT_TAB", "the pane's pull request page: the grid has the arrows"),
-        ("pr_preview.rs", "PREV_TAB", "the pane's pull request page: the grid has the arrows"),
-        ("pr_preview.rs", "TABS", "the pane's pull request page: the grid has the arrows"),
+        (
+            "pr_preview.rs",
+            "NEXT_TAB",
+            "the pane's pull request page: the grid has the arrows",
+        ),
+        (
+            "pr_preview.rs",
+            "PREV_TAB",
+            "the pane's pull request page: the grid has the arrows",
+        ),
+        (
+            "pr_preview.rs",
+            "TABS",
+            "the pane's pull request page: the grid has the arrows",
+        ),
         // A form's fields: Tab the next field, ←/→ (and Space) its value,
         // Space beside them.
-        ("pr_actions.rs", "FIELD", "a form: Tab the next field, ↓ too"),
+        (
+            "pr_actions.rs",
+            "FIELD",
+            "a form: Tab the next field, ↓ too",
+        ),
         ("pr_actions.rs", "MODE", "a form row: ←/→ or Space"),
         ("pr_actions.rs", "CHANGE", "a form row: ←/→ or Space"),
-        ("preset_overlays.rs", "FIELD", "a form: Tab the next field, ↓ too"),
-        ("preset_overlays.rs", "WORKTREE", "the preset picker's own Tab"),
+        (
+            "preset_overlays.rs",
+            "FIELD",
+            "a form: Tab the next field, ↓ too",
+        ),
+        (
+            "preset_overlays.rs",
+            "WORKTREE",
+            "the preset picker's own Tab",
+        ),
         // The LINEAR VIEW's new-issue box: Tab its team.
         ("linear.rs", "TEAM", "the new-issue box: Tab the next team"),
     ];
@@ -263,12 +338,17 @@ mod tests {
                         .windows(2)
                         .position(|w| {
                             w[0].trim() == "#[cfg(test)]"
-                                && w[1].trim_start().trim_start_matches("pub(crate) ").starts_with("mod tests")
+                                && w[1]
+                                    .trim_start()
+                                    .trim_start_matches("pub(crate) ")
+                                    .starts_with("mod tests")
                         })
                         .unwrap_or(lines.len());
                     for (i, line) in lines[..live].iter().enumerate() {
                         // Making an Esc to send on is not asking for one.
-                        if line.contains("KeyCode::Esc") && !line.contains("KeyEvent::new(KeyCode::Esc") {
+                        if line.contains("KeyCode::Esc")
+                            && !line.contains("KeyEvent::new(KeyCode::Esc")
+                        {
                             stray.push(format!(
                                 "{}:{} asks for KeyCode::Esc — use nav::closes",
                                 path.display(),

@@ -147,7 +147,9 @@ async fn relocate_project(store: &Store, repo: &Path, candidates: &[PathBuf], re
         };
         let to = git::worktrees_home(repo).join(name);
         if to.symlink_metadata().is_ok() {
-            report.left.push((from.clone(), format!("{} already exists", to.display())));
+            report
+                .left
+                .push((from.clone(), format!("{} already exists", to.display())));
             continue;
         }
         let from_canon = canonical_or_raw(from);
@@ -233,7 +235,9 @@ fn has_venv(checkout: &Path) -> bool {
 /// `candidates`, keyed by the candidate's resolved path. Asked again for
 /// up to [`HOLDER_WAIT`] while any are left: the last daemon's sessions
 /// die moments before this one boots.
-async fn wait_for_holders(candidates: &[PathBuf]) -> std::collections::HashMap<PathBuf, Vec<String>> {
+async fn wait_for_holders(
+    candidates: &[PathBuf],
+) -> std::collections::HashMap<PathBuf, Vec<String>> {
     let canon: Vec<PathBuf> = candidates.iter().map(|p| canonical_or_raw(p)).collect();
     let deadline = tokio::time::Instant::now() + HOLDER_WAIT;
     loop {
@@ -359,7 +363,10 @@ mod tests {
             parse_lsof(out, 99),
             vec![
                 ("zsh".to_string(), PathBuf::from("/w/repo-worktrees/feat")),
-                ("node".to_string(), PathBuf::from("/w/repo-worktrees/feat/web")),
+                (
+                    "node".to_string(),
+                    PathBuf::from("/w/repo-worktrees/feat/web")
+                ),
             ]
         );
     }
@@ -368,8 +375,14 @@ mod tests {
     fn a_holder_is_a_process_in_the_checkout_or_under_it_only() {
         let cwds = vec![
             ("zsh".to_string(), PathBuf::from("/w/repo-worktrees/feat")),
-            ("node".to_string(), PathBuf::from("/w/repo-worktrees/feat/web")),
-            ("zsh".to_string(), PathBuf::from("/w/repo-worktrees/feature")),
+            (
+                "node".to_string(),
+                PathBuf::from("/w/repo-worktrees/feat/web"),
+            ),
+            (
+                "zsh".to_string(),
+                PathBuf::from("/w/repo-worktrees/feature"),
+            ),
             ("vim".to_string(), PathBuf::from("/w/repo")),
         ];
         let holders = holders_of(&cwds, &[PathBuf::from("/w/repo-worktrees/feat")]);
@@ -385,7 +398,10 @@ mod tests {
         let report = Report {
             moved: vec![(PathBuf::from("/w/.orion-worktrees/repo"), 2)],
             stopped: vec!["feat".into()],
-            left: vec![(PathBuf::from("/w/repo-worktrees/busy"), "still in use by zsh".into())],
+            left: vec![(
+                PathBuf::from("/w/repo-worktrees/busy"),
+                "still in use by zsh".into(),
+            )],
             venvs: vec![PathBuf::from("/w/.orion-worktrees/repo/py")],
         };
         assert_eq!(
@@ -409,7 +425,10 @@ mod tests {
         git_in(&repo, &["init", "-b", "main"]);
         git_in(&repo, &["commit", "--allow-empty", "-m", "init"]);
         let old = root.join("repo-worktrees").join("feat");
-        git_in(&repo, &["worktree", "add", &old.to_string_lossy(), "-b", "feat"]);
+        git_in(
+            &repo,
+            &["worktree", "add", &old.to_string_lossy(), "-b", "feat"],
+        );
 
         let store = Store::open(&root.join("orion.db"), &[]).unwrap();
         let project = orion_core::Project {
@@ -434,12 +453,19 @@ mod tests {
         let new = root.join(".orion-worktrees").join("repo").join("feat");
         assert!(note.starts_with("Moved 1 worktree into"), "{note}");
         assert!(new.join(".git").is_file(), "the checkout moved");
-        assert!(!root.join("repo-worktrees").exists(), "the empty old folder went");
+        assert!(
+            !root.join("repo-worktrees").exists(),
+            "the empty old folder went"
+        );
         let listed = git::linked_worktree_paths(&repo).await.unwrap();
         assert_eq!(listed, vec![new.clone()], "git knows it at the new path");
         let moved = store.get_worktree(&row.id).unwrap().unwrap();
         assert_eq!(moved.path, new, "the row kept its id and took the new path");
 
-        assert_eq!(relocate_legacy_worktrees(&store).await, None, "nothing left to move");
+        assert_eq!(
+            relocate_legacy_worktrees(&store).await,
+            None,
+            "nothing left to move"
+        );
     }
 }

@@ -216,6 +216,7 @@ pub(super) fn stage_agent(
         alive: false,
         recent_prompts: Vec::new(),
         usage_limit: None,
+        automation: None,
     });
     // A prompt fired into another project is not a place to go: the row
     // is in the tree for that project's list, the cursors hold their
@@ -673,6 +674,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         }
     }
 
@@ -2240,6 +2242,7 @@ mod tests {
                     status: AgentStatus::Running,
                     changed_at: crate::app::now_ms(),
                     unseen: false,
+                    reason: None,
                 },
             );
             assert_eq!(project_names(&app), ["demo", "two"]);

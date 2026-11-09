@@ -182,6 +182,9 @@ pub enum HitTarget {
     /// One of the footer's SPOTIFY READOUT buttons (`⏮  ⏸ ⏭`): a click
     /// sends Spotify that command (`event_loop::press_spotify`).
     FooterSpotify(crate::spotify::Button),
+    /// The footer's `⌘K needs you N`: a click opens the NEEDS YOU BOARD,
+    /// through the `open_palette` its key runs.
+    FooterNeedsYou,
     /// The `↗ open in browser` BUTTON on the PULL REQUESTS MODAL's and the
     /// LINEAR VIEW's reading pane, pinned right on its top border: a click
     /// opens the row under the cursor in the browser, through the very
@@ -202,7 +205,7 @@ pub enum HitTarget {
     /// A `<details>` summary on that page's description or comments: a
     /// click opens or shuts it. Registered ahead of the pane, so it wins.
     PrPageFold(crate::markdown::FoldKey),
-    /// A session, an issue or `⌘G send autofix` in that page's WORK BLOCK
+    /// A session, an issue or `⌘G send to the PR fixer` in that page's WORK BLOCK
     /// (`pr_work`): a click lands on the session in the grid, opens the
     /// issue, or is `⌘G`. Registered ahead of the pane, so it wins.
     PrPageWork(crate::pr_work::WorkHit),
@@ -311,8 +314,12 @@ pub enum MenuAction {
     RenameTerminal(TerminalId),
     CloseTerminal(TerminalId),
     NewWorktree(ProjectId),
-    /// Hand a link row's URL to the browser.
-    OpenLink(String),
+    /// Hand a link row's URL to the browser — the one `account`'s **Open
+    /// links in** picks, for a link that belongs to a session.
+    OpenLink {
+        url: String,
+        account: Option<String>,
+    },
     /// Read the selected open pull request's diff in the diff modal. Carries
     /// no id: the row is the selection, and the fetch reads it back off the
     /// cursor the same way `g` does.
@@ -825,6 +832,30 @@ pub enum PromptKind {
     /// Esc keeps it; both put the overlay back on the row.
     AccountChipMark {
         id: String,
+    },
+    /// Enter on an account's **Open links in** row: the browser, then a
+    /// profile after it (`Chrome Profile 1`), prefilled with the one it
+    /// has. Enter saves it — empty puts the default browser back — and Esc
+    /// keeps it; both put the overlay back on the row.
+    LinkBrowser {
+        id: String,
+    },
+    /// `c` on Settings › Connections › SLACK: token `step` of the three
+    /// (`phone::TOKENS`), the ones typed before it carried along. Enter
+    /// asks for the next, and after the third saves all three; Esc and an
+    /// empty box put the overlay back with nothing saved.
+    SlackToken {
+        step: usize,
+        tokens: Vec<String>,
+    },
+    /// `c` on Settings › Connections › MICROSOFT 365 with no app in the
+    /// config: the Application (client) ID, then — `client_id` carried
+    /// along — the Directory (tenant) ID; both on one line skip the
+    /// second. After both, they are saved to the config and the sign-in
+    /// starts; Esc and an empty box put the overlay back with nothing
+    /// saved (`microsoft::submit_app_id`).
+    MicrosoftAppId {
+        client_id: Option<String>,
     },
 }
 
@@ -2370,7 +2401,10 @@ pub enum Overlay {
     ProjectPicker(crate::launcher::ProjectPicker),
     /// The AUTOFIX MODAL: one of your pull requests broke (or `⌘G` in the
     /// PULL REQUESTS MODAL) — what to send the agent to fix.
-    Autofix(Box<crate::autofix::AutofixForm>),
+    Autofix(Box<crate::automations::pr_fixer::AutofixForm>),
+    /// `⌘J`: AUTOMATIONS — each one's on/off, preset, extra steer, and
+    /// what it is running and has done (`crate::automations::view`).
+    Automations(crate::automations::view::AutomationsView),
     /// `⌘I`: the TODOS MODAL — the selected project's own todo list.
     Todos(crate::todos::TodoView),
     /// `⌘⇧Y`: the WEEK IN REVIEW — what was finished in the last seven
@@ -2379,6 +2413,9 @@ pub enum Overlay {
     /// Enter on a conflicted file of a pull request: the CONFLICT
     /// RESOLVER, its merge's files to settle (`crate::conflicts`).
     Conflicts(Box<crate::conflicts::ConflictView>),
+    /// A meeting's TAKEAWAYS SCREEN, from its Needs you card or its row
+    /// on the Automations screen (`crate::takeaways_view`).
+    Takeaways(Box<crate::takeaways_view::TakeawaysView>),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an
@@ -2457,6 +2494,10 @@ pub struct AgentLaunchDraft {
     /// The TODO this launch was sent at: `create_agent` keeps it by the
     /// request (`App::todo_pending`) for the Ack to write the session onto.
     pub todo: Option<crate::todos::TodoRef>,
+    /// The AUTOMATION starting this session: the tag the DAEMON keeps on
+    /// the row (`Agent::automation`). Set through
+    /// `crate::automations::launch`, which minds the running cap.
+    pub automation: Option<crate::automations::Automation>,
 }
 
 impl AgentLaunchDraft {
@@ -2489,6 +2530,7 @@ impl AgentLaunchDraft {
             follow: true,
             mode: orion_core::AgentMode::Edit,
             todo: None,
+            automation: None,
         }
     }
 }
@@ -3982,6 +4024,15 @@ pub struct App {
     /// startup and when the settings overlay applies a change; off here
     /// until startup applies it.
     pub spotify_enabled: bool,
+    /// AWAY, as the daemon last said (`ServerEvent::AwayChanged`).
+    pub away: bool,
+    /// AWAY BY HAND (⌘⇧A) is on: the next key sends `SetAway { on: false }`.
+    pub away_by_hand: bool,
+    /// How the daemon's Slack connection stands (`ServerEvent::SlackStatus`).
+    pub slack_status: orion_core::SlackStatus,
+    /// Requests queued by a handler that has no request list to hand —
+    /// the settings overlay's — sent with the loop's own on its next turn.
+    pub outbox: Vec<orion_core::ClientRequest>,
     /// Where the Spotify polls and commands answer — the loop's channel,
     /// held here so a click on one of the readout's buttons can reach it.
     pub spotify_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::spotify::Answer>>,
@@ -4519,6 +4570,14 @@ pub struct App {
     /// The WEEK IN REVIEW's fetches and the review being written: on the
     /// app, not its modal, so closing the modal loses neither.
     pub week_review: crate::week_review::State,
+    /// MICROSOFT 365: the sign-in, and the calendar behind the footer's
+    /// next meeting.
+    pub microsoft: crate::microsoft::State,
+    /// Each project's **What it is** being written (`projects`).
+    pub project_about: crate::projects::State,
+    /// NEEDS YOU: Done and Snooze, what its poll last heard, and crashed
+    /// sessions' exit codes (`crate::needs_you`).
+    pub needs_you: crate::needs_you::State,
     /// Where the PR REVIEW's reads and writes land.
     pub pr_review: crate::pr_review::State,
     /// The on-disk memory of every pull-request answer (`pr_cache`), when
@@ -4530,10 +4589,11 @@ pub struct App {
     pub pr_cache: Option<crate::pr_cache::PrCache>,
     pub pr_cache_dirty: bool,
     /// AUTOFIX: the ledger, the watched pull requests and the queued asks
-    /// (`crate::autofix`).
-    pub autofix: crate::autofix::State,
-    /// **Auto-fix my PRs** (Settings → General), mirrored.
-    pub autofix_mode: crate::autofix::Mode,
+    /// (`crate::automations::pr_fixer`).
+    pub autofix: crate::automations::pr_fixer::State,
+    /// AUTOMATIONS: their runners, their settings mirrored, and the
+    /// creates still on their way (`crate::automations`).
+    pub automations: crate::automations::Engine,
     /// Where a file dropped onto a prompt box bound for an agent is copied
     /// before macOS deletes it (`dropped_files`), and where `^V` keeps the
     /// clipboard's image (`clipboard_image`): the main loop installs the
@@ -4705,6 +4765,10 @@ impl App {
             spotify_seq: 0,
             spotify_denied: false,
             spotify_enabled: false,
+            away: false,
+            away_by_hand: false,
+            slack_status: Default::default(),
+            outbox: Vec::new(),
             spotify_tx: None,
             edge_tap: None,
             release_watch: None,
@@ -4819,11 +4883,14 @@ impl App {
             pr_comment_tx: None,
             pr_actions_tx: None,
             week_review: Default::default(),
+            microsoft: Default::default(),
+            project_about: Default::default(),
+            needs_you: Default::default(),
             pr_review: Default::default(),
             pr_cache: None,
             pr_cache_dirty: false,
-            autofix: crate::autofix::State::default(),
-            autofix_mode: crate::autofix::Mode::Off,
+            autofix: crate::automations::pr_fixer::State::default(),
+            automations: Default::default(),
             attachments_dir: None,
             pr_detail_stale: std::collections::HashSet::new(),
             pr_detail_unsaved: std::collections::HashSet::new(),
@@ -6729,6 +6796,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             })
             .collect();
         app
@@ -7016,6 +7084,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         });
         app.tree.agents.push(Agent {
             id: AgentId("a2".into()),
@@ -7250,6 +7319,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             });
         }
 

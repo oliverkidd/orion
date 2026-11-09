@@ -18,9 +18,9 @@ mod grep_view;
 mod launcher_view;
 pub(crate) use launcher_view::{chip, session_chip, session_line, CHIP_W};
 
-pub(crate) use diff_view::diff_keys;
 #[cfg(test)]
 pub(crate) use diff_view::diff_hints;
+pub(crate) use diff_view::diff_keys;
 use footer::draw_footer;
 
 /// Outer size of the editor modal, as (width, height) percent of the frame.
@@ -198,8 +198,7 @@ const CAP_RIGHT: &str = "\u{e0b4}";
 /// video, which is a cursor or a selection inside a field.
 pub(crate) fn round_caps(buf: &mut ratatui::buffer::Buffer, area: Rect) {
     let solid = |c: &ratatui::buffer::Cell| {
-        !matches!(c.bg, Color::Reset | Color::Rgb(..))
-            && !c.modifier.contains(Modifier::REVERSED)
+        !matches!(c.bg, Color::Reset | Color::Rgb(..)) && !c.modifier.contains(Modifier::REVERSED)
     };
     for y in area.top()..area.bottom() {
         let mut x = area.left();
@@ -400,7 +399,8 @@ pub(crate) mod install_keys {
     use crate::hints::Key;
 
     pub const STOP: Key = Key::new(&["ctrl+q"], "stop");
-    pub const CLOSE: Key = Key::new(&["enter", "q", "ctrl+q"], "close").also(crate::nav::CLOSE.chords);
+    pub const CLOSE: Key =
+        Key::new(&["enter", "q", "ctrl+q"], "close").also(crate::nav::CLOSE.chords);
 }
 
 /// The editor modal's bottom-border keys, for the editor it runs: its
@@ -1446,7 +1446,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                         ),
                         (Slots, "open that project tab"),
                         (Act(&[CloseProjectTab]), "close the project tab"),
-                        (Act(&[Palette]), "jump to anything, add a project"),
+                        (Act(&[Palette]), "needs you; type to jump to anything"),
                         (
                             Keys(&[finder_keys::ATTACH, finder_keys::FOCUS_ROW]),
                             "jump pick: open / focus row",
@@ -1842,8 +1842,25 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                                 Some(p) if spec.kind.is_status() => {
                                     crate::linear::key_status(app, &p.repo_path)
                                 }
+                                Some(p) if spec.kind == crate::config::SettingKind::About => {
+                                    crate::projects::label(app, &cfg, &p.repo_path)
+                                }
+                                None if spec.kind
+                                    == crate::config::SettingKind::Connection(
+                                        crate::config::Connection::Microsoft,
+                                    ) =>
+                                {
+                                    crate::microsoft::status(app, &cfg.microsoft)
+                                }
                                 Some(p) => cfg.project(&p.repo_path).value_label(spec.kind),
                                 None if spec.kind.is_project() => "n/a".into(),
+                                None if spec.kind
+                                    == crate::config::SettingKind::Connection(
+                                        crate::config::Connection::Slack,
+                                    ) =>
+                                {
+                                    crate::phone::status_label(&app.slack_status)
+                                }
                                 None => cfg.value_label(spec.kind),
                             };
                             (spec.label.to_string(), value, None)
@@ -1944,6 +1961,33 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
             }
         }
         Overlay::Diff(view) => diff_view::draw(f, app, &view, th),
+        // Nothing typed: the NEEDS YOU BOARD, over the whole body.
+        Overlay::Palette(mut palette) if palette.on_board() => {
+            // Everything above the footer, a cell in from its edges.
+            let screen = f.area();
+            let area = Rect {
+                x: screen.x + 1,
+                y: screen.y + 1,
+                width: screen.width.saturating_sub(2),
+                height: screen.height.saturating_sub(FOOTER_ROWS + 1),
+            };
+            let meeting = crate::microsoft::next_meeting(app);
+            crate::needs_you::board::draw(
+                f,
+                &mut palette.board,
+                &palette.query,
+                meeting.as_deref(),
+                area,
+                th,
+            );
+            // Write-back (draw works on a clone): what the keys and the
+            // pointer read.
+            if let Some(Overlay::Palette(p)) = &mut app.overlay {
+                p.area = area;
+                p.board.height = palette.board.height;
+                p.board.hits = palette.board.hits;
+            }
+        }
         Overlay::Palette(palette) => {
             let area = centered_rect(f.area(), PALETTE_SIZE.0, PALETTE_SIZE.1);
             let title = if palette.query.is_empty() {
@@ -2336,9 +2380,11 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::Todos(view) => crate::todos::draw(f, app, &view, th, false),
         Overlay::Onboard(view) => crate::onboard::draw(f, app, &view, th),
         Overlay::WhatsNew(view) => crate::whats_new::draw(f, app, &view, th),
-        Overlay::Autofix(form) => crate::autofix::draw(f, app, &form, th),
+        Overlay::Autofix(form) => crate::automations::pr_fixer::draw(f, app, &form, th),
+        Overlay::Automations(view) => crate::automations::view::draw(f, app, &view, th),
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
+        Overlay::Takeaways(view) => crate::takeaways_view::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
         Overlay::OpenRepo(view) => crate::open_repo::draw(f, app, &view, th),
@@ -2907,13 +2953,18 @@ pub(crate) mod settings_keys {
     /// the Enter that runs its installer once asked.
     pub const INSTALL: Key = Key::new(&["i"], "install");
     pub const RUN: Key = Key::new(&["enter"], "run it here");
+    /// A CONNECTIONS TAB status row.
+    pub const CONNECT: Key = Key::new(&["c"], "connect");
+    pub const DISCONNECT: Key = Key::new(&["o"], "disconnect");
+    /// A project's **What it is**: written again.
+    pub const REWRITE: Key = Key::new(&["ctrl+r"], "write it again");
 
     #[cfg(test)]
     #[test]
     fn every_settings_key_parses() {
         for key in [
             CLOSE, NEXT_TAB, PREV_TAB, CHOOSE, CYCLE, RESET_ALL, RENAME, SIGN_OUT, REMOVE,
-            CHIP_TINT, CHIP_MARK, INSTALL, RUN,
+            CHIP_TINT, CHIP_MARK, INSTALL, RUN, CONNECT, DISCONNECT, REWRITE,
         ] {
             assert!(key.parses(), "{:?}", key.chords);
         }
@@ -2946,6 +2997,8 @@ pub(crate) fn settings_hints(
         vec![CYCLE.hint_as("tab"), Hint::new(digits, "jump")]
     } else if view.is_hotkeys() {
         Vec::new()
+    } else if kind == Some(crate::config::SettingKind::About) {
+        vec![CHOOSE.hint_as("edit").kept(), REWRITE.hint()]
     } else if kind.is_some_and(|k| k.is_text()) {
         vec![CHOOSE.hint_as("type a value (empty = default)").kept()]
     } else if let Some(screen) = presets {
@@ -2954,6 +3007,14 @@ pub(crate) fn settings_hints(
         hints.push(NEXT_TAB.hint());
         hints.extend(tail);
         return hints;
+    } else if matches!(kind, Some(crate::config::SettingKind::Connection(_))) {
+        vec![CONNECT.hint().kept(), DISCONNECT.hint()]
+    } else if kind
+        == Some(crate::config::SettingKind::Away(
+            crate::config::AwayField::ByHand,
+        ))
+    {
+        vec![CHOOSE.hint_as("away until your next key").kept()]
     } else if kind.is_some_and(|k| k.is_status()) {
         vec![CHOOSE.hint_as("test the connection").kept()]
     } else {
@@ -2985,6 +3046,16 @@ pub(crate) fn settings_hints(
                 hints.push(CYCLE.hint_as("on/off"));
                 hints.push(CLOSE.hint());
                 return hints;
+            }
+            None if cfg
+                .as_ref()
+                .and_then(|cfg| cfg.agent_row(view.selected))
+                .is_some_and(|(_, field)| field == crate::config::HarnessField::Browser) =>
+            {
+                vec![
+                    CHOOSE.hint_as("type browser and profile").kept(),
+                    CYCLE.hint(),
+                ]
             }
             None => vec![CHOOSE.hint().kept(), CYCLE.hint()],
         }
@@ -4152,7 +4223,10 @@ fn draw_terminal(f: &mut Frame, app: &mut App, area: Rect) {
                 "new agent",
             ));
             hint.push(sep());
-            hint.extend(key(&spelled(crate::keymap::Action::Palette, "⌘K"), "jump"));
+            hint.extend(key(
+                &spelled(crate::keymap::Action::Palette, "⌘K"),
+                "needs you",
+            ));
             hint.push(sep());
             hint.extend(key(&spelled(crate::keymap::Action::Help, "?"), "help"));
             let mut lines = vec![Line::from("")];
@@ -5432,6 +5506,7 @@ mod tests {
             todo: None,
             under: None,
             mode: orion_core::AgentMode::Edit,
+            automation: None,
         });
         let follow_up = PromptKind::FollowUp {
             id: orion_core::AgentId::from("a".to_string()),

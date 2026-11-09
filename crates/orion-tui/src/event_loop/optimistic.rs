@@ -487,6 +487,7 @@ mod tests {
                 status: orion_core::AgentStatus::NeedsFeedback,
                 changed_at: 42,
                 unseen: false,
+                reason: None,
             },
         );
         assert!(agent_name(&app, "a1").is_none(), "still down");

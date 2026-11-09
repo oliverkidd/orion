@@ -129,6 +129,8 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     });
                     let _ = out_tx.send(snapshot).await;
                     let _ = out_tx.send(daemon.stacks.current()).await;
+                    let _ = out_tx.send(daemon.away.current()).await;
+                    let _ = out_tx.send(daemon.slack.current()).await;
                     let notes = std::mem::take(&mut *daemon.boot_notes.lock().unwrap());
                     for message in notes {
                         let _ = out_tx
@@ -261,6 +263,8 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                         tracing::warn!(error = %e, "mark agent seen failed");
                     }
                 }
+                ClientRequest::SetAway { on } => daemon.set_away_by_hand(on),
+                ClientRequest::SlackReconnect => daemon.slack.reconnect(),
                 ClientRequest::GetMetrics { req_id } => {
                     // A machine-wide `ps` sweep takes tens of ms; keep it off
                     // the request loop so Input/Attach frames keep flowing.
@@ -362,6 +366,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     auto_title,
                     starting_prompt,
                     mode,
+                    automation,
                 } => {
                     // Logged by mode only — never the prompt text.
                     let launch_mode = starting_prompt.as_ref().map(|_| "preset");
@@ -377,6 +382,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             starting_prompt,
                             pr_url: None,
                             mode,
+                            automation,
                         })
                         .await;
                     if let Some(launch_mode) = launch_mode {
@@ -415,6 +421,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     head,
                     starting_prompt,
                     mode,
+                    automation,
                 } => {
                     // A PR SESSION whose checkout does not exist yet is a
                     // fetch and a `git worktree add` before the CLI spawns
@@ -442,6 +449,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                                 head,
                                 starting_prompt,
                                 mode,
+                                automation,
                             })
                             .await;
                         match &result {
@@ -588,6 +596,36 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 } => {
                     let result = daemon.send_turn(&id, &text, cols, rows);
                     reply_done(&out_tx, req_id, result).await;
+                }
+                // Off the request loop: the dialog's keystrokes go in a
+                // beat apart, and this connection's own typing must not
+                // wait on them.
+                ClientRequest::Answer { req_id, id, answer } => {
+                    let daemon = daemon.clone();
+                    let out_tx = out_tx.clone();
+                    tokio::spawn(async move {
+                        let result = daemon.answer(&id, answer).await;
+                        reply_done(&out_tx, req_id, result).await;
+                    });
+                }
+                // A transcript tail runs to a megabyte: read off the
+                // async workers.
+                ClientRequest::LastResponse { req_id, id } => {
+                    let daemon = daemon.clone();
+                    let out_tx = out_tx.clone();
+                    tokio::spawn(async move {
+                        let (text, reason) =
+                            tokio::task::spawn_blocking(move || daemon.last_response(&id))
+                                .await
+                                .unwrap_or_default();
+                        let _ = out_tx
+                            .send(ServerEvent::LastResponse {
+                                req_id,
+                                text,
+                                reason,
+                            })
+                            .await;
+                    });
                 }
                 ClientRequest::ContinueAgentOn {
                     req_id,

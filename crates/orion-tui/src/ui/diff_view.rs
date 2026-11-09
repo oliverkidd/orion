@@ -198,7 +198,9 @@ pub(crate) fn diff_explanation(view: &DiffView) -> String {
     // A pull request's: whether the review's threads are on the diff.
     let all = diff_keys::ALL.label();
     if !crate::pr_review::viewer::whole_pr(view) {
-        return format!("{said} Review threads sit on the whole pull request: {all} ticks every commit.");
+        return format!(
+            "{said} Review threads sit on the whole pull request: {all} ticks every commit."
+        );
     }
     match crate::pr_review::viewer::reviewing(view) {
         true => format!(

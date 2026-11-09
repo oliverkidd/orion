@@ -36,9 +36,7 @@
 //! modal paints from the last run while the next ask is out.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -68,7 +66,6 @@ pub const CACHE_FILE: &str = "usage.json";
 
 const CLAUDE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CURSOR_URL: &str = "https://cursor.com/api/usage-summary";
-const TIMEOUT_SECS: &str = "20";
 
 /// The Keychain item Claude Code keeps an unpinned login in; a pinned
 /// config dir's adds `-<8 hex of sha256(dir)>`.
@@ -517,68 +514,23 @@ fn get_json(url: &str, headers: &[String], who: &str) -> Result<Value, Problem> 
         .map_err(|_| Problem::Failed(format!("{who} sent something that wasn't JSON")))
 }
 
-/// `GET url` through curl, the headers on its stdin config so no token
-/// reaches argv. The body of a 2xx; a [`Problem`] for anything else.
+/// `GET url` through [`orion_core::http`], the headers off argv. The
+/// body of a 2xx; a [`Problem`] for anything else.
 fn get(url: &str, headers: &[String]) -> Result<Vec<u8>, Problem> {
-    let mut config = format!("url = \"{}\"\n", config_escape(url));
-    for header in headers {
-        config.push_str(&format!("header = \"{}\"\n", config_escape(header)));
-    }
-    let mut child = Command::new("curl")
-        .args([
-            "-sS",
-            "--max-time",
-            TIMEOUT_SECS,
-            "--config",
-            "-",
-            "-w",
-            "\n%{http_code}",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| Problem::Failed(format!("couldn't run curl: {e}")))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(config.as_bytes());
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|e| Problem::Failed(e.to_string()))?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(Problem::Failed(format!(
-            "couldn't reach the provider: {}",
-            err.lines().next().unwrap_or("curl failed")
-        )));
-    }
-    let (body, status) = split_status(&output.stdout);
-    match status {
-        200..=299 => Ok(body.to_vec()),
+    let response = orion_core::http::request(&orion_core::http::Request {
+        url,
+        headers,
+        ..Default::default()
+    })
+    .map_err(|why| Problem::Failed(format!("couldn't reach the provider: {why}")))?;
+    match response.status {
+        200..=299 => Ok(response.body),
         401 | 403 => Err(Problem::Expired),
         429 => Err(Problem::RateLimited),
         code => Err(Problem::Failed(format!(
             "the provider answered HTTP {code}"
         ))),
     }
-}
-
-/// curl's `-w "\n%{http_code}"` tail off the body.
-fn split_status(out: &[u8]) -> (&[u8], u16) {
-    let (body, tail) = match out.iter().rposition(|&b| b == b'\n') {
-        Some(at) => (&out[..at], &out[at + 1..]),
-        None => (&out[..0], out),
-    };
-    let code = std::str::from_utf8(tail)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-    (body, code)
-}
-
-/// A value inside a curl config file's double quotes.
-fn config_escape(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 // ---- Claude ----
@@ -605,7 +557,8 @@ pub fn claude_service(dir: Option<&Path>) -> String {
 }
 
 fn claude_credentials(account: &Account) -> Result<ClaudeCreds, Problem> {
-    let mut blob = keychain(&claude_service(account.keychain_dir.as_deref()), None);
+    let mut blob =
+        orion_core::secrets::read_item(&claude_service(account.keychain_dir.as_deref()), None);
     if blob.is_none() {
         blob = account
             .dir
@@ -685,7 +638,7 @@ struct CursorCreds {
 
 fn cursor_credentials() -> Result<CursorCreds, Problem> {
     let home = orion_core::env::home_dir().ok_or(Problem::SignedOut)?;
-    let mut token = keychain(CURSOR_SERVICE, Some(CURSOR_KEY_ACCOUNT));
+    let mut token = orion_core::secrets::read_item(CURSOR_SERVICE, Some(CURSOR_KEY_ACCOUNT));
     if token.is_none() {
         token = [".config/cursor/auth.json", ".cursor/auth.json"]
             .iter()
@@ -797,36 +750,6 @@ fn cursor_reading(json: &Value, now: i64) -> Reading {
 }
 
 // ---- shared ----
-
-/// A Keychain generic password's secret, through `security` — the tool
-/// Claude Code saves with, so its items let it read them without a prompt.
-fn keychain(service: &str, account: Option<&str>) -> Option<String> {
-    let mut cmd = Command::new("/usr/bin/security");
-    cmd.args(["find-generic-password", "-s", service]);
-    if let Some(account) = account {
-        cmd.args(["-a", account]);
-    }
-    let out = cmd.arg("-w").stderr(Stdio::null()).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(out.stdout).ok()?;
-    let text = text.trim();
-    (!text.is_empty()).then(|| unhex(text).unwrap_or_else(|| text.to_string()))
-}
-
-/// `security -w` prints a secret that is not plain text as hex: a JSON
-/// blob saved that way comes back as `7b22…`.
-fn unhex(text: &str) -> Option<String> {
-    if !text.len().is_multiple_of(2) || !text.starts_with("7b") {
-        return None;
-    }
-    let bytes: Option<Vec<u8>> = (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
-        .collect();
-    String::from_utf8(bytes?).ok()
-}
 
 /// Pay-as-you-go spend in cents, as the details line says it:
 /// `on-demand $3.50 of $20.00`, or `on-demand $3.50` with no limit.
@@ -1552,13 +1475,6 @@ mod tests {
     }
 
     #[test]
-    fn a_hex_secret_is_decoded_and_plain_text_left_alone() {
-        assert_eq!(unhex("7b7d").as_deref(), Some("{}"));
-        assert_eq!(unhex("{\"a\":1}"), None);
-        assert_eq!(unhex("abc"), None);
-    }
-
-    #[test]
     fn the_cursor_account_id_comes_from_the_cli_config_then_the_token() {
         let config: Value =
             serde_json::from_str(r#"{"authInfo":{"authId":"auth0|user_01ABC","email":"a@b.co"}}"#)
@@ -1652,14 +1568,6 @@ mod tests {
         let names: Vec<&str> = limits.iter().map(|(name, _)| *name).collect();
         assert_eq!(names, ["Weekly"]);
         assert_eq!(emptiest(&[]), None);
-    }
-
-    #[test]
-    fn curl_status_comes_off_the_tail() {
-        assert_eq!(split_status(b"{\"a\":1}\n200"), (&b"{\"a\":1}"[..], 200));
-        assert_eq!(split_status(b"\n429"), (&b""[..], 429));
-        assert_eq!(split_status(b"garbage"), (&b""[..], 0));
-        assert_eq!(config_escape(r#"a"b\c"#), r#"a\"b\\c"#);
     }
 
     #[test]
@@ -1846,6 +1754,7 @@ mod tests {
                 reason: orion_core::LimitReason::RateLimit,
                 message: None,
             }),
+            automation: None,
         });
         let limited = limited_harnesses(&app);
         assert!(claude[1].limit_hit(&limited), "the second account's limit");

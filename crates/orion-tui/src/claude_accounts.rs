@@ -1789,6 +1789,7 @@ case " $INSTALLED " in *" $2 "*) exit 0 ;; *) exit 1 ;; esac"#,
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         }
     }
 

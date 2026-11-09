@@ -1,0 +1,19 @@
+# The MOVE PICKER (5.8), over the stored read of takeaways.setup.sh (which takeaways-move.setup.sh
+# sources): the takeaways screen as in takeaways.keys, then down onto the habit tracker and `m` puts
+# the picker over the right side, `where it is now` beside Ideas; typing `i` narrows it to the groups with an i
+# in them (Ideas, Tools › CLI), with `+ new group "i"` last.
+cmd j
+Down
+Down
+Down
+Down
+Tab
+Down
+Down
+Down
+Enter
+Down
+Down
+Down
+m
+i

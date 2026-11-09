@@ -234,6 +234,13 @@ pub struct Agent {
     /// read it through [`Agent::limit_reached`].
     #[serde(default)]
     pub usage_limit: Option<UsageLimit>,
+    /// The AUTOMATION that started this session — its id, `pr_fixer`,
+    /// `bug_fixer` … (the TUI's `automations::Automation::id`) — or None
+    /// for one you started. Set once at create and persisted with the
+    /// row; it drives the grid's badge, the Needs-you kind label and the
+    /// automations' running cap.
+    #[serde(default)]
+    pub automation: Option<String>,
 }
 
 /// A Claude session stopped on its account rather than its work: a usage
@@ -306,6 +313,83 @@ impl LimitReason {
             "billing_error" => LimitReason::BillingError,
             "account_on_hold" => LimitReason::AccountOnHold,
             _ => return None,
+        })
+    }
+}
+
+/// Why a session is waiting on you: what the DAEMON learnt from the hook
+/// that turned it red (or from the PTY dying). A Claude `AskUserQuestion`
+/// or `ExitPlanMode` names its question or plan in the hook's
+/// `tool_input`; any other `PermissionRequest` names only the tool. Sent
+/// beside the status on `StatusChanged` and with `LastResponse`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WaitReason {
+    /// An `AskUserQuestion` (its first question, when it asks several).
+    Question {
+        question: String,
+        /// The option labels, in the order the dialog numbers them.
+        options: Vec<String>,
+        /// Several options may be picked.
+        multi: bool,
+    },
+    /// An `ExitPlanMode`: the plan waiting for approval.
+    Plan { plan: String },
+    /// A permission prompt for this tool.
+    Permission { tool: String },
+    /// The CLI exited with an error.
+    Crash { exit_code: Option<i32> },
+}
+
+/// Claude's question tool.
+pub const ASK_USER_QUESTION_TOOL: &str = "AskUserQuestion";
+/// Claude's plan approval tool.
+pub const EXIT_PLAN_MODE_TOOL: &str = "ExitPlanMode";
+
+impl WaitReason {
+    /// The reason a dialog for `tool` raises, read off its input — a hook's
+    /// `tool_input`, or a transcript's `tool_use.input` (the same shape).
+    /// An `AskUserQuestion` or `ExitPlanMode` whose input doesn't parse
+    /// says no more than any other tool's permission prompt does.
+    pub fn from_tool(tool: &str, input: Option<&serde_json::Value>) -> Self {
+        let parsed = input.and_then(|input| match tool {
+            ASK_USER_QUESTION_TOOL => Self::question(input),
+            EXIT_PLAN_MODE_TOOL => {
+                let plan = input.get("plan")?.as_str()?.trim();
+                (!plan.is_empty()).then(|| WaitReason::Plan {
+                    plan: plan.to_string(),
+                })
+            }
+            _ => None,
+        });
+        parsed.unwrap_or_else(|| WaitReason::Permission {
+            tool: tool.to_string(),
+        })
+    }
+
+    /// `questions[0]` of an `AskUserQuestion` input: `{question, options:
+    /// [{label, description}], multiSelect}`.
+    fn question(input: &serde_json::Value) -> Option<Self> {
+        let first = input.get("questions")?.as_array()?.first()?;
+        let question = first.get("question")?.as_str()?.trim().to_string();
+        let options = first
+            .get("options")
+            .and_then(|o| o.as_array())
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|o| o.get("label").and_then(|l| l.as_str()))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let multi = first
+            .get("multiSelect")
+            .and_then(|m| m.as_bool())
+            .unwrap_or(false);
+        Some(WaitReason::Question {
+            question,
+            options,
+            multi,
         })
     }
 }
@@ -441,4 +525,65 @@ pub enum EntityId {
     Agent(AgentId),
     Terminal(TerminalId),
     Link(LinkId),
+}
+
+#[cfg(test)]
+mod wait_reason_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The `tool_input` Claude Code 2.1.319 posts on `PreToolUse` and
+    /// `PermissionRequest` for its question and plan dialogs.
+    #[test]
+    fn question_and_plan_parse_from_the_hook_tool_input() {
+        let ask = json!({"questions": [
+            {"question": "Which color do you like?", "header": "Color", "multiSelect": false,
+             "options": [{"label": "Red", "description": "Red"}, {"label": "Green", "description": "Green"}]},
+            {"question": "A second one", "options": []}
+        ]});
+        assert_eq!(
+            WaitReason::from_tool(ASK_USER_QUESTION_TOOL, Some(&ask)),
+            WaitReason::Question {
+                question: "Which color do you like?".into(),
+                options: vec!["Red".into(), "Green".into()],
+                multi: false,
+            }
+        );
+        let multi = json!({"questions": [{"question": "Fruits?", "multiSelect": true,
+            "options": [{"label": "Apple"}, {"label": "Pear"}]}]});
+        assert!(matches!(
+            WaitReason::from_tool(ASK_USER_QUESTION_TOOL, Some(&multi)),
+            WaitReason::Question { multi: true, .. }
+        ));
+        let plan = json!({"plan": "# Create hello.txt\n\n1. Write it.\n", "planFilePath": "/x.md"});
+        assert_eq!(
+            WaitReason::from_tool(EXIT_PLAN_MODE_TOOL, Some(&plan)),
+            WaitReason::Plan {
+                plan: "# Create hello.txt\n\n1. Write it.".into()
+            }
+        );
+    }
+
+    #[test]
+    fn anything_else_is_the_tool_permission() {
+        assert_eq!(
+            WaitReason::from_tool("Bash", Some(&json!({"command": "ls"}))),
+            WaitReason::Permission {
+                tool: "Bash".into()
+            }
+        );
+        // A question or plan whose input drifted still names its tool.
+        assert_eq!(
+            WaitReason::from_tool(ASK_USER_QUESTION_TOOL, Some(&json!({"questions": []}))),
+            WaitReason::Permission {
+                tool: ASK_USER_QUESTION_TOOL.into()
+            }
+        );
+        assert_eq!(
+            WaitReason::from_tool(EXIT_PLAN_MODE_TOOL, None),
+            WaitReason::Permission {
+                tool: EXIT_PLAN_MODE_TOOL.into()
+            }
+        );
+    }
 }

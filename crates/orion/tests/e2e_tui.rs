@@ -36,6 +36,7 @@ const CTRL_A: &[u8] = &[0x01];
 /// `⌘U`, `⌘N`, `⌘E` and `⌘F` as Ghostty's kitty protocol spells them.
 const CMD_U: &[u8] = b"\x1b[117;9u";
 const CMD_N: &[u8] = b"\x1b[110;9u";
+const CMD_K: &[u8] = b"\x1b[107;9u";
 /// ⌘⇧N as the kitty protocol spells it: `n`, modifiers 1 + shift 1 + super 8.
 const CMD_SHIFT_N: &[u8] = b"\x1b[110;10u";
 const CMD_E: &[u8] = b"\x1b[101;9u";
@@ -135,7 +136,13 @@ impl TuiHarness {
         cmd.env(orion_core::env::WORKTREE_SYNC_MS, "100"); // fast external-change pickup
         cmd.env(orion_core::env::UPDATE_CHECK_SECS, "0"); // the footer must not depend on GitHub
         cmd.env(orion_core::env::SPOTIFY_POLL_SECS, "0"); // …nor on what's playing
+        cmd.env(orion_core::env::NEEDS_YOU_POLL_SECS, "0"); // …nor on Linear and GitHub's inboxes
+        cmd.env(orion_core::env::LINEAR_BUILDER_POLL_SECS, "0"); // …nor pick Linear tickets up
+        cmd.env(orion_core::env::WEEK_REVIEW_CHECK_SECS, "0"); // …nor writes a week in review on its own
         cmd.env(orion_core::env::USAGE, "off"); // never read the machine's logins
+        cmd.env(orion_core::env::MICROSOFT_POLL_SECS, "0"); // never call Microsoft Graph
+        cmd.env(orion_core::env::MEETING_TAKEAWAYS_POLL_SECS, "0"); // …nor look for a meeting's transcript
+        cmd.env(orion_core::env::PROJECT_ABOUT, "off"); // a new project runs no model
         cmd.env(orion_core::env::LOG, "debug");
         cmd.env("SHELL", "/bin/sh");
         cmd.env("TERM", "xterm-256color");
@@ -356,8 +363,8 @@ fn row_is_selected(screen: &vt100::Screen, needle: &str) -> bool {
             }
         }
         if let Some(at) = line.find(needle) {
-            // Selection paints the row with the raised fill: indexed 237 in
-            // the focused panel, 235 in unfocused ones (theme sel_bg /
+            // Selection paints the row with the raised fill: indexed 236 in
+            // the focused panel, 234 in unfocused ones (theme sel_bg /
             // sel_bg_dim). Only the needle's own panel band counts — the
             // panels share screen lines, and a selected pill in the next
             // column over used to pass this check for a row it had nothing
@@ -375,7 +382,7 @@ fn row_is_selected(screen: &vt100::Screen, needle: &str) -> bool {
             let filled = (band_start..band_end).any(|col| {
                 matches!(
                     screen.cell(row, col as u16).map(|c| c.bgcolor()),
-                    Some(vt100::Color::Idx(237)) | Some(vt100::Color::Idx(235))
+                    Some(vt100::Color::Idx(236)) | Some(vt100::Color::Idx(234))
                 )
             });
             if filled {
@@ -499,6 +506,36 @@ fn host_working_directory_follows_project_switches_and_restores_on_exit() {
     tui.wait_for_text("Quit orion");
     tui.send(ENTER);
     tui.wait_for_working_directory(&tui._repos.path().canonicalize().unwrap());
+}
+
+/// `⌘K` with nothing typed is the NEEDS YOU board — its five sections,
+/// each saying it is empty in the same words — and typing turns it into
+/// the jump list, which Esc closes.
+#[test]
+fn tui_cmd_k_is_the_needs_you_board_until_you_type() {
+    let mut tui = TuiHarness::spawn();
+    let repo = tui.make_repo("board-demo");
+    tui.wait_for_text("to begin");
+    add_project(&mut tui, &repo, "board-demo");
+
+    tui.send(CMD_K);
+    tui.wait_for_text("Needs you");
+    for empty in [
+        "No agents waiting for you",
+        "No Linear issues waiting for you",
+        "No code reviews waiting for you",
+        "No Slack messages waiting for you",
+        "No meetings waiting for you",
+    ] {
+        tui.wait_for_text(empty);
+    }
+
+    tui.type_str("board");
+    tui.wait_for_text("Jump to (");
+    tui.wait_for_gone("No agents waiting for you");
+
+    tui.send(ESC);
+    tui.wait_for_gone("Jump to (");
 }
 
 #[test]
@@ -885,11 +922,11 @@ fn tui_drag_past_the_pane_top_autoscrolls_and_copies_the_run() {
         let parser = tui.parser.lock().unwrap();
         let screen = parser.screen();
         // The session's mark is the WORKING SPINNER while it runs, on
-        // whichever quarter turn the frame caught.
-        let (header_row, _) = ["◐", "◓", "◑", "◒", "●"]
+        // whichever frame the screen caught.
+        let (header_row, _) = ["✻", "✽", "✶", "✳", "✢", "·", "●"]
             .iter()
             .find_map(|mark| find_text(screen, &format!("{mark} agent-1  ⌂")))
-            .expect("the pane header");
+            .unwrap_or_else(|| panic!("the pane header:\n{}", screen_to_text(screen)));
         let (row58, col58) = find_text(screen, "row 58").expect("row 58 on screen");
         (header_row, header_row + 2, row58, col58)
     };
@@ -1246,7 +1283,7 @@ fn tui_pr_review_comments_on_a_line_and_sends_the_review() {
     tui.send(SHIFT_RIGHT);
     tui.wait_for_text("a.txt");
     tui.send(CMD_SHIFT_R);
-    tui.wait_for_text("Review #7 Add things");
+    tui.wait_for_text("Your review");
     tui.wait_for_text("Looks off");
     tui.wait_for("the diff, ada's thread under deux", |s| {
         let text = screen_to_text(s);
@@ -1422,4 +1459,57 @@ fn tui_cmd_u_pastes_a_preset_into_the_running_agent() {
     tui.wait_for_text("normal size");
     tui.type_str("still here");
     tui.wait_for_text("still here");
+}
+
+/// The BLUE SKY BUILDER, end to end: `Enter` on an idea for `blue sky` in
+/// Todos › Blue sky makes the Blue sky folder (a scratch one here, never
+/// `~/Code/orion-blue-sky`) a git repository, adds it as a project, and
+/// starts a session tagged `Blue sky builder` in its checkout, with the
+/// idea's own `<slug>/` folder made and written onto the idea.
+#[test]
+fn tui_blue_sky_builder_makes_its_folder_a_project_and_starts_there() {
+    const CMD_I: &[u8] = b"\x1b[105;9u";
+    let scratch = tempfile::tempdir().unwrap();
+    let folder = scratch.path().join("orion-blue-sky");
+    let mut tui = TuiHarness::spawn_with_env(&[(
+        orion_core::env::BLUE_SKY_DIR,
+        folder.to_string_lossy().into_owned(),
+    )]);
+    tui.wait_for_text("to begin");
+    let list = tui.data_dir.join("todos/blue-sky.json");
+
+    // No projects yet: ⌘I opens on Blue sky's tab, where ⌘N writes an idea.
+    tui.send(CMD_I);
+    tui.wait_for_text("Enter starts the Blue sky builder");
+    tui.send(CMD_N);
+    tui.type_str("A tiny habit tracker");
+    tui.send(ENTER);
+    tui.send(ESC);
+    tui.wait_for_text("Blue sky 1");
+    tui.wait_for_text("blue sky · not started");
+    tui.send(DOWN);
+    tui.wait_for_selected("A tiny habit tracker");
+    tui.send(ENTER);
+
+    // The folder is a repository and a project, and the session starts in
+    // it, its folder made.
+    tui.wait_for("the Blue sky folder added as a project", |s| {
+        screen_to_text(s).contains("orion-blue-sky")
+    });
+    assert!(folder.join(".git").exists(), "git init'd");
+    tui.wait_for("the idea's session written onto it", |_| {
+        std::fs::read_to_string(&list).is_ok_and(|raw| raw.contains("\"agent\""))
+    });
+    let raw = std::fs::read_to_string(&list).unwrap();
+    assert!(
+        raw.contains("\"built_in\": \"a-tiny-habit-tracker/\""),
+        "{raw}"
+    );
+    assert!(folder.join("a-tiny-habit-tracker").is_dir());
+    tui.wait_for_gone("not started");
+
+    // On the grid, the session is the Blue sky builder's.
+    tui.send(ESC);
+    tui.wait_for_gone("Enter starts the Blue sky builder");
+    tui.wait_for_text("Blue sky builder");
 }

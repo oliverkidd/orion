@@ -1,4 +1,4 @@
-//! AUTOFIX: an agent sent to mend one of your pull requests — its merge
+//! The PR FIXER (AUTOFIX): an agent sent to mend one of your pull requests — its merge
 //! conflicts, its failing unit and e2e tests, its other failing checks —
 //! that runs them locally until they pass and pushes the fix to the PR.
 //!
@@ -19,14 +19,16 @@
 //!   session at work in a checkout of the PR's branch — any, not only an
 //!   `autofix-<n>` — holds the ask back until it is done, and a PR already
 //!   being asked about is not asked about twice.
-//! * **Sending, unasked.** **Auto-fix my PRs** (`Config::pr_autofix`, on by
+//! * **Sending, unasked.** The **PR fixer** automation (`⌘J`, on by
 //!   default) sends the agent the moment a breakage has settled — no modal,
 //!   nothing to confirm — until [`AUTO_ATTEMPTS`] tries in a row have not
 //!   turned the PR green, when it stops and says so (a flash, and a desktop
 //!   notification while the window is away). `⌘G` in the PULL REQUESTS
 //!   MODAL, or on the pane's PULL REQUEST PAGE ([`open_asked`]), still
 //!   opens the AUTOFIX MODAL for any PR — the issues as a checklist and a
-//!   note — whatever the setting.
+//!   note — whatever the setting. An unasked send waits while
+//!   `automations.max_running` automation sessions are running
+//!   ([`super::may_start`]).
 //! * **As the worktree's agent.** [`dispatch`] launches a PR SESSION
 //!   (`CreatePrAgent`, so the DAEMON finds or cuts the PR's worktree) named
 //!   `autofix-<n>` on the harness, account, model and effort of the session
@@ -35,7 +37,10 @@
 //!   and a harness that preset pins over both ([`launch_of`]) — its first
 //!   prompt [`prompt`]: the pull request and what failed, at that preset's
 //!   `{task}`, its text orion's own rules
-//!   ([`PRESET_TEXT`]) while it holds none of the user's.
+//!   ([`PRESET_TEXT`]) while it holds none of the user's, and the
+//!   automation's extra steer after it ([`super::compose`]). `⌘U` on the
+//!   Automations screen can put another preset in that one's place
+//!   ([`super::preset_of`]). Every one is tagged `pr_fixer`.
 //! * **Standing down.** Another session live on the branch — mid-turn, or
 //!   waiting on the user — does not hold the agent back. It is told where
 //!   that session's conversation is ([`stand_down_preamble`]) and reads it
@@ -49,6 +54,7 @@
 //! an e2e spec or a lint is the agent's to read off the logs, under the
 //! preset's rules for each.
 
+use super::{Automation, Dot, Panel, PanelList, PanelRow, Runner, Tone};
 use crate::agent_presets::AgentPreset;
 use crate::app::{App, Overlay};
 use crate::flash::Flash;
@@ -79,31 +85,6 @@ pub const SETTLE_LIMIT: Duration = Duration::from_secs(20 * 60);
 /// `auto` sends this many times in a row without the PR going green, then
 /// asks.
 pub const AUTO_ATTEMPTS: u8 = 3;
-
-/// **Auto-fix my PRs** (Settings → General): on or off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mode {
-    #[default]
-    Off,
-    Auto,
-}
-
-impl Mode {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Mode::Off => "off",
-            Mode::Auto => "auto",
-        }
-    }
-
-    /// The stored word: `off` is off, and anything else on — the default.
-    pub fn parse(word: &str) -> Self {
-        match word.trim().to_ascii_lowercase().as_str() {
-            "off" => Mode::Off,
-            _ => Mode::Auto,
-        }
-    }
-}
 
 /// One kind of thing the agent can be sent to fix — a row of the form, in
 /// [`Issue::ALL`] order (which is also its index in [`Picks`]).
@@ -401,7 +382,7 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
         if status.trouble().is_none() {
             continue;
         }
-        if app.autofix_mode == Mode::Off {
+        if !app.automations.is_on(Automation::PrFixer) {
             continue;
         }
         let handled = app
@@ -544,7 +525,7 @@ pub fn land_detail(
     if let Some(name) = unreadable {
         if app.autofix.held.insert(url.to_string()) {
             app.flash = Some(Flash::note(format!(
-                "Autofix held for #{}: {name} is busy on its branch",
+                "PR fixer held #{}: {name} is busy on its branch",
                 pr.number
             )));
             app.dirty = true;
@@ -552,20 +533,27 @@ pub fn land_detail(
         app.autofix.recheck_later(url);
         return;
     }
+    let record = app.autofix.ledger.get(url).cloned().unwrap_or_default();
+    // At the cap: the breakage waits, still watched, for a place.
+    let on = app.automations.is_on(Automation::PrFixer);
+    if on && record.attempts < AUTO_ATTEMPTS && !super::may_start(app) {
+        app.autofix.recheck_later(url);
+        return;
+    }
     app.autofix.watching.remove(url);
     app.autofix.held.remove(url);
-    let record = app.autofix.ledger.get(url).cloned().unwrap_or_default();
     let mut form = AutofixForm::new(watch.project, pr, detail, status.health.conflicts);
     if record.handled.as_ref() == Some(&form.fingerprint()) {
         return;
     }
-    match app.autofix_mode {
-        Mode::Off => {}
-        Mode::Auto if record.attempts < AUTO_ATTEMPTS => {
-            form.peers = peers;
-            send(app, form, out);
-        }
-        Mode::Auto => give_up(app, &form, record.attempts),
+    if !on {
+        return;
+    }
+    if record.attempts < AUTO_ATTEMPTS {
+        form.peers = peers;
+        send(app, form, out);
+    } else {
+        give_up(app, &form, record.attempts);
     }
     app.dirty = true;
 }
@@ -575,18 +563,18 @@ pub fn land_detail(
 /// until a push or a different failure.
 fn give_up(app: &mut App, form: &AutofixForm, attempts: u8) {
     let text = format!(
-        "{} is still failing after {attempts} autofix runs: over to you",
+        "{} is still failing after {attempts} PR fixer tries: over to you",
         form.pr.label()
     );
     if app.may_notify_desktop() {
-        crate::event_loop::alerts::notify_text("Autofix", &text);
+        crate::event_loop::alerts::notify_text("PR fixer", &text);
     }
     app.flash = Some(Flash::failed(text));
     app.autofix.record(&form.pr.url).handled = Some(form.fingerprint());
 }
 
 /// `⌘G` — in the PULL REQUESTS MODAL, or on the pane's PULL REQUEST PAGE
-/// (and a click on its `⌘G send autofix`): the form for the pull request
+/// (and a click on its `⌘G send to the PR fixer`): the form for the pull request
 /// it shows, at once from a fresh body, else once a fresh one lands
 /// ([`land_detail`]), so it names the checks failing now.
 pub(crate) fn open_asked(app: &mut App) {
@@ -790,6 +778,96 @@ fn source_agent<'a>(
 /// ahead of its reason: what [`note_stand_downs`] knows it by.
 pub const STOOD_DOWN: &str = "autofix · stood down: ";
 
+// ---- the automation ----
+
+/// The PR fixer's [`Runner`]. Its state is `App::autofix`, which the
+/// open-PR lists and PR bodies drive as they land ([`note_list`],
+/// [`land_detail`]); the tick sends what waited on its conflicting files
+/// and flashes the agents that stood down.
+pub struct PrFixer;
+
+impl Runner for PrFixer {
+    fn automation(&self) -> Automation {
+        Automation::PrFixer
+    }
+
+    fn tick(&mut self, app: &mut App, out: &mut Vec<ClientRequest>) {
+        send_waiting(app, out);
+        note_stand_downs(app);
+    }
+
+    fn panel(&self, app: &App) -> Panel {
+        let mut open = Vec::new();
+        for project in &app.tree.projects {
+            let Some(prs) = app.open_prs.get(&project.id) else {
+                continue;
+            };
+            for pr in prs.list.iter().filter(|pr| pr.mine) {
+                open.push(open_pr_row(app, &project.id, pr));
+            }
+        }
+        let fixing: Vec<&PanelRow> = open.iter().filter(|r| r.session.is_some()).collect();
+        let stuck = open.iter().filter(|r| r.tone == Tone::Waiting).count();
+        let (dot, state) = match (fixing.first(), stuck) {
+            (Some(row), _) => (
+                Dot::Working,
+                format!("fixing {}", row.text.split(' ').next().unwrap_or_default()),
+            ),
+            (None, n) if n > 0 => (Dot::Waiting, format!("{n} needs you")),
+            (None, _) => (Dot::Idle, "watching your PRs".into()),
+        };
+        Panel {
+            dot,
+            state,
+            lists: vec![
+                PanelList {
+                    title: "YOUR OPEN PRS",
+                    empty: "No open PRs of yours",
+                    rows: open,
+                },
+                super::done_this_week(app, Automation::PrFixer),
+            ],
+        }
+    }
+}
+
+/// One of your open pull requests on the PR fixer's panel: `#n title`,
+/// and where the fixer stands on it.
+fn open_pr_row(app: &App, project: &ProjectId, pr: &OpenPr) -> PanelRow {
+    let attempts = app.autofix.ledger.get(&pr.url).map_or(0, |r| r.attempts);
+    let status = app.prs.status_or_open(&pr.url);
+    let (state, tone, session) = match fixer(app, project, &pr.head, pr.number) {
+        Some(agent) if agent.status == AgentStatus::NeedsFeedback => (
+            "fixing, waiting on you".to_string(),
+            Tone::Waiting,
+            Some(agent.id.clone()),
+        ),
+        Some(agent) => (
+            format!(
+                "fixing {}, try {} of {AUTO_ATTEMPTS}",
+                match status.trouble() {
+                    Some(crate::pull_request::Trouble::Conflicts) => "conflicts",
+                    Some(crate::pull_request::Trouble::FailingChecks) => "checks",
+                    None => "it",
+                },
+                attempts.max(1)
+            ),
+            Tone::Working,
+            Some(agent.id.clone()),
+        ),
+        None if status.is_green() => ("green".into(), Tone::Done, None),
+        None if attempts >= AUTO_ATTEMPTS => ("gave up, needs you".into(), Tone::Waiting, None),
+        None if status.trouble().is_some() => ("waiting for checks".into(), Tone::Quiet, None),
+        None => ("watching".into(), Tone::Quiet, None),
+    };
+    PanelRow {
+        text: format!("#{} {}", pr.number, pr.title),
+        state,
+        tone,
+        session,
+    }
+}
+
 /// The git beat: flash each `autofix-<n>` that stood down since the last
 /// look, with its reason. The first look only takes note — those were
 /// archived before this run.
@@ -810,7 +888,7 @@ pub fn note_stand_downs(app: &mut App) {
     };
     for (id, why) in down {
         if seen.insert(id) {
-            app.flash = Some(Flash::note(format!("Autofix stood down: {why}")));
+            app.flash = Some(Flash::note(format!("PR fixer stood down: {why}")));
             app.dirty = true;
         }
     }
@@ -878,6 +956,7 @@ pub fn prompt(
     picks: &Picks,
     note: &str,
     preset: &AgentPreset,
+    extra: &str,
 ) -> String {
     let base = match refs.base.as_str() {
         "" => "the base branch".to_string(),
@@ -887,10 +966,11 @@ pub fn prompt(
         .into_iter()
         .filter(|i| picks[i.index()])
         .collect();
-    preset
-        .clone()
-        .with_builtin_text()
-        .compose(&context(pr, refs, diagnosis, &ticked, &base, note))
+    super::compose(
+        preset,
+        &context(pr, refs, diagnosis, &ticked, &base, note),
+        extra,
+    )
 }
 
 /// What the agent is pointed at: the pull request, its branches, each
@@ -1256,14 +1336,15 @@ pub fn send_waiting(app: &mut App, out: &mut Vec<ClientRequest>) {
 pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) {
     let Some(worktree) = app.root_worktree(&form.project) else {
         app.flash = Some(Flash::failed(
-            "Autofix: the project has no checkout to start from",
+            "PR fixer: the project has no checkout to start from",
         ));
         return;
     };
-    // The PR autofix SYSTEM PRESET: its text, and what the agent runs on.
-    let preset = crate::agent_presets::system(crate::agent_presets::SystemPreset::PrAutofix);
-    let (kind, custom, model, effort) =
-        launch_of(app, &form, &preset, &crate::config::Config::load());
+    // The PR fixer's preset — the PR autofix SYSTEM PRESET unless `⌘U`
+    // picked another: its text, and what the agent runs on.
+    let cfg = crate::config::Config::load();
+    let preset = super::preset_of(&cfg.automations, Automation::PrFixer);
+    let (kind, custom, model, effort) = launch_of(app, &form, &preset, &cfg);
     let task = prompt(
         &form.pr,
         &form.refs,
@@ -1271,6 +1352,7 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
         &form.picks,
         form.note.as_str(),
         &preset,
+        &cfg.automations.of(Automation::PrFixer).extra_steer,
     );
     let text = [stand_down_preamble(&form.peers, &form.pr), task]
         .into_iter()
@@ -1284,6 +1366,7 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
         pr: Some(PrLaunch::of(&form.pr)),
         focus_pane: false,
         follow: false,
+        automation: Some(Automation::PrFixer),
         ..crate::app::AgentLaunchDraft::new(worktree, kind, model, effort)
     };
     crate::event_loop::create_agent(app, draft, out);
@@ -1334,7 +1417,7 @@ pub mod keys {
 
     pub const OPTION: Key = Key::new(&["up", "down"], "option").show(2);
     pub const TICK: Key = Key::new(&["space"], "tick");
-    pub const SEND: Key = Key::new(&["enter"], "send autofix");
+    pub const SEND: Key = Key::new(&["enter"], "send");
     #[cfg(test)]
     pub const ALL: &[Key] = &[OPTION, TICK, SEND];
 }
@@ -1569,7 +1652,7 @@ pub fn draw(f: &mut Frame, app: &mut App, form: &AutofixForm, th: Theme) {
     let area = crate::ui::centered_rect(frame, width, height);
     f.render_widget(Clear, area);
     let block = crate::hints::modal_block(
-        crate::ui::modal_block(format!(" Autofix #{} ", form.pr.number), th),
+        crate::ui::modal_block(format!(" PR fixer #{} ", form.pr.number), th),
         &hints(form),
         area.width,
         th,
@@ -1748,6 +1831,7 @@ mod tests {
             &[false, true],
             "flaky on CI",
             &orions(),
+            "",
         );
         assert!(text.starts_with("You are orion's PR autofixer."), "{text}");
         assert!(text.contains("https://github.com/o/r/pull/7"));
@@ -1789,6 +1873,7 @@ mod tests {
             &[true, false],
             "",
             &preset,
+            "",
         );
         assert!(text.starts_with("Do it my way."));
         assert!(text.ends_with("Then push."));
@@ -1828,6 +1913,7 @@ mod tests {
             &form.picks,
             "",
             &orions(),
+            "",
         );
         let fix = &text[text.find("\nFix:\n").unwrap()..text.find("Then commit").unwrap()];
         assert_eq!(
@@ -1847,21 +1933,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn modes_read_leniently() {
-        assert_eq!(
-            Mode::parse("ASK"),
-            Mode::Auto,
-            "an older orion's ask sends now"
-        );
-        assert_eq!(Mode::parse("auto"), Mode::Auto);
-        assert_eq!(Mode::parse(" Off "), Mode::Off);
-        assert_eq!(Mode::parse(""), Mode::Auto, "on unless switched off");
-    }
-
     // ---- detection, on an App ----
 
-    fn app_with(list: Vec<OpenPr>, mode: Mode) -> App {
+    fn app_with(list: Vec<OpenPr>, on: bool) -> App {
         let mut app = App::new();
         let project = ProjectId("p".into());
         app.tree.projects.push(orion_core::Project {
@@ -1889,7 +1963,7 @@ mod tests {
                 step: Duration::from_secs(15),
             },
         );
-        app.autofix_mode = mode;
+        app.automations.settings.of_mut(Automation::PrFixer).on = Some(on);
         app
     }
 
@@ -1981,6 +2055,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         });
         id
     }
@@ -2031,15 +2106,15 @@ mod tests {
             mine: false,
             ..broken(true, false)
         };
-        let mut app = app_with(vec![theirs], Mode::Auto);
+        let mut app = app_with(vec![theirs], true);
         listed(&mut app);
         assert!(app.autofix.watching.is_empty(), "not mine");
 
-        let mut app = app_with(vec![broken(true, false)], Mode::Off);
+        let mut app = app_with(vec![broken(true, false)], false);
         listed(&mut app);
         assert!(app.autofix.watching.is_empty(), "off");
 
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         listed(&mut app);
         assert!(app.autofix.watching.contains_key(&pr().url));
         assert_eq!(
@@ -2052,7 +2127,7 @@ mod tests {
 
     #[test]
     fn running_checks_are_waited_out_but_conflicts_alone_are_not() {
-        let mut app = app_with(vec![broken(false, true)], Mode::Auto);
+        let mut app = app_with(vec![broken(false, true)], true);
         listed(&mut app);
         let running = detail(
             false,
@@ -2068,7 +2143,7 @@ mod tests {
             "asked again later"
         );
 
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         listed(&mut app);
         let out = landed(
             &mut app,
@@ -2080,7 +2155,7 @@ mod tests {
 
     #[test]
     fn a_sent_breakage_is_not_sent_again_until_it_changes() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         listed(&mut app);
         let out = landed(&mut app, &detail(true, Vec::new()));
         assert!(sent_prompt(&out).is_some(), "sent unasked");
@@ -2098,7 +2173,7 @@ mod tests {
         assert!(app.autofix.watching.contains_key(&pr().url));
 
         // So is a push.
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         app.autofix.ledger.insert(
             pr().url,
             Record {
@@ -2118,7 +2193,7 @@ mod tests {
     /// waiting on the user, a second is never sent, and the watch waits.
     #[test]
     fn a_second_autofix_never_starts_for_one_pr() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         session_on_branch(&mut app, "autofix-7", AgentStatus::Fresh);
         listed(&mut app);
         let out = landed(&mut app, &detail(true, Vec::new()));
@@ -2133,7 +2208,7 @@ mod tests {
     /// the agent back — said once — rather than send it in blind.
     #[test]
     fn a_live_session_with_no_conversation_to_read_holds_autofix() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         session_on_branch(&mut app, "billing", AgentStatus::Running);
         listed(&mut app);
         let out = landed(&mut app, &detail(true, Vec::new()));
@@ -2153,7 +2228,7 @@ mod tests {
     /// there whose conversation it can read, opens on checking it.
     #[test]
     fn autofix_copies_the_branchs_agent_and_checks_with_the_live_one() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         session_on_branch(&mut app, "worker", AgentStatus::Finished);
         listed(&mut app);
         let out = landed(&mut app, &detail(true, Vec::new()));
@@ -2184,7 +2259,7 @@ mod tests {
         let slug = claude.join("projects").join("-tmp-repo-worktrees-feat");
         std::fs::create_dir_all(&slug).unwrap();
         std::fs::write(slug.join("sid-1.jsonl"), "{}\n").unwrap();
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         let live = session_on_branch(&mut app, "billing", AgentStatus::NeedsFeedback);
         let agent = app.tree.agents.iter_mut().find(|a| a.id == live).unwrap();
         agent.kind = orion_core::AgentKind::Claude;
@@ -2215,7 +2290,7 @@ mod tests {
     /// this run are taken note of, never flashed.
     #[test]
     fn a_stand_down_is_flashed_once_with_its_reason() {
-        let mut app = app_with(Vec::new(), Mode::Auto);
+        let mut app = app_with(Vec::new(), true);
         let old = session_on_branch(&mut app, "old", AgentStatus::Finished);
         let set = |app: &mut App, id: &orion_core::AgentId, why: &str| {
             let a = app.tree.agents.iter_mut().find(|a| &a.id == id).unwrap();
@@ -2231,7 +2306,7 @@ mod tests {
         note_stand_downs(&mut app);
         assert_eq!(
             app.flash.as_deref(),
-            Some("Autofix stood down: billing: already on it")
+            Some("PR fixer stood down: billing: already on it")
         );
         app.flash = None;
         note_stand_downs(&mut app);
@@ -2251,7 +2326,7 @@ mod tests {
             },
             ..pr()
         };
-        let mut app = app_with(vec![unsure(Checks::Failing)], Mode::Auto);
+        let mut app = app_with(vec![unsure(Checks::Failing)], true);
         app.autofix.ledger.insert(
             pr().url,
             Record {
@@ -2289,7 +2364,7 @@ mod tests {
 
     #[test]
     fn auto_sends_until_its_attempts_run_out_then_says_so() {
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         listed(&mut app);
         let out = landed(&mut app, &detail(true, Vec::new()));
         assert!(app.overlay.is_none(), "sent, not asked");
@@ -2303,7 +2378,7 @@ mod tests {
             "{out:?}"
         );
 
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         app.autofix.ledger.insert(
             pr().url,
             Record {
@@ -2327,7 +2402,7 @@ mod tests {
 
     #[test]
     fn going_green_forgets_the_attempts() {
-        let mut app = app_with(vec![broken(false, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(false, false)], true);
         app.autofix.ledger.insert(
             pr().url,
             Record {
@@ -2388,7 +2463,7 @@ mod tests {
             })
             .collect();
         for text in [
-            "Autofix #7",
+            "PR fixer #7",
             "#7 Add things",
             "merge conflicts · 2 failing checks",
             "[x] Merge conflicts",
@@ -2396,7 +2471,7 @@ mod tests {
             "[x] Failing checks  2 failing",
             "CI              unit tests, lint",
             "Note",
-            "send autofix",
+            "send",
             "not now",
         ] {
             assert!(shot.contains(text), "{text} missing:\n{shot}");
@@ -2421,7 +2496,7 @@ mod tests {
             },
             ..broken(false, true)
         };
-        let mut app = app_with(vec![row(1)], Mode::Auto);
+        let mut app = app_with(vec![row(1)], true);
         listed(&mut app);
         assert_eq!(due_fetches(&mut app).len(), 1);
         let running = detail(
@@ -2456,7 +2531,7 @@ mod tests {
     fn conflicted_app(dir: &tempfile::TempDir) -> (App, PrDetail) {
         let (_, clone) = crate::conflicts::tests::conflicted_clone(dir);
         let head = crate::conflicts::tests::git(&clone, &["rev-parse", "HEAD"]);
-        let mut app = app_with(vec![broken(true, false)], Mode::Auto);
+        let mut app = app_with(vec![broken(true, false)], true);
         app.tree.projects[0].repo_path = clone;
         let page = PrDetail {
             head_sha: head,
@@ -2479,6 +2554,7 @@ mod tests {
             &[true, false],
             "",
             &orions(),
+            "",
         );
         assert!(
             text.contains("- Merge conflicts with `main`, in:\n  - a.txt\n  - src/gone.rs\n"),

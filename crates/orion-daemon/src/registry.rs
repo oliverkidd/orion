@@ -12,7 +12,7 @@ use orion_core::env;
 use orion_core::harness::HarnessDescriptor;
 use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, EnterOutcome, Entity, EntityId, LinkId, Project,
-    ProjectId, ServerEvent, SessionRef, TerminalId, TerminalTab, Worktree, WorktreeId,
+    ProjectId, ServerEvent, SessionRef, TerminalId, TerminalTab, WaitReason, Worktree, WorktreeId,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -97,6 +97,8 @@ pub(crate) struct CreateAgentSpec {
     pub pr_url: Option<String>,
     /// The mode the CLI starts in (plan, ask, edit). Request-only.
     pub mode: orion_core::harness::AgentMode,
+    /// The AUTOMATION starting the session (`Agent::automation`).
+    pub automation: Option<String>,
 }
 
 /// What [`Daemon::delete_worktree`] came to.
@@ -147,6 +149,11 @@ pub struct Daemon {
     /// the CLAUDE TITLE SYNC (`session_title.rs`) when the PTY's window
     /// title changes, which no hook reports.
     pub(crate) transcripts: Mutex<HashMap<AgentId, crate::session_title::TranscriptRef>>,
+    /// Why each red (or crashed) agent is waiting on you, from the hook
+    /// that turned it red (`WaitReason`). Memory only: a restarted daemon
+    /// rebuilds a red row's from its transcript (`Daemon::wait_reason`).
+    /// Dropped as soon as the agent leaves red.
+    pub(crate) wait_reasons: Mutex<HashMap<AgentId, WaitReason>>,
     /// Agents that ran `orion worktree` and are waiting for their turn to
     /// end: the row already sits under the target worktree while the PTY
     /// still runs in the old checkout. Drained by `complete_pending_move`
@@ -191,6 +198,10 @@ pub struct Daemon {
     /// SPARE WORKTREES: the warm next worktree of each project in use
     /// (`spare`).
     pub(crate) spares: crate::spare::SpareBook,
+    /// AWAY: whether you are at the desk, for the phone bridge (`away`).
+    pub away: crate::away::AwayWatch,
+    /// The SLACK BRIDGE's connection and status (`slack`).
+    pub slack: crate::slack::SlackBridge,
 }
 
 impl Daemon {
@@ -211,6 +222,7 @@ impl Daemon {
             session_interest: Mutex::new(HashMap::new()),
             last_cwd: Mutex::new(HashMap::new()),
             transcripts: Mutex::new(HashMap::new()),
+            wait_reasons: Mutex::new(HashMap::new()),
             pending_moves: Mutex::new(HashMap::new()),
             spawn_gate: Mutex::new(()),
             boot_notes: Mutex::new(Vec::new()),
@@ -221,6 +233,8 @@ impl Daemon {
             queued_runs: Mutex::new(HashMap::new()),
             stacks: crate::stacks::StackWatch::default(),
             spares: Default::default(),
+            away: Default::default(),
+            slack: Default::default(),
         })
     }
 
@@ -234,6 +248,27 @@ impl Daemon {
         event: HookEvent,
         session_id: Option<String>,
     ) {
+        self.apply_hook_event_with(agent_id, event, session_id, None);
+    }
+
+    /// [`Self::apply_hook_event`] for an event that may say why the turn
+    /// waits on you (`HookDelivery::reason`). The reason is recorded only
+    /// when the event is this agent's own and leaves it red, so the
+    /// `StatusChanged` into red carries it. The PTY dying with an error
+    /// is its own reason: a crash.
+    pub fn apply_hook_event_with(
+        &self,
+        agent_id: &AgentId,
+        event: HookEvent,
+        session_id: Option<String>,
+        reason: Option<WaitReason>,
+    ) {
+        let reason = match &event {
+            HookEvent::SessionEnded { exit_code } => Some(WaitReason::Crash {
+                exit_code: *exit_code,
+            }),
+            _ => reason,
+        };
         // A `orion worktree` relocation waiting on this agent's turn end
         // holds that end at `running` (`AgentStatusMachine::set_relocating`;
         // `complete_pending_move` drains it). Read off the daemon's own
@@ -244,35 +279,67 @@ impl Daemon {
         if matches!(event, HookEvent::SessionStart { .. }) {
             self.spares.note_boot(agent_id);
         }
-        let effects = {
+        let handled = {
             let mut machines = self.status_machines.lock().unwrap();
-            match machines.entry(agent_id.clone()) {
-                std::collections::hash_map::Entry::Occupied(e) => {
-                    let machine = e.into_mut();
-                    machine.set_relocating(relocating);
-                    Some(machine.handle(event, session_id.as_deref(), Instant::now()))
-                }
+            let machine = match machines.entry(agent_id.clone()) {
+                std::collections::hash_map::Entry::Occupied(e) => Some(e.into_mut()),
                 std::collections::hash_map::Entry::Vacant(slot) => {
                     // Lazily seed from the persisted row.
                     match self.store.get_agent(agent_id) {
                         Ok(Some(agent)) => {
                             let limited = agent.limit_reached().is_some();
-                            let machine = slot.insert(
-                                AgentStatusMachine::new(agent.status, agent.session_id)
-                                    .at_limit(limited),
-                            );
-                            machine.set_relocating(relocating);
-                            Some(machine.handle(event, session_id.as_deref(), Instant::now()))
+                            Some(
+                                slot.insert(
+                                    AgentStatusMachine::new(agent.status, agent.session_id)
+                                        .at_limit(limited),
+                                ),
+                            )
                         }
                         // No row: a stale env's id, or an agent deleted
                         // since — nothing to drive.
                         _ => None,
                     }
                 }
-            }
+            };
+            machine.map(|machine| {
+                machine.set_relocating(relocating);
+                let foreign = machine.is_foreign(&event, session_id.as_deref());
+                let effects = machine.handle(event, session_id.as_deref(), Instant::now());
+                (effects, (!foreign).then(|| machine.status()))
+            })
         };
-        if let Some(effects) = effects {
+        if let Some((effects, own_status)) = handled {
+            if let (Some(status), Some(reason)) = (own_status, reason) {
+                self.note_wait_reason(agent_id, status, reason);
+            }
             self.apply_status_effects(agent_id, effects);
+        }
+    }
+
+    /// Record why `id` waits on you, when `status` (the machine's, after
+    /// the event that carried `reason`) is the one it explains: a dialog's
+    /// reason while red, a crash once terminated. The newest wins — one
+    /// dialog shows at a time.
+    fn note_wait_reason(&self, id: &AgentId, status: AgentStatus, reason: WaitReason) {
+        let explains = match reason {
+            WaitReason::Crash { .. } => status == AgentStatus::Terminated,
+            _ => status == AgentStatus::NeedsFeedback,
+        };
+        if explains {
+            self.wait_reasons.lock().unwrap().insert(id.clone(), reason);
+        }
+    }
+
+    /// The reason a `StatusChanged` into `status` carries: the recorded
+    /// one while red or terminated; leaving those drops it.
+    fn reason_for_status(&self, id: &AgentId, status: AgentStatus) -> Option<WaitReason> {
+        let mut reasons = self.wait_reasons.lock().unwrap();
+        match status {
+            AgentStatus::NeedsFeedback | AgentStatus::Terminated => reasons.get(id).cloned(),
+            _ => {
+                reasons.remove(id);
+                None
+            }
         }
     }
 
@@ -307,6 +374,7 @@ impl Daemon {
                         status,
                         changed_at,
                         unseen,
+                        reason: self.reason_for_status(agent_id, status),
                     });
                 }
                 Effect::SaveSessionId(sid) => {
@@ -1162,6 +1230,7 @@ impl Daemon {
             starting_prompt,
             pr_url,
             mode,
+            automation,
         } = spec;
         let starting_prompt = match starting_prompt {
             Some(prompt) => Some(validate_starting_prompt(&prompt)?),
@@ -1247,6 +1316,7 @@ impl Daemon {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation,
         };
         if let Err(e) =
             self.store
@@ -2509,15 +2579,7 @@ impl Daemon {
             }
         };
         if let Some(session) = live {
-            let data = if text.contains('\n') {
-                let mut data = b"\x1b[200~".to_vec();
-                data.extend_from_slice(text.as_bytes());
-                data.extend_from_slice(b"\x1b[201~");
-                data
-            } else {
-                text.as_bytes().to_vec()
-            };
-            session.write_input(&data)?;
+            session.write_input(&typed_bytes(text))?;
             session.write_input(b"\r")?;
         }
         Ok(())
@@ -3337,6 +3399,22 @@ impl Daemon {
                 }
             }
         });
+    }
+}
+
+/// `text` as keystrokes a CLI's input box takes as typed: a BRACKETED
+/// PASTE when it has line breaks, so the CLI takes it as one block, plain
+/// bytes otherwise, which keeps a one-liner out of the "[Pasted text]"
+/// placeholder. The Enter that submits it is the caller's, as a write of
+/// its own.
+pub(crate) fn typed_bytes(text: &str) -> Vec<u8> {
+    if text.contains('\n') {
+        let mut data = b"\x1b[200~".to_vec();
+        data.extend_from_slice(text.as_bytes());
+        data.extend_from_slice(b"\x1b[201~");
+        data
+    } else {
+        text.as_bytes().to_vec()
     }
 }
 
@@ -4956,6 +5034,7 @@ pub(crate) mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         let claude = orion_core::harness::builtin("claude").unwrap();
         let builtin = agent(AgentKind::Claude, None);
@@ -5063,6 +5142,7 @@ pub(crate) mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         for agent in [
             row("working", AgentStatus::Running, Some("sid-1"), false),
@@ -5787,6 +5867,7 @@ pub(crate) mod tests {
     async fn pr_launch_context_is_accepted_for_every_kind() {
         let daemon = test_daemon();
         let spec = |kind: AgentKind| CreateAgentSpec {
+            automation: None,
             mode: Default::default(),
             worktree: WorktreeId("unused".into()),
             name: "pr".into(),
@@ -5931,6 +6012,7 @@ pub(crate) mod tests {
                 pr_url: "https://github.com/o/r/pull/7".into(),
                 head: "--force".into(),
                 starting_prompt: None,
+                automation: None,
             })
             .await
             .unwrap_err();
@@ -5952,6 +6034,7 @@ pub(crate) mod tests {
                 pr_url: "https://github.com/o/r/pull/7".into(),
                 head: "feat-x".into(),
                 starting_prompt: Some("fix\0auth".into()),
+                automation: None,
             })
             .await
             .unwrap_err();
@@ -5972,6 +6055,7 @@ pub(crate) mod tests {
             auto_title: true,
             starting_prompt: starting.map(String::from),
             pr_url: None,
+            automation: None,
         };
         // Validation runs before the worktree lookup, so an unknown
         // worktree is fine here and every failure is the prompt's own.
@@ -6042,6 +6126,7 @@ pub(crate) mod tests {
             auto_title: false,
             starting_prompt: task.map(String::from),
             pr_url: None,
+            automation: None,
         };
 
         let created = |mut events: broadcast::Receiver<ServerEvent>| {
@@ -6189,6 +6274,7 @@ pub(crate) mod tests {
                 alive: false,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             })
             .unwrap();
     }
@@ -6320,6 +6406,7 @@ pub(crate) mod tests {
                 auto_title: false,
                 starting_prompt: None,
                 pr_url: None,
+                automation: None,
             })
             .await
             .unwrap()
@@ -6430,7 +6517,10 @@ pub(crate) mod tests {
 
         let (target, _) = daemon.enter_worktree(&a1, "feat", None).await.unwrap();
         assert_eq!(target.branch, "feat");
-        assert_eq!(target.path, root.join(".orion-worktrees").join("repo").join("feat"));
+        assert_eq!(
+            target.path,
+            root.join(".orion-worktrees").join("repo").join("feat")
+        );
         assert!(target.path.join(".git").exists(), "a real checkout");
         assert_eq!(agent_worktree(&daemon, "a1"), target.id.to_string());
         // The worktree's upsert lands first, then the agent's.
@@ -6475,7 +6565,11 @@ pub(crate) mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("is empty"), "{err}");
         assert!(
-            !root.join(".orion-worktrees").join("repo").join("feat").exists(),
+            !root
+                .join(".orion-worktrees")
+                .join("repo")
+                .join("feat")
+                .exists(),
             "a refused spawn leaves no checkout behind"
         );
 
@@ -6484,7 +6578,10 @@ pub(crate) mod tests {
             .worktree_for_branch(&project, "feat", None)
             .await
             .unwrap();
-        assert_eq!(made.path, root.join(".orion-worktrees").join("repo").join("feat"));
+        assert_eq!(
+            made.path,
+            root.join(".orion-worktrees").join("repo").join("feat")
+        );
         let again = daemon
             .worktree_for_branch(&project, " feat ", None)
             .await
@@ -6523,6 +6620,7 @@ pub(crate) mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 },
                 true,
             )
@@ -6772,7 +6870,10 @@ pub(crate) mod tests {
         std::fs::create_dir(&repo).unwrap();
         git_in(&repo, &["init", "-b", "main"]);
         git_in(&repo, &["commit", "--allow-empty", "-m", "init"]);
-        let feat = root.join(".orion-worktrees").join("repo").join("gentle-narwhal-files");
+        let feat = root
+            .join(".orion-worktrees")
+            .join("repo")
+            .join("gentle-narwhal-files");
         git_in(
             &repo,
             &[
@@ -6898,7 +6999,11 @@ pub(crate) mod tests {
             &daemon,
             "p",
             "ghost",
-            &root.join(".orion-worktrees").join("repo").join("gone").to_string_lossy(),
+            &root
+                .join(".orion-worktrees")
+                .join("repo")
+                .join("gone")
+                .to_string_lossy(),
             true,
         );
 
@@ -7095,7 +7200,10 @@ pub(crate) mod tests {
         };
         let worktree = daemon.store.get_worktree(id).unwrap().unwrap();
         assert_eq!(worktree.branch, "teammate");
-        assert_eq!(worktree.path, root.join(".orion-worktrees").join("repo").join("teammate"));
+        assert_eq!(
+            worktree.path,
+            root.join(".orion-worktrees").join("repo").join("teammate")
+        );
 
         let again = daemon
             .create_worktree(&project.id, "origin/teammate", None, true)
@@ -7331,6 +7439,51 @@ pub(crate) mod tests {
             }
             other => panic!("expected a status change, got {other:?}"),
         }
+    }
+
+    /// The reason a hook gives rides the `StatusChanged` into red, a
+    /// foreign session's never does, and leaving red drops it; the PTY
+    /// dying with an error is a crash.
+    #[test]
+    fn status_broadcast_carries_why_the_agent_waits() {
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["p"]);
+        seed_worktree(&daemon, "p", "root", "/orion-test/p", true);
+        seed_agent(&daemon, "a1", "root", None);
+        let id = AgentId("a1".into());
+        let mut rx = daemon.events.subscribe();
+        let reason_of_next = |rx: &mut broadcast::Receiver<ServerEvent>| loop {
+            if let ServerEvent::StatusChanged { reason, .. } = rx.try_recv().unwrap() {
+                return reason;
+            }
+        };
+        let plan = WaitReason::Plan {
+            plan: "Do it.".into(),
+        };
+        let pre_plan = || HookEvent::PreToolUse {
+            tool_name: Some(orion_core::EXIT_PLAN_MODE_TOOL.into()),
+            subagent_id: None,
+        };
+        // Seeded running: the prompt only claims the session.
+        daemon.apply_hook_event(&id, HookEvent::UserPromptSubmit, Some("s1".into()));
+        // Another Claude in the same checkout asks nothing of this row.
+        daemon.apply_hook_event_with(&id, pre_plan(), Some("other".into()), Some(plan.clone()));
+        assert!(daemon.wait_reasons.lock().unwrap().is_empty());
+        daemon.apply_hook_event_with(&id, pre_plan(), Some("s1".into()), Some(plan.clone()));
+        assert_eq!(reason_of_next(&mut rx), Some(plan.clone()));
+        assert_eq!(daemon.wait_reason(&id), Some(plan));
+        let approved = HookEvent::PostToolUse {
+            tool_name: Some(orion_core::EXIT_PLAN_MODE_TOOL.into()),
+            subagent_id: None,
+        };
+        daemon.apply_hook_event(&id, approved, Some("s1".into()));
+        assert_eq!(reason_of_next(&mut rx), None);
+        assert_eq!(daemon.wait_reason(&id), None);
+        daemon.apply_hook_event(&id, HookEvent::SessionEnded { exit_code: Some(2) }, None);
+        assert_eq!(
+            reason_of_next(&mut rx),
+            Some(WaitReason::Crash { exit_code: Some(2) })
+        );
     }
 
     /// `mark_agent_seen` clears the flag and hands every subscriber the row

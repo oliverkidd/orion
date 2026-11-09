@@ -21,8 +21,8 @@ default and stays in the file as written), and a malformed file is logged and ig
 
 ## Every setting
 
-The overlay has five tabs: **General · Accounts · Projects · Presets · Keys**. `Tab` / `⇧Tab`,
-`[` / `]` or `1`–`5` change tab; `Enter` or `Space` toggles a row, `←` / `→` cycle it, and a typed
+The overlay has six tabs: **General · Accounts · Projects · Presets · Connections · Keys**.
+`Tab` / `⇧Tab`, `[` / `]` or `1`–`6` change tab; `Enter` or `Space` toggles a row, `←` / `→` cycle it, and a typed
 row opens a prompt prefilled with its value (empty puts the default back). `⇧R` puts every setting
 back to its default, after a confirm, and removes `config.local.json`. **Presets** is the
 [presets screen](#presets), kept in its own file; **Keys** lists every action and its chords and
@@ -38,7 +38,6 @@ The DAEMON reads `session_idle_timeout`, `harnesses`, `claude_accounts`, `quick_
 |---|---|---|---|
 | `follow_new_session` | `true` | Launching → **Follow new session** | A QUICK PROMPT launch puts the cursor on the new session's row and the pane on it, without entering it. Off, the cursor stays where it was and the footer names where the session went. |
 | `session_idle_timeout` | `"5m"` | **Idle session timeout** | How long a session in a worktree no client is viewing may sit idle before the IDLE REAPER kills its PTY. See [below](#idle-timeout). |
-| `pr_autofix` | `"auto"` | **Auto-fix my PRs** | `auto` or `off`. When one of your pull requests hits conflicts or failing checks, an `autofix-<n>` session starts on it with the **PR autofix** preset's text, on the PR's own agent (see [Presets](#presets)). It stops after 3 sends in a row that didn't turn the PR green. `⌘G` on a pull request sends one by hand either way. |
 | `outside_editor` | `"auto"` | **Open files in** | The app `⌘O` opens a file or checkout in: `auto`, `cursor`, `vscode` or `sublime`. `auto` is the first installed of Cursor, VS Code and Sublime Text, else macOS's `open`. `i` on the row installs a missing app (`brew install --cask cursor`, `visual-studio-code`, `sublime-text`). Over ssh a file opens in the BUILT-IN EDITOR. |
 | `done_sound` | `"Glass"` | Sounds → **Turn finished** | Rung when a turn you haven't seen finishes: `off`, `bell`, or a macOS system sound (`Glass`, `Ping`, `Pop`, `Hero`, …). `←` / `→` play each. While the window is in the background the finish is also a desktop notification; `off` silences both. |
 | `feedback_sound` | `"Sosumi"` | Sounds → **Needs you** | The same, for a turn that stops to ask you or a CLI that dies mid-turn. Never rung for the pane you are typing in. |
@@ -67,11 +66,19 @@ rests on it, so attaching is instant; this timeout is what bounds that cost.
 | `claude_accounts` | `[]` | **Claude accounts** | Claude accounts beyond the default one: `[{"id": "claude-2", "config_dir": "~/.claude-2"}]`. See [Claude accounts](#claude-accounts). |
 | `account_tags` | `{}` | `c` / `g` on an account | The ACCOUNT MARK each account's rows wear, and its chip in Settings and Account usage, by account id (`claude` for the default): `{"claude-2": {"icon": "★", "tint": 2}}`. `icon` replaces the letter; `tint` picks one of six tints. Without an entry an account gets the first letter of its name or email no other mark uses. Marks show only with more than one account. |
 | `claude_enabled`, `codex_enabled`, `cursor_enabled`, `opencode_enabled` | `false` | **Enabled** | Whether the pickers offer that harness. Sessions that exist keep attaching and resuming. A harness whose CLI isn't installed is never offered. |
-| `harnesses` | `{"grok": {"enabled": false}}` | **Enabled**, **Model**, **Effort** | What is yours of each harness and each Claude account, by id. See [The harness registry](#the-harness-registry). |
+| `harnesses` | `{"grok": {"enabled": false}}` | **Enabled**, **Model**, **Effort**, **Open links in** | What is yours of each harness and each Claude account, by id. See [The harness registry](#the-harness-registry). |
 
 The tab opens on **New agents on**, then **Claude accounts**, then one section per harness and
-account with its **Enabled**, **Model** and **Effort** rows. `i` on a harness whose CLI is missing
-installs it.
+account with its **Enabled**, **Model** and **Effort** rows, and on each Claude account an **Open
+links in** row. `i` on a harness whose CLI is missing installs it.
+
+**Open links in** is the browser links from that account's sessions open in: a link ⌥- or ^-clicked
+in its pane, and the pull request `⇧V` or a card's menu opens from its card. `←`/`→` step `default`,
+`Safari`, `Chrome`, `Firefox`, `Arc`; `Enter` types it, with a profile after Chrome or Firefox
+(`Chrome Profile 1` opens Chrome's `--profile-directory=Profile 1`, `Firefox work` its `-P work`;
+any other app's name works too, with no profile). It is stored as `harnesses.<id>.browser`, `{"app":
+"Chrome", "profile": "Profile 1"}`. Every other link goes to the default browser, as does a URL
+⌘-clicked in the pane, which your terminal opens itself.
 
 ### Projects
 
@@ -94,9 +101,142 @@ One block per project in the tree, each row reading and writing that project's e
 | `worktree_containers` | `""` (`off`) | **On worktree delete** | What deleting a worktree does to the docker compose projects started in it. See [Worktree containers](#worktree-containers). |
 | `merge_method` | `""` (squash) | — | The method the project's last merge took; its next merge form opens on it. |
 | — | — | **Linear key** | Not a setting: where the project's `LINEAR_API_KEY` was found. See [Linear](#linear). |
+| `takeaways` | `true` | **Link to meeting takeaways** | Whether takeaways from your meetings can be placed in this project's todos. |
+| `about` | `""` | **What it is** | One line saying what the project is. Meeting takeaways and tickets are routed by it. |
+
+orion writes **What it is** when you add a project, from its README and its last 20 merged PRs. It
+asks the default Claude account once, at haiku and low effort. A project added before this release
+gets its line the first time something needs it. `Enter` edits the line and `^R` writes it again.
+Edit it if takeaways land in the wrong place.
 
 A project with no entry reads as the defaults, and an entry that only repeats them is dropped on
 save. A key inside an entry this build doesn't know is kept.
+
+### Connections
+
+What orion reaches outside itself through, a section each (**Connections** in the command palette
+opens Settings here): **AWAY AND PHONE**, **SLACK**,
+**MICROSOFT 365** and **GITHUB AND LINEAR**. `←→` changes a row, `Enter` edits it, `Tab` goes on
+to the next tab and `Esc` closes. SLACK and MICROSOFT 365 each have a status row: `c` (or `Enter`)
+connects it and `o` disconnects it. GITHUB AND LINEAR is two switches (below). A section whose rows haven't arrived yet reads
+`not connected`, and its keys below are read as they are written.
+
+**AWAY AND PHONE · Slack DM from Orion** — when you count as away, and what reaches your phone then
+(see [How it works](how-it-works.md#phone-bridge)):
+
+| Row | Default | What it does |
+|---|---|---|
+| Away when the screen locks | `on` | The screen locking counts as away. |
+| Away after no keys or mouse | `10m` | `never`, `5m`, `10m`, `15m`, `30m` or `60m` with no keys or mouse. |
+| Away by hand | `⌘⇧A` | Says which key does it; `Enter` here does it too. Your next key, in any orion, clears it. |
+| Send to your phone while away | `questions, plans, crashes` | `←→` steps through every mix of the three, down to `nothing`. |
+| Quiet hours | `22:00 to 07:00` | Nothing goes to your phone between them. `Enter` types them (`22:00 to 07:00`, `22:00-07:00`); empty is `off`. |
+
+**SLACK** — the **Workspace** row says which workspace orion is signed in to, `connecting…`, what
+is wrong, or `not connected`. `c` on it asks for the three tokens of the Orion Slack app in turn —
+the app-level token (`xapp-…`), the bot token (`xoxb-…`) and the user token (`xoxp-…`) — and saves
+them in the Keychain as `dev.orion.slack` / `app`, `bot` and `user`; `o` forgets them. Make the
+app once from `docs/2026-11-07-needs-you/slack-manifest.json` (api.slack.com/apps › Create New App ›
+From a manifest), install it, and create its app-level token with `connections:write`. The rest of
+the section is what counts as a Slack message for you in Needs you: **Direct messages** (`every
+message` / `off`), **Mentions of you** (`every channel` / `off`), **Threads you're in** (`new
+replies` / `off`), **Channels, every message** and **Keywords** (typed, comma-separated), and
+**Banner and sound** (`DMs and mentions`, `every message`, `never`). Those messages are the SLACK
+column's cards on the [Needs you board](keys.md#needs-you-k); turning a row off hides the cards it
+made. A thread counts as yours once you post in it, or when you started it. Channels are matched
+by name (`#eng`), which orion asks Slack for once per channel; a keyword matches anywhere in a
+message, any case. **Banner and sound** rings the feedback sound and, while orion's window is in
+the background, posts a desktop notification naming the sender. An app made from an older copy of
+the manifest lacks the `channels:read` and `groups:read` user scopes that name channels: add them
+under OAuth & Permissions and reinstall.
+
+**MICROSOFT 365.**
+- **Status:** the email you signed in as.
+  - It reads `needs your organisation's app id · c to add it` until the Entra app's two IDs are
+    set. `c` (or `Enter`) then asks for the **Application (client) ID** and then the **Directory
+    (tenant) ID**, both on the app's Overview page in Entra (your admin can send them). Both
+    pasted on one line, apart by a space, comma or line break, skip the second box. Each must be
+    a GUID (`8-4-4-4-12` hex digits, either case); anything else keeps the box up and says so.
+    `Esc` or an empty box saves nothing. After the second, both are saved to `config.json` as
+    `microsoft.client_id` and `microsoft.tenant`, and the sign-in starts. Writing them into
+    `config.json` by hand works too.
+  - `c` asks Microsoft for a sign-in code, copies it, and opens microsoft.com/devicelogin in your
+    default browser. Paste the code there and sign in. The row reads `enter <code> in the browser`
+    until you do.
+  - orion keeps the refresh token and your email in the Keychain, under `dev.orion.microsoft`.
+  - `o` signs out, and stops a sign-in that is still waiting. It leaves the two IDs alone; `o`
+    again, with nobody signed in, clears them from `config.json`, so `c` asks for them again.
+- **Next meeting in the footer** (`microsoft.footer_meeting`): see
+  [Your next meeting](sessions.md#your-next-meeting).
+- **Takeaways from Teams transcripts** (`microsoft.takeaways`): off, [meeting takeaways](sessions.md#meeting-takeaways)
+  never asks Microsoft for a transcript, whatever its own **On** says.
+
+orion signs in with these delegated permissions: `User.Read`, `Calendars.Read`,
+`OnlineMeetings.Read`, `OnlineMeetingTranscript.Read.All` and `offline_access`.
+
+**GITHUB AND LINEAR** `· through gh and project keys` says what the [Needs you board](keys.md#needs-you-k)
+lists, two switches `←`/`→` or `Enter` turn on and off:
+
+- **Code reviews asked of you** (`inbox.code_reviews`): open pull requests that ask you to review
+  them — your projects' own, as their open lists say, and every other repo's, through one
+  `gh search prs --review-requested=@me` every five minutes.
+- **Linear comments that mention you** (`inbox.linear_mentions`): your unread Linear notifications —
+  a mention, a new comment on an issue you're in, an issue given to you — asked with each project's
+  `LINEAR_API_KEY` (one ask per distinct key). Marking one done on the board marks it read in
+  Linear too.
+
+```json
+{ "away": { "screen_lock": true, "idle_minutes": 10,
+            "phone": ["question", "plan", "crash"], "quiet": ["22:00", "07:00"] },
+  "slack": { "dms": true, "mentions": true, "threads": true,
+             "channels": [], "keywords": [], "banner": "dms_and_mentions" },
+  "microsoft": { "client_id": "", "tenant": "organizations",
+                 "footer_meeting": true, "takeaways": true },
+  "inbox": { "code_reviews": true, "linear_mentions": true } }
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `away.screen_lock` | `true` | The screen locking counts as away. |
+| `away.idle_minutes` | `10` | Minutes with no keys or mouse before you count as away; `0` is never. |
+| `away.phone` | `["question", "plan", "crash"]` | What goes to your phone while you are away. |
+| `away.quiet` | `["22:00", "07:00"]` | Quiet hours: nothing goes to your phone between them. `null` is none. |
+| `slack.dms`, `slack.mentions`, `slack.threads` | `true` | Direct messages, mentions of you, and new replies in threads you're in count as messages for you. |
+| `slack.channels`, `slack.keywords` | `[]` | Channels whose every message counts, and words that make a message count anywhere. |
+| `slack.banner` | `"dms_and_mentions"` | Which messages bring a banner and a sound: `every`, `dms_and_mentions` or `never`. |
+| `microsoft.client_id`, `microsoft.tenant` | `""`, `"organizations"` | The Entra app orion signs in to Microsoft 365 through. Not secret, so a team can share them. |
+| `microsoft.footer_meeting`, `microsoft.takeaways` | `true` | The next meeting in the footer, and takeaways from Teams transcripts. |
+| `inbox.code_reviews`, `inbox.linear_mentions` | `true` | Code reviews asked of you, and Linear comments that mention you, show in Needs you (GITHUB AND LINEAR's two rows). |
+
+A key left out of a section keeps its default, the others as written. Tokens are never in the
+file: orion keeps them in the macOS Keychain, under services named `dev.orion.<service>`.
+
+### Automations
+
+Set on the AUTOMATIONS screen (`⌘J`, see [Automations](sessions.md#automations)), not in
+Settings. Global, never per project.
+
+```json
+{ "automations": {
+    "max_running": 5,
+    "per": {
+      "pr_fixer": { "on": true, "extra_steer": "" },
+      "bug_fixer": { "on": false, "labels": ["Bug"], "preset": "Careful" },
+      "week_review": { "when": { "day": "fri", "at": "08:30" }, "whose": "just_me" } } } }
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `automations.max_running` | `5` | No automation starts a session while this many automation sessions are running (at work or waiting on you). `←` / `→` on the screen change it, 1 to 20. |
+| `automations.per.<id>.on` | `true` for `pr_fixer`, `meeting_takeaways` and `blue_sky`, else `false` | The automation on or off. Ids: `pr_fixer`, `bug_fixer`, `feature_builder`, `week_review`, `meeting_takeaways`, `blue_sky`. |
+| `automations.per.<id>.extra_steer` | `""` | Added to every prompt the automation sends, after a blank line, as `Extra steer: …`. |
+| `automations.per.<id>.preset` | none | The preset `⌘U` picked in place of the automation's own system preset, by name. A name no preset has falls back to the system preset. |
+| `automations.per.<id>.labels` | `[]` | The Linear labels a ticket assigned to you needs for the bug fixer (`bug_fixer`) or the feature builder (`feature_builder`) to pick it up, matched in any case. Empty is each one's own: `Bug`, `Regression`, `Customer bug` for the bug fixer; `Feature`, `Improvement` for the feature builder. **Labels** on the screen picks them from your Linear workspace. |
+| `automations.per.<id>.when`, `.whose` | none (Fridays 08:30), `"just_me"` | When week in review runs — a day and a time, `{"day": "fri", "at": "08:30"}` — and whose work it covers (`just_me` or `whole_team`). |
+
+`pr_autofix` (**Auto-fix my PRs**, through 2.x) is retired. A config that has it keeps it for the
+older builds that read it, and its value turns the PR fixer on (`auto`, `ask`) or off (`off`) once,
+until `automations.per.pr_fixer.on` says otherwise.
 
 ### Hand-edited
 
@@ -166,6 +306,7 @@ CLI):
 | `effort_default` | the effort new sessions get (Claude `--effort`, Codex `model_reasoning_effort`, Cursor a model suffix, Grok `--effort`); `"default"` passes none |
 | `models` | the model rows its pickers offer: `[{"id": "big-1", "hint": "the big one"}]` |
 | `env` | environment variables for its CLI, exported after your login shell's profile runs; a leading `~/` is expanded, `null` clears it |
+| `browser` | a Claude account's **Open links in**: `{"app": "Chrome", "profile": "Profile 1"}`; absent is the default browser. Only orion's window reads it |
 
 An id no built-in or account holds adds a CLI by the name of its program: `"agy": {}` launches
 `agy` with `--model`, the first prompt as its last argument, and status from the process. A broken
@@ -185,21 +326,26 @@ task goes (after the text, past a blank line, when it names none). Its **Task** 
 optional task is asked for) or `skip` (it launches on its text alone). The editor shows a preview
 of what the agent will get.
 
-**Used by orion** lists the three SYSTEM PRESETS, each tagged `orion`:
+**Used by orion** lists the seven SYSTEM PRESETS, each tagged `orion`:
 
 | Preset | Used for | Runs on |
 |---|---|---|
-| **PR autofix** | the text round what broke, for every autofix agent | the PR's own agent (the session that worked on its branch), else your default |
+| **PR autofix** | the text round what broke, for every agent the PR fixer sends | the PR's own agent (the session that worked on its branch), else your default |
 | **Linear Ticket** | wraps every `⌘L` launch; `{issues}`, `{ids}` and `{first_id}` are filled in | the box's agent |
 | **Week review** | the rules the week in review is written by | your default agent's account, at sonnet · medium |
+| **Bug fixer** | what the bug fixer tells the agent it starts on a labelled Linear bug | the box's agent |
+| **Feature builder** | what the feature builder tells the agent it starts on a labelled Linear feature | the box's agent |
+| **Meeting takeaways** | how takeaways are pulled from a Teams meeting's transcript | your default agent's account, at sonnet · medium |
+| **Blue sky builder** | what the blue sky builder tells the agent it starts on an idea | the box's agent |
 
 A system preset always has text: empty, it shows orion's built-in text greyed and uses it. It can't
 be renamed or deleted. On it `Enter` edits and `^R` puts orion's text back. On one of yours, under
 **Yours**, `Enter` edits, `^N` makes a new one and `^D` deletes it.
 
 Presets are picked, never managed, elsewhere: `⌘U` / `^X` in the QUICK PROMPT — the box `Enter` opens on
-a Linear issue or a todo — **Agent presets** in the palette, and `⌘U` over an agent's locked pane, which
-pastes the text in at the caret.
+a Linear issue or a todo — **Agent presets** in the palette, `⌘U` over an agent's locked pane, which
+pastes the text in at the caret, and `⌘U` on the AUTOMATIONS screen, which picks the preset an
+automation is told by in place of its system preset.
 
 ## Setup command
 
@@ -355,8 +501,8 @@ Everything orion writes under its data dir:
 | `config.json`, `config.local.json` | settings | — |
 | `agent_presets.json` | presets | — |
 | `ssh_hosts.json` | ssh destinations | the 20 newest |
-| `todos/` | each project's todo list | ticked items: 120 days |
-| `reviews/` | week in review write-ups | the last 12 per project, and 12 across projects |
+| `todos/` | each project's todo list, and Blue sky's (`blue-sky.json`) | ticked items: 120 days |
+| `reviews/` | week in review runs, `all/<last day>/<project>.md` and a `meta.json` each | the last 12 runs |
 | `pr-cache/` | the last pull request lists and pages | 100 open per project, the last 7 days' merges, the last 30 days' closes; pages while their PR is on a row |
 | `linear-cache/issues.json` | each project's last Linear lists and comments | rewritten on each fetch |
 | `linear-links.json` | which branch was cut for which Linear issue | 90 days after the last link, once nothing is on the branch |
@@ -364,6 +510,9 @@ Everything orion writes under its data dir:
 | `cursor_models.json` | Cursor's model list | refreshed after 24 h |
 | `recent_files.json` | Go to file's recent files | 20 per checkout |
 | `reviewed.json` | the diff viewer's reviewed marks | until the checkout's HEAD moves |
+| `needs-you.json` | which Needs you cards are done or snoozed, and the Slack cards | a done card until no source offers it; a snooze for its hour |
+| `automations/linear-builder.json` | every Linear ticket the bug fixer and feature builder have picked up, so none is picked up twice | — |
+| `automations/meeting-takeaways.json` | each meeting's takeaways and where they stand | two weeks after the meeting |
 | `quick_prompt_drafts.json` | unsent QUICK PROMPT text | until it is sent or cleared |
 | `attachments/` | files dropped or pasted into a prompt | 7 days |
 | `fresh/config.json` | fresh's config | — |
@@ -385,6 +534,16 @@ Everything orion writes under its data dir:
 | `ORION_USAGE` | `off` stops usage reads |
 | `ORION_UPDATE_CHECK_SECS` | how often to check for a new release (default 3600; `0` off) |
 | `ORION_SPOTIFY_POLL_SECS` | how often to ask Spotify (default 1; `0` off) |
+| `ORION_MICROSOFT_POLL_SECS` | how often to read your Microsoft 365 calendar (default 300; `0` off) |
+| `ORION_MEETING_TAKEAWAYS_POLL_SECS` | how often meeting takeaways looks for a finished Teams meeting's transcript, for up to an hour after it ends (default 120; `0` off) |
+| `ORION_MICROSOFT_GRAPH_URL`, `ORION_MICROSOFT_TOKEN` | a Microsoft Graph base URL and access token used instead of `https://graph.microsoft.com/v1.0` and your sign-in (tests: a fake Graph) |
+| `ORION_AWAY_POLL_MS` | how often the DAEMON reads whether you are away, from the screen lock and the time since your last key, while Slack is connected (default 5000; `0` off, so only `⌘⇧A` makes you away) |
+| `ORION_SLACK_API_URL`, `ORION_SLACK_TOKENS` | a Slack Web API base URL used instead of `https://slack.com/api`, and the three tokens as `<app>,<bot>,<user>` used instead of the Keychain's (tests: a fake Slack) |
+| `ORION_PROJECT_ABOUT` | `off` stops orion writing a project's **What it is** (tests) |
+| `ORION_BLUE_SKY_DIR` | the folder the Blue sky builder builds ideas tied to no project in (default `~/Code/orion-blue-sky`) |
+| `ORION_NEEDS_YOU_POLL_SECS` | how often Needs you asks Linear for your notifications and `gh` for the reviews asked of you (default 300; `0` off) |
+| `ORION_LINEAR_BUILDER_POLL_SECS` | how often the bug fixer and feature builder look for labelled Linear tickets assigned to you (default 120; `0` off) |
+| `ORION_WEEK_REVIEW_CHECK_SECS` | how often week in review looks whether its **When** has come round (default 60; `0` off, so it never runs on its own) |
 | `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |
 
 The DAEMON sets `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` on every agent so its hooks

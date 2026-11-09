@@ -27,7 +27,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
-use orion_core::{AgentId, LimitReason};
+use orion_core::{AgentId, LimitReason, WaitReason};
 use serde::Deserialize;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -150,6 +150,10 @@ pub struct HookDelivery {
     /// (`prompt_history::condense`). Only a `UserPromptSubmit` carries
     /// one, and only when the payload had a non-blank, user-written one.
     pub prompt: Option<String>,
+    /// Why the turn is waiting on you, when this event opens a dialog: a
+    /// `PermissionRequest`, or the `PreToolUse` of a question or a plan.
+    /// Claude-dialect routes only (Claude, Codex).
+    pub reason: Option<WaitReason>,
 }
 
 /// Permissive payload: every field optional, unknown fields ignored. Hook
@@ -178,6 +182,9 @@ pub struct HookPayload {
     pub session_id_camel: Option<String>,
     pub notification_type: Option<String>,
     pub tool_name: Option<String>,
+    /// The tool call's arguments on `PreToolUse` / `PermissionRequest`:
+    /// an `AskUserQuestion`'s questions, an `ExitPlanMode`'s plan.
+    pub tool_input: Option<serde_json::Value>,
     pub agent_id: Option<String>,
     /// Cursor's name for the subagent id in subagentStart/subagentStop.
     pub subagent_id: Option<String>,
@@ -220,6 +227,21 @@ impl HookPayload {
 
     fn subagent_id(&self) -> Option<String> {
         self.agent_id.clone().or_else(|| self.subagent_id.clone())
+    }
+
+    /// Why the turn waits on you, when `event` opens a dialog: any
+    /// permission prompt names its tool, and the question and plan tools
+    /// carry their question or plan in `tool_input`.
+    fn wait_reason(&self, event: &HookEvent) -> Option<WaitReason> {
+        let tool = match event {
+            HookEvent::PermissionRequest { .. } => self.tool_name.as_deref()?,
+            HookEvent::PreToolUse {
+                tool_name: Some(tool),
+                ..
+            } if crate::status::opens_dialog(Some(tool)) => tool,
+            _ => return None,
+        };
+        Some(WaitReason::from_tool(tool, self.tool_input.as_ref()))
     }
 
     /// What Claude said about the limit, on one line: the error text the
@@ -463,6 +485,10 @@ async fn receive_hook(
             .and_then(crate::prompt_history::condense),
         _ => None,
     };
+    let reason = match cli {
+        HookCli::Claude | HookCli::Codex => payload.wait_reason(&event),
+        HookCli::Cursor | HookCli::Grok | HookCli::OpenCode => None,
+    };
     let _ = state
         .tx
         .send(HookDelivery {
@@ -472,6 +498,7 @@ async fn receive_hook(
             cwd,
             transcript,
             prompt,
+            reason,
         })
         .await;
 
@@ -577,6 +604,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         store
             .insert_agent_with_auto_title(&agent("pending"), true)

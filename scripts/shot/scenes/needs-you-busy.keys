@@ -1,0 +1,45 @@
+# Three launches of the README grid's stand-in agent into orbit-api's main checkout (needs-you-busy.setup.sh):
+# the first and third finish unread, the second stops on a permission prompt. Once the finishes have
+# landed, ⌘K: NEEDS YOU with an agent waiting on you and two finished, and code reviews asked of you on
+# repos that are no orion project.
+cmd n
+Migrate the checkout page to the new design tokens
+Enter
+F12
+F12
+cmd n
+Add a --json flag to every list command
+Enter
+F12
+F12
+cmd n
+Write integration tests for token expiry and refresh
+Enter
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+F12
+cmd k

@@ -24,13 +24,6 @@ use std::path::{Path, PathBuf};
 /// is reaped).
 pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1h"];
 
-/// The **Auto-fix my PRs** words (Settings → General), off and on, in the
-/// order the row cycles them (`crate::autofix::Mode`).
-pub const AUTOFIX_MODES: &[&str] = &[
-    crate::autofix::Mode::Off.as_str(),
-    crate::autofix::Mode::Auto.as_str(),
-];
-
 /// Values the settings overlay cycles through for `done_sound` (what rings
 /// when a turn nobody watched reaches FINISHED) and `feedback_sound` (what
 /// rings when one stops at NEEDS FEEDBACK, or dies mid-turn). `off` is
@@ -389,7 +382,6 @@ pub struct SettingsTab {
 pub enum SettingKind {
     FollowNewSession,
     SessionIdleTimeout,
-    PrAutofix,
     OutsideEditor,
     DoneSound,
     FeedbackSound,
@@ -411,17 +403,90 @@ pub enum SettingKind {
     /// found, if anywhere, and what the last test said
     /// (`linear::key_status`); Enter asks Linear whose key it is.
     LinearKey,
+    /// A CONNECTIONS TAB section's status row: whether that connection is
+    /// set up. Nothing in the file behind it.
+    Connection(Connection),
+    /// MICROSOFT 365 › **Next meeting in the footer** (`microsoft.footer_meeting`).
+    MicrosoftFooterMeeting,
+    /// MICROSOFT 365 › **Takeaways from Teams transcripts** (`microsoft.takeaways`).
+    MicrosoftTakeaways,
+    /// A project's **Link to meeting takeaways**
+    /// (`projects.<repo>.takeaways`): whether takeaways may land in it.
+    TakeawaysLink,
+    /// A project's **What it is** (`projects.<repo>.about`): the one line
+    /// routing reads ([`crate::projects::about`]).
+    About,
+    /// A row of the CONNECTIONS TAB's AWAY AND PHONE (`away`).
+    Away(AwayField),
+    /// A row of the CONNECTIONS TAB's SLACK (`slack`).
+    Slack(SlackField),
+    /// GITHUB AND LINEAR › **Code reviews asked of you** (`inbox.code_reviews`):
+    /// NEEDS YOU lists them.
+    CodeReviews,
+    /// GITHUB AND LINEAR › **Linear comments that mention you**
+    /// (`inbox.linear_mentions`): NEEDS YOU lists your unread notifications.
+    LinearMentions,
 }
+
+/// The AWAY AND PHONE rows, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AwayField {
+    ScreenLock,
+    Idle,
+    /// Says which key toggles it; Enter toggles it too.
+    ByHand,
+    Phone,
+    Quiet,
+}
+
+/// The SLACK rows under its status row, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlackField {
+    Dms,
+    Mentions,
+    Threads,
+    Channels,
+    Keywords,
+    Banner,
+}
+
+/// The idle times **Away after no keys or mouse** steps through, in
+/// minutes; 0 is never.
+pub const AWAY_IDLE_MINUTES: &[u32] = &[0, 5, 10, 15, 30, 60];
+
+/// Every choice of what goes to the phone, in the order ←/→ steps them.
+const PHONE_CHOICES: &[&[PhoneKind]] = &[
+    &[PhoneKind::Question, PhoneKind::Plan, PhoneKind::Crash],
+    &[PhoneKind::Question, PhoneKind::Plan],
+    &[PhoneKind::Question],
+    &[PhoneKind::Plan],
+    &[PhoneKind::Crash],
+    &[],
+];
+
+/// One section of the CONNECTIONS TAB with a status row, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connection {
+    Slack,
+    Microsoft,
+}
+
+/// What a connection that is not set up says.
+pub const NOT_CONNECTED: &str = "not connected";
 
 /// One harness field row in the Accounts tab. The tab renders one section
 /// per registry entry — built-ins, Claude accounts and `harnesses` map ids
-/// alike — with an Enabled row, a Model row, and an Effort row while the
-/// harness offers effort.
+/// alike — with an Enabled row, a Model row, an Effort row while the
+/// harness offers effort, and on a Claude account an Open links in row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessField {
     Enabled,
     Model,
     Effort,
+    /// **Open links in**: the browser the account's links open in
+    /// (`harnesses.<id>.browser`, [`crate::open_url`]). ←/→ steps the
+    /// browser; Enter types it, a profile after it.
+    Browser,
 }
 
 /// One row of the Accounts tab's CLAUDE ACCOUNTS section.
@@ -440,6 +505,7 @@ impl HarnessField {
             HarnessField::Enabled => "Enabled",
             HarnessField::Model => "Model",
             HarnessField::Effort => "Effort",
+            HarnessField::Browser => "Open links in",
         }
     }
 }
@@ -456,6 +522,9 @@ impl SettingKind {
                 | SettingKind::SetupCommand
                 | SettingKind::RunCommand
                 | SettingKind::OpenCommand
+                | SettingKind::About
+                | SettingKind::Away(AwayField::Quiet)
+                | SettingKind::Slack(SlackField::Channels | SlackField::Keywords)
         )
     }
 
@@ -463,7 +532,7 @@ impl SettingKind {
     /// nothing in the file behind it, nothing to cycle. Its value is the
     /// app's to tell (`linear::key_status`), and Enter is its one verb.
     pub fn is_status(self) -> bool {
-        matches!(self, SettingKind::LinearKey)
+        matches!(self, SettingKind::LinearKey | SettingKind::Connection(_))
     }
 
     /// A row on the PROJECTS TAB: its value is that project's, kept in
@@ -481,6 +550,8 @@ impl SettingKind {
                 | SettingKind::OpenCommand
                 | SettingKind::WorktreeContainers
                 | SettingKind::LinearKey
+                | SettingKind::TakeawaysLink
+                | SettingKind::About
         )
     }
 }
@@ -526,6 +597,12 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
         title: "Presets",
         body: TabBody::Presets,
     },
+    // What orion reaches outside itself through: away and the phone,
+    // Slack, Microsoft 365, GitHub and Linear.
+    SettingsTab {
+        title: "Connections",
+        body: TabBody::Values(CONNECTIONS_SETTINGS),
+    },
     SettingsTab {
         title: "Keys",
         body: TabBody::Keys,
@@ -545,12 +622,6 @@ pub const GENERAL_SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::SessionIdleTimeout,
         label: "Idle session timeout",
         hint: "Kill idle sessions in unviewed worktrees (busy ones spared; off disables)",
-        group: "Launching",
-    },
-    SettingSpec {
-        kind: SettingKind::PrAutofix,
-        label: "Auto-fix my PRs",
-        hint: "When one of your pull requests hits merge conflicts or failing checks, a fresh autofix agent starts on it at once, nothing to confirm: on the same agent, account, model and effort as the session that did the work — with none, your default agent at the PR autofix preset's model and effort — unless that preset's Runs on row pins a harness. It is told that preset's text. ^G in the pull requests modal sends one whatever this says",
         group: "Launching",
     },
     SettingSpec {
@@ -631,6 +702,131 @@ pub const PROJECT_SETTINGS: &[SettingSpec] = &[
         hint: "Where this project's LINEAR_API_KEY comes from — its .env.local, then its .env, then orion's own environment — never the key itself. Enter asks Linear whose key it is",
         group: "",
     },
+    SettingSpec {
+        kind: SettingKind::TakeawaysLink,
+        label: "Link to meeting takeaways",
+        hint: "Whether takeaways from your meetings can be placed in this project's todos",
+        group: "",
+    },
+    SettingSpec {
+        kind: SettingKind::About,
+        label: "What it is",
+        hint: ABOUT_HINT,
+        group: "",
+    },
+];
+
+/// **What it is**'s explanation.
+pub const ABOUT_HINT: &str = "Orion writes \"What it is\" when you add a project, from its README and recent PRs. Edit it if takeaways land in the wrong place. Enter edits it; ^R writes it again";
+
+/// What every AWAY AND PHONE row explains (design 5.2).
+const AWAY_EXPLAINED: &str = "The screen locking counts as away. An agent that starts waiting then goes to your phone straight away.";
+
+/// The CONNECTIONS TAB's rows, a section each: its own rows, or a status
+/// row until they arrive.
+pub const CONNECTIONS_SETTINGS: &[SettingSpec] = &[
+    SettingSpec {
+        kind: SettingKind::Away(AwayField::ScreenLock),
+        label: "Away when the screen locks",
+        hint: AWAY_EXPLAINED,
+        group: "AWAY AND PHONE · Slack DM from Orion",
+    },
+    SettingSpec {
+        kind: SettingKind::Away(AwayField::Idle),
+        label: "Away after no keys or mouse",
+        hint: AWAY_EXPLAINED,
+        group: "AWAY AND PHONE · Slack DM from Orion",
+    },
+    SettingSpec {
+        kind: SettingKind::Away(AwayField::ByHand),
+        label: "Away by hand",
+        hint: "{away_toggle} anywhere says you are away until your next key; Enter here does too. Being in a meeting is never away",
+        group: "AWAY AND PHONE · Slack DM from Orion",
+    },
+    SettingSpec {
+        kind: SettingKind::Away(AwayField::Phone),
+        label: "Send to your phone while away",
+        hint: AWAY_EXPLAINED,
+        group: "AWAY AND PHONE · Slack DM from Orion",
+    },
+    SettingSpec {
+        kind: SettingKind::Away(AwayField::Quiet),
+        label: "Quiet hours",
+        hint: "Nothing goes to your phone between these times; Enter types them, like 22:00 to 07:00 (empty = off)",
+        group: "AWAY AND PHONE · Slack DM from Orion",
+    },
+    SettingSpec {
+        kind: SettingKind::Connection(Connection::Slack),
+        label: "Workspace",
+        hint: "c pastes the Orion app's three tokens (docs/2026-11-07-needs-you/slack-manifest.json makes the app); o forgets them",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Dms),
+        label: "Direct messages",
+        hint: "Slack messages waiting for you show in Needs you",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Mentions),
+        label: "Mentions of you",
+        hint: "Slack messages waiting for you show in Needs you",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Threads),
+        label: "Threads you're in",
+        hint: "Slack messages waiting for you show in Needs you",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Channels),
+        label: "Channels, every message",
+        hint: "Channels whose every message shows in Needs you; Enter types them, like #eng, #deploys (empty = none)",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Keywords),
+        label: "Keywords",
+        hint: "Words that put a message in Needs you wherever it is; Enter types them, comma-separated (empty = none)",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Slack(SlackField::Banner),
+        label: "Banner and sound",
+        hint: "Which Slack messages ring and show a banner as they arrive",
+        group: "SLACK",
+    },
+    SettingSpec {
+        kind: SettingKind::Connection(Connection::Microsoft),
+        label: "Status",
+        hint: "c signs in to Microsoft 365 in the browser, first asking for your organisation's client and tenant IDs; o signs out, and o again clears the IDs",
+        group: "MICROSOFT 365",
+    },
+    SettingSpec {
+        kind: SettingKind::MicrosoftFooterMeeting,
+        label: "Next meeting in the footer",
+        hint: "Show your next meeting in the footer from an hour before it starts",
+        group: "MICROSOFT 365",
+    },
+    SettingSpec {
+        kind: SettingKind::MicrosoftTakeaways,
+        label: "Takeaways from Teams transcripts",
+        hint: "When a Teams meeting's transcript lands, pull out the takeaways for you to place in your todos",
+        group: "MICROSOFT 365",
+    },
+    SettingSpec {
+        kind: SettingKind::CodeReviews,
+        label: "Code reviews asked of you",
+        hint: "Pull requests that ask you to review them show in Needs you: your projects' own, and every other repo's through gh",
+        group: "GITHUB AND LINEAR · through gh and project keys",
+    },
+    SettingSpec {
+        kind: SettingKind::LinearMentions,
+        label: "Linear comments that mention you",
+        hint: "Your unread Linear notifications show in Needs you, asked with each project's LINEAR_API_KEY: mentions, new comments on your issues, issues given to you. Marking one done there marks it read in Linear",
+        group: "GITHUB AND LINEAR · through gh and project keys",
+    },
 ];
 
 /// Index of the Keys tab, which the overlay special-cases.
@@ -655,6 +851,15 @@ pub fn accounts_tab() -> usize {
         .iter()
         .position(|t| t.body == TabBody::Accounts)
         .expect("SETTINGS_TABS declares an Accounts tab")
+}
+
+/// The Connections tab: away and the phone, Slack, Microsoft 365, GitHub
+/// and Linear.
+pub fn connections_tab() -> usize {
+    SETTINGS_TABS
+        .iter()
+        .position(|t| t.title == "Connections")
+        .expect("SETTINGS_TABS declares a Connections tab")
 }
 
 pub fn tab_count() -> usize {
@@ -997,12 +1202,13 @@ pub struct Config {
     /// opened on.
     #[serde(skip_serializing)]
     pub pr_merge_method: Option<String>,
-    /// **Auto-fix my PRs** (Settings → General): when one of your pull
-    /// requests hits merge conflicts or failing checks, send an agent to
-    /// fix it at once — `auto`, the default — or not, `off`. An older
-    /// orion's `ask` is rewritten to `auto` on load ([`Config::migrate`]).
-    /// See `crate::autofix`.
-    pub pr_autofix: String,
+    /// RETIRED: **Auto-fix my PRs**, through 2.x — `off`, or anything else
+    /// (`auto`, an older `ask`) for on. Read, never written, and left in
+    /// the file for the older builds that read it: its value seeds the
+    /// PR fixer's `automations.per.pr_fixer.on` once
+    /// ([`Config::migrate`]).
+    #[serde(skip_serializing)]
+    pub pr_autofix: Option<String>,
     /// MOVED to the **PR autofix** SYSTEM PRESET's model and effort:
     /// through 2.x the autofix agent's fallback model and effort. Read,
     /// never written; [`Config::move_into_presets`] carries them across as
@@ -1119,6 +1325,18 @@ pub struct Config {
     /// written, so the file stays small and new defaults reach existing
     /// installs. See [`crate::keymap`].
     pub keybindings: BTreeMap<String, String>,
+    /// Settings → Connections › AWAY AND PHONE.
+    pub away: AwaySettings,
+    /// Settings → Connections › SLACK: what counts as a message for you.
+    pub slack: SlackSettings,
+    /// Settings → Connections › MICROSOFT 365: the Entra app orion signs
+    /// in through, and what it reads.
+    pub microsoft: MicrosoftSettings,
+    /// Settings → Connections › GITHUB AND LINEAR: what Needs you lists.
+    pub inbox: InboxSettings,
+    /// AUTOMATIONS (`⌘J`): the running cap, and each automation's own
+    /// settings (`crate::automations::config`).
+    pub automations: crate::automations::config::AutomationsSettings,
     /// Keys the files held that this build could not read; they loaded as
     /// defaults. Never written: [`Config::save`] reads it to leave those
     /// stored values alone — most likely a newer orion's — unless the
@@ -1131,7 +1349,7 @@ pub struct Config {
 /// project's repo path in [`Config::projects`]. Read through
 /// [`Config::project`], which supplies the defaults for a project with no
 /// entry; written through [`Config::set_project`].
-#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ProjectSettings {
     /// The branch this project's new WORKTREES start from when nobody
@@ -1178,12 +1396,41 @@ pub struct ProjectSettings {
     /// Empty is squash.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub merge_method: String,
+    /// **Link to meeting takeaways**: whether meeting takeaways may be
+    /// placed in this project's todos. On by default, and left out of the
+    /// file while on.
+    #[serde(skip_serializing_if = "is_true")]
+    pub takeaways: bool,
+    /// **What it is**: one line saying what the project is, which routing
+    /// reads (`projects::about`). orion writes it; the user may edit it.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub about: String,
     /// Keys in the entry this build doesn't know — a newer orion's, most
     /// likely, or the retired `hide_root_worktree` an older one wrote —
     /// carried through a save untouched, as the file's top-level keys
     /// are. An entry holding one is never dropped as "all default".
     #[serde(flatten)]
     pub other: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for ProjectSettings {
+    fn default() -> Self {
+        Self {
+            base_branch: String::new(),
+            setup_command: String::new(),
+            run_command: String::new(),
+            open_command: String::new(),
+            worktree_containers: String::new(),
+            merge_method: String::new(),
+            takeaways: true,
+            about: String::new(),
+            other: BTreeMap::new(),
+        }
+    }
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl ProjectSettings {
@@ -1197,6 +1444,8 @@ impl ProjectSettings {
             SettingKind::RunCommand => blank_as(&self.run_command, NO_COMMAND),
             SettingKind::OpenCommand => blank_as(&self.open_command, NO_COMMAND),
             SettingKind::WorktreeContainers => self.containers().as_str().into(),
+            SettingKind::TakeawaysLink => on_off(self.takeaways).into(),
+            SettingKind::About => blank_as(&self.about, crate::projects::NOT_WRITTEN),
             _ => String::new(),
         }
     }
@@ -1216,6 +1465,7 @@ impl ProjectSettings {
             SettingKind::SetupCommand => self.setup_command.clone(),
             SettingKind::RunCommand => self.run_command.clone(),
             SettingKind::OpenCommand => self.open_command.clone(),
+            SettingKind::About => self.about.clone(),
             _ => String::new(),
         }
     }
@@ -1229,6 +1479,7 @@ impl ProjectSettings {
             SettingKind::SetupCommand => &mut self.setup_command,
             SettingKind::RunCommand => &mut self.run_command,
             SettingKind::OpenCommand => &mut self.open_command,
+            SettingKind::About => &mut self.about,
             _ => return false,
         };
         *field = value.trim().to_string();
@@ -1239,6 +1490,10 @@ impl ProjectSettings {
     /// stored as nothing, so a project back on the defaults leaves no
     /// entry.
     pub fn cycle(&mut self, kind: SettingKind, delta: i32) -> bool {
+        if kind == SettingKind::TakeawaysLink {
+            self.takeaways = !self.takeaways;
+            return true;
+        }
         if kind != SettingKind::WorktreeContainers {
             return false;
         }
@@ -1280,7 +1535,7 @@ impl Default for Config {
             hide_draft_prs: false,
             diff_tree_view: true,
             pr_merge_method: None,
-            pr_autofix: crate::autofix::Mode::Auto.as_str().into(),
+            pr_autofix: None,
             autofix_model: None,
             autofix_effort: None,
             review_account: None,
@@ -1305,7 +1560,121 @@ impl Default for Config {
             quick_prompt_kind: AgentKind::Claude.as_str().into(),
             follow_new_session: true,
             keybindings: BTreeMap::new(),
+            away: AwaySettings::default(),
+            slack: SlackSettings::default(),
+            microsoft: MicrosoftSettings::default(),
+            inbox: InboxSettings::default(),
+            automations: Default::default(),
             skipped: BTreeSet::new(),
+        }
+    }
+}
+
+/// `away` in the config file, and what may go to your phone then: shared
+/// with the daemon, which acts on them (`orion_core::away`).
+pub use orion_core::away::{AwaySettings, PhoneKind};
+
+/// Which Slack messages bring a banner and a sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BannerWhen {
+    Every,
+    #[default]
+    DmsAndMentions,
+    Never,
+}
+
+impl BannerWhen {
+    /// In the order **Banner and sound** steps them.
+    pub const ALL: [BannerWhen; 3] = [
+        BannerWhen::DmsAndMentions,
+        BannerWhen::Every,
+        BannerWhen::Never,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BannerWhen::Every => "every message",
+            BannerWhen::DmsAndMentions => "DMs and mentions",
+            BannerWhen::Never => "never",
+        }
+    }
+}
+
+/// `at` stepped by `step` (±1) round a list of `len`.
+fn step_index(at: usize, len: usize, step: i32) -> usize {
+    (at as i64 + i64::from(step)).rem_euclid(len as i64) as usize
+}
+
+/// `slack` in the config file: which messages are for you.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SlackSettings {
+    /// Every direct message.
+    pub dms: bool,
+    /// Mentions of you, in every channel.
+    pub mentions: bool,
+    /// New replies in threads you're in.
+    pub threads: bool,
+    /// Channels whose every message counts, by name.
+    pub channels: Vec<String>,
+    /// Words that make a message count wherever it is.
+    pub keywords: Vec<String>,
+    pub banner: BannerWhen,
+}
+
+impl Default for SlackSettings {
+    fn default() -> Self {
+        Self {
+            dms: true,
+            mentions: true,
+            threads: true,
+            channels: Vec::new(),
+            keywords: Vec::new(),
+            banner: BannerWhen::default(),
+        }
+    }
+}
+
+/// `microsoft` in the config file. The client and tenant ids are not
+/// secret, so a team shares one Entra app.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct MicrosoftSettings {
+    pub client_id: String,
+    pub tenant: String,
+    /// The next meeting in the footer.
+    pub footer_meeting: bool,
+    /// Takeaways from Teams transcripts.
+    pub takeaways: bool,
+}
+
+impl Default for MicrosoftSettings {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            tenant: "organizations".into(),
+            footer_meeting: true,
+            takeaways: true,
+        }
+    }
+}
+
+/// `inbox` in the config file: what GitHub and Linear put in Needs you.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct InboxSettings {
+    /// Code reviews asked of you.
+    pub code_reviews: bool,
+    /// Linear comments that mention you.
+    pub linear_mentions: bool,
+}
+
+impl Default for InboxSettings {
+    fn default() -> Self {
+        Self {
+            code_reviews: true,
+            linear_mentions: true,
         }
     }
 }
@@ -1741,7 +2110,8 @@ impl Config {
 
     /// `(id, field)` rows below the Accounts head, in registry order: every
     /// entry, enabled or not, valid or not (broken rows show their reason
-    /// so they can be fixed); Effort only while the harness offers effort.
+    /// so they can be fixed); Effort only while the harness offers effort,
+    /// and Open links in only on a Claude account.
     pub fn agent_rows(&self) -> Vec<(String, HarnessField)> {
         let mut rows = Vec::new();
         for entry in self.harness_registry() {
@@ -1749,6 +2119,9 @@ impl Config {
             rows.push((entry.id.clone(), HarnessField::Model));
             if entry.effort.offered {
                 rows.push((entry.id.clone(), HarnessField::Effort));
+            }
+            if entry.is_claude_account() {
+                rows.push((entry.id.clone(), HarnessField::Browser));
             }
         }
         rows
@@ -1939,7 +2312,26 @@ impl Config {
                     descriptor.effort.default.clone()
                 }
             }
+            HarnessField::Browser => crate::open_url::label(self.link_browser(id)),
         }
+    }
+
+    /// Account `id`'s **Open links in** (`harnesses.<id>.browser`); None
+    /// is the default browser.
+    pub fn link_browser(&self, id: &str) -> Option<&orion_core::harness::LinkBrowser> {
+        self.harnesses.get(id)?.browser.as_ref()
+    }
+
+    /// Write account `id`'s **Open links in**; None puts the default back.
+    pub fn set_link_browser(
+        &mut self,
+        id: &str,
+        browser: Option<orion_core::harness::LinkBrowser>,
+    ) {
+        if browser.is_none() && !self.harnesses.contains_key(id) {
+            return;
+        }
+        self.harness_override_mut(id).browser = browser;
     }
 
     /// The hint an Accounts harness row shows: what the row edits, with the
@@ -1976,6 +2368,9 @@ impl Config {
                     format!("Reserved until the {label} CLI documents a reasoning flag (default = unset)")
                 }
             }
+            HarnessField::Browser => format!(
+                "The browser links from {label}'s sessions open in; type a profile after Chrome or Firefox (Chrome Profile 1). Other links open in the default browser"
+            ),
         };
         if let Some(problem) = descriptor.problem() {
             hint.push_str(&format!(" — broken: {problem}"));
@@ -2037,6 +2432,15 @@ impl Config {
                 }
                 let next = cycle_owned(&descriptor.effort.default, &choices, step);
                 self.set_harness_effort(id, next);
+            }
+            // A profile belongs to the browser it was typed after, so a
+            // step drops it.
+            HarnessField::Browser => {
+                let current = self
+                    .link_browser(id)
+                    .map_or(crate::open_url::DEFAULT.to_string(), |b| b.app.clone());
+                let next = cycle_owned(&current, &crate::open_url::choices(), step);
+                self.set_link_browser(id, crate::open_url::parse(&next));
             }
         }
     }
@@ -2159,11 +2563,6 @@ impl Config {
             }
         }
         out
-    }
-
-    /// **Auto-fix my PRs**, read: anything but `off` is on.
-    pub fn autofix_mode(&self) -> crate::autofix::Mode {
-        crate::autofix::Mode::parse(&self.pr_autofix)
     }
 
     /// What the AUTOFIX agent launches on when it does not run on the pull
@@ -2407,9 +2806,6 @@ impl Config {
         match kind {
             SettingKind::FollowNewSession => on_off(self.follow_new_session).into(),
             SettingKind::SessionIdleTimeout => self.session_idle_timeout.clone(),
-            SettingKind::PrAutofix => {
-                on_off(self.autofix_mode() == crate::autofix::Mode::Auto).into()
-            }
             SettingKind::OutsideEditor => crate::outside_editor::row_label(&self.outside_editor),
             SettingKind::DoneSound => self.done_sound.clone(),
             SettingKind::FeedbackSound => self.feedback_sound.clone(),
@@ -2440,8 +2836,97 @@ impl Config {
             | SettingKind::RunCommand
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
-            | SettingKind::LinearKey => ProjectSettings::default().value_label(kind),
+            | SettingKind::LinearKey
+            | SettingKind::TakeawaysLink
+            | SettingKind::About => ProjectSettings::default().value_label(kind),
+            SettingKind::Connection(_) => NOT_CONNECTED.into(),
+            SettingKind::MicrosoftFooterMeeting => on_off(self.microsoft.footer_meeting).into(),
+            SettingKind::MicrosoftTakeaways => on_off(self.microsoft.takeaways).into(),
+            SettingKind::Away(field) => self.away_value(field),
+            SettingKind::Slack(field) => self.slack_value(field),
+            SettingKind::CodeReviews => on_off(self.inbox.code_reviews).into(),
+            SettingKind::LinearMentions => on_off(self.inbox.linear_mentions).into(),
         }
+    }
+
+    /// An AWAY AND PHONE row's value.
+    fn away_value(&self, field: AwayField) -> String {
+        let away = &self.away;
+        match field {
+            AwayField::ScreenLock => on_off(away.screen_lock).into(),
+            AwayField::Idle => match away.idle_minutes {
+                0 => "never".into(),
+                m => format!("{m}m"),
+            },
+            AwayField::ByHand => crate::keymap::Keymap::from_overrides(&self.keybindings)
+                .first(crate::keymap::Action::AwayToggle)
+                .map_or_else(|| "unbound".into(), |chord| chord.display()),
+            AwayField::Phone => away.phone_label(),
+            AwayField::Quiet => away.quiet_label(),
+        }
+    }
+
+    /// A SLACK row's value.
+    fn slack_value(&self, field: SlackField) -> String {
+        let slack = &self.slack;
+        let list = |items: &[String]| match items.is_empty() {
+            true => "none".to_string(),
+            false => items.join(", "),
+        };
+        match field {
+            SlackField::Dms => if slack.dms { "every message" } else { "off" }.into(),
+            SlackField::Mentions => if slack.mentions {
+                "every channel"
+            } else {
+                "off"
+            }
+            .into(),
+            SlackField::Threads => if slack.threads { "new replies" } else { "off" }.into(),
+            SlackField::Channels => list(&slack.channels),
+            SlackField::Keywords => list(&slack.keywords),
+            SlackField::Banner => slack.banner.label().into(),
+        }
+    }
+
+    /// A typed top-level row's value as its prompt opens on it: what the
+    /// file holds, not its display label.
+    pub fn text_value(&self, kind: SettingKind) -> String {
+        match kind {
+            SettingKind::Away(AwayField::Quiet) => match &self.away.quiet {
+                Some(_) => self.away.quiet_label(),
+                None => String::new(),
+            },
+            SettingKind::Slack(SlackField::Channels) => self.slack.channels.join(", "),
+            SettingKind::Slack(SlackField::Keywords) => self.slack.keywords.join(", "),
+            _ => String::new(),
+        }
+    }
+
+    /// Write a typed top-level row (`SettingKind::is_text`, not a
+    /// project's). The error is the line to show; nothing changed then.
+    pub fn set_text(&mut self, kind: SettingKind, value: &str) -> Result<(), String> {
+        let items = || -> Vec<String> {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        match kind {
+            SettingKind::Away(AwayField::Quiet) => {
+                self.away.quiet = orion_core::away::parse_quiet(value)?;
+            }
+            SettingKind::Slack(SlackField::Channels) => {
+                self.slack.channels = items()
+                    .into_iter()
+                    .map(|c| format!("#{}", c.trim_start_matches('#')))
+                    .collect();
+            }
+            SettingKind::Slack(SlackField::Keywords) => self.slack.keywords = items(),
+            _ => {}
+        }
+        Ok(())
     }
 
     /// `delta == 0` means activate (toggle a bool, cycle a choice forward).
@@ -2484,10 +2969,6 @@ impl Config {
                 self.session_idle_timeout =
                     cycle_choice(&self.session_idle_timeout, SESSION_IDLE_TIMEOUTS, step).into();
             }
-            SettingKind::PrAutofix => {
-                let on = self.autofix_mode() == crate::autofix::Mode::Auto;
-                self.pr_autofix = AUTOFIX_MODES[usize::from(!on)].into();
-            }
             SettingKind::OutsideEditor => {
                 let current = crate::outside_editor::Choice::parse(&self.outside_editor);
                 self.outside_editor =
@@ -2520,7 +3001,66 @@ impl Config {
             | SettingKind::RunCommand
             | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
-            | SettingKind::LinearKey => {}
+            | SettingKind::LinearKey
+            | SettingKind::TakeawaysLink
+            | SettingKind::About => {}
+            // Says how a connection stands; nothing to step.
+            SettingKind::Connection(_) => {}
+            SettingKind::MicrosoftFooterMeeting => {
+                self.microsoft.footer_meeting = !self.microsoft.footer_meeting;
+            }
+            SettingKind::MicrosoftTakeaways => {
+                self.microsoft.takeaways = !self.microsoft.takeaways;
+            }
+            SettingKind::Away(field) => {
+                let away = &mut self.away;
+                match field {
+                    AwayField::ScreenLock => away.screen_lock = !away.screen_lock,
+                    AwayField::Idle => {
+                        let at = AWAY_IDLE_MINUTES
+                            .iter()
+                            .position(|m| *m == away.idle_minutes)
+                            .unwrap_or(2);
+                        away.idle_minutes =
+                            AWAY_IDLE_MINUTES[step_index(at, AWAY_IDLE_MINUTES.len(), step)];
+                    }
+                    AwayField::Phone => {
+                        let at = PHONE_CHOICES
+                            .iter()
+                            .position(|c| {
+                                c.len() == away.phone.len()
+                                    && c.iter().all(|k| away.phone.contains(k))
+                            })
+                            .unwrap_or(0);
+                        away.phone =
+                            PHONE_CHOICES[step_index(at, PHONE_CHOICES.len(), step)].to_vec();
+                    }
+                    // Typed (`set_text`), or a toggle the app makes.
+                    AwayField::ByHand | AwayField::Quiet => {}
+                }
+            }
+            SettingKind::Slack(field) => {
+                let slack = &mut self.slack;
+                match field {
+                    SlackField::Dms => slack.dms = !slack.dms,
+                    SlackField::Mentions => slack.mentions = !slack.mentions,
+                    SlackField::Threads => slack.threads = !slack.threads,
+                    SlackField::Banner => {
+                        let at = BannerWhen::ALL
+                            .iter()
+                            .position(|b| *b == slack.banner)
+                            .unwrap_or(0);
+                        slack.banner = BannerWhen::ALL[step_index(at, BannerWhen::ALL.len(), step)];
+                    }
+                    SlackField::Channels | SlackField::Keywords => {}
+                }
+            }
+            SettingKind::CodeReviews => {
+                self.inbox.code_reviews = !self.inbox.code_reviews;
+            }
+            SettingKind::LinearMentions => {
+                self.inbox.linear_mentions = !self.inbox.linear_mentions;
+            }
         }
     }
 }
@@ -2669,12 +3209,15 @@ fn load_layers(path: &Path, local: &Path) -> Config {
 
 impl Config {
     /// What an older release stored, in the words this one keeps, so the
-    /// next save writes it once and nothing reads the old word after: a
-    /// `pr_autofix` of `ask` — from when autofix asked before it sent —
-    /// is `auto`.
+    /// next save writes it once: the retired `pr_autofix` — `off`, or on
+    /// in any other word — is the PR fixer's on/off, unless the PR fixer
+    /// already says.
     fn migrate(&mut self) {
-        if self.pr_autofix.trim().eq_ignore_ascii_case("ask") {
-            self.pr_autofix = crate::autofix::Mode::Auto.as_str().into();
+        use crate::automations::Automation;
+        if let Some(old) = &self.pr_autofix {
+            let on = !old.trim().eq_ignore_ascii_case("off");
+            let fixer = self.automations.of_mut(Automation::PrFixer);
+            fixer.on.get_or_insert(on);
         }
         self.move_harness_keys();
     }
@@ -2853,7 +3396,9 @@ impl Config {
         match field {
             HarnessField::Model => self.set_harness_model(id, value.into()),
             HarnessField::Effort => self.set_harness_effort(id, value.into()),
-            HarnessField::Enabled => panic!("a default is a model or an effort"),
+            HarnessField::Enabled | HarnessField::Browser => {
+                panic!("a default is a model or an effort")
+            }
         }
     }
 
@@ -2864,7 +3409,9 @@ impl Config {
         let value = match field {
             HarnessField::Model => over.and_then(|o| o.model_default.clone()),
             HarnessField::Effort => over.and_then(|o| o.effort_default.clone()),
-            HarnessField::Enabled => panic!("a default is a model or an effort"),
+            HarnessField::Enabled | HarnessField::Browser => {
+                panic!("a default is a model or an effort")
+            }
         };
         value.unwrap_or_else(|| DEFAULT_CHOICE.into())
     }
@@ -2925,17 +3472,66 @@ mod tests {
     }
     use crate::keymap::Keymap;
 
-    /// An older orion's `pr_autofix: "ask"` is `auto` once loaded, and a
-    /// save writes `auto` back in its place.
+    /// The retired `pr_autofix` loads as nothing a setting reads and
+    /// survives a save as written; its value seeds the PR fixer's on/off
+    /// once — `off` off, any other word on — and the PR fixer's own entry
+    /// wins after that.
     #[test]
-    fn an_old_autofix_ask_is_rewritten_to_auto() {
+    fn the_retired_pr_autofix_seeds_the_pr_fixer_once() {
+        use crate::automations::Automation;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        std::fs::write(&path, r#"{"pr_autofix": "ask"}"#).unwrap();
-        let cfg = load_from(&path);
-        assert_eq!(cfg.pr_autofix, "auto");
+        for (word, on) in [
+            ("off", false),
+            (" Off ", false),
+            ("auto", true),
+            ("ask", true),
+        ] {
+            std::fs::write(&path, format!(r#"{{"pr_autofix": "{word}"}}"#)).unwrap();
+            let cfg = load_from(&path);
+            assert_eq!(cfg.automations.is_on(Automation::PrFixer), on, "{word}");
+            cfg.save_to(&path).unwrap();
+            let saved = read_json_file(&path);
+            assert_eq!(saved["pr_autofix"], word, "survives a save");
+            assert_eq!(saved["automations"]["per"]["pr_fixer"]["on"], on);
+        }
+        // Seeded once: the PR fixer's own word stands from then on.
+        std::fs::write(
+            &path,
+            r#"{"pr_autofix": "off", "automations": {"per": {"pr_fixer": {"on": true}}}}"#,
+        )
+        .unwrap();
+        assert!(load_from(&path).automations.is_on(Automation::PrFixer));
+        // A config with neither has it on.
+        let none: Config = serde_json::from_str("{}").unwrap();
+        assert!(none.automations.is_on(Automation::PrFixer));
+        assert_eq!(none.automations.max_running, 5);
+    }
+
+    /// The `automations` keys round-trip through a save.
+    #[test]
+    fn automations_settings_round_trip() {
+        use crate::automations::config::{Schedule, Whose};
+        use crate::automations::Automation;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut cfg = Config::default();
+        cfg.automations.max_running = 3;
+        let bug = cfg.automations.of_mut(Automation::BugFixer);
+        bug.on = Some(true);
+        bug.extra_steer = "Keep it small.".into();
+        bug.labels = vec!["Bug".into(), "Regression".into()];
+        bug.preset = Some("Careful".into());
+        let review = cfg.automations.of_mut(Automation::WeekReview);
+        review.when = Some(Schedule {
+            day: "fri".into(),
+            at: "08:30".into(),
+        });
+        review.whose = Whose::WholeTeam;
         cfg.save_to(&path).unwrap();
-        assert_eq!(read_json_file(&path)["pr_autofix"], "auto");
+        let loaded = load_from(&path);
+        assert!(loaded.skipped.is_empty(), "{:?}", loaded.skipped);
+        assert_eq!(loaded.automations, cfg.automations);
     }
 
     /// The config file the newest release wrote, every key off its
@@ -3610,21 +4206,12 @@ mod tests {
         assert!(cfg.animations);
     }
 
-    /// **Auto-fix my PRs** is on by default, toggling off and back on; with
-    /// no session to copy, the agent runs on the default agent at the PR
-    /// autofix preset's model — one that harness no longer offers falls
-    /// back to its own default.
+    /// With no session to copy, the autofix agent runs on the default
+    /// agent at the PR autofix preset's model — one that harness no longer
+    /// offers falls back to its own default.
     #[test]
-    fn autofix_toggles_and_falls_back_to_the_presets_model() {
+    fn autofix_falls_back_to_the_presets_model() {
         let mut cfg = Config::default();
-        assert_eq!(cfg.value_label(SettingKind::PrAutofix), "on");
-        cfg.cycle_kind(SettingKind::PrAutofix, 1);
-        assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Off);
-        assert_eq!(cfg.value_label(SettingKind::PrAutofix), "off");
-        cfg.cycle_kind(SettingKind::PrAutofix, 1);
-        assert_eq!(cfg.autofix_mode(), crate::autofix::Mode::Auto);
-        let missing: Config = serde_json::from_str("{}").unwrap();
-        assert_eq!(missing.autofix_mode(), crate::autofix::Mode::Auto);
 
         let preset = crate::agent_presets::SystemPreset::PrAutofix.default_preset();
         let defaults = cfg.autofix_launch(&preset);
@@ -4000,6 +4587,8 @@ mod tests {
                 SettingKind::OpenCommand,
                 SettingKind::WorktreeContainers,
                 SettingKind::LinearKey,
+                SettingKind::TakeawaysLink,
+                SettingKind::About,
             ]
         );
         assert_eq!(kind(n + 1), Some(SettingKind::SetupCommand));
@@ -4209,6 +4798,70 @@ mod tests {
         assert_eq!(saved["harnesses"]["grok"]["effort_default"], "high");
     }
 
+    /// **Open links in** is on every Claude account and on nothing else:
+    /// ←/→ step the browser, dropping a profile typed for the last one, and
+    /// the choice is `harnesses.<id>.browser`, round-tripped by a save.
+    #[test]
+    fn each_claude_account_picks_the_browser_its_links_open_in() {
+        let mut cfg: Config = serde_json::from_str(
+            r#"{"claude_accounts": [{"id": "claude-b", "config_dir": "~/.claude-b"}]}"#,
+        )
+        .unwrap();
+        let browsers: Vec<String> = cfg
+            .agent_rows()
+            .into_iter()
+            .filter(|(_, field)| *field == HarnessField::Browser)
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(browsers, ["claude", "claude-b"]);
+        assert_eq!(
+            cfg.agent_value("claude-b", HarnessField::Browser),
+            "default"
+        );
+        // Nothing chosen writes nothing.
+        cfg.set_link_browser("claude-b", None);
+        assert!(!cfg.harnesses.contains_key("claude-b"));
+
+        let (tab, row) = locate_in(&cfg, "claude-b", HarnessField::Browser).unwrap();
+        cfg.cycle(tab, row, 1);
+        assert_eq!(cfg.agent_value("claude-b", HarnessField::Browser), "Safari");
+        cfg.cycle(tab, row, -1);
+        assert_eq!(
+            cfg.agent_value("claude-b", HarnessField::Browser),
+            "default"
+        );
+        assert_eq!(cfg.harnesses["claude-b"].browser, None);
+        cfg.cycle(tab, row, -1);
+        assert_eq!(cfg.agent_value("claude-b", HarnessField::Browser), "Arc");
+
+        cfg.set_link_browser("claude-b", crate::open_url::parse("Chrome Profile 2"));
+        assert_eq!(
+            cfg.agent_value("claude-b", HarnessField::Browser),
+            "Chrome · Profile 2"
+        );
+        assert_eq!(cfg.agent_value("claude", HarnessField::Browser), "default");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved["harnesses"]["claude-b"]["browser"],
+            serde_json::json!({"app": "Chrome", "profile": "Profile 2"})
+        );
+        let mut loaded = load_from(&path);
+        assert_eq!(
+            loaded.link_browser("claude-b"),
+            cfg.link_browser("claude-b")
+        );
+        // A step moves to the next browser, without Chrome's profile.
+        loaded.cycle(tab, row, 1);
+        assert_eq!(
+            loaded.agent_value("claude-b", HarnessField::Browser),
+            "Firefox"
+        );
+    }
+
     /// A second Claude account's own entry survives the Accounts tab
     /// saving its section — the map is written back typed — and the
     /// account is a place a Claude session can be carried to, and back; a
@@ -4249,6 +4902,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         assert_eq!(
             loaded.continue_targets(&agent(AgentKind::Claude, None)),
@@ -4813,14 +5467,21 @@ mod tests {
         });
     }
 
-    /// Settings is five tabs, and General holds what is left of orion's
+    /// Settings is six tabs, and General holds what is left of orion's
     /// own switches under three groups.
     #[test]
-    fn settings_is_five_tabs_and_general_has_three_groups() {
+    fn settings_is_six_tabs_and_general_has_three_groups() {
         let titles: Vec<&str> = SETTINGS_TABS.iter().map(|t| t.title).collect();
         assert_eq!(
             titles,
-            ["General", "Accounts", "Projects", "Presets", "Keys"]
+            [
+                "General",
+                "Accounts",
+                "Projects",
+                "Presets",
+                "Connections",
+                "Keys"
+            ]
         );
         let general: Vec<(&str, &str)> = GENERAL_SETTINGS
             .iter()
@@ -4831,7 +5492,6 @@ mod tests {
             [
                 ("Launching", "Follow new session"),
                 ("Launching", "Idle session timeout"),
-                ("Launching", "Auto-fix my PRs"),
                 ("Launching", "Open files in"),
                 ("Sounds", "Turn finished"),
                 ("Sounds", "Needs you"),
@@ -4849,7 +5509,9 @@ mod tests {
                 "Run command",
                 "Open command",
                 "On worktree delete",
-                "Linear key"
+                "Linear key",
+                "Link to meeting takeaways",
+                "What it is"
             ]
         );
     }
@@ -4901,7 +5563,8 @@ mod tests {
                         vec![
                             "Enabled".to_string(),
                             "Model".to_string(),
-                            "Effort".to_string()
+                            "Effort".to_string(),
+                            "Open links in".to_string()
                         ]
                     ),
                     (
@@ -5051,6 +5714,237 @@ mod tests {
             old.keymap().label(crate::keymap::Action::Quit),
             Keymap::default().label(crate::keymap::Action::Quit)
         );
+    }
+
+    /// Connections is four sections in the design's order: AWAY AND PHONE
+    /// and SLACK with their rows and values (5.2), MICROSOFT 365's status
+    /// row, and GITHUB AND LINEAR's two switches, on.
+    #[test]
+    fn connections_is_four_sections_in_order() {
+        let tab = SETTINGS_TABS
+            .iter()
+            .position(|t| t.title == "Connections")
+            .unwrap();
+        let headers: Vec<String> = settings_rows(tab, 1)
+            .into_iter()
+            .filter_map(|row| match row {
+                SettingsRow::Header(title) => Some(title),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                "AWAY AND PHONE · Slack DM from Orion",
+                "SLACK",
+                "MICROSOFT 365",
+                "GITHUB AND LINEAR · through gh and project keys"
+            ]
+        );
+        let mut cfg = Config::default();
+        let rows: Vec<(&str, String)> = CONNECTIONS_SETTINGS
+            .iter()
+            .filter(|spec| matches!(spec.kind, SettingKind::Away(_) | SettingKind::Slack(_)))
+            .map(|spec| (spec.label, cfg.value_label(spec.kind)))
+            .collect();
+        let want = [
+            ("Away when the screen locks", "on"),
+            ("Away after no keys or mouse", "10m"),
+            ("Away by hand", "⌘⇧A"),
+            ("Send to your phone while away", "questions, plans, crashes"),
+            ("Quiet hours", "22:00 to 07:00"),
+            ("Direct messages", "every message"),
+            ("Mentions of you", "every channel"),
+            ("Threads you're in", "new replies"),
+            ("Channels, every message", "none"),
+            ("Keywords", "none"),
+            ("Banner and sound", "DMs and mentions"),
+        ];
+        assert_eq!(rows, want.map(|(l, v)| (l, v.to_string())).to_vec());
+        for spec in CONNECTIONS_SETTINGS {
+            if let SettingKind::Connection(_) = spec.kind {
+                assert!(spec.kind.is_status());
+                assert_eq!(cfg.value_label(spec.kind), NOT_CONNECTED);
+            } else if matches!(
+                spec.kind,
+                SettingKind::CodeReviews | SettingKind::LinearMentions
+            ) {
+                assert_eq!(cfg.value_label(spec.kind), "on");
+                cfg.cycle_kind(spec.kind, 1);
+                assert_eq!(cfg.value_label(spec.kind), "off");
+            }
+        }
+        assert!(!cfg.inbox.code_reviews && !cfg.inbox.linear_mentions);
+    }
+
+    /// MICROSOFT 365's two switches sit under its status row, on by
+    /// default, and step `microsoft.footer_meeting` and
+    /// `microsoft.takeaways`.
+    #[test]
+    fn microsoft_rows_switch_their_keys() {
+        let rows: Vec<(&str, SettingKind)> = CONNECTIONS_SETTINGS
+            .iter()
+            .filter(|spec| spec.group == "MICROSOFT 365")
+            .map(|spec| (spec.label, spec.kind))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Status", SettingKind::Connection(Connection::Microsoft)),
+                (
+                    "Next meeting in the footer",
+                    SettingKind::MicrosoftFooterMeeting
+                ),
+                (
+                    "Takeaways from Teams transcripts",
+                    SettingKind::MicrosoftTakeaways
+                ),
+            ]
+        );
+        let mut cfg = Config::default();
+        assert_eq!(cfg.value_label(SettingKind::MicrosoftFooterMeeting), "on");
+        cfg.cycle_kind(SettingKind::MicrosoftFooterMeeting, 1);
+        assert!(!cfg.microsoft.footer_meeting);
+        assert_eq!(cfg.value_label(SettingKind::MicrosoftFooterMeeting), "off");
+        cfg.cycle_kind(SettingKind::MicrosoftTakeaways, 0);
+        assert!(!cfg.microsoft.takeaways);
+    }
+
+    /// A project's **Link to meeting takeaways** is on until switched off,
+    /// and its **What it is** is typed; neither leaves an entry while on
+    /// its default, and both round-trip.
+    #[test]
+    fn project_takeaways_and_about_round_trip() {
+        let repo = Path::new("/code/web");
+        let fresh = ProjectSettings::default();
+        assert!(fresh.takeaways);
+        assert_eq!(fresh.value_label(SettingKind::TakeawaysLink), "on");
+        assert_eq!(
+            fresh.value_label(SettingKind::About),
+            crate::projects::NOT_WRITTEN
+        );
+        assert!(SettingKind::About.is_text() && SettingKind::About.is_project());
+        assert!(SettingKind::TakeawaysLink.is_project());
+
+        let mut cfg = Config::default();
+        assert!(cfg.cycle_project(repo, SettingKind::TakeawaysLink, 1));
+        assert!(cfg.set_project_text(repo, SettingKind::About, "  The web app.  "));
+        let web = cfg.project(repo);
+        assert!(!web.takeaways);
+        assert_eq!(web.about, "The web app.");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        assert_eq!(
+            saved["projects"]["/code/web"],
+            serde_json::json!({"takeaways": false, "about": "The web app."})
+        );
+        assert_eq!(load_from(&path).project(repo), web);
+
+        // Back on the defaults, the entry goes.
+        cfg.cycle_project(repo, SettingKind::TakeawaysLink, 1);
+        cfg.set_project_text(repo, SettingKind::About, "");
+        assert!(cfg.projects.is_empty());
+    }
+
+    /// The AWAY AND PHONE and SLACK rows step and type as their values say.
+    #[test]
+    fn away_and_slack_rows_step_and_type() {
+        let mut cfg = Config::default();
+        cfg.cycle_kind(SettingKind::Away(AwayField::Idle), 1);
+        assert_eq!(cfg.away.idle_minutes, 15);
+        cfg.cycle_kind(SettingKind::Away(AwayField::Idle), -1);
+        cfg.cycle_kind(SettingKind::Away(AwayField::Idle), -1);
+        cfg.cycle_kind(SettingKind::Away(AwayField::Idle), -1);
+        assert_eq!(cfg.value_label(SettingKind::Away(AwayField::Idle)), "never");
+        cfg.cycle_kind(SettingKind::Away(AwayField::Phone), 1);
+        assert_eq!(cfg.away.phone_label(), "questions, plans");
+        cfg.cycle_kind(SettingKind::Away(AwayField::Phone), -1);
+        cfg.cycle_kind(SettingKind::Away(AwayField::Phone), -1);
+        assert_eq!(cfg.away.phone_label(), "nothing");
+        cfg.cycle_kind(SettingKind::Away(AwayField::ScreenLock), 0);
+        assert!(!cfg.away.screen_lock);
+        cfg.cycle_kind(SettingKind::Slack(SlackField::Banner), 1);
+        assert_eq!(cfg.slack.banner, BannerWhen::Every);
+        cfg.cycle_kind(SettingKind::Slack(SlackField::Dms), 0);
+        assert_eq!(cfg.value_label(SettingKind::Slack(SlackField::Dms)), "off");
+
+        let quiet = SettingKind::Away(AwayField::Quiet);
+        assert!(quiet.is_text() && !quiet.is_project());
+        cfg.set_text(quiet, "23:00-6:30").unwrap();
+        assert_eq!(cfg.value_label(quiet), "23:00 to 06:30");
+        assert_eq!(cfg.text_value(quiet), "23:00 to 06:30");
+        assert!(cfg.set_text(quiet, "late").is_err());
+        cfg.set_text(quiet, "").unwrap();
+        assert_eq!(cfg.value_label(quiet), "off");
+        let channels = SettingKind::Slack(SlackField::Channels);
+        cfg.set_text(channels, "eng, #deploys,,").unwrap();
+        assert_eq!(cfg.slack.channels, ["#eng", "#deploys"]);
+        assert_eq!(cfg.text_value(channels), "#eng, #deploys");
+    }
+
+    /// The Connections keys default as the design says, a file without
+    /// them loads those defaults, and a file with them round-trips.
+    #[test]
+    fn connections_keys_default_and_round_trip() {
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.away, AwaySettings::default());
+        assert!(old.away.screen_lock);
+        assert_eq!(old.away.idle_minutes, 10);
+        assert_eq!(
+            old.away.phone,
+            [PhoneKind::Question, PhoneKind::Plan, PhoneKind::Crash]
+        );
+        assert_eq!(
+            old.away.quiet,
+            Some(("22:00".to_string(), "07:00".to_string()))
+        );
+        assert!(old.slack.dms && old.slack.mentions && old.slack.threads);
+        assert_eq!(old.slack.banner, BannerWhen::DmsAndMentions);
+        assert_eq!(old.microsoft.tenant, "organizations");
+        assert!(old.microsoft.client_id.is_empty());
+        assert!(old.microsoft.footer_meeting && old.microsoft.takeaways);
+        assert!(old.inbox.code_reviews && old.inbox.linear_mentions);
+
+        // One key set inside a section leaves the rest on their defaults.
+        let partial: Config = serde_json::from_str(
+            r##"{"away": {"idle_minutes": 5}, "slack": {"channels": ["#eng"]}}"##,
+        )
+        .unwrap();
+        assert_eq!(partial.away.idle_minutes, 5);
+        assert!(partial.away.screen_lock);
+        assert_eq!(partial.slack.channels, ["#eng"]);
+        assert!(partial.slack.dms);
+
+        let mut cfg = Config {
+            away: AwaySettings {
+                screen_lock: false,
+                idle_minutes: 30,
+                phone: vec![PhoneKind::Crash],
+                quiet: None,
+            },
+            ..Config::default()
+        };
+        cfg.slack.keywords = vec!["deploy".into()];
+        cfg.slack.banner = BannerWhen::Never;
+        cfg.microsoft.client_id = "abc".into();
+        cfg.microsoft.tenant = "t-1".into();
+        cfg.inbox.linear_mentions = false;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        cfg.save_to(&path).unwrap();
+        let saved = read_json_file(&path);
+        assert_eq!(saved["away"]["quiet"], serde_json::Value::Null);
+        assert_eq!(saved["slack"]["banner"], "never");
+        assert_eq!(saved["away"]["phone"], serde_json::json!(["crash"]));
+        let reloaded = load_from(&path);
+        assert!(reloaded.skipped.is_empty(), "{:?}", reloaded.skipped);
+        assert_eq!(reloaded.away, cfg.away);
+        assert_eq!(reloaded.slack, cfg.slack);
+        assert_eq!(reloaded.microsoft, cfg.microsoft);
+        assert_eq!(reloaded.inbox, cfg.inbox);
     }
 
     #[test]

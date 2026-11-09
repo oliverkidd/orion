@@ -1,0 +1,12 @@
+# AUTOMATIONS with the keys in a panel: ↓ to the bug fixer, Space turns it on, Tab takes the keys to
+# its panel (On, Labels, Preset, Extra steer), and Enter on Extra steer writes one in place — the
+# field lit, the keys along the border `Enter save · Esc cancel`.
+cmd j
+Down
+Space
+Tab
+Down
+Down
+Down
+Enter
+Keep each change small enough to review in one sitting

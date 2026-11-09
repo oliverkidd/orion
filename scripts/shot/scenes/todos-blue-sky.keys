@@ -1,0 +1,8 @@
+# Todos › Blue sky (5.9): ⌘I opens Todos on the demo project's tab and ⌘1 turns to Blue sky's, the
+# first tab. Down onto the first idea, `w` sends it to the demo project: its row says `demo`, the
+# others `blue sky`, each with its state — `not started`, or `● built · habit-tracker/`.
+Escape
+cmd i
+cmd 1
+Down
+w

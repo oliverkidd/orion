@@ -1,0 +1,4 @@
+# ⌘J over the stock demo: AUTOMATIONS, every automation down the left with its dot and state (the PR
+# fixer on, the rest off), and the PR fixer's panel on the right — its SETTINGS (On, Preset
+# `PR autofix · the PR's own agent`, Extra steer) and its YOUR OPEN PRS and DONE THIS WEEK lists.
+cmd j

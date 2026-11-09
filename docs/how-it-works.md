@@ -116,7 +116,7 @@
   viewer's top line, beside the branch's pull request and its checks. Nothing is checked out or
   fetched: base sync keeps origin's copy of the base fresh, so this works before a pull request
   exists and needs no network. Answers are kept by the two commits' SHAs, so opening the viewer
-  again on the same commits costs two `rev-parse`s. AUTOFIX asks the same of a pull request it
+  again on the same commits costs two `rev-parse`s. The PR FIXER asks the same of a pull request it
   sends an agent to — its head against its base, the head fetched by its pull ref when the repo
   lacks it — as soon as it is seen to conflict, and names the files in the agent's prompt; a send
   whose answer is still out waits for it and goes on the next git tick. `Enter` on a `U` file opens the CONFLICT
@@ -287,10 +287,42 @@
   question dialog sends the same type — so one can land just *after* the answer that closed the
   dialog. Inside 5 s of the row leaving red that notification is taken as the echo it is and
   ignored; a genuinely new dialog announces itself through `PermissionRequest` or `PreToolUse`
-  first, never through that notification alone.
+  first, never through that notification alone. A plan is the other dialog a `PreToolUse` opens:
+  Claude's `ExitPlanMode` turns the row red as it puts the plan up for approval. It is answered
+  like a permission prompt, by the next tool event of its origin. Sent back with feedback, it fires
+  no `PostToolUse` at all, and Claude goes straight on revising the plan.
+- **Red says why.** The hook that turns a row red carries the reason with it, and the status
+  change sends it on as a WAITING REASON: the question and its options (from the
+  `AskUserQuestion` call's `tool_input`), the plan (from `ExitPlanMode`'s), the tool a permission
+  prompt is for, or a crash's exit code. The daemon holds the newest one per session in memory and
+  drops it as soon as the row leaves red. A daemon that restarted rebuilds a red row's reason from
+  the dialog its transcript ends on. Answering from outside the session types the keys Claude's own
+  dialog takes: a digit for an option, the row after the options for your own words, `1` to approve
+  a plan, the plan's last row ("Tell Claude what to change") for feedback, Esc and then your words to
+  refuse a permission prompt. A session with no dialog open (stopped, or asked before a restart)
+  gets the answer as its next turn instead, in words.
+- **Phone bridge.** <a id="phone-bridge"></a>While you are away, a session that starts waiting on you
+  — a question, a plan, a permission prompt — or crashes goes to your phone at once, as a Slack DM
+  from the Orion app's bot; there is never a delay. You are away when the screen is locked (macOS's
+  `IOConsoleLocked`, read with `ioreg` every 5 s), after the set minutes with no keys or mouse
+  (`HIDIdleTime`), or by hand with `⌘⇧A` until your next key in any orion. Being in a meeting is never
+  away. Quiet hours and **Send to your phone while away** (Settings › Connections) hold messages
+  back. The DM reads `● Agent · <project> · <HH:MM>`, then the session's name, then its whole last
+  response from the transcript (never summarised; split into Slack's 3000-character sections, and
+  continued in the thread past Slack's 50 blocks), then the question in bold with a button per
+  option and `Something else…`, or the plan with `Approve` and a reply button. A button answers
+  through the same keys an answer from orion types; `Something else…` and the reply button say
+  "Reply in this thread". A reply in a message's thread answers that session in words (feedback, for
+  a plan), a plain DM answers the newest message still waiting, and only the user who installed the
+  app is listened to. Each answer gets `✓ Sent · working again` in its thread. A session answered
+  at the desk instead has its DM updated to say "Answered in Orion", its buttons gone. The daemon
+  holds one Socket Mode websocket to Slack (reopened with backoff when it drops), keeps which message
+  is which session's in its database so a reply finds its session after a restart, and forwards
+  every message event your user token sees to the TUIs, unfiltered, for Needs you. With no tokens
+  saved nothing connects and nothing polls.
 - **Which of those signals you get depends on the harness.** Claude is installed with all ten hook
   groups — `UserPromptSubmit`, `Stop`, `SessionStart`, `PermissionRequest`, `Notification`, a
-  `PreToolUse` on `AskUserQuestion`, an unmatched `PostToolUse` (the question's answer, a permission
+  `PreToolUse` on `AskUserQuestion` and `ExitPlanMode`, an unmatched `PostToolUse` (the question's answer, a permission
   prompt's approval, and the cwd probe that re-homes a session that moves seconds later instead of
   at the turn's `Stop`), `SubagentStart` and `SubagentStop`, plus `StopFailure` (the USAGE LIMIT).
   Codex gets six of them: no `Notification`, no `StopFailure` and neither `*ToolUse` group, because
@@ -501,13 +533,29 @@ all say where the same pull request stands, on their own beats, and land in what
 network gives. So none of them is drawn directly: each answer goes into one store of what is known
 about every pull request, each fact stamped with when its answer was *asked*, and every surface — the
 modal's rows and page, the preview, the band, its rows, the footer, the palette, Linear's work column,
-the merge form and AUTOFIX — draws from that store. The newest-asked answer wins, so a slow list asked
+the merge form and the PR fixer — draws from that store. The newest-asked answer wins, so a slow list asked
 before a page can't undo what the page said; an answer that doesn't know (GitHub's `mergeable:
 UNKNOWN` right after a push, a recheck cut short) never replaces one that does; and the cache from the
 last launch loses to any live answer, the page saying `cached` beside its state until one lands. Linear's
 list and the git counts on the bands keep their answers by the same rules. Linear's lists are kept on
 disk the same way (`linear-cache/issues.json`), and each project's is asked for as the project is
 selected, so `⌘L` opens on what was last read while the ask runs underneath.
+
+## Automations
+
+An automation starts its sessions the way you do — the same create request to the DAEMON, in a
+fresh or the pull request's own checkout — with one more field: `automation`, its id (`pr_fixer`,
+`bug_fixer` …). The DAEMON keeps it on the session's row (`agents.automation`), so the tag survives
+restarts and resumes, and every client reads it off the session: the grid puts the automation's
+name ahead of what the row runs on, Needs you uses it as the card's kind, and a phone message names
+it on its context line.
+
+The TUI runs the automations: each one's runner looks for work on the git tick, and none starts a
+session while `automations.max_running` tagged sessions are at work or waiting on you — creates
+still on their way to the DAEMON count too, so one tick can't overshoot. The PR fixer reads the same
+open-PR lists and pull request bodies as the grid, so it asks `gh` for nothing of its own beyond a
+watched pull request's body. Every runner's prompt is its preset's text with the task at `{task}`,
+then `Extra steer: …` when the automation has one.
 
 Settings and key overrides live in [Configuration](configuration.md). The process model, the IPC CODEC and
 the crate layout are covered in more depth in [ARCHITECTURE.md](../ARCHITECTURE.md).

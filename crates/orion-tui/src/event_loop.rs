@@ -47,6 +47,7 @@ use host_terminal::{
     on_host_resize, reassert_modes, repaint, report_working_directory, setup_terminal,
     take_worker_panic, watch_held_key, MODE_REASSERT,
 };
+pub(crate) use quick_launch::submit_unattended;
 pub use release_watch::ReleaseWatch;
 
 /// Wheel step for the pull-request reading pane, in lines. Prose wants a
@@ -262,13 +263,13 @@ async fn main_loop(
 ) -> Result<Exit> {
     let mut app = App::new();
     app.conn = ConnState::Connected;
-    app.round_caps =
-        std::env::var("TERM_PROGRAM").is_ok_and(|t| t.eq_ignore_ascii_case("ghostty"));
+    app.round_caps = std::env::var("TERM_PROGRAM").is_ok_and(|t| t.eq_ignore_ascii_case("ghostty"));
     // The repo orion was started in, for the first run's "open this
     // folder" — looked up once, off the tree the snapshot has not sent yet.
     app.launch_repo = crate::app::launch_repo();
     let cfg = crate::config::Config::load();
     apply_config(&mut app, &cfg);
+    crate::microsoft::load(&mut app, &cfg.microsoft);
     app.keymap = cfg.keymap();
     // The SYSTEM PRESETS (PR autofix, Linear Ticket, Week review) on every
     // list, so the presets list shows them and their text can be edited there.
@@ -345,7 +346,10 @@ async fn main_loop(
     let (week_review_tx, mut week_review_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::week_review::Answer>();
     app.week_review.tx = Some(week_review_tx);
-    app.week_review.root = Some(orion_core::paths::data_dir().join("reviews"));
+    let reviews = orion_core::paths::data_dir().join("reviews");
+    crate::automations::week_review::migrate_notes(&mut app, &reviews);
+    app.week_review.root = Some(reviews);
+    crate::week_review::reload(&mut app);
     // The PR REVIEW's threads, diff and writes.
     let (review_tx, mut review_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::pr_review::Answer>();
@@ -355,6 +359,17 @@ async fn main_loop(
     app.linear_tx = Some(linear_tx);
     app.linear_links =
         crate::linear::LinkStore::load(orion_core::paths::data_dir().join("linear-links.json"));
+    // NEEDS YOU: Done and Snooze from the last run, and the POLL for your
+    // Linear notifications and the reviews asked of you (`needs_you::
+    // interval`; the e2e tests turn it off), first at start. The Slack
+    // section's asks land on the same channel, poll or no poll: they
+    // follow Slack's own events.
+    crate::needs_you::load(&mut app);
+    let (needs_you_tx, mut needs_you_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::needs_you::Answer>();
+    let needs_you_interval = crate::needs_you::interval();
+    app.needs_you.tx = Some(needs_you_tx);
+    let mut next_needs_you = tokio::time::Instant::now();
     // The WORKTREE PICKER's branch listings and their background fetch
     // land here too.
     let (branch_tx, mut branch_rx) =
@@ -371,7 +386,8 @@ async fn main_loop(
     let (repo_tx, mut repo_rx) = tokio::sync::mpsc::unbounded_channel::<crate::open_repo::Answer>();
     app.open_repo.tx = Some(repo_tx);
     // CLONE FROM GITHUB's listing and clones land here.
-    let (clone_tx, mut clone_rx) = tokio::sync::mpsc::unbounded_channel::<crate::clone_repo::Answer>();
+    let (clone_tx, mut clone_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::clone_repo::Answer>();
     app.clone_repo.tx = Some(clone_tx);
     // A BASE SYNC's fetch and fast-forward land here.
     let (base_tx, mut base_rx) = tokio::sync::mpsc::unbounded_channel::<crate::base_sync::Answer>();
@@ -412,6 +428,26 @@ async fn main_loop(
     app.spotify_tx = Some(spotify_tx.clone());
     let spotify_interval = crate::spotify::interval();
     let mut next_spotify = tokio::time::Instant::now();
+    // MICROSOFT 365: a sign-in's steps and the calendar reads land here;
+    // while signed in, a minute's tick repaints the footer's countdown and
+    // reads the calendar when due (`microsoft::calendar::interval`; the
+    // e2e tests turn it off).
+    let (microsoft_tx, mut microsoft_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::microsoft::Answer>();
+    app.microsoft.tx = Some(microsoft_tx);
+    let calendar_interval = crate::microsoft::calendar::interval();
+    let mut next_microsoft = tokio::time::Instant::now();
+    // A project's **What it is**, written off the loop (`projects`).
+    let (about_tx, mut about_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::projects::Answer>();
+    app.project_about.tx = Some(about_tx);
+    // AUTOMATIONS' asks off the loop — Linear, the one-shot model — land
+    // here; the bug fixer's and feature builder's ledger from the last run.
+    let (automations_tx, mut automations_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::automations::Answer>();
+    app.automations.tx = Some(automations_tx);
+    crate::automations::linear_builder::load(&mut app);
+    crate::automations::meeting_takeaways::load(&mut app);
     let mut next_metrics_poll = tokio::time::Instant::now();
     let mut next_splash_frame = tokio::time::Instant::now();
     let mut next_confetti_frame = tokio::time::Instant::now();
@@ -493,11 +529,12 @@ async fn main_loop(
                 // AUTOFIX: the checks of each broken pull request it is
                 // watching, when their turn has come — and a queued ask
                 // onto a free screen.
-                for (url, number, dir) in crate::autofix::due_fetches(&mut app) {
+                for (url, number, dir) in crate::automations::pr_fixer::due_fetches(&mut app) {
                     spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
                 }
-                crate::autofix::send_waiting(&mut app, &mut out);
-                crate::autofix::note_stand_downs(&mut app);
+                // AUTOMATIONS: each runner's turn — the PR fixer's queued
+                // asks among them.
+                crate::automations::tick(&mut app, &mut out);
                 // BASE SYNC: the most overdue project's root fetched, and
                 // fast-forwarded when it sits on the base branch.
                 crate::base_sync::tick(&mut app);
@@ -750,6 +787,23 @@ async fn main_loop(
                     land_spotify(&mut app, answer);
                 }
             }
+            _ = tokio::time::sleep_until(next_microsoft),
+                if calendar_interval.is_some() && app.microsoft.email.is_some() =>
+            {
+                let every = calendar_interval.unwrap_or(crate::microsoft::calendar::DEFAULT_INTERVAL);
+                crate::microsoft::tick(&mut app, every);
+                next_microsoft = tokio::time::Instant::now() + crate::microsoft::TICK;
+            }
+            answer = microsoft_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::microsoft::land(&mut app, answer);
+                }
+            }
+            answer = about_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::projects::land(&mut app, answer);
+                }
+            }
             // The hover debounce: the cursor has rested on a pull request
             // long enough to mean it.
             _ = tokio::time::sleep(app.pr_detail_delay().unwrap_or(Duration::MAX)),
@@ -795,6 +849,21 @@ async fn main_loop(
             answer = linear_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::linear::land_answer(&mut app, answer);
+                }
+            }
+            _ = tokio::time::sleep_until(next_needs_you), if needs_you_interval.is_some() => {
+                crate::needs_you::poll(&mut app);
+                next_needs_you = tokio::time::Instant::now()
+                    + needs_you_interval.unwrap_or(crate::needs_you::DEFAULT_INTERVAL);
+            }
+            answer = needs_you_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::needs_you::land(&mut app, answer);
+                }
+            }
+            answer = automations_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::automations::land(&mut app, answer, &mut out);
                 }
             }
             answer = branch_rx.recv() => {
@@ -916,6 +985,22 @@ async fn main_loop(
             }
         }
 
+        // Slack messages for you that Settings' **Banner and sound** names
+        // ring the FEEDBACK SOUND and post a desktop notification on the
+        // same terms (`needs_you::slack`).
+        let banners = crate::needs_you::slack::due_banners(&mut app);
+        if !banners.is_empty() {
+            if let Some(sound) = crate::config::Config::load().feedback_sound() {
+                alerts::play_sound(terminal.backend_mut(), sound);
+                app.done_sounds.rang(std::time::Instant::now());
+                if app.may_notify_desktop() {
+                    for (summary, body) in &banners {
+                        alerts::notify_text(summary, body);
+                    }
+                }
+            }
+        }
+
         // Unseen finishes that have settled ring the DONE SOUND — once for
         // the lot, and not at all inside the FOLD of the last sound, the
         // FEEDBACK SOUND just above included — and each is named in a
@@ -948,6 +1033,8 @@ async fn main_loop(
         // round's requests fail through `connection_lost` instead, so a
         // launch typed after the DAEMON went comes back with its text.
         let mut lost = false;
+        // What a handler with no request list of its own queued.
+        out.append(&mut app.outbox);
         for req in out.drain(..) {
             if !matches!(app.conn, ConnState::Connected) || channels.tx.send(req).await.is_err() {
                 lost = true;
@@ -1851,7 +1938,7 @@ fn note_open_prs_answer_at(
     // AUTOFIX watches the user's pull requests that broke — on a real
     // answer, not the old list kept over a failed one.
     if !failed {
-        crate::autofix::note_list(app, &project, &list);
+        crate::automations::pr_fixer::note_list(app, &project, &list);
     }
     let project_id = project.clone();
     app.open_prs.insert(
@@ -2283,7 +2370,7 @@ fn land_pr_detail(
         );
     }
     // A watched pull request's checks, for AUTOFIX.
-    crate::autofix::land_detail(app, &url, detail.as_ref(), out);
+    crate::automations::pr_fixer::land_detail(app, &url, detail.as_ref(), out);
     match detail {
         Some(detail) => {
             let retired = !app.prs.status_or_open(&url).is_open();
@@ -2845,7 +2932,11 @@ fn land_client_rss(app: &mut App, bytes: u64) {
 }
 
 /// Queue a request that wants no follow-up when its Ack lands.
-fn send(app: &mut App, out: &mut Vec<ClientRequest>, make: impl FnOnce(u64) -> ClientRequest) {
+pub(crate) fn send(
+    app: &mut App,
+    out: &mut Vec<ClientRequest>,
+    make: impl FnOnce(u64) -> ClientRequest,
+) {
     send_with(app, out, PendingIntent::None, make);
 }
 
@@ -2866,18 +2957,20 @@ fn send_with(
 /// first half — the checkout it cuts for a prompt fired into another
 /// project — so the screen stays where the user left it, the same way a
 /// launch the user navigated away from is treated (`App::left_behind`).
+/// Returns the request's id.
 fn send_with_follow(
     app: &mut App,
     out: &mut Vec<ClientRequest>,
     intent: PendingIntent,
     follow: bool,
     make: impl FnOnce(u64) -> ClientRequest,
-) {
+) -> u64 {
     let req_id = app.alloc_req_id(intent);
     if !follow {
         app.left_behind.insert(req_id);
     }
     out.push(make(req_id));
+    req_id
 }
 
 fn log_server_event(ev: &ServerEvent) {
@@ -3300,7 +3393,7 @@ fn typing_into_pane(app: &App) -> bool {
             .is_some_and(|t| !t.exited && t.scroll_offset() == 0)
 }
 
-/// Is `chord` one of the pane fold's (`⌘J`, whatever `keybindings` binds
+/// Is `chord` one of the pane fold's (`⌘⇧J`, whatever `keybindings` binds
 /// to it) that a LOCKED PANE lets through rather than forwards — a ⌘
 /// chord only: `^J` is the agent's newline.
 fn folds_launcher_pane(app: &App, chord: &crate::keymap::KeyChord) -> bool {
@@ -3406,11 +3499,7 @@ fn paste_into_overlay(app: &mut App, text: &str) -> bool {
         return crate::todos::paste(app, text);
     }
     if matches!(&app.overlay, Some(Overlay::Autofix(_))) {
-        crate::autofix::paste(app, text);
-        return true;
-    }
-    if matches!(&app.overlay, Some(Overlay::WeekReview(_))) {
-        crate::week_review::paste(app, text);
+        crate::automations::pr_fixer::paste(app, text);
         return true;
     }
     // A pull request's review: the comment being written, the summary.
@@ -3781,6 +3870,8 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     // must never reach an Esc arm as one: the new-agent box would close
     // under its own **Select worktree** key.
     let key = crate::keymap::untangle_cmd_period(key);
+    // Back at the desk: the first key after AWAY BY HAND clears it.
+    crate::phone::note_key(app, &key);
     // `⌘W` closes the agent or terminal in the pane, never a modal: over
     // the editor, a markdown page or any overlay it does nothing at all,
     // rather than reach the editor as its `^W` or a list as a `w` — except
@@ -3911,7 +4002,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             leave_terminal_lock(app);
             return;
         }
-        // `⌘J` is the way out of the LAUNCHER PANE: the first press
+        // `⌘⇧J` is the way out of the LAUNCHER PANE: the first press
         // hands the keys back to the card the pane reads, and the same
         // chord from the cards then folds the pane away
         // (`launcher::fold_key`). Only the pane under the cards (a
@@ -4137,7 +4228,9 @@ fn dispatch_action(
         Action::Home => toggle_home(app),
         Action::Help => app.overlay = Some(Overlay::Help(HelpView::default())),
         Action::Settings => open_settings(app),
+        Action::AwayToggle => crate::phone::toggle_away(app),
         Action::ClaudeAccounts => open_claude_accounts(app, None),
+        Action::Connections => open_connections(app),
         Action::Usage => crate::usage::open(app),
         Action::StopAllStacks => crate::stacks::stop_all(app, out),
         Action::CleanUnusedWorktrees => crate::clean_worktrees::start(app),
@@ -4173,7 +4266,8 @@ fn dispatch_action(
         Action::Linear => crate::linear::open(app),
         Action::CopyLinearIssues => crate::linear::copy_worktree_issues(app),
         Action::Todos => crate::todos::open(app),
-        Action::WeekReview => crate::week_review::open(app),
+        Action::WeekReview => crate::automations::week_review::run_now(app),
+        Action::Automations => crate::automations::view::open(app),
         Action::PullWorktree => {
             if let Some(id) = crate::git_sync::target(app) {
                 crate::git_sync::request(app, id, crate::git_sync::Op::Pull);
@@ -4347,15 +4441,10 @@ fn dispatch_action(
                 toggle_archived(app, out);
             }
         }
-        // Fuzzy-search palette over every project / worktree / session.
+        // NEEDS YOU, and typed, the fuzzy jump to anything.
         Action::Palette => {
             if app.focus != Focus::Terminal {
-                // Every project's todos, for their rows.
-                crate::todos::view::load_every_list(app);
-                let mut extra = crate::palette::linear_rows(&app.tree, &app.linear);
-                extra.extend(crate::palette::todo_rows(&app.tree, &app.todos));
-                let palette = Palette::new(&app.tree, &app.open_prs, &app.prs, app.hide_draft_prs);
-                app.overlay = Some(Overlay::Palette(palette.with_extra(extra)));
+                open_palette(app);
             }
         }
         // `.` / `,`: the palette's attention order as a ring, no modal —
@@ -4758,7 +4847,7 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             };
             let value = match project {
                 Some(path) => cfg.project_text_value(path, *kind),
-                None => String::new(),
+                None => cfg.text_value(*kind),
             };
             (title.into(), hint.into(), value)
         }
@@ -4827,6 +4916,28 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 format!("Chip · {}", cfg.effective_harness_by_id(id).display_label()).into(),
                 format!("the letter or glyph its chip shows, one character{letter}").into(),
                 crate::claude_accounts::chip_icon(&cfg, id),
+            )
+        }
+        PromptKind::SlackToken { step, .. } => {
+            let (title, label) = crate::phone::prompt_text(*step);
+            (title.into(), label.into(), String::new())
+        }
+        PromptKind::MicrosoftAppId { client_id } => {
+            let (title, label) = crate::microsoft::app_id_prompt_text(client_id.as_deref());
+            (title.into(), label.into(), String::new())
+        }
+        PromptKind::LinkBrowser { id } => {
+            let cfg = crate::config::Config::load();
+            (
+                format!(
+                    "Open links in · {}",
+                    cfg.effective_harness_by_id(id).display_label()
+                )
+                .into(),
+                "Safari, Chrome, Firefox, Arc or an app's name; a profile after Chrome or \
+                 Firefox (empty = default browser)"
+                    .into(),
+                crate::open_url::typed(cfg.link_browser(id)),
             )
         }
     };
@@ -4979,10 +5090,12 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::Help
             | Action::Settings
             | Action::ClaudeAccounts
+            | Action::Connections
             | Action::Usage
             | Action::Hosts
             | Action::AgentPresets
             | Action::OpenSkillsFolder
+            | Action::Automations
     )
 }
 
@@ -5129,7 +5242,7 @@ fn open_repo_in_browser(app: &mut App) {
     // Not open_link: this is a repo page, never a PR row to mark read. The
     // page opening is the answer; only a page that won't says why.
     let failed = move || match crate::remote::repo_url(&root) {
-        Ok(url) if open_url(&url) => None,
+        Ok(url) if crate::open_url::open_url(&url, None) => None,
         Ok(url) => Some(format!("couldn't open {url}")),
         Err(msg) => Some(msg),
     };
@@ -5170,7 +5283,7 @@ fn open_outside_terminal_with(app: &mut App, ghostty: Option<std::path::PathBuf>
     };
     match context_dir(app) {
         Some(Ok(dir)) => {
-            if !open_in_app(&ghostty, &dir) {
+            if !crate::open_url::open_in_app(&ghostty, &dir) {
                 app.flash = Some(crate::flash::Flash::failed(format!(
                     "couldn't open a Ghostty tab in {}",
                     dir.display()
@@ -5320,16 +5433,6 @@ pub(crate) fn open_file_outside(app: &mut App, root: &std::path::Path, file: &st
     } else {
         open_file(app, &editor, root, file, line, size);
     }
-}
-
-/// `open -a <bundle> <path>`: whether LaunchServices took the hand-off.
-fn open_in_app(bundle: &std::path::Path, path: &std::path::Path) -> bool {
-    if cfg!(test) {
-        return true;
-    }
-    let mut open = std::process::Command::new("open");
-    open.arg("-a").arg(bundle).arg(path);
-    spawn_and_reap(open, "open in app")
 }
 
 /// `r` on the Worktrees panel: start the selected checkout's RUN COMMAND,
@@ -6620,7 +6723,7 @@ fn act_on_page(app: &mut App, asked: crate::markdown_view::PageKey) {
             open_file_outside(app, &root, &file, line);
         }
         PageKey::Follow(Away::Web(url)) => {
-            if !open_url(&url) {
+            if !crate::open_url::open_url(&url, None) {
                 app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
             }
         }
@@ -7191,7 +7294,10 @@ fn open_delete_marked_confirm(app: &mut App) -> bool {
 fn menu_items_for_link(row: &LinkRow) -> Vec<MenuItem> {
     let mut items = vec![MenuItem::new(
         "Open in browser",
-        MenuAction::OpenLink(row.url().to_string()),
+        MenuAction::OpenLink {
+            url: row.url().to_string(),
+            account: None,
+        },
     )];
     if row.pull_request().is_some() {
         items.push(MenuItem::new("View diff", MenuAction::ViewPrDiff));
@@ -7252,7 +7358,16 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
     // checkout's Open on a live one.
     let mut links: Vec<MenuItem> = crate::launcher::row(app, &a.id)
         .and_then(|row| row.pr)
-        .map(|pr| MenuItem::new("Open pull request", MenuAction::OpenLink(pr.url)))
+        .map(|pr| {
+            let account = Some(crate::open_url::account_of(a));
+            MenuItem::new(
+                "Open pull request",
+                MenuAction::OpenLink {
+                    url: pr.url,
+                    account,
+                },
+            )
+        })
         .into_iter()
         .collect();
     // And the Linear issue it works on, in the LINEAR VIEW.
@@ -7377,7 +7492,13 @@ fn pr_row_menu_items(app: &App, pr: &crate::pull_request::OpenPr) -> Vec<MenuIte
         ));
     }
     items.extend([
-        MenuItem::new("Open in browser", MenuAction::OpenLink(pr.url.clone())),
+        MenuItem::new(
+            "Open in browser",
+            MenuAction::OpenLink {
+                url: pr.url.clone(),
+                account: None,
+            },
+        ),
         MenuItem::new("View diff", MenuAction::ViewPrDiff),
         MenuItem::new("Comment…", MenuAction::CommentPullRequest),
     ]);
@@ -7763,9 +7884,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::Todos(_) => crate::todos::handle_key(app, key, out),
         Overlay::Onboard(_) => crate::onboard::handle_key(app, key, out),
         Overlay::WhatsNew(_) => crate::whats_new::handle_key(app, key),
-        Overlay::Autofix(_) => crate::autofix::handle_key(app, key, out),
+        Overlay::Autofix(_) => crate::automations::pr_fixer::handle_key(app, key, out),
+        Overlay::Automations(_) => crate::automations::view::handle_key(app, key, out),
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
+        Overlay::Takeaways(_) => crate::takeaways_view::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
         Overlay::OpenRepo(_) => crate::open_repo::handle_key(app, key, out),
@@ -7837,6 +7960,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::AddClaudeAccount
                         | PromptKind::RenameClaudeAccount { .. }
                         | PromptKind::AccountChipMark { .. }
+                        | PromptKind::LinkBrowser { .. }
+                        | PromptKind::SlackToken { .. }
+                        | PromptKind::MicrosoftAppId { .. }
                 );
                 // The comment box stood in for the PULL REQUESTS MODAL: Esc
                 // puts the modal back on its row, the comment unposted.
@@ -8133,6 +8259,25 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
             }
         }
+        // Nothing typed: the NEEDS YOU BOARD's own keys. Anything else
+        // types, which turns it into the jump list.
+        Overlay::Palette(palette) if palette.on_board() => {
+            use crate::needs_you::board::keys;
+            match key.code {
+                KeyCode::Down => palette.board.step(1),
+                KeyCode::Up => palette.board.step(-1),
+                KeyCode::Left => palette.board.sideways(false),
+                KeyCode::Right => palette.board.sideways(true),
+                _ if keys::JUMP.matches(&key) => activate::needs_you_card(app, out),
+                _ if keys::DONE.matches(&key) => crate::needs_you::done(app),
+                _ if keys::SNOOZE.matches(&key) => crate::needs_you::snooze(app),
+                _ => {
+                    if palette.query.handle_key(&key).changed() {
+                        palette.apply_filter();
+                    }
+                }
+            }
+        }
         Overlay::Palette(palette) => {
             match key.code {
                 // Esc closes the palette, query and all (`closes_on_esc`).
@@ -8150,10 +8295,13 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                     activate::palette_row(app, Some(Landing::FocusOnly), out)
                 }
                 // Everything else edits the query like a terminal line
-                // (see text_input).
+                // (see text_input); emptied, it is the board again.
                 _ => {
                     if palette.query.handle_key(&key).changed() {
                         palette.apply_filter();
+                        if palette.on_board() {
+                            crate::needs_you::refresh(app);
+                        }
                     }
                 }
             }
@@ -8325,6 +8473,20 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
             .flatten()
     };
     let account = || matches!(account_row(), Some(crate::config::AccountRow::Account(_)));
+    // The list row's kind, for the verbs only some rows have.
+    let row_kind = (!on_tabs)
+        .then(|| crate::config::setting_at(tab, selected).map(|spec| spec.kind))
+        .flatten();
+    // A CONNECTIONS TAB status row's own verbs: `c` connects, `o`
+    // disconnects.
+    if let Some(crate::config::SettingKind::Connection(c)) = row_kind {
+        use crate::ui::settings_keys as keys;
+        for (key_of, connect) in [(keys::CONNECT, true), (keys::DISCONNECT, false)] {
+            if key_of.matches(&key) {
+                return run_settings_cmd(app, SettingsCmd::Connection(c, connect));
+            }
+        }
+    }
 
     use crate::ui::settings_keys as keys;
     let cmd = match key.code {
@@ -8363,6 +8525,10 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
                 Some(cmd) => SettingsCmd::Preset(cmd),
                 None => return,
             }
+        }
+        // A project's **What it is**: written again.
+        _ if keys::REWRITE.matches(&key) && row_kind == Some(crate::config::SettingKind::About) => {
+            SettingsCmd::RewriteAbout(selected)
         }
         _ if keys::INSTALL.matches(&key) && !hotkeys => SettingsCmd::Install(selected),
         _ if keys::RENAME.matches(&key) && account() => SettingsCmd::RenameAccount(selected),
@@ -8446,6 +8612,15 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
             }
         }
         SettingsCmd::Preset(cmd) => crate::presets_tab::run(app, cmd),
+        SettingsCmd::Connection(connection, connect) => connection_cmd(app, connection, connect),
+        SettingsCmd::RewriteAbout(i) => {
+            if let Some(repo) = app.settings_project(tab, i).map(|p| p.repo_path.clone()) {
+                let note = crate::projects::rewrite(app, &repo);
+                if let Some(view) = settings_mut(app) {
+                    view.info(note);
+                }
+            }
+        }
         SettingsCmd::Nudge => {
             if let Some(view) = settings_mut(app) {
                 view.info(HOTKEYS_ARE_HAND_EDITED);
@@ -8466,6 +8641,31 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
                 area: ratatui::layout::Rect::default(),
             }));
         }
+    }
+}
+
+/// `c` (or Enter) on a CONNECTIONS TAB status row connects it, `o`
+/// disconnects it; the overlay says how that went.
+fn connection_cmd(app: &mut App, connection: crate::config::Connection, connect: bool) {
+    use crate::config::Connection;
+    let note = match (connection, connect) {
+        // No app to sign in through yet: its two IDs' prompts first.
+        (Connection::Microsoft, true) => {
+            let ms = crate::config::Config::load().microsoft;
+            if !crate::microsoft::has_app(&ms) {
+                return crate::microsoft::ask_app_id(app);
+            }
+            crate::microsoft::connect(app, &ms)
+        }
+        (Connection::Microsoft, false) => {
+            crate::microsoft::disconnect(app, &crate::config::Config::load().microsoft)
+        }
+        // The Slack tokens' prompts, or forgetting them: each says its own.
+        (Connection::Slack, true) => return crate::phone::connect(app),
+        (Connection::Slack, false) => return crate::phone::disconnect(app),
+    };
+    if let Some(view) = settings_mut(app) {
+        view.info(note);
     }
 }
 
@@ -8531,6 +8731,10 @@ enum SettingsCmd {
     ChipMark(usize),
     /// A key on a Settings → Presets row.
     Preset(crate::presets_tab::Cmd),
+    /// `c` (true) or `o` (false) on a CONNECTIONS TAB status row.
+    Connection(crate::config::Connection, bool),
+    /// `^R` on a project's **What it is**.
+    RewriteAbout(usize),
     /// A HOTKEYS row: nothing to change here, so say where it changes.
     Nudge,
     ResetAll,
@@ -8558,10 +8762,16 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
     // A CLAUDE ACCOUNTS row: Enter signs the account in, asking first for
     // the email that fills Claude's login page; ←/→ are its switch, which
     // the cycle below flips like any harness's. **Add account** asks for
-    // the new one's name.
+    // the new one's name. Enter on **Open links in** types the browser and
+    // its profile; ←/→ step the browser in the cycle below.
     if tab == crate::config::accounts_tab() {
         use crate::config::AccountRow;
-        match (crate::config::Config::load().account_row(index), delta) {
+        let cfg = crate::config::Config::load();
+        if let (Some((id, crate::config::HarnessField::Browser)), 0) = (cfg.agent_row(index), delta)
+        {
+            return open_prompt(app, PromptKind::LinkBrowser { id });
+        }
+        match (cfg.account_row(index), delta) {
             (Some(AccountRow::Account(id)), 0) => {
                 return open_prompt(app, PromptKind::ClaudeSignIn { id });
             }
@@ -8605,10 +8815,28 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
         // nothing to cycle.
         if spec.kind.is_status() {
             match (delta, project) {
+                // A CONNECTIONS TAB status row: Enter connects, as `c` does.
+                _ if matches!(spec.kind, crate::config::SettingKind::Connection(_)) => {
+                    if let crate::config::SettingKind::Connection(c) = spec.kind {
+                        connection_cmd(app, c, true);
+                    }
+                }
                 (0, Some(dir)) => crate::linear::test_connection(app, dir),
                 _ => {
                     if let Some(view) = settings_mut(app) {
                         view.info("Enter: test the connection");
+                    }
+                }
+            }
+            return;
+        }
+        // **Away by hand**: Enter is ⌘⇧A; there is nothing to cycle.
+        if spec.kind == crate::config::SettingKind::Away(crate::config::AwayField::ByHand) {
+            match delta {
+                0 => crate::phone::toggle_away(app),
+                _ => {
+                    if let Some(view) = settings_mut(app) {
+                        view.info("Enter: away until your next key");
                     }
                 }
             }
@@ -8672,13 +8900,16 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.theme = cfg.theme();
     app.animations = cfg.animations;
     app.diff_tree = cfg.diff_tree_view;
-    app.autofix_mode = cfg.autofix_mode();
+    app.automations.settings = cfg.automations.clone();
     // Turned off, the readout goes at once; the poll stops with it.
     app.spotify_enabled = cfg.spotify;
     if !cfg.spotify && app.spotify.take().is_some() {
         app.dirty = true;
     }
+    app.microsoft.footer = cfg.microsoft.footer_meeting;
     set_hide_draft_prs(app, cfg.hide_draft_prs);
+    app.needs_you.inbox = cfg.inbox.clone();
+    app.needs_you.slack.settings = cfg.slack.clone();
 }
 
 /// A Spotify poll's answer: the footer's readout follows it, repainting
@@ -8758,6 +8989,16 @@ fn open_settings(app: &mut App) {
     if app.settings_memory_expired() {
         app.forget_settings_focus();
     }
+    reopen_settings(app);
+}
+
+/// The settings overlay on the Connections tab, its first row under the
+/// cursor. **Connections** in the COMMAND PALETTE.
+pub(crate) fn open_connections(app: &mut App) {
+    let tab = crate::config::connections_tab();
+    app.settings_tab = tab;
+    app.remember_settings_row(tab, 0);
+    app.settings_on_tabs = false;
     reopen_settings(app);
 }
 
@@ -9112,6 +9353,9 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             | PromptKind::AddClaudeAccount
             | PromptKind::RenameClaudeAccount { .. }
             | PromptKind::AccountChipMark { .. }
+            | PromptKind::LinkBrowser { .. }
+            | PromptKind::SlackToken { .. }
+            | PromptKind::MicrosoftAppId { .. }
             | PromptKind::QuickPrompt(_)
     );
     if value.is_empty() && !empty_is_a_default {
@@ -9209,8 +9453,19 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             // row's value goes into the entry of the project the prompt
             // was opened on, and the notice reads that entry back.
             let mut cfg = crate::config::Config::load();
-            if let Some(path) = &project {
-                cfg.set_project_text(path, kind, &value);
+            let typed = match &project {
+                Some(path) => {
+                    cfg.set_project_text(path, kind, &value);
+                    Ok(())
+                }
+                None => cfg.set_text(kind, &value),
+            };
+            if let Err(why) = typed {
+                reopen_settings(app);
+                if let Some(view) = settings_mut(app) {
+                    view.warn(why);
+                }
+                return;
             }
             let saved = save_config(app, &cfg);
             if saved {
@@ -9230,6 +9485,12 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
                 }
             }
         }
+        PromptKind::SlackToken { step, tokens } => {
+            crate::phone::submit_token(app, step, tokens, &value);
+        }
+        PromptKind::MicrosoftAppId { client_id } => {
+            crate::microsoft::submit_app_id(app, client_id, &value);
+        }
         PromptKind::EditLink { id } => {
             send(app, out, |req_id| ClientRequest::UpdateLink {
                 req_id,
@@ -9248,6 +9509,18 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         PromptKind::AccountChipMark { id } => {
             let result = crate::claude_accounts::set_chip_mark(&id, &value);
             back_on_the_account(app, &id, result);
+        }
+        PromptKind::LinkBrowser { id } => {
+            let mut cfg = crate::config::Config::load();
+            cfg.set_link_browser(&id, crate::open_url::parse(&value));
+            let saved = save_config(app, &cfg);
+            reopen_settings(app);
+            if saved {
+                let shown = cfg.agent_value(&id, crate::config::HarnessField::Browser);
+                if let Some(view) = settings_mut(app) {
+                    view.info(format!("Open links in: {shown}"));
+                }
+            }
         }
     }
 }
@@ -9554,7 +9827,7 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             );
         }
         MenuAction::NewWorktree(project) => open_new_worktree_prompt(app, project),
-        MenuAction::OpenLink(url) => open_link(app, &url, out),
+        MenuAction::OpenLink { url, account } => open_link(app, &url, account.as_deref(), out),
         MenuAction::ViewPrDiff => request_pr_diff(app),
         MenuAction::CommentPullRequest => open_pr_comment(app),
         MenuAction::CheckOutPr { project, pr } => {
@@ -9912,7 +10185,7 @@ fn jump_to_target_inner(
         PaletteTarget::Project(id) => launcher::open_tab(app, &id, out),
         PaletteTarget::AddProject => crate::open_repo::start(app),
         PaletteTarget::LinearIssue { project, id } => crate::linear::open_at(app, &project, &id),
-        PaletteTarget::Todo { project, item } => crate::todos::view::open_at(app, &project, item),
+        PaletteTarget::Todo { tab, item } => crate::todos::view::open_at(app, &tab, item),
         PaletteTarget::Worktree(id) => {
             if app.selected_worktree().is_some_and(|w| w.id == id) {
                 app.focus = Focus::Sessions;
@@ -10015,7 +10288,7 @@ fn jump_to_target_inner(
             }
             app.focus = Focus::Worktrees;
             if landing == Landing::Attach {
-                open_link(app, &url, out);
+                open_link(app, &url, None, out);
             }
         }
     }
@@ -10221,7 +10494,7 @@ fn attach_selected(app: &mut App, out: &mut Vec<ClientRequest>) {
     };
     let Some(sref) = row.sref() else {
         if let Some(link) = row.as_link() {
-            open_link(app, link.url(), out);
+            open_link(app, link.url(), None, out);
         }
         return;
     };
@@ -10254,9 +10527,16 @@ fn leave_terminal_lock(app: &mut App) {
 /// browser comes up in front of the terminal on success, so a silent
 /// failure would read as "orion did nothing". A pull request is marked
 /// read on the way out: the conversation is about to be on screen, so the
-/// row's unread count starts again from here.
-pub(crate) fn open_link(app: &mut App, url: &str, out: &mut Vec<ClientRequest>) {
-    if open_url(url) {
+/// row's unread count starts again from here. `account` is the session's
+/// the link belongs to, whose **Open links in** picks the browser
+/// ([`crate::open_url`]); None for the default browser.
+pub(crate) fn open_link(
+    app: &mut App,
+    url: &str,
+    account: Option<&str>,
+    out: &mut Vec<ClientRequest>,
+) {
+    if crate::open_url::open_url(url, account) {
         mark_pr_seen(app, url, out);
     } else {
         app.flash = Some(crate::flash::Flash::failed(format!("couldn't open {url}")));
@@ -10568,7 +10848,9 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         follow,
         mode,
         todo,
+        automation,
     } = draft;
+    let automation = automation.map(|a| a.id().to_string());
     // A PR SESSION is addressed to the PROJECT, not to a checkout: the
     // DAEMON runs it in the PR head branch's own worktree, creating that
     // checkout the first time. `worktree` here only names which project.
@@ -10657,6 +10939,9 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
     if let Some(todo) = todo {
         app.todo_pending.insert(req_id, todo);
     }
+    if automation.is_some() {
+        app.automations.launching.insert(req_id);
+    }
     // The second half of a launch the user already navigated away from:
     // its Ack leaves the cursors where they are, as the first half's did.
     if !follow {
@@ -10676,6 +10961,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             head: pr.head,
             starting_prompt,
             mode,
+            automation,
         },
         None => ClientRequest::CreateAgent {
             req_id,
@@ -10688,6 +10974,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
             auto_title,
             starting_prompt,
             mode,
+            automation,
         },
     });
 }
@@ -11125,59 +11412,6 @@ fn copy_to_clipboard(text: &str) -> bool {
     wrote && child.wait().is_ok_and(|status| status.success())
 }
 
-/// Open a URL in the default browser via open(1) (this tool targets macOS).
-/// The scheme allowlist is defense in depth — the link scanner only ever
-/// produces http(s) URLs, but the text originates from untrusted PTY output.
-pub(crate) fn open_url(url: &str) -> bool {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return false;
-    }
-    if cfg!(test) {
-        #[cfg(test)]
-        OPENED.with(|opened| opened.borrow_mut().push(url.to_string()));
-        return true;
-    }
-    let mut open = std::process::Command::new("open");
-    open.arg(url);
-    spawn_and_reap(open, "open url")
-}
-
-#[cfg(test)]
-thread_local! {
-    static OPENED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// The URLs [`open_url`] handed the browser on this test's thread, taken.
-#[cfg(test)]
-pub(crate) fn take_opened() -> Vec<String> {
-    OPENED.with(|opened| std::mem::take(&mut *opened.borrow_mut()))
-}
-
-/// Start `command` and let it finish on its own: true once it is running.
-/// `open` spends 50 to 150 ms talking to LaunchServices before it exits,
-/// and the key that asked for a browser tab used to spend them with it —
-/// the loop frozen, the flash unpainted. Whether it then succeeds is not
-/// something the keypress can wait to learn; a failure is logged (the
-/// `spawn_open_command` rule), and the reaper thread is what keeps the
-/// child from lingering as a zombie.
-fn spawn_and_reap(mut command: std::process::Command, what: &'static str) -> bool {
-    use std::process::Stdio;
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    let Ok(mut child) = child else {
-        return false;
-    };
-    std::thread::spawn(move || match child.wait() {
-        Ok(status) if !status.success() => tracing::warn!(what, %status, "open failed"),
-        Err(err) => tracing::warn!(what, %err, "open not reaped"),
-        Ok(_) => {}
-    });
-    true
-}
-
 /// Two clicks on the same cell within this window make a double-click.
 pub(crate) const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -11293,6 +11527,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::HomeBack
                 | HitTarget::Upgrade
                 | HitTarget::FooterSpotify(_)
+                | HitTarget::FooterNeedsYou
         )
     });
     // The PULL REQUESTS MODAL's and the LINEAR VIEW's `↗ open in browser`
@@ -11353,7 +11588,7 @@ fn open_link_under(app: &mut App, mouse: &MouseEvent) -> bool {
         .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL);
     match link {
         PaneLink::Url(url) if held => {
-            if !open_url(&url) {
+            if !crate::open_url::open_url(&url, pane_account(app).as_deref()) {
                 app.flash = Some(crate::flash::Flash::failed(format!("open failed: {url}")));
             }
         }
@@ -11364,6 +11599,19 @@ fn open_link_under(app: &mut App, mouse: &MouseEvent) -> bool {
     }
     app.dirty = true;
     true
+}
+
+/// The account of the agent the TERMINAL PANE shows, whose browser its
+/// links open in; None for a shell.
+fn pane_account(app: &App) -> Option<String> {
+    let SessionRef::Agent(id) = &app.term.as_ref()?.sref else {
+        return None;
+    };
+    app.tree
+        .agents
+        .iter()
+        .find(|agent| &agent.id == id)
+        .map(crate::open_url::account_of)
 }
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) {
@@ -11654,6 +11902,31 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         }
         return;
     }
+    // The NEEDS YOU BOARD: the wheel walks the column, a click on a card
+    // is Enter on it, and on `+N more` unfolds it, as → does.
+    if let Some(Overlay::Palette(palette)) = &mut app.overlay {
+        if palette.on_board() {
+            let board = &mut palette.board;
+            match mouse.kind {
+                MouseEventKind::ScrollUp => board.step(-1),
+                MouseEventKind::ScrollDown => board.step(1),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let hit = board
+                        .hits
+                        .iter()
+                        .find(|(rect, _, _)| rect.contains(mouse_pos))
+                        .map(|&(_, column, row)| (column, row));
+                    if let Some((column, row)) = hit {
+                        board.select(column, row);
+                        activate::needs_you_card(app, out);
+                    }
+                }
+                _ => {}
+            }
+            app.dirty = true;
+            return;
+        }
+    }
     // Palette: the wheel moves the selection, a click on a result row jumps
     // there; everything else inside the box is swallowed.
     if let Some(Overlay::Palette(palette)) = &mut app.overlay {
@@ -11847,7 +12120,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         return;
     }
     if matches!(&app.overlay, Some(Overlay::Autofix(_))) {
-        crate::autofix::handle_mouse(app, mouse);
+        crate::automations::pr_fixer::handle_mouse(app, mouse);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Automations(_))) {
+        crate::automations::view::handle_mouse(app, mouse, mouse_pos, out);
         return;
     }
     if matches!(&app.overlay, Some(Overlay::WeekReview(_))) {
@@ -11856,6 +12133,10 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
     }
     if matches!(&app.overlay, Some(Overlay::Conflicts(_))) {
         crate::conflicts::handle_mouse(app, mouse);
+        return;
+    }
+    if matches!(&app.overlay, Some(Overlay::Takeaways(_))) {
+        crate::takeaways_view::handle_mouse(app, mouse, mouse_pos);
         return;
     }
     // Hosts picker: the wheel moves the selection, a click on a row connects
@@ -12067,6 +12348,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // A SPOTIFY READOUT button: its command, straight to the
                 // app, with a poll behind it.
                 Some(HitTarget::FooterSpotify(button)) => press_spotify(app, button),
+                // The footer's `needs you`: the board, as `⌘K` opens it.
+                Some(HitTarget::FooterNeedsYou) => open_palette(app),
                 // The CLOSE BUTTON at the strip's right end: the pane
                 // folds away through the one `toggle_pane` `^~` runs. It
                 // is only drawn on a pane that is showing, so the toggle
@@ -12533,7 +12816,11 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                 }
             }
         }
-        ServerEvent::SessionExited { session, .. } => {
+        ServerEvent::SessionExited { session, exit_code } => {
+            // A crash's code, for its NEEDS YOU card: `crashed, exit 1`.
+            if let (SessionRef::Agent(id), Some(code)) = (&session, exit_code) {
+                crate::needs_you::exited(app, id, code);
+            }
             if let Some(term) = &mut app.term {
                 if term.sref == session {
                     term.exited = true;
@@ -12553,7 +12840,10 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             status,
             changed_at,
             unseen,
+            reason,
         } => {
+            // Why it waits, for its NEEDS YOU card.
+            crate::needs_you::status_changed(app, &agent, status, reason);
             // A status flip reorders the sessions list — and, since
             // worktrees and projects sort on their sessions' stamps,
             // re-sorts those columns too.
@@ -12616,6 +12906,9 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             }
             // Nothing left any list, so this only re-seats the cursors.
             reconcile_selection_inner(app, before, out);
+            // A session that starts or stops wanting you comes or goes on
+            // an open NEEDS YOU board.
+            crate::needs_you::refresh(app);
         }
         ServerEvent::Ack { req_id, created } => {
             // False for a create the user has navigated away from since
@@ -12623,6 +12916,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             // real ones, and nothing below moves a cursor, the pane or
             // FOCUS back to them.
             let follow = !app.left_behind.remove(&req_id);
+            app.automations.launching.remove(&req_id);
             // A session sent at a TODO is written onto the item.
             if let Some(todo) = app.todo_pending.remove(&req_id) {
                 if let Some(EntityId::Agent(id)) = &created {
@@ -12750,8 +13044,21 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             if let orion_core::Entity::Worktree(w) = &entity {
                 placeholder::adopt_worktree(app, w);
             }
+            // A project the tree didn't have is one just added: its
+            // **What it is** gets written.
+            let added = match &entity {
+                orion_core::Entity::Project(p)
+                    if !app.tree.projects.iter().any(|known| known.id == p.id) =>
+                {
+                    Some(p.repo_path.clone())
+                }
+                _ => None,
+            };
             let before = selection_snapshot(app);
             apply_upsert(app, entity);
+            if let Some(repo) = added {
+                crate::projects::added(app, &repo);
+            }
             // Cursors follow the row they were on across re-sorts and
             // re-homes; a row that left its list (archived away,
             // moved elsewhere) hands the cursor — and the terminal pane —
@@ -12793,6 +13100,15 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
         ServerEvent::StacksChanged { stacks, .. } => {
             crate::stacks::listed(app, stacks);
         }
+        ServerEvent::AwayChanged { away, by_hand } => {
+            crate::phone::away_changed(app, away, by_hand);
+        }
+        ServerEvent::SlackStatus { status } => crate::phone::slack_changed(app, status),
+        event @ ServerEvent::SlackMessage { .. } => {
+            if let Some((message, json)) = crate::needs_you::slack::Message::of(event) {
+                crate::needs_you::slack::heard(app, message, &json);
+            }
+        }
         // `orion open` in a session: the user asked to see these files.
         ServerEvent::FilesOpened {
             root, paths, lines, ..
@@ -12822,6 +13138,7 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             if let Some(id) = &req_id {
                 app.left_behind.remove(id);
                 app.todo_pending.remove(id);
+                app.automations.launching.remove(id);
             }
             match req_id.and_then(|id| app.pending.remove(&id)) {
                 Some(PendingIntent::DeleteWorktree(rollback)) => {
@@ -12860,7 +13177,8 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                 // The worktree the QUICK PROMPT wanted to cut first was
                 // refused (a fetch that failed, a branch that exists):
                 // both stand-in rows go, and the box comes back, its
-                // target untouched, for a retry.
+                // target untouched, for a retry. An automation's had no box:
+                // it tries again on its own.
                 Some(PendingIntent::LaunchInCreatedWorktree {
                     launch,
                     text,
@@ -12868,7 +13186,9 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
                     ..
                 }) => {
                     placeholder::discard(app, &placeholder, out);
-                    reopen_prompt_with(app, PromptKind::QuickPrompt(launch), text);
+                    if launch.automation.is_none() {
+                        reopen_prompt_with(app, PromptKind::QuickPrompt(launch), text);
+                    }
                 }
                 // The NEW WORKTREE modal's checkout was refused: its
                 // stand-in row goes, and with it the FOCUS it took — the
@@ -13191,6 +13511,20 @@ fn refresh_palette(app: &mut App) {
     if let Some(Overlay::Palette(palette)) = &mut app.overlay {
         palette.rebuild(&app.tree, &app.open_prs, &app.prs, app.hide_draft_prs);
     }
+    crate::needs_you::refresh(app);
+}
+
+/// `⌘K`, and a click on the footer's `needs you`: the NEEDS YOU BOARD,
+/// over the palette whose rows typing reaches.
+pub(crate) fn open_palette(app: &mut App) {
+    // Every project's todos, for their rows.
+    crate::todos::view::load_every_list(app);
+    let mut extra = crate::palette::linear_rows(&app.tree, &app.linear);
+    extra.extend(crate::palette::todo_rows(&app.tree, &app.todos));
+    let palette = Palette::new(&app.tree, &app.open_prs, &app.prs, app.hide_draft_prs);
+    app.overlay = Some(Overlay::Palette(palette.with_extra(extra)));
+    crate::needs_you::refresh(app);
+    crate::needs_you::opened(app);
 }
 
 /// What each panel cursor pointed at, captured with `selection_snapshot`
@@ -13385,6 +13719,7 @@ fn reconcile_selection_inner(
 mod tests {
     use super::*;
     use crate::app::FeedbackAlert;
+    use crate::open_url::{take_opened, take_opened_as};
     use orion_core::{AgentId, LinkId, ServerEvent, SessionRef};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -13414,6 +13749,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -13442,6 +13778,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -13484,6 +13821,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: true,
+                reason: None,
             },
         );
         assert_eq!(app.worktree_unseen(&w1), 1, "one terminal to go read");
@@ -13525,6 +13863,7 @@ mod tests {
             status,
             changed_at: crate::app::now_ms(),
             unseen: status == orion_core::AgentStatus::Finished,
+            reason: None,
         }
     }
 
@@ -13842,6 +14181,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: true,
+                reason: None,
             },
             &mut out,
         );
@@ -13871,6 +14211,7 @@ mod tests {
             status,
             changed_at: crate::app::now_ms(),
             unseen: status == AgentStatus::Finished,
+            reason: None,
         };
 
         hse(&mut app, flip("a2", AgentStatus::NeedsFeedback));
@@ -14040,6 +14381,7 @@ mod tests {
             status,
             changed_at: crate::app::now_ms(),
             unseen: false,
+            reason: None,
         };
         app.term = Some(AttachedTerm::new(SessionRef::Agent(a2.clone()), 40, 10));
         app.focus = Focus::Terminal;
@@ -14144,6 +14486,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: true,
+                reason: None,
             },
         );
         let (fg, row) = dot(&mut app);
@@ -14335,6 +14678,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -18760,7 +19104,7 @@ mod tests {
         let row = footer_row(&terminal);
         assert!(
             row.trim_end()
-                .ends_with("♪ Midnight City · M83  ⏮  ⏸ ⏭  1 agent · 1.0 GB"),
+                .ends_with("♪ Midnight City · M83  ⏮  ⏸ ⏭  ⌘K needs you 0  1 agent · 1.0 GB"),
             "left of the usage readout:\n{row}"
         );
 
@@ -18898,7 +19242,7 @@ mod tests {
         // title keeps what is left.
         assert!(
             row.trim_end()
-                .ends_with("♪ Midnight …  ⏮  ⏸ ⏭  1 agent · 1.0 GB"),
+                .ends_with("♪ Midnight …  ⏮  ⏸ ⏭  ⌘K needs you 0  1 agent · 1.0 GB"),
             "{row}"
         );
     }
@@ -18933,6 +19277,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             }
         };
@@ -18987,6 +19332,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             }),
         };
         // A long-running turn outranks a more recent finish, because a
@@ -19024,6 +19370,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: now,
                 unseen: false,
+                reason: None,
             },
         );
         let rows = app.visible_sessions();
@@ -19068,6 +19415,7 @@ mod tests {
                 alive: true,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             }),
         };
         hse(
@@ -19127,6 +19475,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -19140,6 +19489,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: false,
+                reason: None,
             },
         );
         let rows = app.visible_sessions();
@@ -19194,6 +19544,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -21010,6 +21361,7 @@ mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -21534,6 +21886,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         })
     }
 
@@ -22297,7 +22650,11 @@ mod tests {
             modifiers: KeyModifiers::ALT,
         };
 
-        // ⌥click on the link opens it and swallows the click entirely.
+        // ⌥click on the link opens it and swallows the click entirely, in
+        // the browser of the account the pane's session runs on.
+        let a1 = app.tree.agents.iter_mut().find(|a| a.id.0 == "a1").unwrap();
+        a1.kind = AgentKind::Claude;
+        a1.custom_harness = Some("claude-work".into());
         app.focus = Focus::Projects;
         handle_mouse(
             &mut app,
@@ -22305,9 +22662,12 @@ mod tests {
             &mut out,
         );
         assert_eq!(
-            take_opened(),
-            ["https://example.com"],
-            "the URL under the cursor is opened"
+            take_opened_as(),
+            [(
+                "https://example.com".to_string(),
+                Some("claude-work".to_string())
+            )],
+            "the URL under the cursor is opened, for its session's account"
         );
         assert!(app.flash.is_none());
         assert_eq!(app.focus, Focus::Projects, "focus is untouched");
@@ -23116,6 +23476,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
 
         // a1 is the selected session; its upsert lands under w2.
@@ -23306,6 +23667,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         })
     }
 
@@ -23362,6 +23724,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: now - 60_000,
                 unseen: false,
+                reason: None,
             },
         );
         assert_eq!(names(&app), ["two", "demo"]);
@@ -23381,6 +23744,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: now,
                 unseen: false,
+                reason: None,
             },
         );
         assert_eq!(names(&app), ["demo", "two"]);
@@ -23425,6 +23789,7 @@ mod tests {
             status,
             changed_at,
             unseen: false,
+            reason: None,
         };
         // Both mid-turn; the user is in "demo".
         hse(&mut app, flip("a1", AgentStatus::Running, now - 60_000));
@@ -23517,6 +23882,7 @@ mod tests {
                     status,
                     changed_at: crate::app::now_ms(),
                     unseen: false,
+                    reason: None,
                 },
             );
             assert_eq!(branches(&app), ["main", "feat", "older"]);
@@ -24849,7 +25215,11 @@ mod tests {
         assert_eq!(state(&app).2, 21, "Space pages it");
         for arrow in [KeyCode::Left, KeyCode::Right] {
             press(&mut app, arrow, KeyModifiers::NONE, &mut out);
-            assert_eq!(state(&app).0, DiffFocus::Diff, "{arrow:?} stays in the diff");
+            assert_eq!(
+                state(&app).0,
+                DiffFocus::Diff,
+                "{arrow:?} stays in the diff"
+            );
         }
         press(&mut app, KeyCode::BackTab, KeyModifiers::NONE, &mut out);
         assert_eq!(state(&app).0, DiffFocus::Files, "⇧Tab back to the files");
@@ -25790,6 +26160,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -25814,6 +26185,7 @@ mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -25969,6 +26341,7 @@ mod tests {
                 status: orion_core::AgentStatus::NeedsFeedback,
                 changed_at: crate::app::now_ms(),
                 unseen: false,
+                reason: None,
             },
         );
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
@@ -25998,6 +26371,7 @@ mod tests {
                 status: orion_core::AgentStatus::NeedsFeedback,
                 changed_at: crate::app::now_ms(),
                 unseen: false,
+                reason: None,
             },
         );
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
@@ -26091,6 +26465,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         for a in [
             agent("ask", "w2", AgentStatus::NeedsFeedback, false),
@@ -26315,6 +26690,7 @@ mod tests {
                 status: AgentStatus::Finished,
                 changed_at: crate::app::now_ms(),
                 unseen: true,
+                reason: None,
             },
         );
         assert_eq!(app.worktree_unseen(&w1), 1, "one terminal to go read");
@@ -26457,15 +26833,24 @@ mod tests {
         seed_tree(&mut app);
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        // Tall enough that the sidebar's headers show past the modal.
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        // Tall enough that the sidebar's headers show past the modal, and
+        // wide enough for the board's empty states.
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+        let text = buffer_text(&terminal);
+        // Nothing typed: the NEEDS YOU BOARD, every section empty.
+        assert!(text.contains("Needs you"), "the board:\n{text}");
+        assert!(text.contains("type to jump to any"), "its search:\n{text}");
+        for section in crate::needs_you::model::Section::ALL {
+            assert!(text.contains(section.empty()), "{section:?}:\n{text}");
+        }
+        // Typed, the jump list.
+        for c in "agent".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
+        }
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         let text = buffer_text(&terminal);
         assert!(text.contains("Jump to"), "palette title rendered:\n{text}");
-        assert!(
-            text.contains("type to search"),
-            "query placeholder rendered:\n{text}"
-        );
         // Palette rows carry per-kind glyphs, FLAT: the session on a line
         // of its own behind its STATUS MARK (`○`, never run), the project
         // it lives in in front of it — but not the branch, which is
@@ -26479,6 +26864,9 @@ mod tests {
             "the branch is searched, not drawn:\n{text}"
         );
         // A query reaches the worktree, ▸, its project in front of it too.
+        for _ in "agent".chars() {
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+        }
         for c in "main".chars() {
             press(&mut app, KeyCode::Char(c), KeyModifiers::NONE, &mut out);
         }
@@ -26500,6 +26888,9 @@ mod tests {
         seed_tree(&mut app);
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
+        // Typed — a space, which narrows to the sessions — so the jump
+        // list and not the board.
+        press(&mut app, KeyCode::Char(' '), KeyModifiers::NONE, &mut out);
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
@@ -26521,6 +26912,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -26924,6 +27316,145 @@ mod tests {
                 crate::linear::key_status(&app, repo.path()),
                 "found in .env.local · ✓ Ada · ada@x.dev"
             );
+        });
+    }
+
+    /// MICROSOFT 365's status row with no app id in the config: `c` and
+    /// Enter both ask for the two IDs, Esc and an empty box save nothing,
+    /// a value that is not an ID keeps the box up as typed, and the second
+    /// ID saves both into the config — its other keys kept — and starts
+    /// the sign-in. Both pasted on one line skip the second box. `o` with
+    /// nobody signed in clears the IDs again. Off the row, `c` is not a
+    /// connect.
+    #[test]
+    fn the_microsoft_row_asks_for_the_app_ids_and_saves_them() {
+        use crate::config::{Connection, SettingKind};
+        const CLIENT: &str = "3f1c2a7e-9b4d-4e21-8c55-1a2b3c4d5e6f";
+        const TENANT: &str = "72f988bf-86f1-41af-91ab-2d7cd011db47";
+        let config = tempfile::tempdir().unwrap();
+        let path = config.path().join("config.json");
+        std::fs::write(&path, r#"{ "from_a_newer_orion": { "kept": true } }"#).unwrap();
+        crate::config::with_config_path(path.clone(), || {
+            let mut app = App::new();
+            let mut out = Vec::new();
+            let notice = |app: &App| settings_view(app).notice.as_ref().map(|(t, _)| t.clone());
+            let asking = |app: &App| match &app.overlay {
+                Some(Overlay::Prompt(p)) => match &p.kind {
+                    PromptKind::MicrosoftAppId { client_id } => {
+                        Some((client_id.clone(), p.input.as_str().to_string()))
+                    }
+                    other => panic!("another box is up: {other:?}"),
+                },
+                _ => None,
+            };
+            let ms = || crate::config::Config::load().microsoft;
+            let (tab, row) =
+                crate::config::locate(SettingKind::Connection(Connection::Microsoft)).unwrap();
+            assert_eq!(crate::config::SETTINGS_TABS[tab].title, "Connections");
+            open_settings_on(&mut app, tab, &mut out);
+            for _ in 0..row {
+                press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            assert_eq!(notice(&app).as_deref(), Some("not connected"));
+
+            // `c`, then Esc: nothing saved, back on the row.
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            assert_eq!(asking(&app), Some((None, String::new())));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(settings_view(&app).selected, row);
+            // Enter is `c`; an empty box is Esc.
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(asking(&app), Some((None, String::new())));
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(ms(), crate::config::MicrosoftSettings::default());
+
+            // Not an ID: the box stays, as typed, and says why.
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            type_text(&mut app, "nope", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(asking(&app), Some((None, "nope".into())));
+            assert!(app.flash.as_ref().unwrap().text.contains("not an ID"));
+
+            // The client id, in capitals with spaces round it, then Esc on
+            // the second box: still nothing saved.
+            press(
+                &mut app,
+                KeyCode::Char('u'),
+                KeyModifiers::CONTROL,
+                &mut out,
+            );
+            type_text(&mut app, &format!(" {} ", CLIENT.to_uppercase()), &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(asking(&app), Some((Some(CLIENT.into()), String::new())));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(ms(), crate::config::MicrosoftSettings::default());
+
+            // Both, one box after the other: saved, and the sign-in starts
+            // (with no loop to run it on here, it says it can't).
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            type_text(&mut app, CLIENT, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            type_text(&mut app, TENANT, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(
+                (ms().client_id, ms().tenant),
+                (CLIENT.into(), TENANT.into())
+            );
+            assert_eq!(
+                notice(&app).as_deref(),
+                Some("Microsoft 365 can't be reached from here")
+            );
+            let file: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                file["from_a_newer_orion"]["kept"], true,
+                "unknown keys survive"
+            );
+            assert_eq!(file["microsoft"]["client_id"], CLIENT);
+
+            // `o`, nobody signed in: the IDs go.
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                notice(&app).as_deref(),
+                Some("app IDs cleared · c adds them again")
+            );
+            assert_eq!(ms(), crate::config::MicrosoftSettings::default());
+
+            // Both pasted on one line: no second box.
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            assert!(paste_into_overlay(&mut app, &format!("{CLIENT}\n{TENANT}")));
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(asking(&app).is_none());
+            assert_eq!(
+                (ms().client_id, ms().tenant),
+                (CLIENT.into(), TENANT.into())
+            );
+
+            // Signed in, `o` signs out and keeps the IDs; a second clears.
+            app.microsoft.email = Some("ada@riplo.ai".into());
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                notice(&app).as_deref(),
+                Some("signed out ada@riplo.ai · o again clears the app IDs")
+            );
+            assert_eq!(ms().client_id, CLIENT);
+            press(&mut app, KeyCode::Char('o'), KeyModifiers::NONE, &mut out);
+            assert_eq!(ms().client_id, "");
+            assert_eq!(app.microsoft.sign_in, crate::microsoft::SignIn::Idle);
+
+            // **Next meeting in the footer**, a row down: `c` does nothing
+            // there, and Enter switches it off.
+            press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('c'), KeyModifiers::NONE, &mut out);
+            assert!(crate::config::Config::load().microsoft.footer_meeting);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(!crate::config::Config::load().microsoft.footer_meeting);
+            assert!(!app.microsoft.footer, "the app follows the config");
         });
     }
 
@@ -27767,6 +28298,63 @@ mod tests {
         });
     }
 
+    /// Enter on an account's **Open links in** asks for the browser and a
+    /// profile after it, prefilled with the one it has; Enter saves it to
+    /// `harnesses.<id>.browser` and puts the overlay back on the row, and
+    /// an empty answer is the default browser again.
+    #[test]
+    fn enter_on_open_links_in_types_the_browser_and_profile() {
+        with_two_accounts(|_| {
+            use crate::config::{locate_agent, HarnessField};
+            let mut app = App::new();
+            let mut out = Vec::new();
+            let (tab, row) = locate_agent("claude-2", HarnessField::Browser).unwrap();
+            open_settings_on(&mut app, tab, &mut out);
+            while settings_view(&app).selected < row {
+                press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(140, 60)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let text = buffer_text(&terminal);
+            assert!(text.contains("Open links in"), "{text}");
+            assert!(text.contains("Enter type browser and profile"), "{text}");
+
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p))
+                    if p.kind == PromptKind::LinkBrowser { id: "claude-2".into() }
+                        && p.input.as_str().is_empty()),
+                "{:?}",
+                app.overlay
+            );
+            type_text(&mut app, "chrome Profile 1", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let stored = || {
+                crate::config::Config::load()
+                    .link_browser("claude-2")
+                    .cloned()
+            };
+            assert_eq!(
+                stored(),
+                Some(orion_core::harness::LinkBrowser {
+                    app: "Chrome".into(),
+                    profile: Some("Profile 1".into()),
+                })
+            );
+            assert_eq!(settings_view(&app).selected, row, "back on its row");
+
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(
+                matches!(&app.overlay, Some(Overlay::Prompt(p)) if p.input.as_str() == "Chrome Profile 1")
+            );
+            for _ in 0.."Chrome Profile 1".len() {
+                press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(stored(), None, "empty is the default browser");
+        });
+    }
+
     /// `r` asks for a name, prefilled with the one it has; Enter keeps it
     /// — the id and the dir unmoved — and Esc leaves it. The default
     /// account is renamed the same way, and an empty name puts it back on
@@ -27854,6 +28442,25 @@ mod tests {
                     false
                 )
             );
+        });
+    }
+
+    /// **Connections** in the COMMAND PALETTE opens Settings on the
+    /// Connections tab, the cursor on its first row, not the tab strip.
+    #[test]
+    fn the_palette_opens_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::config::with_config_path(dir.path().join("config.json"), || {
+            let mut app = App::new();
+            run_action(&mut app, crate::keymap::Action::Connections);
+            let view = settings_view(&app);
+            assert_eq!(
+                (view.tab, view.selected, view.on_tabs),
+                (crate::config::connections_tab(), 0, false)
+            );
+            assert_eq!(crate::config::SETTINGS_TABS[view.tab].title, "Connections");
+            let spec = crate::keymap::spec_of(crate::keymap::Action::Connections).unwrap();
+            assert!(spec.defaults.is_empty(), "a palette row, no key of its own");
         });
     }
 
@@ -28012,6 +28619,10 @@ mod tests {
                     "PR autofix",
                     "Linear Ticket",
                     "Week review",
+                    "Bug fixer",
+                    "Feature builder",
+                    "Meeting takeaways",
+                    "Blue sky builder",
                     "reviewer",
                     "scratch",
                     "+ New"
@@ -28064,7 +28675,8 @@ mod tests {
             );
 
             // One of the user's: ^N makes a preset, the save lands on it.
-            for _ in 0..2 {
+            let systems = crate::agent_presets::SystemPreset::ALL.len();
+            for _ in 1..systems {
                 press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
             press(
@@ -28095,11 +28707,11 @@ mod tests {
             );
             assert!(matches!(
                 &app.overlay,
-                Some(Overlay::Confirm(c)) if c.action == PendingAction::DeletePreset { index: 5 }
+                Some(Overlay::Confirm(c)) if c.action == PendingAction::DeletePreset { index: systems + 2 }
             ));
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert_eq!(settings_view(&app).selected, at, "back on the row");
-            assert_eq!(crate::agent_presets::load_seeded().len(), 6);
+            assert_eq!(crate::agent_presets::load_seeded().len(), systems + 3);
             press(
                 &mut app,
                 KeyCode::Char('d'),
@@ -31191,6 +31803,7 @@ mod tests {
                         alive: true,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
+                        automation: None,
                     }),
                 },
             );
@@ -31266,6 +31879,7 @@ mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         })
     }
 
@@ -31293,7 +31907,7 @@ mod tests {
         // `^A` asks first; Enter on the confirm is the archive.
         press(
             &mut app,
-            KeyCode::Char('A'),
+            KeyCode::Char('X'),
             KeyModifiers::SUPER | KeyModifiers::SHIFT,
             &mut out,
         );
@@ -31358,7 +31972,7 @@ mod tests {
 
             press(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
                 &mut out,
             );
@@ -31394,7 +32008,7 @@ mod tests {
             // Enter goes through, exactly as the bare key would have.
             press(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
                 &mut out,
             );
@@ -31907,6 +32521,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -31973,6 +32588,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -33593,6 +34209,7 @@ mod tests {
                         alive: true,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
+                        automation: None,
                     }),
                 },
             );
@@ -36043,6 +36660,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -36209,8 +36827,13 @@ mod tests {
     fn a_click_on_a_list_row_is_enter_on_it() {
         with_seeded_presets(|| {
             type Open = fn(&mut App, &mut Vec<ClientRequest>);
+            // Typed, so the jump list and not the NEEDS YOU BOARD (whose
+            // cards have a test of their own, below).
             let palette: Open = |app, out| {
                 press(app, KeyCode::Char('k'), KeyModifiers::SUPER, out);
+                for c in "agent".chars() {
+                    press(app, KeyCode::Char(c), KeyModifiers::NONE, out);
+                }
             };
             let new_session: Open = |app, _out| {
                 app.focus = Focus::Sessions;
@@ -36284,6 +36907,102 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// A click on a NEEDS YOU card is Enter with the cursor on it: a
+    /// session waiting on you attaches, a finished one is landed on — and
+    /// a click on `+N more` is → on it, the section unfolded.
+    #[test]
+    fn a_click_on_a_needs_you_card_is_enter_on_it() {
+        with_seeded_presets(|| {
+            let open = |app: &mut App, out: &mut Vec<ClientRequest>| {
+                for a in app.tree.agents.iter_mut() {
+                    match a.id.0.as_str() {
+                        "a9" => a.unseen = true,
+                        _ => a.status = orion_core::AgentStatus::NeedsFeedback,
+                    }
+                }
+                press(app, KeyCode::Char('k'), KeyModifiers::SUPER, out);
+            };
+            for row in 0..2usize {
+                let mut by_keys = parity_tree();
+                let mut keys_out = Vec::new();
+                open(&mut by_keys, &mut keys_out);
+                drawn_board_hits(&mut by_keys);
+                for _ in 0..row {
+                    press(
+                        &mut by_keys,
+                        KeyCode::Down,
+                        KeyModifiers::NONE,
+                        &mut keys_out,
+                    );
+                }
+                press(
+                    &mut by_keys,
+                    KeyCode::Enter,
+                    KeyModifiers::NONE,
+                    &mut keys_out,
+                );
+
+                let mut by_mouse = parity_tree();
+                let mut mouse_out = Vec::new();
+                open(&mut by_mouse, &mut mouse_out);
+                let hits = drawn_board_hits(&mut by_mouse);
+                let (rect, _, _) = hits
+                    .iter()
+                    .find(|(_, column, slot)| (*column, *slot) == (0, row))
+                    .copied()
+                    .expect("the card is drawn");
+                click(&mut by_mouse, rect.x + 2, rect.y + 1, &mut mouse_out);
+
+                assert_eq!(
+                    ui_digest(&by_mouse, &mouse_out),
+                    ui_digest(&by_keys, &keys_out),
+                    "card {row}"
+                );
+                assert!(by_keys.overlay.is_none(), "the board went: card {row}");
+            }
+
+            // `+N more`: a short screen folds the agents, and a click on
+            // the fold unfolds it as → does.
+            let mut app = parity_tree();
+            let mut out = Vec::new();
+            open(&mut app, &mut out);
+            let mut terminal = Terminal::new(TestBackend::new(160, 12)).unwrap();
+            terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+            let Some(Overlay::Palette(p)) = &app.overlay else {
+                panic!("the board is up");
+            };
+            let more = p.board.slots(0).len() - 1;
+            assert_eq!(
+                p.board.slots(0)[more],
+                crate::needs_you::board::Slot::More(crate::needs_you::model::Section::Agents)
+            );
+            let (rect, _, _) = *p
+                .board
+                .hits
+                .iter()
+                .find(|(_, column, slot)| (*column, *slot) == (0, more))
+                .unwrap();
+            click(&mut app, rect.x + 1, rect.y, &mut out);
+            let Some(Overlay::Palette(p)) = &app.overlay else {
+                panic!("the board stays");
+            };
+            assert_eq!(
+                p.board.expanded,
+                Some(crate::needs_you::model::Section::Agents)
+            );
+        });
+    }
+
+    /// Draw the open board and hand back where its slots were drawn.
+    fn drawn_board_hits(app: &mut App) -> Vec<(ratatui::layout::Rect, usize, usize)> {
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal.draw(|f| ui::draw(f, app)).unwrap();
+        match &app.overlay {
+            Some(Overlay::Palette(p)) => p.board.hits.clone(),
+            other => panic!("no board in {other:?}"),
+        }
     }
 
     /// A click on a file finder row is Enter on it — the MARKDOWN PAGE for
@@ -36703,7 +37422,7 @@ mod tests {
                 "WeekReview",
                 |app| {
                     seed_tree(app);
-                    run_action(app, crate::keymap::Action::WeekReview);
+                    app.overlay = Some(Overlay::WeekReview(Box::default()));
                 },
                 None,
             ),
@@ -36766,7 +37485,9 @@ mod tests {
             (
                 "Autofix",
                 |app| {
-                    app.overlay = Some(Overlay::Autofix(Box::new(crate::autofix::sample_form())));
+                    app.overlay = Some(Overlay::Autofix(Box::new(
+                        crate::automations::pr_fixer::sample_form(),
+                    )));
                 },
                 None,
             ),
@@ -36790,6 +37511,22 @@ mod tests {
                     );
                 },
                 Some("Prompt"),
+            ),
+            (
+                "Automations",
+                |app| {
+                    run_action(app, crate::keymap::Action::Automations);
+                },
+                None,
+            ),
+            (
+                // Its move picker is a mode of it, its Esc the picker's
+                // own (`takeaways_view`'s tests).
+                "Takeaways",
+                |app| {
+                    app.overlay = Some(Overlay::Takeaways(Box::default()));
+                },
+                None,
             ),
         ]
     }
@@ -36992,6 +37729,8 @@ mod tests {
             Overlay::WeekReview(_) => "WeekReview",
             Overlay::Conflicts(_) => "Conflicts",
             Overlay::Todos(_) => "Todos",
+            Overlay::Automations(_) => "Automations",
+            Overlay::Takeaways(_) => "Takeaways",
         }
     }
 
@@ -37020,7 +37759,7 @@ mod tests {
             let mut unique = seen.clone();
             unique.dedup();
             assert_eq!(unique, seen, "two rows for the same variant");
-            assert_eq!(seen.len(), 23, "a variant came or went: {seen:?}");
+            assert_eq!(seen.len(), 25, "a variant came or went: {seen:?}");
         });
     }
 
@@ -37333,14 +38072,14 @@ mod tests {
         // The palette is a modal with a text field: what is typed into it
         // never shows, its navigation keys show bare.
         press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
-        assert_eq!(combo_text(&app).as_deref(), Some("⌘K - Jump to…"));
+        assert_eq!(combo_text(&app).as_deref(), Some("⌘K - Needs you"));
         assert!(matches!(app.overlay, Some(Overlay::Palette(_))));
         press(&mut app, KeyCode::Char('a'), KeyModifiers::NONE, &mut out);
         press(&mut app, KeyCode::Char('B'), KeyModifiers::SHIFT, &mut out);
         press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
         assert_eq!(
             combo_text(&app).as_deref(),
-            Some("⌘K - Jump to…"),
+            Some("⌘K - Needs you"),
             "typed text leaves the last combo standing"
         );
         press(
@@ -37765,6 +38504,14 @@ mod tests {
         }
     }
 
+    /// The tab the todos modal is on: its project's id, or `blue sky`.
+    fn todo_tab(app: &App) -> &str {
+        todo_view(app)
+            .tab
+            .project()
+            .map_or("blue sky", |p| p.0.as_str())
+    }
+
     fn todo_file(app: &App) -> &crate::todos::TodoFile {
         &app.todos[std::path::Path::new("/tmp/demo")]
     }
@@ -37836,7 +38583,7 @@ mod tests {
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('i'), KeyModifiers::SUPER, &mut out);
         let view = todo_view(&app);
-        assert_eq!(view.project.0, "p1");
+        assert_eq!(view.tab.project().unwrap().0, "p1");
         assert_eq!(view.dir, std::path::PathBuf::from("/tmp/demo"));
         assert!(app.todos.contains_key(std::path::Path::new("/tmp/demo")));
         app.overlay = None;
@@ -37844,12 +38591,13 @@ mod tests {
         todo_view(&app);
     }
 
-    /// A tab per open project, in the projects' order, each with what is
-    /// open in it: `←`/`→` walk them round the ends — `⇧←`/`⇧→` too, the
-    /// filter's caret taking the plain ones while it is up — and `⌘2`
-    /// goes straight to the second, each project's tab coming back as it
-    /// was left: its cursor, its filter. `Tab` is the DONE panel's way in,
-    /// and the panel stays as it is from tab to tab.
+    /// Blue sky's tab, then one per open project in the projects' order,
+    /// each with what is open in it: `←`/`→` walk them round the ends —
+    /// `⇧←`/`⇧→` too, the filter's caret taking the plain ones while it is
+    /// up — and `⌘1` goes straight to Blue sky's, `⌘2` on to the projects',
+    /// each tab coming back as it was left: its cursor, its filter. `Tab`
+    /// is the DONE panel's way in, and the panel stays as it is from tab
+    /// to tab.
     #[test]
     fn arrows_walk_a_tab_per_project() {
         use crate::todos::view::Entry;
@@ -37869,27 +38617,32 @@ mod tests {
             );
             let text = buffer_text(&draw_todos(&mut app));
             assert!(text.contains("demo 3"), "{text}");
-            assert!(text.contains("projects"), "{text}");
+            assert!(text.contains("Blue sky"), "{text}");
+            assert!(
+                text.find("Blue sky") < text.find("demo 3"),
+                "Blue sky's tab first: {text}"
+            );
+            assert!(text.contains("tabs"), "{text}");
             assert!(text.contains("nightshift"), "{text}");
             assert!(!text.contains("Log"), "no Today/Log tabs: {text}");
 
             // → the moment the modal is up, and back; ⇧→ the same.
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p2");
+            assert_eq!(todo_tab(&app), "p2");
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
             press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p2");
+            assert_eq!(todo_tab(&app), "p2");
             press(&mut app, KeyCode::Left, KeyModifiers::SHIFT, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
             // Tab puts the keys on the DONE panel, where ←/→ are its
             // spans' and never cross back; Tab hands them back.
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
             assert!(todo_view(&app).done.focused);
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
             assert!(todo_view(&app).done.focused, "← stays on the panel");
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Tab, KeyModifiers::NONE, &mut out);
             assert!(!todo_view(&app).done.focused);
@@ -37907,30 +38660,103 @@ mod tests {
             let cursor = todo_view(&app).cursor;
             assert!(matches!(cursor, Some(Entry::Item { .. })));
             press(&mut app, KeyCode::Left, KeyModifiers::NONE, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "p1");
 
             press(&mut app, KeyCode::Right, KeyModifiers::SHIFT, &mut out);
             let view = todo_view(&app);
-            assert_eq!(view.project.0, "p2");
+            assert_eq!(view.tab.project().unwrap().0, "p2");
             assert_eq!(view.dir, std::path::PathBuf::from("/tmp/nightshift"));
             assert!(view.query.is_empty());
             let text = buffer_text(&draw_todos(&mut app));
             assert!(!text.contains("setup resend"), "{text}");
 
-            // →, round the end and back on demo, as it was left.
+            // →, round the end onto Blue sky's, then back on demo, as it
+            // was left.
+            press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
+            assert_eq!(todo_tab(&app), "blue sky");
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
             let view = todo_view(&app);
-            assert_eq!(view.project.0, "p1");
+            assert_eq!(view.tab.project().unwrap().0, "p1");
             assert_eq!(view.query.trim(), "r");
             assert_eq!(view.cursor, cursor);
 
-            // ⌘2: the second tab; ⌘9, with no ninth, nothing.
-            press(&mut app, KeyCode::Char('2'), KeyModifiers::SUPER, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p2");
+            // ⌘3: the third tab, the second project's; ⌘9, with no ninth,
+            // nothing; ⌘1 Blue sky's, ⌘2 the first project's.
+            press(&mut app, KeyCode::Char('3'), KeyModifiers::SUPER, &mut out);
+            assert_eq!(todo_tab(&app), "p2");
             press(&mut app, KeyCode::Char('9'), KeyModifiers::SUPER, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p2");
+            assert_eq!(todo_tab(&app), "p2");
             press(&mut app, KeyCode::Char('1'), KeyModifiers::SUPER, &mut out);
-            assert_eq!(todo_view(&app).project.0, "p1");
+            assert_eq!(todo_tab(&app), "blue sky");
+            press(&mut app, KeyCode::Char('2'), KeyModifiers::SUPER, &mut out);
+            assert_eq!(todo_tab(&app), "p1");
+        });
+    }
+
+    /// Blue sky's tab: a click on its label lands there as `⌘1` does
+    /// (INPUT PARITY), under the line saying what Enter does. On an idea
+    /// `w` steps where it goes — `blue sky`, then each project — and its
+    /// row says so beside how its build stands; any other letter still
+    /// types onto it. `Enter` starts the BLUE SKY BUILDER: the first idea
+    /// for `blue sky` makes the Blue sky folder and adds it as a project.
+    #[test]
+    fn blue_sky_ideas_go_where_w_says_and_enter_builds_them() {
+        let folder = tempfile::tempdir().unwrap();
+        let folder = folder.path().join("orion-blue-sky");
+        crate::automations::blue_sky::with_folder(folder.clone(), || {
+            crate::todos::with_now(todo_clock(6), || {
+                let mut out = Vec::new();
+                let mut app = todos_with(TWO_EMAILS);
+                app.automations
+                    .settings
+                    .of_mut(crate::automations::Automation::BlueSky)
+                    .on = Some(true);
+                let key = crate::todos::store::blue_sky_key();
+                let mut ideas = crate::todos::TodoFile::new(&key);
+                let inbox = ideas.inbox();
+                let idea = ideas.add_item(inbox, "habit tracker", crate::todos::today());
+                app.todos.insert(key.clone(), ideas);
+                draw_todos(&mut app);
+                let (x, _) = todo_view(&app).project_hits[0];
+                let y = todo_view(&app).project_row.y;
+                click(&mut app, x, y, &mut out);
+                assert_eq!(todo_tab(&app), "blue sky");
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+                let text = buffer_text(&draw_todos(&mut app));
+                assert!(text.contains("Enter starts the Blue sky builder"), "{text}");
+                assert!(text.contains("blue sky · not started"), "{text}");
+                assert!(text.contains("w where"), "{text}");
+
+                let target = |app: &App| app.todos[&key].item(idea).unwrap().target.clone();
+                press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE, &mut out);
+                assert_eq!(target(&app).as_deref(), Some("p1"));
+                let text = buffer_text(&draw_todos(&mut app));
+                assert!(text.contains("demo · not started"), "{text}");
+                press(&mut app, KeyCode::Char('w'), KeyModifiers::NONE, &mut out);
+                assert_eq!(target(&app), None, "round to blue sky");
+                press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE, &mut out);
+                assert!(todo_view(&app).input.is_some(), "x types onto the row");
+                press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+                out.clear();
+                press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                assert!(
+                    out.iter().any(|r| matches!(
+                        r,
+                        ClientRequest::AddProject {
+                            create_missing: true,
+                            ..
+                        }
+                    )),
+                    "{out:?}"
+                );
+                assert!(folder.is_dir());
+                assert!(app.todos[&key].item(idea).unwrap().queued);
+                assert!(
+                    matches!(app.overlay, Some(Overlay::Todos(_))),
+                    "the modal stays"
+                );
+            });
         });
     }
 

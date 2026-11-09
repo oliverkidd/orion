@@ -145,8 +145,8 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
     let card = band.and_then(|b| {
         crate::launcher::card_cursor(app, &bands[b]).and_then(|c| bands[b].cards.get(c))
     });
+    // `⌘K` is the right edge's `needs you`, so not one of these.
     let tail = [
-        act(km, Action::Palette, "jump"),
         act(km, Action::CommandPalette, "commands"),
         act(km, Action::Home, "home"),
     ];
@@ -452,10 +452,18 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     // footprint, fed by the footer metrics poll. The hints clip before the
     // readout does.
     let usage = footer_usage(app);
-    let right_w = usage
+    // Before the counts, NEEDS YOU's: `⌘K needs you 3`, a button that
+    // opens the board.
+    let needs_you =
+        crate::needs_you::footer_segment(app, app.hover_crumb == Some(HitTarget::FooterNeedsYou));
+    let needs_w = needs_you.as_ref().map_or(0, |spans| {
+        spans.iter().map(|s| s.width() as u16).sum::<u16>() + 2
+    });
+    let right_w = (usage
         .as_ref()
         .map(|s| s.chars().count() as u16 + 2)
         .unwrap_or(0)
+        + needs_w)
         .min(area.width);
     // Beside it, what Spotify is playing (`crate::spotify`), in at most a
     // third of the bar — and never so much the readout can't keep its
@@ -470,11 +478,20 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         crate::spotify::readout(np, usize::from(spot_max), th, spotify_hover, spot_sweep)
     });
     let spot_w = spot.as_ref().map_or(0, |r| r.width);
+    let spot_room = if spot.is_some() { spot_w + 2 } else { 0 };
+    // Left of those, the next meeting within the hour (`crate::microsoft`),
+    // while the hints keep at least half the bar.
+    let meeting = crate::microsoft::footer_text(app).filter(|text| {
+        let w = text.chars().count() as u16 + 2;
+        right_w + spot_room + w <= area.width / 2
+    });
+    let meeting_w = meeting.as_ref().map_or(0, |t| t.chars().count() as u16 + 2);
     let left = Rect {
         width: area
             .width
             .saturating_sub(right_w)
-            .saturating_sub(if spot.is_some() { spot_w + 2 } else { 0 }),
+            .saturating_sub(spot_room)
+            .saturating_sub(meeting_w),
         ..area
     };
     // The pointer resting on an ACCOUNT MARK has its account said in the
@@ -496,6 +513,15 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         (None, None) => spans.extend(crate::hints::spans(&hints(app), room, th)),
     }
     f.render_widget(Paragraph::new(Line::from(spans)), left);
+    if let Some(meeting) = meeting {
+        let rect = Rect {
+            x: left.x + left.width,
+            width: meeting_w,
+            ..area
+        };
+        let span = Span::styled(meeting, Style::default().fg(th.muted));
+        f.render_widget(Paragraph::new(Line::from(span)), rect);
+    }
     if let Some(spot) = spot {
         let rect = Rect {
             x: area.x + area.width.saturating_sub(right_w + spot_w),
@@ -516,10 +542,22 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         }
         f.render_widget(Paragraph::new(Line::from(spot.spans)), rect);
     }
+    if let Some(spans) = needs_you {
+        let x = area.x + area.width.saturating_sub(right_w) + 2;
+        let rect = Rect {
+            x,
+            width: needs_w
+                .saturating_sub(2)
+                .min(area.right().saturating_sub(x)),
+            ..area
+        };
+        push_hit(app, rect, x, rect.width, HitTarget::FooterNeedsYou);
+        f.render_widget(Paragraph::new(Line::from(spans)), rect);
+    }
     if let Some(usage) = usage {
         let right = Rect {
-            x: area.x + area.width.saturating_sub(right_w),
-            width: right_w,
+            x: area.x + area.width.saturating_sub(right_w - needs_w),
+            width: right_w - needs_w,
             ..area
         };
         let span = Span::styled(usage, Style::default().fg(th.dim));

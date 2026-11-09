@@ -67,8 +67,6 @@ const LIST_PCT: u16 = crate::pr_modal::LIST_PCT;
 const MIN_LIST_W: u16 = crate::pr_modal::MIN_LIST_W;
 const WHEEL_LINES: i32 = crate::pr_modal::WHEEL_LINES;
 #[cfg(not(test))]
-const TIMEOUT_SECS: &str = "20";
-#[cfg(not(test))]
 const LINEAR_URL: &str = "https://api.linear.app/graphql";
 const KEY_NAME: &str = "LINEAR_API_KEY";
 const ENV_FILES: &[&str] = &[".env.local", ".env"];
@@ -2656,10 +2654,7 @@ fn start_issues(app: &mut App, launch: &QuickLaunch, issues: &[LinearIssue]) {
             None => refused = Some((starts[0].1.clone(), NO_KEY.to_string())),
             Some(key) => {
                 for (id, identifier, state_id, me) in starts {
-                    let result = match state_id {
-                        Some(state_id) => start_issue(&key, &id, &state_id, me.as_deref()).await,
-                        None => Err("its team has no started state".into()),
-                    };
+                    let result = start_issue(&key, &id, state_id.as_deref(), me.as_deref()).await;
                     match result {
                         Ok(started) => moved |= started,
                         Err(why) => {
@@ -2678,18 +2673,37 @@ fn start_issues(app: &mut App, launch: &QuickLaunch, issues: &[LinearIssue]) {
     });
 }
 
+/// The first of an issue's team's started states, by Linear's `position`.
+fn first_started(issue: &serde_json::Value) -> Option<String> {
+    let at = |s: &serde_json::Value| s.get("position").and_then(|p| p.as_f64());
+    issue
+        .pointer("/team/states/nodes")?
+        .as_array()?
+        .iter()
+        .filter(|s| s.get("type").and_then(|t| t.as_str()) == Some("started"))
+        .min_by(|a, b| {
+            at(a)
+                .partial_cmp(&at(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .and_then(|s| Some(s.get("id")?.as_str()?.to_string()))
+}
+
 /// Issue `issue_id` moved to state `state_id`, and given to `me` when
 /// nobody has it — `false` when Linear has it started already, or further
-/// on, and nothing was asked.
+/// on, and nothing was asked. With no `state_id` — issues that came from
+/// no LINEAR VIEW list, as an automation's do — its team's first started
+/// state, read with the issue ([`first_started`]).
 async fn start_issue(
     key: &str,
     issue_id: &str,
-    state_id: &str,
+    state_id: Option<&str>,
     me: Option<&str>,
 ) -> Result<bool, String> {
     let json = graphql(
         key,
-        r#"query($id: String!) { issue(id: $id) { state { type } assignee { id } } }"#,
+        r#"query($id: String!) { issue(id: $id) { state { type } assignee { id }
+          team { states { nodes { id type position } } } } }"#,
         serde_json::json!({ "id": issue_id }),
     )
     .await?;
@@ -2699,6 +2713,10 @@ async fn start_issue(
     if !unstarted_kind(&json_text(issue, "/state/type")) {
         return Ok(false);
     }
+    let state_id = match state_id {
+        Some(id) => id.to_string(),
+        None => first_started(issue).ok_or("its team has no started state")?,
+    };
     let mut input = serde_json::json!({ "stateId": state_id });
     if let (true, Some(me)) = (issue["assignee"].is_null(), me) {
         input["assigneeId"] = me.into();
@@ -3032,8 +3050,8 @@ pub(crate) mod keys {
     pub const COPY: Key = crate::todos::view::keys::COPY;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        MARK, ROWS, CONFIRM, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE,
-        PICK, SET, LEVEL, LINK, GO, NEW, FILE, TEAM, TABS, FILTER, JUMP, SELECT, COPY,
+        MARK, ROWS, CONFIRM, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE, PICK,
+        SET, LEVEL, LINK, GO, NEW, FILE, TEAM, TABS, FILTER, JUMP, SELECT, COPY,
     ];
 }
 
@@ -4332,7 +4350,7 @@ fn launch_for(app: &mut App, issues: Vec<LinearIssue>) -> Option<QuickLaunch> {
 fn open_in_browser(app: &mut App, out: &mut Vec<ClientRequest>) {
     let url = selected_issue(app).map(|issue| issue.url.clone());
     if let Some(url) = url {
-        crate::event_loop::open_link(app, &url, out);
+        crate::event_loop::open_link(app, &url, None, out);
     }
 }
 
@@ -4752,7 +4770,7 @@ pub(crate) fn priority_mark(priority: u8, th: Theme) -> Span<'static> {
 
 /// A priority as one letter on a row — `U`rgent, `H`igh, `M`edium,
 /// `L`ow — louder the higher it is; a faint `·` for none.
-fn priority_letter(priority: u8, th: Theme) -> (&'static str, Style) {
+pub(crate) fn priority_letter(priority: u8, th: Theme) -> (&'static str, Style) {
     match priority {
         1 => (
             "U",
@@ -5551,7 +5569,7 @@ fn comment_lines(
 /// once, under `teams` ([`lists_query`]) — and the pull requests attached
 /// to it for the work column — the same fields whoever's issues are asked
 /// for.
-const ISSUE_FIELDS: &str =
+pub(crate) const ISSUE_FIELDS: &str =
     "id identifier title url description priority createdAt updatedAt completedAt \
     state { name type color position } labels { nodes { name color } } project { name color } \
     assignee { id displayName } creator { displayName } externalUserCreator { name } \
@@ -5722,7 +5740,11 @@ async fn create_issue(
 
 /// A mutation's answer: `Ok` when `data.<field>.success` is true, else
 /// Linear's own error, else `refused`.
-fn mutation_result(json: &serde_json::Value, field: &str, refused: &str) -> Result<(), String> {
+pub(crate) fn mutation_result(
+    json: &serde_json::Value,
+    field: &str,
+    refused: &str,
+) -> Result<(), String> {
     let success = json
         .pointer(&format!("/data/{field}/success"))
         .and_then(|v| v.as_bool());
@@ -5931,7 +5953,7 @@ fn already_attached(why: &str) -> bool {
     why.to_ascii_lowercase().contains("duplicate attachment")
 }
 
-async fn graphql(
+pub(crate) async fn graphql(
     key: &str,
     query: &str,
     variables: serde_json::Value,
@@ -5985,8 +6007,8 @@ pub(crate) fn with_graphql_stub<T>(stub: GraphqlStub, f: impl FnOnce() -> T) -> 
     out.unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
-/// One GraphQL request to Linear through `curl`, the key on its stdin
-/// config and the body in a temp file, never on argv.
+/// One GraphQL request to Linear through [`orion_core::http`]: the key
+/// on curl's stdin config and the body in a temp file, never on argv.
 #[cfg(not(test))]
 async fn curl_graphql(
     key: &str,
@@ -5994,51 +6016,23 @@ async fn curl_graphql(
     variables: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({ "query": query, "variables": variables }).to_string();
-    // Body stays off argv (and off the key's stdin config). std, not the
-    // `tempfile` crate: that one is a test-only dep of this crate.
-    let body_path = std::env::temp_dir().join(format!(
-        "orion-linear-{}-{}.json",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    std::fs::write(&body_path, body.as_bytes()).map_err(|e| e.to_string())?;
-    let _cleanup = DeleteOnDrop(body_path.clone());
-    let config =
-        format!("header = \"Authorization: {key}\"\nheader = \"Content-Type: application/json\"\n");
-    let mut cmd = tokio::process::Command::new("curl");
-    cmd.args([
-        "-sS",
-        "--max-time",
-        TIMEOUT_SECS,
-        "--config",
-        "-",
-        "-X",
-        "POST",
-        LINEAR_URL,
-        "--data-binary",
-        &format!("@{}", body_path.display()),
-    ])
-    .stdin(std::process::Stdio::piped())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| format!("couldn't run curl: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(config.as_bytes()).await;
-    }
-    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "Linear request failed: {}",
-            err.lines().next().unwrap_or("curl error")
-        ));
-    }
-    serde_json::from_slice(&output.stdout)
+    let headers = vec![
+        format!("Authorization: {key}"),
+        "Content-Type: application/json".to_string(),
+    ];
+    let response = tokio::task::spawn_blocking(move || {
+        orion_core::http::request(&orion_core::http::Request {
+            method: "POST",
+            url: LINEAR_URL,
+            headers: &headers,
+            body: Some(body.as_bytes()),
+            ..Default::default()
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|why| format!("Linear request failed: {why}"))?;
+    serde_json::from_slice(&response.body)
         .map_err(|_| "Linear returned something that wasn't JSON".into())
 }
 
@@ -6079,7 +6073,7 @@ fn parse_lists(json: &serde_json::Value) -> Result<LinearList, String> {
 /// name, then the latest filed first in triage, the latest finished first
 /// in the done, then priority — urgent first, none last — and the most
 /// recently touched first.
-fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
+pub(crate) fn parse_issues(json: &serde_json::Value) -> Result<Vec<LinearIssue>, String> {
     if let Some(err) = graphql_error(json) {
         return Err(err);
     }
@@ -6223,23 +6217,30 @@ fn status_rank(issue: &LinearIssue) -> u8 {
     }
 }
 
-#[cfg(not(test))]
-struct DeleteOnDrop(PathBuf);
-
-#[cfg(not(test))]
-impl Drop for DeleteOnDrop {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-fn graphql_error(json: &serde_json::Value) -> Option<String> {
+pub(crate) fn graphql_error(json: &serde_json::Value) -> Option<String> {
     json.get("errors")
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.first())
         .and_then(|err| err.get("message"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+/// Every distinct Linear key across the projects, each with the projects
+/// that read it, in project order: `(key, projects)`. Projects that share a
+/// workspace share a key, so one ask per key covers them all.
+pub(crate) fn keys_by_project(app: &App) -> Vec<(String, Vec<ProjectId>)> {
+    let mut by_key: Vec<(String, Vec<ProjectId>)> = Vec::new();
+    for project in &app.tree.projects {
+        let Some(key) = read_linear_key(&project.repo_path) else {
+            continue;
+        };
+        match by_key.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, projects)) => projects.push(project.id.clone()),
+            None => by_key.push((key, vec![project.id.clone()])),
+        }
+    }
+    by_key
 }
 
 /// `LINEAR_API_KEY` from the project's env files, then the process env.
@@ -8075,6 +8076,7 @@ pub(crate) mod tests {
             alive: true,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         });
     }
 

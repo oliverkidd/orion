@@ -660,13 +660,18 @@ pub(super) fn follow_up(app: &mut App) {
 /// band's rule (`view::RowPr`) — in the browser, without stepping into a
 /// session or opening the PULL REQUESTS MODAL to find it. The opening is
 /// `event_loop::open_link`'s, so the pull request is marked read on the
-/// way out, as it is from every other place a PR opens.
+/// way out, as it is from every other place a PR opens. It opens in the
+/// browser the card's account picks (**Open links in**).
 ///
 /// INPUT PARITY: the menu row's `MenuAction::OpenLink` carries the URL
-/// this reads, and ends in the same `open_link`.
+/// and the account this reads, and ends in the same `open_link`.
 pub(super) fn open_pull_request(app: &mut App, out: &mut Vec<ClientRequest>) {
     if let Some(pr) = card_pull_request(app) {
-        super::open_link(app, &pr.url, out);
+        let account = match app.selected_session_row() {
+            Some(crate::app::SessionRow::Agent(agent)) => Some(crate::open_url::account_of(&agent)),
+            _ => None,
+        };
+        super::open_link(app, &pr.url, account.as_deref(), out);
     }
 }
 
@@ -2171,7 +2176,7 @@ pub(super) fn pane_key(
     if action == Some(Action::Activate) {
         crate::key_combo::note(app, &[chord], Some("Open"));
         if let Some(url) = app.reading_url() {
-            super::open_link(app, &url, out);
+            super::open_link(app, &url, None, out);
         } else {
             enter_terminal_pane(app, out);
         }
@@ -2817,6 +2822,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -2856,6 +2862,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -2907,6 +2914,7 @@ mod tests {
                     alive: true,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 }),
             },
         );
@@ -3819,7 +3827,7 @@ mod tests {
         );
 
         let before = app.selected_session_row().and_then(|r| r.sref());
-        crate::event_loop::take_opened();
+        crate::open_url::take_opened();
         mouse(
             &mut app,
             MouseEventKind::Down(MouseButton::Left),
@@ -3827,7 +3835,7 @@ mod tests {
             at.y,
         );
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             vec!["http://localhost:3000"]
         );
         assert_eq!(app.selected_session_row().and_then(|r| r.sref()), before);
@@ -3840,7 +3848,7 @@ mod tests {
             second.y,
         );
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             vec!["http://localhost:5173"]
         );
     }
@@ -3852,11 +3860,11 @@ mod tests {
     fn open_app_in_the_open_menu_opens_the_first_port() {
         let mut app = App::new();
         seed_tree(&mut app);
-        crate::event_loop::take_opened();
+        crate::open_url::take_opened();
         let act = crate::keymap::Action::OpenApp;
 
         super::super::run_action(&mut app, act);
-        assert!(crate::event_loop::take_opened().is_empty());
+        assert!(crate::open_url::take_opened().is_empty());
         assert_eq!(
             app.flash.as_deref(),
             Some("no stack running here — ⌘⇧S starts it")
@@ -3886,7 +3894,7 @@ mod tests {
         app.overlay = None;
         super::super::run_action(&mut app, act);
         assert_eq!(
-            crate::event_loop::take_opened(),
+            crate::open_url::take_opened(),
             vec!["http://localhost:5173"]
         );
     }
@@ -4091,8 +4099,16 @@ mod tests {
 
             let mut by_key = locked();
             draw(&mut by_key);
-            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::SUPER);
-            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut by_key,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
+            key(
+                &mut by_key,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
 
             for app in [&by_click, &by_key] {
                 assert!(app.launcher_pane_hidden, "the pane folded away");
@@ -4744,10 +4760,10 @@ mod tests {
             );
             assert_eq!(app.pr_tabs.tab, PrTab::Checks);
             draw_tall(&mut app);
-            crate::event_loop::take_opened();
+            crate::open_url::take_opened();
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(
-                crate::event_loop::take_opened(),
+                crate::open_url::take_opened(),
                 ["https://github.com/o/demo/actions/runs/1"],
                 "a check's page"
             );
@@ -4836,7 +4852,7 @@ mod tests {
 
     /// `⌘G` on the pane's PULL REQUEST PAGE is the AUTOFIX MODAL for the
     /// pull request it reads — not HOME — as it is in the PULL REQUESTS
-    /// MODAL, and so is a click on the work block's `⌘G send autofix`.
+    /// MODAL, and so is a click on the work block's `⌘G send to the PR fixer`.
     /// Esc closes it with nothing remembered, the page still up. With no
     /// fresh body to read the checks off, one is asked for and the form
     /// opens as it lands.
@@ -4868,7 +4884,7 @@ mod tests {
             keys(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
             assert_eq!(app.focus, Focus::Terminal);
             assert!(
-                footer_text(&app).contains("autofix"),
+                footer_text(&app).contains("PR fixer"),
                 "{}",
                 footer_text(&app)
             );
@@ -4913,7 +4929,7 @@ mod tests {
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             let screen = screen_text(&draw_tall(&mut app));
             assert!(
-                screen.contains("AUTOFIX   ✗ 1 failing check · ⌘G send autofix"),
+                screen.contains("PR FIXER  ✗ 1 failing check · ⌘G send to the PR fixer"),
                 "{screen}"
             );
             let at = app
@@ -5451,7 +5467,11 @@ mod tests {
         with_default_config(|| {
             let mut app = three_sessions();
             draw(&mut app);
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(app.launcher_pane_hidden, "the pane is folded away");
 
             let mut sent = Vec::new();
@@ -6678,7 +6698,11 @@ mod tests {
                 super::open_project(&mut app, &ProjectId("p3".into()), &mut out);
                 assert_eq!(reading(&app), None, "nothing of demo's left attached");
 
-                key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+                key(
+                    &mut app,
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                );
                 let text = buffer_text(&draw(&mut app));
                 assert!(
                     super::has_pane(&app),
@@ -7985,7 +8009,10 @@ mod tests {
             for back_down in [
                 (KeyCode::Char('f'), KeyModifiers::SUPER),
                 (KeyCode::Char('q'), KeyModifiers::CONTROL),
-                (KeyCode::Char('j'), KeyModifiers::SUPER),
+                (
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                ),
             ] {
                 let out = ctrl_f(&mut app);
                 assert!(
@@ -8127,7 +8154,7 @@ mod tests {
 
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             assert!(
@@ -8194,7 +8221,7 @@ mod tests {
             assert_eq!(selected(&app).as_deref(), Some("a1"), "the last card");
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             assert_eq!(cards(&app), ["a9", "a2"], "the press unarchives one");
@@ -8212,7 +8239,7 @@ mod tests {
             );
             key_kind(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
                 Repeat,
             );
@@ -8254,7 +8281,7 @@ mod tests {
             let before = archived(&app);
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             assert_eq!(archived(&app), before - 1, "the press unarchives one");
@@ -8262,7 +8289,7 @@ mod tests {
             for _ in 0..5 {
                 key_kind(
                     &mut app,
-                    KeyCode::Char('A'),
+                    KeyCode::Char('X'),
                     KeyModifiers::SUPER | KeyModifiers::SHIFT,
                     Repeat,
                 );
@@ -8288,7 +8315,7 @@ mod tests {
 
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -8361,7 +8388,7 @@ mod tests {
 
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -8396,7 +8423,7 @@ mod tests {
             );
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             let out = key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -8496,7 +8523,7 @@ mod tests {
 
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -8515,7 +8542,7 @@ mod tests {
             for keys in [
                 &[
                     (
-                        KeyCode::Char('A'),
+                        KeyCode::Char('X'),
                         KeyModifiers::SUPER | KeyModifiers::SHIFT,
                     ),
                     (KeyCode::Char('y'), KeyModifiers::NONE),
@@ -8607,7 +8634,11 @@ mod tests {
         with_default_config(|| {
             let mut by_key = two_sessions();
             draw(&mut by_key);
-            key(&mut by_key, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut by_key,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(by_key.launcher_pane_hidden, "^~ folded the pane away");
             to_feat(&mut by_key);
             assert!(
@@ -8624,7 +8655,11 @@ mod tests {
 
             let mut by_click = two_sessions();
             draw(&mut by_click);
-            key(&mut by_click, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut by_click,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(by_click.launcher_pane_hidden);
             key(&mut by_click, KeyCode::Esc, KeyModifiers::NONE);
             draw(&mut by_click);
@@ -8681,7 +8716,11 @@ mod tests {
             let mut by_right = two_sessions();
             for app in [&mut by_left, &mut by_right] {
                 draw(app);
-                key(app, KeyCode::Char('j'), KeyModifiers::SUPER);
+                key(
+                    app,
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                );
                 keys(app, &[KeyCode::Esc, KeyCode::Down]);
                 assert!(
                     app.launcher_pane_hidden,
@@ -9041,6 +9080,7 @@ mod tests {
                         alive: true,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
+                        automation: None,
                     }),
                 },
             );
@@ -9249,7 +9289,7 @@ mod tests {
             // `u` unarchives the card under the cursor where it stands.
             let out = key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             assert!(
@@ -9533,7 +9573,12 @@ mod tests {
             let sent =
                 crate::event_loop::run_action(&mut by_key, crate::keymap::Action::OpenPullRequest);
             assert!(by_key.overlay.is_none(), "{:?}", by_key.overlay);
-            assert_eq!(crate::event_loop::take_opened(), [PR_42]);
+            let opened = crate::open_url::take_opened_as();
+            assert_eq!(
+                opened,
+                [(PR_42.to_string(), Some("claude".to_string()))],
+                "in the card account's browser"
+            );
             assert_eq!(by_key.flash, None);
             assert!(
                 sent.iter()
@@ -9548,7 +9593,11 @@ mod tests {
             }
             let sent_by_menu = key(&mut by_menu, KeyCode::Enter, KeyModifiers::NONE);
             assert!(by_menu.overlay.is_none(), "{:?}", by_menu.overlay);
-            assert_eq!(crate::event_loop::take_opened(), [PR_42]);
+            assert_eq!(
+                crate::open_url::take_opened_as(),
+                opened,
+                "the menu row opens it for the same account"
+            );
             assert_eq!(by_menu.flash, by_key.flash);
             assert_eq!(format!("{sent_by_menu:?}"), format!("{sent:?}"));
             assert_eq!(by_menu.pr_seen, by_key.pr_seen);
@@ -9579,7 +9628,7 @@ mod tests {
             let sent =
                 crate::event_loop::run_action(&mut app, crate::keymap::Action::OpenPullRequest);
             assert!(sent.is_empty(), "{sent:?}");
-            assert!(crate::event_loop::take_opened().is_empty());
+            assert!(crate::open_url::take_opened().is_empty());
             assert_eq!(app.flash, None);
             assert_eq!(pr_menu_row(&mut app), None);
         });
@@ -9685,7 +9734,7 @@ mod tests {
             let sent = click_at(&mut by_click, line.x + 3, line.y);
             assert!(by_click.overlay.is_none(), "{:?}", by_click.overlay);
             assert_eq!(
-                crate::event_loop::take_opened(),
+                crate::open_url::take_opened(),
                 [PR_42, PR_42],
                 "the key's, then the click's"
             );
@@ -9736,7 +9785,7 @@ mod tests {
                 "the cursor is on the band whose link was clicked"
             );
             assert_eq!(
-                crate::event_loop::take_opened(),
+                crate::open_url::take_opened(),
                 ["https://github.com/o/demo/pull/43"],
                 "and it is that band's pull request that opened"
             );
@@ -10095,6 +10144,7 @@ mod tests {
                     status: AgentStatus::NeedsFeedback,
                     changed_at: crate::app::now_ms(),
                     unseen: false,
+                    reason: None,
                 },
             );
             assert_eq!(app.pending_feedback.len(), 1);
@@ -10164,8 +10214,10 @@ mod tests {
                 Some("1".to_string()),
                 "one red dot, carrying its count: {text}"
             );
+            // The header's row; the footer's `⌘K needs you` is the board's.
+            let header = text.lines().nth(1).unwrap_or_default();
             assert!(
-                !text.contains("needs you"),
+                !header.contains("needs you"),
                 "the dot says it; the header spends no words on it: {text}"
             );
         });
@@ -10616,7 +10668,7 @@ mod tests {
         });
     }
 
-    /// ⌘J folds the PANE away and takes the selection with it: no pane
+    /// ⌘⇧J folds the PANE away and takes the selection with it: no pane
     /// is drawn under the cards, no card wears the cursor, and the edge
     /// the pane gave the pointer to drag is gone with it. The same key
     /// brings all three back. ^J is its twin, for the terminals that
@@ -10648,8 +10700,12 @@ mod tests {
             let (was_pane, grid_was) = (has_pane(&app), cards_h(&app));
             assert!(was_pane && !app.launcher_unaimed);
 
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
-            assert!(app.launcher_pane_hidden, "⌘J folded the pane away");
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
+            assert!(app.launcher_pane_hidden, "⌘⇧J folded the pane away");
             assert!(
                 app.launcher_unaimed,
                 "folding the pane away let the card under the cursor go"
@@ -10667,7 +10723,11 @@ mod tests {
 
             // The same key back: the pane returns, reading the card it is
             // aimed at again.
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(!app.launcher_pane_hidden);
             assert!(
                 !app.launcher_unaimed,
@@ -10679,8 +10739,14 @@ mod tests {
 
             // Both ways again.
             for chord in [
-                (KeyCode::Char('j'), KeyModifiers::SUPER),
-                (KeyCode::Char('j'), KeyModifiers::SUPER),
+                (
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                ),
+                (
+                    KeyCode::Char('J'),
+                    KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                ),
             ] {
                 let folded = app.launcher_pane_hidden;
                 key(&mut app, chord.0, chord.1);
@@ -10693,12 +10759,12 @@ mod tests {
         });
     }
 
-    /// ⌘J from inside the pane hands the keys back to the card first —
+    /// ⌘⇧J from inside the pane hands the keys back to the card first —
     /// the pane still up, the card still selected — and only a second
     /// press folds the pane; a third brings it back. ^J is the agent's in
     /// there (a newline to most of them).
     #[test]
-    fn cmd_j_steps_out_to_the_card_then_folds_the_pane() {
+    fn cmd_shift_j_steps_out_to_the_card_then_folds_the_pane() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
@@ -10715,11 +10781,15 @@ mod tests {
             assert!(!app.launcher_pane_hidden && app.term_locked);
 
             let card = crate::launcher::cursor(&app, &crate::launcher::bands(&app));
-            let out = key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
-            assert!(!typed(&out), "⌘J never reaches the session: {out:?}");
+            let out = key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
+            assert!(!typed(&out), "⌘⇧J never reaches the session: {out:?}");
             assert_eq!(app.focus, Focus::Sessions, "the keys are the grid's");
             assert!(!app.term_locked);
-            assert!(!app.launcher_pane_hidden, "the first ⌘J left the pane up");
+            assert!(!app.launcher_pane_hidden, "the first ⌘⇧J left the pane up");
             assert!(!app.launcher_unaimed, "and the card it reads selected");
             assert_eq!(
                 crate::launcher::cursor(&app, &crate::launcher::bands(&app)),
@@ -10730,13 +10800,21 @@ mod tests {
             assert_eq!(app.focus, Focus::Sessions);
 
             // Again, from the cards: the pane folds away.
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
-            assert!(app.launcher_pane_hidden, "the second ⌘J folded the pane");
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
+            assert!(app.launcher_pane_hidden, "the second ⌘⇧J folded the pane");
             assert_eq!(app.focus, Focus::Sessions);
             draw(&mut app);
 
             // And once more brings it back.
-            key(&mut app, KeyCode::Char('j'), KeyModifiers::SUPER);
+            key(
+                &mut app,
+                KeyCode::Char('J'),
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+            );
             assert!(!app.launcher_pane_hidden);
         });
     }
@@ -11270,7 +11348,7 @@ mod tests {
             super::select(&mut app, AgentId("a2".into()), &mut Vec::new());
             key(
                 &mut app,
-                KeyCode::Char('A'),
+                KeyCode::Char('X'),
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
             );
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -11616,6 +11694,7 @@ mod tests {
                         alive: false,
                         recent_prompts: Vec::new(),
                         usage_limit: None,
+                        automation: None,
                     }),
                 },
             );

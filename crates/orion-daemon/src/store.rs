@@ -384,7 +384,49 @@ const MIGRATIONS: &[&str] = &[
       WHERE kind = 'claude' AND custom_harness IS NOT NULL
         AND custom_harness NOT IN (SELECT id FROM temp.claude_account_ids);
     ",
+    // 34: PHONE MESSAGES — each Slack DM the phone bridge posted about a
+    // waiting session, by its conversation and `ts`, so a reply in its
+    // thread finds the session after a restart (`phone`). `answered` is
+    // NULL while it waits, then `phone` or `orion`, by where it was
+    // answered. Gone with its agent.
+    "
+    CREATE TABLE phone_messages (
+      channel    TEXT NOT NULL,
+      ts         TEXT NOT NULL,
+      agent_id   TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      kind       TEXT NOT NULL,
+      blocks     TEXT NOT NULL,
+      posted_at  INTEGER NOT NULL,
+      answered   TEXT,
+      PRIMARY KEY (channel, ts)
+    );
+    CREATE INDEX phone_messages_agent ON phone_messages(agent_id);
+    ",
+    // 35: the AUTOMATION that started a session (`Agent::automation`) —
+    // `pr_fixer`, `bug_fixer` … Nullable: every existing row is one you
+    // started.
+    "
+    ALTER TABLE agents ADD COLUMN automation TEXT;
+    ",
 ];
+
+fn phone_kind_str(kind: orion_core::away::PhoneKind) -> &'static str {
+    use orion_core::away::PhoneKind;
+    match kind {
+        PhoneKind::Question => "question",
+        PhoneKind::Plan => "plan",
+        PhoneKind::Crash => "crash",
+    }
+}
+
+fn parse_phone_kind(text: &str) -> orion_core::away::PhoneKind {
+    use orion_core::away::PhoneKind;
+    match text {
+        "plan" => PhoneKind::Plan,
+        "crash" => PhoneKind::Crash,
+        _ => PhoneKind::Question,
+    }
+}
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -605,8 +647,8 @@ impl Store {
         pr_url: Option<&str>,
     ) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, pr_url, custom_harness)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO agents (id, worktree_id, name, status, archived, archived_at, kind, claude_session_id, sort_order, created_at, status_changed_at, model, effort, auto_title_pending, unseen, pr_url, custom_harness, automation)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 a.id.as_str(),
                 a.worktree_id.as_str(),
@@ -625,6 +667,7 @@ impl Store {
                 a.unseen as i64,
                 pr_url,
                 a.custom_harness,
+                a.automation,
             ],
         )?;
         Ok(())
@@ -1035,6 +1078,92 @@ impl Store {
         Ok(seen)
     }
 
+    // ---- phone messages ----
+
+    pub fn insert_phone_message(&self, m: &crate::phone::PhoneMessage) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT OR REPLACE INTO phone_messages
+               (channel, ts, agent_id, kind, blocks, posted_at, answered)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+            params![
+                m.channel,
+                m.ts,
+                m.agent.as_str(),
+                phone_kind_str(m.kind),
+                m.blocks,
+                now_ms()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The phone message `ts` in `channel`, and whether it still waits.
+    pub fn phone_message(
+        &self,
+        channel: &str,
+        ts: &str,
+    ) -> Result<Option<(crate::phone::PhoneMessage, bool)>> {
+        self.phone_messages_where("channel = ?1 AND ts = ?2", params![channel, ts])
+            .map(|mut found| found.pop())
+    }
+
+    /// The newest phone message in `channel` still waiting for an answer.
+    pub fn latest_open_phone_message(
+        &self,
+        channel: &str,
+    ) -> Result<Option<(crate::phone::PhoneMessage, bool)>> {
+        self.phone_messages_where(
+            "channel = ?1 AND answered IS NULL ORDER BY posted_at DESC, ts DESC LIMIT 1",
+            params![channel],
+        )
+        .map(|mut found| found.pop())
+    }
+
+    /// Agent `id`'s phone messages still waiting for an answer.
+    pub fn open_phone_messages(&self, id: &AgentId) -> Result<Vec<crate::phone::PhoneMessage>> {
+        Ok(self
+            .phone_messages_where("agent_id = ?1 AND answered IS NULL", params![id.as_str()])?
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect())
+    }
+
+    /// Mark a phone message answered — `phone` or `orion` — or, None,
+    /// waiting again (an answer that did not go in).
+    pub fn set_phone_answered(&self, channel: &str, ts: &str, by: Option<&str>) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE phone_messages SET answered = ?3 WHERE channel = ?1 AND ts = ?2",
+            params![channel, ts, by],
+        )?;
+        Ok(())
+    }
+
+    fn phone_messages_where(
+        &self,
+        filter: &str,
+        args: impl rusqlite::Params,
+    ) -> Result<Vec<(crate::phone::PhoneMessage, bool)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT channel, ts, agent_id, kind, blocks, answered FROM phone_messages WHERE {filter}"
+        ))?;
+        let rows = stmt.query_map(args, |r| {
+            let kind: String = r.get(3)?;
+            let answered: Option<String> = r.get(5)?;
+            Ok((
+                crate::phone::PhoneMessage {
+                    channel: r.get(0)?,
+                    ts: r.get(1)?,
+                    agent: AgentId(r.get(2)?),
+                    kind: parse_phone_kind(&kind),
+                    blocks: r.get(4)?,
+                },
+                answered.is_none(),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     // ---- point lookups ----
 
     pub fn get_project(&self, id: &ProjectId) -> Result<Option<Project>> {
@@ -1176,7 +1305,7 @@ const WORKTREE_COLUMNS: &str = "id, project_id, path, branch, is_main, sort_orde
 const AGENT_COLUMNS: &str = "id, worktree_id, name, status, archived, kind, \
                              claude_session_id, sort_order, status_changed_at, model, effort, \
                              archived_at, unseen, recent_prompts, custom_harness, \
-                             usage_limit";
+                             usage_limit, automation";
 const TERMINAL_COLUMNS: &str = "id, worktree_id, name, sort_order, run_command, setup";
 const LINK_COLUMNS: &str = "id, worktree_id, url, sort_order";
 
@@ -1221,6 +1350,7 @@ fn row_to_agent(r: &rusqlite::Row) -> rusqlite::Result<Agent> {
         recent_prompts: parse_prompts(r.get::<_, Option<String>>(13)?.as_deref()),
         custom_harness: r.get(14)?,
         usage_limit: parse_usage_limit(r.get::<_, Option<String>>(15)?.as_deref()),
+        automation: r.get(16)?,
     })
 }
 
@@ -1326,6 +1456,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         let pr_url = "https://github.com/oliverkidd/orion/pull/42";
         store
@@ -1349,6 +1480,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         store.insert_agent(&codex_agent).unwrap();
         let cursor_agent = Agent {
@@ -1369,6 +1501,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         store.insert_agent(&cursor_agent).unwrap();
         let titled_agent = Agent {
@@ -1389,6 +1522,8 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            // An automation's session keeps its tag (migration 35).
+            automation: Some("bug_fixer".into()),
         };
         store
             .insert_agent_with_auto_title(&titled_agent, true)
@@ -1404,6 +1539,10 @@ mod tests {
         assert_eq!(agents[0].model.as_deref(), Some("opus"));
         assert_eq!(agents[0].effort.as_deref(), Some("high"));
         assert_eq!(agents[0].custom_harness, None, "built-ins store no id");
+        assert_eq!(agents[0].automation, None, "one you started has no tag");
+        assert!(agents
+            .iter()
+            .any(|a| a.id == titled_agent.id && a.automation.as_deref() == Some("bug_fixer")));
         assert_eq!(
             store.agent_pr_url(&agents[0].id).unwrap().as_deref(),
             Some(pr_url)
@@ -1430,6 +1569,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
         store.insert_agent(&custom).unwrap();
         let (_, _, reloaded, _) = store.load_tree().unwrap();
@@ -1802,6 +1942,7 @@ mod tests {
         [
             "agents",
             "links",
+            "phone_messages",
             "pr_seen",
             "projects",
             "terminals",
@@ -2138,6 +2279,7 @@ mod tests {
             alive: false,
             recent_prompts: Vec::new(),
             usage_limit: None,
+            automation: None,
         };
 
         // Default-named session: pending until the agent titles it, and the
@@ -2225,6 +2367,7 @@ mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 },
                 true,
             )
@@ -2406,6 +2549,7 @@ mod tests {
                     alive: false,
                     recent_prompts: Vec::new(),
                     usage_limit: None,
+                    automation: None,
                 })
                 .unwrap();
         }
@@ -2490,6 +2634,7 @@ mod tests {
                 alive: false,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             })
             .unwrap();
         store
@@ -2573,6 +2718,7 @@ mod tests {
                 alive: false,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             };
             store.insert_agent(&agent).unwrap();
             agent.id
@@ -2672,6 +2818,7 @@ mod tests {
                 alive: false,
                 recent_prompts: Vec::new(),
                 usage_limit: None,
+                automation: None,
             })
             .unwrap();
         let entry = |n: usize| PromptEntry {
