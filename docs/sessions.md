@@ -133,8 +133,11 @@ follow the row, and the frame names only those that work on it: `Enter` edits an
 orion's, `^R` puts back orion's text (once you confirm); on one of yours, `^N` makes a new one and
 `^D` deletes it (once you confirm). The editor comes back to the row it was opened on.
 
-Three presets are **system presets**, on every list and tagged `orion` — the agents orion starts
-itself:
+Seven presets are **system presets**, on every list and tagged `orion` — the agents orion starts
+itself. Four belong to one automation each and are described with it: **Bug fixer** and
+**Feature builder** ([below](#the-bug-fixer-and-the-feature-builder)), **Meeting takeaways**
+([below](#meeting-takeaways)) and **Blue sky builder** ([below](#the-blue-sky-builder)). The other
+three:
 
 - **PR autofix** wraps what broke for the agent the **PR fixer** sends to a broken pull request.
   Its **Runs on** row starts on **the PR's own agent** — the session that did the work on its
@@ -202,7 +205,7 @@ A click outside the box closes it, as it closes any modal.
 Nothing about the PANE moves when you use it. It is not unfolded, not swapped onto the row, not
 attached to and not focused, and the turn goes down the session's PTY where it stands: prompting a
 session is not opening it. So the loop is click a row, `Space`, type a line, `Enter`, move to the next
-row — over a folded pane (`⌘J`) if you walk the rows with the keys, since a click on a row always
+row — over a folded pane (`⌘⇧J`) if you walk the rows with the keys, since a click on a row always
 brings the pane back — never once stepping into a session or waiting for one to attach. A pane already open is left on whatever it was reading, a terminal included.
 
 Only a live local agent takes one. An archived session's turn is over, a shell
@@ -405,7 +408,7 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   opening a shell or a worktree there, sending a follow-up, or typing into one of its sessions in the
   pane moves its tab to the front, so the header reads from the project you last worked in, left to
   right. Only switching to a tab moves none of them, so `[` / `]` walk a row that holds still.
-  A click on a tab, `[` / `]` for the tab to the left / right (stopping at either end), or a digit `1`–`9` for
+  A click on a tab, `[` / `]` for the tab to the left / right (stopping at either end), or `⌘1`–`⌘9` for
   the Nth from the left opens that project's sessions, on the row you last left it on — its session
   back in the pane — or its first row on a first visit. A project with no sessions yet — a folder
   just opened, or any other — opens on its EMPTY BANDS with the pane folded away, however it was
@@ -446,7 +449,7 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   without one closes once it is lit), then whole tabs, from the right, into the MORE CHIP after the
   last one drawn: `2 more ▾`, carrying their STATUS DOTS between them and sweeping as a tab's name
   does, so a project the row had no room for still says it wants you. A click on the chip (either
-  button) lists just those projects under it, and the pick opens one; `[` / `]`, the digits and the
+  button) lists just those projects under it, and the pick opens one; `[` / `]`, `⌘1`–`⌘9` and the
   header's cursor reach them too, each drawn in the lit tab's place. The lit tab is always drawn,
   its name whole wherever there is room for it. A tab's name, its `×`, the chip and the `+` all mark
   themselves while the pointer rests on them. The rows are grouped
@@ -545,13 +548,13 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   puts its shell there the same way. It is the selected session, so
   it comes and goes with the selection: clicking a row opens the pane on it — reading only, the keys
   stay on the grid, so a clicked row stays a
-  preview under its rule — and letting the row go (`Esc`, or `⌘J`) collapses
+  preview under its rule — and letting the row go (`Esc`, or `⌘⇧J`) collapses
   the pane and gives the grid the whole body back. A click on the air between the rows does not: a
   miss with the pointer leaves the pane exactly where it is. It takes a second click, or Enter, to type into it. It is the same pane
   a full-screen session has — the same attach, the same scrollback and wheel, and the session it shows is marked read
   the moment it lands there, so a `done` badge comes down as you arrive rather than when you open it.
   A click into the pane types into that session where it stands, with the grid still up beside it, and
-  `Esc` hands the keys back to the grid; `⌘J` folds the pane away. The edge facing the grid is
+  `Esc` hands the keys back to the grid; `⌘⇧J` folds the pane away. The edge facing the grid is
   draggable — a short `┃` grip marks it — and pulling it sideways trades columns between the grid
   and the session, stopping against the pane's own minimum one way and the grid's narrowest the
   other. Laid along the bottom, it is the pane's top edge that drags, under a short `━` grip,
@@ -568,7 +571,7 @@ already — so a new agent in a new worktree is that one chord, the task and `En
 - **Stepping into one** is Enter on a row (or a double-click): the keys cross
   into the pane beside the grid, where that session is already running, with its input locked and
   the grid still up beside it — the same place a click into the pane lands. `Esc` hands the keys
-  back to the grid (`⇧Esc` sends the agent its Esc), and `⌘J` folds the pane away.
+  back to the grid (`⇧Esc` sends the agent its Esc), and `⌘⇧J` folds the pane away.
 - **Full-screen** is `⌘F` in the pane (or on a row), or the `⤢` in the pane's header: the grid and
   its header give way to the session, the keys still in it. `⌘F` again, `Esc`, `^Q` or the `⤡` at
   the right end of the full-screen header brings it back down into the pane beside the grid.
@@ -585,15 +588,15 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   behind a confirm, which leaves the clone on disk alone. There is nothing above the bands to walk
   out to: `Esc` lets the row go, a second does nothing, and `↑` on the first band stays put.
 
-Every other key acts on the session under the cursor — `⌘⇧A` archives, `Backspace` deletes, `⌘E` opens its
-diff, `⌘K` jumps, `s` opens Settings. `⌘⇧A` asks first, always: a CONFIRM DIALOG names
+Every other key acts on the session under the cursor — `⌘⇧X` archives, `Backspace` deletes, `⌘E` opens its
+diff, `⌘K` jumps, `s` opens Settings. `⌘⇧X` asks first, always: a CONFIRM DIALOG names
 the session, `Enter` or `y` archives it and `Esc` or `n` keeps it, so a letter aimed at an agent
 that lands on the grid archives nothing — and saying yes is cheap, since `⌘⇧U` brings it back. The
 cursor lands on the row after the one archived in its band — the one that slides up into its
 place — or, when the band's last row went, on the one before it; a band's only session leaving leaves
 the band, empty, under the cursor. `Backspace` lands the same way, and its confirm is the session's
 own: deleting a worktree's last session never asks about the worktree, which stays as an empty band
-until its own `Backspace`. A held `⌘⇧A` opens one dialog and
+until its own `Backspace`. A held `⌘⇧X` opens one dialog and
 archives nothing by itself; a held `⌘⇧U` in the ARCHIVED VIEW unarchives one session, and the next needs
 the key let go and pressed again (on a terminal with the kitty keyboard protocol, which is what
 tells a held key's repeats from a fresh press; without it a long hold still walks the row).
@@ -644,9 +647,9 @@ Under the open rows sits **Merged**: the pull requests that landed in the last 7
 merge first, each in the merged purple with how long ago it merged — so the list reads as a lineage,
 not only as what is left to do. They ride the same query as the open list (the first page of 100
 merged pull requests, most recently touched first), and only the modal lists them:
-the grid's counts, the `⌘K` jump list and AUTOFIX see open pull requests alone. A merged row is read,
+the grid's counts, the `⌘K` jump list and the PR fixer see open pull requests alone. A merged row is read,
 diffed, commented on and opened in the browser like any other; the verbs that need an open pull
-request — `Enter`'s agent, merge, edit, close, ready/draft, autofix — say it has merged and do nothing.
+request — `Enter`'s agent, merge, edit, close, ready/draft, the PR fixer — say it has merged and do nothing.
 `is:merged` in the filter shows them alone. After them comes **Closed**: the pull requests closed
 without merging in the last 30 days, each saying why where GitHub does, and `Enter` on one opens
 **Edit pull request** at its reopen ([Keys](keys.md#views)); `is:closed` shows them alone.

@@ -525,7 +525,7 @@ pub fn land_detail(
     if let Some(name) = unreadable {
         if app.autofix.held.insert(url.to_string()) {
             app.flash = Some(Flash::note(format!(
-                "Autofix held for #{}: {name} is busy on its branch",
+                "PR fixer held #{}: {name} is busy on its branch",
                 pr.number
             )));
             app.dirty = true;
@@ -563,18 +563,18 @@ pub fn land_detail(
 /// until a push or a different failure.
 fn give_up(app: &mut App, form: &AutofixForm, attempts: u8) {
     let text = format!(
-        "{} is still failing after {attempts} autofix runs: over to you",
+        "{} is still failing after {attempts} PR fixer tries: over to you",
         form.pr.label()
     );
     if app.may_notify_desktop() {
-        crate::event_loop::alerts::notify_text("Autofix", &text);
+        crate::event_loop::alerts::notify_text("PR fixer", &text);
     }
     app.flash = Some(Flash::failed(text));
     app.autofix.record(&form.pr.url).handled = Some(form.fingerprint());
 }
 
 /// `⌘G` — in the PULL REQUESTS MODAL, or on the pane's PULL REQUEST PAGE
-/// (and a click on its `⌘G send autofix`): the form for the pull request
+/// (and a click on its `⌘G send to the PR fixer`): the form for the pull request
 /// it shows, at once from a fresh body, else once a fresh one lands
 /// ([`land_detail`]), so it names the checks failing now.
 pub(crate) fn open_asked(app: &mut App) {
@@ -888,7 +888,7 @@ pub fn note_stand_downs(app: &mut App) {
     };
     for (id, why) in down {
         if seen.insert(id) {
-            app.flash = Some(Flash::note(format!("Autofix stood down: {why}")));
+            app.flash = Some(Flash::note(format!("PR fixer stood down: {why}")));
             app.dirty = true;
         }
     }
@@ -1336,7 +1336,7 @@ pub fn send_waiting(app: &mut App, out: &mut Vec<ClientRequest>) {
 pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) {
     let Some(worktree) = app.root_worktree(&form.project) else {
         app.flash = Some(Flash::failed(
-            "Autofix: the project has no checkout to start from",
+            "PR fixer: the project has no checkout to start from",
         ));
         return;
     };
@@ -1417,7 +1417,7 @@ pub mod keys {
 
     pub const OPTION: Key = Key::new(&["up", "down"], "option").show(2);
     pub const TICK: Key = Key::new(&["space"], "tick");
-    pub const SEND: Key = Key::new(&["enter"], "send autofix");
+    pub const SEND: Key = Key::new(&["enter"], "send");
     #[cfg(test)]
     pub const ALL: &[Key] = &[OPTION, TICK, SEND];
 }
@@ -1652,7 +1652,7 @@ pub fn draw(f: &mut Frame, app: &mut App, form: &AutofixForm, th: Theme) {
     let area = crate::ui::centered_rect(frame, width, height);
     f.render_widget(Clear, area);
     let block = crate::hints::modal_block(
-        crate::ui::modal_block(format!(" Autofix #{} ", form.pr.number), th),
+        crate::ui::modal_block(format!(" PR fixer #{} ", form.pr.number), th),
         &hints(form),
         area.width,
         th,
@@ -2306,7 +2306,7 @@ mod tests {
         note_stand_downs(&mut app);
         assert_eq!(
             app.flash.as_deref(),
-            Some("Autofix stood down: billing: already on it")
+            Some("PR fixer stood down: billing: already on it")
         );
         app.flash = None;
         note_stand_downs(&mut app);
@@ -2463,7 +2463,7 @@ mod tests {
             })
             .collect();
         for text in [
-            "Autofix #7",
+            "PR fixer #7",
             "#7 Add things",
             "merge conflicts · 2 failing checks",
             "[x] Merge conflicts",
@@ -2471,7 +2471,7 @@ mod tests {
             "[x] Failing checks  2 failing",
             "CI              unit tests, lint",
             "Note",
-            "send autofix",
+            "send",
             "not now",
         ] {
             assert!(shot.contains(text), "{text} missing:\n{shot}");

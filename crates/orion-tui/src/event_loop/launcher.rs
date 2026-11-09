@@ -4852,7 +4852,7 @@ mod tests {
 
     /// `⌘G` on the pane's PULL REQUEST PAGE is the AUTOFIX MODAL for the
     /// pull request it reads — not HOME — as it is in the PULL REQUESTS
-    /// MODAL, and so is a click on the work block's `⌘G send autofix`.
+    /// MODAL, and so is a click on the work block's `⌘G send to the PR fixer`.
     /// Esc closes it with nothing remembered, the page still up. With no
     /// fresh body to read the checks off, one is asked for and the form
     /// opens as it lands.
@@ -4884,7 +4884,7 @@ mod tests {
             keys(&mut app, &[KeyCode::Down, KeyCode::Down, KeyCode::Right]);
             assert_eq!(app.focus, Focus::Terminal);
             assert!(
-                footer_text(&app).contains("autofix"),
+                footer_text(&app).contains("PR fixer"),
                 "{}",
                 footer_text(&app)
             );
@@ -4929,7 +4929,7 @@ mod tests {
             key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
             let screen = screen_text(&draw_tall(&mut app));
             assert!(
-                screen.contains("AUTOFIX   ✗ 1 failing check · ⌘G send autofix"),
+                screen.contains("PR FIXER  ✗ 1 failing check · ⌘G send to the PR fixer"),
                 "{screen}"
             );
             let at = app

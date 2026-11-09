@@ -368,7 +368,7 @@ impl Runner for MeetingTakeaways {
         } else if busy > 0 {
             (Dot::Working, format!("reading {busy}"))
         } else if app.microsoft.email.is_none() {
-            (Dot::Idle, "Microsoft 365 not connected".into())
+            (Dot::Idle, "not connected".into())
         } else {
             (Dot::Idle, "idle".into())
         };
@@ -1178,6 +1178,19 @@ mod tests {
         let json = serde_json::to_string(&kept).unwrap();
         assert!(json.contains(r#""stage":"added","detail":2"#), "{json}");
         assert_eq!(serde_json::from_str::<Kept>(&json).unwrap(), kept);
+    }
+
+    /// Signed out of Microsoft 365, the left list's state is short enough
+    /// to sit whole beside the name, like `off` and `idle`.
+    #[test]
+    fn signed_out_reads_not_connected() {
+        let app = App::new();
+        assert!(app.microsoft.email.is_none());
+        let panel = MeetingTakeaways.panel(&app);
+        assert_eq!(
+            (panel.dot, panel.state.as_str()),
+            (Dot::Idle, "not connected")
+        );
     }
 
     /// The panel's MEETINGS rows say where each meeting is, the latest

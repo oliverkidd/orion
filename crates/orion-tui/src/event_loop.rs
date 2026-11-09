@@ -4230,6 +4230,7 @@ fn dispatch_action(
         Action::Settings => open_settings(app),
         Action::AwayToggle => crate::phone::toggle_away(app),
         Action::ClaudeAccounts => open_claude_accounts(app, None),
+        Action::Connections => open_connections(app),
         Action::Usage => crate::usage::open(app),
         Action::StopAllStacks => crate::stacks::stop_all(app, out),
         Action::CleanUnusedWorktrees => crate::clean_worktrees::start(app),
@@ -5085,6 +5086,7 @@ fn opens_from_closed_splash(action: crate::keymap::Action) -> bool {
             | Action::Help
             | Action::Settings
             | Action::ClaudeAccounts
+            | Action::Connections
             | Action::Usage
             | Action::Hosts
             | Action::AgentPresets
@@ -8975,6 +8977,16 @@ fn open_settings(app: &mut App) {
     if app.settings_memory_expired() {
         app.forget_settings_focus();
     }
+    reopen_settings(app);
+}
+
+/// The settings overlay on the Connections tab, its first row under the
+/// cursor. **Connections** in the COMMAND PALETTE.
+pub(crate) fn open_connections(app: &mut App) {
+    let tab = crate::config::connections_tab();
+    app.settings_tab = tab;
+    app.remember_settings_row(tab, 0);
+    app.settings_on_tabs = false;
     reopen_settings(app);
 }
 
@@ -28318,6 +28330,25 @@ mod tests {
                     false
                 )
             );
+        });
+    }
+
+    /// **Connections** in the COMMAND PALETTE opens Settings on the
+    /// Connections tab, the cursor on its first row, not the tab strip.
+    #[test]
+    fn the_palette_opens_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::config::with_config_path(dir.path().join("config.json"), || {
+            let mut app = App::new();
+            run_action(&mut app, crate::keymap::Action::Connections);
+            let view = settings_view(&app);
+            assert_eq!(
+                (view.tab, view.selected, view.on_tabs),
+                (crate::config::connections_tab(), 0, false)
+            );
+            assert_eq!(crate::config::SETTINGS_TABS[view.tab].title, "Connections");
+            let spec = crate::keymap::spec_of(crate::keymap::Action::Connections).unwrap();
+            assert!(spec.defaults.is_empty(), "a palette row, no key of its own");
         });
     }
 

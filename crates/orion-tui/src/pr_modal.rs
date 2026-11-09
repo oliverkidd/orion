@@ -1607,7 +1607,7 @@ pub(crate) mod keys {
     pub const LINEAR: Key = Key::new(&["cmd+l", "ctrl+l"], "Linear");
     /// The AUTOFIX form: an agent sent at the pull request's conflicts and
     /// failing checks (`crate::autofix`).
-    pub const AUTOFIX: Key = Key::new(&["cmd+g", "ctrl+g"], "autofix");
+    pub const AUTOFIX: Key = Key::new(&["cmd+g", "ctrl+g"], "PR fixer");
     /// The pull request's checkout, found or cut (`pr_checkout`): the
     /// row menu's **Check out**. ⌘B for its branch.
     pub const CHECKOUT: Key = Key::new(&["cmd+b", "ctrl+b"], "check out");

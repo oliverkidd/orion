@@ -116,7 +116,7 @@
   viewer's top line, beside the branch's pull request and its checks. Nothing is checked out or
   fetched: base sync keeps origin's copy of the base fresh, so this works before a pull request
   exists and needs no network. Answers are kept by the two commits' SHAs, so opening the viewer
-  again on the same commits costs two `rev-parse`s. AUTOFIX asks the same of a pull request it
+  again on the same commits costs two `rev-parse`s. The PR FIXER asks the same of a pull request it
   sends an agent to — its head against its base, the head fetched by its pull ref when the repo
   lacks it — as soon as it is seen to conflict, and names the files in the agent's prompt; a send
   whose answer is still out waits for it and goes on the next git tick. `Enter` on a `U` file opens the CONFLICT
@@ -533,7 +533,7 @@ all say where the same pull request stands, on their own beats, and land in what
 network gives. So none of them is drawn directly: each answer goes into one store of what is known
 about every pull request, each fact stamped with when its answer was *asked*, and every surface — the
 modal's rows and page, the preview, the band, its rows, the footer, the palette, Linear's work column,
-the merge form and AUTOFIX — draws from that store. The newest-asked answer wins, so a slow list asked
+the merge form and the PR fixer — draws from that store. The newest-asked answer wins, so a slow list asked
 before a page can't undo what the page said; an answer that doesn't know (GitHub's `mergeable:
 UNKNOWN` right after a push, a recheck cut short) never replaces one that does; and the cache from the
 last launch loses to any live answer, the page saying `cached` beside its state until one lands. Linear's

@@ -2,9 +2,9 @@
 //! between the page's sentence and its tabs (`pr_preview::page`) — up to
 //! three lines, each only when it has something to say:
 //!
-//! * **AUTOFIX** — the live `autofix-<n>` on it and what it is doing; or,
+//! * **PR FIXER** — the live `autofix-<n>` on it and what it is doing; or,
 //!   with none on it while it is broken, what broke and the key that sends
-//!   one: `✗ 1 failing check, 3 files conflict · ⌘G send autofix`.
+//!   one: `✗ 1 failing check, 3 files conflict · ⌘G send to the PR fixer`.
 //! * **LINEAR** — the issues linked to it, each with its state: those its
 //!   branch was linked to (`linear-links.json`, `App::linear_links`) and
 //!   those Linear has it attached to, as the project's list (`App::linear`)
@@ -13,7 +13,7 @@
 //!   TAG its grid row wears.
 //!
 //! A click on a session lands on it in the grid; on an issue, opens it in
-//! the LINEAR VIEW; on `⌘G send autofix`, is that key ([`click`]).
+//! the LINEAR VIEW; on `⌘G send to the PR fixer`, is that key ([`click`]).
 
 use crate::app::App;
 use crate::theme::Theme;
@@ -93,7 +93,7 @@ fn head_branch(app: &App, project: &ProjectId, url: &str) -> Option<String> {
         .filter(|head| !head.is_empty())
 }
 
-/// AUTOFIX: the `autofix-<n>` at work on it, as a session chip and what it
+/// PR FIXER: the `autofix-<n>` at work on it, as a session chip and what it
 /// is doing — or, with none, what broke while it is open and broken, and
 /// the key that sends one.
 fn autofix_line(app: &App, url: &str, fixer: Option<&Agent>) -> Option<WorkLine> {
@@ -103,7 +103,7 @@ fn autofix_line(app: &App, url: &str, fixer: Option<&Agent>) -> Option<WorkLine>
         let mut spans = crate::ui::session_chip(app, agent);
         spans.push(Span::styled(format!("  {}", doing(agent)), dim));
         return Some(WorkLine {
-            label: "AUTOFIX",
+            label: "PR FIXER",
             items: vec![Item {
                 spans,
                 hit: Some(WorkHit::Session(agent.id.clone())),
@@ -136,7 +136,7 @@ fn autofix_line(app: &App, url: &str, fixer: Option<&Agent>) -> Option<WorkLine>
     }
     let key = Style::default().fg(th.text).add_modifier(Modifier::BOLD);
     Some(WorkLine {
-        label: "AUTOFIX",
+        label: "PR FIXER",
         items: vec![
             Item {
                 spans: vec![Span::styled(
@@ -148,7 +148,7 @@ fn autofix_line(app: &App, url: &str, fixer: Option<&Agent>) -> Option<WorkLine>
             Item {
                 spans: vec![
                     Span::styled(crate::pr_modal::keys::AUTOFIX.label(), key),
-                    Span::styled(" send autofix", dim),
+                    Span::styled(" send to the PR fixer", dim),
                 ],
                 hit: Some(WorkHit::SendAutofix),
             },
@@ -472,13 +472,13 @@ mod tests {
         crate::conflicts::want(&mut app, URL, &clone);
         assert_eq!(
             shown(&app, 100),
-            [" AUTOFIX   ✗ 1 failing check, 2 files conflict · ⌘G send autofix"]
+            [" PR FIXER  ✗ 1 failing check, 2 files conflict · ⌘G send to the PR fixer"]
         );
 
         let app = app_with_pr(&clone, &head, false, vec![failed("unit"), failed("lint")]);
         assert_eq!(
             shown(&app, 100),
-            [" AUTOFIX   ✗ 2 failing checks · ⌘G send autofix"]
+            [" PR FIXER  ✗ 2 failing checks · ⌘G send to the PR fixer"]
         );
         assert!(
             shown(&quiet_app(), 100).is_empty(),
@@ -529,7 +529,7 @@ mod tests {
 
         let lines = shown(&app, 100);
         assert_eq!(lines.len(), 2, "{lines:?}");
-        assert!(lines[0].starts_with(" AUTOFIX   "), "{lines:?}");
+        assert!(lines[0].starts_with(" PR FIXER  "), "{lines:?}");
         assert!(lines[0].ends_with("autofix-7  working · 4m"), "{lines:?}");
         let chip = |id: &AgentId| -> String {
             let a = app.tree.agents.iter().find(|a| &a.id == id).unwrap();
@@ -659,8 +659,8 @@ mod tests {
                 .position(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("{needle}:\n{}", screen.join("\n")))
         };
-        assert!(at("kate · feat → main") < at("AUTOFIX   ✗ 1 failing check"));
-        assert_eq!(at("AUTOFIX") + 1, at("SESSIONS"));
+        assert!(at("kate · feat → main") < at("PR FIXER  ✗ 1 failing check"));
+        assert_eq!(at("PR FIXER") + 1, at("SESSIONS"));
         assert!(at("SESSIONS") < at("Description"));
         let Some(Overlay::PullRequests(view)) = &app.overlay else {
             panic!("the modal");

@@ -1887,7 +1887,7 @@ pub(crate) fn pane_key(
     let (pr, detail) = pane_pr(app)?;
     if crate::pr_modal::keys::AUTOFIX.matches(key) {
         crate::automations::pr_fixer::open_asked(app);
-        return Some("Autofix");
+        return Some("PR fixer");
     }
     if keys::NEXT_TAB.matches(key) || keys::PREV_TAB.matches(key) {
         let delta = if keys::NEXT_TAB.matches(key) { 1 } else { -1 };

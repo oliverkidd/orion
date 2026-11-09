@@ -853,6 +853,15 @@ pub fn accounts_tab() -> usize {
         .expect("SETTINGS_TABS declares an Accounts tab")
 }
 
+/// The Connections tab: away and the phone, Slack, Microsoft 365, GitHub
+/// and Linear.
+pub fn connections_tab() -> usize {
+    SETTINGS_TABS
+        .iter()
+        .position(|t| t.title == "Connections")
+        .expect("SETTINGS_TABS declares a Connections tab")
+}
+
 pub fn tab_count() -> usize {
     SETTINGS_TABS.len()
 }

@@ -114,7 +114,8 @@ save. A key inside an entry this build doesn't know is kept.
 
 ### Connections
 
-What orion reaches outside itself through, a section each: **AWAY AND PHONE**, **SLACK**,
+What orion reaches outside itself through, a section each (**Connections** in the command palette
+opens Settings here): **AWAY AND PHONE**, **SLACK**,
 **MICROSOFT 365** and **GITHUB AND LINEAR**. `←→` changes a row, `Enter` edits it, `Tab` goes on
 to the next tab and `Esc` closes. SLACK and MICROSOFT 365 each have a status row: `c` (or `Enter`)
 connects it and `o` disconnects it. GITHUB AND LINEAR is two switches (below). A section whose rows haven't arrived yet reads
@@ -189,7 +190,7 @@ lists, two switches `←`/`→` or `Enter` turn on and off:
 | Key | Default | What it does |
 |---|---|---|
 | `away.screen_lock` | `true` | The screen locking counts as away. |
-| `away.idle_minutes` | `10` | Minutes with no keys or mouse before you count as away. |
+| `away.idle_minutes` | `10` | Minutes with no keys or mouse before you count as away; `0` is never. |
 | `away.phone` | `["question", "plan", "crash"]` | What goes to your phone while you are away. |
 | `away.quiet` | `["22:00", "07:00"]` | Quiet hours: nothing goes to your phone between them. `null` is none. |
 | `slack.dms`, `slack.mentions`, `slack.threads` | `true` | Direct messages, mentions of you, and new replies in threads you're in count as messages for you. |
@@ -492,7 +493,7 @@ Everything orion writes under its data dir:
 | `config.json`, `config.local.json` | settings | — |
 | `agent_presets.json` | presets | — |
 | `ssh_hosts.json` | ssh destinations | the 20 newest |
-| `todos/` | each project's todo list | ticked items: 120 days |
+| `todos/` | each project's todo list, and Blue sky's (`blue-sky.json`) | ticked items: 120 days |
 | `reviews/` | week in review runs, `all/<last day>/<project>.md` and a `meta.json` each | the last 12 runs |
 | `pr-cache/` | the last pull request lists and pages | 100 open per project, the last 7 days' merges, the last 30 days' closes; pages while their PR is on a row |
 | `linear-cache/issues.json` | each project's last Linear lists and comments | rewritten on each fetch |
@@ -501,7 +502,9 @@ Everything orion writes under its data dir:
 | `cursor_models.json` | Cursor's model list | refreshed after 24 h |
 | `recent_files.json` | Go to file's recent files | 20 per checkout |
 | `reviewed.json` | the diff viewer's reviewed marks | until the checkout's HEAD moves |
-| `needs-you.json` | which Needs you cards are done or snoozed | a done card until no source offers it; a snooze for its hour |
+| `needs-you.json` | which Needs you cards are done or snoozed, and the Slack cards | a done card until no source offers it; a snooze for its hour |
+| `automations/linear-builder.json` | every Linear ticket the bug fixer and feature builder have picked up, so none is picked up twice | — |
+| `automations/meeting-takeaways.json` | each meeting's takeaways and where they stand | two weeks after the meeting |
 | `quick_prompt_drafts.json` | unsent QUICK PROMPT text | until it is sent or cleared |
 | `attachments/` | files dropped or pasted into a prompt | 7 days |
 | `fresh/config.json` | fresh's config | — |
@@ -526,6 +529,8 @@ Everything orion writes under its data dir:
 | `ORION_MICROSOFT_POLL_SECS` | how often to read your Microsoft 365 calendar (default 300; `0` off) |
 | `ORION_MEETING_TAKEAWAYS_POLL_SECS` | how often meeting takeaways looks for a finished Teams meeting's transcript, for up to an hour after it ends (default 120; `0` off) |
 | `ORION_MICROSOFT_GRAPH_URL`, `ORION_MICROSOFT_TOKEN` | a Microsoft Graph base URL and access token used instead of `https://graph.microsoft.com/v1.0` and your sign-in (tests: a fake Graph) |
+| `ORION_AWAY_POLL_MS` | how often the DAEMON reads whether you are away, from the screen lock and the time since your last key, while Slack is connected (default 5000; `0` off, so only `⌘⇧A` makes you away) |
+| `ORION_SLACK_API_URL`, `ORION_SLACK_TOKENS` | a Slack Web API base URL used instead of `https://slack.com/api`, and the three tokens as `<app>,<bot>,<user>` used instead of the Keychain's (tests: a fake Slack) |
 | `ORION_PROJECT_ABOUT` | `off` stops orion writing a project's **What it is** (tests) |
 | `ORION_BLUE_SKY_DIR` | the folder the Blue sky builder builds ideas tied to no project in (default `~/Code/orion-blue-sky`) |
 | `ORION_NEEDS_YOU_POLL_SECS` | how often Needs you asks Linear for your notifications and `gh` for the reviews asked of you (default 300; `0` off) |

@@ -197,6 +197,9 @@ pub enum Action {
     /// The settings overlay on the Accounts tab's CLAUDE ACCOUNTS: who each
     /// Claude Code login is, signing one in or out, adding another.
     ClaudeAccounts,
+    /// The settings overlay on its Connections tab: away and the phone,
+    /// Slack, Microsoft 365, GitHub and Linear.
+    Connections,
     /// `⇧U`: ACCOUNT USAGE — how much is left on each Claude and Cursor
     /// account, window by window.
     Usage,
@@ -333,7 +336,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::NextAttention,
         id: "next_attention",
         label: "Next session needing you",
-        hint: "Jump to the next session in the palette's attention order (needs you or crashed, finished unread, running, then recency) in any project, wrapping",
+        hint: "Jump to the next session in attention order (needs you or crashed, finished unread, running, then recency) in any project, wrapping",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &["."],
@@ -342,7 +345,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::PrevAttention,
         id: "prev_attention",
         label: "Prev session needing you",
-        hint: "The same walk backwards: the session before this one in the palette's attention order, wrapping at the top",
+        hint: "The same walk backwards: the session before this one in attention order, wrapping at the top",
         group: "NAVIGATE",
         scope: Scope::Global,
         defaults: &[","],
@@ -907,6 +910,16 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "Settings → Accounts → Claude accounts: who each Claude Code login is signed in as, sign one in or out, add another",
         group: "GENERAL",
         scope: Scope::Global,
+        defaults: &[],
+    },
+    ActionSpec {
+        action: Action::Connections,
+        id: "connections",
+        label: "Connections",
+        hint: "Settings → Connections: when you count as away and what reaches your phone, Slack, Microsoft 365, GitHub and Linear",
+        group: "GENERAL",
+        scope: Scope::Global,
+        // No key: Settings (⌘,) and this palette row reach it.
         defaults: &[],
     },
     ActionSpec {
