@@ -23829,9 +23829,11 @@ mod tests {
 
     /// Worktrees keep one order below the root checkout: the order they
     /// were made in. A turn starting or finishing moves nothing; the one
-    /// move is a checkout whose sessions have all gone cold sinking to the
-    /// bottom, and coming back to its place when one wakes. The cursor
-    /// follows its row across that move.
+    /// move is a checkout whose sessions have all gone cold sinking below
+    /// the divider, and coming up to the bottom of the live ones when one
+    /// wakes — not back to the slot it was made in, which would push every
+    /// live checkout under that slot down a row. The cursor follows its
+    /// row across that move.
     #[test]
     fn worktrees_keep_creation_order_and_dormant_ones_sink() {
         use orion_core::AgentStatus;
@@ -23903,14 +23905,25 @@ mod tests {
             Some("older")
         );
 
-        // It wakes: back to its place.
+        // A checkout with no sessions is dormant from the start, below.
+        hse(
+            &mut app,
+            ServerEvent::EntityUpserted {
+                entity: wt_entity("w4", "p1", "idle", false),
+            },
+        );
+        assert_eq!(branches(&app), ["main", "older", "feat", "idle"]);
+
+        // "feat" wakes: up to the bottom of the live ones, right above the
+        // divider, so "older" above it never moves.
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
                 entity: agent_stamped("a2", "w2", now),
             },
         );
-        assert_eq!(branches(&app), ["main", "feat", "older"]);
+        assert!(!app.worktree_dormant(&WorktreeId("w2".into())));
+        assert_eq!(branches(&app), ["main", "older", "feat", "idle"]);
         assert_eq!(
             app.selected_worktree().map(|w| w.branch.as_str()),
             Some("older")

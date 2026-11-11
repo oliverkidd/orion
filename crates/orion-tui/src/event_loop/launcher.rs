@@ -11762,7 +11762,8 @@ mod tests {
     /// Clicking a DORMANT card attaches it, which boots its reaped CLI and
     /// wakes its checkout. Held, the band stays where it was clicked —
     /// under the divider — until the cursor leaves it; then it goes up to
-    /// its place among the live checkouts.
+    /// the bottom of the live checkouts, right above the divider, which
+    /// is the spot it already stands in.
     #[test]
     fn a_dormant_checkout_woken_by_a_click_stays_put_until_the_cursor_leaves() {
         let mut app = back_from_away();
@@ -11795,9 +11796,10 @@ mod tests {
         super::select_card(&mut app, agent_ref("new-chat"), &mut out);
         assert_eq!(
             band_order(&app),
-            ["w1", "wOld", "wNew"],
-            "off it, `old` takes its place among the live ones, cut first"
+            ["w1", "wNew", "wOld"],
+            "off it, `old` joins the live ones at their bottom: nothing moves"
         );
+        assert!(!app.worktree_dormant(&WorktreeId("wOld".into())));
     }
 
     /// The attach boots the reaped CLI, and the DAEMON's word that it is

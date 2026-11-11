@@ -4723,6 +4723,40 @@ pub struct App {
     pub round_caps: bool,
     /// The ROWS MEMO, armed by the frame and by [`App::reading_url`].
     pub rows_memo: RowsMemo,
+    /// The WAKE ORDER the live checkouts stand in ([`App::worktree_order`]).
+    wake_order: std::cell::RefCell<WakeOrder>,
+}
+
+/// The order the LIVE checkouts stand in: the order they went live in, as
+/// this TUI saw it. A checkout waking from DORMANT goes to the bottom of
+/// the live ones, right above the divider it came up from, so nothing
+/// above it moves. The checkouts live when a project's list is first
+/// drawn take their places in creation order.
+#[derive(Default)]
+struct WakeOrder {
+    /// Each live checkout's place: lower stands higher.
+    seq: HashMap<WorktreeId, u64>,
+    next: u64,
+}
+
+impl WakeOrder {
+    /// Bring the places up to date with `rows`, one project's checkouts in
+    /// tree order, each with whether it sorts live: a newly live one takes
+    /// the next place, a dormant one gives its place up.
+    fn note<'a>(&mut self, rows: impl Iterator<Item = (&'a WorktreeId, bool)>) {
+        for (id, live) in rows {
+            if !live {
+                self.seq.remove(id);
+            } else if !self.seq.contains_key(id) {
+                self.seq.insert(id.clone(), self.next);
+                self.next += 1;
+            }
+        }
+    }
+
+    fn place(&self, id: &WorktreeId) -> u64 {
+        self.seq.get(id).copied().unwrap_or(u64::MAX)
+    }
 }
 
 impl Default for App {
@@ -4928,6 +4962,7 @@ impl App {
             animations: true,
             round_caps: false,
             rows_memo: RowsMemo::default(),
+            wake_order: std::cell::RefCell::default(),
         }
     }
 
@@ -6123,29 +6158,44 @@ impl App {
 
     /// `project`'s checkouts as indices into `tree.worktrees`, in the one
     /// order every list of them uses: the root checkout first, then the
-    /// LIVE ones, then the DORMANT ones ([`App::worktree_dormant`]), each
-    /// group oldest first: in tree order, which is the order the DAEMON
-    /// registered them in (its store loads them by `created_at`), with a
-    /// checkout cut since appended.
+    /// LIVE ones in the order they went live ([`WakeOrder`]), then the
+    /// DORMANT ones ([`App::worktree_dormant`]) oldest first: in tree
+    /// order, which is the order the DAEMON registered them in (its store
+    /// loads them by `created_at`), with a checkout cut since appended.
     ///
     /// Never by recency. Ordering on the last turn moved a checkout every
     /// time one of its sessions started or finished one, and the list
     /// reshuffled under the reader all day. The one move left is a whole
-    /// checkout going cold, or waking up again — and the HELD CHECKOUT
-    /// under the cursor does not make even that move until the cursor
-    /// leaves it ([`App::worktree_hold`]).
+    /// checkout going cold and sinking below the divider, or waking and
+    /// coming up to sit right above it, at the bottom of the live ones —
+    /// never back into the slot it was made in, which shifted every live
+    /// checkout below that slot. The HELD CHECKOUT under the cursor does
+    /// not make even that move until the cursor leaves it
+    /// ([`App::worktree_hold`]).
     pub fn worktree_order(&self, project: &ProjectId) -> Vec<usize> {
         let worktrees = &self.tree.worktrees;
-        let mut rows: Vec<usize> = (0..worktrees.len())
+        let rows: Vec<usize> = (0..worktrees.len())
             .filter(|&i| &worktrees[i].project_id == project)
             .collect();
         let live = self.live_worktrees();
-        // A stable sort: inside each group, tree order stands.
-        rows.sort_by_key(|&i| {
+        let dormant: Vec<bool> = rows
+            .iter()
+            .map(|&i| self.dormant_in(&live, &worktrees[i].id))
+            .collect();
+        let mut wake = self.wake_order.borrow_mut();
+        wake.note(
+            rows.iter()
+                .zip(&dormant)
+                .map(|(&i, &dormant)| (&worktrees[i].id, !dormant)),
+        );
+        let mut keyed: Vec<(usize, bool)> = rows.iter().copied().zip(dormant).collect();
+        // A stable sort: the dormant ones keep tree order.
+        keyed.sort_by_key(|&(i, dormant)| {
             let w = &worktrees[i];
-            (std::cmp::Reverse(w.is_main), self.dormant_in(&live, &w.id))
+            let place = if dormant { 0 } else { wake.place(&w.id) };
+            (std::cmp::Reverse(w.is_main), dormant, place)
         });
-        rows
+        keyed.into_iter().map(|(i, _)| i).collect()
     }
 
     /// Whether checkout `id` sorts as DORMANT, given the `live` ones: the
