@@ -477,18 +477,17 @@ impl PtySession {
     ///
     /// A replay that rebuilds the client's screen from a ring that has
     /// wrapped opens with the modes whose set may have fallen off its head
-    /// — bracketed paste, which claude turns on once at startup and the
-    /// client reads to paste the way a terminal would (#107) — and
+    /// (`kitty::KittyScanner::replay_modes`) — claude turns them on once,
+    /// as its fullscreen screen opens: bracketed paste, which the client
+    /// reads to paste the way a terminal would (#107), and the alternate
+    /// screen and mouse tracking, which it reads to hand the wheel to
+    /// claude rather than scroll a history claude never wrote into — and
     /// `base_seq` backs up by their length, so the client's byte count
     /// still ends where the ring does.
     pub fn snapshot(&self, from_seq: Option<u64>) -> (u64, Vec<u8>) {
         let (base_seq, data) = self.ring.lock().unwrap().snapshot_from(from_seq);
-        let modes: &[u8] = if self.kitty.lock().unwrap().bracketed_paste() {
-            b"\x1b[?2004h"
-        } else {
-            b""
-        };
-        with_modes(from_seq, base_seq, data, modes)
+        let modes = self.kitty.lock().unwrap().replay_modes();
+        with_modes(from_seq, base_seq, data, &modes)
     }
 
     /// The child's current kitty keyboard flags (0 = legacy).
@@ -756,6 +755,40 @@ mod tests {
             with_modes(None, 8, b"tail".to_vec(), modes),
             (8, b"tail".to_vec())
         );
+    }
+
+    /// A fullscreen program whose screen and mouse sets fell off the ring
+    /// still reads as one to the client: the replay's modes put its parser
+    /// on the alternate screen with the mouse on, so the pane hands the
+    /// wheel to the program instead of scrolling a history it never wrote.
+    #[test]
+    fn a_replay_that_lost_the_mouse_set_still_hands_over_the_wheel() {
+        let mut scanner = kitty::KittyScanner::new();
+        scanner.feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+        // Everything since the sets: frames drawn in place.
+        let tail = b"\x1b[H\x1b[2Jframe".to_vec();
+        let (_, replay) = with_modes(None, 1_000_000, tail.clone(), &scanner.replay_modes());
+
+        let mut lost = vt100::Parser::new(24, 80, 0);
+        lost.process(&tail);
+        assert_eq!(
+            lost.screen().mouse_protocol_mode(),
+            vt100::MouseProtocolMode::None,
+            "the tail alone has no mouse"
+        );
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(&replay);
+        let screen = parser.screen();
+        assert!(screen.alternate_screen());
+        assert_eq!(
+            screen.mouse_protocol_mode(),
+            vt100::MouseProtocolMode::PressRelease
+        );
+        assert_eq!(
+            screen.mouse_protocol_encoding(),
+            vt100::MouseProtocolEncoding::Sgr
+        );
+        assert!(screen.contents().contains("frame"));
     }
 
     /// A command line over the OS's ceiling is refused before the spawn,

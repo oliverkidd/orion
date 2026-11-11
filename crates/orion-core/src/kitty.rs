@@ -17,10 +17,16 @@
 //! answers before it draws — Microsoft Edit asks for DA1 and a cursor
 //! report at startup — would otherwise hang on a blank screen.
 //!
-//! And bracketed paste (`CSI ? 2004 h` / `l`): a client reads the mode off
-//! its own parser to paste the way a terminal would, but a child sets it
-//! once — claude at startup — and a ring that has wrapped since no longer
-//! holds the set, so the replay has to restore it (`PtySession::snapshot`).
+//! And the REPLAYED MODES: bracketed paste (`CSI ? 2004 h` / `l`), the
+//! alternate screen (`?1049`, `?1047`, `?47`), mouse tracking (`?1000`,
+//! `?1002`, `?1003`) and its encoding (`?1005`, `?1006`, `?1015`). A client
+//! reads each off its own parser — to paste the way a terminal would, and
+//! to hand the wheel to a program that asked for the mouse rather than
+//! scroll its own history — but a child sets them once, claude as it opens
+//! its fullscreen screen, and a ring that has wrapped since no longer holds
+//! the sets, so the replay has to restore them (`PtySession::snapshot`).
+//! Lose them and a long session's pane no longer scrolls: the wheel goes
+//! to a history a fullscreen program never wrote into.
 
 const ESC: u8 = 0x1b;
 
@@ -74,6 +80,12 @@ pub struct KittyScanner {
     params: Vec<u8>,
     stack: Vec<u8>,
     bracketed_paste: bool,
+    /// The alternate screen mode set, if one is: 1049, 1047 or 47.
+    alt_screen: Option<u16>,
+    /// The mouse tracking mode set, if one is: 1000, 1002 or 1003.
+    mouse_tracking: Option<u16>,
+    /// The mouse encoding set, if one is: 1005, 1006 or 1015.
+    mouse_encoding: Option<u16>,
 }
 
 impl Default for KittyScanner {
@@ -89,6 +101,9 @@ impl KittyScanner {
             params: Vec::new(),
             stack: Vec::new(),
             bracketed_paste: false,
+            alt_screen: None,
+            mouse_tracking: None,
+            mouse_encoding: None,
         }
     }
 
@@ -100,6 +115,45 @@ impl KittyScanner {
     /// Has the child turned bracketed paste on (`CSI ? 2004 h`)?
     pub fn bracketed_paste(&self) -> bool {
         self.bracketed_paste
+    }
+
+    /// The REPLAYED MODES the child has on, as the sets that turn them on:
+    /// the alternate screen first, so what the replay draws after lands on
+    /// it, then the mouse and its encoding, then bracketed paste. Empty
+    /// when none is on.
+    pub fn replay_modes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for mode in [self.alt_screen, self.mouse_tracking, self.mouse_encoding]
+            .into_iter()
+            .flatten()
+        {
+            out.extend_from_slice(format!("\x1b[?{mode}h").as_bytes());
+        }
+        if self.bracketed_paste {
+            out.extend_from_slice(b"\x1b[?2004h");
+        }
+        out
+    }
+
+    /// One DECSET (`on`) or DECRST of private mode `mode`, for the
+    /// REPLAYED MODES. Setting one of a family replaces the family's last;
+    /// resetting clears it when it is the one set.
+    fn set_mode(&mut self, mode: u16, on: bool) {
+        let slot = match mode {
+            2004 => {
+                self.bracketed_paste = on;
+                return;
+            }
+            47 | 1047 | 1049 => &mut self.alt_screen,
+            1000 | 1002 | 1003 => &mut self.mouse_tracking,
+            1005 | 1006 | 1015 => &mut self.mouse_encoding,
+            _ => return,
+        };
+        if on {
+            *slot = Some(mode);
+        } else if *slot == Some(mode) {
+            *slot = None;
+        }
     }
 
     /// Scan a chunk of child output. Sequences split across chunks are fine —
@@ -133,6 +187,9 @@ impl KittyScanner {
                     // RIS (`ESC c`) puts every mode back to its default.
                     if b == b'c' {
                         self.bracketed_paste = false;
+                        self.alt_screen = None;
+                        self.mouse_tracking = None;
+                        self.mouse_encoding = None;
                     }
                     // Includes ESC ESC; any other escape kind is not a CSI.
                     self.state = if b == ESC { State::Esc } else { State::Ground };
@@ -207,11 +264,13 @@ impl KittyScanner {
                 _ => {}
             },
             // DECSET / DECRST, any number of modes at once
-            // (`CSI ? 1004 ; 2004 h`): only bracketed paste is tracked.
+            // (`CSI ? 1004 ; 2004 h`): the REPLAYED MODES are tracked.
             b'h' | b'l' => {
                 if let Some((b'?', modes)) = params.split_first() {
-                    if modes.split(|&b| b == b';').any(|m| m == b"2004") {
-                        self.bracketed_paste = final_byte == b'h';
+                    for mode in modes.split(|&b| b == b';').filter_map(parse_num) {
+                        if let Ok(mode) = u16::try_from(mode) {
+                            self.set_mode(mode, final_byte == b'h');
+                        }
                     }
                 }
             }
@@ -295,6 +354,39 @@ mod tests {
         let a = s.feed(b"\x1b[31mred\x1b[H\x1b[u\x1b[12345678901234567890u");
         assert_eq!(a, ScanActions::default());
         assert_eq!(s.flags(), 0);
+    }
+
+    /// The alternate screen, the mouse and its encoding are tracked as
+    /// claude sets them on opening its fullscreen screen, and replay as the
+    /// sets that turn them on, the screen first.
+    #[test]
+    fn replay_modes_follow_the_screen_and_the_mouse() {
+        let mut s = KittyScanner::new();
+        assert!(
+            s.replay_modes().is_empty(),
+            "nothing on until the child asks"
+        );
+        s.feed(b"\x1b[?1049h\x1b[?10");
+        s.feed(b"00h\x1b[?1006h\x1b[?2004h frame");
+        assert_eq!(
+            s.replay_modes(),
+            b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?2004h"
+        );
+        // A later tracking mode replaces the first; several at once count.
+        s.feed(b"\x1b[?1002;1015h");
+        assert_eq!(
+            s.replay_modes(),
+            b"\x1b[?1049h\x1b[?1002h\x1b[?1015h\x1b[?2004h"
+        );
+        // Resetting a mode that is not the one set changes nothing.
+        s.feed(b"\x1b[?1000l");
+        assert!(s.replay_modes().starts_with(b"\x1b[?1049h\x1b[?1002h"));
+        // Leaving the screen and the mouse, as claude does on exit.
+        s.feed(b"\x1b[?1002l\x1b[?1015l\x1b[?1049l");
+        assert_eq!(s.replay_modes(), b"\x1b[?2004h");
+        // RIS drops every mode.
+        s.feed(b"\x1b[?1049h\x1b[?1003h\x1bc");
+        assert!(s.replay_modes().is_empty());
     }
 
     #[test]
