@@ -14,7 +14,7 @@ use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, EnterOutcome, Entity, EntityId, LinkId, Project,
     ProjectId, ServerEvent, SessionRef, TerminalId, TerminalTab, WaitReason, Worktree, WorktreeId,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -1151,12 +1151,39 @@ impl Daemon {
         let main_path = entries.first().map(|e| e.path.clone());
         let is_root = |path: &Path| main_path.as_deref() == Some(path);
         let (_, worktrees, agents, terminals) = self.store.load_tree()?;
+        let links = self.store.load_links()?;
         let ours: Vec<&Worktree> = worktrees
             .iter()
             .filter(|w| w.project_id == project.id)
             .collect();
+        let occupied = |id: &WorktreeId| {
+            agents.iter().any(|a| &a.worktree_id == id)
+                || terminals.iter().any(|t| &t.worktree_id == id)
+        };
+        // Rows a MOVED CHECKOUT took over, already standing on a path in
+        // git's list: the vanished-row sweep below leaves them be.
+        let mut rehomed: HashSet<WorktreeId> = HashSet::new();
         for entry in &entries {
             if let Some(known) = ours.iter().find(|w| w.path == entry.path) {
+                // A MOVED CHECKOUT this reconcile adopted as a row of its
+                // own before it knew better: the old row keeps the sessions
+                // and the new one only the path. The old row takes the path
+                // and the new one goes, so there is one row again, with the
+                // sessions on the checkout they work in.
+                let bare = !occupied(&known.id) && !links.iter().any(|l| l.worktree_id == known.id);
+                if bare && !is_root(&entry.path) {
+                    if let Some(stale) = moved_from(&ours, &entries, &entry.branch, &rehomed)
+                        .filter(|stale| stale.id != known.id && occupied(&stale.id))
+                    {
+                        self.store.delete_worktree(&known.id)?;
+                        self.broadcast(ServerEvent::EntityRemoved {
+                            id: EntityId::Worktree(known.id.clone()),
+                        });
+                        self.rehome_moved_row(stale, entry)?;
+                        rehomed.insert(stale.id.clone());
+                        continue;
+                    }
+                }
                 // Branch switched in place (checkout on the root or inside a
                 // linked worktree): refresh the stored name so the row tracks
                 // reality instead of the branch at adoption time.
@@ -1177,6 +1204,17 @@ impl Daemon {
                     });
                 }
                 continue;
+            }
+            // A checkout git lists where no row stands, on the branch of a
+            // row whose checkout git no longer lists: the same checkout,
+            // moved (`git worktree move`, or another orion relocating it).
+            // The row follows it, keeping its id and so its sessions.
+            if !is_root(&entry.path) {
+                if let Some(stale) = moved_from(&ours, &entries, &entry.branch, &rehomed) {
+                    self.rehome_moved_row(stale, entry)?;
+                    rehomed.insert(stale.id.clone());
+                    continue;
+                }
             }
             let worktree = Worktree {
                 id: WorktreeId::generate(),
@@ -1200,12 +1238,10 @@ impl Daemon {
             // that isn't there is a linked checkout that went away — including
             // one still carrying an `is_main` from before root-ness was
             // derived, which no longer earns the row a reprieve.
-            if entries.iter().any(|e| e.path == w.path) {
+            if entries.iter().any(|e| e.path == w.path) || rehomed.contains(&w.id) {
                 continue;
             }
-            let occupied = agents.iter().any(|a| a.worktree_id == w.id)
-                || terminals.iter().any(|t| t.worktree_id == w.id);
-            if occupied {
+            if occupied(&w.id) {
                 continue;
             }
             self.store.delete_worktree(&w.id)?;
@@ -1214,6 +1250,24 @@ impl Daemon {
             });
         }
         Ok(adopted)
+    }
+
+    /// Row `stale` stands on `entry`'s path from here on: its checkout moved
+    /// there ([`moved_from`]).
+    fn rehome_moved_row(&self, stale: &Worktree, entry: &git::WorktreeEntry) -> Result<()> {
+        tracing::info!(
+            worktree = %stale.id,
+            from = %stale.path.display(),
+            to = %entry.path.display(),
+            "worktree row follows its moved checkout"
+        );
+        self.store.update_worktree_path(&stale.id, &entry.path)?;
+        let mut moved = stale.clone();
+        moved.path = entry.path.clone();
+        self.broadcast(ServerEvent::EntityUpserted {
+            entity: Entity::Worktree(moved),
+        });
+        Ok(())
     }
 
     // ---- agents ----
@@ -3422,6 +3476,31 @@ pub(crate) fn typed_bytes(text: &str) -> Vec<u8> {
 /// whenever [`Daemon::claude_projects_roots`] names somewhere to look for
 /// it, which is what the callers ask first. None under the
 /// `ORION_AGENT_CMD` override (tests), which never resumes.
+/// The row a MOVED CHECKOUT on `branch` came from: the one linked row of
+/// `ours` on that branch whose path git no longer lists, and which no other
+/// checkout has taken over already (`rehomed`). None when there is none,
+/// or more than one to choose between. git checks a branch out in one
+/// place at a time, so a vanished row and a new checkout on the same
+/// branch are the one checkout, moved.
+fn moved_from<'a>(
+    ours: &[&'a Worktree],
+    entries: &[git::WorktreeEntry],
+    branch: &str,
+    rehomed: &HashSet<WorktreeId>,
+) -> Option<&'a Worktree> {
+    if branch.is_empty() || git::is_detached_label(branch) {
+        return None;
+    }
+    let mut vanished = ours.iter().copied().filter(|w| {
+        !w.is_main
+            && w.branch == branch
+            && !rehomed.contains(&w.id)
+            && !entries.iter().any(|e| e.path == w.path)
+    });
+    let row = vanished.next()?;
+    vanished.next().is_none().then_some(row)
+}
+
 fn claude_resumable_session(agent: &Agent) -> Option<&str> {
     if std::env::var(env::AGENT_CMD).is_ok() {
         return None;
@@ -7016,6 +7095,128 @@ pub(crate) mod tests {
         );
         let rt = worktrees.iter().find(|w| w.id.as_str() == "rt").unwrap();
         assert!(rt.is_main, "the surviving root row keeps the badge");
+    }
+
+    /// A repo with a linked checkout on `feat` that has been moved, by
+    /// `git worktree move`, from `<root>/old/feat` to `<root>/new/feat`, and
+    /// the project with its root row and the `feat` row (holding session
+    /// `a`) still on the old path, as a daemon that missed the move has it.
+    fn moved_checkout() -> (tempfile::TempDir, Arc<Daemon>, Project, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let repo = init_repo(&root);
+        let old = root.join("old").join("feat");
+        let new = root.join("new").join("feat");
+        git_in(
+            &repo,
+            &["worktree", "add", &old.to_string_lossy(), "-b", "feat"],
+        );
+        let daemon = test_daemon();
+        let project = Project {
+            id: ProjectId("p".into()),
+            name: "p".into(),
+            repo_path: repo.clone(),
+            sort_order: 0,
+        };
+        daemon.store.insert_project(&project).unwrap();
+        seed_worktree(&daemon, "p", "main", &repo.to_string_lossy(), true);
+        seed_worktree(&daemon, "p", "feat", &old.to_string_lossy(), false);
+        seed_agent(&daemon, "a", "feat", None);
+        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "move",
+                &old.to_string_lossy(),
+                &new.to_string_lossy(),
+            ],
+        );
+        (tmp, daemon, project, new)
+    }
+
+    fn rows_of(daemon: &Daemon) -> Vec<Worktree> {
+        let (_, worktrees, _, _) = daemon.store.load_tree().unwrap();
+        worktrees
+    }
+
+    /// A checkout moved on disk while its session sat on it is the same
+    /// checkout: its row takes the new path, keeping its id and so the
+    /// session, rather than a second row being adopted for the new path
+    /// while the session stays on one for a folder that is gone.
+    #[tokio::test]
+    async fn a_moved_checkout_takes_its_row_with_it() {
+        let (_tmp, daemon, project, new) = moved_checkout();
+
+        daemon.sync_project_worktrees(&project).await.unwrap();
+
+        let rows = rows_of(&daemon);
+        let feat: Vec<&Worktree> = rows.iter().filter(|w| w.branch == "feat").collect();
+        assert_eq!(feat.len(), 1, "one row for the checkout: {rows:#?}");
+        assert_eq!(feat[0].id.as_str(), "feat", "the row kept its id");
+        assert_eq!(feat[0].path, new);
+        let (_, _, agents, _) = daemon.store.load_tree().unwrap();
+        assert_eq!(
+            agents[0].worktree_id.as_str(),
+            "feat",
+            "the session stayed on it"
+        );
+    }
+
+    /// A daemon that already adopted the moved checkout as a row of its own
+    /// heals the pair: the old row, which holds the session, takes the path,
+    /// and the bare new row goes.
+    #[tokio::test]
+    async fn a_moved_checkout_adopted_twice_is_one_row_again() {
+        let (_tmp, daemon, project, new) = moved_checkout();
+        daemon
+            .store
+            .insert_worktree(&Worktree {
+                id: WorktreeId("dup".into()),
+                project_id: ProjectId("p".into()),
+                path: new.clone(),
+                branch: "feat".into(),
+                is_main: false,
+                sort_order: 0,
+            })
+            .unwrap();
+
+        daemon.sync_project_worktrees(&project).await.unwrap();
+
+        let rows = rows_of(&daemon);
+        assert!(rows.iter().all(|w| w.id.as_str() != "dup"), "{rows:#?}");
+        let feat = rows.iter().find(|w| w.id.as_str() == "feat").unwrap();
+        assert_eq!(feat.path, new);
+        // And it stays so on the next pass.
+        daemon.sync_project_worktrees(&project).await.unwrap();
+        assert_eq!(rows_of(&daemon).len(), 2, "the root row and feat's");
+    }
+
+    /// When the new row has a session of its own, both rows hold work and
+    /// neither is the user's to lose on a guess: the pair is left for them.
+    #[tokio::test]
+    async fn a_moved_checkout_with_sessions_on_both_rows_is_left_alone() {
+        let (_tmp, daemon, project, new) = moved_checkout();
+        daemon
+            .store
+            .insert_worktree(&Worktree {
+                id: WorktreeId("dup".into()),
+                project_id: ProjectId("p".into()),
+                path: new.clone(),
+                branch: "feat".into(),
+                is_main: false,
+                sort_order: 0,
+            })
+            .unwrap();
+        seed_agent(&daemon, "b", "dup", None);
+
+        daemon.sync_project_worktrees(&project).await.unwrap();
+
+        let rows = rows_of(&daemon);
+        let dup = rows.iter().find(|w| w.id.as_str() == "dup").unwrap();
+        assert_eq!(dup.path, new);
+        let feat = rows.iter().find(|w| w.id.as_str() == "feat").unwrap();
+        assert_ne!(feat.path, new, "the old row keeps its own path");
     }
 
     /// A fresh repo with one commit, at a canonical path (the macOS

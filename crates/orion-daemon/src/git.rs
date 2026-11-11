@@ -78,7 +78,7 @@ pub async fn list_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
     // the take renames its branch before the row goes in.
     entries.retain(|e| !orion_core::is_spare_branch(&e.branch));
     for entry in &mut entries {
-        if entry.branch != "(detached)" && !entry.branch.starts_with("detached @ ") {
+        if !is_detached_label(&entry.branch) {
             continue;
         }
         if let Some(branch) = rebasing_branch(&entry.path).await {
@@ -352,6 +352,11 @@ fn detached_label(head: Option<&str>) -> String {
         Some(sha) => format!("detached @ {}", &sha[..sha.len().min(7)]),
         None => "(detached)".into(),
     }
+}
+
+/// Whether `branch` is a [`detached_label`] rather than a branch's name.
+pub(crate) fn is_detached_label(branch: &str) -> bool {
+    branch == "(detached)" || branch.starts_with("detached @ ")
 }
 
 /// The hidden folder beside the repo that holds the WORKTREES orion cuts
