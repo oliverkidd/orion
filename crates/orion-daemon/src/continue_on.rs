@@ -31,7 +31,7 @@ use anyhow::{bail, Context, Result};
 use orion_core::harness::HarnessDescriptor;
 use orion_core::{AgentId, AgentKind, AgentStatus, SessionRef};
 
-use crate::pty::{PtyEvent, DEFAULT_COLS, DEFAULT_ROWS};
+use crate::pty::{process_groups_under, DEFAULT_COLS, DEFAULT_ROWS, KILL_GRACE};
 use crate::registry::{harness_registry, resolve_harness, Daemon};
 
 /// Where `session_id`'s transcript sits under any of `roots` (projects
@@ -106,9 +106,12 @@ impl CopyPlan {
                     return Ok(());
                 }
                 if !carried.starts_with(&held) {
+                    // The reason first: the footer cuts a long line off at
+                    // its end, and the path is the longest part of it.
                     bail!(
-                        "{} is already there and holds what this session's own copy does not — \
-                         nothing was moved",
+                        "nothing was moved — the other account already holds a copy of {} \
+                         with lines this session's copy does not: {}",
+                        dst.file_name().unwrap_or_default().to_string_lossy(),
                         dst.display()
                     );
                 }
@@ -133,27 +136,37 @@ impl CopyPlan {
     }
 }
 
-/// How long a move waits for the CLI it stopped to exit before copying
-/// the transcript out from under it — the kill's own grace before it
-/// escalates.
-const STOP_WAIT: Duration = Duration::from_secs(3);
+/// How long a move waits for the CLI it stopped to be gone before copying
+/// the transcript out from under it: the kill's grace for the shell, the
+/// same again for the jobs it leaves behind, then SIGKILL — with a beat
+/// to spare.
+const STOP_WAIT: Duration = KILL_GRACE
+    .saturating_mul(2)
+    .saturating_add(Duration::from_secs(1));
 
-/// How often [`wait_for_exit`] looks for the exit while it waits.
-const EXIT_POLL: Duration = Duration::from_millis(10);
+/// How often [`wait_until_gone`] looks while it waits.
+const EXIT_POLL: Duration = Duration::from_millis(25);
 
-/// Block until the PTY whose events `exits` follows reports its exit, or
-/// `limit` passes. A move runs off the async workers, so polling here
-/// holds no one up.
-fn wait_for_exit(exits: &mut tokio::sync::broadcast::Receiver<PtyEvent>, limit: Duration) {
-    use tokio::sync::broadcast::error::TryRecvError;
+/// Block until no process is left in any of `groups` — the process groups
+/// under the session the move stopped — or `limit` passes; whether they all
+/// went. The PTY closing is not enough: on macOS the shell's death revokes
+/// the terminal while the CLI in its job group is still writing its last
+/// records (cost, last prompt, queued notices) to the transcript, and a copy
+/// taken then leaves the account it left a tail the moved copy lacks — which
+/// refuses every move back. A move runs off the async workers, so polling
+/// here holds no one up.
+fn wait_until_gone(groups: &[u32], limit: Duration) -> bool {
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+    let alive = |g: &u32| killpg(Pid::from_raw(*g as i32), None).is_ok();
     let deadline = Instant::now() + limit;
-    while Instant::now() < deadline {
-        match exits.try_recv() {
-            Ok(PtyEvent::Exited { .. }) | Err(TryRecvError::Closed) => return,
-            Ok(_) | Err(TryRecvError::Lagged(_)) => {}
-            Err(TryRecvError::Empty) => std::thread::sleep(EXIT_POLL),
+    while groups.iter().any(alive) {
+        if Instant::now() >= deadline {
+            return false;
         }
+        std::thread::sleep(EXIT_POLL);
     }
+    true
 }
 
 /// Why `target` cannot take a Claude session, in the words the footer
@@ -238,12 +251,19 @@ impl Daemon {
         // it again on the account it is leaving.
         let _gate = self.spawn_gate.lock().unwrap();
         let sref = SessionRef::Agent(id.clone());
-        let mut exits = self.session(&sref).map(|s| s.events.subscribe());
+        // Every process group under the session, taken before the kill: a
+        // shell the signal takes leaves its jobs to init, where no walk
+        // from its pid finds them afterwards.
+        let groups = self
+            .session(&sref)
+            .and_then(|s| s.child_pid)
+            .map(process_groups_under)
+            .unwrap_or_default();
         self.kill_session(&sref);
         // A kill only signals: give the CLI its moment to go, so what it
         // last wrote is what moves.
-        if let Some(exits) = exits.as_mut() {
-            wait_for_exit(exits, STOP_WAIT);
+        if !wait_until_gone(&groups, STOP_WAIT) {
+            tracing::warn!(agent = %id, ?groups, "still running after the kill — moving what it has written");
         }
         let copied = match CopyPlan::new(&from, &file, &to)
             .and_then(|plan| plan.apply().map(|()| plan.copies.len()))
@@ -394,6 +414,27 @@ mod tests {
 
         // Moved again with nothing new: nothing to write.
         assert_eq!(CopyPlan::new(&from, &file, &to).unwrap().copies, Vec::new());
+    }
+
+    /// A move waits for every process group under the session, not just
+    /// the PTY: a CLI still writing its transcript holds the copy back.
+    #[test]
+    fn a_move_waits_until_every_group_is_gone() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let groups = [child.id()];
+        assert!(
+            !wait_until_gone(&groups, Duration::from_millis(100)),
+            "a group still running is waited on"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(wait_until_gone(&groups, Duration::from_secs(1)));
+        assert!(wait_until_gone(&[], Duration::ZERO), "nothing to wait on");
     }
 
     /// Carried back to an account it ran on before: the copy there is an

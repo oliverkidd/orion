@@ -32,7 +32,7 @@ const COALESCE_HOLD: std::time::Duration = std::time::Duration::from_millis(5);
 const READER_CHANNEL_BOUND: usize = 64;
 /// After the polite SIGHUP, how long the child gets to exit before its whole
 /// process group is SIGKILLed.
-const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+pub(crate) const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 /// Size a session is spawned at when no client is attached to say better
 /// (prewarms, respawns after a move, restarts). The first attach resizes it
 /// to the real pane, so these only shape the child's first paint.
@@ -122,7 +122,7 @@ fn descendants(rows: &[ProcRow], root: u32) -> Vec<&ProcRow> {
 /// named even when the `ps` sweep fails). An interactive shell running the
 /// agent as a job puts it in a group of its own; SIGKILLing the leader's
 /// group alone would miss it. Taken while the tree is intact — see `kill`.
-fn process_groups_under(root: u32) -> Vec<u32> {
+pub(crate) fn process_groups_under(root: u32) -> Vec<u32> {
     process_groups_in_table(&ps_table().unwrap_or_default(), root)
 }
 
