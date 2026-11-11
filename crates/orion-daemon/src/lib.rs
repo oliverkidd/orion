@@ -105,7 +105,14 @@ async fn serve() -> Result<()> {
     // folder move into `.orion-worktrees/<repo>` now, while no session runs
     // in them — the last daemon's died with it, and nothing respawns until
     // the resume below.
-    let relocation_note = relocate::relocate_legacy_worktrees(&store).await;
+    // A DEV INSTANCE's checkouts are the real daemon's: moving them here
+    // left the real one with two rows for each, its sessions on the old
+    // path and the work on the new.
+    let relocation_note = if env::dev_instance() {
+        None
+    } else {
+        relocate::relocate_legacy_worktrees(&store).await
+    };
 
     // Hook receiver: loopback HTTP endpoint the claude hook one-liners hit.
     // It shares the store to answer UserPromptSubmit hooks with the
@@ -276,8 +283,10 @@ async fn serve() -> Result<()> {
 
     // SPARE WORKTREES: the warm next worktree of each project in use, cut,
     // kept and taken away on their own tick (see `spare`) — the ones the
-    // last daemon left kept or cleared first.
-    {
+    // last daemon left kept or cleared first. Not in a DEV INSTANCE: its
+    // spares would be cut in the real repos, and its boot sweep would
+    // remove the real daemon's.
+    if !env::dev_instance() {
         let daemon = daemon.clone();
         tokio::spawn(async move {
             daemon.sweep_spares_at_boot().await;

@@ -41,8 +41,10 @@ KEEP ?= 3
 AGENT ?=
 
 # Every dev-instance run goes through this: its own socket dir and its own DB,
-# so nothing here can touch the real daemon's state.
-DEV_ENV = ORION_RUNTIME_DIR=$(DEV_RUNTIME) ORION_DATA_DIR=$(DEV_DATA) \
+# so nothing here can touch the real daemon's state. The seeded projects are
+# still the real repos, though, so ORION_DEV_INSTANCE keeps the dev daemon's
+# hands off them: it moves no worktree folder and cuts or sweeps no spare.
+DEV_ENV = ORION_RUNTIME_DIR=$(DEV_RUNTIME) ORION_DATA_DIR=$(DEV_DATA) ORION_DEV_INSTANCE=1 \
 	$(if $(AGENT),ORION_AGENT_CMD=$(AGENT))
 
 .DEFAULT_GOAL := help

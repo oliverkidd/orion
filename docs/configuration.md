@@ -529,6 +529,7 @@ Everything orion writes under its data dir:
 | `ORION_CONFIG_FILE` | where `config.json` is; after changing it, `orion kill` and relaunch |
 | `ORION_DATA_DIR` | the data dir (tests, parallel instances) |
 | `ORION_RUNTIME_DIR` | the dir holding the daemon socket and pidfile (default `$XDG_RUNTIME_DIR/orion`, else `/tmp/orion-<uid>`) |
+| `ORION_DEV_INSTANCE` | set by `make dev`: the DAEMON leaves the seeded projects' checkouts alone, moving no worktree folder and cutting or sweeping no spare worktree, since they are the real daemon's |
 | `ORION_AGENT_CMD` | one command line in place of every agent CLI (tests) |
 | `ORION_INSTALL_URL` | the install script `orion upgrade` and `orion ssh` fetch |
 | `ORION_USAGE` | `off` stops usage reads |

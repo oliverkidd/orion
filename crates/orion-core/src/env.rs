@@ -17,6 +17,13 @@ pub const API_TOKEN: &str = "ORION_API_TOKEN";
 pub const RUNTIME_DIR: &str = "ORION_RUNTIME_DIR";
 /// Overrides the data dir holding the database, config and logs.
 pub const DATA_DIR: &str = "ORION_DATA_DIR";
+/// Set by `make dev`: this daemon is a DEV INSTANCE whose projects were
+/// seeded from the real one's, so the checkouts it lists belong to the
+/// real daemon. It leaves them where they are: no boot relocation of old
+/// worktree folders and no SPARE WORKTREES cut, kept or swept — each of
+/// those changes the real repos under the real daemon, which still has
+/// the old paths.
+pub const DEV_INSTANCE: &str = "ORION_DEV_INSTANCE";
 /// Moves `config.json` alone — into a dotfiles checkout, say — leaving the
 /// database, the logs and `config.local.json` in the data dir.
 pub const CONFIG_FILE: &str = "ORION_CONFIG_FILE";
@@ -133,6 +140,11 @@ pub const PANE_COLORTERM: &str = "truecolor";
 /// coloured (#37). The TUI still honours its own `NO_COLOR` on the way
 /// out, so a user who wants none keeps none.
 pub const PANE_COLOR_OVERRIDES: &[&str] = &["NO_COLOR", "FORCE_COLOR"];
+
+/// Whether this process is a `make dev` DEV INSTANCE ([`DEV_INSTANCE`]).
+pub fn dev_instance() -> bool {
+    non_empty(DEV_INSTANCE).is_some_and(|v| v != "0")
+}
 
 /// The value of `var`, treating unset and empty the same way — an empty
 /// override is how a caller says "use the default".
