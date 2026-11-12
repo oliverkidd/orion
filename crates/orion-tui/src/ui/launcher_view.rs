@@ -897,6 +897,7 @@ fn draw_bands(
     let mut band_areas = Vec::with_capacity(bands.len());
     let facts: Vec<RuleFacts> = bands.iter().map(|b| rule_facts(app, b, th)).collect();
     let cols = RuleColumns::of(&facts);
+    let list_cols = list_columns(panel, bands, &mut cfg);
     if let Some(y) = panel.divider_y {
         let line = Rect {
             y,
@@ -983,6 +984,7 @@ fn draw_bands(
                 scroll,
                 on,
                 at,
+                cols: list_cols,
             },
             &mut cfg,
         );
@@ -1212,14 +1214,7 @@ fn draw_drawer(
         .cloned()
         .map(crate::launcher::Card::Session)
         .collect();
-    let mut cols = (0, 0);
-    for row in drawer {
-        cols = (
-            cols.0.max(row.agent.name.chars().count()),
-            cols.1.max(list_runs_line(&row.agent, cfg).chars().count()),
-        );
-    }
-    let cols = (cols.0.min(LIST_NAME_MAX), cols.1.min(LIST_RUNS_MAX));
+    let cols = column_widths(&cards, cfg);
     for (i, card) in cards.iter().enumerate() {
         let Some(placed) = crate::launcher::place(window, scroll, pb.drawer_row(inset, i)) else {
             continue;
@@ -1245,8 +1240,9 @@ const LIST_MARK: &str = "▌ ";
 /// status dot (or a terminal's glyph), two apiece.
 const LIST_LEAD: u16 = 4;
 /// Longest a LIST's name column grows, and its runs-on column: past these
-/// the entries truncate rather than push the prompt off the line.
-const LIST_NAME_MAX: usize = 28;
+/// the entries truncate rather than push the prompt off the line, or the
+/// whole grid's prompts along with it ([`list_columns`]).
+const LIST_NAME_MAX: usize = 24;
 const LIST_RUNS_MAX: usize = 24;
 /// Air between a LIST entry's columns.
 const LIST_GAP: usize = 2;
@@ -1260,12 +1256,55 @@ struct ListBand<'a> {
     /// The cursor is on the band, and `at` is its card.
     on: bool,
     at: Option<usize>,
+    /// The name and runs-on column widths, shared by every band
+    /// ([`list_columns`]).
+    cols: (usize, usize),
+}
+
+/// The LIST's name and runs-on column widths: as wide as the widest entry
+/// shown in any band, capped at [`LIST_NAME_MAX`] and [`LIST_RUNS_MAX`],
+/// so what each entry runs on and its prompt start at the same column
+/// down the whole grid rather than jumping from one band to the next.
+fn list_columns(
+    panel: &crate::launcher::PanelLayout,
+    bands: &[crate::launcher::Band],
+    cfg: &mut Option<crate::config::Config>,
+) -> (usize, usize) {
+    let shown = bands.iter().zip(&panel.bands).flat_map(|(band, pb)| {
+        pb.content
+            .rows
+            .iter()
+            .filter_map(|r| r.first().map(|&i| &band.cards[i]))
+    });
+    column_widths(shown, cfg)
+}
+
+/// The name and runs-on column widths `cards` need between them, capped
+/// at [`LIST_NAME_MAX`] and [`LIST_RUNS_MAX`].
+fn column_widths<'a>(
+    cards: impl IntoIterator<Item = &'a crate::launcher::Card>,
+    cfg: &mut Option<crate::config::Config>,
+) -> (usize, usize) {
+    let mut cols = (0, 0);
+    for card in cards {
+        let (name, runs) = match card {
+            crate::launcher::Card::Session(row) => (
+                row.agent.name.chars().count(),
+                list_runs_line(&row.agent, cfg).chars().count(),
+            ),
+            crate::launcher::Card::Terminal(t) => {
+                (t.name.chars().count(), terminal_runs(t).chars().count())
+            }
+        };
+        cols = (cols.0.max(name), cols.1.max(runs));
+    }
+    (cols.0.min(LIST_NAME_MAX), cols.1.min(LIST_RUNS_MAX))
 }
 
 /// A band in the LIST: under its rule, one line per entry
-/// (`launcher::list_layout`), the names and what each runs on in columns
-/// shared down the band. A click on a line lands the cursor on its entry
-/// (`HitTarget::LauncherCard`).
+/// (`launcher::list_layout`), the names and what each runs on in the
+/// grid's columns (`cols`). A click on a line lands the cursor on its
+/// entry (`HitTarget::LauncherCard`).
 fn draw_list_band(
     f: &mut Frame,
     app: &mut App,
@@ -1280,28 +1319,10 @@ fn draw_list_band(
         scroll,
         on,
         at,
+        cols,
     } = list;
-    let content = &pb.content;
-    let shown: Vec<usize> = content
-        .rows
-        .iter()
-        .filter_map(|r| r.first().copied())
-        .collect();
-    let mut cols = (0, 0);
-    for &i in &shown {
-        let (name, runs) = match &band.cards[i] {
-            crate::launcher::Card::Session(row) => (
-                row.agent.name.chars().count(),
-                list_runs_line(&row.agent, cfg).chars().count(),
-            ),
-            crate::launcher::Card::Terminal(t) => {
-                (t.name.chars().count(), terminal_runs(t).chars().count())
-            }
-        };
-        cols = (cols.0.max(name), cols.1.max(runs));
-    }
-    let cols = (cols.0.min(LIST_NAME_MAX), cols.1.min(LIST_RUNS_MAX));
-    for &i in &shown {
+    let shown = pb.content.rows.iter().filter_map(|r| r.first().copied());
+    for i in shown {
         let Some(placed) = pb
             .cell(i)
             .and_then(|cell| crate::launcher::place(window, scroll, cell))
@@ -5461,6 +5482,38 @@ mod tests {
         let buf = rule_row(&app, &band, 40);
         assert_eq!(buf[(39, 0)].fg, app.theme.ok);
         assert_eq!(painted(&buf, 0, app.theme.stack_sweep[0]), "");
+    }
+
+    /// The LIST's columns are the grid's, not each band's: a band of short
+    /// names starts what its entries run on where the band of long names
+    /// does, and a name past [`LIST_NAME_MAX`] is cut rather than pushing
+    /// every band's prompts along.
+    #[test]
+    fn the_list_lines_its_columns_up_down_the_grid() {
+        let short = a_band(false, "feat-a");
+        let mut long = a_band(false, "feat-b");
+        let crate::launcher::Card::Session(row) = &mut long.cards[0] else {
+            unreachable!()
+        };
+        row.agent.name = "Unify Onboarding Login And Signup Flow".into();
+        let bands = [short, long];
+        let panel = crate::launcher::panel_layout(Rect::new(0, 0, 100, 20), &bands);
+        let cols = list_columns(&panel, &bands, &mut None);
+        assert_eq!(cols.0, LIST_NAME_MAX, "the long name caps the column");
+        let app = App::new();
+        let draw = |band: &crate::launcher::Band| -> String {
+            let area = Rect::new(0, 0, 100, 1);
+            let mut buf = Buffer::empty(area);
+            draw_list_row(&mut buf, &app, area, &band.cards[0], false, cols, &mut None);
+            row_string(&buf, 0)
+        };
+        let (a, b) = (draw(&bands[0]), draw(&bands[1]));
+        let runs_at = |row: &str| {
+            let at = row.find("claude").unwrap_or_else(|| panic!("{row}"));
+            row[..at].chars().count()
+        };
+        assert_eq!(runs_at(&a), runs_at(&b), "\n{a}\n{b}");
+        assert!(b.contains('…'), "the long name is cut: {b}");
     }
 
     /// Every rule on the grid gives its pull request and its counts the
