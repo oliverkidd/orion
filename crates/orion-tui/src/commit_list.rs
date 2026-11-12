@@ -231,15 +231,27 @@ pub fn read(root: &Path, base_setting: &str, uncommitted: &[DiffFile]) -> Commit
 /// has — `event_loop::open_pr_review` — measured against `base`, the
 /// branch it merges into (origin's copy first, then a local one): its own
 /// commits, newest first, and no uncommitted row, since nothing checked
-/// out is being read. None when the repo has no such commit, no such
-/// base — never another branch standing in for it — or nothing in common
-/// with it: the head and base are then fetched and it is read again.
+/// out is being read. A pull request already merged into `base` with a
+/// merge commit is measured against the base as it was just before that
+/// merge ([`before_merge`]), so it still lists its own commits. None when
+/// the repo has no such commit, no such base — never another branch
+/// standing in for it — or nothing in common with it: the head and base
+/// are then fetched and it is read again.
 pub fn read_tip(root: &Path, base: &str, tip: &str) -> Option<CommitListing> {
     if !has_commit(root, tip) {
         return None;
     }
-    let base = branch_ref(root, base)?;
-    let merge_base = merge_base(root, tip, &base)?;
+    let mut base = branch_ref(root, base)?;
+    let mut merge_base = merge_base(root, tip, &base)?;
+    // A pull request merged with a merge commit: its head is in the base
+    // now, so measured against the base it has nothing of its own. Read it
+    // against the base as it stood just before the merge, as GitHub does.
+    if merge_base == tip {
+        if let Some(before) = before_merge(root, tip, &base) {
+            merge_base = self::merge_base(root, tip, &before)?;
+            base = before;
+        }
+    }
     let total = count_since(root, &merge_base, tip);
     let commits = match total {
         0 => Vec::new(),
@@ -394,6 +406,27 @@ pub(crate) fn has_commit(root: &Path, rev: &str) -> bool {
 
 fn merge_base(root: &Path, tip: &str, base: &str) -> Option<String> {
     git_line(root, &["merge-base", tip, base])
+}
+
+/// The base as it stood just before `tip` was merged into it: the first
+/// parent of the oldest commit on `base`'s own line that has `tip` in its
+/// history — the merge commit — as a short sha. None when that is `tip`
+/// itself (a fast-forward), or git can't say.
+fn before_merge(root: &Path, tip: &str, base: &str) -> Option<String> {
+    let range = format!("{tip}..{base}");
+    let path = git_line(
+        root,
+        &[
+            "rev-list",
+            "--first-parent",
+            "--ancestry-path",
+            "--reverse",
+            &range,
+        ],
+    )?;
+    let merge = path.lines().next()?;
+    let before = git_line(root, &["rev-parse", "--short", &format!("{merge}^1")])?;
+    (!tip.starts_with(&before)).then_some(before)
 }
 
 /// How many of its own commits `tip` — HEAD, or a pull request's head —
@@ -1293,6 +1326,38 @@ mod tests {
         assert!(list.all_ticked(), "the whole pull request");
         assert!(read_tip(&repo, "release", &tip).is_none(), "no such base");
         assert!(read_tip(&repo, "main", &"0".repeat(40)).is_none());
+    }
+
+    /// A pull request merged with a merge commit — its head now in the
+    /// base — still lists its own commits, read against the base as it was
+    /// just before the merge, and a diff from there holds only its files.
+    #[test]
+    fn a_merged_pull_request_is_read_against_the_base_before_its_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = branch_repo(&dir);
+        commit(&repo, "a.txt", "a\n", "first");
+        commit(&repo, "b.txt", "b\n", "second");
+        let tip = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "-q", "main"]);
+        commit(&repo, "other.txt", "x\n", "main moves on");
+        git(&repo, &["merge", "-q", "--no-ff", "--no-edit", "feat"]);
+        commit(&repo, "later.txt", "y\n", "after the merge");
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        let listing = read_tip(&repo, "main", &tip).expect("the tip is here");
+        assert_eq!(listing.total, 2);
+        let subjects: Vec<&str> = listing.commits.iter().map(|c| c.subject.as_str()).collect();
+        assert_eq!(subjects, ["second", "first"]);
+        let base = listing.base.clone().expect("a base");
+        let before = git(&repo, &["rev-parse", "HEAD~1^1"]);
+        assert_eq!(
+            git(&repo, &["rev-parse", &base]),
+            before,
+            "main before the merge"
+        );
+        let merge_base = listing.merge_base.expect("a merge-base");
+        let files = git(&repo, &["diff", "--name-only", &merge_base, &tip]);
+        assert_eq!(files, "a.txt\nb.txt");
     }
 
     #[test]

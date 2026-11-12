@@ -3163,6 +3163,39 @@ mod tests {
         });
     }
 
+    /// A pull request with nothing of its own past its base — its head the
+    /// base's own commit — doesn't close the modal unseen: the viewer gives
+    /// way to the modal on its row, and the footer says why.
+    #[test]
+    fn a_pull_request_with_nothing_to_show_comes_back_to_the_modal() {
+        pinned(|| {
+            let (repo, _) = crate::pr_review::tests::repo();
+            let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
+            app.tree.projects[0].repo_path = repo.path().to_path_buf();
+            open(&mut app);
+            let main = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(["rev-parse", "main"])
+                .output()
+                .unwrap();
+            let mut page = detail(42, "Fix login");
+            page.head_sha = String::from_utf8_lossy(&main.stdout).trim().to_string();
+            page.base = "main".into();
+            app.pr_detail.insert(page.url.clone(), page);
+            let mut out = Vec::new();
+            handle_key(&mut app, cmd('e'), &mut out);
+            assert_eq!(
+                view(&app).selected_url.as_deref(),
+                Some("https://github.com/o/r/pull/42"),
+                "the modal is back: {:?}",
+                app.overlay
+            );
+            let flash = format!("{:?}", app.flash);
+            assert!(flash.contains("#42 has no commits of its own"), "{flash}");
+        });
+    }
+
     /// A draft flipped lands in the footer and has the pull request read
     /// again, so the page and the badge follow.
     #[test]

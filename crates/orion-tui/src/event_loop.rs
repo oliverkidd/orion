@@ -6038,20 +6038,38 @@ fn land_diff_listing(
                 crate::diff_actions::ask(app);
             }
         }
-        Ok(_) => app.overlay = None,
-        Err(msg) => {
-            // A pull request the PULL REQUESTS MODAL opened puts the modal
-            // back on its row, as Esc would.
-            let back = match &mut app.overlay {
-                Some(Overlay::Diff(view)) => view.back.take(),
+        // Nothing to read: a pull request says so and goes back to the
+        // PULL REQUESTS MODAL it came from, rather than closing unseen.
+        Ok(_) => {
+            let said = match &app.overlay {
+                Some(Overlay::Diff(view)) => view
+                    .pr_review
+                    .as_ref()
+                    .map(|r| format!("#{} has no commits of its own to show here", r.number)),
                 _ => None,
             };
-            match back {
-                Some(back) => crate::pr_modal::reopen(app, *back),
-                None => app.overlay = None,
+            viewer_gives_way(app);
+            if let Some(said) = said {
+                app.flash = Some(crate::flash::Flash::note(said));
             }
+        }
+        Err(msg) => {
+            viewer_gives_way(app);
             app.flash = Some(crate::flash::Flash::failed(msg));
         }
+    }
+}
+
+/// The DIFF VIEWER down with nothing to show: one the PULL REQUESTS MODAL
+/// opened puts the modal back on its row, as Esc would; any other closes.
+fn viewer_gives_way(app: &mut App) {
+    let back = match &mut app.overlay {
+        Some(Overlay::Diff(view)) => view.back.take(),
+        _ => None,
+    };
+    match back {
+        Some(back) => crate::pr_modal::reopen(app, *back),
+        None => app.overlay = None,
     }
 }
 
