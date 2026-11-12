@@ -48,9 +48,9 @@ pub(super) fn submit(
     // the user was on stays under the cursor and in the pane.
     // An AUTOMATION's launch has nobody at a box: it moves nothing on
     // screen and says nothing, its card going up where it belongs.
-    let unattended = launch.automation.is_some();
-    let stay = unattended || background || stays_put(app, &cfg);
-    if !unattended {
+    let unattended = launch.automation;
+    let stay = unattended.is_some() || background || stays_put(app, &cfg);
+    if unattended.is_none() {
         // The launch lands on a card, so the GRID has an aim again whether
         // or not it had one when the box went up (`launcher::clear_aim`).
         super::launcher::take_aim(app);
@@ -133,8 +133,8 @@ pub(super) fn submit(
             );
             // The checkout being cut holds a place under the running cap
             // until the session's own create takes it over.
-            if unattended {
-                app.automations.launching.insert(req_id);
+            if let Some(which) = unattended {
+                app.automations.launching.insert(req_id, which);
             }
         }
     }

@@ -225,7 +225,7 @@ pub fn start(app: &mut App, ids: &[u64], out: &mut Vec<ClientRequest>) {
     if !ideas(app).is_some_and(|f| f.items.iter().any(|i| i.queued)) {
         return;
     }
-    app.flash = Some(if super::may_start(app) {
+    app.flash = Some(if super::may_start(app, Automation::BlueSky) {
         Flash::working(format!(
             "making {} a project, then the Blue sky builder starts",
             folder().map_or_else(|| BLUE_SKY.to_string(), |f| f.display().to_string())
@@ -264,7 +264,7 @@ pub fn open_built(app: &mut App, item: &Item) {
     }
 }
 
-/// The Automations screen's IDEAS row for `agent`: the Todos modal on
+/// The Automations overview's row for `agent`: the Todos modal on
 /// Blue sky's tab, on the idea it builds.
 pub fn open_idea(app: &mut App, agent: &AgentId) {
     // An idea no longer found opens the tab at its top.
@@ -295,7 +295,7 @@ impl Runner for BlueSkyBuilder {
             .map(|f| f.items.iter().filter(|i| i.queued).cloned().collect())
             .unwrap_or_default();
         for item in queued {
-            if !super::may_start(app) {
+            if !super::may_start(app, Automation::BlueSky) {
                 return;
             }
             if item.target.is_some() {
@@ -473,9 +473,10 @@ fn send(
     let cfg = crate::config::Config::load();
     let preset = super::preset_of(&cfg.automations, Automation::BlueSky);
     let context = format!("The idea: {}\n\n{place}", item.text.trim());
-    let prompt = super::compose(
+    let prompt = super::compose_with(
         &preset,
         &context,
+        cfg.automations.local_e2e.rule(),
         &cfg.automations.of(Automation::BlueSky).extra_steer,
     );
     let mut launch = QuickLaunch::of_preset(target, preset, None, &cfg)

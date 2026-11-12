@@ -30,6 +30,7 @@ pub const SLACK_ACCOUNTS: [&str; 3] = ["app", "bot", "user"];
 /// `security`: keep it off async workers.
 pub fn slack_token(account: &str) -> Option<String> {
     let token = match crate::env::non_empty(crate::env::SLACK_TOKENS) {
+        Some(list) if list == "off" => None,
         Some(list) => {
             let at = SLACK_ACCOUNTS.iter().position(|a| *a == account)?;
             list.split(',').nth(at).map(|t| t.trim().to_string())

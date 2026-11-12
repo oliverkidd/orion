@@ -88,6 +88,8 @@ pub struct Board {
     pub height: u16,
     /// Where each slot was drawn, for the pointer: `(rect, column, slot)`.
     pub hits: Vec<(Rect, usize, usize)>,
+    /// The REPLY PANEL over the right two columns, while `r` has it up.
+    pub reply: Option<super::reply::Panel>,
 }
 
 /// The rows a section of `n` cards needs to show them all.
@@ -300,8 +302,12 @@ impl Board {
     }
 }
 
-/// The board's keys line, on its bottom border.
-pub fn hints() -> Vec<Hint> {
+/// The board's keys line, on its bottom border — the REPLY PANEL's while
+/// it is up.
+pub fn hints(board: &Board) -> Vec<Hint> {
+    if board.reply.is_some() {
+        return super::reply::hints();
+    }
     vec![
         Hint::new("type", "to jump"),
         keys::COLUMN.hint(),
@@ -309,12 +315,16 @@ pub fn hints() -> Vec<Hint> {
         keys::JUMP.hint().kept(),
         keys::DONE.hint(),
         keys::SNOOZE.hint(),
+        super::reply::keys::REPLY.hint(),
         keys::BACK.hint().kept(),
     ]
 }
 
 /// A card's glyph and its color: what kind of thing waits.
 fn glyph(card: &Card, th: Theme) -> (&'static str, ratatui::style::Color) {
+    if let Some(mark) = card.mark {
+        return mark;
+    }
     match card.section {
         Section::Agents => match card.urgency {
             2 => ("✕", th.err),
@@ -340,7 +350,7 @@ pub fn draw(
     area: Rect,
     th: Theme,
 ) {
-    let inner = crate::ui::render_modal_frame(f, area, "", &hints(), th);
+    let inner = crate::ui::render_modal_frame(f, area, "", &hints(board), th);
     if inner.height < 4 || inner.width < 12 {
         return;
     }
@@ -395,7 +405,18 @@ pub fn draw(
     board.hits.clear();
     let gutter = 2;
     let width = body.width.saturating_sub(gutter * 2) / 3;
-    for column in 0..3 {
+    // The REPLY PANEL takes the right two columns' room.
+    let columns = if board.reply.is_some() { 1 } else { 3 };
+    if let Some(panel) = &mut board.reply {
+        let x = body.x + width + gutter;
+        let room = Rect {
+            x,
+            width: body.right().saturating_sub(x),
+            ..body
+        };
+        super::reply::draw(f, panel, room, th);
+    }
+    for column in 0..columns {
         let x = body.x + column as u16 * (width + gutter);
         let col = Rect {
             x,

@@ -62,7 +62,9 @@ pub(super) fn palette_row(app: &mut App, landing: Option<Landing>, out: &mut Vec
 /// a `⌘K` jump to it does — a session waiting on you attached, a Linear
 /// issue open in the issues modal, a pull request on its row — and a pull
 /// request of a repo orion has no project for, or a Slack message, in
-/// the browser. On `+N more` it unfolds the section, as → does.
+/// the browser. A Slack card is marked done first, as `⌘D` marks it, so
+/// it comes back only with a newer message — answering it in Slack can
+/// go unheard. On `+N more` it unfolds the section, as → does.
 pub(super) fn needs_you_card(app: &mut App, out: &mut Vec<ClientRequest>) {
     use crate::needs_you::board::Slot;
     use crate::needs_you::model::CardTarget;
@@ -100,6 +102,7 @@ pub(super) fn needs_you_card(app: &mut App, out: &mut Vec<ClientRequest>) {
         }
         // Its link, from Slack once; it opens when Slack gives it.
         CardTarget::SlackMessage { channel, ts, .. } => {
+            crate::needs_you::done(app);
             app.overlay = None;
             if let Some(url) = crate::needs_you::slack::permalink(app, &channel, &ts) {
                 open_link(app, &url, None, out);

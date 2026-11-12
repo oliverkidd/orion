@@ -383,10 +383,6 @@ impl Runner for MeetingTakeaways {
         }
     }
 
-    fn opens_rows(&self) -> bool {
-        true
-    }
-
     /// Enter on a MEETINGS row: its takeaways, or — when it couldn't be
     /// read — a read again.
     fn open_row(&mut self, app: &mut App, index: usize) {

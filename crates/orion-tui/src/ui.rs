@@ -1753,8 +1753,20 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 .iter()
                 .map(|spec| spec.label.chars().count() + 1)
                 .fold(28, usize::max);
+            // Settings → Automations draws its own rows too.
+            let automations = tab == crate::config::automations_tab();
             for row in rows.iter().skip(first_row).take(body_h) {
                 match row {
+                    _ if automations => {
+                        let selected = (!view.on_tabs).then_some(view.selected);
+                        lines.push(crate::automations::settings_tab::line(
+                            app,
+                            row,
+                            selected,
+                            inner.width,
+                            th,
+                        ));
+                    }
                     // Settings → Presets draws its own rows.
                     crate::config::SettingsRow::Setting(i) if presets.is_some() => {
                         let selected = *i == view.selected && !view.on_tabs;
@@ -1986,6 +1998,13 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 p.area = area;
                 p.board.height = palette.board.height;
                 p.board.hits = palette.board.hits;
+                // The REPLY PANEL's Send and the rows its field drew.
+                if let (Some(live), Some(drawn)) = (&mut p.board.reply, &palette.board.reply) {
+                    live.send_at = drawn.send_at;
+                    if let Some(view) = drawn.view {
+                        live.input.set_view(view);
+                    }
+                }
             }
         }
         Overlay::Palette(palette) => {
@@ -3004,6 +3023,11 @@ pub(crate) fn settings_hints(
     } else if let Some(screen) = presets {
         // Nothing on the tab is installed: its keys and the way out.
         let mut hints = screen.hints(view.selected);
+        hints.push(NEXT_TAB.hint());
+        hints.extend(tail);
+        return hints;
+    } else if view.tab == crate::config::automations_tab() {
+        let mut hints = crate::automations::settings_tab::hints(view.selected);
         hints.push(NEXT_TAB.hint());
         hints.extend(tail);
         return hints;

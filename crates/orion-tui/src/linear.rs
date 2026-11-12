@@ -5594,6 +5594,12 @@ const MEMBERS_LIMIT: usize = 100;
 /// Not done and not canceled: the open issues.
 const OPEN_STATES: &str = r#"state: { type: { nin: ["completed", "canceled"] } }"#;
 
+/// The states a ticket is live in, someone's to act on: triage, todo
+/// (`unstarted`) and every started one (In Progress, In Review…) — not
+/// the backlog, and nothing done, cancelled or a duplicate (a cancelled
+/// state). What Needs you's LINEAR column lists (`needs_you::linear`).
+pub(crate) const LIVE_STATES: [&str; 3] = ["triage", "unstarted", "started"];
+
 /// How far back the LINEAR VIEW's done issues reach: a week of what was
 /// finished, under the open ones, as the PULL REQUESTS MODAL keeps a week
 /// of merges (`pull_request::MERGED_DAYS`).

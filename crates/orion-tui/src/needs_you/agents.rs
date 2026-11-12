@@ -174,9 +174,12 @@ mod tests {
         let waiting = agent(AgentStatus::NeedsFeedback, false);
         assert_eq!(reason_text(&waiting, None, None), "waiting for you");
         let question = WaitReason::Question {
-            question: "Which?".into(),
-            options: vec!["A".into(), "B".into()],
-            multi: false,
+            questions: vec![orion_core::Asked {
+                question: "Which?".into(),
+                header: String::new(),
+                options: vec!["A".into(), "B".into()],
+                multi: false,
+            }],
         };
         assert_eq!(
             reason_text(&waiting, Some(&question), None),

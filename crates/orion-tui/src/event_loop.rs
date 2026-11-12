@@ -3846,6 +3846,8 @@ pub(crate) fn run_action(app: &mut App, action: crate::keymap::Action) -> Vec<Cl
 fn closes_on_esc(overlay: &Overlay) -> bool {
     match overlay {
         Overlay::Hosts(view) => view.input.is_none(),
+        // The board's REPLY PANEL takes Esc back to the board, draft kept.
+        Overlay::Palette(palette) if palette.board.reply.is_some() => false,
         // A pull request's review keeps Esc while it is writing.
         Overlay::Diff(view) => !crate::pr_review::viewer::takes_esc(view),
         Overlay::Menu(_)
@@ -4925,6 +4927,11 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
         PromptKind::MicrosoftAppId { client_id } => {
             let (title, label) = crate::microsoft::app_id_prompt_text(client_id.as_deref());
             (title.into(), label.into(), String::new())
+        }
+        PromptKind::AutomationText { which, row } => {
+            let (title, label, text) =
+                crate::automations::settings_tab::prompt_text(app, *which, *row);
+            (title.into(), label.into(), text)
         }
         PromptKind::LinkBrowser { id } => {
             let cfg = crate::config::Config::load();
@@ -7982,6 +7989,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                         | PromptKind::SlackToken { .. }
                         | PromptKind::MicrosoftAppId { .. }
                 );
+                // Settings → Automations' line, back on its row.
+                if let PromptKind::AutomationText { which, row } = prompt.kind {
+                    crate::automations::settings_tab::back_on(app, which, row);
+                    return;
+                }
                 // The comment box stood in for the PULL REQUESTS MODAL: Esc
                 // puts the modal back on its row, the comment unposted.
                 let back_to_prs = match &prompt.kind {
@@ -8277,6 +8289,11 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 }
             }
         }
+        // The board's REPLY PANEL: every key is the draft's, but Enter
+        // (send) and Esc (back to the board).
+        Overlay::Palette(palette) if palette.on_board() && palette.board.reply.is_some() => {
+            crate::needs_you::reply::key(app, &key)
+        }
         // Nothing typed: the NEEDS YOU BOARD's own keys. Anything else
         // types, which turns it into the jump list.
         Overlay::Palette(palette) if palette.on_board() => {
@@ -8289,6 +8306,16 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 _ if keys::JUMP.matches(&key) => activate::needs_you_card(app, out),
                 _ if keys::DONE.matches(&key) => crate::needs_you::done(app),
                 _ if keys::SNOOZE.matches(&key) => crate::needs_you::snooze(app),
+                // `r` on a SLACK card: the REPLY PANEL. On any other card
+                // it types, as every letter does.
+                _ if crate::needs_you::reply::keys::REPLY.matches(&key)
+                    && palette
+                        .board
+                        .selected()
+                        .is_some_and(|c| c.section == crate::needs_you::model::Section::Slack) =>
+                {
+                    crate::needs_you::reply::open(app)
+                }
                 _ => {
                     if palette.query.handle_key(&key).changed() {
                         palette.apply_filter();
@@ -8535,6 +8562,14 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         // ↑ off the top row steps onto the tab strip.
         KeyCode::Char('k') | KeyCode::Up if selected == 0 => SettingsCmd::FocusTabs,
         KeyCode::Char('k') | KeyCode::Up => SettingsCmd::Move(selected - 1),
+        // Settings → Automations: Enter, the arrows, Space and `⌘U` are
+        // the tab's own, and nothing else is.
+        _ if !on_tabs && tab == crate::config::automations_tab() => {
+            match crate::automations::settings_tab::key_cmd(selected, &key) {
+                Some(cmd) => SettingsCmd::Automation(cmd),
+                None => return,
+            }
+        }
         _ if keys::CHOOSE.matches(&key) => activate::settings_row_cmd(hotkeys, selected),
         // Settings → Presets: the keys its selected row has a use for,
         // and nothing else — not the value rows' cycle or install.
@@ -8630,6 +8665,10 @@ fn run_settings_cmd(app: &mut App, cmd: SettingsCmd) {
             }
         }
         SettingsCmd::Preset(cmd) => crate::presets_tab::run(app, cmd),
+        SettingsCmd::Automation(cmd) => {
+            app.remember_settings_row(tab, view.selected);
+            crate::automations::settings_tab::run(app, cmd)
+        }
         SettingsCmd::Connection(connection, connect) => connection_cmd(app, connection, connect),
         SettingsCmd::RewriteAbout(i) => {
             if let Some(repo) = app.settings_project(tab, i).map(|p| p.repo_path.clone()) {
@@ -8749,6 +8788,8 @@ enum SettingsCmd {
     ChipMark(usize),
     /// A key on a Settings → Presets row.
     Preset(crate::presets_tab::Cmd),
+    /// A key on a Settings → Automations row.
+    Automation(crate::automations::settings_tab::Cmd),
     /// `c` (true) or `o` (false) on a CONNECTIONS TAB status row.
     Connection(crate::config::Connection, bool),
     /// `^R` on a project's **What it is**.
@@ -8802,6 +8843,17 @@ fn apply_setting_at(app: &mut App, tab: usize, index: usize, delta: i32) {
             }
             _ => {}
         }
+    }
+    // A Settings → Automations row: the tab's own Enter (a second click)
+    // or step.
+    if tab == crate::config::automations_tab() {
+        use crate::automations::settings_tab::{run, Cmd};
+        app.remember_settings_row(tab, index);
+        let cmd = match delta.signum() as i8 {
+            0 => Cmd::Open(index),
+            step => Cmd::Step(index, step),
+        };
+        return run(app, cmd);
     }
     // A Settings → Presets row: Enter (or a second click) edits its
     // preset, or makes one on **+ New preset**; there is nothing to cycle.
@@ -9374,6 +9426,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
             | PromptKind::LinkBrowser { .. }
             | PromptKind::SlackToken { .. }
             | PromptKind::MicrosoftAppId { .. }
+            | PromptKind::AutomationText { .. }
             | PromptKind::QuickPrompt(_)
     );
     if value.is_empty() && !empty_is_a_default {
@@ -9527,6 +9580,9 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         PromptKind::AccountChipMark { id } => {
             let result = crate::claude_accounts::set_chip_mark(&id, &value);
             back_on_the_account(app, &id, result);
+        }
+        PromptKind::AutomationText { which, row } => {
+            crate::automations::settings_tab::write_text(app, which, row, &value)
         }
         PromptKind::LinkBrowser { id } => {
             let mut cfg = crate::config::Config::load();
@@ -10868,6 +10924,7 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
         todo,
         automation,
     } = draft;
+    let which = automation;
     let automation = automation.map(|a| a.id().to_string());
     // A PR SESSION is addressed to the PROJECT, not to a checkout: the
     // DAEMON runs it in the PR head branch's own worktree, creating that
@@ -10957,8 +11014,8 @@ pub(crate) fn create_agent(app: &mut App, draft: AgentLaunchDraft, out: &mut Vec
     if let Some(todo) = todo {
         app.todo_pending.insert(req_id, todo);
     }
-    if automation.is_some() {
-        app.automations.launching.insert(req_id);
+    if let Some(which) = which {
+        app.automations.launching.insert(req_id, which);
     }
     // The second half of a launch the user already navigated away from:
     // its Ack leaves the cursors where they are, as the first half's did.
@@ -11545,7 +11602,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::HomeBack
                 | HitTarget::Upgrade
                 | HitTarget::FooterSpotify(_)
-                | HitTarget::FooterNeedsYou
+                | HitTarget::NeedsYouCount
         )
     });
     // The PULL REQUESTS MODAL's and the LINEAR VIEW's `↗ open in browser`
@@ -11921,8 +11978,14 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
         return;
     }
     // The NEEDS YOU BOARD: the wheel walks the column, a click on a card
-    // is Enter on it, and on `+N more` unfolds it, as → does.
+    // is Enter on it, and on `+N more` unfolds it, as → does. With the
+    // REPLY PANEL up, a click on Send is its Enter (`needs_you::reply`).
     if let Some(Overlay::Palette(palette)) = &mut app.overlay {
+        if palette.on_board() && palette.board.reply.is_some() {
+            crate::needs_you::reply::mouse(app, &mouse);
+            app.dirty = true;
+            return;
+        }
         if palette.on_board() {
             let board = &mut palette.board;
             match mouse.kind {
@@ -12366,8 +12429,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // A SPOTIFY READOUT button: its command, straight to the
                 // app, with a poll behind it.
                 Some(HitTarget::FooterSpotify(button)) => press_spotify(app, button),
-                // The footer's `needs you`: the board, as `⌘K` opens it.
-                Some(HitTarget::FooterNeedsYou) => open_palette(app),
+                // The header's NEEDS YOU COUNT: the board, as `⌘K` opens it.
+                Some(HitTarget::NeedsYouCount) => open_palette(app),
                 // The CLOSE BUTTON at the strip's right end: the pane
                 // folds away through the one `toggle_pane` `^~` runs. It
                 // is only drawn on a pane that is showing, so the toggle
@@ -13532,7 +13595,7 @@ fn refresh_palette(app: &mut App) {
     crate::needs_you::refresh(app);
 }
 
-/// `⌘K`, and a click on the footer's `needs you`: the NEEDS YOU BOARD,
+/// `⌘K`, and a click on the header's NEEDS YOU COUNT: the NEEDS YOU BOARD,
 /// over the palette whose rows typing reaches.
 pub(crate) fn open_palette(app: &mut App) {
     // Every project's todos, for their rows.
@@ -19122,7 +19185,7 @@ mod tests {
         let row = footer_row(&terminal);
         assert!(
             row.trim_end()
-                .ends_with("♪ Midnight City · M83  ⏮  ⏸ ⏭  ⌘K needs you 0  1 agent · 1.0 GB"),
+                .ends_with("♪ Midnight City · M83  ⏮  ⏸ ⏭  1 agent · 1.0 GB"),
             "left of the usage readout:\n{row}"
         );
 
@@ -19260,7 +19323,7 @@ mod tests {
         // title keeps what is left.
         assert!(
             row.trim_end()
-                .ends_with("♪ Midnight …  ⏮  ⏸ ⏭  ⌘K needs you 0  1 agent · 1.0 GB"),
+                .ends_with("♪ Midnight …  ⏮  ⏸ ⏭  1 agent · 1.0 GB"),
             "{row}"
         );
     }
@@ -37036,6 +37099,218 @@ mod tests {
         }
     }
 
+    /// A mention of you in a thread of `#eng`, its newest message at `ts`:
+    /// one SLACK card on the board.
+    fn slack_mention(app: &mut App, ts: &str) {
+        app.slack_status.user_id = Some("U0ME".into());
+        app.needs_you
+            .store
+            .slack
+            .channels
+            .insert("C1".into(), "eng".into());
+        let m = crate::needs_you::slack::Message {
+            channel: "C1".into(),
+            channel_type: "channel".into(),
+            user: Some("U1".into()),
+            text: "<@U0ME> can you look?".into(),
+            ts: ts.into(),
+            thread_ts: Some("10.000000".into()),
+            subtype: None,
+        };
+        crate::needs_you::slack::heard(app, m, "{}");
+    }
+
+    fn slack_cards(app: &App) -> usize {
+        crate::needs_you::cards(app)
+            .iter()
+            .filter(|c| c.section == crate::needs_you::model::Section::Slack)
+            .count()
+    }
+
+    /// `⌘K`, and the cursor onto the SLACK column.
+    fn board_on_slack(app: &mut App, out: &mut Vec<ClientRequest>) {
+        press(app, KeyCode::Char('k'), KeyModifiers::SUPER, out);
+        // Laid out once, as on screen, so the columns have their cards.
+        drawn_board_hits(app);
+        press(app, KeyCode::Right, KeyModifiers::NONE, out);
+        press(app, KeyCode::Right, KeyModifiers::NONE, out);
+    }
+
+    fn reply_panel(app: &App) -> Option<&crate::needs_you::reply::Panel> {
+        match &app.overlay {
+            Some(Overlay::Palette(p)) => p.board.reply.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn posts(app: &App) -> Vec<crate::needs_you::reply::Ask> {
+        use crate::needs_you::reply::Ask;
+        app.needs_you
+            .reply_asks
+            .iter()
+            .filter(|a| matches!(a, Ask::Post { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// Enter on a SLACK card opens it in Slack and marks it done, so an
+    /// answer given there that orion never hears doesn't leave it up —
+    /// and a newer message brings it back.
+    #[test]
+    fn enter_on_a_slack_card_marks_it_done_until_a_newer_message() {
+        with_seeded_presets(|| {
+            let mut app = parity_tree();
+            let mut out = Vec::new();
+            slack_mention(&mut app, "11.000000");
+            assert_eq!(slack_cards(&app), 1);
+            board_on_slack(&mut app, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(app.overlay.is_none(), "the board went");
+            assert_eq!(slack_cards(&app), 0, "done as it opened");
+            slack_mention(&mut app, "12.000000");
+            assert_eq!(slack_cards(&app), 1, "a newer message brings it back");
+        });
+    }
+
+    /// `r` on a SLACK card, a reply typed and Enter: one `chat.postMessage`
+    /// as you, into the card's thread, and the card gone once it lands.
+    #[test]
+    fn a_reply_typed_on_the_board_is_sent_once_into_the_thread() {
+        use crate::needs_you::reply::{Ask, Got, Landed};
+        with_seeded_presets(|| {
+            let mut app = parity_tree();
+            let mut out = Vec::new();
+            slack_mention(&mut app, "11.000000");
+            board_on_slack(&mut app, &mut out);
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                app.needs_you.reply_asks,
+                [Ask::Read {
+                    channel: "C1".into(),
+                    thread: Some("10.000000".into()),
+                }],
+                "the thread is read for the panel"
+            );
+            type_into(&mut app, "on it", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::SHIFT, &mut out);
+            type_into(&mut app, "today", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let post = Ask::Post {
+                channel: "C1".into(),
+                root: Some("10.000000".into()),
+                thread: Some("10.000000".into()),
+                text: "on it\ntoday".into(),
+            };
+            assert_eq!(
+                posts(&app),
+                std::slice::from_ref(&post),
+                "sent once, ⇧Enter a new line"
+            );
+            assert_eq!(slack_cards(&app), 1, "up until Slack says it went");
+
+            crate::needs_you::land(
+                &mut app,
+                crate::needs_you::Answer::Reply(Landed {
+                    ask: post,
+                    got: Ok(Got::Sent),
+                }),
+            );
+            assert_eq!(slack_cards(&app), 0, "the card went with the reply");
+            assert!(reply_panel(&app).is_none(), "back on the board");
+            assert_eq!(
+                app.flash.as_ref().map(|f| f.text.as_str()),
+                Some("Sent to #eng · thread")
+            );
+        });
+    }
+
+    /// A token from before `chat:write` was asked for says how to get it,
+    /// and keeps the draft; Esc goes back to the board with the draft
+    /// kept for the next `r`.
+    #[test]
+    fn a_reply_without_chat_write_says_to_reinstall_and_keeps_the_draft() {
+        use crate::needs_you::reply::{Landed, MISSING_SCOPE};
+        with_seeded_presets(|| {
+            let mut app = parity_tree();
+            let mut out = Vec::new();
+            slack_mention(&mut app, "11.000000");
+            board_on_slack(&mut app, &mut out);
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            type_into(&mut app, "on it", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let post = posts(&app).remove(0);
+            crate::needs_you::land(
+                &mut app,
+                crate::needs_you::Answer::Reply(Landed {
+                    ask: post,
+                    got: Err("missing_scope".into()),
+                }),
+            );
+            assert_eq!(
+                app.flash.as_ref().map(|f| f.text.as_str()),
+                Some(MISSING_SCOPE)
+            );
+            assert!(MISSING_SCOPE.contains("Reinstall Orion from the manifest"));
+            let panel = reply_panel(&app).expect("the panel stays");
+            assert!(!panel.sending);
+            assert_eq!(panel.input.as_str(), "on it");
+            assert_eq!(slack_cards(&app), 1);
+
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            assert!(reply_panel(&app).is_none(), "Esc: back to the board");
+            assert!(
+                matches!(app.overlay, Some(Overlay::Palette(_))),
+                "the board stays"
+            );
+            press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
+            assert_eq!(
+                reply_panel(&app).map(|p| p.input.as_str()),
+                Some("on it"),
+                "the draft came back"
+            );
+        });
+    }
+
+    /// INPUT PARITY: a click on the REPLY PANEL's Send is Enter in it.
+    #[test]
+    fn a_click_on_send_is_enter_in_the_reply_panel() {
+        with_seeded_presets(|| {
+            let typed = |out: &mut Vec<ClientRequest>| {
+                let mut app = parity_tree();
+                slack_mention(&mut app, "11.000000");
+                board_on_slack(&mut app, out);
+                press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, out);
+                type_into(&mut app, "on it", out);
+                drawn_board_hits(&mut app);
+                app
+            };
+            let mut keys_out = Vec::new();
+            let mut by_keys = typed(&mut keys_out);
+            press(
+                &mut by_keys,
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+                &mut keys_out,
+            );
+
+            let mut mouse_out = Vec::new();
+            let mut by_mouse = typed(&mut mouse_out);
+            let send = reply_panel(&by_mouse)
+                .and_then(|p| p.send_at)
+                .expect("Send is drawn");
+            click(&mut by_mouse, send.x + 1, send.y, &mut mouse_out);
+
+            assert_eq!(posts(&by_mouse).len(), 1, "the click sent it");
+            assert_eq!(posts(&by_mouse), posts(&by_keys));
+            assert_eq!(
+                ui_digest(&by_mouse, &mouse_out),
+                ui_digest(&by_keys, &keys_out)
+            );
+            assert_eq!(by_mouse.flash, by_keys.flash);
+        });
+    }
+
     /// A click on a file finder row is Enter on it — the MARKDOWN PAGE for
     /// a markdown file. The click used to call the editor directly, and so
     /// missed the reader when Enter learned it.
@@ -37085,6 +37360,63 @@ mod tests {
             ui_digest(&by_mouse, &mouse_out),
             ui_digest(&by_keys, &keys_out)
         );
+    }
+
+    /// Settings → Automations: a second click on the bug fixer's **On** is
+    /// Enter on it, through the tab's own command; `→` on the overall cap
+    /// steps it, `Space` on any of a section's rows switches its
+    /// automation.
+    #[test]
+    fn a_second_click_on_an_automations_row_is_enter_on_it() {
+        use crate::automations::{settings_tab, Automation};
+        with_default_config(|| {
+            let on = settings_tab::row_of(Automation::BugFixer, None);
+            let open = |at: usize| {
+                let mut app = App::new();
+                seed_tree(&mut app);
+                settings_tab::reopen_at(&mut app, at);
+                let mut terminal = Terminal::new(TestBackend::new(160, 50)).unwrap();
+                terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+                app
+            };
+            let row_line = |app: &App| {
+                let view = settings(app).expect("settings are open");
+                let line = app
+                    .settings_rows(view.tab)
+                    .iter()
+                    .position(|r| r.index() == Some(on))
+                    .unwrap();
+                let body = view.body_area;
+                (body.x + 1, body.y + (line - view.first_row) as u16)
+            };
+            let none = KeyModifiers::NONE;
+            let (mut by_keys, mut keys_out) = (open(on), Vec::new());
+            press(&mut by_keys, KeyCode::Enter, none, &mut keys_out);
+            // The mouse starts elsewhere: its first click is the move.
+            let (mut by_mouse, mut mouse_out) = (open(0), Vec::new());
+            let (x, y) = row_line(&by_mouse);
+            click(&mut by_mouse, x, y, &mut mouse_out);
+            click(&mut by_mouse, x, y, &mut mouse_out);
+            assert_eq!(
+                ui_digest(&by_mouse, &mouse_out),
+                ui_digest(&by_keys, &keys_out)
+            );
+            assert!(by_keys.automations.is_on(Automation::BugFixer));
+            assert!(by_mouse.automations.is_on(Automation::BugFixer));
+
+            // Space on its Labels row switches it back; → on the cap steps it.
+            let labels = settings_tab::row_of(
+                Automation::BugFixer,
+                Some(crate::automations::SettingRow::Labels),
+            );
+            settings_tab::reopen_at(&mut by_keys, labels);
+            press(&mut by_keys, KeyCode::Char(' '), none, &mut keys_out);
+            assert!(!by_keys.automations.is_on(Automation::BugFixer));
+            settings_tab::reopen_at(&mut by_keys, 0);
+            press(&mut by_keys, KeyCode::Right, none, &mut keys_out);
+            assert_eq!(by_keys.automations.settings.max_running, 4);
+            assert!(settings(&by_keys).is_some(), "still on the tab");
+        });
     }
 
     /// A second click on a SETTINGS OVERLAY row is Enter on it, and a click

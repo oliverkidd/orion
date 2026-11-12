@@ -408,6 +408,12 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE agents ADD COLUMN automation TEXT;
     ",
+    // 36: the WaitReason a phone message was posted about (JSON), so a
+    // button that opens a modal can build it after a restart. NULL on
+    // older rows and on crashes.
+    "
+    ALTER TABLE phone_messages ADD COLUMN reason TEXT;
+    ",
 ];
 
 fn phone_kind_str(kind: orion_core::away::PhoneKind) -> &'static str {
@@ -1083,15 +1089,18 @@ impl Store {
     pub fn insert_phone_message(&self, m: &crate::phone::PhoneMessage) -> Result<()> {
         self.conn.lock().unwrap().execute(
             "INSERT OR REPLACE INTO phone_messages
-               (channel, ts, agent_id, kind, blocks, posted_at, answered)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
+               (channel, ts, agent_id, kind, blocks, posted_at, answered, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)",
             params![
                 m.channel,
                 m.ts,
                 m.agent.as_str(),
                 phone_kind_str(m.kind),
                 m.blocks,
-                now_ms()
+                now_ms(),
+                m.reason
+                    .as_ref()
+                    .and_then(|r| serde_json::to_string(r).ok()),
             ],
         )?;
         Ok(())
@@ -1145,11 +1154,13 @@ impl Store {
     ) -> Result<Vec<(crate::phone::PhoneMessage, bool)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
-            "SELECT channel, ts, agent_id, kind, blocks, answered FROM phone_messages WHERE {filter}"
+            "SELECT channel, ts, agent_id, kind, blocks, answered, reason
+               FROM phone_messages WHERE {filter}"
         ))?;
         let rows = stmt.query_map(args, |r| {
             let kind: String = r.get(3)?;
             let answered: Option<String> = r.get(5)?;
+            let reason: Option<String> = r.get(6)?;
             Ok((
                 crate::phone::PhoneMessage {
                     channel: r.get(0)?,
@@ -1157,6 +1168,7 @@ impl Store {
                     agent: AgentId(r.get(2)?),
                     kind: parse_phone_kind(&kind),
                     blocks: r.get(4)?,
+                    reason: reason.and_then(|r| serde_json::from_str(&r).ok()),
                 },
                 answered.is_none(),
             ))

@@ -296,11 +296,16 @@
   `AskUserQuestion` call's `tool_input`), the plan (from `ExitPlanMode`'s), the tool a permission
   prompt is for, or a crash's exit code. The daemon holds the newest one per session in memory and
   drops it as soon as the row leaves red. A daemon that restarted rebuilds a red row's reason from
-  the dialog its transcript ends on. Answering from outside the session types the keys Claude's own
-  dialog takes: a digit for an option, the row after the options for your own words, `1` to approve
-  a plan, the plan's last row ("Tell Claude what to change") for feedback, Esc and then your words to
-  refuse a permission prompt. A session with no dialog open (stopped, or asked before a restart)
-  gets the answer as its next turn instead, in words.
+  the dialog its transcript ends on. A question keeps every question of the ask, and a plan whose
+  `ExitPlanMode` input carries no text is read from its `planFilePath`, else shown as "(plan in
+  Claude)". Answering from outside the session types the keys Claude's own dialog takes: a digit for
+  an option, the row after the options for your own words, `1` to approve a plan, the plan's last row
+  ("Tell Claude what to change") for feedback, Esc and then your words to refuse a permission
+  prompt. An ask with several questions is answered tab by tab, then `1. Submit answers` on its
+  review tab; an answer that leaves a question out (your words on a three-part ask) presses Esc
+  instead, cancelling the dialog, and sends the words as the next turn under `You asked:` and the
+  questions, so a session is never left half-answered. A session with no dialog open (stopped, or
+  asked before a restart) gets the answer as its next turn instead, in words.
 - **Phone bridge.** <a id="phone-bridge"></a>While you are away, a session that starts waiting on you
   — a question, a plan, a permission prompt — or crashes goes to your phone at once, as a Slack DM
   from the Orion app's bot; there is never a delay. You are away when the screen is locked (macOS's
@@ -309,15 +314,23 @@
   away. Quiet hours and **Send to your phone while away** (Settings › Connections) hold messages
   back. The DM reads `● Agent · <project> · <HH:MM>`, then the session's name, then its whole last
   response from the transcript (never summarised; split into Slack's 3000-character sections, and
-  continued in the thread past Slack's 50 blocks), then the question in bold with a button per
-  option and `Something else…`, or the plan with `Approve` and a reply button. A button answers
-  through the same keys an answer from orion types; `Something else…` and the reply button say
-  "Reply in this thread". A reply in a message's thread answers that session in words (feedback, for
-  a plan), a plain DM answers the newest message still waiting, and only the user who installed the
-  app is listened to. Each answer gets `✓ Sent · working again` in its thread. A session answered
-  at the desk instead has its DM updated to say "Answered in Orion", its buttons gone. The daemon
+  continued in the thread past Slack's 50 blocks), then what it waits on. One single-select question
+  is in bold with a button per option, `Type an answer…` and `or just reply here` under them. A
+  multi-select question, or several in one ask, lists every question in bold with its options dim
+  under it, and one `Answer…`. A plan has `Approve` and `Suggest changes…`; a permission prompt
+  `Yes` and `Type an answer…`. A button answers through the same keys an answer from orion types.
+  `Type an answer…`, `Suggest changes…` and `Answer…` open a Slack modal: a text box, or for
+  `Answer…` radio buttons or checkboxes per question, each with an optional "Or in your own words"
+  box that wins over the picks; its submit answers every question at once. A reply in a message's
+  thread answers that session in words (feedback, for a plan), a plain DM answers the newest message
+  still waiting, and only the user who installed the app is listened to. After an answer the DM is
+  updated in place, its buttons swapped for `✓ Sent: <what went in> · working again`; one that
+  didn't go in gets `✗ Not sent: …` in its thread, and a modal submitted on a message already
+  answered says "This one was already answered" inside the modal. A session answered at the desk
+  instead has its DM updated to say "Answered in Orion", its buttons gone. The daemon
   holds one Socket Mode websocket to Slack (reopened with backoff when it drops), keeps which message
-  is which session's in its database so a reply finds its session after a restart, and forwards
+  is which session's (and what it was about) in its database so a reply or a modal finds its session
+  after a restart, and forwards
   every message event your user token sees to the TUIs, unfiltered, for Needs you. With no tokens
   saved nothing connects and nothing polls.
 - **Which of those signals you get depends on the harness.** Claude is installed with all ten hook
@@ -385,7 +398,7 @@
   Pure capture: nothing is injected into the
   model's context and no extra turn runs. See [Sessions](sessions.md#recent-prompts).
 - **The header counts what is waiting on the repo.** The GRID's header says
-  `4 sessions  3 prs` for the
+  `3 prs` for the
   selected project, the count muted, a count being a fact rather than a status — the open
   pull requests the OPEN PRS sweep already keeps warm for every project (drafts left out while
   `hide_draft_prs` is on). Zero says nothing, and a narrow column

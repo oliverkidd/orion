@@ -340,7 +340,9 @@ pub struct SettingSpec {
 /// new action shows up there without being declared twice — and the Accounts
 /// tab is generated from the harness registry, so a new CLI shows up
 /// there without being declared twice. The Presets tab is the AGENT
-/// PRESETS themselves, read from their file (`presets_tab`).
+/// PRESETS themselves, read from their file (`presets_tab`), and the
+/// Automations tab is generated from the automations' registry
+/// (`automations::settings_tab`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBody {
     Values(&'static [SettingSpec]),
@@ -348,6 +350,7 @@ pub enum TabBody {
     Keys,
     Accounts,
     Presets,
+    Automations,
 }
 
 /// The Accounts tab's section listing every CLAUDE ACCOUNT, between the
@@ -569,7 +572,8 @@ pub fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
 }
 
 /// The tab strip, left to right: what orion does, the accounts it runs
-/// agents on, each project's own settings, the presets, and the keys —
+/// agents on, each project's own settings, the presets, the automations,
+/// what orion connects to, and the keys —
 /// last because it is the biggest and the least casual.
 pub const SETTINGS_TABS: &[SettingsTab] = &[
     SettingsTab {
@@ -596,6 +600,12 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
     SettingsTab {
         title: "Presets",
         body: TabBody::Presets,
+    },
+    // What orion starts on its own: the caps, then each automation's
+    // section.
+    SettingsTab {
+        title: "Automations",
+        body: TabBody::Automations,
     },
     // What orion reaches outside itself through: away and the phone,
     // Slack, Microsoft 365, GitHub and Linear.
@@ -823,8 +833,8 @@ pub const CONNECTIONS_SETTINGS: &[SettingSpec] = &[
     },
     SettingSpec {
         kind: SettingKind::LinearMentions,
-        label: "Linear comments that mention you",
-        hint: "Your unread Linear notifications show in Needs you, asked with each project's LINEAR_API_KEY: mentions, new comments on your issues, issues given to you. Marking one done there marks it read in Linear",
+        label: "Linear tickets and mentions",
+        hint: "Your live Linear tickets (triage, todo, in progress) and unread notifications about them show in Needs you, asked with each project's LINEAR_API_KEY. Marking one done there marks its notifications read in Linear",
         group: "GITHUB AND LINEAR · through gh and project keys",
     },
 ];
@@ -843,6 +853,14 @@ pub fn presets_tab() -> usize {
         .iter()
         .position(|t| t.body == TabBody::Presets)
         .expect("SETTINGS_TABS declares a Presets tab")
+}
+
+/// Index of the Automations tab (`automations::settings_tab`).
+pub fn automations_tab() -> usize {
+    SETTINGS_TABS
+        .iter()
+        .position(|t| t.body == TabBody::Automations)
+        .expect("SETTINGS_TABS declares an Automations tab")
 }
 
 /// Index of the Accounts tab, generated from the harness registry.
@@ -890,6 +908,7 @@ pub fn tab_len(tab: usize, projects: usize) -> usize {
             ACCOUNTS_HEAD.len() + cfg.account_rows().len() + cfg.agent_rows().len()
         }
         Some(TabBody::Presets) => crate::presets_tab::Screen::load().rows.len(),
+        Some(TabBody::Automations) => crate::automations::settings_tab::len(),
         None => 0,
     }
 }
@@ -966,6 +985,7 @@ pub fn hint_at(tab: usize, index: usize) -> String {
             .to_string(),
         Some(TabBody::Accounts) => Config::load().agent_hint_by_index(index),
         Some(TabBody::Presets) => crate::presets_tab::Screen::load().explain(index),
+        Some(TabBody::Automations) => crate::automations::settings_tab::explain(index),
         None => String::new(),
     }
 }
@@ -1065,6 +1085,7 @@ pub fn settings_rows(tab: usize, projects: usize) -> Vec<SettingsRow> {
             out
         }
         Some(TabBody::Presets) => crate::presets_tab::Screen::load().settings_rows(),
+        Some(TabBody::Automations) => crate::automations::settings_tab::settings_rows(),
         None => Vec::new(),
     }
 }
@@ -3442,7 +3463,7 @@ pub fn locate(kind: SettingKind) -> Option<(usize, usize)> {
                 settings.iter().position(|s| s.kind == kind)
             }
             TabBody::Accounts => ACCOUNTS_HEAD.iter().position(|s| s.kind == kind),
-            TabBody::Keys | TabBody::Presets => None,
+            TabBody::Keys | TabBody::Presets | TabBody::Automations => None,
         }
         .map(|i| (t, i))
     })
@@ -3505,7 +3526,7 @@ mod tests {
         // A config with neither has it on.
         let none: Config = serde_json::from_str("{}").unwrap();
         assert!(none.automations.is_on(Automation::PrFixer));
-        assert_eq!(none.automations.max_running, 5);
+        assert_eq!(none.automations.max_running, 3);
     }
 
     /// The `automations` keys round-trip through a save.
@@ -5462,15 +5483,20 @@ mod tests {
                     TabBody::Keys => assert!(headers > 0, "the Keys tab groups its rows"),
                     TabBody::Accounts => assert!(headers > 0, "the Accounts tab groups its rows"),
                     TabBody::Presets => assert_eq!(headers, 2, "orion's presets, then yours"),
+                    TabBody::Automations => assert_eq!(
+                        headers,
+                        1 + crate::automations::Automation::ALL.len(),
+                        "the caps, then a section per automation"
+                    ),
                 }
             }
         });
     }
 
-    /// Settings is six tabs, and General holds what is left of orion's
+    /// Settings is seven tabs, and General holds what is left of orion's
     /// own switches under three groups.
     #[test]
-    fn settings_is_six_tabs_and_general_has_three_groups() {
+    fn settings_is_seven_tabs_and_general_has_three_groups() {
         let titles: Vec<&str> = SETTINGS_TABS.iter().map(|t| t.title).collect();
         assert_eq!(
             titles,
@@ -5479,6 +5505,7 @@ mod tests {
                 "Accounts",
                 "Projects",
                 "Presets",
+                "Automations",
                 "Connections",
                 "Keys"
             ]

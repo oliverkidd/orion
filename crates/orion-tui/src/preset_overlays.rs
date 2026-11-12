@@ -985,7 +985,7 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
         // leaves on its row.
         // One opened for an automation goes back to its screen.
         _ if crate::nav::closes(&key) => match (view.for_automation, view.box_behind().cloned()) {
-            (Some(which), _) => crate::automations::view::picked(app, which, None),
+            (Some(which), _) => crate::automations::settings_tab::picked(app, which, None),
             (None, Some(back)) => crate::quick_prompt::reopen(app, back.launch, &back.text),
             (None, None) => match view.quick.clone().and_then(|back| back.launch.under) {
                 Some(under) => under.reopen(app),
@@ -1029,7 +1029,7 @@ fn activate_selected(app: &mut App, out: &mut Vec<ClientRequest>) {
     let view = view.clone();
     if let Some(which) = view.for_automation {
         let name = view.presets.get(view.selected).map(|p| p.name.clone());
-        crate::automations::view::picked(app, which, name);
+        crate::automations::settings_tab::picked(app, which, name);
         return;
     }
     if let Some(session) = view.pane_target() {

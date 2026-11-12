@@ -667,21 +667,23 @@ fn tab_ramp(tally: Tally, th: Theme) -> Option<[Color; 3]> {
     }
 }
 
-/// The header's right side: how many cards the grid holds, and how many
-/// of them are off screen. Which of them want something is the STATUS
-/// DOTS' business on the PROJECT TABS, told in dots rather than in a
-/// second sentence.
+/// The header's right side: the NEEDS YOU COUNT (`⌘K 4`, how many cards
+/// wait on the board, in the waiting red and gone at zero), in the
+/// ARCHIVED VIEW how many sessions it holds, and how many cards are off
+/// screen. Which sessions want something is the STATUS DOTS' business on
+/// the PROJECT TABS; how many run is the footer's.
 ///
 /// It gets what the tabs leave of the row ([`draw_head`]), and what does
-/// not fit in `width` gives way whole, least needed first: the count of
-/// the cards (each band's rule says its own), then the PR COUNT (`v`
-/// says it again), and the HIDDEN MARKER last — a
-/// screenful of cards with more behind it looks exactly like a project
-/// with that many sessions in it, and the PANE dragged up over the grid
-/// is the usual way of getting there. The row never runs past `width`.
+/// not fit in `width` gives way whole, least needed first: the archived
+/// count (each band's rule says its own), then the PR COUNT (`v` says it
+/// again), then the HIDDEN MARKER — a screenful of cards with more behind
+/// it looks exactly like a project with that many sessions in it, and the
+/// PANE dragged up over the grid is the usual way of getting there — and
+/// the NEEDS YOU COUNT last, the one place it is said. The row never runs
+/// past `width`.
 ///
-/// Each span comes with the button it is, if any: only the two counts are,
-/// and [`draw_head`] lays their hit rects where the row lands them.
+/// Each span comes with the button it is, if any: the two counts are, and
+/// [`draw_head`] lays their hit rects where the row lands them.
 fn head_count(
     app: &App,
     count: HeadCount,
@@ -690,10 +692,27 @@ fn head_count(
     th: Theme,
 ) -> Vec<(Span<'static>, Option<HitTarget>)> {
     type Part = Vec<(Span<'static>, Option<HitTarget>)>;
-    let words: Part = vec![(
-        Span::styled(count_words(app, count), Style::default().fg(th.dim)),
-        None,
-    )];
+    // A button: a click opens the board, as its key does.
+    let needs: Part = crate::needs_you::header_count(app)
+        .map(|text| {
+            let mut style = Style::default().fg(th.err);
+            if app.hover_crumb == Some(HitTarget::NeedsYouCount) {
+                style = style.add_modifier(Modifier::UNDERLINED);
+            }
+            vec![
+                (Span::raw("  "), None),
+                (Span::styled(text, style), Some(HitTarget::NeedsYouCount)),
+            ]
+        })
+        .unwrap_or_default();
+    let words: Part = if app.show_archived {
+        vec![(
+            Span::styled(count_words(count), Style::default().fg(th.dim)),
+            None,
+        )]
+    } else {
+        Vec::new()
+    };
     // The PR COUNT the PROJECTS PANEL's rows used to carry: how many open
     // pull requests the project in front of you has, so the number is
     // read without opening `v` to find it — and a click on it opens that
@@ -770,6 +789,7 @@ fn head_count(
         }
     };
     let upgrade = keep(upgrade);
+    let needs = keep(needs);
     let host = keep(host);
     let mark = keep(mark);
     let badge = keep(badge);
@@ -780,20 +800,20 @@ fn head_count(
         .chain(words)
         .chain(badge)
         .chain(mark)
+        .chain(needs)
         .collect()
 }
 
-/// The header's count of what the grid holds: `3 sessions · 2 terminals`
-/// — the terminals only when there are any, since most projects have
-/// none — under the ARCHIVED VIEW's own word there, so the header says
-/// which of the two lists is on screen without a second line to read.
-fn count_words(app: &App, count: HeadCount) -> String {
-    let noun = if app.show_archived {
-        "archived session"
-    } else {
-        "session"
-    };
-    let mut out = format!("{} {noun}{}", count.sessions, plural(count.sessions));
+/// The ARCHIVED VIEW's count of what it holds: `3 archived sessions · 2
+/// terminals` — the terminals only when there are any — so the header
+/// says which of the two lists is on screen without a second line to
+/// read. The live grid's header counts no sessions: the footer does.
+fn count_words(count: HeadCount) -> String {
+    let mut out = format!(
+        "{} archived session{}",
+        count.sessions,
+        plural(count.sessions)
+    );
     if count.terminals > 0 {
         out.push_str(&format!(
             " · {} terminal{}",
@@ -3888,7 +3908,6 @@ mod tests {
         );
         let lines = drawn_lines(&mut app, body);
         let head = &lines[1];
-        assert!(head.contains("9 sessions"), "{head:?}");
         assert!(head.contains("↓ 7 hidden"), "{head:?}");
 
         // And the grid really did draw two of them: the header is not
@@ -3969,7 +3988,7 @@ mod tests {
         let body = Rect::new(0, 0, 60, HEAD_H + BAND_RULE_H + LIST_ROW_H * 2);
         let lines = drawn_lines(&mut app, body);
         let head = &lines[1];
-        assert!(head.contains("2 sessions"), "{head:?}");
+        assert!(head.contains("api"), "{head:?}");
         assert!(!head.contains("hidden"), "{head:?}");
     }
 
@@ -4619,30 +4638,28 @@ mod tests {
         let th = app.theme;
         let mark = |hidden| row_text(&count_spans(&app, 9, hidden, 80, th));
 
-        assert_eq!(mark(Hidden::default()), "9 sessions", "nothing is missing");
+        assert_eq!(mark(Hidden::default()), "", "nothing is missing");
         assert_eq!(
             mark(Hidden { above: 0, below: 5 }),
-            "9 sessions  ↓ 5 hidden",
+            "  ↓ 5 hidden",
             "under the fold: step down to them"
         );
-        assert_eq!(
-            mark(Hidden { above: 4, below: 0 }),
-            "9 sessions  ↑ 4 hidden"
-        );
+        assert_eq!(mark(Hidden { above: 4, below: 0 }), "  ↑ 4 hidden");
         assert_eq!(
             mark(Hidden { above: 2, below: 3 }),
-            "9 sessions  ↑↓ 5 hidden",
+            "  ↑↓ 5 hidden",
             "both ways at once, counted together"
         );
     }
 
     /// The counts get what the tabs leave them and give way whole, least
-    /// needed first — the count of the cards, then the PR COUNT — with the
-    /// HIDDEN MARKER last, and never run past their room.
+    /// needed first — the PR COUNT, then the HIDDEN MARKER — with the
+    /// NEEDS YOU COUNT last, and never run past their room.
     #[test]
     fn the_counts_give_way_a_piece_at_a_time() {
         let mut app = a_tree();
         select(&mut app, "api");
+        waiting_on_you(&mut app, 4);
         let id = app.selected_project().expect("api").id.clone();
         let now = std::time::Instant::now();
         app.open_prs.insert(
@@ -4667,24 +4684,62 @@ mod tests {
         );
         let th = app.theme;
         let hidden = Hidden { above: 0, below: 5 };
-        let mark_w = "  ↓ 5 hidden".chars().count();
+        let needs_w = "  ⌘K 4".chars().count();
         for width in 0..=120usize {
             let spans = count_spans(&app, 9, hidden, width, th);
             let text = row_text(&spans);
             let used: usize = spans.iter().map(|s| s.width()).sum();
             assert!(used <= width, "{width}: {text:?} overruns");
-            let words = text.contains("9 sessions");
+            let needs = text.contains("⌘K 4");
             let badge = text.contains("1 pr");
             let mark = text.contains("5 hidden");
-            assert_eq!(mark, width >= mark_w, "{width}: {text:?}");
+            assert_eq!(needs, width >= needs_w, "{width}: {text:?}");
+            assert!(!mark || needs, "{width}: the count went first: {text:?}");
             assert!(!badge || mark, "{width}: the marker went first: {text:?}");
-            assert!(!words || badge, "{width}: the counts went first: {text:?}");
         }
         assert_eq!(
             row_text(&count_spans(&app, 9, hidden, 120, th)),
-            "9 sessions  1 pr  ↓ 5 hidden",
-            "a column of air more between the count and the badge"
+            "  1 pr  ↓ 5 hidden  ⌘K 4",
+            "no session count: what waits on you, at the right edge"
         );
+    }
+
+    /// The NEEDS YOU COUNT: the board's number in the waiting red, a
+    /// button that opens it, and nothing at all while nothing waits.
+    #[test]
+    fn the_header_counts_what_waits_on_you_and_nothing_at_zero() {
+        let mut app = a_tree();
+        select(&mut app, "api");
+        let th = app.theme;
+        let right = |app: &App| head_count(app, HeadCount::default(), Hidden::default(), 80, th);
+        assert!(right(&app).is_empty(), "nothing waits: nothing said");
+        waiting_on_you(&mut app, 2);
+        let spans = right(&app);
+        let (count, hit) = spans.last().expect("the count");
+        assert_eq!(count.content, "⌘K 2");
+        assert_eq!(count.style.fg, Some(th.err));
+        assert_eq!(*hit, Some(HitTarget::NeedsYouCount));
+    }
+
+    /// `n` Slack DMs waiting on you: `n` cards on the NEEDS YOU BOARD.
+    fn waiting_on_you(app: &mut App, n: usize) {
+        for i in 0..n {
+            app.needs_you
+                .store
+                .slack
+                .waiting
+                .push(crate::needs_you::slack::Waiting {
+                    channel: format!("D{i}"),
+                    root: None,
+                    in_thread: false,
+                    direct: true,
+                    user: "U1".into(),
+                    text: "hi".into(),
+                    ts: format!("{i}.0"),
+                    why: crate::needs_you::slack::Why::Direct,
+                    keyword: None,
+                });
+        }
     }
 
     /// [`head_count`]'s spans without the buttons they carry.

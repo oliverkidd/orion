@@ -2,16 +2,17 @@
 //! fixer, the feature builder, week in review, meeting takeaways and the
 //! blue sky builder — and the one engine they all plug into.
 //!
-//! * **The registry.** [`Automation`] names every one, with what the
-//!   Automations screen (`⌘J`, [`view`]) says about it and the SYSTEM
-//!   PRESET it is told by. Each one that does anything has a [`Runner`]
+//! * **The registry.** [`Automation`] names every one, with what
+//!   Settings › Automations ([`settings_tab`]) and the running overview
+//!   (`⌘J`, [`view`]) say about it and the SYSTEM PRESET it is told by. Each one that does anything has a [`Runner`]
 //!   in [`Engine`], which the git tick drives ([`tick`]).
 //! * **Tagged sessions.** Every session an automation starts carries its
 //!   id in `Agent::automation` ([`launch`], or a draft's own
 //!   `AgentLaunchDraft::automation`), which the DAEMON keeps with the row:
 //!   the grid's badge and Needs you's kind label read it ([`kind_of`]).
-//! * **One cap.** No automation starts a session while
-//!   `automations.max_running` of them are running ([`may_start`]).
+//! * **Two caps.** No automation starts a session while
+//!   `automations.max_running` of them are running, nor while its own
+//!   `automations.per.<id>.max_running` of its own are ([`may_start`]).
 //! * **One way to say it.** A runner's first prompt is its preset's text
 //!   with its context at `{task}`, and the user's extra steer after it
 //!   ([`compose`]).
@@ -24,15 +25,17 @@ pub mod config;
 pub mod linear_builder;
 pub mod meeting_takeaways;
 pub mod pr_fixer;
+pub mod settings_tab;
 pub mod view;
 pub mod week_review;
 
 use crate::agent_presets::{AgentPreset, SystemPreset};
 use crate::app::{AgentLaunchDraft, App};
 use orion_core::{Agent, AgentId, AgentStatus, ClientRequest};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
-/// Every automation, in the order the Automations screen lists them.
+/// Every automation, in the order Settings › Automations and the overview
+/// list them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Automation {
     PrFixer,
@@ -71,13 +74,14 @@ impl Automation {
         orion_core::automation::ALL[self as usize].1
     }
 
-    /// The one line under its name on the screen.
+    /// What it does: the line under **On** in Settings › Automations, its
+    /// keys `{token}`s the keymap spells (`hints::expand`).
     pub const fn description(self) -> &'static str {
         match self {
             Automation::PrFixer => "When one of your PRs hits conflicts or failing checks, fixes it and watches until it's green. Stops after 3 tries in a row that don't work.",
             Automation::BugFixer => "Picks up Linear tickets assigned to you that carry one of its labels, plans each one, waits for your approval, then builds to a draft PR.",
             Automation::FeatureBuilder => "Picks up Linear tickets assigned to you that carry one of its labels, plans each one, waits for your approval, then builds to a draft PR.",
-            Automation::WeekReview => "Writes up the week from everything merged, done and ticked, so it's ready before the meeting. Also in ⌘⇧P as \"Run week in review now\".",
+            Automation::WeekReview => "Writes up the week from everything merged, done and ticked, so it's ready before the meeting. Also in {command_palette} as \"Run week in review now\".",
             Automation::MeetingTakeaways => "When a Teams meeting's transcript lands, pulls out the takeaways, accepts the ones that name you and places them in your todos for you to check. Covers all projects.",
             Automation::BlueSky => "Builds an idea from Todos › Blue sky when you press Enter on it: writes a brief, waits for your approval, then builds a prototype to try.",
         }
@@ -107,15 +111,29 @@ impl Automation {
         )
     }
 
-    /// The SETTINGS rows its panel shows, in order (5.5).
+    /// Its own cap in a config that says nothing about it: one PR fixer,
+    /// bug fixer and feature builder session at a time; the blue sky
+    /// builder only under the overall cap. None for the two with no
+    /// **At most at once** row, which never start more than one.
+    pub const fn default_cap(self) -> Option<u8> {
+        match self {
+            Automation::PrFixer | Automation::BugFixer | Automation::FeatureBuilder => Some(1),
+            Automation::BlueSky | Automation::WeekReview | Automation::MeetingTakeaways => None,
+        }
+    }
+
+    /// Its rows in Settings › Automations, in order. **At most at once**
+    /// only where it starts sessions of its own: week in review runs one
+    /// session, and meeting takeaways only asks the model.
     pub const fn settings(self) -> &'static [SettingRow] {
         use SettingRow::*;
         match self {
-            Automation::BugFixer | Automation::FeatureBuilder => &[On, Labels, Preset, ExtraSteer],
-            Automation::WeekReview => &[On, When, Whose, Preset, ExtraSteer],
-            Automation::PrFixer | Automation::MeetingTakeaways | Automation::BlueSky => {
-                &[On, Preset, ExtraSteer]
+            Automation::BugFixer | Automation::FeatureBuilder => {
+                &[On, Cap, Labels, Preset, ExtraSteer]
             }
+            Automation::WeekReview => &[On, When, Whose, Preset, ExtraSteer],
+            Automation::PrFixer | Automation::BlueSky => &[On, Cap, Preset, ExtraSteer],
+            Automation::MeetingTakeaways => &[On, Preset, ExtraSteer],
         }
     }
 }
@@ -125,11 +143,14 @@ pub fn kind_of(agent: &Agent) -> Option<Automation> {
     agent.automation.as_deref().and_then(Automation::from_id)
 }
 
-/// A SETTINGS row on an automation's panel.
+/// A row of an automation's section in Settings › Automations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingRow {
     /// Space or Enter: on or off.
     On,
+    /// `←`/`→`: the most of its sessions at once, or any
+    /// ([`config::AutomationsSettings::cap_of`]).
+    Cap,
     /// The Linear labels a ticket needs (the bug fixer's, the feature
     /// builder's): Enter is the runner's ([`Runner::edit`]).
     Labels,
@@ -148,6 +169,7 @@ impl SettingRow {
     pub const fn label(self) -> &'static str {
         match self {
             SettingRow::On => "On",
+            SettingRow::Cap => "At most at once",
             SettingRow::Labels => "Labels",
             SettingRow::When => "When",
             SettingRow::Whose => "Whose",
@@ -198,9 +220,10 @@ pub struct PanelList {
     pub rows: Vec<PanelRow>,
 }
 
-/// What a runner shows: its row's dot and short state on the left, its
-/// lists on the right. The name, description and SETTINGS come from the
-/// registry and the config, not from here.
+/// What a runner shows: its row's dot and short state, and its lists —
+/// whose live sessions the overview (`⌘J`) lists under it. The name,
+/// description and settings come from the registry and the config, not
+/// from here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Panel {
     pub dot: Dot,
@@ -228,17 +251,13 @@ pub trait Runner {
     fn tick(&mut self, _app: &mut App, _out: &mut Vec<ClientRequest>) {}
     /// Its dot, state and lists, as of now.
     fn panel(&self, app: &App) -> Panel;
-    /// Its SETTINGS rows.
-    fn settings(&self) -> &'static [SettingRow] {
-        self.automation().settings()
-    }
-    /// Enter on a SETTINGS row the screen has no editor for of its own
+    /// Enter on a row Settings › Automations has no editor for of its own
     /// ([`SettingRow::Labels`], [`SettingRow::When`],
     /// [`SettingRow::Whose`]). True when it did something.
     fn edit(&mut self, _app: &mut App, _row: SettingRow) -> bool {
         false
     }
-    /// A SETTINGS row Enter edits as a line of text (week in review's
+    /// A row Enter edits as a line of text (week in review's
     /// **When**): the line as it stands. None for every other row.
     fn text_of(&self, _app: &App, _row: SettingRow) -> Option<String> {
         None
@@ -247,16 +266,12 @@ pub trait Runner {
     fn set_text(&mut self, _app: &mut App, row: SettingRow, _text: &str) -> Result<(), String> {
         Err(format!("{} can't be written here", row.label()))
     }
-    /// Whether its list rows with no session take the keys, Enter on one
-    /// being [`Runner::open_row`] (week in review's REVIEWS).
-    fn opens_rows(&self) -> bool {
-        false
-    }
     /// Enter on the `index`th of its list rows with no session, counted
-    /// across its lists.
+    /// across its lists (meeting takeaways' MEETINGS, week in review's
+    /// REVIEWS).
     fn open_row(&mut self, _app: &mut App, _index: usize) {}
-    /// A key of its own on its panel, shown at the panel's top right
-    /// (week in review's `r` run now).
+    /// A key of its own on its row in the overview, shown in the keys
+    /// while the cursor is on it (week in review's `r` run now).
     fn hotkey(&self) -> Option<crate::hints::Key> {
         None
     }
@@ -273,10 +288,12 @@ pub struct Engine {
     runners: Vec<Box<dyn Runner>>,
     /// `automations` in the config, mirrored (`event_loop::apply_config`).
     pub settings: config::AutomationsSettings,
-    /// Creates sent for an automation whose Ack has not come: counted as
-    /// running, so one tick can't start past the cap.
-    pub launching: HashSet<u64>,
-    /// The Automations screen's row, kept for its next open.
+    /// Creates sent for an automation whose Ack has not come, and the
+    /// automation each is for: counted as running, so one tick can't
+    /// start past either cap.
+    pub launching: HashMap<u64, Automation>,
+    /// The automation the overview (`⌘J`) was last left on, by
+    /// [`Automation::ALL`] index, for its next open.
     pub selected: usize,
     /// Where the runners' asks off the loop land ([`land`]).
     pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
@@ -306,7 +323,7 @@ impl Default for Engine {
                 Box::new(meeting_takeaways::MeetingTakeaways),
             ],
             settings,
-            launching: HashSet::new(),
+            launching: HashMap::new(),
             selected: 0,
             tx: None,
             linear_builder: linear_builder::Shared::default(),
@@ -340,12 +357,6 @@ impl Engine {
             panel.state = "off".into();
         }
         panel
-    }
-
-    /// `which`'s SETTINGS rows.
-    pub fn settings_of(&self, which: Automation) -> &'static [SettingRow] {
-        self.runner(which)
-            .map_or_else(|| which.settings(), |r| r.settings())
     }
 }
 
@@ -390,6 +401,19 @@ pub fn running(app: &App) -> usize {
     live + app.automations.launching.len()
 }
 
+/// How many of `which`'s own sessions are running, as [`running`] counts
+/// them: its tagged live sessions and its creates on their way.
+pub fn running_of(app: &App, which: Automation) -> usize {
+    let live = app
+        .tree
+        .agents
+        .iter()
+        .filter(|a| kind_of(a) == Some(which) && !a.archived && occupies(a))
+        .count();
+    let coming = app.automations.launching.values();
+    live + coming.filter(|w| **w == which).count()
+}
+
 /// Whether a session holds one of the cap's places: mid-turn, waiting on
 /// you, or booting.
 fn occupies(agent: &Agent) -> bool {
@@ -400,20 +424,31 @@ fn occupies(agent: &Agent) -> bool {
     }
 }
 
-/// Whether one more automation session may start under the cap.
-pub fn may_start(app: &App) -> bool {
-    running(app) < app.automations.settings.cap()
+/// Whether one more of `which`'s sessions may start: under the overall
+/// cap, and under its own.
+pub fn may_start(app: &App, which: Automation) -> bool {
+    let settings = &app.automations.settings;
+    running(app) < settings.cap()
+        && settings
+            .cap_of(which)
+            .is_none_or(|own| running_of(app, which) < own)
 }
 
-/// Start `which`'s session: tagged with it, and refused — false — at the
-/// cap, for the runner to try again on a later tick.
+/// Whether `which` waits at its own cap while the overall cap still has
+/// room: what "(at its cap)" says.
+pub fn at_own_cap(app: &App, which: Automation) -> bool {
+    running(app) < app.automations.settings.cap() && !may_start(app, which)
+}
+
+/// Start `which`'s session: tagged with it, and refused — false — at
+/// either cap, for the runner to try again on a later tick.
 pub fn launch(
     app: &mut App,
     which: Automation,
     draft: AgentLaunchDraft,
     out: &mut Vec<ClientRequest>,
 ) -> bool {
-    if !may_start(app) {
+    if !may_start(app, which) {
         return false;
     }
     let draft = AgentLaunchDraft {
@@ -427,8 +462,8 @@ pub fn launch(
 /// Start `which`'s session in a fresh worktree — or in the checkout
 /// `launch` names — as the QUICK PROMPT's Enter does with `launch` and
 /// `text` typed, tagged with it, moving nothing on screen; refused, false,
-/// at the cap, for the runner to try again on a later tick. The checkout
-/// being cut holds its place under the cap.
+/// at either cap, for the runner to try again on a later tick. The
+/// checkout being cut holds its place under both.
 pub fn launch_in_new_worktree(
     app: &mut App,
     which: Automation,
@@ -436,7 +471,7 @@ pub fn launch_in_new_worktree(
     text: String,
     out: &mut Vec<ClientRequest>,
 ) -> bool {
-    if !may_start(app) {
+    if !may_start(app, which) {
         return false;
     }
     let launch = crate::quick_prompt::QuickLaunch {
@@ -513,17 +548,28 @@ pub fn preset_of(settings: &config::AutomationsSettings, which: Automation) -> A
 /// user's `extra` steer after a blank line as `Extra steer: …` when there
 /// is any. Every runner's prompt goes through here.
 pub fn compose(preset: &AgentPreset, context: &str, extra: &str) -> String {
-    let text = preset.clone().with_builtin_text().compose(context);
-    match extra.trim() {
-        "" => text,
-        extra => format!("{text}\n\nExtra steer: {extra}"),
+    compose_with(preset, context, "", extra)
+}
+
+/// [`compose`] for an agent that writes code: `rule` (the testing rule,
+/// [`config::LocalE2e::rule`]) between the preset's text and the extra
+/// steer, so the user's steer still has the last word.
+pub fn compose_with(preset: &AgentPreset, context: &str, rule: &str, extra: &str) -> String {
+    let mut parts = vec![preset.clone().with_builtin_text().compose(context)];
+    if !rule.trim().is_empty() {
+        parts.push(rule.trim().to_string());
     }
+    if !extra.trim().is_empty() {
+        parts.push(format!("Extra steer: {}", extra.trim()));
+    }
+    parts.join("\n\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use orion_core::{AgentKind, WorktreeId};
+    use std::collections::HashSet;
 
     fn tagged(id: &str, status: AgentStatus, automation: Option<&str>) -> Agent {
         Agent {
@@ -579,6 +625,44 @@ mod tests {
     }
 
     #[test]
+    fn the_testing_rule_sits_between_the_preset_and_the_extra_steer() {
+        use config::{AutomationsSettings, LocalE2e};
+        let preset = AgentPreset {
+            text: "Fix it.\n\n{task}".into(),
+            ..SystemPreset::PrAutofix.default_preset()
+        };
+        // Out of the box, agents leave e2e to CI.
+        let never = AutomationsSettings::default().local_e2e;
+        assert_eq!(never, LocalE2e::Never);
+        let text = compose_with(&preset, "PR #7", never.rule(), "Be quick.");
+        assert_eq!(
+            text,
+            format!(
+                "Fix it.\n\nPR #7\n\n{}\n\nExtra steer: Be quick.",
+                never.rule()
+            )
+        );
+        assert!(never.rule().contains("never run end-to-end"));
+        assert!(LocalE2e::Covering.rule().contains("only the e2e specs"));
+        assert_eq!(never.next(), LocalE2e::Covering);
+        // A saved choice reads back, and a config without one is never.
+        let saved: AutomationsSettings =
+            serde_json::from_str(r#"{"local_e2e": "covering"}"#).unwrap();
+        assert_eq!(saved.local_e2e, LocalE2e::Covering);
+        let none: AutomationsSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(none.local_e2e, LocalE2e::Never);
+        // orion's own coding presets defer to the rule instead of naming e2e runs.
+        for text in [
+            pr_fixer::PRESET_TEXT,
+            linear_builder::BUG_FIXER_TEXT,
+            linear_builder::FEATURE_BUILDER_TEXT,
+        ] {
+            assert!(text.contains("testing rule below"), "{text}");
+            assert!(!text.contains("full suite once"), "{text}");
+        }
+    }
+
+    #[test]
     fn the_running_cap_counts_live_tagged_sessions_and_creates_on_their_way() {
         let mut app = App::new();
         app.tree.agents = vec![
@@ -598,10 +682,13 @@ mod tests {
             2,
             "finished, untagged and archived don't count"
         );
-        assert!(may_start(&app));
-        app.automations.launching.insert(9);
+        assert!(may_start(&app, Automation::BlueSky));
+        app.automations.launching.insert(9, Automation::BlueSky);
         assert_eq!(running(&app), 3);
-        assert!(!may_start(&app), "a create on its way takes a place");
+        assert!(
+            !may_start(&app, Automation::BlueSky),
+            "a create on its way takes a place"
+        );
 
         // A refused launch sends nothing.
         let mut out = Vec::new();
@@ -613,15 +700,128 @@ mod tests {
         app.automations.launching.clear();
         app.tree.agents.clear();
         app.automations.settings.max_running = 0;
-        assert!(may_start(&app));
+        assert!(may_start(&app, Automation::BugFixer));
+    }
+
+    /// The bug fixer at its own cap of one waits while the overall cap has
+    /// room; the overall cap stops a launch its own cap would allow.
+    #[test]
+    fn each_cap_stops_a_launch_the_other_would_allow() {
+        let mut app = App::new();
+        app.automations.settings.max_running = 3;
+        app.tree.agents = vec![tagged("a", AgentStatus::Running, Some("bug_fixer"))];
+        assert_eq!(running_of(&app, Automation::BugFixer), 1);
+        assert_eq!(
+            app.automations.settings.cap_of(Automation::BugFixer),
+            Some(1)
+        );
+        assert!(!may_start(&app, Automation::BugFixer), "at its own cap");
+        assert!(at_own_cap(&app, Automation::BugFixer));
+        assert!(
+            may_start(&app, Automation::FeatureBuilder),
+            "its own is free"
+        );
+        // A create on its way counts against its own automation only.
+        app.automations
+            .launching
+            .insert(7, Automation::FeatureBuilder);
+        assert_eq!(running_of(&app, Automation::FeatureBuilder), 1);
+        assert!(!may_start(&app, Automation::FeatureBuilder));
+        assert!(may_start(&app, Automation::BlueSky));
+
+        // Raised to two, the bug fixer may start again…
+        app.automations
+            .settings
+            .of_mut(Automation::BugFixer)
+            .max_running = Some(2);
+        assert!(may_start(&app, Automation::BugFixer));
+        // …until the overall cap is full, its own cap still with room.
+        app.automations.settings.max_running = 2;
+        assert_eq!(running(&app), 2);
+        assert!(!may_start(&app, Automation::BugFixer));
+        assert!(!at_own_cap(&app, Automation::BugFixer));
+        // "Any" is only the overall cap.
+        app.automations.settings.max_running = 5;
+        app.automations
+            .settings
+            .of_mut(Automation::BugFixer)
+            .max_running = Some(config::ANY);
+        assert_eq!(app.automations.settings.cap_of(Automation::BugFixer), None);
+        app.tree
+            .agents
+            .push(tagged("b", AgentStatus::Running, Some("bug_fixer")));
+        assert!(may_start(&app, Automation::BugFixer));
+    }
+
+    #[test]
+    fn own_caps_default_to_one_but_blue_sky_and_step_through_any() {
+        let mut s = config::AutomationsSettings::default();
+        let caps: Vec<Option<usize>> = Automation::ALL.iter().map(|a| s.cap_of(*a)).collect();
+        assert_eq!(caps, [Some(1), Some(1), Some(1), None, None, None]);
+        for which in Automation::ALL {
+            assert_eq!(
+                which.settings().contains(&SettingRow::Cap),
+                matches!(
+                    which,
+                    Automation::PrFixer
+                        | Automation::BugFixer
+                        | Automation::FeatureBuilder
+                        | Automation::BlueSky
+                ),
+                "{}",
+                which.name()
+            );
+        }
+        // 1 → 2; ← from 1 stays; 10 → any; any ← 10; any → any.
+        s.step_cap_of(Automation::PrFixer, 1);
+        assert_eq!(s.cap_of(Automation::PrFixer), Some(2));
+        s.step_cap_of(Automation::PrFixer, -1);
+        s.step_cap_of(Automation::PrFixer, -1);
+        assert_eq!(s.cap_of(Automation::PrFixer), Some(1));
+        s.of_mut(Automation::PrFixer).max_running = Some(10);
+        s.step_cap_of(Automation::PrFixer, 1);
+        assert_eq!(s.cap_of(Automation::PrFixer), None);
+        assert_eq!(s.of(Automation::PrFixer).max_running, Some(config::ANY));
+        s.step_cap_of(Automation::PrFixer, 1);
+        assert_eq!(s.cap_of(Automation::PrFixer), None);
+        s.step_cap_of(Automation::BlueSky, -1);
+        assert_eq!(s.cap_of(Automation::BlueSky), Some(10));
+    }
+
+    /// A saved cap of 8 (stepped up before the default came down) is kept
+    /// through a load and a save; a config without one reads as 3.
+    #[test]
+    fn a_saved_cap_survives_and_a_missing_one_is_three() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        crate::config::with_config_path(path.clone(), || {
+            std::fs::write(&path, r#"{"automations": {"max_running": 8}}"#).unwrap();
+            let cfg = crate::config::Config::load();
+            assert_eq!(cfg.automations.max_running, 8);
+            cfg.try_save().unwrap();
+            assert_eq!(crate::config::Config::load().automations.max_running, 8);
+            let saved: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(saved["automations"]["max_running"], 8);
+
+            std::fs::write(
+                &path,
+                r#"{"automations": {"per": {"bug_fixer": {"on": true}}}}"#,
+            )
+            .unwrap();
+            let cfg = crate::config::Config::load();
+            assert_eq!(cfg.automations.max_running, 3);
+            assert_eq!(cfg.automations.cap(), 3);
+            assert_eq!(cfg.automations.of(Automation::BugFixer).max_running, None);
+        });
     }
 
     #[test]
     fn the_cap_steps_within_its_range() {
         let mut s = config::AutomationsSettings::default();
-        assert_eq!(s.max_running, 5);
+        assert_eq!(s.max_running, 3);
         s.step_cap(1);
-        assert_eq!(s.max_running, 6);
+        assert_eq!(s.max_running, 4);
         s.max_running = 1;
         s.step_cap(-1);
         assert_eq!(s.max_running, 1);

@@ -57,7 +57,7 @@ macro_rules! builder_rules {
 2. Find the product areas the change touches. Read every decision in the repo's `docs/decisions/<area>/` folders for those areas before you plan. If no folder fits, create a new area folder.
 3. Write a plan and wait for approval. Never go against a logged decision without saying so in the plan.
 4. After approval, build. Reuse the design system, the component library and the central registries; add no new helper where one exists.
-5. Run the unit tests, and only the e2e specs that cover the change. Never run the full e2e suite.
+5. Test as the testing rule below says.
 6. Log any new product decision the user made while steering you as a file under `docs/decisions/<area>/`.
 7. Push the branch and open a **draft** pull request with `gh pr create --draft`, titled \"<ticket IDs>: <short summary>\", whose description has these sections:
 
@@ -500,7 +500,7 @@ fn placed(app: &mut App, groups: Vec<Group>, released: Vec<String>) {
 
 /// Start `which`'s queued groups while the cap has room.
 fn launch_queued(app: &mut App, which: Automation, out: &mut Vec<ClientRequest>) {
-    while super::may_start(app) {
+    while super::may_start(app, which) {
         let queue = &mut app.automations.linear_builder.queue;
         let Some(at) = queue.iter().position(|g| g.which == which) else {
             return;
@@ -525,7 +525,12 @@ fn launch(app: &mut App, group: Group, out: &mut Vec<ClientRequest>) -> Result<(
     let settings = &app.automations.settings;
     let preset = super::preset_of(settings, which);
     let extra = settings.of(which).extra_steer;
-    let prompt = super::compose(&preset, &context(app, &group), &extra);
+    let prompt = super::compose_with(
+        &preset,
+        &context(app, &group),
+        settings.local_e2e.rule(),
+        &extra,
+    );
     let mut batch = crate::linear::LinearBatch::of(group.issues.clone());
     batch.task = prompt;
     let branch = batch.branch(&app.project_branches(&group.project));
@@ -911,13 +916,19 @@ pub fn panel(app: &App, which: Automation) -> Panel {
         });
     }
     let running = super::running(app);
+    // Waiting on its own cap, not the overall one: Settings › Automations
+    // is where that changes.
+    let at_cap = super::at_own_cap(app, which);
     let queued: Vec<&Group> = shared.queue.iter().filter(|g| g.which == which).collect();
     for group in &queued {
         let ids: Vec<&str> = group.issues.iter().map(|i| i.identifier.as_str()).collect();
         let title = group.issues.first().map_or("", |i| i.title.as_str());
         rows.push(PanelRow {
             text: format!("{} {title}", ids.join(", ")),
-            state: format!("queued, {running} running"),
+            state: match at_cap {
+                true => "queued (at its cap)".to_string(),
+                false => format!("queued, {running} running"),
+            },
             tone: Tone::Quiet,
             session: None,
         });
@@ -931,6 +942,11 @@ pub fn panel(app: &App, which: Automation) -> Panel {
         (n, _, _) if n > 1 => (Dot::Waiting, format!("{n} plans waiting")),
         (_, n, _) if n > 0 => (Dot::Waiting, format!("{n} waiting on you")),
         (_, _, Some(id)) => (Dot::Working, format!("{verb} {id}")),
+        _ if at_cap && !queued.is_empty() => {
+            let first = queued.first().and_then(|g| g.issues.first());
+            let id = first.map_or("", |i| i.identifier.as_str());
+            (Dot::Idle, format!("queued: {id} (at its cap)"))
+        }
         _ if !queued.is_empty() => (Dot::Idle, format!("{} queued", queued.len())),
         _ => (Dot::Idle, "watching Linear".to_string()),
     };
@@ -1406,7 +1422,7 @@ mod tests {
             }
             assert!(text.contains("{task}"));
             assert!(text.contains("docs/decisions/"));
-            assert!(text.contains("Never run the full e2e suite"));
+            assert!(text.contains("Test as the testing rule below says."));
             assert!(text.contains("draft"));
         }
     }
@@ -1476,13 +1492,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         crate::agent_presets::with_presets_path(dir.path().join("presets.json"), || {
             crate::config::with_config_path(dir.path().join("config.json"), || {
+                use super::super::settings_tab;
                 let mut app = App::new();
-                super::super::view::open(&mut app);
-                // The bug fixer, into its panel, down to Labels.
-                press(&mut app, KeyCode::Down);
-                press(&mut app, KeyCode::Enter);
-                press(&mut app, KeyCode::Down);
-                press(&mut app, KeyCode::Enter);
+                // Settings › Automations, Enter on the bug fixer's Labels.
+                let labels = settings_tab::row_of(Automation::BugFixer, Some(SettingRow::Labels));
+                let open_pick = |app: &mut App| {
+                    settings_tab::open_at(app, None);
+                    settings_tab::run(app, settings_tab::Cmd::Open(labels));
+                };
+                open_pick(&mut app);
                 let opened = pick(&app).expect("the pick is up");
                 assert_eq!(opened.which, Automation::BugFixer);
                 assert!(opened.status().unwrap().contains("LINEAR_API_KEY"));
@@ -1540,9 +1558,10 @@ mod tests {
                 );
                 assert_eq!(pick(&app).unwrap().ticked, by_key, "a click is Space");
 
-                // Enter keeps the ticks.
+                // Enter keeps the ticks, back on the Labels row.
                 press(&mut app, KeyCode::Enter);
                 assert!(pick(&app).is_none());
+                assert!(matches!(&app.overlay, Some(Overlay::Settings(v)) if v.selected == labels));
                 let saved = crate::config::Config::load().automations;
                 assert_eq!(
                     saved.of(Automation::BugFixer).labels,
@@ -1550,7 +1569,7 @@ mod tests {
                 );
 
                 // Nothing ticked is refused; Esc leaves the labels be.
-                press(&mut app, KeyCode::Enter);
+                open_pick(&mut app);
                 // With no Linear key the rows are the ticked labels alone,
                 // so each untick takes its row with it.
                 while !pick(&app).unwrap().ticked.is_empty() {

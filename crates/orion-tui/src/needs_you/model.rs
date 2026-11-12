@@ -164,6 +164,9 @@ pub struct Card {
     /// Higher sorts first within its section: a crash over a question.
     pub urgency: u8,
     pub target: CardTarget,
+    /// Its own glyph and colour, over its section's — a Linear ticket's
+    /// state (`linear::state_glyph`).
+    pub mark: Option<(&'static str, ratatui::style::Color)>,
 }
 
 impl Card {
@@ -184,6 +187,15 @@ impl Card {
             since,
             urgency,
             target,
+            mark: None,
+        }
+    }
+
+    /// The card with its own glyph and colour.
+    pub fn with_mark(self, mark: (&'static str, ratatui::style::Color)) -> Card {
+        Card {
+            mark: Some(mark),
+            ..self
         }
     }
 }

@@ -239,9 +239,9 @@ pub enum Action {
     /// so a key bound to it stays bound.
     OpenInCursor,
     Quit,
-    /// `⌘J`: AUTOMATIONS — every automation orion runs on its own, each
-    /// one's on/off, preset and extra steer, and what it is running and
-    /// has done (`crate::automations::view`).
+    /// `⌘J`: AUTOMATIONS — what every automation orion runs on its own
+    /// is doing, and its live sessions (`crate::automations::view`); each
+    /// is set up in Settings › Automations.
     Automations,
 }
 
@@ -1048,7 +1048,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Automations,
         id: "automations",
         label: "Automations",
-        hint: "What orion runs on its own — the PR fixer, the bug fixer, week in review and the rest: turn each on or off, pick its preset, give it an extra steer, see what it is running",
+        hint: "What orion runs on its own — the PR fixer, the bug fixer, week in review and the rest — and what each is doing now; Enter on one opens its settings",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["cmd+j"],

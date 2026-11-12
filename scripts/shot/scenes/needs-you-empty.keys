@@ -1,3 +1,3 @@
 # ⌘K over the stock demo, with nothing waiting: the NEEDS YOU board (⌘K with nothing typed), each of its
-# five sections saying it is empty in the same words, and the footer's `⌘K needs you 0` in green.
+# five sections saying it is empty in the same words, and no NEEDS YOU COUNT in the grid header.
 cmd k

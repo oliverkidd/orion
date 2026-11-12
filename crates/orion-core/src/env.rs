@@ -51,7 +51,9 @@ pub const AWAY_POLL_MS: &str = "ORION_AWAY_POLL_MS";
 pub const SLACK_API_URL: &str = "ORION_SLACK_API_URL";
 /// The three Slack tokens as `<app>,<bot>,<user>`, read in place of the
 /// Keychain's `dev.orion.slack` items: the e2e tests' fake Slack, never a
-/// real workspace's.
+/// real workspace's. `off` is no tokens at all, so a test or screenshot
+/// daemon never signs in to the machine's real Slack (a second Socket
+/// Mode connection would take a share of its button presses).
 pub const SLACK_TOKENS: &str = "ORION_SLACK_TOKENS";
 /// `RUST_LOG`-style tracing filter for both the daemon and the TUI.
 pub const LOG: &str = "ORION_LOG";

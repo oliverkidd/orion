@@ -5,14 +5,14 @@
 //! [`model`] is what the board is made of: the cards each source offers,
 //! the column and section each sits in, and what Done and Snooze hide.
 //! The sources are [`agents`], [`linear`], [`reviews`], [`slack`] and
-//! [`meetings`]; [`board`] lays
-//! the cards out, walks them and draws them. [`State`] is what the app
+//! [`meetings`]; [`board`] lays the cards out, walks them and draws them,
+//! and [`reply`] answers a Slack card from orion (`r`). [`State`] is what the app
 //! keeps for it between frames: the store, what the last polls heard,
 //! and why each session waits.
 //!
-//! The POLL ([`poll`]) asks Linear for your notifications and `gh` for
-//! the reviews asked of you on a slow beat ([`interval`]), and as the
-//! board opens when the last ask is a while ago. `ORION_NEEDS_YOU_POLL_SECS=0`
+//! The POLL ([`poll`]) asks Linear for your notifications and live
+//! tickets and `gh` for the reviews asked of you on a slow beat
+//! ([`interval`]), and as the board opens when the last ask is a while ago. `ORION_NEEDS_YOU_POLL_SECS=0`
 //! turns it off, as the e2e tests and the screenshots do; a section whose
 //! row is off in Settings › Connections › GITHUB AND LINEAR asks nothing.
 
@@ -21,6 +21,7 @@ pub mod board;
 pub mod linear;
 pub mod meetings;
 pub mod model;
+pub mod reply;
 pub mod reviews;
 pub mod slack;
 
@@ -47,16 +48,19 @@ pub fn interval() -> Option<Duration> {
 /// What a poll lands on the loop.
 #[derive(Debug)]
 pub enum Answer {
-    /// The unread notifications under the key `project` reads (None:
-    /// couldn't ask, which keeps what was heard before).
+    /// The unread notifications and live tickets under the key `project`
+    /// reads (None: couldn't ask, which keeps what was heard before).
     Linear {
         project: ProjectId,
-        notes: Option<Vec<linear::Note>>,
+        heard: Option<linear::Heard>,
     },
     /// The open pull requests asking for your review.
     Reviews(Option<Vec<reviews::Found>>),
     /// A Slack name or link asked for (`slack::Lookup`).
     Slack(slack::Looked),
+    /// The REPLY PANEL's conversation read, or its reply sent
+    /// (`reply::Ask`).
+    Reply(reply::Landed),
 }
 
 /// What the app keeps for the board.
@@ -66,6 +70,9 @@ pub struct State {
     pub store: Store,
     /// Unread Linear notifications, under the first project with each key.
     pub linear: HashMap<ProjectId, Vec<linear::Note>>,
+    /// Your live Linear tickets, and the state of each notified one, kept
+    /// as `linear` is.
+    pub linear_tickets: HashMap<ProjectId, linear::Tickets>,
     /// What the last reviews search found.
     pub reviews: Vec<reviews::Found>,
     /// Why each session waits, as the daemon last said
@@ -79,6 +86,11 @@ pub struct State {
     pub slack: slack::Slack,
     /// Where the poll's answers, and the Slack asks', go.
     pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
+    /// The REPLY PANEL's drafts left with `Esc`, by card.
+    pub reply_drafts: HashMap<model::CardKey, String>,
+    /// Every reply ask made, for the tests to read.
+    #[cfg(test)]
+    pub reply_asks: Vec<reply::Ask>,
 }
 
 /// Every card a source offers now, hidden or not.
@@ -106,7 +118,7 @@ pub fn cards(app: &App) -> Vec<Card> {
     app.needs_you.store.visible(all, chrono::Utc::now())
 }
 
-/// The footer's count: how many cards the board would show.
+/// The header's count: how many cards the board would show.
 pub fn count(app: &App) -> usize {
     cards(app).len()
 }
@@ -117,8 +129,14 @@ pub fn refresh(app: &mut App) {
         return;
     }
     let fresh = cards(app);
+    let kept = &app.needs_you.store.slack;
     if let Some(crate::app::Overlay::Palette(palette)) = &mut app.overlay {
         palette.board.set_cards(fresh);
+        // The names Slack has given since the panel opened.
+        if let Some(panel) = &mut palette.board.reply {
+            panel.users.clone_from(&kept.users);
+            panel.channels.clone_from(&kept.channels);
+        }
     }
 }
 
@@ -177,8 +195,8 @@ pub fn poll(app: &mut App) {
             // Kept under the first project with the key.
             let (tx, project) = (tx.clone(), projects[0].clone());
             tokio::spawn(async move {
-                let notes = linear::fetch(key).await.ok();
-                let _ = tx.send(Answer::Linear { project, notes });
+                let heard = linear::fetch(key).await.ok();
+                let _ = tx.send(Answer::Linear { project, heard });
             });
         }
     }
@@ -200,9 +218,10 @@ pub fn opened(app: &mut App) {
 /// A poll's answer lands: kept, and the board brought up to date.
 pub fn land(app: &mut App, answer: Answer) {
     match answer {
-        Answer::Linear { project, notes } => {
-            if let Some(notes) = notes {
-                app.needs_you.linear.insert(project, notes);
+        Answer::Linear { project, heard } => {
+            if let Some(heard) = heard {
+                app.needs_you.linear.insert(project.clone(), heard.notes);
+                app.needs_you.linear_tickets.insert(project, heard.tickets);
             }
         }
         Answer::Reviews(found) => {
@@ -211,6 +230,7 @@ pub fn land(app: &mut App, answer: Answer) {
             }
         }
         Answer::Slack(looked) => slack::landed(app, looked),
+        Answer::Reply(landed) => reply::landed(app, landed),
     }
     let live = offered(app);
     if app.needs_you.store.prune(&live, chrono::Utc::now()) {
@@ -288,21 +308,15 @@ fn mark_read(app: &mut App, card: &Card) {
     }
 }
 
-/// The FOOTER's `⌘K needs you N` segment's spans, or None
-/// when the board's key is unbound.
-pub fn footer_segment(app: &App, hovered: bool) -> Option<Vec<ratatui::text::Span<'static>>> {
-    use ratatui::style::Style;
-    use ratatui::text::Span;
-    let th = app.theme;
-    let key = crate::hints::key(&app.keymap, crate::keymap::Action::Palette)?;
+/// The grid header's NEEDS YOU COUNT: `⌘K 4`, how many cards the board
+/// would show behind the key that opens it (the bare number when the key
+/// is unbound) — None at zero, when nothing waits.
+pub fn header_count(app: &App) -> Option<String> {
     let n = count(app);
-    let color = if n > 0 { th.err } else { th.ok };
-    Some(vec![
-        Span::styled(key, crate::hints::key_style(th)),
-        Span::styled(
-            " needs you ",
-            crate::ui::footer::footer_button_style(th, hovered),
-        ),
-        Span::styled(n.to_string(), Style::default().fg(color)),
-    ])
+    (n > 0).then(
+        || match crate::hints::key(&app.keymap, crate::keymap::Action::Palette) {
+            Some(key) => format!("{key} {n}"),
+            None => n.to_string(),
+        },
+    )
 }

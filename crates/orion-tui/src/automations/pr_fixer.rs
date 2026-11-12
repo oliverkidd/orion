@@ -38,8 +38,8 @@
 //!   prompt [`prompt`]: the pull request and what failed, at that preset's
 //!   `{task}`, its text orion's own rules
 //!   ([`PRESET_TEXT`]) while it holds none of the user's, and the
-//!   automation's extra steer after it ([`super::compose`]). `⌘U` on the
-//!   Automations screen can put another preset in that one's place
+//!   automation's extra steer after it ([`super::compose`]). `⌘U` in
+//!   Settings › Automations can put another preset in that one's place
 //!   ([`super::preset_of`]). Every one is tagged `pr_fixer`.
 //! * **Standing down.** Another session live on the branch — mid-turn, or
 //!   waiting on the user — does not hold the agent back. It is told where
@@ -536,7 +536,7 @@ pub fn land_detail(
     let record = app.autofix.ledger.get(url).cloned().unwrap_or_default();
     // At the cap: the breakage waits, still watched, for a place.
     let on = app.automations.is_on(Automation::PrFixer);
-    if on && record.attempts < AUTO_ATTEMPTS && !super::may_start(app) {
+    if on && record.attempts < AUTO_ATTEMPTS && !super::may_start(app, Automation::PrFixer) {
         app.autofix.recheck_later(url);
         return;
     }
@@ -938,7 +938,7 @@ Rules:
 - Merge conflicts: fetch the base branch from origin and merge it. Resolve each conflict by understanding both sides' intent; never drop one side's work silently. Regenerate lockfiles and generated files rather than hand-merging them, and commit the merge.
 - Failing checks: read each one's failure logs (`gh pr checks`, then `gh run view <run-id> --log-failed`) to see what kind of check it is.
   - Unit tests: reproduce each failing test locally with this repo's test command, and fix it. Change a test only when this pull request meant to change the behaviour it checks.
-  - E2E tests: take the failing specs from the CI logs and re-run only those specs locally, never the full suite — unless earlier attempts failed the same way, then run the full suite once.
+  - E2E tests: take the failing specs from the CI logs, and test as the testing rule below says.
   - Any other check (lint, typecheck, build): reproduce it locally and fix it.
 
 {task}
@@ -949,6 +949,7 @@ Then commit with a message that says what you fixed and `git push`. Watch the pu
 /// the failed checks by workflow — and the user's note, at the PR autofix
 /// preset's `{task}` — orion's own text ([`PRESET_TEXT`]) while it holds
 /// none of the user's.
+#[allow(clippy::too_many_arguments)]
 pub fn prompt(
     pr: &OpenPr,
     refs: &PrRefs,
@@ -956,6 +957,7 @@ pub fn prompt(
     picks: &Picks,
     note: &str,
     preset: &AgentPreset,
+    rule: &str,
     extra: &str,
 ) -> String {
     let base = match refs.base.as_str() {
@@ -966,9 +968,10 @@ pub fn prompt(
         .into_iter()
         .filter(|i| picks[i.index()])
         .collect();
-    super::compose(
+    super::compose_with(
         preset,
         &context(pr, refs, diagnosis, &ticked, &base, note),
+        rule,
         extra,
     )
 }
@@ -1352,6 +1355,7 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
         &form.picks,
         form.note.as_str(),
         &preset,
+        cfg.automations.local_e2e.rule(),
         &cfg.automations.of(Automation::PrFixer).extra_steer,
     );
     let text = [stand_down_preamble(&form.peers, &form.pr), task]
@@ -1832,6 +1836,7 @@ mod tests {
             "flaky on CI",
             &orions(),
             "",
+            "",
         );
         assert!(text.starts_with("You are orion's PR autofixer."), "{text}");
         assert!(text.contains("https://github.com/o/r/pull/7"));
@@ -1844,7 +1849,7 @@ mod tests {
         for rule in [
             "Fix only what is listed",
             "fetch the base branch from origin and merge it",
-            "re-run only those specs locally, never the full suite — unless earlier attempts failed the same way",
+            "take the failing specs from the CI logs, and test as the testing rule below says",
             "reproduce each failing test locally",
             "Any other check (lint, typecheck, build): reproduce it locally and fix it",
             "`gh pr checks --watch` until it is green; when a check fails again, fix it, push, and watch again",
@@ -1873,6 +1878,7 @@ mod tests {
             &[true, false],
             "",
             &preset,
+            "",
             "",
         );
         assert!(text.starts_with("Do it my way."));
@@ -1913,6 +1919,7 @@ mod tests {
             &form.picks,
             "",
             &orions(),
+            "",
             "",
         );
         let fix = &text[text.find("\nFix:\n").unwrap()..text.find("Then commit").unwrap()];
@@ -2554,6 +2561,7 @@ mod tests {
             &[true, false],
             "",
             &orions(),
+            "",
             "",
         );
         assert!(

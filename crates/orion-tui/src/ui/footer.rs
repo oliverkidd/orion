@@ -145,7 +145,7 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
     let card = band.and_then(|b| {
         crate::launcher::card_cursor(app, &bands[b]).and_then(|c| bands[b].cards.get(c))
     });
-    // `⌘K` is the right edge's `needs you`, so not one of these.
+    // `⌘K` is the header's NEEDS YOU COUNT, so not one of these.
     let tail = [
         act(km, Action::CommandPalette, "commands"),
         act(km, Action::Home, "home"),
@@ -452,18 +452,10 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
     // footprint, fed by the footer metrics poll. The hints clip before the
     // readout does.
     let usage = footer_usage(app);
-    // Before the counts, NEEDS YOU's: `⌘K needs you 3`, a button that
-    // opens the board.
-    let needs_you =
-        crate::needs_you::footer_segment(app, app.hover_crumb == Some(HitTarget::FooterNeedsYou));
-    let needs_w = needs_you.as_ref().map_or(0, |spans| {
-        spans.iter().map(|s| s.width() as u16).sum::<u16>() + 2
-    });
-    let right_w = (usage
+    let right_w = usage
         .as_ref()
         .map(|s| s.chars().count() as u16 + 2)
         .unwrap_or(0)
-        + needs_w)
         .min(area.width);
     // Beside it, what Spotify is playing (`crate::spotify`), in at most a
     // third of the bar — and never so much the readout can't keep its
@@ -542,22 +534,10 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         }
         f.render_widget(Paragraph::new(Line::from(spot.spans)), rect);
     }
-    if let Some(spans) = needs_you {
-        let x = area.x + area.width.saturating_sub(right_w) + 2;
-        let rect = Rect {
-            x,
-            width: needs_w
-                .saturating_sub(2)
-                .min(area.right().saturating_sub(x)),
-            ..area
-        };
-        push_hit(app, rect, x, rect.width, HitTarget::FooterNeedsYou);
-        f.render_widget(Paragraph::new(Line::from(spans)), rect);
-    }
     if let Some(usage) = usage {
         let right = Rect {
-            x: area.x + area.width.saturating_sub(right_w - needs_w),
-            width: right_w - needs_w,
+            x: area.x + area.width.saturating_sub(right_w),
+            width: right_w,
             ..area
         };
         let span = Span::styled(usage, Style::default().fg(th.dim));

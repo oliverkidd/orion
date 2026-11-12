@@ -180,10 +180,11 @@ lists, two switches `←`/`→` or `Enter` turn on and off:
 - **Code reviews asked of you** (`inbox.code_reviews`): open pull requests that ask you to review
   them — your projects' own, as their open lists say, and every other repo's, through one
   `gh search prs --review-requested=@me` every five minutes.
-- **Linear comments that mention you** (`inbox.linear_mentions`): your unread Linear notifications —
-  a mention, a new comment on an issue you're in, an issue given to you — asked with each project's
-  `LINEAR_API_KEY` (one ask per distinct key). Marking one done on the board marks it read in
-  Linear too.
+- **Linear tickets and mentions** (`inbox.linear_mentions`): the Linear tickets assigned to you in
+  a live state (triage, todo, in progress — never the backlog, done or cancelled), and your unread
+  notifications about a live ticket — a mention, a new comment on an issue you're in, an issue
+  given to you — asked with each project's `LINEAR_API_KEY` (one ask per distinct key). Marking
+  one done on the board marks its notifications read in Linear too.
 
 ```json
 { "away": { "screen_lock": true, "idle_minutes": 10,
@@ -206,32 +207,36 @@ lists, two switches `←`/`→` or `Enter` turn on and off:
 | `slack.banner` | `"dms_and_mentions"` | Which messages bring a banner and a sound: `every`, `dms_and_mentions` or `never`. |
 | `microsoft.client_id`, `microsoft.tenant` | `""`, `"organizations"` | The Entra app orion signs in to Microsoft 365 through. Not secret, so a team can share them. |
 | `microsoft.footer_meeting`, `microsoft.takeaways` | `true` | The next meeting in the footer, and takeaways from Teams transcripts. |
-| `inbox.code_reviews`, `inbox.linear_mentions` | `true` | Code reviews asked of you, and Linear comments that mention you, show in Needs you (GITHUB AND LINEAR's two rows). |
+| `inbox.code_reviews`, `inbox.linear_mentions` | `true` | Code reviews asked of you, and your live Linear tickets and mentions, show in Needs you (GITHUB AND LINEAR's two rows). |
 
 A key left out of a section keeps its default, the others as written. Tokens are never in the
 file: orion keeps them in the macOS Keychain, under services named `dev.orion.<service>`.
 
 ### Automations
 
-Set on the AUTOMATIONS screen (`⌘J`, see [Automations](sessions.md#automations)), not in
-Settings. Global, never per project.
+Set in Settings › Automations (see [Automations](sessions.md#automations)); `⌘J` only shows what
+they are doing. Global, never per project.
 
 ```json
 { "automations": {
-    "max_running": 5,
+    "max_running": 3,
+    "local_e2e": "never",
     "per": {
-      "pr_fixer": { "on": true, "extra_steer": "" },
+      "pr_fixer": { "on": true, "max_running": 1, "extra_steer": "" },
+      "blue_sky": { "max_running": 0 },
       "bug_fixer": { "on": false, "labels": ["Bug"], "preset": "Careful" },
       "week_review": { "when": { "day": "fri", "at": "08:30" }, "whose": "just_me" } } } }
 ```
 
 | Key | Default | What it does |
 |---|---|---|
-| `automations.max_running` | `5` | No automation starts a session while this many automation sessions are running (at work or waiting on you). `←` / `→` on the screen change it, 1 to 20. |
+| `automations.max_running` | `3` | No automation starts a session while this many automation sessions are running, all automations together (at work or waiting on you). **Sessions at once, all automations** in Settings › Automations, `←` / `→` 1 to 20. A value saved before the default came down from 5 is kept as it is. |
+| `automations.per.<id>.max_running` | `1` for `pr_fixer`, `bug_fixer` and `feature_builder`; any for `blue_sky` | No more than this many of the automation's own sessions run at once, under the overall cap too — `0` is any, only the overall cap applying. **At most at once** in its section, `←` / `→` 1 to 10, then any. Week in review and meeting takeaways have none: they never run more than one. |
+| `automations.local_e2e` | `never` | Whether automation agents that write code (PR fixer, bug fixer, feature builder, Blue sky builder) run end-to-end tests on this machine: `never` leaves them to CI on the pull request and runs only the unit tests for what changed; `covering` runs only the e2e specs that cover the change, never the full suite. The rule is added to every such agent's prompt, before its Extra steer. **E2E tests on this machine** in Settings › Automations, `←` / `→` or Enter. |
 | `automations.per.<id>.on` | `true` for `pr_fixer`, `meeting_takeaways` and `blue_sky`, else `false` | The automation on or off. Ids: `pr_fixer`, `bug_fixer`, `feature_builder`, `week_review`, `meeting_takeaways`, `blue_sky`. |
 | `automations.per.<id>.extra_steer` | `""` | Added to every prompt the automation sends, after a blank line, as `Extra steer: …`. |
 | `automations.per.<id>.preset` | none | The preset `⌘U` picked in place of the automation's own system preset, by name. A name no preset has falls back to the system preset. |
-| `automations.per.<id>.labels` | `[]` | The Linear labels a ticket assigned to you needs for the bug fixer (`bug_fixer`) or the feature builder (`feature_builder`) to pick it up, matched in any case. Empty is each one's own: `Bug`, `Regression`, `Customer bug` for the bug fixer; `Feature`, `Improvement` for the feature builder. **Labels** on the screen picks them from your Linear workspace. |
+| `automations.per.<id>.labels` | `[]` | The Linear labels a ticket assigned to you needs for the bug fixer (`bug_fixer`) or the feature builder (`feature_builder`) to pick it up, matched in any case. Empty is each one's own: `Bug`, `Regression`, `Customer bug` for the bug fixer; `Feature`, `Improvement` for the feature builder. **Labels** in its section picks them from your Linear workspace. |
 | `automations.per.<id>.when`, `.whose` | none (Fridays 08:30), `"just_me"` | When week in review runs — a day and a time, `{"day": "fri", "at": "08:30"}` — and whose work it covers (`just_me` or `whole_team`). |
 
 `pr_autofix` (**Auto-fix my PRs**, through 2.x) is retired. A config that has it keeps it for the
@@ -344,7 +349,7 @@ be renamed or deleted. On it `Enter` edits and `^R` puts orion's text back. On o
 
 Presets are picked, never managed, elsewhere: `⌘U` / `^X` in the QUICK PROMPT — the box `Enter` opens on
 a Linear issue or a todo — **Agent presets** in the palette, `⌘U` over an agent's locked pane, which
-pastes the text in at the caret, and `⌘U` on the AUTOMATIONS screen, which picks the preset an
+pastes the text in at the caret, and `⌘U` in Settings › Automations, which picks the preset an
 automation is told by in place of its system preset.
 
 ## Setup command

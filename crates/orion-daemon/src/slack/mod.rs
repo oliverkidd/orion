@@ -279,15 +279,26 @@ async fn listen(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<socket::
         }
     };
     socket::session(&url, stop, |envelope| {
-        let daemon = daemon.clone();
-        let session = session.clone();
-        tokio::spawn(async move { handle(&daemon, &session, envelope).await });
+        // A modal's submit is checked before its ack, which is the
+        // modal's reply: a refused one shows its errors and goes no
+        // further.
+        let refused = (envelope.kind == "interactive"
+            && envelope.payload["type"] == "view_submission")
+            .then(|| daemon.phone_submission_ack(session, &envelope.payload))
+            .flatten();
+        if refused.is_none() {
+            let daemon = daemon.clone();
+            let session = session.clone();
+            tokio::spawn(async move { handle(&daemon, &session, envelope).await });
+        }
+        refused
     })
     .await
 }
 
 /// One envelope: a message event (the inbox's, and maybe a reply in the
-/// phone's DM) or a button press on a phone message.
+/// phone's DM), a button press on a phone message, or a phone modal's
+/// submit.
 async fn handle(daemon: &Arc<Daemon>, session: &Arc<Session>, envelope: socket::Envelope) {
     match envelope.kind.as_str() {
         "events_api" => {
@@ -313,7 +324,12 @@ async fn handle(daemon: &Arc<Daemon>, session: &Arc<Session>, envelope: socket::
             }
         }
         "interactive" => {
-            if let Some(route) = crate::phone::route_action(&envelope.payload, session) {
+            let payload = &envelope.payload;
+            let route = match payload["type"].as_str() {
+                Some("view_submission") => crate::phone::route_submission(payload, session),
+                _ => crate::phone::route_action(payload, session),
+            };
+            if let Some(route) = route {
                 daemon.phone_reply(session, route).await;
             }
         }
@@ -325,6 +341,14 @@ async fn handle(daemon: &Arc<Daemon>, session: &Arc<Session>, envelope: socket::
 /// a timestamp, unfiltered.
 pub fn inbox_event(event: &Value) -> Option<ServerEvent> {
     let text = |key: &str| event[key].as_str().map(str::to_string);
+    // Which messages arrive at all, never what they say.
+    tracing::debug!(
+        channel = event["channel"].as_str(),
+        user = event["user"].as_str(),
+        subtype = event["subtype"].as_str(),
+        thread_ts = event["thread_ts"].as_str(),
+        "slack message event"
+    );
     Some(ServerEvent::SlackMessage {
         channel: text("channel")?,
         channel_type: text("channel_type").unwrap_or_default(),

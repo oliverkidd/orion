@@ -299,10 +299,6 @@ impl Runner for WeekReview {
         Ok(())
     }
 
-    fn opens_rows(&self) -> bool {
-        true
-    }
-
     /// Enter on a REVIEWS row: that run on its page, with a tab a project.
     fn open_row(&mut self, app: &mut App, index: usize) {
         crate::week_review::open(app, index, true);

@@ -400,8 +400,10 @@ already — so a new agent in a new worktree is that one chord, the task and `En
 - **The grid** is the body beside the pane: every unarchived session of
   the **selected project**, a line apiece in its checkout's band, most recently touched first,
   under a header of **PROJECT TABS** — ` +   web ●1 ×   api ●2 ●1 ×` — one tab per project you
-  have opened, the one you last worked in first, right after the `+`, and on the right how many
-  sessions (and terminals) the grid holds: `4 sessions · 1 terminal`. The tab the grid is on is lit, a raised chip with its name in the accent. The tabs are how
+  have opened, the one you last worked in first, right after the `+`, and at its right end the
+  NEEDS YOU COUNT, `⌘K 4` in the waiting red: how many cards wait on the
+  [Needs you board](keys.md#needs-you-k), nothing at all at zero, and a click opens the board (how
+  many sessions run is the footer's to say). The tab the grid is on is lit, a raised chip with its name in the accent. The tabs are how
   you move between projects — there is no level above the grid to walk out to. Opening a project
   that has no tab yet — from the `+`, a `⌘K` jump, a folder just opened — puts one first, next to the `+`,
   and so does working in one: launching a session there (a `^P` launch into another project included),
@@ -509,8 +511,8 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   on the CLI's own default effort stops at the model), then the last thing it was asked to do, on a
   `›` — and, for a session sent at a todo, that todo after it, a dim `☐ text` (`☑` once ticked)
   that a long prompt leaves its share of the line — and how long ago at the right. The pull requests come from the same `gh` lookups
-  the PULL REQUESTS MODAL makes, swept over every checkout the grid lists. The header counts the project's open pull requests beside the session count
-  (`4 sessions  3 prs`), so what is waiting on the repo is read without opening `⌘U` to find it —
+  the PULL REQUESTS MODAL makes, swept over every checkout the grid lists. The header counts the project's open pull requests
+  (`3 prs`), so what is waiting on the repo is read without opening `⌘U` to find it —
   and a click on the count opens that list, as the key does. When the room left
   cannot hold every entry, the far right of that row says how many it could not draw and which way
   they went — `↓ 7 hidden` for entries under the fold, `↑ 4 hidden` for ones scrolled off the top,
@@ -685,32 +687,42 @@ rebindable (`pull_requests`).
 
 ## Automations
 
-`⌘J` opens AUTOMATIONS: the agents orion starts on its own, in a list on the left with what each
-is doing, and the one under the cursor on the right.
+The automations are the agents orion starts on its own. Each one is set up in
+**Settings › Automations** (`⌘,`), and `⌘J` shows what they are doing.
 
 ```
-Automations                                      1 of at most 5 agents running ←→
-● PR fixer        fixing #407  │ PR fixer
-○ Bug fixer               off  │ When one of your PRs hits conflicts or failing checks, …
-○ Feature builder         off  │ SETTINGS
-○ Week in review          off  │   On           on
-○ Meeting takeaways       off  │   Preset       PR autofix · the PR's own agent
-○ Blue sky builder       idle  │   Extra steer  none
-                               │ YOUR OPEN PRS
-                               │   #407 Fix the login redirect   fixing checks, try 2 of 3
+Automations                          2 of at most 3 running · caps in Settings
+● PR fixer           fixing #407 · try 2 of 3
+    #407 Fix the login redirect   fixing checks, try 2 of 3      web          12m
+● Bug fixer          1 plan waiting
+    ENG-412 Crash on save         plan to approve                 api          40m
+○ Feature builder    queued: ENG-399 (at its cap)
+● Week in review     Fri 08:30
+● Meeting takeaways  3 to place
+● Blue sky builder   idle
 ```
 
-- **Each one** has **On**, its **Preset** and an **Extra steer**, and the bug fixer, the feature
-  builder and week in review have a row or two more (**Labels**, **When**, **Whose**). The preset
-  says what the agent is told and what it runs on: `Enter` on the row opens it in
-  Settings › Presets, and `⌘U` picks another of your presets in its place. The extra steer is one
-  line added after the preset's text, as `Extra steer: …`, on every prompt that automation sends.
-- **Its lists** say what it is running and what it has done: the PR fixer's **YOUR OPEN PRS**
-  (fixing checks, try 2 of 3 / green / gave up, needs you) and **DONE THIS WEEK**. `Enter` on a row
-  with a session jumps to it.
-- **A cap.** No automation starts a session while `automations.max_running` of them — 5 unless you
-  change it with `←`/`→` in the header — are at work or waiting on you. A breakage the PR fixer
-  sees meanwhile waits, watched, for a place.
+- **`⌘J`, the overview.** A row per automation, its dot (yellow working, red waiting on you, grey
+  idle, hollow off) and what it is doing, and under it each live session it runs, with its project
+  and how long it has been at it. `Enter` on a session jumps to it; on an automation it opens
+  Settings › Automations at that automation's section. Week in review's `Enter` opens its latest
+  review (`r` runs it now), and meeting takeaways' unfolds its meetings, `Enter` on one opening its
+  takeaways. `Space` turns the automation on or off, and `,` opens its settings.
+- **Settings › Automations.** The overall cap first, then a section per automation, its heading
+  saying what it is doing and how many of its sessions run against its own cap. Each has **On**, its
+  **Preset** and an **Extra steer**; the PR fixer, the bug fixer, the feature builder and the blue
+  sky builder an **At most at once**; the bug fixer and the feature builder their **Labels**; week
+  in review its **When** and **Whose**. The preset says what the agent is told and what it runs on:
+  `Enter` on the row opens it in Settings › Presets, and `⌘U` picks another of your presets in its
+  place. The extra steer is one line added after the preset's text, as `Extra steer: …`, on every
+  prompt that automation sends.
+- **Two caps.** No automation starts a session while `automations.max_running` of them — 3 unless
+  you change **Sessions at once, all automations** — are at work or waiting on you, nor while its
+  own **At most at once** of its own are: one PR fixer, bug fixer and feature builder session at a
+  time out of the box, and any number of blue sky builds under the overall cap. A session waiting
+  on you holds its place, so approving or closing it frees one. Work that comes meanwhile waits for
+  a place — a breakage the PR fixer sees stays watched, and a ticket at the bug fixer's cap reads
+  `queued (at its cap)`.
 - **Tagged sessions.** Every session an automation starts is an ordinary row on the grid, its
   automation's name ahead of what it runs on (`PR fixer · opus high`), and Needs you labels it the
   same way. orion keeps the tag with the session, across restarts.
@@ -766,21 +778,16 @@ product area, each point numbered, with what to **Show** and what to **Say** und
 demo. It writes one review for each project that had changes, so it's ready before the meeting.
 
 It runs three ways: on its **When** while it is on (Fridays 08:30 unless you change it), by `r` on
-its panel in Automations (`⌘J`, the `r run now` at the panel's top right), and by **Run week in
-review now** in the command palette (`⌘⇧P`), which also opens Automations on it to watch it go.
+its row in Automations (`⌘J`), and by **Run week in review now** in the command palette (`⌘⇧P`),
+which also opens Automations on it to watch it go. Its section in Settings › Automations:
 
 ```
-Week in review                          r run now
-Writes up the week from everything merged, done and ticked, …
-SETTINGS
-  On           on
-  When         Fri 08:30
-  Whose        just me
-  Preset       Week review · sonnet medium
-  Extra steer  none
-REVIEWS
-  Week 45                   Fri 08:30 · 9 points · new
-  Week 44                   Fri 08:31 · 12 points
+Week in review                                              Fri 08:30
+   On                                  [on]
+   When                                [Fri 08:30]
+   Whose                               [just me]
+   Preset                              [Week review · sonnet medium]
+   Extra steer                         [none]
 ```
 
 - **When** is a day and a time: `Enter` on it and write one, `Fri 08:30` or `mon 9`. orion looks
@@ -793,11 +800,11 @@ REVIEWS
   the Claude account, model and effort that write it (sonnet · medium unless you change them).
   **Extra steer** is added after those rules. A note a project kept for its reviews in an older
   release becomes the extra steer once.
-- **REVIEWS** lists the runs kept, newest first, each named for the week it ends in, with when it
-  was written, how many points it makes, and `new` until read. While one is being written it heads
-  the list (`writing 2 of 4`), and the row's state says the same.
+- The runs are kept, newest first, each named for the week it ends in, with when it was written,
+  how many points it makes, and `new` until read. While one is being written its row in `⌘J` says
+  so (`writing 2 of 4`).
 
-`Enter` (or a click) on a review opens it on a page of its own, **a tab per project** it wrote up:
+`Enter` on week in review's row in `⌘J` opens the latest run on a page of its own, **a tab per project** it wrote up:
 `[`/`]`, `←`/`→` or `⇧←`/`⇧→` move between tabs (a click on one goes there), `↑`/`↓` and
 `PgUp`/`PgDn` scroll, `⌘C` copies the tab's review as Markdown, `⌘O` opens its file, and `Esc` goes
 back to Automations. The run being written opens on the same page, each tab showing its review being
@@ -835,8 +842,8 @@ listed.
 
 When a Teams meeting on your calendar ends, meeting takeaways waits for its transcript, reads it for
 what was agreed, and puts the takeaways in front of you to place in your todos. It needs Microsoft 365
-signed in, and **Takeaways from Teams transcripts** on (Settings › Connections); it is on in `⌘J`
-out of the box.
+signed in, and **Takeaways from Teams transcripts** on (Settings › Connections); it is on in
+Settings › Automations out of the box.
 
 - **The transcript.** orion finds the meeting by its join link and looks for that sitting's
   transcript every 2 minutes, for up to an hour after the meeting ends. No transcript by then reads
@@ -1015,8 +1022,8 @@ run on another account), told the idea and where to build it.
   as `brief to approve`, and to your phone while you're away, as any plan does.
 - **Then the prototype.** Approved, it builds a working prototype — a web tool may also be published
   as a claude.ai artifact, its link noted — and finishes with how to try it.
-- It counts against the automations' cap: with that many running, the idea waits (`● starting`)
-  and starts when one finishes.
-- In Automations (`⌘J`) it has **On** (on unless you turn it off), **Preset** and **Extra steer**,
-  and its **IDEAS** list: each idea it started, `brief to approve` / `building` / `built`; `Enter`
-  on one opens it in Todos › Blue sky.
+- It counts against the automations' cap, and against its own **At most at once** (any unless you
+  set one): with that many running, the idea waits (`● starting`) and starts when one finishes.
+- In Settings › Automations it has **On** (on unless you turn it off), **At most at once**,
+  **Preset** and **Extra steer**. In `⌘J` each idea it is building is a row under it; `Enter` on
+  one opens it in Todos › Blue sky.

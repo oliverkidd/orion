@@ -9384,8 +9384,9 @@ mod tests {
     }
 
     /// PR COUNT: the header counts the selected project's open pull
-    /// requests beside the session count, so what is waiting on the repo
-    /// reads off the header instead of `v`.
+    /// requests, so what is waiting on the repo reads off the header
+    /// instead of `v` — and no longer counts the sessions, which the
+    /// footer does.
     #[test]
     fn the_header_counts_the_projects_open_prs() {
         with_default_config(|| {
@@ -9393,7 +9394,7 @@ mod tests {
             seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Fix the nav")]);
 
             let text = buffer_text(&draw(&mut app));
-            assert!(text.contains("2 sessions"), "{text}");
+            assert!(!text.contains("2 sessions"), "{text}");
             assert!(text.contains("2 prs"), "{text}");
         });
     }
@@ -9466,7 +9467,6 @@ mod tests {
             assert!(!text.contains("PROJECTS"), "{text}");
             assert!(!text.contains("WORKTREES"), "{text}");
             assert_eq!(tabs_drawn(&app), ["demo"], "the header's tabs: {text}");
-            assert!(text.contains("2 sessions"), "{text}");
             assert!(text.contains("polish-nav"), "{text}");
             // Each band names the checkout its cards run in by its SCOPE
             // MARK: `⎇` for a worktree of its own, `⌂` for the project's
@@ -10167,7 +10167,7 @@ mod tests {
                 continue;
             }
             // `●12`: the count starts on the next cell and runs as far as
-            // the digits do, so the `2 sessions` off on the right edge is
+            // the digits do, so a count off on the right edge is
             // never read as part of it.
             let mut count = String::new();
             let mut i = x + 1;
@@ -10214,7 +10214,7 @@ mod tests {
                 Some("1".to_string()),
                 "one red dot, carrying its count: {text}"
             );
-            // The header's row; the footer's `⌘K needs you` is the board's.
+            // The header's row: its NEEDS YOU COUNT is the board's number.
             let header = text.lines().nth(1).unwrap_or_default();
             assert!(
                 !header.contains("needs you"),
@@ -10349,6 +10349,7 @@ mod tests {
     fn the_header_never_overprints_its_count() {
         with_default_config(|| {
             let mut app = two_sessions();
+            seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Fix the nav")]);
             let mut counted = 0;
             // Below this the lit tab and its `×` are wider than the row.
             for width in 20..=130u16 {
@@ -10359,7 +10360,7 @@ mod tests {
                     head.contains(" demo"),
                     "{width}: the lit tab, whole: {head:?}"
                 );
-                if let Some((tabs, _)) = head.split_once("2 sessions") {
+                if let Some((tabs, _)) = head.split_once("2 prs") {
                     // The tabs end before the count begins: the gap
                     // between the two is real air, not a letter eaten by
                     // one of them.
@@ -10369,7 +10370,7 @@ mod tests {
                     );
                     counted += 1;
                 } else {
-                    assert!(!head.contains("session"), "{width}: half a count: {head:?}");
+                    assert!(!head.contains(" pr"), "{width}: half a count: {head:?}");
                 }
             }
             assert!(counted > 0, "some width has room for the count");

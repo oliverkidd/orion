@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 54;
+pub const PROTOCOL_VERSION: u32 = 55;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -460,6 +460,18 @@ pub enum Answer {
     /// Keep planning, with this feedback; on a question, the same as
     /// `Text`.
     Steer(String),
+    /// Every question of an `AskUserQuestion` answered at once, one
+    /// [`Picked`] per question in its order.
+    Answers(Vec<Picked>),
+}
+
+/// One question's answer in [`Answer::Answers`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Picked {
+    /// These options (0-based); one for a single-select question.
+    Options(Vec<usize>),
+    /// Your own words.
+    Text(String),
 }
 
 /// How orion's Slack connection stands (`ServerEvent::SlackStatus`).

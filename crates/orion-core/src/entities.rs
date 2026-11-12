@@ -324,20 +324,45 @@ impl LimitReason {
 /// beside the status on `StatusChanged` and with `LastResponse`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WaitReason {
-    /// An `AskUserQuestion` (its first question, when it asks several).
-    Question {
-        question: String,
-        /// The option labels, in the order the dialog numbers them.
-        options: Vec<String>,
-        /// Several options may be picked.
-        multi: bool,
-    },
+    /// An `AskUserQuestion`: every question it asks, in the order its
+    /// dialog's tabs show them.
+    Question { questions: Vec<Asked> },
     /// An `ExitPlanMode`: the plan waiting for approval.
     Plan { plan: String },
     /// A permission prompt for this tool.
     Permission { tool: String },
     /// The CLI exited with an error.
     Crash { exit_code: Option<i32> },
+}
+
+/// One question of an `AskUserQuestion`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Asked {
+    pub question: String,
+    /// Its short tab label (`header`), empty when it has none.
+    pub header: String,
+    /// The option labels, in the order the dialog numbers them.
+    pub options: Vec<String>,
+    /// Several options may be picked.
+    pub multi: bool,
+}
+
+/// The plan an `ExitPlanMode` shows when its input carries no plan text
+/// and names no readable plan file.
+pub const PLAN_IN_CLAUDE: &str = "(plan in Claude)";
+
+/// An `ExitPlanMode` input's plan: its `plan`, else the contents of its
+/// `planFilePath`. None when neither has any text.
+fn plan_text(input: &serde_json::Value) -> Option<String> {
+    let inline = input.get("plan").and_then(|p| p.as_str()).map(str::trim);
+    let text = match inline {
+        Some(plan) if !plan.is_empty() => plan.to_string(),
+        _ => {
+            let path = input.get("planFilePath")?.as_str()?;
+            std::fs::read_to_string(path).ok()?.trim().to_string()
+        }
+    };
+    (!text.is_empty()).then_some(text)
 }
 
 /// Claude's question tool.
@@ -348,49 +373,56 @@ pub const EXIT_PLAN_MODE_TOOL: &str = "ExitPlanMode";
 impl WaitReason {
     /// The reason a dialog for `tool` raises, read off its input — a hook's
     /// `tool_input`, or a transcript's `tool_use.input` (the same shape).
-    /// An `AskUserQuestion` or `ExitPlanMode` whose input doesn't parse
-    /// says no more than any other tool's permission prompt does.
+    /// An `AskUserQuestion` whose input doesn't parse says no more than any
+    /// other tool's permission prompt does. An `ExitPlanMode` is always a
+    /// plan: its `plan`, else the file its `planFilePath` names (Claude
+    /// Code 2.1.322 sends both), else [`PLAN_IN_CLAUDE`].
     pub fn from_tool(tool: &str, input: Option<&serde_json::Value>) -> Self {
-        let parsed = input.and_then(|input| match tool {
-            ASK_USER_QUESTION_TOOL => Self::question(input),
-            EXIT_PLAN_MODE_TOOL => {
-                let plan = input.get("plan")?.as_str()?.trim();
-                (!plan.is_empty()).then(|| WaitReason::Plan {
-                    plan: plan.to_string(),
-                })
-            }
+        let parsed = match tool {
+            ASK_USER_QUESTION_TOOL => input.and_then(Self::question),
+            EXIT_PLAN_MODE_TOOL => Some(WaitReason::Plan {
+                plan: input.and_then(plan_text).unwrap_or(PLAN_IN_CLAUDE.into()),
+            }),
             _ => None,
-        });
+        };
         parsed.unwrap_or_else(|| WaitReason::Permission {
             tool: tool.to_string(),
         })
     }
 
-    /// `questions[0]` of an `AskUserQuestion` input: `{question, options:
-    /// [{label, description}], multiSelect}`.
+    /// Every question of an `AskUserQuestion` input: `{questions:
+    /// [{question, header, options: [{label, description}],
+    /// multiSelect}]}`. None when it has none.
     fn question(input: &serde_json::Value) -> Option<Self> {
-        let first = input.get("questions")?.as_array()?.first()?;
-        let question = first.get("question")?.as_str()?.trim().to_string();
-        let options = first
-            .get("options")
-            .and_then(|o| o.as_array())
-            .map(|options| {
-                options
-                    .iter()
-                    .filter_map(|o| o.get("label").and_then(|l| l.as_str()))
-                    .map(str::to_string)
-                    .collect()
+        let questions: Vec<Asked> = input
+            .get("questions")?
+            .as_array()?
+            .iter()
+            .filter_map(|q| {
+                let text = |key: &str| q.get(key).and_then(|v| v.as_str()).map(str::trim);
+                let options = q
+                    .get("options")
+                    .and_then(|o| o.as_array())
+                    .map(|options| {
+                        options
+                            .iter()
+                            .filter_map(|o| o.get("label").and_then(|l| l.as_str()))
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Some(Asked {
+                    question: text("question")?.to_string(),
+                    header: text("header").unwrap_or_default().to_string(),
+                    options,
+                    multi: q
+                        .get("multiSelect")
+                        .and_then(|m| m.as_bool())
+                        .unwrap_or(false),
+                })
             })
-            .unwrap_or_default();
-        let multi = first
-            .get("multiSelect")
-            .and_then(|m| m.as_bool())
-            .unwrap_or(false);
-        Some(WaitReason::Question {
-            question,
-            options,
-            multi,
-        })
+            .collect();
+        (!questions.is_empty()).then_some(WaitReason::Question { questions })
     }
 }
 
@@ -532,8 +564,9 @@ mod wait_reason_tests {
     use super::*;
     use serde_json::json;
 
-    /// The `tool_input` Claude Code 2.1.319 posts on `PreToolUse` and
-    /// `PermissionRequest` for its question and plan dialogs.
+    /// The `tool_input` Claude Code 2.1.319 (and 2.1.322) posts on
+    /// `PreToolUse` and `PermissionRequest` for its question and plan
+    /// dialogs.
     #[test]
     fn question_and_plan_parse_from_the_hook_tool_input() {
         let ask = json!({"questions": [
@@ -544,16 +577,27 @@ mod wait_reason_tests {
         assert_eq!(
             WaitReason::from_tool(ASK_USER_QUESTION_TOOL, Some(&ask)),
             WaitReason::Question {
-                question: "Which color do you like?".into(),
-                options: vec!["Red".into(), "Green".into()],
-                multi: false,
+                questions: vec![
+                    Asked {
+                        question: "Which color do you like?".into(),
+                        header: "Color".into(),
+                        options: vec!["Red".into(), "Green".into()],
+                        multi: false,
+                    },
+                    Asked {
+                        question: "A second one".into(),
+                        header: String::new(),
+                        options: vec![],
+                        multi: false,
+                    },
+                ]
             }
         );
         let multi = json!({"questions": [{"question": "Fruits?", "multiSelect": true,
             "options": [{"label": "Apple"}, {"label": "Pear"}]}]});
         assert!(matches!(
             WaitReason::from_tool(ASK_USER_QUESTION_TOOL, Some(&multi)),
-            WaitReason::Question { multi: true, .. }
+            WaitReason::Question { questions } if questions[0].multi
         ));
         let plan = json!({"plan": "# Create hello.txt\n\n1. Write it.\n", "planFilePath": "/x.md"});
         assert_eq!(
@@ -579,11 +623,39 @@ mod wait_reason_tests {
                 tool: ASK_USER_QUESTION_TOOL.into()
             }
         );
+    }
+
+    /// An `ExitPlanMode` is a plan however little its input says: the
+    /// plan file stands in for a missing `plan`, and with neither the card
+    /// still reaches the phone as a plan.
+    #[test]
+    fn a_plan_without_its_text_is_still_a_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("plan.md");
+        std::fs::write(&file, "# From the file\n\n1. Do it.\n").unwrap();
         assert_eq!(
-            WaitReason::from_tool(EXIT_PLAN_MODE_TOOL, None),
-            WaitReason::Permission {
-                tool: EXIT_PLAN_MODE_TOOL.into()
+            WaitReason::from_tool(
+                EXIT_PLAN_MODE_TOOL,
+                Some(&json!({"planFilePath": file.to_str().unwrap()}))
+            ),
+            WaitReason::Plan {
+                plan: "# From the file\n\n1. Do it.".into()
             }
+        );
+        let in_claude = WaitReason::Plan {
+            plan: PLAN_IN_CLAUDE.into(),
+        };
+        assert_eq!(
+            WaitReason::from_tool(EXIT_PLAN_MODE_TOOL, Some(&json!({}))),
+            in_claude
+        );
+        assert_eq!(WaitReason::from_tool(EXIT_PLAN_MODE_TOOL, None), in_claude);
+        assert_eq!(
+            WaitReason::from_tool(
+                EXIT_PLAN_MODE_TOOL,
+                Some(&json!({"plan": " ", "planFilePath": "/nowhere/plan.md"}))
+            ),
+            in_claude
         );
     }
 }

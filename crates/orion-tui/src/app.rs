@@ -182,9 +182,9 @@ pub enum HitTarget {
     /// One of the footer's SPOTIFY READOUT buttons (`⏮  ⏸ ⏭`): a click
     /// sends Spotify that command (`event_loop::press_spotify`).
     FooterSpotify(crate::spotify::Button),
-    /// The footer's `⌘K needs you N`: a click opens the NEEDS YOU BOARD,
-    /// through the `open_palette` its key runs.
-    FooterNeedsYou,
+    /// The grid header's NEEDS YOU COUNT, `⌘K N`: a click opens the NEEDS
+    /// YOU BOARD, through the `open_palette` its key runs.
+    NeedsYouCount,
     /// The `↗ open in browser` BUTTON on the PULL REQUESTS MODAL's and the
     /// LINEAR VIEW's reading pane, pinned right on its top border: a click
     /// opens the row under the cursor in the browser, through the very
@@ -839,6 +839,15 @@ pub enum PromptKind {
     /// keeps it; both put the overlay back on the row.
     LinkBrowser {
         id: String,
+    },
+    /// Enter on a Settings › Automations row written as a line — an
+    /// automation's **Extra steer**, week in review's **When**. Enter
+    /// writes it (`automations::settings_tab::write_text`) — an empty
+    /// extra steer is none — and Esc keeps it; both put the overlay back
+    /// on the row.
+    AutomationText {
+        which: crate::automations::Automation,
+        row: crate::automations::SettingRow,
     },
     /// `c` on Settings › Connections › SLACK: token `step` of the three
     /// (`phone::TOKENS`), the ones typed before it carried along. Enter
@@ -2402,8 +2411,9 @@ pub enum Overlay {
     /// The AUTOFIX MODAL: one of your pull requests broke (or `⌘G` in the
     /// PULL REQUESTS MODAL) — what to send the agent to fix.
     Autofix(Box<crate::automations::pr_fixer::AutofixForm>),
-    /// `⌘J`: AUTOMATIONS — each one's on/off, preset, extra steer, and
-    /// what it is running and has done (`crate::automations::view`).
+    /// `⌘J`: AUTOMATIONS — what each one is doing and its live sessions
+    /// (`crate::automations::view`); it also hosts the labels pick for
+    /// Settings › Automations.
     Automations(crate::automations::view::AutomationsView),
     /// `⌘I`: the TODOS MODAL — the selected project's own todo list.
     Todos(crate::todos::TodoView),

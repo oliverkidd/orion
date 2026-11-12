@@ -74,6 +74,7 @@ impl TestEnv {
         cmd.args(["daemon", "--foreground"])
             .env("SHELL", shell)
             .env(env::WORKTREE_SYNC_MS, "100") // fast external-worktree pickup
+            .env(env::SLACK_TOKENS, "off") // never the machine's real Slack; a test's own wins below
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         match agent_cmd {
@@ -1032,9 +1033,12 @@ async fn a_question_hook_carries_its_reason_and_an_answer_types_into_the_dialog(
     .unwrap();
 
     let question = orion_core::WaitReason::Question {
-        question: "Which color do you like?".into(),
-        options: vec!["Red".into(), "Green".into()],
-        multi: false,
+        questions: vec![orion_core::Asked {
+            question: "Which color do you like?".into(),
+            header: "Color".into(),
+            options: vec!["Red".into(), "Green".into()],
+            multi: false,
+        }],
     };
     let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
         evs.iter().any(|e| {
@@ -4968,7 +4972,7 @@ impl FakeSlack {
                                 let n = next_ts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                 serde_json::json!({"ok": true, "ts": format!("{n}.000100")})
                             }
-                            "chat.update" | "chat.postEphemeral" => serde_json::json!({"ok": true}),
+                            "chat.update" | "views.open" => serde_json::json!({"ok": true}),
                             _ => serde_json::json!({"ok": false, "error": "invalid_auth"}),
                         };
                         axum::Json(reply)
@@ -4996,6 +5000,26 @@ impl FakeSlack {
             .iter()
             .filter(|(m, _, _)| m.starts_with("chat."))
             .map(|(m, b, _)| (m.clone(), b.clone()))
+            .collect()
+    }
+
+    /// The modals opened so far: each `views.open`'s view.
+    fn views(&self) -> Vec<serde_json::Value> {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _, _)| m == "views.open")
+            .map(|(_, b, _)| b["view"].clone())
+            .collect()
+    }
+
+    /// The `chat.update`s on message `ts` so far: each one's `text`.
+    fn updates(&self, ts: &str) -> Vec<String> {
+        self.chats()
+            .into_iter()
+            .filter(|(m, b)| m == "chat.update" && b["ts"] == ts)
+            .map(|(_, b)| b["text"].as_str().unwrap_or_default().to_string())
             .collect()
     }
 
@@ -5055,13 +5079,17 @@ fn block_texts(blocks: &serde_json::Value) -> Vec<String> {
 
 /// THE PHONE BRIDGE end to end, against a fake Slack. Away by hand, a
 /// session that asks a question posts one DM in the 5.4 layout — its
-/// whole last response, the question, a button per option and `Something
-/// else…`. A button press comes back down Socket Mode and its digit
-/// reaches the PTY; the thread hears `✓ Sent · working again`. The next
-/// question is answered by a thread reply, which reaches the PTY as the
-/// question's own-words keystrokes and the TUI as a `SlackMessage`. The
-/// third is answered at the desk, and its DM is updated to say "Answered
-/// in Orion", its buttons gone.
+/// whole last response, the question, a button per option and `Type an
+/// answer…`. A button press comes back down Socket Mode and its digit
+/// reaches the PTY; the DM is updated to `✓ Sent: Green · working again`.
+/// The next question is answered by a thread reply, which reaches the PTY
+/// as the question's own-words keystrokes and the TUI as a
+/// `SlackMessage`. The third is answered at the desk, and its DM is
+/// updated to say "Answered in Orion", its buttons gone. The fourth asks
+/// two questions, one a multi-select: `Answer…` opens a modal with radio
+/// buttons and checkboxes, its submit types both answers into the dialog
+/// and submits the review, and the same submit again is refused inside
+/// the modal.
 #[tokio::test]
 async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
     let slack = FakeSlack::start().await;
@@ -5095,6 +5123,24 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
         .to_string(),
     )
     .unwrap();
+    let ask_two = env.tmp.path().join("ask_two.json");
+    std::fs::write(
+        &ask_two,
+        serde_json::json!({
+            "session_id": "sess-1",
+            "hook_event_name": "PreToolUse",
+            "transcript_path": transcript,
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [
+                {"question": "Which color do you like?", "header": "Color", "multiSelect": false,
+                 "options": [{"label": "Red"}, {"label": "Green"}]},
+                {"question": "Which fruits do you like?", "header": "Fruits", "multiSelect": true,
+                 "options": [{"label": "Apple"}, {"label": "Pear"}, {"label": "Mango"}]}
+            ]}
+        })
+        .to_string(),
+    )
+    .unwrap();
     let answered = env.tmp.path().join("answered.json");
     std::fs::write(
         &answered,
@@ -5103,7 +5149,9 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
     .unwrap();
     // Asks, reads one key (the button's digit), asks again and reads a
     // line (the thread reply), asks a third time and reads a line (the
-    // desk's answer); each answer ends its wait.
+    // desk's answer), then asks two questions and reads the seven bytes
+    // that answer both (`2`, `1`, `3`, →, `1`, the escape shown as `E`);
+    // each answer ends its wait.
     let script = env.tmp.path().join("agent.sh");
     std::fs::write(
         &script,
@@ -5123,8 +5171,13 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
              hook '{ask}' PreToolUse\n\
              read line; echo \"DESK:$line\"\n\
              hook '{answered}' PostToolUse\n\
+             stty -icanon min 1\n\
+             hook '{ask_two}' PreToolUse\n\
+             k=$(dd bs=1 count=7 2>/dev/null | tr '\\033' E); echo \"BOTH:$k\"\n\
+             hook '{answered}' PostToolUse\n\
              sleep 30\n",
             ask = ask.display(),
+            ask_two = ask_two.display(),
             answered = answered.display(),
         ),
     )
@@ -5197,7 +5250,8 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
             "pick a colour",
             "I checked *both* palettes.\n\nRed is louder.",
             "*Which color do you like?*",
-            "[Red|Green|Something else…]",
+            "[Red|Green|Type an answer…]",
+            "or just reply here",
         ]
     );
     let first_ts = slack
@@ -5225,12 +5279,8 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
     })
     .await;
     slack
-        .wait_for("✓ Sent in the first thread", |calls| {
-            calls.iter().any(|(m, b)| {
-                m == "chat.postMessage"
-                    && b["thread_ts"] == first_ts.as_str()
-                    && b["text"] == "✓ Sent · working again"
-            })
+        .wait_for("✓ Sent on the first message", |_| {
+            slack.updates(&first_ts) == ["✓ Sent: Green · working again"]
         })
         .await;
 
@@ -5269,12 +5319,8 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
         "the reply also reaches the TUI as a SlackMessage"
     );
     slack
-        .wait_for("✓ Sent in the second thread", |calls| {
-            calls.iter().any(|(m, b)| {
-                m == "chat.postMessage"
-                    && b["thread_ts"] == second_ts.as_str()
-                    && b["text"] == "✓ Sent · working again"
-            })
+        .wait_for("✓ Sent on the second message", |_| {
+            slack.updates(&second_ts) == ["✓ Sent: purple · working again"]
         })
         .await;
 
@@ -5304,24 +5350,133 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
     })
     .await;
     slack
-        .wait_for("Answered in Orion on the third", |calls| {
-            calls
-                .iter()
-                .any(|(m, b)| m == "chat.update" && b["ts"] == third_ts.as_str())
+        .wait_for("Answered in Orion on the third", |_| {
+            !slack.updates(&third_ts).is_empty()
         })
         .await;
     let chats = slack.chats();
-    let (_, update) = chats.iter().find(|(m, _)| m == "chat.update").unwrap();
+    let (_, update) = chats
+        .iter()
+        .find(|(m, b)| m == "chat.update" && b["ts"] == third_ts.as_str())
+        .unwrap();
     let texts = block_texts(&update["blocks"]);
     assert_eq!(texts.last().unwrap(), "✓ Answered in Orion");
     assert!(
         texts.iter().all(|t| !t.starts_with('[')),
         "no buttons: {texts:?}"
     );
+    assert!(
+        chats
+            .iter()
+            .all(|(m, b)| m != "chat.postMessage" || b["thread_ts"].is_null()),
+        "nothing is posted in a thread: {chats:#?}"
+    );
+
+    // ---- two questions, answered in one modal ----
+    slack
+        .wait_for("the fourth phone message", |_| slack.posted().len() == 4)
+        .await;
+    let fourth = slack.posted().pop().unwrap();
     assert_eq!(
-        chats.iter().filter(|(m, _)| m == "chat.update").count(),
-        1,
-        "only the desk's answer updates a message"
+        block_texts(&fourth["blocks"])[3..],
+        [
+            "*Which color do you like?*",
+            "• Red\n• Green",
+            "*Which fruits do you like?* _(pick any)_",
+            "• Apple\n• Pear\n• Mango",
+            "[Answer…]",
+            "or just reply here",
+        ]
+    );
+    let fourth_ts = slack
+        .chats()
+        .iter()
+        .filter(|(m, _)| m == "chat.postMessage")
+        .count();
+    let fourth_ts = format!("{}.000100", 1000 + fourth_ts - 1);
+    slack.send(serde_json::json!({
+        "envelope_id": "env-3",
+        "type": "interactive",
+        "payload": {
+            "type": "block_actions",
+            "user": {"id": "UME"},
+            "trigger_id": "trigger-1",
+            "container": {"type": "message", "message_ts": fourth_ts, "channel_id": "DPHONE"},
+            "actions": [{"action_id": "orion_answer_modal", "value": "answer"}]
+        }
+    }));
+    let deadline = tokio::time::Instant::now() + SLOW_TIMEOUT;
+    while slack.views().is_empty() {
+        assert!(tokio::time::Instant::now() < deadline, "no views.open");
+        tokio::time::sleep(POLL_STEP).await;
+    }
+    let view = slack.views().pop().unwrap();
+    let opened = slack
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(m, _, _)| m == "views.open")
+        .map(|(_, b, bearer)| (b["trigger_id"].clone(), bearer.clone()))
+        .unwrap();
+    assert_eq!(opened, (serde_json::json!("trigger-1"), "xoxb-fake".into()));
+    assert_eq!(view["private_metadata"], format!("DPHONE:{fourth_ts}"));
+    let kinds: Vec<_> = view["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["element"]["type"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "radio_buttons",
+            "plain_text_input",
+            "checkboxes",
+            "plain_text_input"
+        ]
+    );
+    let submit = |envelope: &str| {
+        let mut view = view.clone();
+        view["state"] = serde_json::json!({"values": {
+            "orion_q_0": {"pick": {"type": "radio_buttons", "selected_option": {"value": "1"}}},
+            "orion_t_0": {"text": {"type": "plain_text_input", "value": null}},
+            "orion_q_1": {"pick": {"type": "checkboxes",
+                "selected_options": [{"value": "0"}, {"value": "2"}]}},
+            "orion_t_1": {"text": {"type": "plain_text_input", "value": null}},
+        }});
+        serde_json::json!({
+            "envelope_id": envelope,
+            "type": "interactive",
+            "payload": {"type": "view_submission", "user": {"id": "UME"}, "view": view}
+        })
+    };
+    slack.send(submit("env-4"));
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        seen = collected_output(evs);
+        String::from_utf8_lossy(&seen).contains("BOTH:213E[C1")
+    })
+    .await;
+    slack
+        .wait_for("✓ Sent on the fourth message", |_| {
+            slack.updates(&fourth_ts) == ["✓ Sent: Green; Apple, Mango · working again"]
+        })
+        .await;
+    // The same submit again: refused inside the modal, by its ack.
+    slack.send(submit("env-5"));
+    let deadline = tokio::time::Instant::now() + SLOW_TIMEOUT;
+    let refused = loop {
+        let acks = slack.acks.lock().unwrap().clone();
+        if let Some(ack) = acks.iter().find(|a| a.contains("env-5")) {
+            break serde_json::from_str::<serde_json::Value>(ack).unwrap();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no ack for env-5");
+        tokio::time::sleep(POLL_STEP).await;
+    };
+    assert_eq!(
+        refused["payload"],
+        serde_json::json!({"response_action": "errors",
+            "errors": {"orion_q_0": "This one was already answered"}})
     );
     // Every envelope was acknowledged by its id.
     let acks = slack.acks.lock().unwrap().clone();
@@ -5329,10 +5484,12 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
         acks.contains(&r#"{"envelope_id":"env-1"}"#.to_string()),
         "{acks:?}"
     );
-    assert!(
-        acks.contains(&r#"{"envelope_id":"env-2"}"#.to_string()),
-        "{acks:?}"
-    );
+    for good in ["env-2", "env-3", "env-4"] {
+        assert!(
+            acks.contains(&format!(r#"{{"envelope_id":"{good}"}}"#)),
+            "{acks:?}"
+        );
+    }
 
     write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
     wait_for_exit(&mut daemon);

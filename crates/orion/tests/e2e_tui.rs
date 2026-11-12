@@ -143,6 +143,7 @@ impl TuiHarness {
         cmd.env(orion_core::env::MICROSOFT_POLL_SECS, "0"); // never call Microsoft Graph
         cmd.env(orion_core::env::MEETING_TAKEAWAYS_POLL_SECS, "0"); // …nor look for a meeting's transcript
         cmd.env(orion_core::env::PROJECT_ABOUT, "off"); // a new project runs no model
+        cmd.env(orion_core::env::SLACK_TOKENS, "off"); // never the machine's real Slack
         cmd.env(orion_core::env::LOG, "debug");
         cmd.env("SHELL", "/bin/sh");
         cmd.env("TERM", "xterm-256color");
@@ -510,7 +511,8 @@ fn host_working_directory_follows_project_switches_and_restores_on_exit() {
 
 /// `⌘K` with nothing typed is the NEEDS YOU board — its five sections,
 /// each saying it is empty in the same words — and typing turns it into
-/// the jump list, which Esc closes.
+/// the jump list, which Esc closes. The footer has no `needs you` of its
+/// own any more.
 #[test]
 fn tui_cmd_k_is_the_needs_you_board_until_you_type() {
     let mut tui = TuiHarness::spawn();
@@ -536,6 +538,13 @@ fn tui_cmd_k_is_the_needs_you_board_until_you_type() {
 
     tui.send(ESC);
     tui.wait_for_gone("Jump to (");
+    // The count lives in the grid's header, and only while something
+    // waits: nothing is waiting, so neither it nor a footer item says so.
+    assert!(
+        !tui.try_wait_for_text("needs you", Duration::from_secs(1)),
+        "{}",
+        tui.screen_text()
+    );
 }
 
 #[test]
@@ -1493,10 +1502,14 @@ fn tui_blue_sky_builder_makes_its_folder_a_project_and_starts_there() {
 
     // The folder is a repository and a project, and the session starts in
     // it, its folder made.
+    // The flash names the folder before it is made a repository, so the
+    // screen alone can't say it was: wait on the folder itself.
+    tui.wait_for("the Blue sky folder git init'd", |_| {
+        folder.join(".git").exists()
+    });
     tui.wait_for("the Blue sky folder added as a project", |s| {
         screen_to_text(s).contains("orion-blue-sky")
     });
-    assert!(folder.join(".git").exists(), "git init'd");
     tui.wait_for("the idea's session written onto it", |_| {
         std::fs::read_to_string(&list).is_ok_and(|raw| raw.contains("\"agent\""))
     });

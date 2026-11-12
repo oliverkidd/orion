@@ -312,7 +312,7 @@ pub fn apply(kept: &mut Kept, m: &Message, who: &Who) -> Option<Why> {
 }
 
 /// A Slack `ts` (`1355517523.000005`) as something that sorts.
-fn ts_key(ts: &str) -> (u64, u64) {
+pub(super) fn ts_key(ts: &str) -> (u64, u64) {
     let (secs, frac) = ts.split_once('.').unwrap_or((ts, "0"));
     (secs.parse().unwrap_or(0), frac.parse().unwrap_or(0))
 }
@@ -322,7 +322,7 @@ fn later(a: &str, b: &str) -> bool {
 }
 
 /// A Slack `ts` as a time.
-fn time_of(ts: &str) -> DateTime<Utc> {
+pub(super) fn time_of(ts: &str) -> DateTime<Utc> {
     let (secs, micros) = ts_key(ts);
     DateTime::from_timestamp(secs as i64, (micros.min(999_999) * 1000) as u32).unwrap_or_default()
 }
@@ -399,7 +399,8 @@ fn place(kept: &Kept, w: &Waiting) -> String {
     }
 }
 
-fn card(kept: &Kept, w: &Waiting) -> Card {
+/// The card `w` makes.
+pub(super) fn card(kept: &Kept, w: &Waiting) -> Card {
     let line = first_line(&w.text, &kept.users);
     let urgency = u8::from(matches!(w.why, Why::Direct | Why::Mention));
     Card::new(
@@ -512,7 +513,7 @@ const TOKEN: &str = orion_core::secrets::SLACK_ACCOUNTS[2];
 
 /// POST `method` with form `params` as the user. Slack's `error` code
 /// is the error, as is a status that isn't JSON.
-fn call(method: &str, params: &[(&str, &str)]) -> Result<Value, String> {
+pub(super) fn call(method: &str, params: &[(&str, &str)]) -> Result<Value, String> {
     let token = orion_core::secrets::slack_token(TOKEN).ok_or("Slack isn't connected")?;
     let url = format!("{}/{method}", orion_core::http::slack_api_url());
     let body = params
@@ -646,7 +647,7 @@ pub fn heard(app: &mut App, m: Message, event_json: &str) {
 
 /// Make `next` what the store keeps, saving it when it changed, and
 /// bring an open board up to date.
-fn commit(app: &mut App, next: Kept) {
+pub(super) fn commit(app: &mut App, next: Kept) {
     if next != app.needs_you.store.slack {
         app.needs_you.store.slack = next;
         super::save(app);
@@ -670,6 +671,13 @@ fn ask(app: &mut App, lookup: Lookup) {
             .unwrap_or_else(|e| Err(e.to_string()));
         let _ = tx.send(super::Answer::Slack(Looked { lookup, found }));
     });
+}
+
+/// Ask Slack for `user`'s name, unless it is known or asked already.
+pub(super) fn ask_name(app: &mut App, user: String) {
+    if !app.needs_you.store.slack.users.contains_key(&user) {
+        ask(app, Lookup::User(user));
+    }
 }
 
 /// An ask's answer lands: a name cached (and the cards made again from

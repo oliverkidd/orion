@@ -91,8 +91,9 @@ fn fields(overlay: &mut Overlay) -> Vec<(Field, &mut TextInput)> {
             .iter_mut()
             .map(|p| (Field::Only, &mut p.filter))
             .collect(),
-        // The extra steer, while it is being written.
-        Overlay::Automations(v) => v.steer.iter_mut().map(|i| (Field::Only, i)).collect(),
+        // The overview and its labels pick have no field; its lines are
+        // written in Settings › Automations' prompts.
+        Overlay::Automations(_) => Vec::new(),
         // An open item field has every key, the filter's too.
         Overlay::Todos(v) => match &mut v.input {
             Some((_, input)) => vec![(Field::Only, input)],

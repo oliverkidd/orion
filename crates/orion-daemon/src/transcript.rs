@@ -209,9 +209,12 @@ mod tests {
         assert_eq!(
             pending_wait_reason(&path),
             Some(WaitReason::Question {
-                question: "Fix which?".into(),
-                options: vec!["Both".into(), "Neither".into()],
-                multi: false,
+                questions: vec![orion_core::Asked {
+                    question: "Fix which?".into(),
+                    header: String::new(),
+                    options: vec!["Both".into(), "Neither".into()],
+                    multi: false,
+                }]
             })
         );
         // A tool-only newest message falls back to the last one with text.

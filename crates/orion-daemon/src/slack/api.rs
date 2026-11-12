@@ -126,20 +126,11 @@ impl Api {
         self.call("chat.update", As::Bot, &body).map(drop)
     }
 
-    /// `chat.postEphemeral`: a line only `user` sees, in `thread_ts`'s
-    /// thread when given.
-    pub fn post_ephemeral(
-        &self,
-        channel: &str,
-        user: &str,
-        text: &str,
-        thread_ts: Option<&str>,
-    ) -> Result<(), String> {
-        let mut body = json!({ "channel": channel, "user": user, "text": text });
-        if let Some(thread) = thread_ts {
-            body["thread_ts"] = thread.into();
-        }
-        self.call("chat.postEphemeral", As::Bot, &body).map(drop)
+    /// `views.open` as the bot: `view` as a modal, for the press whose
+    /// `trigger_id` this is (it lasts three seconds).
+    pub fn views_open(&self, trigger_id: &str, view: &Value) -> Result<(), String> {
+        let body = json!({ "trigger_id": trigger_id, "view": view });
+        self.call("views.open", As::Bot, &body).map(drop)
     }
 }
 

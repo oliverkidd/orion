@@ -1,0 +1,6 @@
+# Settings › Automations from ⌘J: ↓ to the bug fixer and Enter opens the tab at its section — On,
+# At most at once `[1]`, Labels, Preset, Extra steer — under the overall cap's **Sessions at once,
+# all automations** `[3]`, each heading saying what its automation is doing on the right.
+cmd j
+Down
+Enter
