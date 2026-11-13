@@ -106,7 +106,7 @@ Ghostty config.
 | Away by hand | `⌘⇧A` | nothing opens: you count as away until your next key in any orion, so a session that starts waiting or crashes goes to your phone as a Slack DM ([phone bridge](how-it-works.md#phone-bridge)); the footer says so. Archive is `⌘⇧X` |
 | Home | `⌘G` | HOME: orion's animation over the grid — the hunter, the name small in his chest, and one line under the sky, `Enter to begin`; `Esc`, `Enter` or an arrow comes back to the grid exactly as it was. With a newer release waiting that line reads `⇡ vX.Y.Z available · Enter to upgrade` on the upgrade's green, and `Enter` asks to install it — once: turned down, it begins again. A click on the footer's `vX.Y.Z` does the same |
 | Restart orion | `⌘⇧R` | stop the DAEMON and every session in it, then start orion again, behind a confirm; agents resume, terminals start a new shell. In the pull requests modal and the PR review `⌘⇧R` is theirs (review, submit) |
-| Upgrade orion | `⌘⇧G` | install the newer release the footer offers, then restart orion on it, behind a confirm |
+| Upgrade orion | `⌘⇧G` | ask GitHub for the newest release, then install it and restart orion on it, behind a confirm |
 | Quit | `^C` | leave the TUI, behind a confirm; sessions keep running in the DAEMON |
 
 ## The grid

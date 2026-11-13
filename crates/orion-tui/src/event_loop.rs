@@ -7031,10 +7031,11 @@ fn confirm_quit() -> ConfirmDialog {
 /// the answer lands in [`note_update_answer`]. With no checker running
 /// (the e2e tests turn it off) it says this one is current.
 pub(super) fn open_upgrade(app: &mut App) {
-    if let Some(v) = app.update_available.clone() {
+    // Always asked afresh: the indicator's answer is up to an hour old, and
+    // a release published since would be offered under the older number.
+    // The confirm comes with the answer (`note_update_answer`).
+    if app.update_available.is_some() {
         app.splash_upgrade_asked = true;
-        app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v)));
-        return;
     }
     match app.update_tx.clone() {
         Some(tx) => {
@@ -7043,7 +7044,10 @@ pub(super) fn open_upgrade(app: &mut App) {
                 "checking GitHub for a newer orion…",
             ));
         }
-        None => app.flash = Some(latest_release_flash()),
+        None => match app.update_available.clone() {
+            Some(v) => app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v))),
+            None => app.flash = Some(latest_release_flash()),
+        },
     }
 }
 
@@ -7069,10 +7073,19 @@ fn note_update_answer(app: &mut App, answer: crate::update_check::Answer) {
             app.update_available = Some(v);
         }
         Status::Current if answer.asked => app.flash = Some(latest_release_flash()),
-        Status::Unknown if answer.asked => {
-            app.flash = Some(crate::flash::Flash::failed(
-                "couldn't reach GitHub to check for a newer orion",
-            ))
+        // GitHub didn't answer, but an earlier check found one: offer that.
+        Status::Unknown if answer.asked && app.overlay.is_none() => {
+            match app.update_available.clone() {
+                Some(v) => {
+                    app.flash = None;
+                    app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v)));
+                }
+                None => {
+                    app.flash = Some(crate::flash::Flash::failed(
+                        "couldn't reach GitHub to check for a newer orion",
+                    ))
+                }
+            }
         }
         _ => {}
     }
@@ -18940,6 +18953,47 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("is the latest release"));
+    }
+
+    /// `⌘⇧G` with an older release already flagged asks GitHub again and
+    /// offers the newest: one published since the last check is not
+    /// offered under the older number. When GitHub can't answer, the one
+    /// it knew is offered.
+    #[test]
+    fn upgrade_asks_again_when_a_release_is_already_flagged() {
+        use crate::update_check::{Answer, Status};
+        let mut app = App::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Answer>();
+        app.update_tx = Some(tx);
+        app.update_available = Some("9.8.0".into());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            open_upgrade(&mut app);
+        });
+        assert!(app.overlay.is_none(), "no confirm before the answer");
+        assert!(app.flash.as_deref().unwrap().contains("checking GitHub"));
+        drop(rx.try_recv());
+        let answer = |status, asked| Answer { status, asked };
+
+        note_update_answer(&mut app, answer(Status::Newer("9.9.0".into()), true));
+        assert_eq!(app.update_available.as_deref(), Some("9.9.0"));
+        assert!(matches!(
+            &app.overlay,
+            Some(Overlay::Confirm(c)) if c.message.contains("9.9.0") || c.title.contains("9.9.0")
+        ));
+
+        app.overlay = None;
+        note_update_answer(&mut app, answer(Status::Unknown, true));
+        assert!(
+            matches!(
+                &app.overlay,
+                Some(Overlay::Confirm(c)) if matches!(c.action, PendingAction::Upgrade { .. })
+            ),
+            "the known release is still offered"
+        );
     }
 
     /// The upgrade confirm says up front whether the release interrupts
