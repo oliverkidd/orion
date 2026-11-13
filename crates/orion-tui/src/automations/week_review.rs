@@ -9,6 +9,10 @@
 //!   laptop slept is run on the first check after it, once ([`due`]).
 //! * **Whose** is just yours or the whole team's; Enter on it switches.
 //!   **When** is written as a line: `Fri 08:30`.
+//! * **A run that could not fetch** wrote nothing, so the week is still
+//!   owed: a run the schedule started is run again [`RERUN`] later, up to
+//!   [`RERUNS`] times, and then it stops and says so ([`Rerun`]). `r`
+//!   tries again at once.
 //! * The note older releases kept a project (`reviews/p-<id>/note.txt`)
 //!   becomes the extra steer, once ([`migrate_notes`]).
 
@@ -23,6 +27,11 @@ use std::time::{Duration, Instant};
 
 /// How often the schedule is looked at.
 pub const CHECK: Duration = Duration::from_secs(60);
+/// How long after a scheduled run that could not fetch it runs again
+/// (`ORION_WEEK_REVIEW_RETRY_SECS` overrides it).
+pub const RERUN: Duration = Duration::from_secs(15 * 60);
+/// How many times a scheduled run that could not fetch is run again.
+pub const RERUNS: usize = 4;
 
 /// When it runs while the config names no time.
 pub fn default_when() -> Schedule {
@@ -57,6 +66,24 @@ pub struct WeekReview {
     /// Since when it has been watched on: a time before it is never run
     /// late, so turning it on never runs it at once.
     on_since: Option<NaiveDateTime>,
+    /// The slot of the run it started, or `r` did, while that run goes.
+    watching: Option<NaiveDateTime>,
+    /// A slot whose run is over, written or with nothing to write: not
+    /// run again.
+    done: Option<NaiveDateTime>,
+    /// The slot's runs that could not fetch, and when the next goes.
+    rerun: Option<Rerun>,
+}
+
+/// A slot whose runs could not fetch what they write from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rerun {
+    pub slot: NaiveDateTime,
+    /// How many of its runs have failed.
+    pub failed: usize,
+    /// When it runs again; `None` once it has stopped trying.
+    pub next: Option<NaiveDateTime>,
+    pub why: crate::week_review::Failure,
 }
 
 /// `fri` `08:30` as a weekday and a time.
@@ -140,6 +167,85 @@ pub fn run_now(app: &mut App) {
     super::view::open(app);
 }
 
+impl WeekReview {
+    /// Once the run it was watching is over: one that could not fetch is
+    /// run again [`RERUN`] later, until [`RERUNS`] have failed too; one
+    /// that ended any other way is the slot done.
+    fn settle(&mut self, app: &mut App, now: NaiveDateTime) {
+        let Some(slot) = self.watching else {
+            return;
+        };
+        if app.week_review.run.is_some() {
+            return;
+        }
+        self.watching = None;
+        let Some(why) = app.week_review.failed.take() else {
+            self.rerun = None;
+            self.done = Some(slot);
+            return;
+        };
+        let failed = 1 + self
+            .rerun
+            .as_ref()
+            .filter(|r| r.slot == slot)
+            .map_or(0, |r| r.failed);
+        let next = (failed <= RERUNS)
+            .then(|| crate::week_review::retry_secs(RERUN))
+            .flatten()
+            .and_then(|wait| Days::from_std(wait).ok())
+            .map(|wait| now + wait);
+        app.flash = Some(crate::flash::Flash::failed(match next {
+            Some(at) => format!(
+                "Week in review: {} · next try {}",
+                why.label(),
+                at.format("%H:%M")
+            ),
+            None => format!("Week in review failed: {} · r to try again", why.label()),
+        }));
+        self.rerun = Some(Rerun {
+            slot,
+            failed,
+            next,
+            why,
+        });
+    }
+
+    /// Whether a run is owed at `now`, and if so it starts: the slot's
+    /// first, or one run again once its wait is over.
+    fn check(&mut self, app: &mut App, now: NaiveDateTime) {
+        let on_since = *self.on_since.get_or_insert(now);
+        if app.week_review.run.is_some() {
+            return;
+        }
+        let when = when_of(app);
+        let last = app
+            .week_review
+            .kept
+            .first()
+            .and_then(|s| local(s.meta.written_at));
+        let Some(slot) = last_slot(&when, now).filter(|_| due(&when, now, last, on_since)) else {
+            self.rerun = None;
+            return;
+        };
+        if self.done == Some(slot) {
+            return;
+        }
+        if let Some(rerun) = self.rerun.as_ref().filter(|r| r.slot == slot) {
+            if rerun.next.is_none_or(|at| now < at) {
+                return;
+            }
+        }
+        match crate::week_review::run_now(app) {
+            Ok(()) => self.watching = Some(slot),
+            Err(why) => {
+                app.flash = Some(crate::flash::Flash::failed(format!(
+                    "Week in review: {why}"
+                )))
+            }
+        }
+    }
+}
+
 /// Move what each project's note said into the extra steer, once: notes
 /// already in it are not added again. The note files stay where they are.
 pub fn migrate_notes(app: &mut App, root: &Path) {
@@ -192,8 +298,12 @@ impl Runner for WeekReview {
     fn tick(&mut self, app: &mut App, _out: &mut Vec<ClientRequest>) {
         if !app.automations.is_on(Automation::WeekReview) {
             self.on_since = None;
+            self.watching = None;
+            self.rerun = None;
             return;
         }
+        let now = Local::now().naive_local();
+        self.settle(app, now);
         let Some(every) =
             orion_core::env::secs_override(orion_core::env::WEEK_REVIEW_CHECK_SECS, CHECK)
         else {
@@ -203,24 +313,7 @@ impl Runner for WeekReview {
             return;
         }
         self.checked = Some(Instant::now());
-        let now = Local::now().naive_local();
-        let on_since = *self.on_since.get_or_insert(now);
-        if app.week_review.run.is_some() {
-            return;
-        }
-        let when = when_of(app);
-        let last = app
-            .week_review
-            .kept
-            .first()
-            .and_then(|s| local(s.meta.written_at));
-        if due(&when, now, last, on_since) {
-            if let Err(why) = crate::week_review::run_now(app) {
-                app.flash = Some(crate::flash::Flash::failed(format!(
-                    "Week in review: {why}"
-                )));
-            }
-        }
+        self.check(app, now);
     }
 
     fn panel(&self, app: &App) -> Panel {
@@ -230,7 +323,7 @@ impl Runner for WeekReview {
             Some(run) => {
                 let (back, all) = run.progress();
                 let state = match run.fetching {
-                    true => "asking GitHub".to_string(),
+                    true => run.waiting_on(),
                     false => format!("writing {} of {all}", back + 1),
                 };
                 rows.push(PanelRow {
@@ -241,7 +334,22 @@ impl Runner for WeekReview {
                 });
                 (Dot::Working, state)
             }
-            None => (Dot::Idle, when_label(&when)),
+            None => match (&self.rerun, &app.week_review.failed) {
+                (Some(rerun), _) if rerun.next.is_some() => (
+                    Dot::Idle,
+                    format!(
+                        "{} · next try {}",
+                        rerun.why.short(),
+                        rerun.next.unwrap_or_default().format("%H:%M")
+                    ),
+                ),
+                (_, Some(why)) => (Dot::Waiting, format!("{} · r to try again", why.label())),
+                (Some(rerun), None) => (
+                    Dot::Waiting,
+                    format!("{} · r to try again", rerun.why.label()),
+                ),
+                (None, None) => (Dot::Idle, when_label(&when)),
+            },
         };
         for saved in &app.week_review.kept {
             let meta = &saved.meta;
@@ -308,9 +416,12 @@ impl Runner for WeekReview {
         Some(RUN_NOW)
     }
 
-    /// `r`: a run, now.
+    /// `r`: a run, now — one that could not fetch counts as one of the
+    /// slot's, so a run given up on says so again.
     fn hotkey_pressed(&mut self, app: &mut App) -> Result<(), String> {
-        crate::week_review::run_now(app)
+        crate::week_review::run_now(app)?;
+        self.watching = last_slot(&when_of(app), Local::now().naive_local());
+        Ok(())
     }
 }
 
@@ -464,5 +575,119 @@ mod tests {
         assert_eq!(row.text, "Week 45");
         assert_eq!(row.state, "Fri 08:30 · 9 points · new");
         assert_eq!(row.tone, Tone::Done);
+    }
+
+    /// An app with one project whose week is in hand: a run starts, and
+    /// stays out writing (no unit test sends anything).
+    fn app_with_a_week() -> App {
+        use crate::week_review::{Fetched, MergedPr, DAYS};
+        let mut app = App::new();
+        let project = orion_core::ProjectId("p1".into());
+        app.tree.projects.push(orion_core::Project {
+            id: project.clone(),
+            name: "demo".into(),
+            repo_path: "/nonexistent/orion-week-review".into(),
+            sort_order: 0,
+        });
+        let merged_at =
+            orion_core::crashlog::format_timestamp(orion_core::clock::now_secs() - 3600);
+        let pr = MergedPr {
+            project: "demo".into(),
+            number: 1,
+            url: "https://github.com/o/r/pull/1".into(),
+            mine: true,
+            merged_at,
+            ..Default::default()
+        };
+        let fetched = Fetched {
+            at: Instant::now(),
+            prs: Some(vec![pr]),
+        };
+        app.week_review.fetched.insert((project, DAYS), fetched);
+        app
+    }
+
+    /// The run the runner started ended as one that could not fetch.
+    fn could_not_fetch(app: &mut App) {
+        assert!(app.week_review.run.is_some(), "a run was going");
+        app.week_review.run = None;
+        app.week_review.failed = Some(crate::week_review::Failure {
+            feed: crate::week_review::Feed::GitHub,
+            project: "riplo-os".into(),
+        });
+    }
+
+    /// A scheduled run that could not fetch wrote nothing, so it is run
+    /// again 15 minutes later — the ⌘J row saying when — up to four
+    /// times; then it stops and says so, and `r` tries again at once.
+    #[test]
+    fn a_run_that_could_not_fetch_runs_again_every_15_minutes_four_times() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::config::with_config_path(dir.path().join("config.json"), || {
+            let mut app = app_with_a_week();
+            let mut runner = WeekReview {
+                on_since: Some(at("2026-11-02", "10:00")),
+                ..Default::default()
+            };
+            let mut now = at("2026-11-06", "08:30");
+            runner.check(&mut app, now);
+            for again in 1..=RERUNS {
+                could_not_fetch(&mut app);
+                runner.settle(&mut app, now);
+                let next = now + Days::minutes(15);
+                let next_label = next.format("%H:%M");
+                assert_eq!(
+                    app.flash.as_deref().map(str::to_string),
+                    Some(format!(
+                        "Week in review: GitHub unreachable for riplo-os · next try {next_label}"
+                    ))
+                );
+                assert_eq!(
+                    runner.panel(&app).state,
+                    format!("GitHub unreachable · next try {next_label}")
+                );
+                runner.check(&mut app, next - Days::minutes(1));
+                assert!(app.week_review.run.is_none(), "not before its time");
+                now = next;
+                runner.check(&mut app, now);
+                assert!(app.week_review.run.is_some(), "run again, {again}");
+            }
+            could_not_fetch(&mut app);
+            runner.settle(&mut app, now);
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("Week in review failed: GitHub unreachable for riplo-os · r to try again")
+            );
+            let panel = runner.panel(&app);
+            assert_eq!(
+                panel.state,
+                "GitHub unreachable for riplo-os · r to try again"
+            );
+            assert_eq!(panel.dot, Dot::Waiting);
+            runner.check(&mut app, now + Days::hours(2));
+            assert!(app.week_review.run.is_none(), "it has stopped");
+            runner.hotkey_pressed(&mut app).unwrap();
+            assert!(app.week_review.run.is_some(), "r: at once");
+        });
+    }
+
+    /// A run that ends any other way is the slot done: not run again.
+    #[test]
+    fn a_run_that_ends_otherwise_is_not_run_again() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::config::with_config_path(dir.path().join("config.json"), || {
+            let mut app = app_with_a_week();
+            let mut runner = WeekReview {
+                on_since: Some(at("2026-11-02", "10:00")),
+                ..Default::default()
+            };
+            let now = at("2026-11-06", "08:30");
+            runner.check(&mut app, now);
+            app.week_review.run = None;
+            runner.settle(&mut app, now);
+            assert!(runner.rerun.is_none());
+            runner.check(&mut app, now + Days::minutes(30));
+            assert!(app.week_review.run.is_none());
+        });
     }
 }

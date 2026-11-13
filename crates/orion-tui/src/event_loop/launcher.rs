@@ -11,8 +11,7 @@ use super::{
     restore_project_cursors, select_project_row_by_id, Landing,
 };
 use crate::app::{
-    App, ConfirmDialog, ContextMenu, Focus, HitTarget, MenuAction, MenuFilter, MenuItem, Overlay,
-    PendingAction, SessionRow,
+    App, ContextMenu, Focus, HitTarget, MenuAction, MenuFilter, MenuItem, Overlay, SessionRow,
 };
 use crate::keymap::{Action, KeyChord};
 use crate::launcher::{self as view, BoxField, CardRef, ProjectPicker};
@@ -619,7 +618,7 @@ pub(super) fn handle_action(
         // The PROJECT TABS across the header.
         Action::NextProjectTab => step_tab(app, 1, out),
         Action::PrevProjectTab => step_tab(app, -1, out),
-        Action::CloseProjectTab => close_active_tab(app, out),
+        Action::CloseProjectTab => close_active_tab(app),
         Action::SelectProjectTab(n) => open_tab_slot(app, n, out),
         // `+` (or `⌘P`): the list the header's `+` drops, the click's own
         // [`open_project_menu`].
@@ -838,6 +837,7 @@ pub(super) fn continue_on(app: &mut App) {
         hover: 0,
         area: ratatui::layout::Rect::default(),
         parent: None,
+        message: None,
     }));
 }
 
@@ -859,7 +859,7 @@ pub(super) fn continue_on_harness(
 
 /// The PROJECT's own menu — a right-click on its PROJECT TAB ([`tab_menu`]):
 /// what the PROJECTS and WORKTREES panels' rows carried between them — a
-/// checkout cut in it, the project renamed or dropped, and the RUN COMMAND
+/// checkout cut in it, the project renamed or closed, and the RUN COMMAND
 /// of the checkout the grid would launch into started or stopped. These have no key of their own on the
 /// grid, whose letters belong to the session under the cursor, so the
 /// project's menu is where they live. `at` is where it hangs.
@@ -888,9 +888,11 @@ fn project_menu(app: &mut App, at: (u16, u16)) {
         "Rename",
         MenuAction::RenameProject(project.clone()),
     ));
+    // The tab's close, which asks whether to remove the project too
+    // ([`ask_close_tab`]) — the one way out of orion a project has here.
     items.push(MenuItem::destructive(
-        "Remove from list",
-        MenuAction::RemoveProject(project),
+        "Close…",
+        MenuAction::AskCloseProjectTab(project),
     ));
     super::open_menu(app, items, at);
 }
@@ -1389,8 +1391,8 @@ pub(super) fn leave_tabs(app: &mut App) {
 /// A key while the PROJECT TABS have the keyboard: `h` / `l` (and `[` /
 /// `]`) walk the header's cursor and the grid with it, Enter goes back
 /// down to the cards of the tab under it, `j`,`j` does too — the double
-/// tap back down the way `k`,`k` came up — `x` closes it, and `d`,
-/// `Delete` or `Backspace` asks first ([`confirm_close_cursor_tab`]).
+/// tap back down the way `k`,`k` came up — and `x`, `d`, `Delete` or
+/// `Backspace` ask whether to close it or remove it ([`ask_close_tab`]).
 /// `k` has nowhere higher to go. Any other key hands the keys
 /// back to the cards and is false, so the grid's own meaning of it runs:
 /// `p` opens the box, `/` the palette, a digit a tab outright.
@@ -1421,11 +1423,10 @@ fn tabs_action(
             }
         }
         Action::MoveUp => {}
-        Action::CloseProjectTab => close_cursor_tab(app, &on, out),
-        // The DELETE keys (`d`, `Delete`, `Backspace`) aimed at the tab
-        // under the cursor rather than the card they left: the same close,
-        // behind the confirm every delete key in orion puts up first.
-        Action::Delete => confirm_close_cursor_tab(app, &on),
+        // `x`, and the DELETE keys (`d`, `Delete`, `Backspace`) aimed at
+        // the tab under the cursor rather than the card they left: the
+        // CLOSE PROJECT DIALOG, as every close of a tab asks.
+        Action::CloseProjectTab | Action::Delete => ask_close_tab(app, &on),
         _ => {
             leave_tabs(app);
             return false;
@@ -1511,13 +1512,92 @@ pub(super) fn drag_tab(app: &mut App, column: u16, row: u16) {
     app.launcher_tab_drag = Some((moving, Some(onto)));
 }
 
-/// `x` with the PROJECT TABS holding the keys — and the answered confirm
-/// of `d`, `Delete` or `Backspace` there ([`confirm_close_cursor_tab`]):
-/// close the tab the header's cursor is on, through the same
-/// [`close_tab`] the `×` takes, and put the cursor on the tab that slid
-/// into its place. The last tab closes to the SPLASH ([`close_tab`]). A
-/// cursor that has moved off the tab by the time the dialog is
-/// answered stays where it is.
+/// The CLOSE PROJECT DIALOG — what every way of closing a PROJECT TAB
+/// opens: its `×`, **Close…** in its right-click menu, **Close project
+/// tab** from the palette or its key, and `x`, `d`, `Delete` or
+/// `Backspace` with the header holding the keys. Closing a tab used to
+/// only hide it, and a project whose folder had been deleted stayed in
+/// the DAEMON, checked every couple of seconds for good; now the close
+/// asks which of the two is meant, in one small menu titled `Close
+/// <name>`:
+///
+/// - **Close tab** — only the tab goes ([`close_cursor_tab`]); the
+///   project stays in orion and the `+` or the palette opens it again.
+/// - **Remove from orion** — the DAEMON forgets it too
+///   (`MenuAction::ForgetProject`): it stops checking the folder, and its
+///   worktree rows go. Its live sessions stop, and the row says how many
+///   first. Nothing on disk is touched; its todos are kept by the folder's
+///   path and come back when the folder is added again.
+///
+/// The cursor starts on **Close tab** — unless the folder is gone, when
+/// the dialog says so and starts on **Remove from orion**. Esc (or a
+/// click off it) leaves the tab where it was. A row is a menu row, so
+/// Enter on it and a click on it are the one `activate::menu_row`.
+pub(super) fn ask_close_tab(app: &mut App, id: &ProjectId) {
+    if let Some(menu) = close_tab_dialog(app, id) {
+        app.overlay = Some(Overlay::Menu(menu));
+        app.dirty = true;
+    }
+}
+
+/// The CLOSE PROJECT DIALOG for project `id` ([`ask_close_tab`]); None
+/// for a project orion no longer has.
+fn close_tab_dialog(app: &App, id: &ProjectId) -> Option<ContextMenu> {
+    let project = app.tree.projects.iter().find(|p| &p.id == id)?;
+    let gone = !project.repo_path.exists();
+    let mut remove =
+        MenuItem::destructive("Remove from orion", MenuAction::ForgetProject(id.clone()));
+    match running_sessions(app, id) {
+        0 => {}
+        1 => remove = remove.with_note("its running session stops"),
+        n => remove = remove.with_note(format!("its {n} running sessions stop")),
+    }
+    Some(ContextMenu {
+        title: Some(format!("Close {}", project.name)),
+        items: vec![
+            MenuItem::new("Close tab", MenuAction::CloseProjectTab(id.clone())),
+            remove,
+        ],
+        at: None,
+        hover: usize::from(gone),
+        area: ratatui::layout::Rect::default(),
+        parent: None,
+        filter: None,
+        message: gone.then(|| "Its folder is gone.".to_string()),
+    })
+}
+
+/// The sessions removing project `id` stops: every session row of its
+/// checkouts with a live PTY — agents and terminals both, as the DAEMON's
+/// `remove_project` kills them.
+fn running_sessions(app: &App, id: &ProjectId) -> usize {
+    let checkouts: Vec<&WorktreeId> = app
+        .tree
+        .worktrees
+        .iter()
+        .filter(|w| &w.project_id == id)
+        .map(|w| &w.id)
+        .collect();
+    let agents = app
+        .tree
+        .agents
+        .iter()
+        .filter(|a| a.alive && checkouts.contains(&&a.worktree_id))
+        .count();
+    let terminals = app
+        .tree
+        .terminals
+        .iter()
+        .filter(|t| t.alive && checkouts.contains(&&t.worktree_id))
+        .count();
+    agents + terminals
+}
+
+/// The CLOSE PROJECT DIALOG's **Close tab**: close tab `on` through the
+/// same [`close_tab`] the `×` used to take, and, if the header's cursor
+/// was on it, put the cursor on the tab that slid into its place. The
+/// last tab closes to the SPLASH ([`close_tab`]). A cursor that has moved
+/// off the tab by the time the dialog is answered stays where it is.
 pub(super) fn close_cursor_tab(app: &mut App, on: &ProjectId, out: &mut Vec<ClientRequest>) {
     let at = open_tabs(app).iter().position(|t| t == on);
     close_tab(app, on, out);
@@ -1532,55 +1612,42 @@ pub(super) fn close_cursor_tab(app: &mut App, on: &ProjectId, out: &mut Vec<Clie
     app.dirty = true;
 }
 
-/// `d`, `Delete` or `Backspace` with the PROJECT TABS holding the keys:
-/// the confirm before the tab under the header's cursor closes. Its Enter
-/// is [`close_cursor_tab`], the `x`; its Esc leaves the tab and the cursor
-/// where they are.
-fn confirm_close_cursor_tab(app: &mut App, on: &ProjectId) {
-    let name = app
-        .tree
-        .projects
-        .iter()
-        .find(|p| &p.id == on)
-        .map(|p| p.name.clone())
-        .unwrap_or_default();
-    app.overlay = Some(Overlay::Confirm(confirm_close_tab(&name, on.clone())));
+/// The CLOSE PROJECT DIALOG's **Remove from orion**: the tab closes as
+/// **Close tab** closes it — the grid and the header's cursor land on the
+/// tab beside it at once — and the DAEMON is asked to forget the project.
+/// Its `EntityRemoved` takes the project's rows away.
+pub(super) fn forget_project(app: &mut App, id: &ProjectId, out: &mut Vec<ClientRequest>) {
+    close_cursor_tab(app, id, out);
+    let id = id.clone();
+    super::send(app, out, |req_id| ClientRequest::RemoveProject {
+        req_id,
+        id,
+    });
 }
 
-/// The confirm before a PROJECT TAB is closed from a delete key. It says
-/// what the `×` never has to: only the tab goes, and the `+` brings it
-/// back.
-fn confirm_close_tab(name: &str, id: ProjectId) -> ConfirmDialog {
-    ConfirmDialog {
-        title: "Close project tab".into(),
-        message: format!("Close the tab for '{name}'? Its sessions run on — + opens it again."),
-        action: PendingAction::CloseProjectTab(id),
-        area: ratatui::layout::Rect::default(),
-    }
-}
-
-/// `x`: close the tab the grid is on — the selected project's.
-fn close_active_tab(app: &mut App, out: &mut Vec<ClientRequest>) {
+/// **Close project tab** (palette, or its key) on the grid: the CLOSE
+/// PROJECT DIALOG for the tab the grid is on — the selected project's.
+fn close_active_tab(app: &mut App) {
     app.settle_project_tabs();
     let active = app
         .selected_project()
         .map(|p| p.id.clone())
         .filter(|id| open_tabs(app).contains(id));
     if let Some(id) = active {
-        close_tab(app, &id, out);
+        ask_close_tab(app, &id);
     }
 }
 
-/// Drop project `id`'s tab from the header — the `×` on it, or `x` on the
-/// one the grid is on. Nothing about the project changes: its sessions
-/// run on, and the `+` dropdown opens it again, back at the right end.
+/// Drop project `id`'s tab from the header — **Close tab** in the CLOSE
+/// PROJECT DIALOG ([`close_cursor_tab`]). Nothing about the project
+/// changes: its sessions run on, and the `+` dropdown opens it again, back at the right end.
 ///
 /// Closing the tab the grid is on moves the grid to the tab that slides
 /// into its place — the one to its right, else the one to its left.
 /// Closing any other tab moves nothing. Closing the last tab leaves orion where it
 /// starts before there is any project: the SPLASH, the pane let go
 /// ([`App::projects_closed`]). Enter, `+` or `o` there opens one again.
-pub(super) fn close_tab(app: &mut App, id: &ProjectId, out: &mut Vec<ClientRequest>) {
+fn close_tab(app: &mut App, id: &ProjectId, out: &mut Vec<ClientRequest>) {
     let mut tabs = open_tabs(app);
     let Some(at) = tabs.iter().position(|t| t == id) else {
         return;
@@ -1696,6 +1763,7 @@ pub(super) fn open_project_menu(app: &mut App) {
         hover,
         area: ratatui::layout::Rect::default(),
         parent: None,
+        message: None,
     }));
     app.dirty = true;
 }
@@ -2590,6 +2658,7 @@ fn show_worktree_picker(app: &mut App, back: QuickReturn, keep: Option<PickerKee
             all: items,
             limit: Some(fixed + PICKER_BRANCH_ROWS),
         }),
+        message: None,
     };
     let (query, hovered) = keep.map_or_default(|k| (k.query, k.hovered));
     // A query the new rows no longer match falls back to the full list.
@@ -2756,7 +2825,9 @@ mod tests {
         with_default_config,
     };
     use super::super::{handle_terminal_event, sweep_target};
-    use crate::app::{App, Focus, HitTarget, Overlay, PendingAction, PromptKind};
+    use crate::app::{
+        App, ContextMenu, Focus, HitTarget, MenuAction, Overlay, PendingAction, PromptKind,
+    };
     use crate::launcher::BoxField;
     use crate::launcher::CardRef;
     use crate::quick_prompt::{QuickLaunch, QuickTarget};
@@ -6988,7 +7059,7 @@ mod tests {
                 panic!("the tab's menu: {:?}", app.overlay);
             };
             let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
-            for want in ["New worktree", "Rename", "Remove from list"] {
+            for want in ["New worktree", "Rename", "Close…"] {
                 assert!(labels.contains(&want), "{want} in {labels:?}");
             }
             assert_eq!(menu.at.map(|(_, row)| row), Some(y + 1), "under the tab");
@@ -7017,9 +7088,14 @@ mod tests {
     ///
     /// **Close project tab** ships with no key (a bare `x` closed tabs by
     /// accident), so these tests bind it to `x` the way a user's rebind
-    /// would, and the close itself is what they exercise.
+    /// would, and the close itself is what they exercise. Both projects'
+    /// folders are on disk, so the CLOSE PROJECT DIALOG `x` opens starts
+    /// on **Close tab**: `x`, Enter closes the tab.
     fn two_tabs() -> App {
         let mut app = two_sessions();
+        for p in app.tree.projects.iter_mut() {
+            p.repo_path = std::env::temp_dir();
+        }
         app.keymap = crate::keymap::Keymap::from_overrides(&std::collections::BTreeMap::from([(
             "close_project_tab".to_string(),
             "x".to_string(),
@@ -7258,7 +7334,8 @@ mod tests {
         });
     }
 
-    /// `x` and the `×` on the lit tab close it the same way: the tab goes
+    /// `x` and the `×` on the lit tab close it the same way — each through
+    /// the CLOSE PROJECT DIALOG's **Close tab**: the tab goes
     /// and the grid lands on the one that slides into its place. The last
     /// tab closes too, back to the SPLASH orion opens on with no project,
     /// the projects and their sessions untouched.
@@ -7266,7 +7343,7 @@ mod tests {
     fn closing_the_lit_tab_lands_on_the_one_beside_it() {
         with_default_config(|| {
             let mut by_key = two_tabs();
-            key(&mut by_key, KeyCode::Char('x'), KeyModifiers::NONE);
+            keys(&mut by_key, &[KeyCode::Char('x'), KeyCode::Enter]);
 
             let mut by_click = two_tabs();
             let (x, y) = crumb_cell(
@@ -7274,6 +7351,7 @@ mod tests {
                 HitTarget::LauncherTabClose(ProjectId("p1".into())),
             );
             mouse(&mut by_click, MouseEventKind::Down(MouseButton::Left), x, y);
+            key(&mut by_click, KeyCode::Enter, KeyModifiers::NONE);
 
             assert_eq!(tab_state(&by_key), tab_state(&by_click));
             assert_eq!(
@@ -7283,7 +7361,7 @@ mod tests {
             // The project itself is untouched: its sessions run on.
             assert!(by_key.tree.projects.iter().any(|p| p.name == "demo"));
 
-            key(&mut by_key, KeyCode::Char('x'), KeyModifiers::NONE);
+            keys(&mut by_key, &[KeyCode::Char('x'), KeyCode::Enter]);
             assert!(by_key.launcher_tabs.is_empty(), "the last tab closes");
             assert!(by_key.projects_closed);
             assert!(!by_key.launcher_active() && by_key.splash_showing());
@@ -7303,7 +7381,15 @@ mod tests {
     fn closing_every_tab_goes_back_to_the_splash() {
         with_default_config(|| {
             let mut app = two_tabs();
-            keys(&mut app, &[KeyCode::Char('x'), KeyCode::Char('x')]);
+            keys(
+                &mut app,
+                &[
+                    KeyCode::Char('x'),
+                    KeyCode::Enter,
+                    KeyCode::Char('x'),
+                    KeyCode::Enter,
+                ],
+            );
             assert!(app.projects_closed && app.splash_showing());
             assert!(app.term.is_none(), "the pane let go");
             draw(&mut app);
@@ -7350,6 +7436,7 @@ mod tests {
             let pane_before = pane(&app);
             let (x, y) = crumb_cell(&app, HitTarget::LauncherTabClose(ProjectId("p2".into())));
             mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             let after = tab_state(&app);
             assert_eq!((&after.0, &after.1), (&before.0, &before.1));
             assert_eq!(after.2, ["p1"]);
@@ -7721,8 +7808,8 @@ mod tests {
         });
     }
 
-    /// `x` with the header holding the keys closes the tab under its
-    /// cursor — the project the walk put on screen — and the grid and the
+    /// `x` with the header holding the keys, answered **Close tab**, closes
+    /// the tab under its cursor — the project the walk put on screen — and the grid and the
     /// cursor both take the tab that slid into its place, the grid on the
     /// card it was left on.
     #[test]
@@ -7733,7 +7820,13 @@ mod tests {
             let before = tab_state(&app);
             keys(
                 &mut app,
-                &[KeyCode::Up, KeyCode::Up, KeyCode::Left, KeyCode::Char('x')],
+                &[
+                    KeyCode::Up,
+                    KeyCode::Up,
+                    KeyCode::Left,
+                    KeyCode::Char('x'),
+                    KeyCode::Enter,
+                ],
             );
             assert_eq!(
                 app.launcher_tabs,
@@ -7749,12 +7842,25 @@ mod tests {
         });
     }
 
-    /// Delete (`Backspace`) with the header holding the keys asks
-    /// before closing the tab under the cursor: the tab is still there
-    /// behind the dialog, `Esc` keeps it with the cursor on it, and the
-    /// dialog's Enter is `x` — the grid and the cursor land where `x` lands
-    /// them — the last tab too, which closes to the SPLASH. Down on the
-    /// cards the same keys are still the card's own delete.
+    /// The project the open CLOSE PROJECT DIALOG is about, None with no
+    /// dialog up.
+    fn closing(app: &App) -> Option<ProjectId> {
+        let Some(Overlay::Menu(menu)) = &app.overlay else {
+            return None;
+        };
+        menu.items.iter().find_map(|item| match &item.action {
+            MenuAction::CloseProjectTab(id) => Some(id.clone()),
+            _ => None,
+        })
+    }
+
+    /// `x` and the DELETE keys (`Backspace`) with the header holding the
+    /// keys open the one CLOSE PROJECT DIALOG for the tab under the
+    /// cursor: the tab is still there behind it, `Esc` keeps it with the
+    /// cursor on it, and **Close tab** lands the grid and the cursor where
+    /// they land from either key — the last tab too, which closes to the
+    /// SPLASH. Down on the cards the same keys are still the card's own
+    /// delete.
     #[test]
     fn the_delete_keys_in_the_header_ask_before_closing_the_tab() {
         with_default_config(|| {
@@ -7768,6 +7874,8 @@ mod tests {
             let mut by_x = two_tabs();
             keys(&mut by_x, &up);
             key(&mut by_x, KeyCode::Char('x'), KeyModifiers::NONE);
+            assert_eq!(closing(&by_x), Some(ProjectId("p2".into())), "x asks too");
+            key(&mut by_x, KeyCode::Enter, KeyModifiers::NONE);
             assert_eq!(by_x.launcher_tabs, [ProjectId("p1".into())]);
 
             {
@@ -7775,29 +7883,25 @@ mod tests {
                 let mut app = two_tabs();
                 keys(&mut app, &up);
                 let before = tab_state(&app);
-                key(&mut app, code, KeyModifiers::NONE);
-                let closing = match &app.overlay {
-                    Some(Overlay::Confirm(c)) => match &c.action {
-                        PendingAction::CloseProjectTab(id) => Some(id.clone()),
-                        _ => None,
-                    },
-                    _ => None,
-                };
+                let out = key(&mut app, code, KeyModifiers::NONE);
                 assert_eq!(
-                    closing,
+                    closing(&app),
                     Some(ProjectId("p2".into())),
                     "{code:?} asks about web's tab: {:?}",
                     app.overlay
                 );
                 assert_eq!(tab_state(&app), before, "{code:?} closed nothing yet");
+                assert!(out.is_empty(), "nothing sent yet: {out:?}");
 
                 // Esc keeps the tab, and the cursor on it.
-                key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+                let out = key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
                 assert!(app.overlay.is_none());
+                assert!(out.is_empty(), "Esc sends nothing: {out:?}");
                 assert_eq!(tab_state(&app), before, "{code:?} Esc kept the tab");
                 assert_eq!(app.launcher_tab_cursor, Some(ProjectId("p2".into())));
+                assert_eq!(app.tree.projects.len(), 2, "Esc removed nothing");
 
-                // Enter on the dialog is x.
+                // Its Close tab is x's.
                 key(&mut app, code, KeyModifiers::NONE);
                 key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
                 assert!(app.overlay.is_none());
@@ -7805,11 +7909,11 @@ mod tests {
                 assert_eq!(app.launcher_tab_cursor, by_x.launcher_tab_cursor);
                 assert_eq!(app.launcher_tab_cursor, Some(ProjectId("p1".into())));
 
-                // The only tab left asks too, and its Enter closes it.
+                // The only tab left asks too, and its Close tab closes it.
                 key(&mut app, code, KeyModifiers::NONE);
-                assert!(
-                    matches!(&app.overlay, Some(Overlay::Confirm(c))
-                        if c.action == PendingAction::CloseProjectTab(ProjectId("p1".into()))),
+                assert_eq!(
+                    closing(&app),
+                    Some(ProjectId("p1".into())),
                     "{code:?} asks about the last tab: {:?}",
                     app.overlay
                 );
@@ -7829,6 +7933,227 @@ mod tests {
                 "{:?}",
                 app.overlay
             );
+            assert_eq!(app.launcher_tabs.len(), 2);
+        });
+    }
+
+    /// The open CLOSE PROJECT DIALOG, as a menu.
+    fn close_dialog(app: &App) -> &ContextMenu {
+        match &app.overlay {
+            Some(Overlay::Menu(menu)) if closing(app).is_some() => menu,
+            other => panic!("no close dialog: {other:?}"),
+        }
+    }
+
+    /// The CLOSE PROJECT DIALOG for `demo` from its tab's `×`.
+    fn ask_to_close_demo(app: &mut App) -> Vec<ClientRequest> {
+        draw(app);
+        let (x, y) = crumb_cell(app, HitTarget::LauncherTabClose(ProjectId("p1".into())));
+        click_out(app, MouseButton::Left, x, y)
+    }
+
+    /// A click that hands back what it sent.
+    fn click_out(app: &mut App, button: MouseButton, column: u16, row: u16) -> Vec<ClientRequest> {
+        let mut out = Vec::new();
+        let event = MouseEvent {
+            kind: MouseEventKind::Down(button),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_terminal_event(app, crossterm::event::Event::Mouse(event), &mut out);
+        out
+    }
+
+    /// Whether `out` asks the DAEMON to forget project `id`.
+    fn removes(out: &[ClientRequest], id: &str) -> bool {
+        out.iter()
+            .any(|r| matches!(r, ClientRequest::RemoveProject { id: p, .. } if p.0 == id))
+    }
+
+    /// The CLOSE PROJECT DIALOG is titled after the project and offers
+    /// the two closes, **Close tab** first and under the cursor while the
+    /// folder is on disk, saying nothing more. **Remove from orion** says
+    /// how many live sessions it stops — agents and terminals with a PTY —
+    /// and nothing when there are none.
+    #[test]
+    fn the_close_dialog_starts_on_close_tab_and_counts_what_remove_stops() {
+        with_default_config(|| {
+            let mut app = two_tabs();
+            for a in app.tree.agents.iter_mut() {
+                a.alive = true;
+            }
+            app.tree.terminals.clear();
+            ask_to_close_demo(&mut app);
+            let menu = close_dialog(&app);
+            assert_eq!(menu.title.as_deref(), Some("Close demo"));
+            let rows: Vec<(&str, Option<&str>)> = menu
+                .items
+                .iter()
+                .map(|i| (i.label.as_str(), i.hint.as_deref()))
+                .collect();
+            assert_eq!(
+                rows,
+                [
+                    ("Close tab", None),
+                    ("Remove from orion", Some("its 2 running sessions stop")),
+                ]
+            );
+            assert_eq!(menu.hover, 0, "Close tab is the safe default");
+            assert_eq!(menu.message, None);
+            assert!(menu.items[1].destructive);
+
+            // One session: said in the singular. None: nothing said.
+            let mut app = two_tabs();
+            for a in app.tree.agents.iter_mut() {
+                a.alive = a.id.0 == "a1";
+            }
+            app.tree.terminals.clear();
+            ask_to_close_demo(&mut app);
+            assert_eq!(
+                close_dialog(&app).items[1].hint.as_deref(),
+                Some("its running session stops")
+            );
+            let mut app = two_tabs();
+            for a in app.tree.agents.iter_mut() {
+                a.alive = false;
+            }
+            app.tree.terminals.clear();
+            ask_to_close_demo(&mut app);
+            assert_eq!(close_dialog(&app).items[1].hint, None);
+        });
+    }
+
+    /// A project whose folder is gone from disk opens the dialog on
+    /// **Remove from orion**, saying why, and draws it.
+    #[test]
+    fn the_close_dialog_starts_on_remove_when_the_folder_is_gone() {
+        with_default_config(|| {
+            let mut app = two_tabs();
+            let gone = std::env::temp_dir().join("orion-test-a-folder-deleted-by-hand");
+            assert!(!gone.exists());
+            app.tree.projects[0].repo_path = gone;
+            ask_to_close_demo(&mut app);
+            let menu = close_dialog(&app);
+            assert_eq!(menu.hover, 1, "Remove from orion is preselected");
+            assert_eq!(menu.message.as_deref(), Some("Its folder is gone."));
+            let text = buffer_text(&draw(&mut app));
+            assert!(text.contains("Close demo"), "{text}");
+            assert!(text.contains("Its folder is gone."), "{text}");
+            assert!(text.contains("Remove from orion"), "{text}");
+            assert!(
+                text.contains("orion forgets it"),
+                "the row explained: {text}"
+            );
+        });
+    }
+
+    /// Enter on **Close tab** only hides the tab: nothing goes to the
+    /// DAEMON, and the project is still in orion. Enter on **Remove from
+    /// orion** closes the tab the same way and asks the DAEMON to forget
+    /// the project — and its todos, kept by the folder's path, stay when
+    /// the project goes.
+    #[test]
+    fn enter_on_each_choice_closes_or_removes() {
+        with_default_config(|| {
+            let mut hide = two_tabs();
+            ask_to_close_demo(&mut hide);
+            let out = key(&mut hide, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(hide.overlay.is_none());
+            assert!(!removes(&out, "p1"), "Close tab removes nothing: {out:?}");
+            assert_eq!(hide.launcher_tabs, [ProjectId("p2".into())]);
+            assert_eq!(hide.tree.projects.len(), 2);
+
+            let mut remove = two_tabs();
+            let repo = remove.tree.projects[0].repo_path.clone();
+            remove
+                .todos
+                .insert(repo.clone(), crate::todos::TodoFile::new(&repo));
+            ask_to_close_demo(&mut remove);
+            key(&mut remove, KeyCode::Down, KeyModifiers::NONE);
+            let out = key(&mut remove, KeyCode::Enter, KeyModifiers::NONE);
+            assert!(remove.overlay.is_none());
+            assert!(removes(&out, "p1"), "Remove from orion: {out:?}");
+            assert_eq!(
+                tab_state(&remove),
+                tab_state(&hide),
+                "the tab closes as Close tab closes it"
+            );
+            hse(
+                &mut remove,
+                ServerEvent::EntityRemoved {
+                    id: orion_core::EntityId::Project(ProjectId("p1".into())),
+                },
+            );
+            assert!(remove.tree.projects.iter().all(|p| p.id.0 != "p1"));
+            assert!(remove.todos.contains_key(&repo), "its todos stay");
+        });
+    }
+
+    /// INPUT PARITY: a click on a choice of the CLOSE PROJECT DIALOG is
+    /// Enter on it — the same tabs, the same requests — and a click on
+    /// its question is inert.
+    #[test]
+    fn a_click_on_a_close_choice_is_enter_on_it() {
+        with_default_config(|| {
+            for row in 0..2u16 {
+                let mut by_key = two_tabs();
+                ask_to_close_demo(&mut by_key);
+                let mut keys_out = Vec::new();
+                for _ in 0..row {
+                    keys_out.extend(key(&mut by_key, KeyCode::Down, KeyModifiers::NONE));
+                }
+                keys_out.extend(key(&mut by_key, KeyCode::Enter, KeyModifiers::NONE));
+
+                let mut by_mouse = two_tabs();
+                ask_to_close_demo(&mut by_mouse);
+                draw(&mut by_mouse);
+                let area = close_dialog(&by_mouse).area;
+                let top = area.y + 1 + close_dialog(&by_mouse).message_rows();
+                let mouse_out = click_out(&mut by_mouse, MouseButton::Left, area.x + 2, top + row);
+
+                assert!(by_mouse.overlay.is_none(), "row {row}");
+                assert_eq!(tab_state(&by_mouse), tab_state(&by_key), "row {row}");
+                assert_eq!(
+                    format!("{mouse_out:?}"),
+                    format!("{keys_out:?}"),
+                    "row {row}"
+                );
+            }
+
+            // With a question above the rows, the rows sit under it.
+            let mut app = two_tabs();
+            app.tree.projects[0].repo_path = std::env::temp_dir().join("orion-test-gone-too");
+            ask_to_close_demo(&mut app);
+            draw(&mut app);
+            let area = close_dialog(&app).area;
+            click_out(&mut app, MouseButton::Left, area.x + 2, area.y + 1);
+            assert!(closing(&app).is_some(), "a click on the question is inert");
+            let out = click_out(&mut app, MouseButton::Left, area.x + 2, area.y + 3);
+            assert!(!removes(&out, "p1"), "the first row is Close tab: {out:?}");
+            assert_eq!(app.launcher_tabs, [ProjectId("p2".into())]);
+        });
+    }
+
+    /// The tab's right-click **Close…** opens the same dialog.
+    #[test]
+    fn the_tab_menus_close_opens_the_close_dialog() {
+        with_default_config(|| {
+            let mut app = two_tabs();
+            let (x, y) = crumb_cell(&app, HitTarget::LauncherTab(ProjectId("p1".into())));
+            mouse(&mut app, MouseEventKind::Down(MouseButton::Right), x, y);
+            let Some(Overlay::Menu(menu)) = &app.overlay else {
+                panic!("the tab's menu: {:?}", app.overlay);
+            };
+            let at = menu
+                .items
+                .iter()
+                .position(|i| i.label == "Close…")
+                .expect("Close… in the tab's menu");
+            let mut out = Vec::new();
+            super::super::activate::menu_row(&mut app, at, &mut out);
+            assert_eq!(closing(&app), Some(ProjectId("p1".into())));
+            assert!(out.is_empty(), "nothing closed yet: {out:?}");
             assert_eq!(app.launcher_tabs.len(), 2);
         });
     }

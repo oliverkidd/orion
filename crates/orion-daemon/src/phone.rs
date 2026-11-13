@@ -10,7 +10,7 @@
 //!   the session's name, its whole last response (never summarised, in
 //!   3000-character sections), then what it waits on and its buttons:
 //!   - one single-select question: a button per option, `Type an
-//!     answer…`, and `or just reply here` under them;
+//!     answer…`, and `or reply in this thread` under them;
 //!   - a multi-select question, or several in one ask: every question in
 //!     bold with its options listed dim under it, and one `Answer…`;
 //!   - a plan: `Approve` and `Suggest changes…`;
@@ -23,13 +23,27 @@
 //!   (`Answer::Answers`). A submit on a message already answered is
 //!   refused inside the modal (`response_action: errors`).
 //! - **Replies**: a reply in a message's thread answers that session in
-//!   words (a steer, for a plan); a plain DM answers the most recent
-//!   message still open. Only the installing user's replies count. Words
-//!   on a several-question ask cancel its dialog and go in as the next
-//!   turn, the questions quoted (`answer::quoted_turn`).
+//!   words (a steer, for a plan). Only the installing user's replies
+//!   count. Words on a several-question ask cancel its dialog and go in
+//!   as the next turn, the questions quoted (`answer::quoted_turn`).
+//! - **A plain DM** answers nothing: it posts every message still waiting
+//!   again, at the foot of the DM where you are looking — each old copy
+//!   updated to `↓ Re-sent below`, its buttons gone, and a fresh one
+//!   posted about what its session waits on now, oldest first. With
+//!   nothing waiting it says so.
 //! - **After an answer**: the message is updated in place, its buttons
 //!   swapped for `✓ Sent: <what went in> · working again`. One that did
-//!   not go in gets `✗ Not sent: …` in its thread.
+//!   not go in gets `✗ Not sent: …` in its thread. One typed into a
+//!   dialog that still waits on the same thing [`ANSWER_CHECK`] later —
+//!   red, over the same reason, its transcript unchanged — didn't take:
+//!   the message gets its buttons back and [`DIDNT_TAKE`], and waits for
+//!   an answer again.
+//! - **A newer dialog**: a session still red that opens another (a
+//!   steered plan going on to ask a question) says red again with the new
+//!   reason (`Daemon::apply_hook_event_with`). Its open message about the
+//!   old one is updated to [`MOVED_ON`], its buttons gone, and a new one
+//!   is posted below. A message already up about the same dialog is never
+//!   posted twice.
 //! - **Answered at the desk**: a session that leaves the state its message
 //!   was about any other way has the message updated to say "Answered in
 //!   Orion", its buttons gone.
@@ -69,12 +83,27 @@ const SUMMARY_CHARS: usize = 300;
 pub const WORKING_AGAIN: &str = "working again";
 /// What an answered message gains.
 pub const ANSWERED_IN_ORION: &str = "Answered in Orion";
+/// What a message gains when its session opens a newer dialog.
+pub const MOVED_ON: &str = "Moved on: a newer question is below";
+/// What a message gains when a plain DM posts it again.
+pub const RESENT_BELOW: &str = "Re-sent below";
+/// What a message answered from the phone gains when the session still
+/// waits on the same thing after [`ANSWER_CHECK`].
+pub const DIDNT_TAKE: &str =
+    "⚠ That didn't take: it's still waiting on this. Try again, or answer at your desk.";
+/// What a plain DM gets with no message waiting.
+pub const NOTHING_WAITING: &str = "Nothing is waiting for you.";
 /// What a modal submitted on an answered message shows.
 pub const ALREADY_ANSWERED: &str = "This one was already answered";
 /// What a modal question with neither a pick nor words shows.
 const NOTHING_PICKED: &str = "Pick one, or write your own below";
 /// The line under a question's buttons.
-const REPLY_HERE: &str = "or just reply here";
+const REPLY_HERE: &str = "or reply in this thread";
+
+/// How long after an answer goes into a dialog the session is looked at
+/// again, to see that it took ([`DIDNT_TAKE`]); `ORION_PHONE_ANSWER_CHECK_MS`
+/// overrides it.
+pub const ANSWER_CHECK: std::time::Duration = std::time::Duration::from_secs(20);
 /// What a session no automation started is called on its context line;
 /// one an automation started goes by the automation's name.
 const AGENT_KIND: &str = "Agent";
@@ -94,7 +123,7 @@ pub const ACTION_TYPE: &str = "orion_type";
 /// `Suggest changes…`: the plan's steer modal.
 pub const ACTION_STEER: &str = "orion_steer";
 
-/// The `block_id`s: the `or just reply here` line, and in a modal each
+/// The `block_id`s: the `or reply in this thread` line, and in a modal each
 /// question's picks (`orion_q_<n>`) and words (`orion_t_<n>`), and the
 /// steer's box.
 const BLOCK_REPLY_HERE: &str = "orion_reply_here";
@@ -164,7 +193,7 @@ pub struct Built {
 }
 
 /// What a message closes on: the blocks under the response, its buttons,
-/// whether `or just reply here` goes under them, and its notification line.
+/// whether `or reply in this thread` goes under them, and its notification line.
 struct Closing {
     blocks: Vec<Value>,
     buttons: Option<Vec<Value>>,
@@ -311,7 +340,64 @@ fn is_one_tap(questions: &[Asked]) -> bool {
 /// `blocks` as answered at the desk: its buttons gone, "Answered in
 /// Orion" at the foot.
 pub fn answered(blocks: &[Value]) -> Vec<Value> {
-    closed(blocks, format!("✓ {ANSWERED_IN_ORION}"))
+    closed_as(blocks, Close::AnsweredInOrion)
+}
+
+/// `blocks` with its buttons gone and why at the foot: answered at the
+/// desk, moved on, or re-sent.
+fn closed_as(blocks: &[Value], close: Close) -> Vec<Value> {
+    closed(blocks, close.foot())
+}
+
+/// `blocks` as posted — its buttons back — with [`DIDNT_TAKE`] above them.
+pub fn reopened(blocks: &[Value]) -> Vec<Value> {
+    let mut out = blocks.to_vec();
+    let at = out
+        .iter()
+        .position(|b| b["type"] == "actions" || b["block_id"] == BLOCK_REPLY_HERE)
+        .unwrap_or(out.len());
+    out.insert(at, section(format!("*{}*", escape(DIDNT_TAKE))));
+    out
+}
+
+/// Why a message closes without the phone's answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Close {
+    /// Its session moved on at the desk.
+    AnsweredInOrion,
+    /// Its session opened a newer dialog, posted below.
+    MovedOn,
+    /// A plain DM posted it again below.
+    Resent,
+}
+
+impl Close {
+    /// The line its message ends on.
+    fn foot(self) -> String {
+        match self {
+            Close::AnsweredInOrion => format!("✓ {ANSWERED_IN_ORION}"),
+            Close::MovedOn => format!("↓ {MOVED_ON}"),
+            Close::Resent => format!("↓ {RESENT_BELOW}"),
+        }
+    }
+
+    /// Its updated message's notification line.
+    fn text(self) -> &'static str {
+        match self {
+            Close::AnsweredInOrion => ANSWERED_IN_ORION,
+            Close::MovedOn => MOVED_ON,
+            Close::Resent => RESENT_BELOW,
+        }
+    }
+
+    /// What the store marks it answered by.
+    fn by(self) -> &'static str {
+        match self {
+            Close::AnsweredInOrion => "orion",
+            Close::MovedOn => "moved",
+            Close::Resent => "resent",
+        }
+    }
 }
 
 /// `blocks` as answered from the phone with `summary`: its buttons gone,
@@ -543,8 +629,8 @@ pub fn split(text: &str) -> Vec<String> {
 pub enum Target {
     /// The phone message with this `ts`.
     Message(String),
-    /// The most recent message still open.
-    Latest,
+    /// No message: a plain DM, which posts every open one again.
+    Dm,
 }
 
 /// What a reply on the phone says.
@@ -709,7 +795,7 @@ pub fn submission_errors(view: &Value, reply: &Reply, open: bool) -> Option<Valu
 }
 
 /// A message event in the phone's DM from the installing user, routed: a
-/// thread reply to its message, a plain message to the latest open one.
+/// thread reply to its message, a plain message to the DM itself.
 /// Anything else — another conversation, someone else, the bot itself, an
 /// edit — is None.
 pub fn route_message(event: &Value, session: &Session) -> Option<Route> {
@@ -732,7 +818,7 @@ fn route_message_for(event: &Value, me: &str, dm: &str) -> Option<Route> {
     let ts = event["ts"].as_str();
     let target = match event["thread_ts"].as_str() {
         Some(thread) if Some(thread) != ts => Target::Message(thread.to_string()),
-        _ => Target::Latest,
+        _ => Target::Dm,
     };
     Some(Route {
         target,
@@ -795,9 +881,55 @@ async fn slack<T: Send + 'static>(
     }
 }
 
+/// Whether a status change into `status` over `reason` closes open
+/// `message`, and why: its session left the state it was about (answered
+/// at the desk), or is red over a different dialog now — moved on, when
+/// a message about that one is going out (`sends`). None leaves it up:
+/// it is about this very wait. A red with no reason known (the daemon
+/// restarted) is taken to be the same wait.
+fn closes(
+    message: &PhoneMessage,
+    status: AgentStatus,
+    reason: Option<&WaitReason>,
+    sends: bool,
+) -> Option<Close> {
+    if status_of(message.kind) != status {
+        return Some(Close::AnsweredInOrion);
+    }
+    let newer = status == AgentStatus::NeedsFeedback
+        && reason.is_some()
+        && message.reason.as_ref() != reason;
+    match (newer, sends) {
+        (false, _) => None,
+        (true, true) => Some(Close::MovedOn),
+        (true, false) => Some(Close::AnsweredInOrion),
+    }
+}
+
+/// How long after a phone answer goes into a dialog it is checked
+/// ([`ANSWER_CHECK`], or `ORION_PHONE_ANSWER_CHECK_MS`).
+fn answer_check() -> std::time::Duration {
+    orion_core::env::non_empty(orion_core::env::PHONE_ANSWER_CHECK_MS)
+        .and_then(|ms| ms.parse().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(ANSWER_CHECK)
+}
+
+/// What a session waiting on a dialog looked like as a phone answer went
+/// in: still so after [`ANSWER_CHECK`], the answer didn't take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Waiting {
+    changed_at: i64,
+    reason: Option<WaitReason>,
+    /// Its transcript's length: an answer that took writes the dialog's
+    /// result there, even when no hook turns the session yellow.
+    transcript: Option<u64>,
+}
+
 impl Daemon {
-    /// A status change: close the agent's open messages it answers, then
-    /// post a new one when it is one to send.
+    /// A status change: close the agent's open messages it answers — or,
+    /// still red over a newer dialog, the ones about the old one — then
+    /// post a new one when it is one to send and none is up about it yet.
     async fn phone_on_status(
         self: &Arc<Self>,
         agent: &AgentId,
@@ -807,24 +939,30 @@ impl Daemon {
         let Some(session) = self.slack.session() else {
             return;
         };
-        let open = self.store.open_phone_messages(agent).unwrap_or_default();
-        for message in open.into_iter().filter(|m| status_of(m.kind) != status) {
-            self.close_answered_in_orion(&session, message).await;
+        let kind = kind_of(status, reason.as_ref());
+        let sends = kind.is_some_and(|kind| self.phone_sends(kind));
+        let mut already_up = false;
+        for message in self.store.open_phone_messages(agent).unwrap_or_default() {
+            match closes(&message, status, reason.as_ref(), sends) {
+                Some(close) => self.close_message(&session, message, close).await,
+                None => already_up = true,
+            }
         }
-        let Some(kind) = kind_of(status, reason.as_ref()) else {
-            return;
-        };
-        let away = self.away.is_away();
+        if let (Some(kind), true, false) = (kind, sends, already_up) {
+            self.phone_post(&session, agent, kind, reason).await;
+        }
+    }
+
+    /// Whether a message of `kind` goes to the phone now: you are away,
+    /// outside quiet hours, and `away.phone` lists it.
+    fn phone_sends(&self, kind: PhoneKind) -> bool {
         let settings = crate::config::Config::load().away;
         let minute = {
             use chrono::Timelike;
             let now = chrono::Local::now();
             now.hour() * 60 + now.minute()
         };
-        if !away || settings.is_quiet(minute) || !settings.sends(kind) {
-            return;
-        }
-        self.phone_post(&session, agent, kind, reason).await;
+        self.away.is_away() && !settings.is_quiet(minute) && settings.sends(kind)
     }
 
     /// Post `agent`'s phone message, at once.
@@ -891,21 +1029,132 @@ impl Daemon {
         }
     }
 
-    /// `message`'s session moved on without the phone: say so on it.
-    async fn close_answered_in_orion(&self, session: &Arc<Session>, message: PhoneMessage) {
-        if let Err(e) = self
-            .store
-            .set_phone_answered(&message.channel, &message.ts, Some("orion"))
+    /// Close `message` without the phone's answer, saying why on it.
+    async fn close_message(&self, session: &Arc<Session>, message: PhoneMessage, close: Close) {
+        if let Err(e) =
+            self.store
+                .set_phone_answered(&message.channel, &message.ts, Some(close.by()))
         {
             tracing::warn!(error = %e, "phone message not closed");
         }
         let blocks: Vec<Value> = serde_json::from_str(&message.blocks).unwrap_or_default();
-        let blocks = answered(&blocks);
+        let blocks = closed_as(&blocks, close);
         let api = session.api.clone();
         slack("chat.update", move || {
-            api.update(&message.channel, &message.ts, ANSWERED_IN_ORION, &blocks)
+            api.update(&message.channel, &message.ts, close.text(), &blocks)
         })
         .await;
+    }
+
+    /// A plain DM: every message still waiting, posted again at the foot
+    /// of the DM, oldest first — each old copy closed as re-sent, and the
+    /// new one about what its session waits on now. A message whose
+    /// session no longer waits closes as answered in Orion; one session's
+    /// second open message closes without a copy.
+    async fn phone_resend(self: &Arc<Self>, session: &Arc<Session>) -> usize {
+        let open = self
+            .store
+            .open_phone_messages_in(&session.dm)
+            .unwrap_or_default();
+        let mut posted: Vec<AgentId> = Vec::new();
+        for message in open {
+            let agent = message.agent.clone();
+            let status = match self.store.get_agent(&agent) {
+                Ok(Some(row)) => row.status,
+                _ => continue,
+            };
+            if status != status_of(message.kind) {
+                self.close_message(session, message, Close::AnsweredInOrion)
+                    .await;
+                continue;
+            }
+            let fallback = message.reason.clone();
+            self.close_message(session, message, Close::Resent).await;
+            if posted.contains(&agent) {
+                continue;
+            }
+            let reason = match status {
+                AgentStatus::NeedsFeedback => {
+                    let daemon = self.clone();
+                    let id = agent.clone();
+                    tokio::task::spawn_blocking(move || daemon.wait_reason(&id))
+                        .await
+                        .ok()
+                        .flatten()
+                        .or(fallback)
+                }
+                _ => fallback,
+            };
+            if let Some(kind) = kind_of(status, reason.as_ref()) {
+                self.phone_post(session, &agent, kind, reason).await;
+                posted.push(agent);
+            }
+        }
+        posted.len()
+    }
+
+    /// How agent `id` waits on a dialog now, if it does.
+    async fn waiting(self: &Arc<Self>, id: &AgentId) -> Option<Waiting> {
+        let agent = self.store.get_agent(id).ok()??;
+        if agent.status != AgentStatus::NeedsFeedback {
+            return None;
+        }
+        let reason = self.wait_reasons.lock().unwrap().get(id).cloned();
+        let transcript = {
+            let daemon = self.clone();
+            let id = id.clone();
+            tokio::task::spawn_blocking(move || {
+                std::fs::metadata(daemon.transcript_path(&id)?)
+                    .ok()
+                    .map(|m| m.len())
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+        Some(Waiting {
+            changed_at: agent.status_changed_at,
+            reason,
+            transcript,
+        })
+    }
+
+    /// [`ANSWER_CHECK`] after `message` was answered from the phone: a
+    /// session still waiting just as it was (`before`) didn't take the
+    /// answer, so the message gets its buttons back, says so, and waits
+    /// for an answer again.
+    fn check_answer_took(
+        self: &Arc<Self>,
+        session: &Arc<Session>,
+        message: PhoneMessage,
+        before: Waiting,
+    ) {
+        let (daemon, session) = (self.clone(), session.clone());
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = daemon.shutdown.cancelled() => return,
+                _ = tokio::time::sleep(answer_check()) => {}
+            }
+            if daemon.waiting(&message.agent).await.as_ref() != Some(&before) {
+                return;
+            }
+            // Closed some other way meanwhile, or already open again.
+            match daemon.store.phone_message(&message.channel, &message.ts) {
+                Ok(Some((_, false))) => {}
+                _ => return,
+            }
+            tracing::warn!(agent = %message.agent, ts = %message.ts, "a phone answer didn't take");
+            let _ = daemon
+                .store
+                .set_phone_answered(&message.channel, &message.ts, None);
+            let blocks: Vec<Value> = serde_json::from_str(&message.blocks).unwrap_or_default();
+            let blocks = reopened(&blocks);
+            let api = session.api.clone();
+            slack("chat.update", move || {
+                api.update(&message.channel, &message.ts, DIDNT_TAKE, &blocks)
+            })
+            .await;
+        });
     }
 
     /// What a modal's submit acks with (see [`submission_errors`]), read
@@ -923,8 +1172,6 @@ impl Daemon {
         submission_errors(&payload["view"], &route.reply, open)
     }
 
-    /// A reply on the phone: open the modal a button asks for, or answer
-    /// the session it is to and update its message to say what went in.
     /// The phone message `ts` in `channel`, and whether it is open. A
     /// reply can beat its own message into the store: Slack hands out the
     /// `ts` (and the phone can show the message) before `phone_post` has
@@ -939,25 +1186,23 @@ impl Daemon {
         None
     }
 
+    /// A reply on the phone: a plain DM posts what waits again; anything
+    /// on a message opens the modal a button asks for, or answers the
+    /// session it is to and updates its message to say what went in.
     pub(crate) async fn phone_reply(self: &Arc<Self>, session: &Arc<Session>, route: Route) {
-        let message = match &route.target {
-            Target::Message(ts) => self.phone_message_soon(&session.dm, ts).await,
-            Target::Latest => self
-                .store
-                .latest_open_phone_message(&session.dm)
-                .ok()
-                .flatten(),
-        };
         let say = |text: String, thread: Option<String>| {
             let (api, dm) = (session.api.clone(), session.dm.clone());
             slack("chat.postMessage", move || {
                 api.post(&dm, &text, None, thread.as_deref()).map(drop)
             })
         };
-        let Some((message, open)) = message else {
-            if route.target == Target::Latest {
-                say("Nothing is waiting for you.".into(), None).await;
+        let Target::Message(ts) = &route.target else {
+            if self.phone_resend(session).await == 0 {
+                say(NOTHING_WAITING.into(), None).await;
             }
+            return;
+        };
+        let Some((message, open)) = self.phone_message_soon(&session.dm, ts).await else {
             return;
         };
         let reason = message.reason.clone().or_else(|| {
@@ -989,15 +1234,19 @@ impl Daemon {
             .set_phone_answered(&message.channel, &message.ts, Some("phone"));
         tracing::info!(agent = %message.agent, ?answer, "answered from the phone");
         let said = summary(reason.as_ref(), &answer);
+        let before = self.waiting(&message.agent).await;
         match self.answer(&message.agent, answer).await {
             Ok(()) => {
                 let blocks: Vec<Value> = serde_json::from_str(&message.blocks).unwrap_or_default();
                 let blocks = answered_with(&blocks, &said);
-                let api = session.api.clone();
+                let (api, sent) = (session.api.clone(), message.clone());
                 slack("chat.update", move || {
-                    api.update(&message.channel, &message.ts, &sent_line(&said), &blocks)
+                    api.update(&sent.channel, &sent.ts, &sent_line(&said), &blocks)
                 })
                 .await;
+                if let Some(before) = before {
+                    self.check_answer_took(session, message, before);
+                }
             }
             Err(e) => {
                 let _ = self
@@ -1019,6 +1268,7 @@ mod tests {
             header: String::new(),
             options: options.iter().map(|o| o.to_string()).collect(),
             multi,
+            previews: false,
         }
     }
 
@@ -1105,7 +1355,7 @@ mod tests {
                 "I looked at *both*.\n*Next*",
                 "*Which color?*",
                 "[Red|Green|Type an answer…]",
-                "or just reply here",
+                "or reply in this thread",
             ]
         );
         assert_eq!(built.text, "Fix the login redirect: Which color?");
@@ -1127,7 +1377,7 @@ mod tests {
                 "*Which fruits?* _(pick any)_",
                 "• Apple\n• Pear\n• Mango",
                 "[Answer…]",
-                "or just reply here",
+                "or reply in this thread",
             ]
         );
         assert_eq!(built.text, "Fix the login redirect: 2 questions");
@@ -1210,7 +1460,78 @@ mod tests {
         assert_eq!(
             texts(&sent)[sent.len() - 2..],
             ["*Which color?*", "✓ Sent: Red &lt;b&gt; · working again"],
-            "the `or just reply here` line goes with the buttons"
+            "the `or reply in this thread` line goes with the buttons"
+        );
+    }
+
+    #[test]
+    fn moved_on_and_re_sent_lose_their_buttons_and_a_lost_answer_gets_them_back() {
+        let reason = question();
+        let built = build(&ask(None, Some(&reason)));
+        let moved = closed_as(&built.blocks, Close::MovedOn);
+        assert!(moved.iter().all(|b| b["type"] != "actions"));
+        assert_eq!(
+            texts(&moved).last().unwrap(),
+            "↓ Moved on: a newer question is below"
+        );
+        let resent = closed_as(&built.blocks, Close::Resent);
+        assert_eq!(texts(&resent).last().unwrap(), "↓ Re-sent below");
+        // As posted, the warning above its buttons.
+        let again = reopened(&built.blocks);
+        assert_eq!(
+            texts(&again)[again.len() - 4..],
+            [
+                "*Which color?*",
+                "*⚠ That didn't take: it's still waiting on this. Try again, or answer at your desk.*",
+                "[Red|Green|Type an answer…]",
+                "or reply in this thread",
+            ]
+        );
+        assert_eq!(
+            again[again.len() - 2]["elements"][0]["action_id"],
+            "orion_option_0"
+        );
+    }
+
+    /// A status change closes the messages it answers; a red over a newer
+    /// dialog closes the one about the old dialog — moved on when the new
+    /// one goes out — and leaves the one about this very wait up.
+    #[test]
+    fn a_newer_dialog_moves_an_open_message_on() {
+        let plan = WaitReason::Plan { plan: "p".into() };
+        let asked = question();
+        let on_plan = PhoneMessage {
+            kind: PhoneKind::Plan,
+            ..message(Some(plan.clone()))
+        };
+        let red = AgentStatus::NeedsFeedback;
+        assert_eq!(
+            closes(&on_plan, AgentStatus::Running, None, true),
+            Some(Close::AnsweredInOrion)
+        );
+        assert_eq!(
+            closes(&on_plan, red, Some(&asked), true),
+            Some(Close::MovedOn)
+        );
+        assert_eq!(
+            closes(&on_plan, red, Some(&asked), false),
+            Some(Close::AnsweredInOrion),
+            "nothing is posted below it at the desk"
+        );
+        assert_eq!(
+            closes(&on_plan, red, Some(&plan), true),
+            None,
+            "the same plan"
+        );
+        assert_eq!(closes(&on_plan, red, None, true), None, "no reason known");
+        let crash = PhoneMessage {
+            kind: PhoneKind::Crash,
+            ..message(None)
+        };
+        assert_eq!(closes(&crash, AgentStatus::Terminated, None, true), None);
+        assert_eq!(
+            closes(&crash, AgentStatus::Running, None, true),
+            Some(Close::AnsweredInOrion)
         );
     }
 
@@ -1428,7 +1749,7 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_reply_goes_to_its_message_and_a_plain_dm_to_the_latest() {
+    fn a_thread_reply_goes_to_its_message_and_a_plain_dm_to_the_dm() {
         let route = |e: Value| route_message_for(&e, "U1", "D1");
         let words = |target| {
             Some(Route {
@@ -1445,7 +1766,7 @@ mod tests {
         );
         assert_eq!(
             route(json!({"channel": "D1", "user": "U1", "text": " purple ", "ts": "200.1"})),
-            words(Target::Latest)
+            words(Target::Dm)
         );
         // Not the installing user, the bot, an edit, another conversation.
         assert_eq!(

@@ -7481,6 +7481,7 @@ pub(super) fn open_menu(app: &mut App, items: Vec<MenuItem>, at: (u16, u16)) {
         area: ratatui::layout::Rect::default(),
         parent: None,
         filter: None,
+        message: None,
     }));
 }
 
@@ -7625,6 +7626,7 @@ fn build_submenu(item: &MenuItem) -> Option<ContextMenu> {
         area: ratatui::layout::Rect::default(),
         parent: None,
         filter,
+        message: None,
     })
 }
 
@@ -9644,7 +9646,6 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
                 id,
             });
         }
-        PendingAction::CloseProjectTab(id) => launcher::close_cursor_tab(app, &id, out),
         PendingAction::DeletePreset { index } => crate::presets_tab::delete(app, index),
         PendingAction::RestorePresetText { index } => crate::presets_tab::restore(app, index),
         PendingAction::ResetSettings => reset_settings(app),
@@ -9940,6 +9941,9 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         MenuAction::AddProject => crate::open_repo::start(app),
         MenuAction::RenameProject(id) => open_prompt(app, PromptKind::RenameProject { id }),
         MenuAction::OpenProject(id) => launcher::open_project(app, &id, out),
+        MenuAction::AskCloseProjectTab(id) => launcher::ask_close_tab(app, &id),
+        MenuAction::CloseProjectTab(id) => launcher::close_cursor_tab(app, &id, out),
+        MenuAction::ForgetProject(id) => launcher::forget_project(app, &id, out),
         MenuAction::RemoveProject(id) => {
             if let Some(p) = app.tree.projects.iter().find(|p| p.id == id).cloned() {
                 app.overlay = Some(Overlay::Confirm(confirm_remove_project(&p.name, id)));
@@ -11773,8 +11777,11 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 && mouse.column < area.x + area.width
                 && mouse.row > area.y
                 && mouse.row < area.y + area.height.saturating_sub(1);
-            let hit = inside
-                .then(|| (mouse.row - area.y - 1) as usize)
+            // The rows start under the border and any question the menu
+            // asks above them (`ContextMenu::message_rows`).
+            let top = area.y + 1 + menu.message_rows();
+            let hit = (inside && mouse.row >= top)
+                .then(|| (mouse.row - top) as usize)
                 .filter(|index| *index < menu.items.len());
             match hit {
                 // Enter on that row, whichever row the hover was on.
@@ -12400,7 +12407,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 // The GRID header's PROJECT TABS: a tab opens its
                 // project, through the `open_tab` that `[` and `]` walk
                 // with — or, with the header holding the keys, through
-                // the `choose_tab` Enter on it runs; its `×` closes it;
+                // the `choose_tab` Enter on it runs; its `×` asks whether
+                // to close it or remove the project (`ask_close_tab`);
                 // the `+` after them drops the PROJECT DROPDOWN — every
                 // project, narrowed by whatever you type, and a row that
                 // opens a folder — whose pick opens a tab; the MORE CHIP
@@ -12411,7 +12419,7 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                     app.launcher_tab_drag = Some((id.clone(), None));
                     launcher::click_tab(app, &id, out);
                 }
-                Some(HitTarget::LauncherTabClose(id)) => launcher::close_tab(app, &id, out),
+                Some(HitTarget::LauncherTabClose(id)) => launcher::ask_close_tab(app, &id),
                 Some(HitTarget::LauncherTabAdd) => launcher::open_project_menu(app),
                 Some(HitTarget::LauncherTabMore) => launcher::open_more_tabs_menu(app),
                 // The key cap in the empty grid's welcome: the QUICK
@@ -20346,6 +20354,7 @@ mod tests {
                 area: ratatui::layout::Rect::default(),
                 parent: None,
                 filter: None,
+                message: None,
             }));
             press(&mut app, KeyCode::Char('?'), KeyModifiers::NONE, &mut out);
             assert!(
@@ -36713,12 +36722,12 @@ mod tests {
             Some(Overlay::Files(v)) => v.list_area,
             Some(Overlay::AgentPresets(v)) => v.list_area,
             Some(Overlay::Menu(v)) => {
-                // A menu's rows sit inside its border.
+                // A menu's rows sit inside its border, under its question.
                 ratatui::layout::Rect::new(
                     v.area.x + 1,
-                    v.area.y + 1,
+                    v.area.y + 1 + v.message_rows(),
                     v.area.width.saturating_sub(2),
-                    v.area.height.saturating_sub(2),
+                    v.area.height.saturating_sub(2 + v.message_rows()),
                 )
             }
             other => panic!("no list to click in {other:?}"),
@@ -36916,7 +36925,8 @@ mod tests {
 
     /// A click on a row of a picking list is Enter with the cursor on that
     /// row: the `/` palette, the NEW AGENT PICKER's menu, the AGENT
-    /// PRESETS list in both of its modes.
+    /// PRESETS list in both of its modes, the CLOSE PROJECT DIALOG's two
+    /// closes (the tab hidden, the project removed).
     #[test]
     fn a_click_on_a_list_row_is_enter_on_it() {
         with_seeded_presets(|| {
@@ -36948,11 +36958,18 @@ mod tests {
                     crate::keymap::Action::AgentPresets,
                 ));
             };
-            let surfaces: [(&str, Open); 4] = [
+            let close_project: Open = |app, _out| {
+                for p in app.tree.projects.iter_mut() {
+                    p.repo_path = std::env::temp_dir();
+                }
+                launcher::ask_close_tab(app, &ProjectId("p1".into()));
+            };
+            let surfaces: [(&str, Open); 5] = [
                 ("palette", palette),
                 ("new session picker", new_session),
                 ("presets", presets),
                 ("PR presets", pr_presets),
+                ("close project dialog", close_project),
             ];
             for (name, open) in surfaces {
                 for row in 0..2u16 {

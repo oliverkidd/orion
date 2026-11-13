@@ -243,6 +243,11 @@ async fn serve() -> Result<()> {
             let mut interval = env_interval(env::WORKTREE_SYNC_MS, 2_000);
             let mut seen: std::collections::HashMap<orion_core::ProjectId, std::time::SystemTime> =
                 std::collections::HashMap::new();
+            // Each failing project's last error: said once, again only
+            // when it changes, so a project whose folder is gone doesn't
+            // write a warning every tick for as long as it stays gone.
+            let mut failing: std::collections::HashMap<orion_core::ProjectId, String> =
+                std::collections::HashMap::new();
             loop {
                 tokio::select! {
                     _ = daemon.shutdown.cancelled() => break,
@@ -252,6 +257,7 @@ async fn serve() -> Result<()> {
                     continue;
                 };
                 seen.retain(|id, _| projects.iter().any(|p| &p.id == id));
+                failing.retain(|id, _| projects.iter().any(|p| &p.id == id));
                 for project in projects {
                     // An unreadable probe is not a fingerprint: caching it
                     // would compare equal on every later tick and retire the
@@ -263,18 +269,29 @@ async fn serve() -> Result<()> {
                     }
                     // The stamp is only recorded on success, so a failed
                     // sync (repo briefly locked, git missing) retries.
-                    match daemon.sync_project_worktrees(&project).await {
-                        Ok(()) => match stamp {
+                    // A project whose folder is gone has nothing to sync:
+                    // no git runs for it until the folder is back.
+                    let synced = match project.repo_path.exists() {
+                        true => daemon.sync_project_worktrees(&project).await,
+                        false => Err(anyhow::anyhow!(
+                            "its folder {} is gone; remove the project, or put the folder back",
+                            project.repo_path.display()
+                        )),
+                    };
+                    if note_sync_failure(&mut failing, &project.id, synced.as_ref().err()) {
+                        if let Err(e) = &synced {
+                            tracing::warn!(project = %project.name, error = %e, "worktree sync failed");
+                        }
+                    }
+                    if synced.is_ok() {
+                        match stamp {
                             Some(stamp) => {
                                 seen.insert(project.id.clone(), stamp);
                             }
                             None => {
                                 seen.remove(&project.id);
                             }
-                        },
-                        Err(e) => tracing::warn!(
-                            project = %project.name, error = %e, "worktree sync failed"
-                        ),
+                        }
                     }
                 }
             }
@@ -447,9 +464,53 @@ fn rebase_on(base: &std::path::Path, target: &str) -> std::path::PathBuf {
     }
 }
 
+/// Record `project`'s worktree sync outcome in `failing`: true when its
+/// failure is news — the first, or a different error from the last —
+/// and so worth a warning; a success clears it.
+fn note_sync_failure(
+    failing: &mut std::collections::HashMap<orion_core::ProjectId, String>,
+    project: &orion_core::ProjectId,
+    error: Option<&anyhow::Error>,
+) -> bool {
+    let Some(error) = error else {
+        failing.remove(project);
+        return false;
+    };
+    let said = format!("{error:#}");
+    failing.insert(project.clone(), said.clone()).as_ref() != Some(&said)
+}
+
 #[cfg(test)]
 mod period_tests {
     use super::*;
+
+    #[test]
+    fn a_sync_failure_is_said_once_until_it_changes_or_clears() {
+        let mut failing = std::collections::HashMap::new();
+        let id = orion_core::ProjectId("p".into());
+        let gone = anyhow::anyhow!("fatal: cannot change to '/x': No such file or directory");
+        assert!(
+            note_sync_failure(&mut failing, &id, Some(&gone)),
+            "the first is news"
+        );
+        assert!(
+            !note_sync_failure(&mut failing, &id, Some(&gone)),
+            "the same again is not"
+        );
+        let other = anyhow::anyhow!("index.lock exists");
+        assert!(
+            note_sync_failure(&mut failing, &id, Some(&other)),
+            "a new error is"
+        );
+        assert!(
+            !note_sync_failure(&mut failing, &id, None),
+            "a success says nothing"
+        );
+        assert!(
+            note_sync_failure(&mut failing, &id, Some(&gone)),
+            "after a success it is news again"
+        );
+    }
 
     #[test]
     fn env_period_ms_defaults_parses_and_floors() {

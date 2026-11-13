@@ -5623,7 +5623,7 @@ fn done_states() -> String {
 /// who that person is, and their `teams`: each one's members, who `⌘I`
 /// assigns to, and its workflow states, where `⌘S` moves an issue — read
 /// once per team, not once per issue.
-async fn fetch_lists(dir: &Path, email: &str) -> Result<LinearList, String> {
+pub(crate) async fn fetch_lists(dir: &Path, email: &str) -> Result<LinearList, String> {
     let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
     let (query, variables) = lists_query(email);
     let json = graphql(&key, &query, variables).await?;

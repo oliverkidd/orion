@@ -204,6 +204,7 @@ pub(crate) fn open_kind_picker(app: &mut App, picker: KindPicker) {
         area: ratatui::layout::Rect::default(),
         parent: None,
         filter: None,
+        message: None,
     }));
 }
 

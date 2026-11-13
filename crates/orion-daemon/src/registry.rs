@@ -309,25 +309,68 @@ impl Daemon {
             })
         };
         if let Some((effects, own_status)) = handled {
-            if let (Some(status), Some(reason)) = (own_status, reason) {
-                self.note_wait_reason(agent_id, status, reason);
-            }
+            let replaced = match (own_status, reason) {
+                (Some(status), Some(reason)) => self.note_wait_reason(agent_id, status, reason),
+                _ => None,
+            };
+            let status_set = effects.iter().any(|e| matches!(e, Effect::SetStatus(_)));
             self.apply_status_effects(agent_id, effects);
+            // Still red, over a new dialog: no status change says so, so
+            // the red one is said again with the new reason — the phone
+            // bridge posts its message, the NEEDS YOU card reads anew. A
+            // steered plan that goes on to ask a question gets no hook in
+            // between to turn it yellow.
+            if let (Some(reason), false) = (replaced, status_set) {
+                self.rebroadcast_wait(agent_id, reason);
+            }
         }
     }
 
     /// Record why `id` waits on you, when `status` (the machine's, after
     /// the event that carried `reason`) is the one it explains: a dialog's
     /// reason while red, a crash once terminated. The newest wins — one
-    /// dialog shows at a time.
-    fn note_wait_reason(&self, id: &AgentId, status: AgentStatus, reason: WaitReason) {
+    /// dialog shows at a time. Returns the reason when it replaced a
+    /// different one while red: a new dialog over the last.
+    fn note_wait_reason(
+        &self,
+        id: &AgentId,
+        status: AgentStatus,
+        reason: WaitReason,
+    ) -> Option<WaitReason> {
         let explains = match reason {
             WaitReason::Crash { .. } => status == AgentStatus::Terminated,
             _ => status == AgentStatus::NeedsFeedback,
         };
-        if explains {
-            self.wait_reasons.lock().unwrap().insert(id.clone(), reason);
+        if !explains {
+            return None;
         }
+        let before = self
+            .wait_reasons
+            .lock()
+            .unwrap()
+            .insert(id.clone(), reason.clone());
+        let new_dialog =
+            status == AgentStatus::NeedsFeedback && before.is_some_and(|before| before != reason);
+        new_dialog.then_some(reason)
+    }
+
+    /// Say again that `id` is red, now over `reason`: the row's own stamp
+    /// and unseen flag, so nothing re-sorts.
+    fn rebroadcast_wait(&self, id: &AgentId, reason: WaitReason) {
+        let Ok(Some(agent)) = self.store.get_agent(id) else {
+            return;
+        };
+        if agent.status != AgentStatus::NeedsFeedback {
+            return;
+        }
+        tracing::info!(agent = %id, "a new dialog while already waiting");
+        self.broadcast(ServerEvent::StatusChanged {
+            agent: id.clone(),
+            status: AgentStatus::NeedsFeedback,
+            changed_at: agent.status_changed_at,
+            unseen: agent.unseen,
+            reason: Some(reason),
+        });
     }
 
     /// The reason a `StatusChanged` into `status` carries: the recorded
@@ -7685,6 +7728,68 @@ pub(crate) mod tests {
             reason_of_next(&mut rx),
             Some(WaitReason::Crash { exit_code: Some(2) })
         );
+    }
+
+    /// A plan steered with feedback leaves the session red, and the
+    /// question it goes on to ask turns nothing red: the red status is
+    /// said again with the new reason, so the phone posts its message. The
+    /// same dialog's second hook says nothing new.
+    #[test]
+    fn a_new_dialog_while_red_says_red_again_with_its_reason() {
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["p"]);
+        seed_worktree(&daemon, "p", "root", "/orion-test/p", true);
+        seed_agent(&daemon, "a1", "root", None);
+        let id = AgentId("a1".into());
+        let pre = |tool: &str| HookEvent::PreToolUse {
+            tool_name: Some(tool.into()),
+            subagent_id: None,
+        };
+        let plan = WaitReason::Plan {
+            plan: "Do it.".into(),
+        };
+        let question = WaitReason::from_tool(
+            orion_core::ASK_USER_QUESTION_TOOL,
+            Some(&serde_json::json!({"questions": [{"question": "Which?",
+                "options": [{"label": "A"}, {"label": "B"}]}]})),
+        );
+        daemon.apply_hook_event(&id, HookEvent::UserPromptSubmit, Some("s1".into()));
+        daemon.apply_hook_event_with(
+            &id,
+            pre(orion_core::EXIT_PLAN_MODE_TOOL),
+            Some("s1".into()),
+            Some(plan.clone()),
+        );
+        let mut rx = daemon.events.subscribe();
+        let red_changes = |rx: &mut broadcast::Receiver<ServerEvent>| {
+            let mut out = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if let ServerEvent::StatusChanged { status, reason, .. } = event {
+                    out.push((status, reason));
+                }
+            }
+            out
+        };
+        // The same plan's permission prompt: nothing new.
+        daemon.apply_hook_event_with(
+            &id,
+            HookEvent::PermissionRequest { subagent_id: None },
+            Some("s1".into()),
+            Some(plan.clone()),
+        );
+        assert_eq!(red_changes(&mut rx), []);
+        // Steered, it asks a question: red again, over the question.
+        daemon.apply_hook_event_with(
+            &id,
+            pre(orion_core::ASK_USER_QUESTION_TOOL),
+            Some("s1".into()),
+            Some(question.clone()),
+        );
+        assert_eq!(
+            red_changes(&mut rx),
+            [(AgentStatus::NeedsFeedback, Some(question.clone()))]
+        );
+        assert_eq!(daemon.wait_reason(&id), Some(question));
     }
 
     /// `mark_agent_seen` clears the flag and hands every subscriber the row

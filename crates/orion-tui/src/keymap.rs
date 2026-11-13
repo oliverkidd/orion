@@ -381,11 +381,12 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::CloseProjectTab,
         id: "close_project_tab",
         label: "Close project tab",
-        hint: "Drop this project's tab from the header and open the tab beside it. Nothing is deleted — {palette} opens it again",
+        hint: "Close this project's tab — it stays in orion, and {palette} opens it again — or remove it from orion, which stops checking its folder. Nothing on disk is touched",
         group: "NAVIGATE",
         scope: Scope::Global,
         // No key: a tab's `×`, its right-click menu and the COMMAND
-        // PALETTE close it. A bare `x` closed one by accident.
+        // PALETTE close it, each through the CLOSE PROJECT DIALOG. A bare
+        // `x` closed one by accident.
         defaults: &[],
     },
     ActionSpec {

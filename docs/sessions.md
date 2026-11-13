@@ -423,10 +423,20 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   walked: `↑`,`↑` on the first line hands the keys up to the tabs, with a cursor of
   their own on the lit tab; `←`/`→` move it and the grid switches with it, each project
   shown on its last-focused row as the cursor passes, and `Enter` — or `↓`,`↓` back
-  down, or `Esc` — hands the keys back to the grid of the project on screen. The `×` on a tab, or `Backspace` on the
-  one under the header's cursor while it has the keys (behind a confirm), closes it and the grid
-  moves to the tab that slides into its place. Closing a tab
-  changes nothing about the project — its sessions run on. Closing the last tab puts orion back on
+  down, or `Esc` — hands the keys back to the grid of the project on screen. Closing a tab always asks
+  first, in a small CLOSE PROJECT DIALOG titled `Close <name>` — from its `×`, **Close…** in its
+  right-click menu, **Close project tab** in the palette, or `Backspace` on the one under the
+  header's cursor while it has the keys. It offers two closes, picked with `↑`/`↓` and `Enter` or a
+  click, and `Esc` leaves the tab where it was:
+  - **Close tab** hides the tab and the grid moves to the tab that slides into its place. Nothing about
+    the project changes — its sessions run on, and the `+` or `⌘K` opens it again.
+  - **Remove from orion** closes the tab the same way and has the daemon forget the project: it stops
+    checking the folder, its worktree rows go, and its live sessions stop — the row says how many
+    (`its 3 running sessions stop`). Nothing on disk is touched, and its todos stay: they are kept by
+    the folder's path, and come back when the folder is added again.
+
+  The cursor starts on **Close tab** — unless the project's folder is gone from disk, when the dialog
+  says `Its folder is gone.` and starts on **Remove from orion**. Closing the last tab puts orion back on
   the splash it opens on before there is any project, where `Enter` begins — it opens the repo orion
   was started in — `+` lists every project and `⌘K`'s last row opens another folder; the splash stays
   across a restart. The
@@ -586,8 +596,8 @@ already — so a new agent in a new worktree is that one chord, the task and `En
 - **The project's own menu** is a
   right-click on its PROJECT TAB: **New worktree**; **Start stack** / **Stop stack** and **Open** for the
   checkout the grid would launch into, and **Delete worktree** when that is a linked one; **Rename**, a label only —
-  the folder on disk keeps its name, and an empty name goes back to it; and **Remove from list**,
-  behind a confirm, which leaves the clone on disk alone. There is nothing above the bands to walk
+  the folder on disk keeps its name, and an empty name goes back to it; and **Close…**, the
+  CLOSE PROJECT DIALOG above — close the tab, or remove the project from orion, which leaves the clone on disk alone. There is nothing above the bands to walk
   out to: `Esc` lets the row go, a second does nothing, and `↑` on the first band stays put.
 
 Every other key acts on the session under the cursor — `⌘⇧X` archives, `Backspace` deletes, `⌘E` opens its
@@ -803,6 +813,14 @@ Week in review                                              Fri 08:30
 - The runs are kept, newest first, each named for the week it ends in, with when it was written,
   how many points it makes, and `new` until read. While one is being written its row in `⌘J` says
   so (`writing 2 of 4`).
+- **A run that can't fetch writes nothing.** Each project's fetch from GitHub or Linear that fails
+  is tried again three times, about 10 s, 30 s and 90 s apart, and the footer and `⌘J` row say so
+  (`GitHub didn't answer for riplo-os, trying again in 30s`). If it still fails, the run writes
+  nothing at all, so the week still counts as owed, and the footer names what failed (`Week in
+  review failed: GitHub unreachable for riplo-os · r to try again`). A run its **When** started is
+  then run again every 15 minutes, up to 4 times, its row in `⌘J` saying when
+  (`GitHub unreachable · next try 09:45`), and after the last it stops and says so. `r` tries again
+  at once. A review whose writing fails is sent once more before its tab says why.
 
 `Enter` on week in review's row in `⌘J` opens the latest run on a page of its own, **a tab per project** it wrote up:
 `[`/`]`, `←`/`→` or `⇧←`/`⇧→` move between tabs (a click on one goes there), `↑`/`↓` and
@@ -812,9 +830,10 @@ written and what went in until it lands; `⌘W` there stops what is still being 
 came back.
 
 orion gathers; a model writes. A run fetches every project's pull requests merged in the week with
-their descriptions (a page of 100 at a time until the week is covered), and reads the done issues
-and ticked todos from the lists in hand. A project with none of the three is left out. A project
-GitHub could not be asked about is not written up from the rest, and its tab says why. Each project
+their descriptions (a page of 100 at a time until the week is covered), asks Linear afresh for the
+lists of every project with a Linear key, and reads the ticked todos from disk; it writes nothing
+until all of them are in. A project not on GitHub, or with no Linear key, has nothing to ask there
+and is written from the rest. A project with none of the three is left out. Each project
 is one prompt, sent through a Claude account's print mode with no tools — text in, text out — three
 at a time. No session starts, nothing runs in a checkout, and there is nothing to tidy up after.
 

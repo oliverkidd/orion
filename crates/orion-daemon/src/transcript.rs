@@ -214,6 +214,7 @@ mod tests {
                     header: String::new(),
                     options: vec!["Both".into(), "Neither".into()],
                     multi: false,
+                    previews: false,
                 }]
             })
         );

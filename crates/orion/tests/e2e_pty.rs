@@ -1038,6 +1038,7 @@ async fn a_question_hook_carries_its_reason_and_an_answer_types_into_the_dialog(
             header: "Color".into(),
             options: vec!["Red".into(), "Green".into()],
             multi: false,
+            previews: false,
         }],
     };
     let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
@@ -5032,6 +5033,27 @@ impl FakeSlack {
             .collect()
     }
 
+    /// The phone messages posted so far — `chat.postMessage` with blocks —
+    /// each with the `ts` the fake handed it.
+    fn cards(&self) -> Vec<(String, serde_json::Value)> {
+        self.chats()
+            .into_iter()
+            .filter(|(m, _)| m == "chat.postMessage")
+            .enumerate()
+            .filter(|(_, (_, b))| !b["blocks"].is_null())
+            .map(|(n, (_, b))| (format!("{}.000100", 1000 + n), b))
+            .collect()
+    }
+
+    /// The `chat.update`s on message `ts` so far: each one's blocks.
+    fn updated_blocks(&self, ts: &str) -> Vec<serde_json::Value> {
+        self.chats()
+            .into_iter()
+            .filter(|(m, b)| m == "chat.update" && b["ts"] == ts)
+            .map(|(_, b)| b["blocks"].clone())
+            .collect()
+    }
+
     /// Wait for `pred` over the `chat.*` calls.
     async fn wait_for(
         &self,
@@ -5251,7 +5273,7 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
             "I checked *both* palettes.\n\nRed is louder.",
             "*Which color do you like?*",
             "[Red|Green|Type an answer…]",
-            "or just reply here",
+            "or reply in this thread",
         ]
     );
     let first_ts = slack
@@ -5385,7 +5407,7 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
             "*Which fruits do you like?* _(pick any)_",
             "• Apple\n• Pear\n• Mango",
             "[Answer…]",
-            "or just reply here",
+            "or reply in this thread",
         ]
     );
     let fourth_ts = slack
@@ -5490,6 +5512,281 @@ async fn a_waiting_session_reaches_the_phone_and_the_phone_answers_it() {
             "{acks:?}"
         );
     }
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
+/// THE PHONE BRIDGE when an answer goes astray, against a fake Slack. A
+/// plain DM with nothing waiting says so. A button press that leaves the
+/// session waiting on the same question gets its buttons back under "That
+/// didn't take", and a second press goes in. A plan the session puts up
+/// while still red over that question gets its own message; a question
+/// it asks while still red over the plan moves the plan's message on and
+/// posts below it. A plain DM then posts the open message again at the
+/// foot of the DM — nothing typed into the session — and a reply in the
+/// new one's thread answers it.
+#[tokio::test]
+async fn a_lost_answer_and_a_newer_question_reach_the_phone() {
+    let slack = FakeSlack::start().await;
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    env.write_config(r#"{"away": {"quiet": null}}"#);
+    let transcript = env.tmp.path().join("transcript.jsonl");
+    std::fs::write(
+        &transcript,
+        serde_json::json!({"type": "assistant", "message": {"id": "m1", "role": "assistant",
+            "content": [{"type": "text", "text": "Looking."}]}})
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let hook_file = |name: &str, tool: &str, input: serde_json::Value| {
+        let path = env.tmp.path().join(name);
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "session_id": "sess-1",
+                "hook_event_name": "PreToolUse",
+                "transcript_path": transcript,
+                "tool_name": tool,
+                "tool_input": input,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        path
+    };
+    let ask = hook_file(
+        "ask.json",
+        "AskUserQuestion",
+        serde_json::json!({"questions": [{"question": "Which color do you like?",
+            "multiSelect": false, "options": [{"label": "Red"}, {"label": "Green"}]}]}),
+    );
+    let plan = hook_file(
+        "plan.json",
+        "ExitPlanMode",
+        serde_json::json!({"plan": "1. Back up\n2. Migrate"}),
+    );
+    let ask_two = hook_file(
+        "ask_two.json",
+        "AskUserQuestion",
+        serde_json::json!({"questions": [
+            {"question": "Which color do you like?", "multiSelect": false,
+             "options": [{"label": "Red"}, {"label": "Green"}]},
+            {"question": "Which fruits do you like?", "multiSelect": true,
+             "options": [{"label": "Apple"}, {"label": "Pear"}]}
+        ]}),
+    );
+    let go = |n: u8| env.tmp.path().join(format!("go{n}"));
+    // Waits to be let go, asks, reads two keys (a press that doesn't take,
+    // then one that does) without the hook that would end the wait, puts
+    // a plan up, waits again, then asks two questions — all while red.
+    let script = env.tmp.path().join("agent.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             hook() {{ curl -sS -m 3 -X POST -H \"Authorization: Bearer $ORION_API_TOKEN\" \
+             -H 'Content-Type: application/json' --data-binary @\"$1\" \
+             \"$ORION_API_URL/api/hooks/claude?agentId=$ORION_AGENT_ID&hookEvent=$2\" >/dev/null; }}\n\
+             stty -icanon min 1\n\
+             while [ ! -f '{go0}' ]; do sleep 0.1; done\n\
+             hook '{ask}' PreToolUse\n\
+             c=$(dd bs=1 count=1 2>/dev/null); echo \"PICKED:$c\"\n\
+             c=$(dd bs=1 count=1 2>/dev/null); echo \"AGAIN:$c\"\n\
+             hook '{plan}' PreToolUse\n\
+             while [ ! -f '{go1}' ]; do sleep 0.1; done\n\
+             hook '{ask_two}' PreToolUse\n\
+             sleep 30\n",
+            go0 = go(0).display(),
+            go1 = go(1).display(),
+            ask = ask.display(),
+            plan = plan.display(),
+            ask_two = ask_two.display(),
+        ),
+    )
+    .unwrap();
+    make_executable(&script);
+    let mut daemon = env.spawn_daemon_with(
+        script.to_str().unwrap(),
+        &[
+            (env::SLACK_API_URL, &slack.base_url),
+            (env::SLACK_TOKENS, FAKE_TOKENS),
+            (env::AWAY_POLL_MS, "0"),
+            (env::PHONE_ANSWER_CHECK_MS, "1500"),
+        ],
+    );
+
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    tokio::time::timeout(SLOW_TIMEOUT, slack.connected.notified())
+        .await
+        .expect("the daemon never opened Socket Mode");
+    write_frame(&mut c, &ClientRequest::SetAway { on: true })
+        .await
+        .unwrap();
+    read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::AwayChanged { away: true, .. }))
+    })
+    .await;
+    let agent_id = create_agent_get_id(&mut c, &worktree.id, "pick a colour", 2).await;
+    write_frame(
+        &mut c,
+        &ClientRequest::Attach {
+            session: SessionRef::Agent(agent_id.clone()),
+            from_seq: None,
+            cols: 120,
+            rows: 30,
+        },
+    )
+    .await
+    .unwrap();
+    let dm = |envelope: &str, text: &str, ts: &str, thread: Option<&str>| {
+        let mut event = serde_json::json!({
+            "type": "message", "channel": "DPHONE", "channel_type": "im",
+            "user": "UME", "text": text, "ts": ts,
+        });
+        if let Some(thread) = thread {
+            event["thread_ts"] = thread.into();
+        }
+        serde_json::json!({
+            "envelope_id": envelope,
+            "type": "events_api",
+            "payload": {"type": "event_callback", "event_id": envelope, "event": event}
+        })
+    };
+    let press = |envelope: &str, ts: &str, action: &str| {
+        serde_json::json!({
+            "envelope_id": envelope,
+            "type": "interactive",
+            "payload": {
+                "type": "block_actions",
+                "user": {"id": "UME"},
+                "container": {"type": "message", "message_ts": ts, "channel_id": "DPHONE"},
+                "actions": [{"action_id": action, "value": "x"}]
+            }
+        })
+    };
+    let didnt_take =
+        "⚠ That didn't take: it's still waiting on this. Try again, or answer at your desk.";
+
+    // ---- a plain DM with nothing waiting ----
+    slack.send(dm("env-0", "anything?", "1990.000100", None));
+    slack
+        .wait_for("nothing is waiting", |calls| {
+            calls
+                .iter()
+                .any(|(m, b)| m == "chat.postMessage" && b["text"] == "Nothing is waiting for you.")
+        })
+        .await;
+    std::fs::write(go(0), "").unwrap();
+
+    // ---- a press that doesn't take gets its buttons back ----
+    slack
+        .wait_for("the question's message", |_| slack.cards().len() == 1)
+        .await;
+    let (first_ts, _) = slack.cards()[0].clone();
+    slack.send(press("env-1", &first_ts, "orion_option_1"));
+    let mut seen = Vec::new();
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        seen = collected_output(evs);
+        String::from_utf8_lossy(&seen).contains("PICKED:2")
+    })
+    .await;
+    slack
+        .wait_for("that didn't take", |_| {
+            slack.updates(&first_ts) == ["✓ Sent: Green · working again", didnt_take]
+        })
+        .await;
+    let again = slack.updated_blocks(&first_ts).pop().unwrap();
+    let texts = block_texts(&again);
+    assert_eq!(
+        texts[texts.len() - 4..],
+        [
+            "*Which color do you like?*".to_string(),
+            format!("*{didnt_take}*"),
+            "[Red|Green|Type an answer…]".to_string(),
+            "or reply in this thread".to_string(),
+        ]
+    );
+    // Open again: a second press goes in.
+    slack.send(press("env-2", &first_ts, "orion_option_0"));
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        seen = collected_output(evs);
+        String::from_utf8_lossy(&seen).contains("AGAIN:1")
+    })
+    .await;
+
+    // ---- a plan while still red: a message of its own ----
+    slack
+        .wait_for("the plan's message", |_| slack.cards().len() == 2)
+        .await;
+    let (plan_ts, plan_card) = slack.cards()[1].clone();
+    assert_eq!(
+        block_texts(&plan_card["blocks"])[3..],
+        [
+            "1. Back up\n2. Migrate",
+            "*Approve this plan?*",
+            "[Approve|Suggest changes…]"
+        ]
+    );
+    assert_eq!(
+        slack.updates(&first_ts)[2],
+        "✓ Sent: Red · working again",
+        "the second press went in"
+    );
+
+    // ---- a question while red over the plan moves the plan's message on ----
+    std::fs::write(go(1), "").unwrap();
+    slack
+        .wait_for("the two questions' message", |_| slack.cards().len() == 3)
+        .await;
+    let (ask_ts, ask_card) = slack.cards()[2].clone();
+    assert_eq!(
+        slack.updates(&plan_ts),
+        ["Moved on: a newer question is below"]
+    );
+    let moved = block_texts(&slack.updated_blocks(&plan_ts)[0]);
+    assert_eq!(
+        moved.last().unwrap(),
+        "↓ Moved on: a newer question is below"
+    );
+    assert!(moved.iter().all(|t| !t.starts_with('[')), "{moved:?}");
+
+    // ---- a plain DM posts it again at the foot ----
+    slack.send(dm("env-3", "where was I?", "1991.000100", None));
+    slack
+        .wait_for("the re-sent message", |_| slack.cards().len() == 4)
+        .await;
+    let (resent_ts, resent_card) = slack.cards()[3].clone();
+    assert_eq!(slack.updates(&ask_ts), ["Re-sent below"]);
+    assert_eq!(
+        block_texts(&resent_card["blocks"])[1..],
+        block_texts(&ask_card["blocks"])[1..]
+    );
+    // ...and a reply in its thread answers it.
+    slack.send(dm("env-4", "purple", "1992.000100", Some(&resent_ts)));
+    slack
+        .wait_for("✓ Sent on the re-sent message", |_| {
+            slack.updates(&resent_ts).first().map(String::as_str)
+                == Some("✓ Sent: purple · working again")
+        })
+        .await;
+    assert!(
+        !String::from_utf8_lossy(&seen).contains("where was I"),
+        "a plain DM types nothing into the session"
+    );
+    // The press that went in was never called lost: the plan came next.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        slack.updates(&first_ts).len(),
+        3,
+        "{:?}",
+        slack.updates(&first_ts)
+    );
 
     write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
     wait_for_exit(&mut daemon);

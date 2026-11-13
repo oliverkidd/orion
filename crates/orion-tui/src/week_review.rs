@@ -10,9 +10,14 @@
 //! * **Gathering is orion's.** A run fetches every pull request merged in
 //!   the week in every project, description and all ([`fetch_merged`]):
 //!   a review is written from what a pull request says it does. Linear's
-//!   done issues and the ticked todos come from the lists the app already
-//!   holds ([`gather`]); a project with none of the three is left out
-//!   ([`split`]).
+//!   done issues come from a list asked afresh for every project with a
+//!   Linear key, and the ticked todos from the lists on disk ([`gather`]);
+//!   a project with none of the three is left out ([`split`]).
+//! * **Nothing is written from part of a week.** A fetch that fails is
+//!   tried again, three times, a while apart ([`retry_wait`]); one that
+//!   fails every time ends the run with nothing written, so the schedule
+//!   still counts the week as owed (`crate::automations::week_review`).
+//!   A write that fails is tried again once.
 //! * **Writing is a model's, one ask a project.** [`prompt`] puts a
 //!   project's week in one text and [`write`] sends it, as one
 //!   [`oneshot::run`], through a Claude account orion runs — the
@@ -88,6 +93,30 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(45);
 const PAGES_MAX: usize = 10;
 /// How long the write may take before it is given up on.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(300);
+/// How many times a project's review is sent before it is given up on:
+/// a write that fails is sent once more.
+const WRITE_TRIES: u32 = 2;
+/// How long a project's fetch that failed waits before each try again:
+/// three more tries, further apart each time.
+const RETRY_WAITS: [Duration; 3] = [
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(90),
+];
+
+/// A wait before trying again, `default` unless
+/// `ORION_WEEK_REVIEW_RETRY_SECS` says; `None` when it turns trying again
+/// off.
+pub fn retry_secs(default: Duration) -> Option<Duration> {
+    orion_core::env::secs_override(orion_core::env::WEEK_REVIEW_RETRY_SECS, default)
+}
+
+/// How long to wait before asking again after a fetch's `failures`th
+/// failure; `None` once its tries are spent.
+pub fn retry_wait(failures: usize) -> Option<Duration> {
+    let wait = *RETRY_WAITS.get(failures.checked_sub(1)?)?;
+    retry_secs(wait)
+}
 
 /// The model a review is written by while the **Week review** SYSTEM
 /// PRESET names none: the best blend of speed and judgement when the
@@ -489,7 +518,13 @@ pub fn gather(
             );
         }
         if picks[Source::Issues.index()] {
-            let issues = app.linear.get(&id).map(|l| l.list.as_slice());
+            // The run's own fresh list, else the one the app holds.
+            let issues = app
+                .week_review
+                .linear
+                .get(&id)
+                .or_else(|| app.linear.get(&id))
+                .map(|l| l.list.as_slice());
             for issue in issues.into_iter().flatten() {
                 let completed = issue.status_type == "completed"
                     && rfc3339_secs(&issue.completed_at).is_some_and(|at| at >= since);
@@ -1286,6 +1321,63 @@ pub struct Fetched {
 /// What one fetch covers: a project, and how many days back.
 pub type Window = (ProjectId, i64);
 
+/// What a run asks for, a project at a time, before it writes anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Feed {
+    /// The project's merged pull requests ([`fetch_merged`]).
+    GitHub,
+    /// The project's Linear lists ([`crate::linear::fetch_lists`]).
+    Linear,
+}
+
+impl Feed {
+    pub fn label(self) -> &'static str {
+        match self {
+            Feed::GitHub => "GitHub",
+            Feed::Linear => "Linear",
+        }
+    }
+}
+
+/// One ask of a run: a feed, for a project.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Need {
+    pub feed: Feed,
+    pub project: ProjectId,
+    pub name: String,
+    pub dir: PathBuf,
+}
+
+/// An ask of the run still out, or waiting to be made again.
+#[derive(Debug, Clone)]
+pub struct Ingest {
+    pub need: Need,
+    /// How many times it has failed.
+    pub failures: usize,
+    /// When it is asked again; `None` while it is out.
+    pub retry_at: Option<Instant>,
+}
+
+/// Why a run ended with nothing written: the feed that failed every try,
+/// and the project it failed for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failure {
+    pub feed: Feed,
+    pub project: String,
+}
+
+impl Failure {
+    /// `GitHub unreachable`.
+    pub fn short(&self) -> String {
+        format!("{} unreachable", self.feed.label())
+    }
+
+    /// `GitHub unreachable for riplo-os`.
+    pub fn label(&self) -> String {
+        format!("{} for {}", self.short(), self.project)
+    }
+}
+
 /// Where one project's review in the run being written is.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PartState {
@@ -1306,6 +1398,8 @@ pub struct Part {
     pub state: PartState,
     pub secs: u64,
     pub cost: Option<f64>,
+    /// How many times it has been sent to be written ([`WRITE_TRIES`]).
+    pub tries: u32,
 }
 
 /// The run being written: one review a project that had changes.
@@ -1317,9 +1411,11 @@ pub struct Run {
     /// Unix seconds when it was asked: what dates it.
     pub asked: i64,
     pub started: Instant,
-    /// GitHub is still being asked what merged: nothing is written yet.
+    /// GitHub and Linear are still being asked: nothing is written yet.
     pub fetching: bool,
-    /// Every project with changes, once GitHub has answered.
+    /// What is still being asked, or waiting to be asked again.
+    pub ingest: Vec<Ingest>,
+    /// Every project with changes, once everything asked has answered.
     pub parts: Vec<Part>,
     /// Who writes it, and at what.
     pub account: Account,
@@ -1329,6 +1425,8 @@ pub struct Run {
     pub rules: String,
     /// The writes, for `⌘W` to stop.
     pub tasks: Vec<tokio::task::AbortHandle>,
+    /// [`AT_ONCE`] writes at a time, a write sent again among them.
+    gate: std::sync::Arc<tokio::sync::Semaphore>,
     /// Its folder has been emptied of a run of the same day it replaces.
     cleared: bool,
 }
@@ -1349,6 +1447,39 @@ impl Run {
             .filter(|p| p.state != PartState::Writing)
             .count();
         (back, self.parts.len())
+    }
+
+    /// What it is waiting on while it gathers: a fetch to be tried again —
+    /// `GitHub didn't answer for riplo-os, trying again in 30s` — else
+    /// what is still being asked.
+    pub fn waiting_on(&self) -> String {
+        let retrying = self.ingest.iter().find_map(|i| Some((i, i.retry_at?)));
+        if let Some((ingest, at)) = retrying {
+            let left = at.saturating_duration_since(Instant::now());
+            let secs = left.as_millis().div_ceil(1000);
+            return format!(
+                "{} didn't answer for {}, trying again in {secs}s",
+                ingest.need.feed.label(),
+                ingest.need.name
+            );
+        }
+        let asking = |feed| self.ingest.iter().any(|i| i.need.feed == feed);
+        match (asking(Feed::GitHub), asking(Feed::Linear)) {
+            (true, true) => "asking GitHub and Linear".into(),
+            (false, true) => "asking Linear".into(),
+            _ => "asking GitHub".into(),
+        }
+    }
+
+    /// What its page says while it gathers.
+    fn waiting_line(&self) -> String {
+        if self.ingest.iter().any(|i| i.retry_at.is_some()) {
+            return self.waiting_on();
+        }
+        match self.ingest.iter().any(|i| i.need.feed == Feed::Linear) {
+            true => "Asking GitHub and Linear what was finished in each project".into(),
+            false => "Asking GitHub what merged in each project".into(),
+        }
     }
 
     /// Its folder: a second run to the same day takes the first's place.
@@ -1396,6 +1527,17 @@ pub enum Answer {
         window: Window,
         prs: Option<Vec<MergedPr>>,
     },
+    /// A project's Linear lists, asked afresh for a run.
+    Linear {
+        project: ProjectId,
+        list: Result<Box<crate::linear::LinearList>, String>,
+    },
+    /// Run `run`'s wait before asking `feed` again for `project` is over.
+    Retry {
+        run: u64,
+        feed: Feed,
+        project: ProjectId,
+    },
     Written {
         run: u64,
         part: usize,
@@ -1415,8 +1557,16 @@ pub struct State {
     pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
     pub fetched: HashMap<Window, Fetched>,
     pub fetching: HashSet<Window>,
+    /// The Linear lists asked afresh for the run being gathered.
+    pub linear: HashMap<ProjectId, crate::linear::LinearList>,
+    /// The projects whose Linear lists are out.
+    pub linear_fetching: HashSet<ProjectId>,
     /// The run being written.
     pub run: Option<Run>,
+    /// Why the last run ended with nothing written, until the next starts
+    /// or the schedule takes it to try again
+    /// (`crate::automations::week_review`).
+    pub failed: Option<Failure>,
     /// The runs kept, newest first, as of the last one kept ([`reload`]).
     pub kept: Vec<Saved>,
     next_id: u64,
@@ -1432,27 +1582,41 @@ pub fn reload(app: &mut App) {
         .unwrap_or_default();
 }
 
-/// Ask for `project`'s last `days` of merged pull requests, unless that
-/// fetch is out or a fresh one is in hand.
-fn request_fetch(app: &mut App, project: &ProjectId, name: &str, dir: &Path, days: i64) {
+/// Ask for `need`, unless that ask is out already — an answer to one
+/// still out from a run stopped since serves this one too. Without a
+/// channel (every unit test) nothing goes out.
+fn ask(app: &mut App, need: &Need) {
     let state = &mut app.week_review;
-    let window = (project.clone(), days);
-    let fresh = state
-        .fetched
-        .get(&window)
-        .is_some_and(|f| f.prs.is_some() && f.at.elapsed() < FRESH);
     let Some(tx) = state.tx.clone() else {
         return;
     };
-    if fresh || !state.fetching.insert(window.clone()) {
-        return;
+    let (project, name, dir) = (need.project.clone(), need.name.clone(), need.dir.clone());
+    match need.feed {
+        Feed::GitHub => {
+            let window = (project, DAYS);
+            if !state.fetching.insert(window.clone()) {
+                return;
+            }
+            let now = orion_core::clock::now_secs() as i64;
+            tokio::spawn(async move {
+                let prs = fetch_merged(dir, name, now, DAYS).await;
+                let _ = tx.send(Answer::Fetched { window, prs });
+            });
+        }
+        Feed::Linear => {
+            if !state.linear_fetching.insert(project.clone()) {
+                return;
+            }
+            let email = crate::config::Config::load()
+                .linear_assignee_email
+                .trim()
+                .to_string();
+            tokio::spawn(async move {
+                let list = crate::linear::fetch_lists(&dir, &email).await.map(Box::new);
+                let _ = tx.send(Answer::Linear { project, list });
+            });
+        }
     }
-    let (name, dir) = (name.to_string(), dir.to_path_buf());
-    let now = orion_core::clock::now_secs() as i64;
-    tokio::spawn(async move {
-        let prs = fetch_merged(dir, name, now, days).await;
-        let _ = tx.send(Answer::Fetched { window, prs });
-    });
 }
 
 /// The todos in `items` ticked since `since` (secs), into `material`.
@@ -1474,21 +1638,67 @@ fn push_ticked<'a>(
     }
 }
 
-/// Ask for every project's week: its merged pull requests, and the lists
-/// a review reads beside them — Linear's, where the project has a key, and
-/// its todos. A fetch gone stale is let go first: descriptions are heavy.
-fn request_all(app: &mut App) {
+/// Ready what a run reads beside what it asks for: a fetch gone stale
+/// let go (descriptions are heavy), the last run's Linear lists dropped,
+/// and every project's todos read from disk — at once, so they are
+/// always in hand.
+fn prepare(app: &mut App) {
     app.week_review
         .fetched
         .retain(|_, fetched| fetched.at.elapsed() < FRESH);
+    app.week_review.linear.clear();
     crate::todos::view::load_list(app, crate::todos::store::blue_sky_key());
-    let projects = every_project(app);
-    for (id, name, dir) in projects {
-        request_fetch(app, &id, &name, &dir, DAYS);
-        crate::todos::view::load_list(app, dir.clone());
-        if !app.linear.contains_key(&id) && crate::linear::key_source(&dir).is_some() {
-            crate::linear::request_list(app, id, dir, false);
+    for (_, _, dir) in every_project(app) {
+        crate::todos::view::load_list(app, dir);
+    }
+}
+
+/// What a run asks for before it writes: each project's merged pull
+/// requests where it is on GitHub (`on_github`) and none were fetched
+/// lately, and its Linear lists — always afresh — where it has a key
+/// (`has_key`). A project with neither has nothing to ask, which is no
+/// failure: its review is written from what else it finished.
+fn needs(
+    app: &App,
+    on_github: &dyn Fn(&Path) -> bool,
+    has_key: &dyn Fn(&Path) -> bool,
+) -> Vec<Need> {
+    let mut needs = Vec::new();
+    for (project, name, dir) in every_project(app) {
+        let in_hand = app
+            .week_review
+            .fetched
+            .get(&(project.clone(), DAYS))
+            .is_some_and(|f| f.prs.is_some() && f.at.elapsed() < FRESH);
+        let wanted = [
+            (Feed::GitHub, !in_hand && on_github(&dir)),
+            (Feed::Linear, has_key(&dir)),
+        ];
+        for (feed, _) in wanted.into_iter().filter(|(_, wanted)| *wanted) {
+            needs.push(Need {
+                feed,
+                project: project.clone(),
+                name: name.clone(),
+                dir: dir.clone(),
+            });
         }
+    }
+    needs
+}
+
+/// Whether the checkout at `dir` is on GitHub: one with no remote, or a
+/// remote elsewhere, has no pull requests to ask about.
+fn on_github(dir: &Path) -> bool {
+    crate::remote::repo_url(dir).is_ok_and(|url| url.contains("github"))
+}
+
+/// What a run the main loop started asks for; nothing without a channel.
+fn live_needs(app: &App) -> Vec<Need> {
+    match app.week_review.tx {
+        Some(_) => needs(app, &on_github, &|dir| {
+            crate::linear::key_source(dir).is_some()
+        }),
+        None => Vec::new(),
     }
 }
 
@@ -1501,29 +1711,15 @@ fn every_project(app: &App) -> Vec<(ProjectId, String, PathBuf)> {
         .collect()
 }
 
-/// Whether GitHub is still being asked about any project's week.
-fn still_fetching(app: &App) -> bool {
-    app.tree
-        .projects
-        .iter()
-        .any(|p| app.week_review.fetching.contains(&(p.id.clone(), DAYS)))
-}
-
 /// Every project that had changes in the week before `now`, each with
-/// what its review is written from; a project with none is left out. A
-/// project GitHub could not be asked about is not written up — a review
-/// of part of a week would pass it off as the whole — and says so, unless
-/// it had nothing else finished either.
+/// what its review is written from; a project with none is left out. Only
+/// reached once everything the run asked has answered: a project with no
+/// pull requests in hand is one not on GitHub.
 pub fn split(app: &App, scope: Scope, now: i64) -> Vec<Part> {
     let mut slugs = HashSet::new();
     let mut parts = Vec::new();
     for (id, name, _) in every_project(app) {
-        let asked = app
-            .week_review
-            .fetched
-            .get(&(id.clone(), scope.range.days()))
-            .is_some_and(|f| f.prs.is_some());
-        let material = gather(app, &id, scope, [asked, true, true], now);
+        let material = gather(app, &id, scope, [true; 3], now);
         if material.is_empty() {
             continue;
         }
@@ -1541,29 +1737,31 @@ pub fn split(app: &App, scope: Scope, now: i64) -> Vec<Part> {
             Whose::Everyone => legend(&material.prs),
             Whose::Mine => Vec::new(),
         };
-        let state = match asked {
-            true => PartState::Writing,
-            false => PartState::Failed("GitHub could not be asked what merged".into()),
-        };
         parts.push(Part {
             project: id,
             name,
             slug,
             material,
             people,
-            state,
+            state: PartState::Writing,
             secs: 0,
             cost: None,
+            tries: 0,
         });
     }
     parts
 }
 
-/// Start a run: every project's week asked for, then — as GitHub answers
-/// ([`advance`]) — a review written for each one that had changes. The
-/// **Week in review** automation's preset and extra steer say how, its
-/// **Whose** whose. Why not, when it can't start.
+/// Start a run: every project's week asked for, then — once GitHub and
+/// Linear have answered ([`advance`]) — a review written for each one
+/// that had changes. The **Week in review** automation's preset and extra
+/// steer say how, its **Whose** whose. Why not, when it can't start.
 pub fn run_now(app: &mut App) -> Result<(), String> {
+    start(app, live_needs)
+}
+
+/// [`run_now`], asking what `needs` says.
+fn start(app: &mut App, needs: impl FnOnce(&App) -> Vec<Need>) -> Result<(), String> {
     use crate::automations::{config::Whose as Whom, Automation};
     if app.week_review.run.is_some() {
         return Err("a week in review is already being written".into());
@@ -1593,7 +1791,9 @@ pub fn run_now(app: &mut App) -> Result<(), String> {
         ..Scope::default()
     };
     let (model, effort) = launch_of(&preset);
-    request_all(app);
+    prepare(app);
+    let needs = needs(app);
+    app.week_review.failed = None;
     app.week_review.next_id += 1;
     app.week_review.run = Some(Run {
         id: app.week_review.next_id,
@@ -1601,32 +1801,48 @@ pub fn run_now(app: &mut App) -> Result<(), String> {
         asked: orion_core::clock::now_secs() as i64,
         started: Instant::now(),
         fetching: true,
+        ingest: needs
+            .iter()
+            .map(|need| Ingest {
+                need: need.clone(),
+                failures: 0,
+                retry_at: None,
+            })
+            .collect(),
         parts: Vec::new(),
         account: through.unwrap_or_default(),
         model,
         effort,
         rules: crate::automations::compose(&preset, "", &own.extra_steer),
         tasks: Vec::new(),
+        gate: std::sync::Arc::new(tokio::sync::Semaphore::new(AT_ONCE)),
         cleared: false,
     });
+    for need in &needs {
+        ask(app, need);
+    }
     app.flash = Some(Flash::working("Week in review: writing…"));
     advance(app);
     app.dirty = true;
     Ok(())
 }
 
-/// The run moves on once GitHub has answered about every project: each
-/// project with changes has its review written, [`AT_ONCE`] at a time.
+/// The run moves on once everything it asked has answered: each project
+/// with changes has its review written, [`AT_ONCE`] at a time.
 fn advance(app: &mut App) {
-    let waiting = app.week_review.run.as_ref().is_some_and(|r| r.fetching);
-    if !waiting || still_fetching(app) {
+    let ready = app
+        .week_review
+        .run
+        .as_ref()
+        .is_some_and(|r| r.fetching && r.ingest.is_empty());
+    if !ready {
         return;
     }
     let Some((scope, asked)) = app.week_review.run.as_ref().map(|r| (r.scope, r.asked)) else {
         return;
     };
     let parts = split(app, scope, asked);
-    let tx = app.week_review.tx.clone();
+    app.week_review.linear.clear();
     let Some(run) = app.week_review.run.as_mut() else {
         return;
     };
@@ -1639,40 +1855,52 @@ fn advance(app: &mut App) {
         )));
         return;
     }
-    if let Some(tx) = tx {
-        let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(AT_ONCE));
-        for (index, part) in run.parts.iter().enumerate() {
-            if part.state != PartState::Writing {
-                continue;
-            }
-            let text = prompt(
-                &part.material,
-                &part.people,
-                run.scope,
-                &part.name,
-                &run.rules,
-                run.asked,
-            );
-            let (model, effort, account) =
-                (run.model.clone(), run.effort.clone(), run.account.clone());
-            let (gate, tx, id) = (gate.clone(), tx.clone(), run.id);
-            let task = tokio::spawn(async move {
-                let _turn = gate.acquire_owned().await;
-                let started = Instant::now();
-                let result = write(text, model, effort, account).await;
-                let secs = started.elapsed().as_secs();
-                let _ = tx.send(Answer::Written {
-                    run: id,
-                    part: index,
-                    result,
-                    secs,
-                });
-            });
-            run.tasks.push(task.abort_handle());
-        }
+    for index in 0..run.parts.len() {
+        send_write(app, index);
     }
-    // Every project with changes may have failed already.
-    finish_run(app);
+}
+
+/// Send the run's `index`th review to be written — again, after a write
+/// that failed.
+fn send_write(app: &mut App, index: usize) {
+    let tx = app.week_review.tx.clone();
+    let Some(run) = app.week_review.run.as_mut() else {
+        return;
+    };
+    let Some(part) = run
+        .parts
+        .get_mut(index)
+        .filter(|p| p.state == PartState::Writing)
+    else {
+        return;
+    };
+    part.tries += 1;
+    let Some(tx) = tx else {
+        return;
+    };
+    let text = prompt(
+        &part.material,
+        &part.people,
+        run.scope,
+        &part.name,
+        &run.rules,
+        run.asked,
+    );
+    let (model, effort, account) = (run.model.clone(), run.effort.clone(), run.account.clone());
+    let (gate, id) = (run.gate.clone(), run.id);
+    let task = tokio::spawn(async move {
+        let _turn = gate.acquire_owned().await;
+        let started = Instant::now();
+        let result = write(text, model, effort, account).await;
+        let secs = started.elapsed().as_secs();
+        let _ = tx.send(Answer::Written {
+            run: id,
+            part: index,
+            result,
+            secs,
+        });
+    });
+    run.tasks.push(task.abort_handle());
 }
 
 /// An answer landed on the loop.
@@ -1680,6 +1908,8 @@ pub fn land_answer(app: &mut App, answer: Answer) {
     match answer {
         Answer::Fetched { window, prs } => {
             app.week_review.fetching.remove(&window);
+            let ok = prs.is_some();
+            let (project, days) = window.clone();
             app.week_review.fetched.insert(
                 window,
                 Fetched {
@@ -1687,8 +1917,25 @@ pub fn land_answer(app: &mut App, answer: Answer) {
                     prs,
                 },
             );
-            advance(app);
+            if days == DAYS {
+                landed(app, Feed::GitHub, &project, ok);
+            }
         }
+        Answer::Linear { project, list } => {
+            app.week_review.linear_fetching.remove(&project);
+            let ok = match list {
+                Ok(list) => {
+                    app.week_review.linear.insert(project.clone(), *list);
+                    true
+                }
+                Err(err) => {
+                    tracing::warn!("week in review: Linear lists not fetched: {err}");
+                    false
+                }
+            };
+            landed(app, Feed::Linear, &project, ok);
+        }
+        Answer::Retry { run, feed, project } => retry(app, run, feed, &project),
         Answer::Written {
             run,
             part,
@@ -1699,8 +1946,114 @@ pub fn land_answer(app: &mut App, answer: Answer) {
     app.dirty = true;
 }
 
-/// One project's review came back: checked, finished and kept — or why
-/// not — and the run finished once it was the last.
+/// `feed` answered about `project`, or failed to, for the run gathering:
+/// an answer crosses it off; a failure is asked again after a wait
+/// ([`retry_wait`]), and one whose tries are spent ends the run
+/// ([`give_up`]).
+fn landed(app: &mut App, feed: Feed, project: &ProjectId, ok: bool) {
+    let tx = app.week_review.tx.clone();
+    let Some(run) = app.week_review.run.as_mut().filter(|r| r.fetching) else {
+        return;
+    };
+    let out = run
+        .ingest
+        .iter()
+        .position(|i| i.need.feed == feed && &i.need.project == project && i.retry_at.is_none());
+    let Some(at) = out else {
+        return;
+    };
+    if ok {
+        run.ingest.remove(at);
+        advance(app);
+        return;
+    }
+    let id = run.id;
+    let ingest = &mut run.ingest[at];
+    ingest.failures += 1;
+    let name = ingest.need.name.clone();
+    let Some(wait) = retry_wait(ingest.failures) else {
+        give_up(
+            app,
+            Failure {
+                feed,
+                project: name,
+            },
+        );
+        return;
+    };
+    ingest.retry_at = Some(Instant::now() + wait);
+    let said = format!(
+        "{} didn't answer for {name}, trying again in {}s",
+        feed.label(),
+        wait.as_secs()
+    );
+    tracing::warn!("week in review: {said}");
+    app.flash = Some(Flash::working(format!("Week in review: {said}")));
+    if let Some(tx) = tx {
+        let project = project.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            let _ = tx.send(Answer::Retry {
+                run: id,
+                feed,
+                project,
+            });
+        });
+    }
+}
+
+/// Run `id`'s wait before asking `feed` again about `project` is over:
+/// asked again, while that run is still gathering.
+fn retry(app: &mut App, id: u64, feed: Feed, project: &ProjectId) {
+    let Some(run) = app
+        .week_review
+        .run
+        .as_mut()
+        .filter(|r| r.id == id && r.fetching)
+    else {
+        return;
+    };
+    let waiting = run
+        .ingest
+        .iter_mut()
+        .find(|i| i.need.feed == feed && &i.need.project == project && i.retry_at.is_some());
+    let Some(ingest) = waiting else {
+        return;
+    };
+    ingest.retry_at = None;
+    let need = ingest.need.clone();
+    app.flash = Some(Flash::working(format!(
+        "Week in review: asking {} again about {}",
+        feed.label(),
+        need.name
+    )));
+    ask(app, &need);
+}
+
+/// A fetch failed every try: the run ends with nothing written — no
+/// folder, no `meta.json` — so the schedule still counts the week owed,
+/// and the footer says what failed and for which project.
+fn give_up(app: &mut App, failure: Failure) {
+    if let Some(run) = app.week_review.run.take() {
+        for task in run.tasks {
+            task.abort();
+        }
+    }
+    app.week_review.linear.clear();
+    tracing::warn!("week in review failed: {}", failure.label());
+    app.flash = Some(Flash::failed(format!(
+        "Week in review failed: {} · r to try again",
+        failure.label()
+    )));
+    app.week_review.failed = Some(failure);
+    if matches!(&app.overlay, Some(Overlay::WeekReview(v)) if v.dir.is_none()) {
+        close(app);
+    }
+}
+
+/// One project's review came back: checked, finished and kept — or, the
+/// first time it fails, sent again; the second, why not — and the run
+/// finished once it was the last.
 pub fn land_written(
     app: &mut App,
     id: u64,
@@ -1715,16 +2068,31 @@ pub fn land_written(
         return;
     };
     part.secs = secs;
-    part.state = match result {
+    let again = match result {
         Ok(reply) => {
             part.cost = reply.cost;
-            PartState::Done {
+            part.state = PartState::Done {
                 problems: check(&reply.text, &part.material, &part.people),
                 text: finish(&reply.text, &part.material),
-            }
+            };
+            false
         }
-        Err(why) => PartState::Failed(why),
+        Err(why) if part.tries < WRITE_TRIES => {
+            tracing::warn!(
+                "week in review: {}'s review failed, sent again: {why}",
+                part.name
+            );
+            true
+        }
+        Err(why) => {
+            part.state = PartState::Failed(why);
+            false
+        }
     };
+    if again {
+        send_write(app, index);
+        return;
+    }
     keep(app, index);
     finish_run(app);
 }
@@ -1832,6 +2200,7 @@ fn stop(app: &mut App) {
         task.abort();
     }
     run.fetching = false;
+    run.ingest.clear();
     for part in &mut run.parts {
         if part.state == PartState::Writing {
             part.state = PartState::Failed("stopped".into());
@@ -2382,8 +2751,9 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &WeekReviewView, th: Theme) {
     let run = app.week_review.run.as_ref().filter(|_| view.dir.is_none());
     let title = match run {
         Some(run) if run.fetching => format!(
-            "{} · asking GitHub · {}",
+            "{} · {} · {}",
             run.name(),
+            run.waiting_on(),
             run.scope.whose_label()
         ),
         Some(run) => {
@@ -2428,12 +2798,7 @@ pub fn draw(f: &mut Frame, app: &mut App, view: &WeekReviewView, th: Theme) {
     let phase = app.animations.then(|| app.sweep_phase());
     let lines = match (run, view.texts.get(tab)) {
         (Some(run), _) => match run.parts.get(tab) {
-            None => vec![waiting_line(
-                app,
-                "Asking GitHub what merged in each project",
-                width,
-                th,
-            )],
+            None => vec![waiting_line(app, &run.waiting_line(), width, th)],
             Some(part) => match &part.state {
                 PartState::Done { text, problems } => {
                     review_lines(text, problems, width, phase, th)
@@ -3184,8 +3549,8 @@ AL Ada L · GR Grace
     }
 
     /// A run is one review a project that had changes: a project with
-    /// none is left out, each one's material is its own, and one GitHub
-    /// could not be asked about is not written from the rest.
+    /// none is left out, and each one's material is its own — one with no
+    /// pull requests in hand (not on GitHub) is written from the rest.
     #[test]
     fn a_run_splits_by_project_and_skips_the_quiet_ones() {
         let (mut app, _, now) = app_with_week();
@@ -3205,8 +3570,8 @@ AL Ada L · GR Grace
         assert_eq!(team[0].material.prs.len(), 3);
         assert_eq!(team[0].people.len(), 2, "each point names its owner");
 
-        // GitHub couldn't be asked about docs: with nothing else finished
-        // there it is left out; with an issue done, it says why.
+        // No pull requests for docs: with nothing else finished there it
+        // is left out; with an issue done, it is written from that.
         app.week_review
             .fetched
             .get_mut(&(ProjectId("p3".into()), DAYS))
@@ -3221,11 +3586,9 @@ AL Ada L · GR Grace
             },
         );
         let parts = split(&app, Scope::default(), now);
-        assert!(
-            matches!(&parts[1].state, PartState::Failed(why) if why.contains("GitHub")),
-            "{:?}",
-            parts[1].state
-        );
+        assert_eq!(parts[1].state, PartState::Writing);
+        assert!(parts[1].material.prs.is_empty());
+        assert_eq!(parts[1].material.issues.len(), 1);
         // Two projects of one name keep a file each.
         app.tree.projects[2].name = "demo".into();
         app.week_review
@@ -3326,6 +3689,8 @@ AL Ada L · GR Grace
             run_now(&mut app).unwrap();
             land(&mut app, 0, Ok(REVIEW));
             land(&mut app, 1, Err("timed out"));
+            assert!(app.week_review.run.is_some(), "sent again once");
+            land(&mut app, 1, Err("timed out"));
             assert_eq!(
                 app.flash.as_deref(),
                 Some("Week in review ready · 1 couldn't be written")
@@ -3354,6 +3719,7 @@ AL Ada L · GR Grace
             app.week_review.root = Some(dir.path().to_path_buf());
             run_now(&mut app).unwrap();
             land(&mut app, 0, Err("not signed in"));
+            land(&mut app, 0, Err("not signed in"));
             assert!(app.week_review.run.is_none());
             assert!(app.week_review.kept.is_empty());
             assert_eq!(app.flash.as_deref(), Some("Week in review: not signed in"));
@@ -3366,6 +3732,231 @@ AL Ada L · GR Grace
                 quiet.flash.as_deref(),
                 Some("Week in review: nothing finished in the last 7 days to write up")
             );
+        });
+    }
+
+    /// `demo`'s week as GitHub sends it, and the app with none of it in
+    /// hand yet.
+    fn app_asking_github() -> (App, ProjectId, Vec<MergedPr>) {
+        let (mut app, project, _) = app_with_week();
+        let window = (project.clone(), DAYS);
+        let prs = app.week_review.fetched.remove(&window).unwrap().prs;
+        (app, project, prs.unwrap())
+    }
+
+    /// GitHub's answer about `project`'s week.
+    fn github(app: &mut App, project: &ProjectId, prs: Option<Vec<MergedPr>>) {
+        let window = (project.clone(), DAYS);
+        land_answer(app, Answer::Fetched { window, prs });
+    }
+
+    /// Linear's answer about `project`'s lists.
+    fn linear(
+        app: &mut App,
+        project: &ProjectId,
+        list: Result<Vec<crate::linear::LinearIssue>, &str>,
+    ) {
+        let list = list
+            .map(|list| {
+                Box::new(crate::linear::LinearList {
+                    list,
+                    ..Default::default()
+                })
+            })
+            .map_err(str::to_string);
+        let project = project.clone();
+        land_answer(app, Answer::Linear { project, list });
+    }
+
+    /// The wait before asking `feed` again about `project` running out.
+    fn waited(app: &mut App, feed: Feed, project: &ProjectId) {
+        let run = app.week_review.run.as_ref().expect("a run").id;
+        let project = project.clone();
+        land_answer(app, Answer::Retry { run, feed, project });
+    }
+
+    /// A fetch that fails is asked again after a wait, and the footer and
+    /// the run say so; one that answers on its third try makes a run of
+    /// the whole week.
+    #[test]
+    fn a_fetch_that_fails_twice_then_answers_writes_the_whole_week() {
+        pinned(|| {
+            let (mut app, project, prs) = app_asking_github();
+            let dir = tempfile::tempdir().unwrap();
+            app.week_review.root = Some(dir.path().to_path_buf());
+            start(&mut app, |app| needs(app, &|_| true, &|_| false)).unwrap();
+            let run = app.week_review.run.as_ref().unwrap();
+            assert!(run.fetching, "waits on GitHub");
+            assert_eq!(run.waiting_on(), "asking GitHub");
+
+            github(&mut app, &project, None);
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("Week in review: GitHub didn't answer for demo, trying again in 10s")
+            );
+            let waiting = app.week_review.run.as_ref().expect("still on").waiting_on();
+            assert!(
+                waiting.starts_with("GitHub didn't answer for demo, trying again in "),
+                "{waiting}"
+            );
+            // An answer to an ask no longer out changes nothing.
+            github(&mut app, &project, None);
+            assert!(app.flash.as_deref().unwrap().ends_with("in 10s"));
+
+            waited(&mut app, Feed::GitHub, &project);
+            assert_eq!(
+                app.week_review.run.as_ref().unwrap().waiting_on(),
+                "asking GitHub"
+            );
+            github(&mut app, &project, None);
+            assert!(app
+                .flash
+                .as_deref()
+                .unwrap()
+                .ends_with("trying again in 30s"));
+            waited(&mut app, Feed::GitHub, &project);
+            github(&mut app, &project, Some(prs));
+
+            let run = app.week_review.run.as_ref().unwrap();
+            assert!(!run.fetching);
+            assert_eq!(run.parts.len(), 1);
+            assert_eq!(run.parts[0].material.prs.len(), 2, "the whole week");
+            land(&mut app, 0, Ok(REVIEW));
+            assert_eq!(app.flash.as_deref(), Some("Week in review ready · ⌘J"));
+            assert_eq!(app.week_review.kept.len(), 1);
+            assert!(app.week_review.failed.is_none());
+        });
+    }
+
+    /// A fetch failing every try writes nothing — no folder, no
+    /// `meta.json`, not even the projects whose weeks came back — so the
+    /// schedule still owes the week; the footer says what failed, and for
+    /// which project.
+    #[test]
+    fn a_fetch_that_fails_every_try_writes_nothing() {
+        pinned(|| {
+            let (mut app, project, _) = app_asking_github();
+            with_two_more(&mut app, orion_core::clock::now_secs() as i64);
+            let dir = tempfile::tempdir().unwrap();
+            app.week_review.root = Some(dir.path().to_path_buf());
+            start(&mut app, |app| needs(app, &|_| true, &|_| false)).unwrap();
+            for _ in RETRY_WAITS {
+                github(&mut app, &project, None);
+                assert!(app.week_review.run.is_some(), "tried again");
+                waited(&mut app, Feed::GitHub, &project);
+            }
+            github(&mut app, &project, None);
+            assert!(app.week_review.run.is_none());
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("Week in review failed: GitHub unreachable for demo · r to try again")
+            );
+            assert_eq!(
+                app.week_review.failed,
+                Some(Failure {
+                    feed: Feed::GitHub,
+                    project: "demo".into()
+                })
+            );
+            assert!(!dir.path().join("all").exists(), "no folder");
+            assert!(app.week_review.kept.is_empty());
+            // The schedule still counts the week owed.
+            use crate::automations::week_review::{default_when, due};
+            let now = Local::now().naive_local();
+            let last = load_runs(dir.path())
+                .first()
+                .and_then(|s| chrono::DateTime::from_timestamp(s.meta.written_at, 0))
+                .map(|at| at.with_timezone(&Local).naive_local());
+            assert!(due(
+                &default_when(),
+                now,
+                last,
+                now - chrono::Duration::days(8)
+            ));
+        });
+    }
+
+    /// Every project with a Linear key has its lists asked afresh when a
+    /// run starts, and the run waits for them: what it writes up is the
+    /// fresh list's, not the list the app held. Linear failing is asked
+    /// again as GitHub is.
+    #[test]
+    fn linear_lists_are_asked_afresh_and_waited_for() {
+        pinned(|| {
+            let (mut app, project, now) = app_with_week();
+            app.linear.insert(
+                project.clone(),
+                crate::linear::LinearList {
+                    list: vec![issue("1", true, now, 1)],
+                    ..Default::default()
+                },
+            );
+            let feeds: Vec<Feed> = needs(&app, &|_| true, &|_| true)
+                .into_iter()
+                .map(|n| n.feed)
+                .collect();
+            assert_eq!(feeds, [Feed::Linear], "the week's merges are in hand");
+            start(&mut app, |app| needs(app, &|_| true, &|_| true)).unwrap();
+            let run = app.week_review.run.as_ref().unwrap();
+            assert!(run.fetching, "waits on Linear");
+            assert_eq!(run.waiting_on(), "asking Linear");
+
+            linear(&mut app, &project, Err("timed out"));
+            assert_eq!(
+                app.flash.as_deref(),
+                Some("Week in review: Linear didn't answer for demo, trying again in 10s")
+            );
+            waited(&mut app, Feed::Linear, &project);
+            linear(&mut app, &project, Ok(vec![issue("2", true, now, 1)]));
+            let run = app.week_review.run.as_ref().unwrap();
+            assert!(!run.fetching);
+            let issues: Vec<&str> = run.parts[0]
+                .material
+                .issues
+                .iter()
+                .map(|i| i.identifier.as_str())
+                .collect();
+            assert_eq!(issues, ["ENG-2"], "the fresh list's");
+            assert!(app.week_review.linear.is_empty(), "let go once read");
+        });
+    }
+
+    /// A project with no Linear key, or not on GitHub, has nothing to ask
+    /// there: it holds nothing up, and is written from what it has.
+    #[test]
+    fn a_project_with_no_linear_key_holds_nothing_up() {
+        pinned(|| {
+            let (mut app, project, now) = app_with_week();
+            with_two_more(&mut app, now);
+            let keyed = app.tree.projects[0].repo_path.clone();
+            let has_key = move |dir: &Path| dir == keyed.as_path();
+            start(&mut app, |app| needs(app, &|_| false, &has_key)).unwrap();
+            let run = app.week_review.run.as_ref().unwrap();
+            assert_eq!(run.ingest.len(), 1, "only demo's Linear");
+            linear(&mut app, &project, Ok(Vec::new()));
+            let run = app.week_review.run.as_ref().unwrap();
+            assert!(!run.fetching);
+            let names: Vec<&str> = run.parts.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["demo", "docs"]);
+            // Not on GitHub, no key: nothing to ask.
+            app.week_review.fetched.clear();
+            assert!(needs(&app, &|_| false, &|_| false).is_empty());
+        });
+    }
+
+    /// A write that fails is sent once more before it counts as failed.
+    #[test]
+    fn a_write_that_fails_once_is_sent_again() {
+        pinned(|| {
+            let (mut app, _, _) = app_with_week();
+            run_now(&mut app).unwrap();
+            assert_eq!(app.week_review.run.as_ref().unwrap().parts[0].tries, 1);
+            land(&mut app, 0, Err("overloaded"));
+            let part = &app.week_review.run.as_ref().expect("sent again").parts[0];
+            assert_eq!((&part.state, part.tries), (&PartState::Writing, 2));
+            land(&mut app, 0, Ok(REVIEW));
+            assert!(app.week_review.run.is_none());
+            assert_eq!(app.flash.as_deref(), Some("Week in review ready · ⌘J"));
         });
     }
 

@@ -366,6 +366,19 @@ pub enum MenuAction {
     OpenWorktree(WorktreeId),
     AddProject,
     RemoveProject(ProjectId),
+    /// A PROJECT TAB's right-click **Close…**: the CLOSE PROJECT DIALOG
+    /// every way of closing a tab opens (`launcher::ask_close_tab`).
+    AskCloseProjectTab(ProjectId),
+    /// The CLOSE PROJECT DIALOG's **Close tab**: only the tab goes — the
+    /// project stays in orion, and the `+` or the palette opens it again
+    /// (`launcher::close_cursor_tab`).
+    CloseProjectTab(ProjectId),
+    /// The CLOSE PROJECT DIALOG's **Remove from orion**: the tab goes and
+    /// the DAEMON forgets the project (`ClientRequest::RemoveProject`) —
+    /// it stops checking the folder, and its live sessions stop. The
+    /// dialog was the question, so nothing asks again; nothing on disk is
+    /// touched, and its todos stay (they are kept by the folder's path).
+    ForgetProject(ProjectId),
     /// Retitle a project's row. Display only — the folder keeps its name and
     /// stays visible under the new one.
     RenameProject(ProjectId),
@@ -504,6 +517,10 @@ pub struct ContextMenu {
     /// Type-ahead over the rows — set on the MODEL / EFFORT submenus, where
     /// letters filter instead of moving (↑/↓ move there); None elsewhere.
     pub filter: Option<MenuFilter>,
+    /// What a menu asking a question says above its answers — the CLOSE
+    /// PROJECT DIALOG's `Its folder is gone.` — one line per `\n`. None on
+    /// every menu that only lists verbs.
+    pub message: Option<String>,
 }
 
 /// A picker submenu's type-ahead: the query typed so far and the full row
@@ -519,6 +536,15 @@ pub struct MenuFilter {
 }
 
 impl ContextMenu {
+    /// Rows the [`ContextMenu::message`] takes above the first menu row:
+    /// its lines and one of air under them, none without one. The draw
+    /// and a click's row both count from it.
+    pub fn message_rows(&self) -> u16 {
+        self.message
+            .as_deref()
+            .map_or(0, |m| m.lines().count() as u16 + 1)
+    }
+
     /// Narrow the rows to `query` (fuzzy, best match first; the full list
     /// in its own order when empty, hovering the ✓ row). Returns false —
     /// and changes nothing — when no row matches, so the list never
@@ -635,10 +661,6 @@ pub enum PendingAction {
         terminals: Vec<TerminalId>,
     },
     RemoveProject(ProjectId),
-    /// `d`, `Delete` or `Backspace` with the PROJECT TABS holding the
-    /// keys: close the tab under the header's cursor once the dialog is
-    /// answered (`event_loop::launcher::close_cursor_tab`, the `x`).
-    CloseProjectTab(ProjectId),
     DeleteLink(LinkId),
     /// `^D` on one of the user's presets in Settings → Presets: drop the
     /// preset at `index` of the list, then the tab again.

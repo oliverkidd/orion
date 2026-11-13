@@ -50,7 +50,7 @@ const SPACE: &[u8] = b" ";
 const COMMANDS: &[u8] = b":";
 
 /// A row only the PROJECT's own menu carries.
-const PROJECT_MENU_ROW: &str = "Remove from list";
+const PROJECT_MENU_ROW: &str = "Close…";
 /// Terminal pane input-locked: keys forward to the PTY, and Esc is the
 /// way back out to the grid's cards.
 const FOOTER_TERMINAL_LOCKED: &str = "Esc back to the grid";

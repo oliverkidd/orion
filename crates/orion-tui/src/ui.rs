@@ -736,9 +736,21 @@ pub(crate) fn menu_hints(menu: &crate::app::ContextMenu) -> Vec<crate::hints::Hi
         hints.push(menu_keys::WIDEN.hint());
     }
     let from_box = crate::event_loop::menu_quick_return(menu).is_some_and(|back| back.from_box);
+    // A menu that asks a question — the CLOSE PROJECT DIALOG — is
+    // cancelled, the tab left where it was.
+    let asks = menu
+        .items
+        .iter()
+        .any(|item| matches!(item.action, crate::app::MenuAction::CloseProjectTab(_)));
     hints.push(Hint::new(
         "Esc",
-        if from_box { "back to the box" } else { "close" },
+        if from_box {
+            "back to the box"
+        } else if asks {
+            "cancel"
+        } else {
+            "close"
+        },
     ));
     hints
 }
@@ -748,22 +760,39 @@ pub(crate) fn menu_hints(menu: &crate::app::ContextMenu) -> Vec<crate::hints::Hi
 /// registry — the COMMAND PALETTE's and the OPEN MENU's rows — and
 /// nothing for a row that is its own explanation.
 pub(crate) fn menu_explanation(menu: &crate::app::ContextMenu) -> &'static str {
+    use crate::app::MenuAction;
     match menu.items.get(menu.hover).map(|item| &item.action) {
-        Some(crate::app::MenuAction::RunAction(action)) => {
+        Some(MenuAction::RunAction(action)) => {
             crate::keymap::spec_of(*action).map_or("", |spec| spec.hint)
         }
+        // The CLOSE PROJECT DIALOG's two answers, told apart.
+        Some(MenuAction::CloseProjectTab(_)) => CLOSE_TAB_EXPLAINED,
+        Some(MenuAction::ForgetProject(_)) => FORGET_PROJECT_EXPLAINED,
         _ => "",
     }
 }
+
+/// What **Close tab** in the CLOSE PROJECT DIALOG does, under its rows.
+pub(crate) const CLOSE_TAB_EXPLAINED: &str =
+    "Only the tab goes: its sessions run on, and the + or {palette} opens it again.";
+
+/// What **Remove from orion** in the CLOSE PROJECT DIALOG does.
+pub(crate) const FORGET_PROJECT_EXPLAINED: &str =
+    "orion forgets it and stops checking its folder. Nothing on disk is touched; its todos stay.";
 
 /// Rows a menu keeps for its EXPLANATION: two, on a menu any of whose
 /// rows has one — so the frame holds still as the cursor moves — else
 /// none.
 fn menu_explain_rows(menu: &crate::app::ContextMenu) -> u16 {
-    let any = menu
-        .items
-        .iter()
-        .any(|item| matches!(item.action, crate::app::MenuAction::RunAction(_)));
+    use crate::app::MenuAction;
+    let any = menu.items.iter().any(|item| {
+        matches!(
+            item.action,
+            MenuAction::RunAction(_)
+                | MenuAction::CloseProjectTab(_)
+                | MenuAction::ForgetProject(_)
+        )
+    });
     if any {
         2
     } else {
@@ -1125,14 +1154,25 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 .unwrap_or(0);
             let explain_rows = menu_explain_rows(&menu);
             let min_w = if explain_rows > 0 { 64 } else { essential };
+            // A menu asking a question says it above its answers.
+            let message_rows = menu.message_rows();
+            let message_w = menu
+                .message
+                .as_deref()
+                .into_iter()
+                .flat_map(str::lines)
+                .map(|l| l.chars().count() + 4)
+                .max()
+                .unwrap_or(0);
             let width = (label_w
                 + 4
                 + if hint_w > 0 { hint_w + 2 } else { 0 }
                 + if any_submenu { 2 } else { 0 })
             .max(title_width + 2)
+            .max(message_w)
             .max(min_w)
             .min(f.area().width as usize) as u16;
-            let height = menu.items.len() as u16 + 2 + explain_rows;
+            let height = menu.items.len() as u16 + 2 + explain_rows + message_rows;
             let area = match at {
                 Some((ax, ay)) => {
                     let x = ax.min(f.area().width.saturating_sub(width));
@@ -1175,8 +1215,19 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                 &crate::hints::expand(menu_explanation(&menu), &app.keymap),
                 th,
             );
+            if let Some(message) = &menu.message {
+                let lines: Vec<Line> = message
+                    .lines()
+                    .map(|l| Line::from(format!(" {l}")))
+                    .collect();
+                f.render_widget(Paragraph::new(lines), inner);
+            }
             let inner = Rect {
-                height: inner.height.saturating_sub(explain_rows),
+                y: inner.y + message_rows.min(inner.height),
+                height: inner
+                    .height
+                    .saturating_sub(explain_rows)
+                    .saturating_sub(message_rows),
                 ..inner
             };
             // Every row spans the modal — the hovered row's bar reaches

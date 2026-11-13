@@ -45,6 +45,7 @@ fn filtered_menu(title: &str, items: Vec<MenuItem>) -> Overlay {
         hover: 0,
         area: ratatui::layout::Rect::default(),
         parent: None,
+        message: None,
     })
 }
 

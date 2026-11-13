@@ -45,6 +45,11 @@ pub const STACK_POLL_MS: &str = "ORION_STACK_POLL_MS";
 /// bridge. `0` turns the reading off, as the e2e tests do: then only the
 /// hand flag (⌘⇧A) makes you away. It runs only while Slack is connected.
 pub const AWAY_POLL_MS: &str = "ORION_AWAY_POLL_MS";
+/// How long (ms, default 20 s) after a phone answer goes into a dialog
+/// the DAEMON looks again: a session still waiting on the same thing
+/// didn't take it, and its phone message gets its buttons back. The e2e
+/// tests shorten it.
+pub const PHONE_ANSWER_CHECK_MS: &str = "ORION_PHONE_ANSWER_CHECK_MS";
 /// The Slack Web API's base URL (default `https://slack.com/api`); the
 /// e2e tests point it at a fake Slack. Socket Mode's websocket is
 /// wherever that API's `apps.connections.open` says it is.
@@ -97,6 +102,11 @@ pub const LINEAR_BUILDER_POLL_SECS: &str = "ORION_LINEAR_BUILDER_POLL_SECS";
 /// Cadence in seconds of the check for the WEEK IN REVIEW's scheduled
 /// time (default a minute); `0` turns it off, so no run starts on its own.
 pub const WEEK_REVIEW_CHECK_SECS: &str = "ORION_WEEK_REVIEW_CHECK_SECS";
+/// Seconds the WEEK IN REVIEW waits before each try again of a project's
+/// GitHub or Linear fetch that failed, and before a scheduled run that
+/// could not fetch is run again (defaults 10, 30 and 90 seconds, and 15
+/// minutes); `0` turns trying again off, so the first failure is final.
+pub const WEEK_REVIEW_RETRY_SECS: &str = "ORION_WEEK_REVIEW_RETRY_SECS";
 /// The folder the BLUE SKY BUILDER builds ideas tied to no project in
 /// (default `~/Code/orion-blue-sky`): the e2e tests point it at a scratch
 /// directory, so a run never makes the real one.

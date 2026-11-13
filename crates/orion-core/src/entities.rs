@@ -345,6 +345,12 @@ pub struct Asked {
     pub options: Vec<String>,
     /// Several options may be picked.
     pub multi: bool,
+    /// An option carries a `preview` (a mockup, a snippet). Claude Code
+    /// shows a single-select question with previews side by side — a
+    /// digit only moves the cursor, and your own words go in as notes —
+    /// and a multi-select one as it shows any other.
+    #[serde(default)]
+    pub previews: bool,
 }
 
 /// The plan an `ExitPlanMode` shows when its input carries no plan text
@@ -400,17 +406,21 @@ impl WaitReason {
             .iter()
             .filter_map(|q| {
                 let text = |key: &str| q.get(key).and_then(|v| v.as_str()).map(str::trim);
-                let options = q
+                let listed = q
                     .get("options")
                     .and_then(|o| o.as_array())
-                    .map(|options| {
-                        options
-                            .iter()
-                            .filter_map(|o| o.get("label").and_then(|l| l.as_str()))
-                            .map(str::to_string)
-                            .collect()
-                    })
+                    .map(Vec::as_slice)
                     .unwrap_or_default();
+                let options = listed
+                    .iter()
+                    .filter_map(|o| o.get("label").and_then(|l| l.as_str()))
+                    .map(str::to_string)
+                    .collect();
+                let previews = listed.iter().any(|o| {
+                    o.get("preview")
+                        .and_then(|p| p.as_str())
+                        .is_some_and(|p| !p.trim().is_empty())
+                });
                 Some(Asked {
                     question: text("question")?.to_string(),
                     header: text("header").unwrap_or_default().to_string(),
@@ -419,6 +429,7 @@ impl WaitReason {
                         .get("multiSelect")
                         .and_then(|m| m.as_bool())
                         .unwrap_or(false),
+                    previews,
                 })
             })
             .collect();
@@ -583,12 +594,14 @@ mod wait_reason_tests {
                         header: "Color".into(),
                         options: vec!["Red".into(), "Green".into()],
                         multi: false,
+                        previews: false,
                     },
                     Asked {
                         question: "A second one".into(),
                         header: String::new(),
                         options: vec![],
                         multi: false,
+                        previews: false,
                     },
                 ]
             }
@@ -599,6 +612,19 @@ mod wait_reason_tests {
             WaitReason::from_tool(ASK_USER_QUESTION_TOOL, Some(&multi)),
             WaitReason::Question { questions } if questions[0].multi
         ));
+        // Claude Code 2.1.323's side-by-side layout: any option's preview.
+        let previews = json!({"questions": [{"question": "Layout?", "multiSelect": false,
+            "options": [{"label": "Grid", "preview": "+--+--+"}, {"label": "List"}]}]});
+        assert!(matches!(
+            WaitReason::from_tool(ASK_USER_QUESTION_TOOL, Some(&previews)),
+            WaitReason::Question { questions } if questions[0].previews
+        ));
+        // A reason stored before `previews` was read has none.
+        let stored: Asked = serde_json::from_value(
+            json!({"question": "Q", "header": "", "options": [], "multi": false}),
+        )
+        .unwrap();
+        assert!(!stored.previews);
         let plan = json!({"plan": "# Create hello.txt\n\n1. Write it.\n", "planFilePath": "/x.md"});
         assert_eq!(
             WaitReason::from_tool(EXIT_PLAN_MODE_TOOL, Some(&plan)),

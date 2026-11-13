@@ -295,13 +295,17 @@
   change sends it on as a WAITING REASON: the question and its options (from the
   `AskUserQuestion` call's `tool_input`), the plan (from `ExitPlanMode`'s), the tool a permission
   prompt is for, or a crash's exit code. The daemon holds the newest one per session in memory and
-  drops it as soon as the row leaves red. A daemon that restarted rebuilds a red row's reason from
+  drops it as soon as the row leaves red. A row still red that opens another dialog (a plan sent
+  back with feedback that goes on to ask a question: no hook turns it yellow in between) has its red
+  said again with the new reason. A daemon that restarted rebuilds a red row's reason from
   the dialog its transcript ends on. A question keeps every question of the ask, and a plan whose
   `ExitPlanMode` input carries no text is read from its `planFilePath`, else shown as "(plan in
   Claude)". Answering from outside the session types the keys Claude's own dialog takes: a digit for
   an option, the row after the options for your own words, `1` to approve a plan, the plan's last row
   ("Tell Claude what to change") for feedback, Esc and then your words to refuse a permission
-  prompt. An ask with several questions is answered tab by tab, then `1. Submit answers` on its
+  prompt. A single-select question whose options carry previews shows them side by side, with no row
+  for your own words: a digit only moves the cursor, so a pick is its digit and Enter, and your own
+  words go in as the question's notes (`n`, the words, Enter), sent with no option picked. An ask with several questions is answered tab by tab, then `1. Submit answers` on its
   review tab; an answer that leaves a question out (your words on a three-part ask) presses Esc
   instead, cancelling the dialog, and sends the words as the next turn under `You asked:` and the
   questions, so a session is never left half-answered. A session with no dialog open (stopped, or
@@ -315,19 +319,27 @@
   back. The DM reads `● Agent · <project> · <HH:MM>`, then the session's name, then its whole last
   response from the transcript (never summarised; split into Slack's 3000-character sections, and
   continued in the thread past Slack's 50 blocks), then what it waits on. One single-select question
-  is in bold with a button per option, `Type an answer…` and `or just reply here` under them. A
+  is in bold with a button per option, `Type an answer…` and `or reply in this thread` under them. A
   multi-select question, or several in one ask, lists every question in bold with its options dim
   under it, and one `Answer…`. A plan has `Approve` and `Suggest changes…`; a permission prompt
   `Yes` and `Type an answer…`. A button answers through the same keys an answer from orion types.
   `Type an answer…`, `Suggest changes…` and `Answer…` open a Slack modal: a text box, or for
   `Answer…` radio buttons or checkboxes per question, each with an optional "Or in your own words"
   box that wins over the picks; its submit answers every question at once. A reply in a message's
-  thread answers that session in words (feedback, for a plan), a plain DM answers the newest message
-  still waiting, and only the user who installed the app is listened to. After an answer the DM is
-  updated in place, its buttons swapped for `✓ Sent: <what went in> · working again`; one that
-  didn't go in gets `✗ Not sent: …` in its thread, and a modal submitted on a message already
-  answered says "This one was already answered" inside the modal. A session answered at the desk
-  instead has its DM updated to say "Answered in Orion", its buttons gone. The daemon
+  thread answers that session in words (feedback, for a plan), and only the user who installed the
+  app is listened to. A plain DM answers nothing: it posts every message still waiting again at the
+  foot of the DM, oldest first, each about what its session waits on now, and updates the old copies
+  to `↓ Re-sent below`, their buttons gone ("Nothing is waiting for you." when none is). After an
+  answer the DM is updated in place, its buttons swapped for `✓ Sent: <what went in> · working
+  again`; one that didn't go in gets `✗ Not sent: …` in its thread, and a modal submitted on a
+  message already answered says "This one was already answered" inside the modal. An answer typed
+  into a dialog that 20 s later still waits on the same thing (red over the same reason, its
+  transcript unchanged) didn't take: the message gets its buttons back under `⚠ That didn't take:
+  it's still waiting on this. Try again, or answer at your desk.` and can be answered again. A
+  session that opens a newer dialog while its message about the last one is still up has that
+  message updated to `↓ Moved on: a newer question is below`, its buttons gone, and the new one
+  posted under it; a message already up about the same dialog is never posted twice. A session
+  answered at the desk instead has its DM updated to say "Answered in Orion", its buttons gone. The daemon
   holds one Socket Mode websocket to Slack (reopened with backoff when it drops), keeps which message
   is which session's (and what it was about) in its database so a reply or a modal finds its session
   after a restart, and forwards

@@ -17,6 +17,17 @@
 //!   a fresh dialog's cursor sits), the text (which ticks it), ↓ to its
 //!   `Submit` row, Enter, then `1` on the review — → would only move the
 //!   text's caret.
+//! - **Question with previews** (single select, an option carrying a
+//!   `preview`; Claude Code 2.1.323): the options sit beside the focused
+//!   one's preview, with no `Type something.` row — `Chat about this`
+//!   below them ends the dialog and the turn goes on without you. A digit
+//!   only moves the cursor; Enter picks the row it is on. Your own words:
+//!   `n` opens the notes box (`Notes: press n to add notes`), then the
+//!   text (a multi-line paste keeps its lines), then Enter — which sends
+//!   them with no option picked: `"Which layout?"=(no option selected)
+//!   notes: <words>`. On a tab of a several-question ask, both move to
+//!   the next tab, as above. A multi-select question with previews shows
+//!   none, and takes the keys above.
 //! - **Several questions in one ask**: a tab per question (`← ☐ Color
 //!   ☐ Fruits ✔ Submit →`), each answered as above but moving on instead
 //!   of submitting — a single-select digit, or its own words' Enter, moves
@@ -62,6 +73,8 @@ const ESC: &[u8] = b"\x1b";
 const UP: &[u8] = b"\x1b[A";
 const DOWN: &[u8] = b"\x1b[B";
 const RIGHT: &[u8] = b"\x1b[C";
+/// Opens a preview question's notes box.
+const NOTES: &[u8] = b"n";
 
 /// The words a plan approval goes in as when there is no dialog to press.
 pub const PLAN_APPROVED_TURN: &str = "Your plan is approved. Go ahead with it.";
@@ -134,9 +147,14 @@ fn tab_keys(asked: &Asked, picked: &Picked) -> Result<Vec<Vec<u8>>> {
         (_, Picked::Options(picks)) if picks.iter().any(|i| *i >= rows) => {
             bail!("no option {}", picks.iter().max().unwrap_or(&0) + 1)
         }
+        (false, Picked::Options(picks)) if picks.len() != 1 => bail!("one option only"),
+        // Side by side with its previews, a digit only moves the cursor:
+        // Enter on it picks it and moves on.
+        (false, Picked::Options(picks)) if asked.previews => {
+            vec![digit(picks[0] + 1)?, ENTER.to_vec()]
+        }
         // A digit picks its option and moves on.
-        (false, Picked::Options(picks)) if picks.len() == 1 => vec![digit(picks[0] + 1)?],
-        (false, Picked::Options(_)) => bail!("one option only"),
+        (false, Picked::Options(picks)) => vec![digit(picks[0] + 1)?],
         // Each digit toggles its option; → moves on.
         (true, Picked::Options(picks)) => {
             let mut picks = picks.clone();
@@ -148,6 +166,11 @@ fn tab_keys(asked: &Asked, picked: &Picked) -> Result<Vec<Vec<u8>>> {
                 .collect::<Result<Vec<_>>>()?;
             keys.push(RIGHT.to_vec());
             keys
+        }
+        // With previews there is no text row: `n` opens the notes box, and
+        // Enter there sends the words with no option picked.
+        (false, Picked::Text(text)) if asked.previews => {
+            vec![NOTES.to_vec(), typed_bytes(text), ENTER.to_vec()]
         }
         // The `N+1` digit focuses the text row; Enter moves on.
         (false, Picked::Text(text)) => vec![digit(rows + 1)?, typed_bytes(text), ENTER.to_vec()],
@@ -355,6 +378,7 @@ mod tests {
             header: String::new(),
             options: options.iter().map(|o| o.to_string()).collect(),
             multi,
+            previews: false,
         }
     }
 
@@ -410,6 +434,46 @@ mod tests {
         );
         assert!(dialog_keys(&question(false), &Answer::Option(3)).is_err());
         assert!(dialog_keys(&question(false), &Answer::ApprovePlan).is_err());
+    }
+
+    /// Claude Code 2.1.323's side-by-side layout: a digit only moves the
+    /// cursor, and your own words are notes (`n`) sent with no option.
+    #[test]
+    fn a_question_with_previews_picks_with_enter_and_words_go_in_as_notes() {
+        let layout = |multi| Asked {
+            previews: true,
+            ..asked("Which layout?", &["Grid", "List", "Cards"], multi)
+        };
+        let lone = WaitReason::Question {
+            questions: vec![layout(false)],
+        };
+        assert_eq!(keys(&lone, Answer::Option(2)), bytes(&["3", "\r"]));
+        assert_eq!(
+            keys(&lone, Answer::Text("purple masonry".into())),
+            bytes(&["n", "purple masonry", "\r"])
+        );
+        // A tab of a several-question ask moves on the same way.
+        let two = WaitReason::Question {
+            questions: vec![layout(false), asked("Theme?", &["Light", "Dark"], false)],
+        };
+        assert_eq!(
+            keys(
+                &two,
+                Answer::Answers(vec![
+                    Picked::Text("masonry".into()),
+                    Picked::Options(vec![1])
+                ])
+            ),
+            bytes(&["n", "masonry", "\r", "2", "1"])
+        );
+        // Multi-select shows no previews: the keys of any other.
+        let multi = WaitReason::Question {
+            questions: vec![layout(true)],
+        };
+        assert_eq!(
+            keys(&multi, Answer::Option(0)),
+            keys(&question(true), Answer::Option(0))
+        );
     }
 
     fn bytes(keys: &[&str]) -> Vec<Vec<u8>> {

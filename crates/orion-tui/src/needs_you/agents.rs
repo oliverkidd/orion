@@ -179,6 +179,7 @@ mod tests {
                 header: String::new(),
                 options: vec!["A".into(), "B".into()],
                 multi: false,
+                previews: false,
             }],
         };
         assert_eq!(

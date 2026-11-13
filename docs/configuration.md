@@ -544,12 +544,14 @@ Everything orion writes under its data dir:
 | `ORION_MEETING_TAKEAWAYS_POLL_SECS` | how often meeting takeaways looks for a finished Teams meeting's transcript, for up to an hour after it ends (default 120; `0` off) |
 | `ORION_MICROSOFT_GRAPH_URL`, `ORION_MICROSOFT_TOKEN` | a Microsoft Graph base URL and access token used instead of `https://graph.microsoft.com/v1.0` and your sign-in (tests: a fake Graph) |
 | `ORION_AWAY_POLL_MS` | how often the DAEMON reads whether you are away, from the screen lock and the time since your last key, while Slack is connected (default 5000; `0` off, so only `⌘⇧A` makes you away) |
+| `ORION_PHONE_ANSWER_CHECK_MS` | how long after a phone answer goes into a dialog the DAEMON looks again: a session still waiting on the same thing didn't take it, and its Slack message gets its buttons back (default 20000) |
 | `ORION_SLACK_API_URL`, `ORION_SLACK_TOKENS` | a Slack Web API base URL used instead of `https://slack.com/api`, and the three tokens as `<app>,<bot>,<user>` used instead of the Keychain's (tests: a fake Slack) |
 | `ORION_PROJECT_ABOUT` | `off` stops orion writing a project's **What it is** (tests) |
 | `ORION_BLUE_SKY_DIR` | the folder the Blue sky builder builds ideas tied to no project in (default `~/Code/orion-blue-sky`) |
 | `ORION_NEEDS_YOU_POLL_SECS` | how often Needs you asks Linear for your notifications and `gh` for the reviews asked of you (default 300; `0` off) |
 | `ORION_LINEAR_BUILDER_POLL_SECS` | how often the bug fixer and feature builder look for labelled Linear tickets assigned to you (default 120; `0` off) |
 | `ORION_WEEK_REVIEW_CHECK_SECS` | how often week in review looks whether its **When** has come round (default 60; `0` off, so it never runs on its own) |
+| `ORION_WEEK_REVIEW_RETRY_SECS` | how long week in review waits before each try again of a GitHub or Linear fetch that failed, and before running again a scheduled run that could not fetch (defaults 10, 30 and 90 seconds, and 15 minutes; `0` off, so the first failure is final) |
 | `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |
 
 The DAEMON sets `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` on every agent so its hooks

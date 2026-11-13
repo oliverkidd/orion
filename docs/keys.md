@@ -257,14 +257,25 @@ the footer (or the modal's border) always names the way:
 | `↑`,`↑` on the first line | **the PROJECT TABS take the keys.** A cursor of its own lands on the lit tab; the row you left stays selected with the pane still on it |
 | `←` / `→`, `[` / `]` | walk the header's cursor along the tabs — **the grid switches with it**, each project on the row you last left it on |
 | `Enter`, `↓`,`↓` | hand the keys back to the grid of the project on screen |
-| `Backspace` | close the tab under the cursor, behind a confirm (or click its `×`; **Close project tab** has no key by default — bind one in `config.json`'s `keybindings`) |
+| `Backspace` | close the tab under the cursor — the CLOSE PROJECT DIALOG asks **Close tab** or **Remove from orion** (or click its `×`; **Close project tab** has no key by default — bind one in `config.json`'s `keybindings`) |
 | `Esc`, a click, any other key | back down to the grid; any other key then means what it means on the grid |
 
-A click on a tab opens it, a tab's `×` closes it, and the `+` in front of the tabs drops the
+A click on a tab opens it, a tab's `×` asks to close it, and the `+` in front of the tabs drops the
 PROJECT DROPDOWN — every project on the machine, the ones waiting on you first, type to narrow.
 Working in a project moves its tab to the far left; switching never reorders the tabs. A
 right-click on a tab is the project's own menu: **New worktree**, **Start stack** / **Stop stack**, **Open**,
-**Delete worktree** for a linked one, **Rename**, **Remove from list**.
+**Delete worktree** for a linked one, **Rename**, **Close…**.
+
+Every close of a tab — its `×`, **Close…**, **Close project tab**, `Backspace` on the tabs — opens
+the CLOSE PROJECT DIALOG, `Close <name>`:
+
+| Key | Action |
+|---|---|
+| `↑` / `↓`, `j` / `k` | move between the two choices |
+| `Enter`, a click on a choice | **Close tab**: hide the tab, the project stays in orion (`+` or `⌘K` opens it again) — or **Remove from orion**: the daemon forgets it and stops checking its folder, and its live sessions stop (the row says how many). Nothing on disk is touched; its todos stay |
+| `Esc`, a click outside | cancel — the tab stays |
+
+It starts on **Close tab**, or on **Remove from orion** when the project's folder is gone (`Its folder is gone.`).
 
 ## Needs you (`⌘K`)
 

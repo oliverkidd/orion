@@ -1116,16 +1116,17 @@ impl Store {
             .map(|mut found| found.pop())
     }
 
-    /// The newest phone message in `channel` still waiting for an answer.
-    pub fn latest_open_phone_message(
-        &self,
-        channel: &str,
-    ) -> Result<Option<(crate::phone::PhoneMessage, bool)>> {
-        self.phone_messages_where(
-            "channel = ?1 AND answered IS NULL ORDER BY posted_at DESC, ts DESC LIMIT 1",
-            params![channel],
-        )
-        .map(|mut found| found.pop())
+    /// Every phone message in `channel` still waiting for an answer, the
+    /// oldest first.
+    pub fn open_phone_messages_in(&self, channel: &str) -> Result<Vec<crate::phone::PhoneMessage>> {
+        Ok(self
+            .phone_messages_where(
+                "channel = ?1 AND answered IS NULL ORDER BY posted_at, ts",
+                params![channel],
+            )?
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect())
     }
 
     /// Agent `id`'s phone messages still waiting for an answer.
@@ -1137,7 +1138,8 @@ impl Store {
             .collect())
     }
 
-    /// Mark a phone message answered — `phone` or `orion` — or, None,
+    /// Mark a phone message answered — `phone`, `orion`, or closed as
+    /// `moved` on or `resent` (`phone::Close`) — or, None,
     /// waiting again (an answer that did not go in).
     pub fn set_phone_answered(&self, channel: &str, ts: &str, by: Option<&str>) -> Result<()> {
         self.conn.lock().unwrap().execute(

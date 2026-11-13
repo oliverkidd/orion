@@ -771,6 +771,10 @@ impl Daemon {
         let Some(launch) = config.spare_launch() else {
             return;
         };
+        // No folder, nothing to cut from: the worktree sync says so once.
+        if !project.repo_path.exists() {
+            return;
+        }
         {
             let mut book = self.spares.book.lock().unwrap();
             // A setup is an install, and two at once would drag the machine
