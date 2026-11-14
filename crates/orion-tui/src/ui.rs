@@ -123,6 +123,7 @@ pub(crate) fn task_hints(kind: &crate::app::PromptKind) -> Vec<crate::hints::Hin
         // The FOLLOW-UP MODAL sends a turn to a session already running.
         PromptKind::FollowUp { .. } => ("send", "cancel"),
         PromptKind::PrComment { .. } => ("post", "cancel"),
+        PromptKind::FactoryText { .. } => ("send", "cancel"),
         // A setting over lines (the Linear task template) saves, and Esc
         // goes back to the overlay.
         PromptKind::SettingText { .. } => ("save", "back"),

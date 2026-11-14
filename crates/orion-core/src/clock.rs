@@ -3,6 +3,11 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// A minute in [`now_ms`]'s units.
+pub const MINUTE_MS: i64 = 60 * 1000;
+/// A day in [`now_ms`]'s units.
+pub const DAY_MS: i64 = 24 * 60 * MINUTE_MS;
+
 /// Milliseconds since the Unix epoch — the stamp every row's `created_at`
 /// and `status_changed_at` carries, so the daemon's and the TUI's compare.
 /// A clock set before 1970 reads as 0.

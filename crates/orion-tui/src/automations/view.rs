@@ -44,7 +44,7 @@ pub(crate) mod keys {
 
 /// What the dim line above the keys says.
 const EXPLAIN: &str =
-    "What the automations are doing. Their caps, labels, presets and steer are in Settings › Automations.";
+    "What the automations are doing. Their caps, labels, presets and steer are in Settings › Factory.";
 
 /// The widest the screen gets.
 const WIDEST: u16 = 100;
@@ -727,6 +727,7 @@ mod tests {
                 session: Some(id.clone()),
                 stage: super::super::linear_builder::Stage::Planning,
                 at: 0,
+                ..Default::default()
             },
         );
         id

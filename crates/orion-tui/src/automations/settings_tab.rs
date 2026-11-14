@@ -1,7 +1,9 @@
-//! SETTINGS › AUTOMATIONS: where every automation is set up. The overall
-//! cap first — how many automation sessions run at once, all of them
-//! together — then a section per automation, in [`Automation::ALL`]
-//! order, holding its runner's rows ([`Automation::settings`]): on or
+//! SETTINGS › FACTORY: where every automation is set up. The factory's
+//! own rows first — **Agents working at once** (the overall cap, all
+//! automations together), **Things waiting on you** (new tickets wait
+//! while this many factory items need you) and the local e2e rule — then
+//! a section per automation, in [`Automation::ALL`] order, holding its
+//! runner's rows ([`Automation::settings`]): on or
 //! off, its own cap, its labels or its schedule, its preset and its extra
 //! steer. Each section's heading says on its right what the automation is
 //! doing now, from its panel ([`super::Engine::panel`]).
@@ -39,24 +41,26 @@ pub(crate) mod keys {
     pub const ALL: &[Key] = &[TOGGLE, PRESET, CHANGE];
 }
 
-/// The first section's heading, over the overall cap.
-pub const ALL_AUTOMATIONS: &str = "All automations";
+/// The first section's heading, over the overall caps.
+pub const ALL_AUTOMATIONS: &str = "Factory";
 /// The overall cap's row.
-pub const SESSIONS_AT_ONCE: &str = "Sessions at once, all automations";
+pub const SESSIONS_AT_ONCE: &str = "Agents working at once";
+/// The attention cap's row ([`super::config::AutomationsSettings::attention_cap`]).
+pub const WAITING_ON_YOU: &str = "Things waiting on you";
 /// The local e2e row ([`super::config::LocalE2e`]).
 pub const LOCAL_E2E: &str = "E2E tests on this machine";
 /// What the line under the rows says on it.
 const E2E_EXPLAINED: &str = "Whether automation agents run end-to-end tests here. Never leaves them to CI on the pull request, so several agents can't grind the machine down at once; the rule is added to every agent's prompt";
-/// What the line under the rows says on it.
-const CAP_EXPLAINED: &str = "The most automation sessions running at once, all automations together, 1 to 20. Waiting-on-you sessions hold a place too, so approving or closing them frees it";
 /// The label column, in cells: the longest label and a gap.
-const LABEL_W: usize = SESSIONS_AT_ONCE.len() + 2;
+const LABEL_W: usize = LOCAL_E2E.len() + 2;
 
 /// One selectable row of the tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entry {
-    /// **Sessions at once, all automations**.
+    /// **Agents working at once**.
     Cap,
+    /// **Things waiting on you**.
+    Attention,
     /// **E2E tests on this machine**.
     E2e,
     /// A row of `which`'s section.
@@ -66,7 +70,7 @@ pub enum Entry {
 impl Entry {
     pub fn automation(self) -> Option<Automation> {
         match self {
-            Entry::Cap | Entry::E2e => None,
+            Entry::Cap | Entry::Attention | Entry::E2e => None,
             Entry::Row(which, _) => Some(which),
         }
     }
@@ -75,7 +79,7 @@ impl Entry {
 /// Every selectable row, top to bottom: the overall cap, then each
 /// automation's rows in its [`Automation::settings`] order.
 pub fn entries() -> Vec<Entry> {
-    [Entry::Cap, Entry::E2e]
+    [Entry::Cap, Entry::Attention, Entry::E2e]
         .into_iter()
         .chain(Automation::ALL.into_iter().flat_map(|which| {
             which
@@ -113,8 +117,9 @@ pub fn settings_rows() -> Vec<SettingsRow> {
         SettingsRow::Header(ALL_AUTOMATIONS.into()),
         SettingsRow::Setting(0),
         SettingsRow::Setting(1),
+        SettingsRow::Setting(2),
     ];
-    let mut at = 2;
+    let mut at = 3;
     for which in Automation::ALL {
         out.push(SettingsRow::Blank);
         out.push(SettingsRow::Header(which.name().into()));
@@ -131,6 +136,7 @@ pub fn value(app: &App, entry: Entry) -> String {
     let settings = &app.automations.settings;
     let (which, row) = match entry {
         Entry::Cap => return settings.cap().to_string(),
+        Entry::Attention => return settings.attention_cap().to_string(),
         Entry::E2e => return settings.local_e2e.label().into(),
         Entry::Row(which, row) => (which, row),
     };
@@ -213,6 +219,7 @@ pub fn line(
             };
             let label = match entry {
                 Entry::Cap => SESSIONS_AT_ONCE,
+                Entry::Attention => WAITING_ON_YOU,
                 Entry::E2e => LOCAL_E2E,
                 Entry::Row(_, row) => row.label(),
             };
@@ -245,12 +252,26 @@ pub fn line(
     }
 }
 
+/// What the line under **Agents working at once** says, its cap `n`.
+pub fn cap_explained(n: usize) -> String {
+    format!("At most {n} agents work at the same time.")
+}
+
+/// What the line under **Things waiting on you** says, its cap `n`.
+pub fn attention_explained(n: usize) -> String {
+    format!("New tickets wait while {n} or more factory items need you.")
+}
+
 /// The line under the rows for row `at`.
 pub fn explain(at: usize) -> String {
     let (which, row) = match entry(at) {
         Some(Entry::Row(which, row)) => (which, row),
         Some(Entry::E2e) => return E2E_EXPLAINED.into(),
-        _ => return CAP_EXPLAINED.into(),
+        Some(Entry::Attention) => {
+            let n = crate::config::Config::load().automations.attention_cap();
+            return attention_explained(n);
+        }
+        _ => return cap_explained(crate::config::Config::load().automations.cap()),
     };
     let name = which.name();
     match row {
@@ -331,10 +352,12 @@ pub fn run(app: &mut App, cmd: Cmd) {
     match (cmd, entry) {
         (Cmd::Open(_), Entry::Cap) => change_settings(app, |s| s.step_cap(1)),
         (Cmd::Step(_, step), Entry::Cap) => change_settings(app, |s| s.step_cap(step)),
+        (Cmd::Open(_), Entry::Attention) => change_settings(app, |s| s.step_attention(1)),
+        (Cmd::Step(_, step), Entry::Attention) => change_settings(app, |s| s.step_attention(step)),
         (Cmd::Open(_) | Cmd::Step(..), Entry::E2e) => {
             change_settings(app, |s| s.local_e2e = s.local_e2e.next())
         }
-        (Cmd::Toggle(_) | Cmd::PickPreset(_), Entry::Cap | Entry::E2e) => {
+        (Cmd::Toggle(_) | Cmd::PickPreset(_), Entry::Cap | Entry::Attention | Entry::E2e) => {
             note(app, "That's for an automation: on one of its rows")
         }
         (Cmd::Toggle(_), Entry::Row(which, _)) => toggle(app, which),
@@ -375,10 +398,14 @@ pub fn run(app: &mut App, cmd: Cmd) {
     }
 }
 
-/// `Space`: `which` on or off.
+/// `Space`: `which` on or off — and, switched on, the factory's setup
+/// checked once ([`super::linear_builder::setup::on_enable`]).
 pub(crate) fn toggle(app: &mut App, which: Automation) {
     let on = !app.automations.is_on(which);
     change_settings(app, |s| s.of_mut(which).on = Some(on));
+    if on {
+        super::linear_builder::setup::on_enable(app, which);
+    }
 }
 
 fn step_own(app: &mut App, which: Automation, step: i8) {
@@ -477,7 +504,7 @@ pub fn back_on(app: &mut App, which: Automation, row: SettingRow) {
     reopen_at(app, row_of(which, Some(row)));
 }
 
-/// Settings › Automations, at `which`'s section — the top when None:
+/// Settings › Factory, at `which`'s section — the top when None:
 /// Enter on an automation in the overview (`⌘J`), and its `,`.
 pub fn open_at(app: &mut App, which: Option<Automation>) {
     reopen_at(app, which.map_or(0, |which| row_of(which, None)));
@@ -596,6 +623,35 @@ mod tests {
             run(&mut app, Cmd::Open(row_of(Automation::BugFixer, None)));
             assert!(!app.automations.is_on(Automation::BugFixer));
             assert!(matches!(&app.overlay, Some(Overlay::Settings(_))));
+        });
+    }
+
+    /// The Factory rows: **Agents working at once** and **Things waiting
+    /// on you**, each stepped by the arrows and saved, each explained with
+    /// its number.
+    #[test]
+    fn the_factory_rows_step_and_explain_both_caps() {
+        in_config(|| {
+            let mut app = App::new();
+            open_at(&mut app, None);
+            assert_eq!(entry(0), Some(Entry::Cap));
+            assert_eq!(entry(1), Some(Entry::Attention));
+            assert_eq!(value(&app, Entry::Attention), "5");
+            run(&mut app, Cmd::Step(1, 1));
+            assert_eq!(crate::config::Config::load().automations.attention_cap, 6);
+            run(&mut app, Cmd::Step(1, -1));
+            run(&mut app, Cmd::Step(1, -1));
+            assert_eq!(crate::config::Config::load().automations.attention_cap, 4);
+            assert_eq!(
+                explain(1),
+                "New tickets wait while 4 or more factory items need you."
+            );
+            assert_eq!(explain(0), "At most 3 agents work at the same time.");
+            assert_eq!(ALL_AUTOMATIONS, "Factory");
+            assert_eq!(SESSIONS_AT_ONCE, "Agents working at once");
+            assert_eq!(WAITING_ON_YOU, "Things waiting on you");
+            let tab = crate::config::automations_tab();
+            assert_eq!(crate::config::SETTINGS_TABS[tab].title, "Factory");
         });
     }
 

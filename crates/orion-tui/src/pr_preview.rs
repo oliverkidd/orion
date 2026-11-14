@@ -536,7 +536,9 @@ pub fn page(input: &PageInput, tabs: &PrTabs, focused: bool, width: usize, th: T
 
 /// The page's top border, for the surface that frames it to draw: where
 /// the pull request stands — `● Open`, `○ Draft`, a red `● Conflicts`
-/// while it is open and cannot merge, the merged purple `● Merged`, a
+/// while it is ready and cannot merge, a quiet `○ Draft · conflicts` for a
+/// draft that cannot (it isn't asking anyone yet), the merged purple
+/// `● Merged`, a
 /// faint `● Closed` — then `#42` and the title; and, for the border's
 /// right end, what it changes: `+106 −4`. The state and the counts wait
 /// for the body; the number and the title are there from the first paint.
@@ -590,10 +592,9 @@ pub fn border(
 /// word, the one its list row and badge draw.
 fn state_word(status: &crate::pr_store::PrStatus, th: Theme) -> (String, Color) {
     match status.standing {
-        Standing::Open | Standing::Draft if status.health.conflicts => {
-            ("● Conflicts".into(), th.err)
-        }
+        Standing::Draft if status.health.conflicts => ("○ Draft · conflicts".into(), th.muted),
         Standing::Draft => ("○ Draft".into(), th.muted),
+        Standing::Open if status.health.conflicts => ("● Conflicts".into(), th.err),
         Standing::Open => ("● Open".into(), th.ok),
         Standing::Merged => ("● Merged".into(), th.merged),
         Standing::Closed => ("● Closed".into(), th.faint),
@@ -2515,7 +2516,8 @@ mod tests {
     }
 
     /// The border's state word: open, a draft, a conflict in red while it
-    /// is open — a merged one is past it — merged and closed.
+    /// is ready — quietly beside `Draft` on a draft, and a merged one is
+    /// past it — merged and closed.
     #[test]
     fn the_border_names_where_it_stands() {
         let th = Theme::default();
@@ -2528,6 +2530,8 @@ mod tests {
         d.answered_draft = true;
         assert_eq!(state(&d), ("○ Draft".into(), Some(th.muted)));
         d.answered.conflicts = Some(true);
+        assert_eq!(state(&d), ("○ Draft · conflicts".into(), Some(th.muted)));
+        d.answered_draft = false;
         assert_eq!(state(&d), ("● Conflicts".into(), Some(th.err)));
         d.answered_state = "MERGED".into();
         assert_eq!(state(&d), ("● Merged".into(), Some(th.merged)));

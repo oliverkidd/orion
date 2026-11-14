@@ -4,7 +4,9 @@ mod upgrade;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{AutofixCommand, Cli, Command, ConfigCommand};
+use cli::{
+    AutofixCommand, Cli, Command, ConfigCommand, KnowledgeCommand, PrCommand, PrFactsCommand,
+};
 use std::path::Path;
 
 fn main() -> Result<()> {
@@ -44,6 +46,16 @@ fn main() -> Result<()> {
         Some(Command::Open { files }) => orion_tui::run_open(files),
         Some(Command::Autofix(AutofixCommand::StandDown { reason })) => {
             orion_tui::run_stand_down(reason.join(" "))
+        }
+        Some(Command::Pr(PrCommand::Facts(op))) => orion_tui::run_pr_facts(match op {
+            PrFactsCommand::Init => orion_tui::PrFactsOp::Init,
+            PrFactsCommand::Set { file, pr } => orion_tui::PrFactsOp::Set { file, pr },
+        }),
+        Some(Command::Knowledge(KnowledgeCommand::For { paths, project })) => {
+            orion_tui::knowledge::cli_for(paths, project)
+        }
+        Some(Command::Knowledge(KnowledgeCommand::Backfill { project, since })) => {
+            orion_tui::knowledge::cli_backfill(project, since)
         }
         Some(Command::Ssh { host, path }) => ssh::run_ssh(&host, path.as_deref()),
         Some(Command::Setup) => {

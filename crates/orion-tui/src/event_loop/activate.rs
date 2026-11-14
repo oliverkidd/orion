@@ -115,6 +115,12 @@ pub(super) fn needs_you_card(app: &mut App, out: &mut Vec<ClientRequest>) {
             crate::automations::meeting_takeaways::open(app, &id, false);
             return;
         }
+        // A factory card's buttons, as a menu in the board's place.
+        CardTarget::Factory { key } => {
+            app.overlay = None;
+            crate::needs_you::factory::open_menu(app, &key);
+            return;
+        }
     };
     let landing = Landing::for_enter_on(app, &jump);
     app.overlay = None;

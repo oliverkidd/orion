@@ -6,6 +6,7 @@ pub mod config;
 pub mod containers;
 pub mod continue_on;
 pub mod env_links;
+pub mod factory;
 pub mod git;
 pub mod hooks;
 pub mod lifecycle;

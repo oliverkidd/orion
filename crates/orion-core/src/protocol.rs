@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 56;
+pub const PROTOCOL_VERSION: u32 = 57;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -437,6 +437,27 @@ pub enum ClientRequest {
     /// new `SlackStatus`.
     SlackReconnect,
 
+    /// Fire-and-forget: post a FACTORY CARD — a Slack message from orion's
+    /// bot that no session's wait owns (a pull request's verdict, a thin
+    /// ticket's question to its reporter, the daily rules). The daemon
+    /// posts it to the owner's DM, or to the DM of whoever
+    /// `CardRecipient::Email` names, and remembers where it went
+    /// (`factory_messages`), so a second post with the same `key` edits
+    /// that message in place rather than posting another. When `image` is
+    /// set, the file is uploaded into the message's thread. A card that
+    /// can't be posted is answered by `ServerEvent::FactoryCardFailed`.
+    PostFactoryCard {
+        card: FactoryCard,
+    },
+
+    /// Fire-and-forget: rewrite the factory card posted under `key` in
+    /// place — the TUI's own wording after an action, or a card closed
+    /// from Needs you. A key never posted is a no-op.
+    UpdateFactoryCard {
+        key: String,
+        card: FactoryCard,
+    },
+
     /// One point-in-time memory reading — the daemon plus every live
     /// session's process subtree. Answered by `ServerEvent::Metrics` with
     /// the same req_id (not an Ack).
@@ -491,6 +512,89 @@ pub struct SlackStatus {
     pub phone_channel: Option<String>,
     /// Why it is not connected, as one line to show.
     pub problem: Option<String>,
+}
+
+/// What a FACTORY CARD's buttons carry, which the TUI builds and the
+/// daemon routes by.
+pub mod factory_card {
+    /// The `action_id` every factory button starts with (`<ACTION>_<n>`).
+    pub const ACTION: &str = "orion_factory";
+    /// The `action_id` prefix of a button that asks for words first: the
+    /// daemon opens its text modal.
+    pub const ACTION_TYPE: &str = "orion_factory_type";
+    /// The `action_id` prefix of a button that opens its `url`: Slack
+    /// opens it, and the daemon acks its press and does nothing else.
+    pub const ACTION_LINK: &str = "orion_factory_link";
+    /// Between a button value's key and its action (`<key>|<action>`).
+    pub const SEP: char = '|';
+}
+
+/// Slack's caps on what a message may hold, in characters (or blocks):
+/// the phone's messages and the factory's cards keep within them.
+pub mod slack_caps {
+    /// A section block's text.
+    pub const SECTION: usize = 3000;
+    /// A header block's text.
+    pub const HEADER: usize = 150;
+    /// A button's label.
+    pub const BUTTON: usize = 75;
+    /// The blocks in one message.
+    pub const MAX_BLOCKS: usize = 50;
+}
+
+/// A FACTORY CARD (`ClientRequest::PostFactoryCard`): one Slack message
+/// from orion's bot, built by the TUI, that no session's wait owns.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactoryCard {
+    /// The TUI's stable id for it, such as `pr:<url>:verdict` or
+    /// `issue:<id>:thin`: a second post under the same key edits the
+    /// message in place, and the key leads every button value
+    /// (`<key>|<action>`).
+    pub key: String,
+    /// Whose DM it goes to.
+    pub to: CardRecipient,
+    /// The notification and fallback text.
+    pub text: String,
+    /// The Block Kit blocks, as Slack takes them.
+    pub blocks: serde_json::Value,
+    /// A picture uploaded into the message's thread — a PR's before and
+    /// after grid.
+    pub image: Option<PathBuf>,
+}
+
+/// Who a factory card is for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CardRecipient {
+    /// The installing user, in the bot's DM with them (the phone's).
+    Owner,
+    /// Whoever has this email in the workspace (`users.lookupByEmail`),
+    /// in the bot's DM with them — a thin ticket's reporter.
+    Email(String),
+}
+
+/// Who pressed a factory card's button (`ServerEvent::FactoryAction`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlackUser {
+    /// Their Slack id (`U…`).
+    pub id: String,
+    /// They are the installing user — the owner.
+    pub is_owner: bool,
+}
+
+/// Why a factory card was not posted (`ServerEvent::FactoryCardFailed`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FactoryCardFailure {
+    /// `CardRecipient::Email` matched nobody in the workspace — an
+    /// external reporter, or one not on Slack. The TUI falls back to a
+    /// card to the owner.
+    NotOnSlack,
+    /// Slack is not connected, so nothing can be posted.
+    NotConnected,
+    /// The Slack app lacks a scope the factory needs (`users:read.email`,
+    /// `files:write`): it wants reinstalling.
+    MissingScope(String),
+    /// Anything else Slack refused, as one line.
+    Other(String),
 }
 
 /// What a new session launches as — its harness (a Claude account is
@@ -718,6 +822,24 @@ pub enum ServerEvent {
         event_json: String,
     },
 
+    /// A button on a factory card was pressed (its value `<key>|<action>`),
+    /// by the owner, or by the one non-owner the card was sent to. A
+    /// "Type…" button's modal brings the words typed as `text`. Every TUI
+    /// hears it; the card's owning module acts on it.
+    FactoryAction {
+        key: String,
+        action: String,
+        text: Option<String>,
+        by: SlackUser,
+    },
+
+    /// `ClientRequest::PostFactoryCard` (or `UpdateFactoryCard`) under
+    /// `key` was not posted, and why — so the TUI can fall back.
+    FactoryCardFailed {
+        key: String,
+        reason: FactoryCardFailure,
+    },
+
     /// Reply to `ClientRequest::LastResponse`: the text of the session's
     /// last assistant message (None when there is no transcript, or no
     /// text in it), and why it is waiting on you, if it is.
@@ -731,6 +853,42 @@ pub enum ServerEvent {
 #[cfg(test)]
 mod stack_tests {
     use super::*;
+
+    /// A factory card's blocks are JSON inside a msgpack frame: they come
+    /// back as they went, and so does a press with its words.
+    #[test]
+    fn factory_frames_round_trip() {
+        let card = FactoryCard {
+            key: "pr:https://github.com/o/r/pull/7:verdict".into(),
+            to: CardRecipient::Email("ann@example.com".into()),
+            text: "Fix the login loop".into(),
+            blocks: serde_json::json!([{"type": "section", "text": {"type": "mrkdwn",
+                "text": "*Merge*"}}, {"type": "actions", "elements": [{"value": "k|merge"}]}]),
+            image: Some(PathBuf::from("/tmp/grid.png")),
+        };
+        let req = ClientRequest::PostFactoryCard { card: card.clone() };
+        let back: ClientRequest = rmp_serde::from_slice(&rmp_serde::to_vec(&req).unwrap()).unwrap();
+        let ClientRequest::PostFactoryCard { card: back } = back else {
+            panic!("{back:?}");
+        };
+        assert_eq!(back, card);
+
+        let ev = ServerEvent::FactoryAction {
+            key: card.key.clone(),
+            action: "send_back".into(),
+            text: Some("use the old flow".into()),
+            by: SlackUser {
+                id: "U2".into(),
+                is_owner: false,
+            },
+        };
+        let back: ServerEvent = rmp_serde::from_slice(&rmp_serde::to_vec(&ev).unwrap()).unwrap();
+        let ServerEvent::FactoryAction { text, by, .. } = back else {
+            panic!("{back:?}");
+        };
+        assert_eq!(text.as_deref(), Some("use the old flow"));
+        assert!(!by.is_owner);
+    }
 
     #[test]
     fn stack_frames_round_trip() {

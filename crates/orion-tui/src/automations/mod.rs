@@ -10,9 +10,11 @@
 //!   id in `Agent::automation` ([`launch`], or a draft's own
 //!   `AgentLaunchDraft::automation`), which the DAEMON keeps with the row:
 //!   the grid's badge and Needs you's kind label read it ([`kind_of`]).
-//! * **Two caps.** No automation starts a session while
+//! * **Three caps.** No automation starts a session while
 //!   `automations.max_running` of them are running, nor while its own
-//!   `automations.per.<id>.max_running` of its own are ([`may_start`]).
+//!   `automations.per.<id>.max_running` of its own are; and no new ticket
+//!   starts while `automations.attention_cap` factory items wait on you
+//!   ([`may_start`], [`attention`]).
 //! * **One way to say it.** A runner's first prompt is its preset's text
 //!   with its context at `{task}`, and the user's extra steer after it
 //!   ([`compose`]).
@@ -381,12 +383,29 @@ pub fn with_runner<T>(
 }
 
 /// The git tick: every runner of an automation that is on looks for work.
+/// The bug fixer and the feature builder share one ledger: it is brought
+/// up to date once before they look, and the Linear writes they made are
+/// sent once after.
 pub fn tick(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let builders = [Automation::BugFixer, Automation::FeatureBuilder]
+        .into_iter()
+        .any(|which| app.automations.is_on(which));
+    if builders {
+        linear_builder::stages::follow(app);
+    }
     for which in Automation::ALL {
         if app.automations.is_on(which) {
             with_runner(app, which, |runner, app| runner.tick(app, out));
         }
     }
+    if builders {
+        linear_builder::owner::send_writes(app);
+    }
+}
+
+/// Where the automations keep their state: `<data_dir>/automations`.
+pub(crate) fn state_dir() -> std::path::PathBuf {
+    orion_core::paths::data_dir().join("automations")
 }
 
 /// How many automation sessions are running: tagged, not archived, at
@@ -425,13 +444,76 @@ fn occupies(agent: &Agent) -> bool {
 }
 
 /// Whether one more of `which`'s sessions may start: under the overall
-/// cap, and under its own.
+/// cap, and under its own — and, for a new ticket (the bug fixer's, the
+/// feature builder's), while fewer than `attention_cap` factory items
+/// wait on you.
 pub fn may_start(app: &App, which: Automation) -> bool {
     let settings = &app.automations.settings;
+    let takes_tickets = matches!(which, Automation::BugFixer | Automation::FeatureBuilder);
     running(app) < settings.cap()
         && settings
             .cap_of(which)
             .is_none_or(|own| running_of(app, which) < own)
+        && (!takes_tickets || attention(app) < settings.attention_cap())
+}
+
+/// The automations whose work is the software factory's.
+const FACTORY: [Automation; 3] = [
+    Automation::BugFixer,
+    Automation::FeatureBuilder,
+    Automation::PrFixer,
+];
+
+/// A factory card open longer than this no longer counts toward
+/// [`attention`]: one whose end nothing noticed mustn't hold the intake
+/// shut for good.
+const CARD_COUNTS_MS: i64 = 7 * orion_core::clock::DAY_MS;
+
+/// How many factory items wait on you: factory sessions waiting on you
+/// (a plan, a question), and the factory cards you haven't acted on —
+/// a pull request's verdict, a ticket held for you, a fix given up on —
+/// in the last [`CARD_COUNTS_MS`]; an older one is said once in the log.
+/// A no-change card is its session's plan, counted once.
+pub fn attention(app: &App) -> usize {
+    use crate::factory::cards::{CardState, Recipient};
+    let sessions = app
+        .tree
+        .agents
+        .iter()
+        .filter(|a| !a.archived && a.status == AgentStatus::NeedsFeedback)
+        .filter(|a| kind_of(a).is_some_and(|k| FACTORY.contains(&k)))
+        .count();
+    let counts = |key: &str| {
+        ["issue:", "pr:", "fix:"].iter().any(|p| key.starts_with(p)) && !key.ends_with(":nochange")
+    };
+    let now = crate::app::now_ms();
+    let cards = app
+        .factory_cards
+        .iter()
+        .filter(|p| p.state == CardState::Open && p.card.to == Recipient::Owner)
+        .filter(|p| counts(&p.card.key))
+        .filter(|p| {
+            let old = now - p.at_ms > CARD_COUNTS_MS;
+            if old {
+                said_old(&p.card.key);
+            }
+            !old
+        })
+        .count();
+    sessions + cards
+}
+
+/// Say once in the log that the card under `key` is too old to count.
+fn said_old(key: &str) {
+    static SAID: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.insert(key.to_string()) {
+        tracing::info!(
+            "automations: the factory card {key} has been open over {} days; it no longer holds new tickets back",
+            CARD_COUNTS_MS / orion_core::clock::DAY_MS
+        );
+    }
 }
 
 /// Whether `which` waits at its own cap while the overall cap still has
@@ -500,7 +582,7 @@ pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
 }
 
 /// How far back DONE THIS WEEK reaches.
-const WEEK_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const WEEK_MS: i64 = 7 * orion_core::clock::DAY_MS;
 
 /// DONE THIS WEEK: `which`'s sessions that came to rest in the last seven
 /// days — finished, or archived — newest first, each a jump to it.
@@ -651,14 +733,22 @@ mod tests {
         assert_eq!(saved.local_e2e, LocalE2e::Covering);
         let none: AutomationsSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(none.local_e2e, LocalE2e::Never);
-        // orion's own coding presets defer to the rule instead of naming e2e runs.
+        // orion's own coding presets leave e2e to CI unless the logs
+        // aren't enough, and never run a full suite; the builders carry
+        // their machine rules in their own layers.
         for text in [
             pr_fixer::PRESET_TEXT,
             linear_builder::BUG_FIXER_TEXT,
             linear_builder::FEATURE_BUILDER_TEXT,
         ] {
-            assert!(text.contains("testing rule below"), "{text}");
+            assert!(text.contains("logs aren't enough"), "{text}");
             assert!(!text.contains("full suite once"), "{text}");
+        }
+        for text in [
+            linear_builder::BUG_FIXER_TEXT,
+            linear_builder::FEATURE_BUILDER_TEXT,
+        ] {
+            assert!(!text.contains("testing rule below"), "{text}");
         }
     }
 
@@ -814,6 +904,78 @@ mod tests {
             assert_eq!(cfg.automations.cap(), 3);
             assert_eq!(cfg.automations.of(Automation::BugFixer).max_running, None);
         });
+    }
+
+    /// **Things waiting on you**: 5 out of the box, kept through a save,
+    /// stepped within 1 to 20, a hand-edited 0 read as 1.
+    #[test]
+    fn the_attention_cap_round_trips_and_steps_within_its_range() {
+        let s = config::AutomationsSettings::default();
+        assert_eq!(s.attention_cap(), 5);
+        let none: config::AutomationsSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(none.attention_cap, 5);
+        let saved: config::AutomationsSettings =
+            serde_json::from_str(r#"{"attention_cap": 7}"#).unwrap();
+        assert_eq!(saved.attention_cap(), 7);
+        let back: config::AutomationsSettings =
+            serde_json::from_value(serde_json::to_value(&saved).unwrap()).unwrap();
+        assert_eq!(back, saved);
+        let mut s = saved;
+        s.attention_cap = 20;
+        s.step_attention(1);
+        assert_eq!(s.attention_cap, 20);
+        s.attention_cap = 1;
+        s.step_attention(-1);
+        assert_eq!(s.attention_cap, 1);
+        s.attention_cap = 0;
+        assert_eq!(s.attention_cap(), 1);
+    }
+
+    /// Factory sessions waiting on you and the factory cards you haven't
+    /// acted on count; other sessions, other cards and a no-change card
+    /// (its session's plan, already counted) don't.
+    #[test]
+    fn attention_counts_factory_items_waiting_on_you() {
+        use crate::factory::cards::{post, Card, Recipient};
+        let mut app = App::new();
+        app.tree.agents = vec![
+            tagged("a", AgentStatus::NeedsFeedback, Some("bug_fixer")),
+            tagged("b", AgentStatus::NeedsFeedback, Some("pr_fixer")),
+            tagged("c", AgentStatus::NeedsFeedback, Some("blue_sky")),
+            tagged("d", AgentStatus::NeedsFeedback, None),
+            tagged("e", AgentStatus::Finished, Some("feature_builder")),
+        ];
+        let card = |key: &str, to: Recipient| Card {
+            key: key.into(),
+            to,
+            context: String::new(),
+            title: String::new(),
+            body: Vec::new(),
+            buttons: Vec::new(),
+            image: None,
+        };
+        post(&mut app, card("pr:u:verdict", Recipient::Owner));
+        post(&mut app, card("issue:i:urgent", Recipient::Owner));
+        post(&mut app, card("issue:i:nochange", Recipient::Owner));
+        post(
+            &mut app,
+            card("issue:j:thin", Recipient::Email("a@x.co".into())),
+        );
+        post(&mut app, card("kb:daily", Recipient::Owner));
+        assert_eq!(attention(&app), 4);
+        app.automations.settings.max_running = 20;
+        app.automations.settings.attention_cap = 4;
+        assert!(!may_start(&app, Automation::FeatureBuilder));
+        assert!(may_start(&app, Automation::BlueSky), "not a new ticket");
+        app.automations.settings.attention_cap = 5;
+        assert!(may_start(&app, Automation::FeatureBuilder));
+        // A card open over a week no longer counts.
+        app.factory_cards
+            .iter_mut()
+            .find(|p| p.card.key == "issue:i:urgent")
+            .unwrap()
+            .at_ms -= CARD_COUNTS_MS + 1;
+        assert_eq!(attention(&app), 3);
     }
 
     #[test]

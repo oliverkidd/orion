@@ -55,6 +55,7 @@
 use std::sync::Arc;
 
 use orion_core::away::PhoneKind;
+use orion_core::slack_caps::{BUTTON, HEADER, MAX_BLOCKS, SECTION};
 use orion_core::{AgentId, AgentStatus, Answer, Asked, Picked, ServerEvent, WaitReason};
 use serde_json::{json, Value};
 
@@ -62,22 +63,14 @@ use crate::answer::picked_words;
 use crate::registry::Daemon;
 use crate::slack::Session;
 
-/// Slack's cap on one section block's text.
-pub const SECTION_CHARS: usize = 3000;
-/// Slack's cap on blocks in one message.
-const MAX_BLOCKS: usize = 50;
-/// Slack's cap on a button's label.
-const BUTTON_CHARS: usize = 75;
-/// Slack's cap on a header block's text.
-const HEADER_CHARS: usize = 150;
 /// Slack's cap on a modal's title.
-const TITLE_CHARS: usize = 24;
+pub(crate) const TITLE_CHARS: usize = 24;
 /// Slack's cap on an input block's label.
-const LABEL_CHARS: usize = 2000;
+pub(crate) const LABEL_CHARS: usize = 2000;
 /// Slack's cap on a radio button's or checkbox's text.
 const OPTION_CHARS: usize = 75;
 /// How much of an answer the updated message repeats.
-const SUMMARY_CHARS: usize = 300;
+pub(crate) const SUMMARY_CHARS: usize = 300;
 
 /// What an answered message ends on, after what went in.
 pub const WORKING_AGAIN: &str = "working again";
@@ -159,6 +152,22 @@ pub fn kind_of(status: AgentStatus, reason: Option<&WaitReason>) -> Option<Phone
     }
 }
 
+/// The line a software factory builder's plan starts with when nothing
+/// should be built.
+const FACTORY_VERDICT: &str = "ORION-VERDICT:";
+
+/// Whether `reason` is a builder's plan that says nothing should be built
+/// (its first non-empty line `ORION-VERDICT: …`): the TUI's No-change
+/// factory card asks about it, so no phone message goes out for it.
+fn factory_verdict(reason: Option<&WaitReason>) -> bool {
+    let Some(WaitReason::Plan { plan }) = reason else {
+        return false;
+    };
+    plan.lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.trim_start().starts_with(FACTORY_VERDICT))
+}
+
 /// The status a message of `kind` is about: once the session is in any
 /// other, the message has been answered.
 fn status_of(kind: PhoneKind) -> AgentStatus {
@@ -209,7 +218,7 @@ pub fn build(ask: &Ask) -> Built {
                 ask.automation.and_then(orion_core::automation::name).unwrap_or(AGENT_KIND),
                 escape(ask.project), ask.time)}]}),
         json!({"type": "header", "text": {"type": "plain_text", "emoji": true,
-            "text": clip(ask.session, HEADER_CHARS)}}),
+            "text": clip(ask.session, HEADER)}}),
     ];
     let mut body: Vec<String> = ask
         .said
@@ -543,7 +552,7 @@ fn text_box(multiline: bool) -> Value {
     json!({"type": "plain_text_input", "action_id": INPUT_TEXT, "multiline": multiline})
 }
 
-fn plain(text: &str) -> Value {
+pub(crate) fn plain(text: &str) -> Value {
     json!({"type": "plain_text", "emoji": true, "text": text})
 }
 
@@ -557,11 +566,11 @@ fn context(text: &str) -> Value {
 
 fn button(label: &str, action_id: &str, value: &str) -> Value {
     json!({"type": "button", "action_id": action_id, "value": value,
-        "text": {"type": "plain_text", "emoji": true, "text": clip(label, BUTTON_CHARS)}})
+        "text": {"type": "plain_text", "emoji": true, "text": clip(label, BUTTON)}})
 }
 
 /// `text` cut to `max` characters, an ellipsis ending one that was cut.
-fn clip(text: &str, max: usize) -> String {
+pub(crate) fn clip(text: &str, max: usize) -> String {
     match text.chars().count() > max {
         true => format!("{}…", text.chars().take(max - 1).collect::<String>()),
         false => text.to_string(),
@@ -569,7 +578,7 @@ fn clip(text: &str, max: usize) -> String {
 }
 
 /// Slack's three escapes for text it reads as mrkdwn.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -593,7 +602,7 @@ pub fn mrkdwn(text: &str) -> String {
         .join("\n")
 }
 
-/// `text` in pieces of at most [`SECTION_CHARS`] characters, each cut at
+/// `text` in pieces of at most [`SECTION`] characters, each cut at
 /// the last line break (else space) that fits, never inside an `&…;`
 /// escape. Nothing is dropped but the whitespace a cut lands on.
 pub fn split(text: &str) -> Vec<String> {
@@ -601,11 +610,11 @@ pub fn split(text: &str) -> Vec<String> {
     let mut rest = text.trim();
     while !rest.is_empty() {
         let chars: Vec<(usize, char)> = rest.char_indices().collect();
-        if chars.len() <= SECTION_CHARS {
+        if chars.len() <= SECTION {
             out.push(rest.to_string());
             break;
         }
-        let limit = chars[SECTION_CHARS].0;
+        let limit = chars[SECTION].0;
         let window = &rest[..limit];
         let mut cut = window
             .rfind('\n')
@@ -940,7 +949,9 @@ impl Daemon {
             return;
         };
         let kind = kind_of(status, reason.as_ref());
-        let sends = kind.is_some_and(|kind| self.phone_sends(kind));
+        // A plan with nothing to build has the No-change card instead.
+        let sends =
+            kind.is_some_and(|kind| self.phone_sends(kind)) && !factory_verdict(reason.as_ref());
         let mut already_up = false;
         for message in self.store.open_phone_messages(agent).unwrap_or_default() {
             match closes(&message, status, reason.as_ref(), sends) {
@@ -1422,13 +1433,13 @@ mod tests {
         let built = build(&ask(Some(&said), Some(&reason)));
         let sections: Vec<String> = texts(&built.blocks)[2..built.blocks.len() - 3].to_vec();
         assert!(sections.len() > 1);
-        assert!(sections.iter().all(|s| s.chars().count() <= SECTION_CHARS));
+        assert!(sections.iter().all(|s| s.chars().count() <= SECTION));
         assert_eq!(sections.join("\n"), said, "nothing lost");
     }
 
     #[test]
     fn past_slacks_block_cap_the_rest_goes_in_the_thread() {
-        let said = "x".repeat(SECTION_CHARS * 60);
+        let said = "x".repeat(SECTION * 60);
         let reason = question();
         let built = build(&ask(Some(&said), Some(&reason)));
         assert_eq!(built.blocks.len(), MAX_BLOCKS);
@@ -1441,9 +1452,9 @@ mod tests {
 
     #[test]
     fn a_split_never_breaks_an_escape() {
-        let text = format!("{}&amp;tail", "x".repeat(SECTION_CHARS - 2));
+        let text = format!("{}&amp;tail", "x".repeat(SECTION - 2));
         let pieces = split(&text);
-        assert_eq!(pieces[0].len(), SECTION_CHARS - 2);
+        assert_eq!(pieces[0].len(), SECTION - 2);
         assert_eq!(pieces[1], "&amp;tail");
         assert_eq!(mrkdwn("a < b && c"), "a &lt; b &amp;&amp; c");
     }
@@ -1570,6 +1581,21 @@ mod tests {
             Some(PhoneKind::Crash)
         );
         assert_eq!(kind_of(AgentStatus::Running, None), None);
+    }
+
+    #[test]
+    fn a_plan_with_nothing_to_build_is_left_to_the_factory_card() {
+        let plan = |text: &str| WaitReason::Plan { plan: text.into() };
+        let verdict = plan("\n  ORION-VERDICT: already-fixed by abc1234\n\n# Plan");
+        assert!(factory_verdict(Some(&verdict)));
+        assert!(!factory_verdict(Some(&plan("1. Back up\n2. Migrate"))));
+        assert!(
+            !factory_verdict(Some(&plan("# Plan\nORION-VERDICT: duplicate RIPLO-1"))),
+            "only the first line counts"
+        );
+        assert!(!factory_verdict(Some(&plan(""))));
+        assert!(!factory_verdict(Some(&question())));
+        assert!(!factory_verdict(None));
     }
 
     #[test]

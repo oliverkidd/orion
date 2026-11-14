@@ -2,12 +2,15 @@
 //! through one of the Claude accounts orion runs sessions on. Nothing
 //! runs in a checkout, no session appears on the grid and nothing is
 //! left to tidy up: the account's CLI in print mode with no tools
-//! ([`run`]), or the same asked for JSON and parsed ([`run_json`]).
+//! ([`run`]), or the same asked for JSON and parsed ([`run_json`]). A
+//! harvest's check reads code: it runs in a folder, with the read-only
+//! tools it names ([`run_in`]).
 //!
 //! Every model call orion makes outside a session goes through here —
 //! the week in review, the automations' briefs, the meeting takeaways —
 //! so the command, its account and its failures are said one way.
 
+use std::path::Path;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -63,6 +66,13 @@ pub struct Reply {
     pub cost: Option<f64>,
 }
 
+/// Whether background work that calls out — a model, `gh`, Linear — is
+/// off: under test, or while `ORION_AGENT_CMD` stands in for the agents
+/// (the e2e tests).
+pub(crate) fn offline() -> bool {
+    cfg!(test) || orion_core::env::non_empty(orion_core::env::AGENT_CMD).is_some()
+}
+
 /// The account `cfg` answers `preset`'s asks through: the Claude account
 /// the preset pins (`Config::review_account`), or the default agent's when
 /// it follows the box. None with no Claude account switched on.
@@ -98,8 +108,22 @@ fn through(cfg: &Config, pinned: &str) -> Option<Account> {
 /// failure is the one line worth showing — the command missing, not
 /// signed in, timed out.
 pub async fn run(ask: Ask) -> Result<Reply, String> {
+    run_in(ask, None, None).await
+}
+
+/// [`run`], in `cwd` when given, with `tools` (`Read,Grep,Glob`) allowed
+/// and nothing else; None allows none.
+pub(crate) async fn run_in(
+    ask: Ask,
+    cwd: Option<&Path>,
+    tools: Option<&str>,
+) -> Result<Reply, String> {
     let mut cmd = tokio::process::Command::new(&ask.account.program);
     cmd.envs(ask.account.env.iter().map(|(name, value)| (name, value)));
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    let tools = tools.unwrap_or("");
     cmd.args([
         "-p",
         "--model",
@@ -107,7 +131,12 @@ pub async fn run(ask: Ask) -> Result<Reply, String> {
         "--effort",
         ask.effort.as_str(),
         "--tools",
-        "",
+        tools,
+    ]);
+    if !tools.is_empty() {
+        cmd.args(["--allowedTools", tools]);
+    }
+    cmd.args([
         "--system-prompt",
         ask.system.as_str(),
         "--no-session-persistence",
@@ -150,7 +179,7 @@ pub fn parse_reply(json: &str) -> Result<Reply, String> {
 
 /// A model's JSON answer as `T`, out of a ```json (or bare ```) fence
 /// when it wrapped one.
-fn parse_json<T: DeserializeOwned>(text: &str) -> Result<T, String> {
+pub(crate) fn parse_json<T: DeserializeOwned>(text: &str) -> Result<T, String> {
     serde_json::from_str(unfenced(text))
         .map_err(|e| truncate(&format!("the model's JSON did not read: {e}"), WHY_CUT))
 }

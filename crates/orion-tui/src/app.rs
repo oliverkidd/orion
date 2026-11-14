@@ -409,6 +409,15 @@ pub enum MenuAction {
         project: ProjectId,
         id: String,
     },
+    /// A button of a software factory card on the NEEDS YOU BOARD:
+    /// pressed as its Slack twin is, or — one that asks for words — a box
+    /// for them first (`needs_you::factory`).
+    FactoryPress {
+        key: String,
+        action: String,
+        label: String,
+        asks_text: bool,
+    },
 }
 
 /// Which submenu → (right arrow) opens from a menu row.
@@ -888,6 +897,15 @@ pub enum PromptKind {
     MicrosoftAppId {
         client_id: Option<String>,
     },
+    /// The words a software factory card's button asks for (`Reply…`),
+    /// chosen on the NEEDS YOU BOARD: Enter presses it with them, as the
+    /// Slack card's text box does (`needs_you::factory::press`). Empty is
+    /// a cancel.
+    FactoryText {
+        key: String,
+        action: String,
+        label: String,
+    },
 }
 
 impl PromptKind {
@@ -990,14 +1008,16 @@ impl PromptDialog {
         matches!(self.kind, PromptKind::AddProject)
     }
 
-    /// The task prompts — the QUICK PROMPT and the FOLLOW-UP — and a pull
-    /// request comment are the ones with a multi-row editor.
+    /// The task prompts — the QUICK PROMPT and the FOLLOW-UP — a pull
+    /// request comment and a factory card's words are the ones with a
+    /// multi-row editor.
     pub fn is_multiline(&self) -> bool {
         matches!(
             self.kind,
             PromptKind::FollowUp { .. }
                 | PromptKind::PrComment { .. }
                 | PromptKind::QuickPrompt { .. }
+                | PromptKind::FactoryText { .. }
         )
     }
 
@@ -4065,6 +4085,10 @@ pub struct App {
     /// Requests queued by a handler that has no request list to hand —
     /// the settings overlay's — sent with the loop's own on its next turn.
     pub outbox: Vec<orion_core::ClientRequest>,
+    /// Every factory card posted and where it stands (`factory::cards`),
+    /// for Needs you to mirror the open ones — kept on disk, so it
+    /// outlives a restart.
+    pub(crate) factory_cards: Vec<crate::factory::cards::Posted>,
     /// Where the Spotify polls and commands answer — the loop's channel,
     /// held here so a click on one of the readout's buttons can reach it.
     pub spotify_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::spotify::Answer>>,
@@ -4311,6 +4335,10 @@ pub struct App {
     /// while an attach waits out its debounce, so the Detach that precedes
     /// the next Attach names the session the daemon actually holds.
     pub attached_sref: Option<SessionRef>,
+    /// When the owner last typed into each session — a key, a paste, a
+    /// dropped file or a follow-up sent from orion — never a turn an
+    /// automation sent. What the PR fixer's archive-on-green waits out.
+    pub typed_at: HashMap<AgentId, std::time::Instant>,
     /// Mouse drag-selection over the terminal pane, if any.
     pub term_selection: Option<TermSelection>,
     /// The next EDGE AUTO-SCROLL tick: set while a drag-selection's pointer
@@ -4626,6 +4654,9 @@ pub struct App {
     /// AUTOMATIONS: their runners, their settings mirrored, and the
     /// creates still on their way (`crate::automations`).
     pub automations: crate::automations::Engine,
+    /// PR BODY AND VERDICT: the factory pull requests being watched,
+    /// and what was written and sent for each (`crate::pr_body`).
+    pub pr_body: crate::pr_body::State,
     /// Where a file dropped onto a prompt box bound for an agent is copied
     /// before macOS deletes it (`dropped_files`), and where `^V` keeps the
     /// clipboard's image (`clipboard_image`): the main loop installs the
@@ -4835,6 +4866,7 @@ impl App {
             away_by_hand: false,
             slack_status: Default::default(),
             outbox: Vec::new(),
+            factory_cards: crate::factory::cards::load(),
             spotify_tx: None,
             edge_tap: None,
             release_watch: None,
@@ -4882,6 +4914,7 @@ impl App {
             saved_draft: None,
             pending_attach: None,
             attached_sref: None,
+            typed_at: HashMap::new(),
             term_selection: None,
             next_drag_autoscroll: None,
             term_mouse_grab: None,
@@ -4957,6 +4990,7 @@ impl App {
             pr_cache_dirty: false,
             autofix: crate::automations::pr_fixer::State::default(),
             automations: Default::default(),
+            pr_body: Default::default(),
             attachments_dir: None,
             pr_detail_stale: std::collections::HashSet::new(),
             pr_detail_unsaved: std::collections::HashSet::new(),
@@ -5400,6 +5434,10 @@ impl App {
     /// a few seconds' worth at most.
     pub fn note_merge_landed(&mut self, worktree: WorktreeId) {
         crate::todos::merge_landed(self, &worktree);
+        // KNOWLEDGE: queue the pull request's harvest.
+        crate::knowledge::merge_landed(self, &worktree);
+        // FACTORY: a run's merge, recorded for its follow-up check.
+        crate::factory::follow_ups::merge_landed(self, &worktree);
         self.merge_landed
             .retain(|_, at| at.elapsed() < ONE_SHOT_SWEEP);
         self.merge_landed

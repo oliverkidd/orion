@@ -601,10 +601,10 @@ pub const SETTINGS_TABS: &[SettingsTab] = &[
         title: "Presets",
         body: TabBody::Presets,
     },
-    // What orion starts on its own: the caps, then each automation's
-    // section.
+    // What orion starts on its own — the software factory: the caps, then
+    // each automation's section.
     SettingsTab {
-        title: "Automations",
+        title: "Factory",
         body: TabBody::Automations,
     },
     // What orion reaches outside itself through: away and the phone,
@@ -855,7 +855,7 @@ pub fn presets_tab() -> usize {
         .expect("SETTINGS_TABS declares a Presets tab")
 }
 
-/// Index of the Automations tab (`automations::settings_tab`).
+/// Index of the Factory tab (`automations::settings_tab`).
 pub fn automations_tab() -> usize {
     SETTINGS_TABS
         .iter()
@@ -1358,6 +1358,9 @@ pub struct Config {
     /// AUTOMATIONS (`⌘J`): the running cap, and each automation's own
     /// settings (`crate::automations::config`).
     pub automations: crate::automations::config::AutomationsSettings,
+    /// The software factory's switches that have no screen yet:
+    /// `factory.auto_merge` (`crate::pr_body`).
+    pub factory: crate::pr_body::FactorySettings,
     /// Keys the files held that this build could not read; they loaded as
     /// defaults. Never written: [`Config::save`] reads it to leave those
     /// stored values alone — most likely a newer orion's — unless the
@@ -1586,6 +1589,7 @@ impl Default for Config {
             microsoft: MicrosoftSettings::default(),
             inbox: InboxSettings::default(),
             automations: Default::default(),
+            factory: Default::default(),
             skipped: BTreeSet::new(),
         }
     }
@@ -5511,7 +5515,7 @@ mod tests {
                 "Accounts",
                 "Projects",
                 "Presets",
-                "Automations",
+                "Factory",
                 "Connections",
                 "Keys"
             ]

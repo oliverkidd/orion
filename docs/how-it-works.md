@@ -470,9 +470,12 @@
 orion finds the pull request on each branch with `gh` and shows it, `#42`, at the right end of the
 band's rule, where it stays once it is merged or closed, badged `merged` or `closed` (an open one is
 badged `ready` — ready for review, the state and nothing more — and a draft is dimmed and badged `draft`;
-one GitHub says cannot merge, its branch conflicting with the base or a check failing, is red end to end
-and badged `conflicts` or `failing` instead, the PULL REQUEST PAGE saying the conflict beside the
-state and marking a failed check on its Checks tab),
+an open, ready one GitHub says cannot merge, its branch conflicting with the base or a check failing,
+is red end to end and badged `conflicts` or `failing` instead, the PULL REQUEST PAGE saying the
+conflict beside the state and marking a failed check on its Checks tab. A draft stays dimmed and
+badged `draft` whatever GitHub says, since it isn't asking anyone yet: its page's border reads
+`○ Draft · conflicts`, and the PR fixer leaves it alone until it is marked ready, except a draft the
+bug fixer or feature builder opened, whose failing checks it fixes at once),
 for as long as the checkout does — a worktree whose PR has shipped is the one
 you are about to archive or delete, and the PR is what you check first. A merged one also takes over the
 checkout's band: purple dot and purple branch name, so the checkout to

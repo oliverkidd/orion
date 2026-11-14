@@ -10,8 +10,9 @@
 //!   phone messages go in.
 //! - Then one Socket Mode websocket (`socket`), opened again with backoff
 //!   whenever it drops. Its button presses and DM replies answer waiting
-//!   sessions (`phone`); every message event is forwarded to the TUIs as
-//!   `ServerEvent::SlackMessage`, unfiltered.
+//!   sessions (`phone`); a press on a factory card goes back to the TUIs
+//!   as `ServerEvent::FactoryAction` (`factory`); every message event is
+//!   forwarded to the TUIs as `ServerEvent::SlackMessage`, unfiltered.
 //!
 //! No tokens is no connection and no polling: the bridge waits for the
 //! Connections tab's `SlackReconnect`.
@@ -297,8 +298,8 @@ async fn listen(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<socket::
 }
 
 /// One envelope: a message event (the inbox's, and maybe a reply in the
-/// phone's DM), a button press on a phone message, or a phone modal's
-/// submit.
+/// phone's DM), a button press on a factory card or a phone message, or
+/// one of their modals' submits.
 async fn handle(daemon: &Arc<Daemon>, session: &Arc<Session>, envelope: socket::Envelope) {
     match envelope.kind.as_str() {
         "events_api" => {
@@ -325,6 +326,19 @@ async fn handle(daemon: &Arc<Daemon>, session: &Arc<Session>, envelope: socket::
         }
         "interactive" => {
             let payload = &envelope.payload;
+            // A factory link button: Slack opened its link; the frame is
+            // already acked, and the card stays as it is.
+            if crate::factory::is_link(payload) {
+                return;
+            }
+            let factory = match payload["type"].as_str() {
+                Some("view_submission") => crate::factory::route_submission(payload),
+                _ => crate::factory::route_action(payload),
+            };
+            if let Some(press) = factory {
+                daemon.factory_press(session, press).await;
+                return;
+            }
             let route = match payload["type"].as_str() {
                 Some("view_submission") => crate::phone::route_submission(payload, session),
                 _ => crate::phone::route_action(payload, session),
