@@ -762,9 +762,10 @@ fn tab_label(
 }
 
 /// The checks' tally in its colour — `✗ 1/3` crimson while one failed,
-/// `◐ 1/2` gold while one runs, `✓ 3/3` green — or None with no checks:
-/// the Checks tab's verdict, and the DIFF VIEWER's top line
-/// (`diff_actions::top_line`).
+/// `◐ 1/2` gold while one runs, a dim `⊘ 2/3` when one was cancelled and
+/// nothing failed or runs, `✓ 3/3` green — or None with no checks: a
+/// cancelled check counts as neither passed nor failed. The Checks tab's
+/// verdict, and the DIFF VIEWER's top line (`diff_actions::top_line`).
 pub(crate) fn check_tally(n: CheckCounts, th: Theme) -> Option<(String, Color)> {
     if n.total == 0 {
         return None;
@@ -773,6 +774,8 @@ pub(crate) fn check_tally(n: CheckCounts, th: Theme) -> Option<(String, Color)> 
         ("✗", th.err)
     } else if n.running > 0 {
         ("◐", th.warn)
+    } else if n.cancelled > 0 {
+        ("⊘", th.dim)
     } else {
         ("✓", th.ok)
     };
@@ -1336,19 +1339,23 @@ fn commit_row(
 /// A Checks row: its mark, its name, and at the right end how it went —
 /// how long it ran, `running 2m`, or what GitHub called a failure that was
 /// not a plain one (`timed out · 15m`) — in the mark's colour when it
-/// failed or still runs.
+/// failed or still runs. A cancelled one is drawn dim, as a skipped one
+/// is: `⊘`, and `cancelled · 40s`.
 fn check_row(check: &PrCheck, now: i64, width: usize, th: Theme) -> Vec<Span<'static>> {
     let (mark, color) = match check.state {
         CheckState::Failed => ("✗", th.err),
         CheckState::Running => ("◐", th.warn),
         CheckState::Passed => ("✓", th.ok),
         CheckState::Skipped => ("–", th.dim),
+        CheckState::Cancelled => ("⊘", th.dim),
     };
     let word = check.word.to_lowercase().replace('_', " ");
     let tail = match (check.state, check.duration(now)) {
         (CheckState::Running, Some(so_far)) => format!("running {so_far}"),
         (CheckState::Running, None) => "queued".into(),
         (CheckState::Skipped, _) => word,
+        (CheckState::Cancelled, Some(took)) => format!("{word} · {took}"),
+        (CheckState::Cancelled, None) => word,
         (CheckState::Failed, Some(took)) if word != "failure" => format!("{word} · {took}"),
         (_, Some(took)) => took,
         (CheckState::Failed, None) => word,
@@ -1359,7 +1366,7 @@ fn check_row(check: &PrCheck, now: i64, width: usize, th: Theme) -> Vec<Span<'st
         CheckState::Running => th.warn,
         _ => th.dim,
     };
-    let name_color = if check.state == CheckState::Skipped {
+    let name_color = if matches!(check.state, CheckState::Skipped | CheckState::Cancelled) {
         th.dim
     } else {
         th.text
@@ -2425,6 +2432,41 @@ mod tests {
     /// Checks group by the workflow they ran in, the group with the worst
     /// check first, a check from no workflow under `Other` — and the row
     /// cursor walks them, and acts on them, in that order.
+    /// A cancelled check is drawn dim with `⊘` and the word, and counts
+    /// for neither side: with nothing failed or running the tab's tally
+    /// is a dim `⊘`, never the red `✗`.
+    #[test]
+    fn a_cancelled_check_reads_cancelled_not_failing() {
+        let th = Theme::default();
+        let mut d = full();
+        for check in &mut d.checks {
+            check.state = CheckState::Passed;
+            check.word = "SUCCESS".into();
+            check.completed = "2026-10-02T10:03:12Z".into();
+        }
+        d.checks[0].state = CheckState::Cancelled;
+        d.checks[0].word = "CANCELLED".into();
+        d.checks[0].completed = "2026-10-02T10:00:40Z".into();
+        let n = CheckCounts::of(&d.checks);
+        assert_eq!((n.failed, n.cancelled, n.ok, n.total), (0, 1, 2, 3));
+        assert_eq!(check_tally(n, th), Some(("⊘ 2/3".into(), th.dim)));
+        assert!(tab_texts(&input(Some(&d)), th).contains(&"Checks ⊘ 2/3".to_string()));
+
+        let row = check_row(&d.checks[0], NOW, 80, th);
+        let line: String = row.iter().map(|s| s.content.as_ref()).collect();
+        assert!(line.contains("⊘ test"), "{line}");
+        assert!(line.contains("cancelled · 40s"), "{line}");
+        assert!(!line.contains('✗'), "{line}");
+        assert!(row.iter().all(|s| s.style.fg != Some(th.err)), "{row:?}");
+
+        d.checks[1].state = CheckState::Running;
+        assert_eq!(
+            check_tally(CheckCounts::of(&d.checks), th).map(|(_, c)| c),
+            Some(th.warn),
+            "running still reads running"
+        );
+    }
+
     #[test]
     fn checks_group_by_workflow_worst_first() {
         let mut d = full();

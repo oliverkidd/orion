@@ -472,7 +472,11 @@ band's rule, where it stays once it is merged or closed, badged `merged` or `clo
 badged `ready` — ready for review, the state and nothing more — and a draft is dimmed and badged `draft`;
 an open, ready one GitHub says cannot merge, its branch conflicting with the base or a check failing,
 is red end to end and badged `conflicts` or `failing` instead, the PULL REQUEST PAGE saying the
-conflict beside the state and marking a failed check on its Checks tab. A draft stays dimmed and
+conflict beside the state and marking a failed check on its Checks tab. A cancelled check is no
+failure: it is drawn dim with `⊘`, and a pull request whose only trouble is cancelled checks reads a
+muted `cancelled`, neither green nor red. A check's newest run stands for it, and one still queued
+or running is newer than any that finished, so a workflow started again on the same commit hides the
+run it cancelled. A draft stays dimmed and
 badged `draft` whatever GitHub says, since it isn't asking anyone yet: its page's border reads
 `○ Draft · conflicts`, and the PR fixer leaves it alone until it is marked ready, except a draft the
 bug fixer or feature builder opened, whose failing checks it fixes at once),

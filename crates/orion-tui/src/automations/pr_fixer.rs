@@ -40,6 +40,11 @@
 //!   agent, a fresh fixer starts with a handover. An `autofix-<n>` whose
 //!   pull request has gone green, its turn done, is archived
 //!   ([`archive_green`]).
+//! * **Cancelled checks.** A cancelled job is no failure: a pull request
+//!   whose checks ended with some cancelled and none failed is never sent
+//!   an agent. A factory one has its cancelled runs started again with
+//!   `gh run rerun`, once per head commit, the ledger keeping the commit
+//!   (`Record::rerun`) so it is not asked twice ([`rerun_cancelled`]).
 //! * **The owner's comments.** On a factory pull request, what the owner
 //!   writes on GitHub — review comments with their file and line, and
 //!   conversation comments — goes to the branch's agent through the same
@@ -103,6 +108,8 @@ pub const RECHECK: Duration = Duration::from_secs(60);
 /// How soon a body is read again while its branch agent's context is
 /// being measured ([`router::measure`]).
 const MEASURE_RECHECK: Duration = Duration::from_secs(3);
+/// How long `gh run rerun` is given to start a cancelled run again.
+const RERUN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long running checks are waited out before acting on the failures
 /// already in.
 pub const SETTLE_LIMIT: Duration = Duration::from_secs(20 * 60);
@@ -147,6 +154,9 @@ pub struct Diagnosis {
     pub conflicts: bool,
     /// The failed checks, in the order GitHub listed them.
     pub failing: Vec<PrCheck>,
+    /// The cancelled checks — no failure, nothing for an agent to fix, but
+    /// a factory pull request's are started again ([`rerun_cancelled`]).
+    pub cancelled: Vec<PrCheck>,
     /// Some check has not finished.
     pub running: bool,
     /// The files its head conflicts in with its base, as the repo merged
@@ -167,6 +177,7 @@ pub fn diagnose(detail: &PrDetail, conflicts: bool) -> Diagnosis {
         match check.state {
             CheckState::Failed => out.failing.push(check.clone()),
             CheckState::Running => out.running = true,
+            CheckState::Cancelled => out.cancelled.push(check.clone()),
             CheckState::Passed | CheckState::Skipped => {}
         }
     }
@@ -182,6 +193,24 @@ impl Diagnosis {
     /// Only conflicts — nothing failed that running checks could add to.
     fn conflicts_only(&self) -> bool {
         self.conflicts && self.failing.is_empty()
+    }
+
+    /// The Actions runs to start again when nothing is wrong but some
+    /// checks were cancelled — nothing failed, nothing conflicts, nothing
+    /// still running: each cancelled check's run, once, in the order they
+    /// came. None otherwise, or for a cancelled check that is no Actions
+    /// job.
+    pub fn cancelled_runs(&self) -> Vec<u64> {
+        if !self.is_empty() || self.running {
+            return Vec::new();
+        }
+        let mut runs = Vec::new();
+        for id in self.cancelled.iter().filter_map(PrCheck::run_id) {
+            if !runs.contains(&id) {
+                runs.push(id);
+            }
+        }
+        runs
     }
 
     /// Whether `issue` was seen.
@@ -271,6 +300,10 @@ pub struct Record {
     /// or seen on the first look; None before that look.
     #[serde(default)]
     pub comments_seen: Option<String>,
+    /// The head commit whose cancelled runs were last started again
+    /// ([`rerun_cancelled`]): not again on that commit.
+    #[serde(default)]
+    pub rerun: Option<String>,
 }
 
 /// A watched pull request: in trouble, its body asked for.
@@ -456,8 +489,13 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
             }
             continue;
         }
-        // Not in trouble, but not known green either: nothing to watch.
+        // Not in trouble, but not known green either: nothing to watch —
+        // unless it is a factory pull request whose checks ended
+        // cancelled, whose body is read for the runs to start again.
         if fixer_trouble(&status).is_none() {
+            if factory && wants_rerun(app, &pr.url, &status) {
+                watch(app, project, pr, Instant::now());
+            }
             continue;
         }
         if !app.automations.is_on(Automation::PrFixer) {
@@ -540,6 +578,70 @@ fn fixer_view(mut status: PrStatus, factory: bool) -> PrStatus {
         status.health.conflicts = false;
     }
     status
+}
+
+/// Whether a factory pull request standing at `status` has checks that
+/// ended cancelled — nothing failed, nothing running — on a head commit
+/// whose cancelled runs were not started again yet, with the PR fixer on
+/// and the pull request not parked.
+fn wants_rerun(app: &App, url: &str, status: &PrStatus) -> bool {
+    let record = app.autofix.ledger.get(url);
+    status.health.checks == Checks::Cancelled
+        && status.is_open()
+        && !status.head_sha.is_empty()
+        && app.automations.is_on(Automation::PrFixer)
+        && !record.is_some_and(|r| r.parked)
+        && record.and_then(|r| r.rerun.as_deref()) != Some(status.head_sha.as_str())
+}
+
+/// A factory pull request whose body shows checks that ended cancelled
+/// and nothing else wrong: start its cancelled runs again with `gh run
+/// rerun <run id>` — no agent, since a cancelled job said nothing about
+/// the code — once per head commit, the commit kept in the ledger
+/// (`Record::rerun`) so a later look does not ask again. The runs it
+/// started; none when this commit's were already, or nothing is only
+/// cancelled.
+fn rerun_cancelled(
+    app: &mut App,
+    url: &str,
+    dir: &std::path::Path,
+    detail: &PrDetail,
+    diagnosis: &Diagnosis,
+) -> Vec<u64> {
+    if diagnosis.cancelled.is_empty() || !diagnosis.is_empty() || diagnosis.running {
+        return Vec::new();
+    }
+    let sha = match detail.head_sha.as_str() {
+        "" => app.prs.status_or_open(url).head_sha,
+        sha => sha.to_string(),
+    };
+    if sha.is_empty() || app.autofix.ledger.get(url).and_then(|r| r.rerun.as_deref()) == Some(&sha)
+    {
+        return Vec::new();
+    }
+    // Kept even when no run could be named, so the body is not read again
+    // for it on every list.
+    app.autofix.record(url).rerun = Some(sha);
+    let runs = diagnosis.cancelled_runs();
+    if runs.is_empty() {
+        return runs;
+    }
+    if let Ok(rt) = tokio::runtime::Handle::try_current() {
+        let (dir, ids) = (dir.to_path_buf(), runs.clone());
+        rt.spawn(async move {
+            for id in ids {
+                let id = id.to_string();
+                crate::pull_request::gh(Some(&dir), &["run", "rerun", &id], RERUN_TIMEOUT).await;
+            }
+        });
+    }
+    app.flash = Some(Flash::note(format!(
+        "PR fixer re-ran {} on #{}",
+        crate::flash::plural(diagnosis.cancelled.len(), "cancelled check"),
+        detail.number
+    )));
+    app.dirty = true;
+    runs
 }
 
 /// What the fixer acts on in a pull request standing at `status` (seen
@@ -711,6 +813,15 @@ pub fn land_detail(
     }
     let status = fixer_view(status, factory);
     let diagnosis = diagnose(detail, status.health.conflicts);
+    // A factory pull request's cancelled runs, started again: nothing for
+    // an agent, and nothing more to watch until the list moves.
+    if factory && status.is_open() && !diagnosis.cancelled.is_empty() && diagnosis.is_empty() {
+        if !diagnosis.running {
+            rerun_cancelled(app, url, &watch.dir, detail, &diagnosis);
+        }
+        app.autofix.forget(url);
+        return;
+    }
     if diagnosis.is_empty() && status.is_open() && pr.is_some() && !status.conflicts_known {
         app.autofix.recheck_later(url);
         return;
@@ -1275,6 +1386,15 @@ fn open_pr_row(app: &App, project: &ProjectId, pr: &OpenPr) -> PanelRow {
         }
         (None, None) if fixer_trouble(&status).is_some() => {
             ("waiting for checks".into(), Tone::Quiet, None)
+        }
+        (None, None) if status.health.checks == Checks::Cancelled => {
+            let rerun = record.and_then(|r| r.rerun.as_deref()) == Some(status.head_sha.as_str());
+            let word = if rerun {
+                "re-ran cancelled checks"
+            } else {
+                "checks cancelled"
+            };
+            (word.into(), Tone::Quiet, None)
         }
         (None, None) => ("watching".into(), Tone::Quiet, None),
     };
@@ -3109,6 +3229,124 @@ mod tests {
         );
     }
 
+    /// A row whose checks ended with some cancelled and none failed.
+    fn cancelled_row() -> OpenPr {
+        OpenPr {
+            answered: Answered {
+                conflicts: Some(false),
+                checks: Some(Checks::Cancelled),
+            },
+            ..pr()
+        }
+    }
+
+    /// A cancelled Actions job of run `run`.
+    fn cancelled(name: &str, run: u64) -> PrCheck {
+        PrCheck {
+            word: "CANCELLED".into(),
+            url: format!("https://github.com/o/r/actions/runs/{run}/job/1"),
+            ..check(name, "Verify app", CheckState::Cancelled)
+        }
+    }
+
+    /// A cancelled check is no failure: nothing to fix, no fingerprint —
+    /// and its run is named once to start again, but only while nothing
+    /// failed, conflicts or runs.
+    #[test]
+    fn a_cancelled_check_is_not_a_failure() {
+        let page = detail(
+            false,
+            vec![
+                cancelled("Wait for Vercel preview", 11),
+                cancelled("MCP checks", 11),
+                cancelled("Build app", 12),
+                check("unit", "CI", CheckState::Passed),
+            ],
+        );
+        let d = diag(&page);
+        assert!(d.is_empty(), "{d:?}");
+        assert!(!d.has(Issue::Checks));
+        assert_eq!(d.cancelled.len(), 3);
+        assert_eq!(d.cancelled_runs(), [11, 12]);
+        assert_eq!(d.summary(), "nothing failing");
+
+        let mut busy = page.clone();
+        busy.checks.push(check("e2e", "CI", CheckState::Running));
+        assert!(diag(&busy).cancelled_runs().is_empty(), "still running");
+        let mut red = page.clone();
+        red.checks.push(check("lint", "CI", CheckState::Failed));
+        let d = diag(&red);
+        assert!(d.cancelled_runs().is_empty(), "a failure is the agent's");
+        assert_eq!(d.fingerprint("abc123").checks, ["lint"]);
+    }
+
+    /// A factory pull request whose checks ended cancelled has its
+    /// cancelled runs started again — no agent — once per head commit,
+    /// the ledger keeping the commit. Another push asks again; a plain
+    /// pull request is left alone.
+    #[test]
+    fn a_factory_prs_cancelled_runs_are_rerun_once_per_head() {
+        let mut app = app_with(vec![cancelled_row()], true);
+        listed(&mut app);
+        assert!(app.autofix.watching.is_empty(), "not a factory PR");
+        assert_eq!(
+            open_pr_row(&app, &ProjectId("p".into()), &cancelled_row()).state,
+            "checks cancelled"
+        );
+
+        make_factory(&mut app);
+        listed(&mut app);
+        assert!(app.autofix.watching.contains_key(&pr().url));
+        let page = detail(
+            false,
+            vec![
+                cancelled("MCP checks", 11),
+                cancelled("Build app", 11),
+                check("unit", "CI", CheckState::Passed),
+            ],
+        );
+        let out = landed(&mut app, &page);
+        assert!(out.is_empty(), "no agent: {out:?}");
+        assert_eq!(
+            app.autofix.ledger[&pr().url].rerun.as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(app.autofix.ledger[&pr().url].attempts, 0);
+        assert!(app.autofix.watching.is_empty());
+        let flash = app.flash.take().expect("said so");
+        assert_eq!(flash.text, "PR fixer re-ran 2 cancelled checks on #7");
+        assert_eq!(
+            open_pr_row(&app, &ProjectId("p".into()), &cancelled_row()).state,
+            "re-ran cancelled checks"
+        );
+
+        // The same commit is not asked about again.
+        listed(&mut app);
+        assert!(app.autofix.watching.is_empty(), "once per head");
+        let d = diag(&page);
+        let dir = std::path::PathBuf::from("/tmp/repo");
+        assert!(rerun_cancelled(&mut app, &pr().url, &dir, &page, &d).is_empty());
+        assert!(app.flash.is_none());
+
+        // A push: the new head's cancelled runs are started again.
+        let pushed = OpenPr {
+            head_sha: "def456".into(),
+            ..cancelled_row()
+        };
+        set_list(&mut app, vec![pushed]);
+        listed(&mut app);
+        assert!(app.autofix.watching.contains_key(&pr().url), "a new head");
+        let page = PrDetail {
+            head_sha: "def456".into(),
+            ..page
+        };
+        landed(&mut app, &page);
+        assert_eq!(
+            app.autofix.ledger[&pr().url].rerun.as_deref(),
+            Some("def456")
+        );
+    }
+
     /// A factory draft (its branch in the builder ledger) is not left
     /// alone: its failing checks are sent at once — its conflicts are not,
     /// while it is a draft — and a draft whose checks pass is green
@@ -3592,6 +3830,7 @@ mod tests {
                 passed: 0,
                 failed,
                 pending,
+                cancelled: 0,
             })
         };
         let row = |pending| OpenPr {

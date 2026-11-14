@@ -1232,6 +1232,7 @@ fn merge_warnings(status: &PrStatus, detail: Option<&PrDetail>) -> Vec<String> {
     match health.checks {
         Checks::Failing => out.push("some checks are failing".into()),
         Checks::Pending => out.push("checks are still running".into()),
+        Checks::Cancelled => out.push("some checks were cancelled".into()),
         Checks::Passing | Checks::Absent => {}
     }
     match detail.map(|d| d.review_decision.as_str()) {

@@ -105,8 +105,11 @@ impl Standing {
 /// How a pull request's checks stand, folded from `gh`'s
 /// `statusCheckRollup` the way `gh pr checks` folds it ([`checks`]): one
 /// failure fails the lot, one still running leaves the lot pending, and a
-/// repo that runs no checks at all has nothing to say. Only `Failing` is
-/// trouble; the rest is what the PR PREVIEW spells out beside the state.
+/// repo that runs no checks at all has nothing to say. `Cancelled` is a
+/// lot with nothing failed and nothing running where some job was
+/// cancelled: neither green nor red, but muted — a cancelled job broke
+/// nothing in the code, it just never said. Only `Failing` is trouble;
+/// the rest is what the PR PREVIEW spells out beside the state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Checks {
     #[default]
@@ -114,6 +117,26 @@ pub enum Checks {
     Pending,
     Passing,
     Failing,
+    Cancelled,
+}
+
+impl Checks {
+    /// The lot's word once `one` more check is in: failing outranks
+    /// running, running outranks cancelled, and cancelled outranks passed.
+    pub(crate) fn and(self, one: Checks) -> Checks {
+        let rank = |c: Checks| match c {
+            Checks::Absent => 0,
+            Checks::Passing => 1,
+            Checks::Cancelled => 2,
+            Checks::Pending => 3,
+            Checks::Failing => 4,
+        };
+        if rank(one) > rank(self) {
+            one
+        } else {
+            self
+        }
+    }
 }
 
 /// What GitHub says stands between a pull request and its merge button,
@@ -496,21 +519,13 @@ fn rollup_state(rollup: &serde_json::Value) -> Checks {
 /// its `conclusion` once `COMPLETED` and its `status` (queued, in
 /// progress) until then; a plain commit status carries a `state` instead.
 /// Any failure fails the lot; else anything still running leaves the lot
-/// pending; else it passes — a skipped or neutral job is not a failure.
+/// pending; else a cancelled job leaves it cancelled; else it passes — a
+/// skipped or neutral job is not a failure, and nor is a cancelled one.
 fn checks(rollup: &[serde_json::Value]) -> Checks {
-    let mut out = Checks::Absent;
-    for entry in latest_runs(rollup) {
-        let one = match check_state(&check_word(entry)) {
-            CheckState::Passed | CheckState::Skipped => Checks::Passing,
-            CheckState::Failed => return Checks::Failing,
-            CheckState::Running => Checks::Pending,
-        };
-        out = match (out, one) {
-            (Checks::Pending, _) | (_, Checks::Pending) => Checks::Pending,
-            _ => Checks::Passing,
-        };
-    }
-    out
+    latest_runs(rollup)
+        .into_iter()
+        .map(|entry| check_state(&check_word(entry)).as_checks())
+        .fold(Checks::Absent, Checks::and)
 }
 
 /// A rollup's entries with every superseded run of a check left out, the
@@ -520,17 +535,24 @@ fn checks(rollup: &[serde_json::Value]) -> Checks {
 /// failure re-run as a fresh run — leaves the old run's `CANCELLED` and
 /// `FAILURE` beside the new one's `SUCCESS` (#1321 on riplo-os read as
 /// failing while every check had passed). A check is its workflow and its
-/// name (a commit status, its context), and the run that started last is
-/// the one that stands. GitHub's order is kept for the rest.
+/// name (a commit status, its context), and the run that stands is one
+/// not yet done, else the one that started last. A queued run has no
+/// `startedAt` yet, so by start alone the cancelled run it replaces would
+/// stand over it; anything still to finish is newer than anything done.
+/// GitHub's order is kept for the rest.
 fn latest_runs(rollup: &[serde_json::Value]) -> Vec<&serde_json::Value> {
     let key = |entry: &serde_json::Value| (workflow_name(entry), check_name(entry));
+    let rank = |entry: &serde_json::Value| {
+        let done = check_state(&check_word(entry)) != CheckState::Running;
+        (!done, started_at(entry))
+    };
     let mut latest: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
     for (i, entry) in rollup.iter().enumerate() {
         latest
             .entry(key(entry))
             .and_modify(|kept| {
-                if started_at(entry) >= started_at(&rollup[*kept]) {
+                if rank(entry) >= rank(&rollup[*kept]) {
                     *kept = i;
                 }
             })
@@ -587,12 +609,15 @@ fn check_word(entry: &serde_json::Value) -> String {
 }
 
 /// Where a check stands by its word: a skipped or neutral job is done and
-/// is no failure; anything not yet concluded is still running.
+/// is no failure; a cancelled one (or one GitHub marked stale) is done
+/// and said nothing either way; anything not yet concluded is still
+/// running.
 fn check_state(word: &str) -> CheckState {
     match word {
         "SUCCESS" => CheckState::Passed,
         "NEUTRAL" | "SKIPPED" => CheckState::Skipped,
-        "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+        "CANCELLED" | "STALE" => CheckState::Cancelled,
+        "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
             CheckState::Failed
         }
         _ => CheckState::Running,
@@ -719,17 +744,20 @@ pub struct PrLabel {
 
 /// How a pull request's checks stand, by count — GitHub's own tally of
 /// the head commit's check runs and statuses. A skipped job counts for
-/// neither side, as `gh pr checks` leaves it out of its passes.
+/// neither side, as `gh pr checks` leaves it out of its passes; a
+/// cancelled one is counted apart, neither passed nor failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CheckTally {
     pub passed: u32,
     pub failed: u32,
     pub pending: u32,
+    #[serde(default)]
+    pub cancelled: u32,
 }
 
 impl CheckTally {
     pub fn total(self) -> u32 {
-        self.passed + self.failed + self.pending
+        self.passed + self.failed + self.pending + self.cancelled
     }
 }
 
@@ -857,16 +885,24 @@ impl OpenPr {
         Some(match self.meta.checks {
             Some(tally) if tally.failed > 0 => Checks::Failing,
             Some(tally) if tally.pending > 0 => Checks::Pending,
+            Some(tally) if tally.cancelled > 0 => Checks::Cancelled,
             Some(_) => Checks::Passing,
             None => word,
         })
     }
 
-    /// Whether either verdict the list carries says failing — the rollup's
-    /// word or the tally — which is what [`recheck_failing`] reads again.
+    /// Whether either verdict the list carries says failing or cancelled —
+    /// the rollup's word or the tally — which is what [`recheck_failing`]
+    /// reads again: GitHub's rollup counts a cancelled run as a failure,
+    /// and a cancelled run a newer one superseded should not linger.
     fn says_failing(&self) -> bool {
-        self.answered.checks == Some(Checks::Failing)
-            || self.meta.checks.is_some_and(|tally| tally.failed > 0)
+        matches!(
+            self.answered.checks,
+            Some(Checks::Failing | Checks::Cancelled)
+        ) || self
+            .meta
+            .checks
+            .is_some_and(|tally| tally.failed > 0 || tally.cancelled > 0)
     }
 
     /// One of the merged tail's rows, not an open one.
@@ -1020,12 +1056,13 @@ fn failing_query(numbers: &[u64]) -> String {
 /// without the runs a later one superseded ([`latest_runs`]). A list row's
 /// word is the rollup's server-side `state`, and its tally the rollup's
 /// per-state counts — both counting every run the head commit ever had,
-/// so a cancelled or re-run workflow leaves the row red after its new run
-/// passed. Only `Failing` can be wrong that way — a superseded run is
-/// done, so it never holds a row pending — and failing rows are few, so
-/// they alone are asked about, in one query — a row whose rollup word or
-/// tally says failing, either, since the two count the same runs and the
-/// row draws one verdict from both ([`OpenPr::listed_checks`]). A row the
+/// so a cancelled or re-run workflow leaves the row red (or cancelled)
+/// after its new run passed. Only `Failing` and `Cancelled` can be wrong
+/// that way — a superseded run is done, so it never holds a row pending —
+/// and such rows are few, so they alone are asked about, in one query — a
+/// row whose rollup word or tally says failing or cancelled, either, since
+/// the two count the same runs and the row draws one verdict from both
+/// ([`OpenPr::listed_checks`]). A row the
 /// answer leaves out keeps GitHub's word: unsure stays red rather than
 /// going quiet. The URLs of the rows it could not read in full come back
 /// ([`ListAnswer::cut`]).
@@ -1097,6 +1134,7 @@ fn tally(contexts: &[serde_json::Value]) -> Option<CheckTally> {
             CheckState::Skipped => {}
             CheckState::Failed => tally.failed += 1,
             CheckState::Running => tally.pending += 1,
+            CheckState::Cancelled => tally.cancelled += 1,
         }
     }
     (tally.total() > 0).then_some(tally)
@@ -1330,8 +1368,9 @@ fn meta(v: &serde_json::Value, viewer: &str) -> PrMeta {
 }
 
 /// GitHub's per-state counts of a commit's check runs and statuses, as
-/// passed / failed / pending. A skipped or neutral run counts for neither
-/// side; None when there is nothing to count.
+/// passed / failed / pending / cancelled. A skipped or neutral run counts
+/// for neither side, and a cancelled or stale one is counted apart; None
+/// when there is nothing to count.
 fn check_tally(contexts: &serde_json::Value) -> Option<CheckTally> {
     let mut tally = CheckTally::default();
     for list in ["checkRunCountsByState", "statusContextCountsByState"] {
@@ -1340,8 +1379,10 @@ fn check_tally(contexts: &serde_json::Value) -> Option<CheckTally> {
             match str_at(entry, "state").as_str() {
                 "SUCCESS" => tally.passed += n,
                 "NEUTRAL" | "SKIPPED" => {}
-                "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
-                | "STARTUP_FAILURE" | "STALE" => tally.failed += n,
+                "CANCELLED" | "STALE" => tally.cancelled += n,
+                "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+                    tally.failed += n
+                }
                 _ => tally.pending += n,
             }
         }
@@ -1556,14 +1597,29 @@ impl PrCommit {
 }
 
 /// Where one check stands. The order is the Checks tab's: what failed
-/// first, then what is still running, then what passed, then what was
-/// skipped.
+/// first, then what is still running, then what was cancelled, then what
+/// passed, then what was skipped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum CheckState {
     Failed,
     Running,
+    /// Stopped before it said anything — cancelled by hand or by its
+    /// concurrency group, or marked stale. Neither passed nor failed.
+    Cancelled,
     Passed,
     Skipped,
+}
+
+impl CheckState {
+    /// This one check, as the lot's word would read were it alone.
+    pub(crate) fn as_checks(self) -> Checks {
+        match self {
+            CheckState::Failed => Checks::Failing,
+            CheckState::Running => Checks::Pending,
+            CheckState::Cancelled => Checks::Cancelled,
+            CheckState::Passed | CheckState::Skipped => Checks::Passing,
+        }
+    }
 }
 
 /// One check on a pull request's head commit: a check run (GitHub
@@ -1605,14 +1661,25 @@ impl PrCheck {
         };
         Some(duration_label(end.saturating_sub(start)))
     }
+
+    /// The Actions run it belongs to, off its page's link
+    /// (`…/actions/runs/<id>/job/<job>`): what `gh run rerun` takes. None
+    /// for a check that is no Actions job.
+    pub fn run_id(&self) -> Option<u64> {
+        let (_, rest) = self.url.split_once("/actions/runs/")?;
+        let id = rest.split(['/', '?', '#']).next()?;
+        id.parse().ok().filter(|id| *id > 0)
+    }
 }
 
 /// The checks of a [`PrDetail`], counted the way the Checks tab's label
-/// says them: how many have not failed and are done, of all of them.
+/// says them: how many passed or were skipped, of all of them — a
+/// cancelled one counts for neither side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CheckCounts {
     pub failed: usize,
     pub running: usize,
+    pub cancelled: usize,
     /// Passed or skipped — done, and not a failure.
     pub ok: usize,
     pub total: usize,
@@ -1626,6 +1693,7 @@ impl CheckCounts {
             match check.state {
                 CheckState::Failed => out.failed += 1,
                 CheckState::Running => out.running += 1,
+                CheckState::Cancelled => out.cancelled += 1,
                 CheckState::Passed | CheckState::Skipped => out.ok += 1,
             }
         }
@@ -1868,8 +1936,9 @@ fn commits_newest_first(v: &serde_json::Value) -> Vec<PrCommit> {
     out
 }
 
-/// Every standing check of a `statusCheckRollup` ([`latest_runs`]), failed first, then running,
-/// passed and skipped, each group in GitHub's order.
+/// Every standing check of a `statusCheckRollup` ([`latest_runs`]),
+/// failed first, then running, cancelled, passed and skipped, each group
+/// in GitHub's order.
 fn check_list(rollup: &[serde_json::Value]) -> Vec<PrCheck> {
     let mut out: Vec<PrCheck> = latest_runs(rollup)
         .into_iter()
@@ -2226,6 +2295,152 @@ mod tests {
         assert_eq!(checks(&two), Checks::Failing);
     }
 
+    /// A workflow started again on the same head: its first run cancelled
+    /// by the concurrency group, the new run's jobs queued with no
+    /// `startedAt` yet or still in progress. The new jobs stand, so the
+    /// pull request reads pending — not three cancelled checks beside the
+    /// ones still running.
+    #[test]
+    fn a_queued_run_supersedes_the_cancelled_one_it_replaces() {
+        let done = |name: &str, conclusion: &str, started: &str| {
+            serde_json::json!({"__typename":"CheckRun","name":name,"workflowName":"Verify app",
+                "status":"COMPLETED","conclusion":conclusion,"startedAt":started,
+                "completedAt":"2026-11-14T10:00:40Z",
+                "detailsUrl":"https://github.com/o/r/actions/runs/111/job/1"})
+        };
+        let waiting = |name: &str, status: &str, started: &str| {
+            serde_json::json!({"__typename":"CheckRun","name":name,"workflowName":"Verify app",
+                "status":status,"conclusion":"","startedAt":started,
+                "detailsUrl":"https://github.com/o/r/actions/runs/222/job/2"})
+        };
+        let rollup = [
+            done(
+                "Wait for Vercel preview",
+                "CANCELLED",
+                "2026-11-14T10:00:00Z",
+            ),
+            done(
+                "Build app for local tests",
+                "CANCELLED",
+                "2026-11-14T10:00:00Z",
+            ),
+            done("MCP checks", "CANCELLED", "2026-11-14T10:00:40Z"),
+            done("Unit tests", "CANCELLED", "2026-11-14T10:00:00Z"),
+            waiting("Wait for Vercel preview", "QUEUED", ""),
+            waiting("Build app for local tests", "QUEUED", ""),
+            waiting("MCP checks", "QUEUED", ""),
+            waiting("Unit tests", "IN_PROGRESS", "2026-11-14T10:01:00Z"),
+            waiting("All checks passed", "IN_PROGRESS", "2026-11-14T10:01:00Z"),
+            serde_json::json!({"__typename":"CheckRun","name":"lint","workflowName":"Checks",
+                "status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-11-14T09:59:00Z"}),
+        ];
+        assert_eq!(checks(&rollup), Checks::Pending);
+        let list = check_list(&rollup);
+        assert_eq!(list.len(), 6, "{list:?}");
+        assert!(
+            list.iter().all(|c| c.state != CheckState::Cancelled),
+            "{list:?}"
+        );
+        let n = CheckCounts::of(&list);
+        assert_eq!((n.failed, n.running, n.cancelled, n.ok), (0, 5, 0, 1));
+        assert_eq!(tally(&rollup).map(|t| t.cancelled), Some(0));
+
+        // Once the new run is done, the later start stands as before.
+        let rerun = [
+            done("MCP checks", "CANCELLED", "2026-11-14T10:00:40Z"),
+            done("MCP checks", "SUCCESS", "2026-11-14T10:05:00Z"),
+        ];
+        assert_eq!(checks(&rerun), Checks::Passing);
+    }
+
+    /// A cancelled check counts neither as passed nor failed: alone with
+    /// passes it leaves the lot cancelled, and the tally keeps it apart.
+    #[test]
+    fn a_cancelled_check_is_counted_apart() {
+        let run = |name: &str, conclusion: &str| {
+            serde_json::json!({"__typename":"CheckRun","name":name,"workflowName":"CI",
+                "status":"COMPLETED","conclusion":conclusion,"startedAt":"2026-11-14T10:00:00Z",
+                "detailsUrl":"https://github.com/o/r/actions/runs/4242/job/7?pr=1"})
+        };
+        let rollup = [run("unit", "SUCCESS"), run("e2e", "CANCELLED")];
+        assert_eq!(checks(&rollup), Checks::Cancelled);
+        assert_eq!(
+            tally(&rollup),
+            Some(CheckTally {
+                passed: 1,
+                failed: 0,
+                pending: 0,
+                cancelled: 1,
+            })
+        );
+        let list = check_list(&rollup);
+        assert_eq!(
+            list[0].state,
+            CheckState::Cancelled,
+            "after failed and running"
+        );
+        assert_eq!(list[0].run_id(), Some(4242));
+        let n = CheckCounts::of(&list);
+        assert_eq!((n.failed, n.cancelled, n.ok, n.total), (0, 1, 1, 2));
+
+        // GitHub's per-state counts: CANCELLED and STALE are cancelled.
+        let counts = serde_json::json!({"checkRunCountsByState":[
+            {"state":"SUCCESS","count":3},{"state":"CANCELLED","count":2},
+            {"state":"STALE","count":1}]});
+        let t = check_tally(&counts).unwrap();
+        assert_eq!((t.passed, t.failed, t.cancelled), (3, 0, 3));
+
+        // A listed row reads its tally: cancelled, not failing — and is
+        // read again, so a superseded cancelled run does not linger.
+        let row = OpenPr {
+            number: 1,
+            title: String::new(),
+            url: "https://github.com/o/r/pull/1".into(),
+            answered_draft: false,
+            answered: Answered {
+                conflicts: Some(false),
+                checks: Some(Checks::Failing),
+            },
+            head: String::new(),
+            mine: true,
+            head_sha: String::new(),
+            meta: PrMeta {
+                checks: Some(t),
+                ..Default::default()
+            },
+        };
+        assert_eq!(row.listed_checks(), Some(Checks::Cancelled));
+        assert!(row.says_failing());
+        let health = Health {
+            conflicts: false,
+            checks: Checks::Cancelled,
+        };
+        assert_eq!(health.trouble(), None, "cancelled is no trouble");
+    }
+
+    #[test]
+    fn a_checks_run_id_is_read_off_its_link() {
+        let check = |url: &str| PrCheck {
+            name: "unit".into(),
+            workflow: String::new(),
+            state: CheckState::Cancelled,
+            word: "CANCELLED".into(),
+            started: String::new(),
+            completed: String::new(),
+            url: url.into(),
+        };
+        assert_eq!(
+            check("https://github.com/o/r/actions/runs/123/job/456").run_id(),
+            Some(123)
+        );
+        assert_eq!(
+            check("https://github.com/o/r/actions/runs/9").run_id(),
+            Some(9)
+        );
+        assert_eq!(check("https://vercel.com/o/r/abc").run_id(), None);
+        assert_eq!(check("").run_id(), None);
+    }
+
     /// GitHub's server-side rollup `state` and per-state counts on a list
     /// row count superseded runs too, so a failing row's checks are read
     /// again and folded here. The answer's GraphQL shape names the
@@ -2249,6 +2464,7 @@ mod tests {
                     passed: 2,
                     failed: 2,
                     pending: 0,
+                    cancelled: 0,
                 }),
                 ..Default::default()
             },
@@ -2276,7 +2492,8 @@ mod tests {
             Some(CheckTally {
                 passed: 2,
                 failed: 0,
-                pending: 0
+                pending: 0,
+                cancelled: 0,
             })
         );
         assert_eq!(
@@ -2405,21 +2622,58 @@ mod tests {
             checks(&[run("COMPLETED", "SUCCESS"), run("IN_PROGRESS", "")]),
             Checks::Pending
         );
+        let named = |name: &str, status: &str, conclusion: &str| {
+            serde_json::json!({"__typename":"CheckRun","name":name,"status":status,
+                "conclusion":conclusion})
+        };
         assert_eq!(
-            checks(&[run("QUEUED", ""), run("COMPLETED", "FAILURE")]),
+            checks(&[
+                named("e2e", "QUEUED", ""),
+                named("unit", "COMPLETED", "FAILURE")
+            ]),
             Checks::Failing,
             "one failure fails the lot, whatever is still running"
         );
         for word in [
             "FAILURE",
             "ERROR",
-            "CANCELLED",
             "TIMED_OUT",
             "ACTION_REQUIRED",
             "STARTUP_FAILURE",
         ] {
             assert_eq!(checks(&[run("COMPLETED", word)]), Checks::Failing, "{word}");
         }
+        for word in ["CANCELLED", "STALE"] {
+            assert_eq!(
+                checks(&[run("COMPLETED", word)]),
+                Checks::Cancelled,
+                "{word} is no failure"
+            );
+        }
+        assert_eq!(
+            checks(&[
+                named("build", "COMPLETED", "CANCELLED"),
+                named("unit", "COMPLETED", "SUCCESS")
+            ]),
+            Checks::Cancelled,
+            "a cancelled job leaves the lot neither green nor red"
+        );
+        assert_eq!(
+            checks(&[
+                named("build", "COMPLETED", "CANCELLED"),
+                named("unit", "IN_PROGRESS", "")
+            ]),
+            Checks::Pending,
+            "anything running leaves it pending"
+        );
+        assert_eq!(
+            checks(&[
+                named("build", "COMPLETED", "CANCELLED"),
+                named("unit", "COMPLETED", "FAILURE")
+            ]),
+            Checks::Failing,
+            "a failure still fails it"
+        );
         assert_eq!(checks(&[ctx("SUCCESS")]), Checks::Passing);
         assert_eq!(checks(&[ctx("PENDING")]), Checks::Pending);
         assert_eq!(checks(&[ctx("ERROR")]), Checks::Failing);
@@ -2603,7 +2857,8 @@ mod tests {
             Some(CheckTally {
                 passed: 28,
                 failed: 0,
-                pending: 1
+                pending: 1,
+                cancelled: 0,
             }),
             "skipped runs count for neither side"
         );
@@ -3059,6 +3314,7 @@ mod tests {
             CheckCounts {
                 failed: 1,
                 running: 1,
+                cancelled: 0,
                 ok: 2,
                 total: 4
             }
