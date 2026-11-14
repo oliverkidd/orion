@@ -248,6 +248,48 @@ files = 5
         );
     }
 
+    /// riplo-os's own contract, as its PR #2114 commits it.
+    #[test]
+    fn riplo_os_s_contract_parses() {
+        let c = parse(include_str!("../../fixtures/riplo-os-pr-contract.toml")).unwrap();
+        assert_eq!(c.risky_paths.len(), 9);
+        assert!(c.risky_paths.contains(&"**/package.json".to_string()));
+        assert_eq!(
+            c.visible_paths,
+            [
+                "apps/web/src/components/**",
+                "apps/web/src/app/**",
+                "packages/ui/**",
+                "packages/deck/**"
+            ]
+        );
+        assert!(c
+            .rule_paths
+            .contains(&"scripts/automation-*.mjs".to_string()));
+        assert_eq!(
+            c.limits.bug,
+            Limit {
+                lines: 3000,
+                files: 60
+            }
+        );
+        assert_eq!(
+            c.limits.feature,
+            Limit {
+                lines: 5000,
+                files: 70
+            }
+        );
+        assert!(matches_any(&c.risky_paths, "package.json"));
+        assert!(matches_any(&c.risky_paths, "apps/web/package.json"));
+        assert!(matches_any(
+            &c.visible_paths,
+            "apps/web/src/components/deck/Slide.tsx"
+        ));
+        assert!(matches_any(&c.rule_paths, "scripts/automation-guard.mjs"));
+        assert!(matches_any(&c.rule_paths, "apps/web/CLAUDE.md"));
+    }
+
     #[test]
     fn globs_match_as_the_doc_says() {
         assert!(glob_match("src/auth/**", "src/auth/a/b.rs"));
