@@ -13,7 +13,8 @@
 //!   PR with facts — from `<data_dir>/pr-facts/`, else the body's hidden
 //!   block; a PR without facts is never touched — has the rest asked for
 //!   off the loop ([`gather`]): the repo's contract on the base branch, the
-//!   commits' messages, the pictures on `pr-screenshots`, and, until it is
+//!   commits' messages, the pictures job's `pictures.json` on
+//!   `pr-screenshots` (its grid downloaded for the card), and, until it is
 //!   posted, the approved plan from the builder's transcript. A PR whose
 //!   [`signature`] hasn't moved since its last gather isn't gathered
 //!   again until its repo's contract is due a new read ([`CONTRACT_TTL`]);
@@ -594,7 +595,7 @@ pub struct Gathered {
     fresh_contract: bool,
     contract: Option<contract::Read>,
     messages: Option<Vec<String>>,
-    pictures: Option<Vec<pictures::Picture>>,
+    pictures: Option<pictures::Manifest>,
     grid_file: Option<PathBuf>,
     plan: Option<String>,
 }
@@ -653,22 +654,24 @@ async fn gather(job: Job) -> Gathered {
             None => commit_messages(&job.url).await,
         }
     };
-    let (contract, messages, listing) = tokio::join!(
+    let (contract, messages, manifest) = tokio::join!(
         contract_fut,
         messages_fut,
-        pictures::listing(&job.owner, &job.repo, job.number)
+        pictures::manifest(&job.owner, &job.repo, job.number)
     );
     let mut grid_file = None;
-    if let (Some(read), Some(found), Some(cache)) = (&contract, &listing, &job.cache) {
+    if let (Some(read), Some(found), Some(cache)) = (&contract, &manifest, &job.cache) {
         let visible = read
             .as_ref()
             .map(|c| c.visible_paths.clone())
             .unwrap_or_default();
-        let signal = pictures::of(&job.detail, &visible, found.clone());
+        let signal = pictures::of(&job.detail, &visible, found);
         if let Some(grid) = signal.grid() {
-            let name = facts::file_for(Path::new(""), &grid.url);
-            let to = cache.join(name.with_extension("png"));
-            if to.is_file() || pictures::download(&job.owner, &job.repo, grid, &to).await {
+            // One per PR and head: a new push's pictures are a new file.
+            let to = pictures::grid_file(cache, job.number, &job.detail.head_sha);
+            if to.is_file()
+                || pictures::download(&job.owner, &job.repo, job.number, grid, &to).await
+            {
                 grid_file = Some(to);
             }
         }
@@ -694,7 +697,7 @@ async fn gather(job: Job) -> Gathered {
         fresh_contract,
         contract,
         messages,
-        pictures: listing,
+        pictures: manifest,
         grid_file,
         plan,
     }
@@ -774,7 +777,7 @@ fn land_gathered(app: &mut App, g: Gathered) {
     if let Some(t) = app.pr_body.tracked.get_mut(&url) {
         t.gathering = false;
     }
-    let (Some(read), Some(messages), Some(listing)) = (&g.contract, &g.messages, &g.pictures)
+    let (Some(read), Some(messages), Some(manifest)) = (&g.contract, &g.messages, &g.pictures)
     else {
         // Couldn't ask for all of it: try again on the next look.
         if let Some(t) = app.pr_body.tracked.get_mut(&url) {
@@ -808,7 +811,7 @@ fn land_gathered(app: &mut App, g: Gathered) {
         unresolved,
     };
     let hooks = trailers::hooks(messages.iter().map(String::as_str));
-    let pics = pictures::of(detail, &rules.visible_paths, listing.clone());
+    let pics = pictures::of(detail, &rules.visible_paths, manifest);
     let kind = g
         .job
         .factory

@@ -1,0 +1,19 @@
+# What orion and the PR pictures job read about a pull request's paths.
+# orion reads this file from the PR's base branch and rejects unknown keys.
+# Every glob must match at least one file: `npm run repo:enforce` checks.
+
+# A PR touching any of these is Review, whatever its size.
+risky_paths = ["**/drizzle/**", "**/migrations/**", "**/proxy.ts", "**/auth/**", "**/next.config.*",
+               "**/security-headers.ts", ".github/workflows/**", "**/package.json", "infra/**"]
+# Paths users see (UI and slide output): a PR touching one needs before/after pictures.
+visible_paths = ["apps/web/src/components/**", "apps/web/src/app/**", "packages/ui/**", "packages/deck/**"]
+# The repo's rules for agents, listed on the PR when touched.
+rule_paths = ["CLAUDE.md", "AGENTS.md", "**/CLAUDE.md", "**/AGENTS.md", "agent_docs/**", ".claude/**",
+              ".githooks/**", "scripts/enforce-repo-contract.mjs", "scripts/automation-*.mjs"]
+
+[limits.bug]       # changed lines / files, excluding lockfiles, changesets, docs, snapshots, JSON
+lines = 3000       # about 5% of the last 60 days' bug PRs exceed either
+files = 60
+[limits.feature]
+lines = 5000       # about 15% of feature PRs
+files = 70

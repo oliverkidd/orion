@@ -7,7 +7,9 @@
 //!   line is `ORION-VERDICT: <already-fixed|duplicate|not-reproducible|
 //!   wont-build> <reason>`, the no-change card asks whether to close the
 //!   ticket instead ([`parse_verdict`]).
-//! - **Building**: the plan approved.
+//! - **Building**: the plan approved. The protected policy files it names
+//!   are written to the worktree's `.orion/approved-paths.json` for the
+//!   repo's guard, afresh on every approval (`approved_paths`).
 //! - **PrOpen**, **Merged**: a pull request on its branch, open, merged.
 //! - **Parked**: the ticket left your hands — Backlog, canceled, done by
 //!   someone else, or no longer yours — and its session is archived.
@@ -130,6 +132,8 @@ enum Do {
     Stalled(String, AgentId),
     Dead(String),
     Archive(AgentId),
+    /// A plan approved in the worktree at this path.
+    Approved(std::path::PathBuf, String),
     /// Your cards on the ticket closed, with this note: what they were
     /// about has ended.
     Close(String, &'static str),
@@ -199,6 +203,7 @@ pub(crate) fn follow(app: &mut App) {
                 }
             }
             Do::Archive(session) => super::owner::archive(app, session),
+            Do::Approved(dir, plan) => super::approved_paths::approve(app, dir, plan),
             Do::Close(id, note) => super::owner::close_cards(app, &id, note),
         }
     }
@@ -369,8 +374,8 @@ fn step(
         .tree
         .worktrees
         .iter()
-        .any(|w| w.project_id == entry.project && w.branch == entry.branch);
-    let Some(agent) = agent.filter(|_| checkout) else {
+        .find(|w| w.project_id == entry.project && w.branch == entry.branch);
+    let Some(agent) = agent.filter(|_| checkout.is_some()) else {
         let since = *entry.gone_since.get_or_insert(now);
         if now - since >= DEAD_MS {
             stage_to(entry, Stage::Dead, rec);
@@ -398,9 +403,15 @@ fn step(
         if was == Stage::Approving && next == Stage::Building {
             rec(Rec::Answered(Some("approved".into())));
             entry.asking = false;
+            if let (Some(plan), Some(w)) = (entry.plan.take(), checkout) {
+                todo.push(Do::Approved(w.path.clone(), plan));
+            }
         }
     }
     if let Some(plan) = plan {
+        if entry.plan.as_deref() != Some(plan) {
+            entry.plan = Some(plan.to_string());
+        }
         if !entry.asking {
             entry.asking = true;
             rec(Rec::Ask(Question {

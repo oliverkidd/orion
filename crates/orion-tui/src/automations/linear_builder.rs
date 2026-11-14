@@ -53,6 +53,7 @@
 //! * **Labels.** Enter on the panel's **Labels** row picks them from the
 //!   workspace's issue labels (`issueLabels`) — [`LabelPick`].
 
+pub(crate) mod approved_paths;
 pub mod intake;
 pub(crate) mod owner;
 pub(crate) mod setup;
@@ -349,6 +350,10 @@ pub struct Entry {
     /// A question to you is open in its run record.
     #[serde(default)]
     pub asking: bool,
+    /// The plan waiting on you while it is Approving: what approving it
+    /// approves (`approved_paths`). Taken when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
 }
 
 impl Default for Entry {
@@ -375,6 +380,7 @@ impl Default for Entry {
             steered_at: None,
             stalled: false,
             asking: false,
+            plan: None,
         }
     }
 }
@@ -2855,6 +2861,35 @@ mod tests {
         app.tree.agents[0].status_changed_at = crate::app::now_ms() + 1;
         follow(&mut app);
         assert_eq!(card(&app, key).state, CardState::Open);
+    }
+
+    /// The plan waiting on you is held while it is Approving, and taken
+    /// for the approved paths each time it is approved — again after it
+    /// was sent back and planned afresh.
+    #[test]
+    fn the_plan_is_held_until_approved_each_time() {
+        let mut app = app_with_project();
+        building(&mut app, Stage::Planning);
+        let plan_of = |app: &App| {
+            app.automations.linear_builder.ledger.issues["uuid-ENG-7"]
+                .plan
+                .clone()
+        };
+        for plan in ["Edit `CLAUDE.md`.", "Edit `AGENTS.md` instead."] {
+            app.tree.agents[0].status = AgentStatus::NeedsFeedback;
+            app.needs_you.reasons.insert(
+                AgentId("s7".into()),
+                orion_core::WaitReason::Plan { plan: plan.into() },
+            );
+            follow(&mut app);
+            assert_eq!(stage_of(&app), Stage::Approving);
+            assert_eq!(plan_of(&app).as_deref(), Some(plan));
+            app.tree.agents[0].status = AgentStatus::Running;
+            app.needs_you.reasons.clear();
+            follow(&mut app);
+            assert_eq!(stage_of(&app), Stage::Building);
+            assert_eq!(plan_of(&app), None);
+        }
     }
 
     /// Your cards on a ticket close as what they were about ends, so none

@@ -1,14 +1,22 @@
 //! PICTURES: whether a pull request changes what users see, and whether it
 //! shows it.
 //!
+//! The repo's pictures job (riplo-os's `pr-keyframes.yml`) commits its
+//! before/after grids to `pr-<n>/grids/` on the `pr-screenshots` branch and
+//! writes what it found to `pr-<n>/pictures.json` there ([`Manifest`], read
+//! with `gh api` by [`manifest`]). It reports in a check named `PR
+//! pictures` that is never red, and that shows as skipped when the job
+//! decided not to run.
+//!
 //! - **Visible** when a changed file matches the contract's
-//!   `visible_paths`, or the repo's `PR pictures` check ran on it (the CI
-//!   job only runs, rather than skips, for a visible change).
-//! - **Shown** when that check passed, or the `pr-screenshots` branch
-//!   holds pictures under `pr-<number>/` (the manifest, read with `gh api`
-//!   by [`listing`]). The grid is the one named `grid…`, else the first.
+//!   `visible_paths`, or the `PR pictures` check ran on it (the job only
+//!   runs, rather than skips, for a visible change). Skipped isn't ran.
+//! - **Shown** when `pictures.json` names at least one grid and was taken
+//!   at the PR's current head: pictures of an older push don't count.
+//!   The grid in the body and on the card is the first one.
 
 use serde::Deserialize;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::pull_request::{CheckState, PrDetail};
@@ -18,13 +26,55 @@ pub const CHECK: &str = "PR pictures";
 /// The branch pictures are kept on.
 pub const BRANCH: &str = "pr-screenshots";
 
-/// One picture on [`BRANCH`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Picture {
-    /// Its path on the branch (`pr-7/grid-ab12cd34.png`).
-    pub path: String,
+/// One grid of before/after pictures, as `pictures.json` lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Grid {
+    /// Its file name in `pr-<n>/grids/` (`grid-01-ab12cd34.png`).
+    pub file: String,
     /// Where a browser — and a PR body — shows it.
     pub url: String,
+}
+
+impl Grid {
+    /// Its file name: `file`, else the last part of `url`.
+    fn name(&self) -> &str {
+        let name = self.file.trim();
+        if !name.is_empty() {
+            return name;
+        }
+        let path = self.url.split(['?', '#']).next().unwrap_or_default();
+        path.rsplit('/').next().unwrap_or_default()
+    }
+}
+
+/// One frame the job checked.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Frame {
+    pub index: i64,
+    pub label: String,
+    /// `changed`, `no visible difference`, `new`, `missing` or `blank`.
+    pub verdict: String,
+    /// The share of pixels that differ, when both sides have the frame.
+    pub difference: Option<f64>,
+}
+
+/// `pr-<n>/pictures.json` on [`BRANCH`]. A PR without one reads as the
+/// default: no grids, so nothing shown.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct Manifest {
+    /// The commit the pictures were taken at.
+    pub head_sha: String,
+    /// The preview the "after" side was taken from.
+    pub preview: String,
+    /// The Actions run that took them.
+    pub run: String,
+    pub grids: Vec<Grid>,
+    pub frames: Vec<Frame>,
+    pub problems: Vec<String>,
+    pub notes: Vec<String>,
 }
 
 /// The pictures signal.
@@ -32,18 +82,18 @@ pub struct Picture {
 pub struct Pictures {
     pub visible: bool,
     pub shown: bool,
-    /// The grid first, then the rest.
-    pub pictures: Vec<Picture>,
+    /// The first grid, when shown.
+    pub grid: Option<Grid>,
 }
 
 impl Pictures {
-    pub fn grid(&self) -> Option<&Picture> {
-        self.pictures.first()
+    pub fn grid(&self) -> Option<&Grid> {
+        self.grid.as_ref()
     }
 }
 
-/// The signal from what the PR's body and the manifest say.
-pub fn of(detail: &PrDetail, visible_paths: &[String], mut pictures: Vec<Picture>) -> Pictures {
+/// The signal from the PR and its `pictures.json`.
+pub fn of(detail: &PrDetail, visible_paths: &[String], manifest: &Manifest) -> Pictures {
     let check = detail
         .checks
         .iter()
@@ -57,71 +107,74 @@ pub fn of(detail: &PrDetail, visible_paths: &[String], mut pictures: Vec<Picture
         check,
         Some(CheckState::Passed | CheckState::Failed | CheckState::Running)
     );
-    pictures.sort_by_key(|p| {
-        let name = p.path.rsplit('/').next().unwrap_or_default();
-        (!name.starts_with("grid"), p.path.clone())
-    });
+    let current = !manifest.head_sha.trim().is_empty()
+        && !detail.head_sha.trim().is_empty()
+        && manifest.head_sha.trim() == detail.head_sha.trim();
+    let grid = manifest
+        .grids
+        .iter()
+        .find(|g| !g.url.trim().is_empty())
+        .filter(|_| current)
+        .cloned();
     Pictures {
         visible: touched || ran,
-        shown: check == Some(CheckState::Passed) || !pictures.is_empty(),
-        pictures,
+        shown: grid.is_some(),
+        grid,
     }
 }
 
-#[derive(Deserialize)]
-struct Entry {
-    path: String,
-    #[serde(rename = "type")]
-    kind: String,
-}
-
-const IMAGE: [&str; 5] = [".png", ".jpg", ".jpeg", ".gif", ".webp"];
-
-/// The pictures in a `contents` listing of `pr-<n>/` on [`BRANCH`].
-pub fn parse_listing(owner: &str, repo: &str, json: &str) -> Vec<Picture> {
-    let entries: Vec<Entry> = serde_json::from_str(json).unwrap_or_default();
-    entries
-        .into_iter()
-        .filter(|e| e.kind == "file")
-        .filter(|e| {
-            let lower = e.path.to_ascii_lowercase();
-            IMAGE.iter().any(|x| lower.ends_with(x))
-        })
-        .map(|e| Picture {
-            url: format!(
-                "https://github.com/{owner}/{repo}/blob/{BRANCH}/{}?raw=true",
-                e.path
-            ),
-            path: e.path,
-        })
-        .collect()
+/// `pictures.json` from a `contents` answer: its base64 `content`
+/// decoded. A manifest that can't be read is no manifest.
+pub fn parse_contents(json: &str) -> Manifest {
+    use base64::Engine as _;
+    let content = serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v.get("content")?.as_str().map(str::to_string))
+        .unwrap_or_default();
+    let packed: String = content.split_whitespace().collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(packed)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The pictures kept for PR `number` of `owner/repo`; an empty list when
-/// there are none, None when `gh` couldn't ask.
-pub async fn listing(owner: &str, repo: &str, number: u64) -> Option<Vec<Picture>> {
-    let endpoint = format!("repos/{owner}/{repo}/contents/pr-{number}?ref={BRANCH}");
+/// PR `number`'s `pictures.json` on [`BRANCH`]; the default when it has
+/// none, None when `gh` couldn't ask.
+pub async fn manifest(owner: &str, repo: &str, number: u64) -> Option<Manifest> {
+    let endpoint = format!("repos/{owner}/{repo}/contents/pr-{number}/pictures.json?ref={BRANCH}");
     let mut cmd = tokio::process::Command::new("gh");
     cmd.args(["api", endpoint.as_str()]);
     match crate::pull_request::run_piped(cmd, "", TIMEOUT).await {
-        Ok(json) => Some(parse_listing(owner, repo, &json)),
-        Err(why) if super::not_found(&why) => Some(Vec::new()),
+        Ok(json) => Some(parse_contents(&json)),
+        Err(why) if super::not_found(&why) => Some(Manifest::default()),
         Err(why) => {
-            tracing::info!("pr_body: listing pictures of {owner}/{repo}#{number}: {why}");
+            tracing::info!("pr_body: reading the pictures of {owner}/{repo}#{number}: {why}");
             None
         }
     }
 }
 
-/// Download `picture` to `to`, for the verdict card. False when it
-/// couldn't.
-pub async fn download(owner: &str, repo: &str, picture: &Picture, to: &std::path::Path) -> bool {
-    let endpoint = format!(
-        "repos/{owner}/{repo}/contents/{}?ref={BRANCH}",
-        picture.path
-    );
+/// Where PR `number`'s grid at `head_sha` is kept for the card, under the
+/// `pr-body` cache dir.
+pub fn grid_file(cache: &Path, number: u64, head_sha: &str) -> PathBuf {
+    let sha: String = head_sha
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    cache.join("grids").join(format!("{number}-{sha}.png"))
+}
+
+/// Download PR `number`'s `grid` to `to`, for the verdict card. False when
+/// it couldn't.
+pub async fn download(owner: &str, repo: &str, number: u64, grid: &Grid, to: &Path) -> bool {
+    let name = grid.name();
+    if name.is_empty() || name.contains("..") {
+        return false;
+    }
+    let endpoint = format!("repos/{owner}/{repo}/contents/pr-{number}/grids/{name}?ref={BRANCH}");
     let run = tokio::process::Command::new("gh")
         .args(["api", "-H", "Accept: application/vnd.github.raw", &endpoint])
         .kill_on_drop(true)
@@ -135,7 +188,9 @@ pub async fn download(owner: &str, repo: &str, picture: &Picture, to: &std::path
     if let Some(dir) = to.parent() {
         let _ = tokio::fs::create_dir_all(dir).await;
     }
-    tokio::fs::write(to, &out.stdout).await.is_ok()
+    // Written whole, then moved in: a card never uploads half a picture.
+    let part = to.with_extension("png.part");
+    tokio::fs::write(&part, &out.stdout).await.is_ok() && tokio::fs::rename(&part, to).await.is_ok()
 }
 
 #[cfg(test)]
@@ -164,44 +219,116 @@ mod tests {
         }
     }
 
+    /// What riplo-os's pictures job writes (`pr-keyframes.yml`, publish).
+    const MANIFEST: &str = r#"{
+        "pr": 7,
+        "head_sha": "abc123",
+        "preview": "https://editor-git-x.vercel.app",
+        "run": "https://github.com/o/r/actions/runs/1",
+        "grids": [
+            {"file": "grid-01-ab12cd34.png",
+             "rows": [{"index": 1, "label": "home", "verdict": "changed"}],
+             "url": "https://github.com/o/r/blob/pr-screenshots/pr-7/grids/grid-01-ab12cd34.png?raw=true"},
+            {"file": "grid-02-ef56ab78.png", "rows": [],
+             "url": "https://github.com/o/r/blob/pr-screenshots/pr-7/grids/grid-02-ef56ab78.png?raw=true"}
+        ],
+        "frames": [
+            {"index": 1, "label": "home", "before": "1-home.png", "after": "1-home.png",
+             "difference": 0.12, "verdict": "changed"},
+            {"index": 2, "label": "menu", "before": null, "after": "2-menu.png",
+             "difference": null, "verdict": "new"}
+        ],
+        "problems": ["Frame 3 menu: the picture of dev is blank."],
+        "notes": []
+    }"#;
+
+    fn contents(json: &str) -> String {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json);
+        // GitHub wraps the content at 60 columns.
+        let wrapped: Vec<String> = encoded
+            .as_bytes()
+            .chunks(60)
+            .map(|c| String::from_utf8_lossy(c).into_owned())
+            .collect();
+        serde_json::json!({"type": "file", "encoding": "base64", "content": wrapped.join("\n")})
+            .to_string()
+    }
+
+    fn at(head: &str) -> PrDetail {
+        PrDetail {
+            head_sha: head.into(),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn the_listing_keeps_pictures_and_puts_the_grid_first() {
-        let json = r#"[
-            {"path":"pr-7/web-1.png","type":"file"},
-            {"path":"pr-7/manifest.json","type":"file"},
-            {"path":"pr-7/grid-ab.png","type":"file"},
-            {"path":"pr-7/old","type":"dir"}
-        ]"#;
-        let found = parse_listing("o", "r", json);
-        assert_eq!(found.len(), 2);
-        let detail = PrDetail::default();
-        let p = of(&detail, &[], found);
-        assert_eq!(p.grid().unwrap().path, "pr-7/grid-ab.png");
+    fn the_manifest_is_read_from_its_base64_contents() {
+        let m = parse_contents(&contents(MANIFEST));
+        assert_eq!(m.head_sha, "abc123");
+        assert_eq!(m.run, "https://github.com/o/r/actions/runs/1");
+        assert_eq!(m.grids.len(), 2);
+        assert_eq!(m.grids[0].file, "grid-01-ab12cd34.png");
+        assert_eq!(m.frames[1].verdict, "new");
+        assert_eq!(m.frames[0].difference, Some(0.12));
+        assert_eq!(m.problems.len(), 1);
+        // The job writes `{}` when it can't build the manifest.
+        assert_eq!(parse_contents(&contents("{}")), Manifest::default());
+        assert_eq!(parse_contents("not json"), Manifest::default());
+    }
+
+    #[test]
+    fn shown_takes_grids_taken_at_the_current_head_and_the_first_is_the_grid() {
+        let m = parse_contents(&contents(MANIFEST));
+        let p = of(&at("abc123"), &[], &m);
+        assert!(p.shown && !p.visible);
         assert_eq!(
             p.grid().unwrap().url,
-            "https://github.com/o/r/blob/pr-screenshots/pr-7/grid-ab.png?raw=true"
+            "https://github.com/o/r/blob/pr-screenshots/pr-7/grids/grid-01-ab12cd34.png?raw=true"
         );
-        assert!(p.shown && !p.visible);
+        // Pictures of an older push don't count.
+        let stale = of(&at("def456"), &[], &m);
+        assert!(!stale.shown && stale.grid().is_none());
+        // Nor does a manifest without grids.
+        let empty = Manifest {
+            head_sha: "abc123".into(),
+            ..Default::default()
+        };
+        assert!(!of(&at("abc123"), &[], &empty).shown);
+        assert!(!of(&at(""), &[], &Manifest::default()).shown);
     }
 
     #[test]
     fn visible_by_path_or_by_the_check_running() {
+        let none = Manifest::default();
         let mut detail = PrDetail {
             files: vec![file("apps/web/a.tsx")],
             ..Default::default()
         };
         let visible = ["apps/web/**".to_string()];
-        let p = of(&detail, &visible, vec![]);
+        let p = of(&detail, &visible, &none);
         assert!(p.visible && !p.shown);
         detail.files = vec![file("server/a.rs")];
-        assert!(!of(&detail, &visible, vec![]).visible);
+        assert!(!of(&detail, &visible, &none).visible);
         detail.checks = vec![check(CheckState::Skipped)];
-        assert!(!of(&detail, &visible, vec![]).visible);
+        assert!(!of(&detail, &visible, &none).visible);
         detail.checks = vec![check(CheckState::Passed)];
-        let p = of(&detail, &visible, vec![]);
-        assert!(p.visible && p.shown);
-        detail.checks = vec![check(CheckState::Failed)];
-        let p = of(&detail, &visible, vec![]);
+        let p = of(&detail, &visible, &none);
+        // A green check alone isn't pictures: it is never red.
         assert!(p.visible && !p.shown);
+        detail.checks = vec![check(CheckState::Running)];
+        assert!(of(&detail, &visible, &none).visible);
+    }
+
+    #[test]
+    fn the_grid_is_cached_by_pr_and_head_and_named_from_its_file() {
+        let to = grid_file(Path::new("/data/pr-body"), 7, "abc123");
+        assert_eq!(to, Path::new("/data/pr-body/grids/7-abc123.png"));
+        let g = Grid {
+            file: String::new(),
+            url: "https://github.com/o/r/blob/pr-screenshots/pr-7/grids/grid-01-ab.png?raw=true"
+                .into(),
+        };
+        assert_eq!(g.name(), "grid-01-ab.png");
     }
 }
