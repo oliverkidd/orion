@@ -658,6 +658,7 @@ fn checks_word(checks: Checks) -> &'static str {
         Checks::Passing => "passing",
         Checks::Failing => "failing",
         Checks::Pending => "pending",
+        Checks::Cancelled => "cancelled",
         Checks::Absent => "",
     }
 }
@@ -1412,11 +1413,11 @@ fn pick_facets(list: &[OpenPr], prs: &PrStore, th: Theme) -> Vec<PickFacet> {
                     &count("review"),
                     |_| None,
                 ),
-                "checks" => {
-                    fixed_values(&["passing", "failing", "pending"], &count("checks"), |_| {
-                        None
-                    })
-                }
+                "checks" => fixed_values(
+                    &["passing", "failing", "pending", "cancelled"],
+                    &count("checks"),
+                    |_| None,
+                ),
                 "is" => fixed_values(
                     &["ready", "draft", "conflicts", "merged", "closed"],
                     &count("is"),
@@ -1908,6 +1909,7 @@ fn status_spans(pr: &OpenPr, status: &PrStatus, marks: bool, th: Theme) -> Vec<S
     let checks = pr.meta.checks.map(|_| match status.health.checks {
         Checks::Failing => ("✗", tint(th.err)),
         Checks::Pending => ("◐", tint(th.warn)),
+        Checks::Cancelled => ("⊘", tint(th.dim)),
         _ => ("✓", tint(th.ok)),
     });
     let review = match pr.meta.review {
@@ -4089,6 +4091,7 @@ mod tests {
                     passed: 27,
                     failed: 0,
                     pending: 2,
+                    cancelled: 0,
                 }),
                 ..PrMeta::default()
             },
@@ -4403,6 +4406,7 @@ mod tests {
             passed: 27,
             failed: 2,
             pending: 0,
+            cancelled: 0,
         });
         failing.meta.labels.clear();
         let mut draft = rich(39, "Spike", "sam", false);
@@ -4447,6 +4451,7 @@ mod tests {
             passed: 27,
             failed: 2,
             pending: 0,
+            cancelled: 0,
         });
         let (mut app, _) = app_with(vec![rich(42, "Fix login", "sam", false), failing], true);
         open(&mut app);

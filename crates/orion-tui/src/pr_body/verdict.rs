@@ -3,7 +3,7 @@
 //!
 //! | Tier | When |
 //! |---|---|
-//! | Blocked | CI red; a conflict on a ready PR; an open Cubic P0, or an open P1 the agent hasn't declared; a visible change with no pictures |
+//! | Blocked | CI red; a check still cancelled at head; a conflict on a ready PR; an open Cubic P0, or an open P1 the agent hasn't declared; a visible change with no pictures |
 //! | Review | a risky path from the contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a `security`, `dep` or `arch` call; over the size limit; a contract that doesn't parse |
 //! | Skim | a visible change with pictures |
 //! | Merge | everything else |
@@ -258,6 +258,11 @@ pub fn verdict(
             format!("CI red ({})", some_of(&red, NAMES_SHOWN)),
         );
     }
+    // A cancelled check said nothing either way: not red, but not green
+    // until it runs again.
+    if pr.checks.iter().any(|c| c.state == CheckState::Cancelled) {
+        say(Tier::Blocked, "checks cancelled: re-run".into());
+    }
     if !pr.answered_draft && pr.answered.conflicts == Some(true) {
         say(Tier::Blocked, format!("conflicts with {}", pr.base));
     }
@@ -455,6 +460,19 @@ mod tests {
         let mut i = In::new();
         i.pr.checks = vec![failed("unit")];
         assert_tier(&i, Tier::Blocked, "CI red (unit)");
+    }
+
+    #[test]
+    fn a_cancelled_check_blocks_until_it_runs_again() {
+        let mut i = In::new();
+        i.pr.checks = vec![failed("unit"), failed("e2e")];
+        i.pr.checks[0].state = CheckState::Passed;
+        i.pr.checks[1].state = CheckState::Cancelled;
+        i.pr.checks[1].word = "CANCELLED".into();
+        assert_tier(&i, Tier::Blocked, "checks cancelled: re-run");
+        assert!(!i.run().line().contains("CI red"), "{}", i.run().line());
+        i.pr.checks[1].state = CheckState::Passed;
+        assert_eq!(i.run().tier, Tier::Merge);
     }
 
     #[test]

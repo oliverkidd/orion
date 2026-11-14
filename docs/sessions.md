@@ -770,6 +770,15 @@ agent and another 3 tries, Park to leave it alone until it goes green), and what
 GitHub — review comments with their file and line, and conversation comments — goes to the branch's
 agent the same way, verbatim, to be done in that pull request.
 
+A cancelled check is not a failing one: a job cancelled by hand, or by its workflow starting again
+on the same commit, broke nothing in the code. It is drawn dim with `⊘`, counts as neither passed
+nor failed, and never brings the PR fixer or `⌘G`'s *failing checks*. A run started again on the
+same commit replaces the cancelled one at once, even while its jobs are still queued. With nothing
+failed and nothing running, a pull request with a cancelled check reads a muted *cancelled*: not
+green, not red. On a factory pull request the PR fixer starts its cancelled runs again (`gh run
+rerun`), once per head commit and without an agent, and its verdict stays **Blocked**
+(`checks cancelled: re-run`) until they have run.
+
 ### The bug fixer and the feature builder
 
 Together they are the software factory's intake. Both pick up Linear tickets assigned to you that

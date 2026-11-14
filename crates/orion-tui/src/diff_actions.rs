@@ -180,6 +180,7 @@ fn standing(app: &App, url: &str, th: Theme) -> Option<(String, Color)> {
         Checks::Failing => Some(("✗ checks failing".into(), th.err)),
         Checks::Pending => Some(("◐ checks running".into(), th.warn)),
         Checks::Passing => Some(("✓ checks passed".into(), th.ok)),
+        Checks::Cancelled => Some(("⊘ checks cancelled".into(), th.dim)),
         Checks::Absent => None,
     }
 }
