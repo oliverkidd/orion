@@ -1,0 +1,22 @@
+crates/orion-tui/src/automations/linear_builder/stages.rs
+  s_0ea5bf705342bd::t_5530b7af79d5e6 10-15,138-140,210-212,413
+crates/orion-tui/src/automations/linear_builder/approved_paths.rs
+  s_0ea5bf705342bd::t_3ec0224ca5755a 14-24,32-34,43-56,58-59,61-74,78,83-97,101-132,134-185,197-202,205,212-218,510,521-526,528-533,536-587,589-625
+  s_0ea5bf705342bd::t_2b668a24c0afc5 60,133,588
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "78b0c9d45820d3cfd99e89bb21df0a730343cd5b",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
