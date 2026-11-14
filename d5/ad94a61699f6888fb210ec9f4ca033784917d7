@@ -1,0 +1,35 @@
+crates/orion-tui/src/pr_body/mod.rs
+  s_0ea5bf705342bd::t_ac73e17fb357fc 16-17,598,657,660,663,668,670-674,700,780,814
+crates/orion-tui/fixtures/riplo-os-pr-contract.toml
+  s_0ea5bf705342bd::t_6b087dc66c35be 1-19
+crates/orion-tui/src/pr_body/contract.rs
+  s_0ea5bf705342bd::t_6b087dc66c35be 251-292
+crates/orion-tui/src/automations/linear_builder/approved_paths.rs
+  s_0ea5bf705342bd::t_90c69c124fc214 49-51,116,151-154
+  s_0ea5bf705342bd::t_d8c75254de033d 111-114,156-157,284
+  s_0ea5bf705342bd::t_e2975af3b67ed8 84-88,119-123,144-147,310-317,327-333,335-340
+  s_0ea5bf705342bd::t_f60c76a224ae19 1-48,52-83,89-110,115,117-118,124-143,148-150,155,158-283,285-309,318-326,334,341-387
+crates/orion-tui/src/automations/linear_builder.rs
+  s_0ea5bf705342bd::t_d8c75254de033d 56,353-356,383
+  s_0ea5bf705342bd::t_be64381b31d0b3 2866-2894
+crates/orion-tui/src/automations/linear_builder/stages.rs
+  s_0ea5bf705342bd::t_d8c75254de033d 10-12,135-136,206,377-378,406-408,412-414
+crates/orion-tui/src/pr_body/pictures.rs
+  s_0ea5bf705342bd::t_d30159542a685b 4-10,12-16,19,29-34,39-79,85-86,90-91,95-96,110-118,121-122,126-139,144-147,151-152,154,160-177,191-193,222-279,281-284,287,289-298,303,309,312,314,316-317,319-332
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d5ad94a61699f6888fb210ec9f4ca033784917d7",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
