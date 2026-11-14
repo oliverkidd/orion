@@ -11,19 +11,26 @@
 //! key of a JSON file. The session can't write that file itself, so
 //! without orion it could never edit a policy file.
 //!
-//! Each time a plan is approved (Approving → Building, `stages`), orion
-//! reads the policy list in the worktree and writes `{ "paths": [...] }`:
-//! the paths the plan names ([`named`]) that a policy entry covers
-//! ([`approved`]). The file is rewritten on every approval — a plan sent
-//! back and approved again replaces the last one's paths — and is empty
-//! when the plan names none. A repo without the policy script has no
-//! guard, and gets no file.
+//! Each time a plan is answered (Approving → Building, `stages`), orion
+//! asks the session's transcript how ([`verdict`]): the result of its
+//! latest `ExitPlanMode`. Approved, it reads the policy list in the
+//! worktree and writes `{ "paths": [...] }`: the paths the plan names
+//! ([`named`]) that a policy entry covers ([`approved`]). Sent back with
+//! changes ("Suggest changes" runs the session again too), or with a
+//! transcript that can't be read or doesn't say, it writes
+//! `{ "paths": [] }`: the guard allows nothing until a real approval. The
+//! file is rewritten every time — a plan approved again replaces the last
+//! one's paths — and is empty when the plan names none. A repo without
+//! the policy script has no guard, and gets no file.
 //!
 //! The file is never committed: the repo ignores `.orion/` but its
 //! contract. One that doesn't ignore it is logged.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use orion_core::AgentId;
+use serde_json::Value;
 
 use crate::app::App;
 use crate::pr_body::contract::glob_match;
@@ -33,24 +40,147 @@ pub(crate) const FILE: &str = ".orion/approved-paths.json";
 /// The repo's policy list.
 const SCRIPT: &str = "scripts/automation-protected-paths.mjs";
 const NODE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the plan's answer is waited for in the transcript, a read
+/// every [`RESULT_EVERY`]: the session can run again a moment before
+/// Claude Code writes it down.
+const RESULT_READS: u32 = 10;
+const RESULT_EVERY: Duration = Duration::from_secs(1);
 
-/// The plan just approved in the worktree at `dir`: its approved paths
-/// written there, off the loop. With no loop (the tests), nothing.
-pub(crate) fn approve(app: &App, dir: PathBuf, plan: String) {
+/// The start of Claude Code's `ExitPlanMode` result when you approve the
+/// plan (Claude Code 2.1: "User has approved your plan. You can now start
+/// coding. …").
+const APPROVED: &str = "User has approved your plan";
+/// The start of its result, an error, when you send the plan back ("The
+/// user doesn't want to proceed with this tool use. The tool use was
+/// rejected … the user said: …").
+const REJECTED: &str = "The user doesn't want to proceed with this tool use";
+
+/// How the session's latest plan was answered, by its transcript.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    Approved,
+    /// Sent back with changes.
+    Rejected,
+    /// Its result not written down yet.
+    Pending,
+    /// No transcript, no plan in it, or a result that is neither.
+    Unknown,
+}
+
+/// The plan just answered in the worktree at `dir` by `session`: its
+/// approved paths written there, off the loop — or none, when the
+/// transcript doesn't say it was approved. With no loop (the tests),
+/// nothing.
+pub(crate) fn approve(app: &App, dir: PathBuf, plan: String, session: &AgentId) {
     if app.automations.tx.is_none() {
         return;
     }
+    let agent = app.tree.agents.iter().find(|a| &a.id == session).cloned();
     tokio::spawn(async move {
         if !dir.join(SCRIPT).is_file() {
             return;
         }
-        let mut cmd = tokio::process::Command::new("node");
-        cmd.args([SCRIPT, "--json"]).current_dir(&dir);
-        let policy = crate::pull_request::run_piped(cmd, "", NODE_TIMEOUT)
-            .await
-            .and_then(|json| parse_policy(&json));
-        let _ = tokio::task::spawn_blocking(move || write(&dir, &plan, policy)).await;
+        let verdict = match agent {
+            Some(agent) => answered(agent).await,
+            None => Verdict::Unknown,
+        };
+        let policy = match verdict {
+            Verdict::Approved => {
+                let mut cmd = tokio::process::Command::new("node");
+                cmd.args([SCRIPT, "--json"]).current_dir(&dir);
+                crate::pull_request::run_piped(cmd, "", NODE_TIMEOUT)
+                    .await
+                    .and_then(|json| parse_policy(&json))
+            }
+            _ => Ok(Vec::new()),
+        };
+        let _ = tokio::task::spawn_blocking(move || write(&dir, &plan, verdict, policy)).await;
     });
+}
+
+/// How `agent`'s latest plan was answered, read off its transcript on the
+/// blocking pool, [`RESULT_READS`] times while the answer is still to be
+/// written down. Still pending then, [`Verdict::Pending`].
+async fn answered(agent: orion_core::Agent) -> Verdict {
+    let mut verdict = Verdict::Pending;
+    for read in 0..RESULT_READS {
+        if read > 0 {
+            tokio::time::sleep(RESULT_EVERY).await;
+        }
+        let agent = agent.clone();
+        verdict = tokio::task::spawn_blocking(move || {
+            verdict_in(crate::automations::pr_fixer::transcript_of(&agent, None).as_deref())
+        })
+        .await
+        .unwrap_or(Verdict::Unknown);
+        if verdict != Verdict::Pending {
+            break;
+        }
+    }
+    verdict
+}
+
+/// [`verdict`] of the transcript at `path`; [`Verdict::Unknown`] with no
+/// path or a file that can't be read.
+fn verdict_in(path: Option<&Path>) -> Verdict {
+    path.and_then(|p| std::fs::read_to_string(p).ok())
+        .map_or(Verdict::Unknown, |text| verdict(&text))
+}
+
+/// How the latest `ExitPlanMode` in a Claude Code `transcript` was
+/// answered: its `tool_result` [`APPROVED`] (not an error) or
+/// [`REJECTED`]. Subagents' lines aside.
+fn verdict(transcript: &str) -> Verdict {
+    let mut latest: Option<(String, Verdict)> = None;
+    for line in transcript.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in content {
+            let str_of = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or("");
+            match str_of("type") {
+                "tool_use" if str_of("name") == orion_core::EXIT_PLAN_MODE_TOOL => {
+                    latest = Some((str_of("id").to_string(), Verdict::Pending));
+                }
+                "tool_result" => {
+                    if let Some((id, answer)) = latest.as_mut() {
+                        if id.as_str() == str_of("tool_use_id") {
+                            *answer = result_verdict(item);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    latest.map_or(Verdict::Unknown, |(_, answer)| answer)
+}
+
+/// One `ExitPlanMode` `tool_result`'s answer.
+fn result_verdict(result: &Value) -> Verdict {
+    let text = match result.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => String::new(),
+    };
+    let text = text.trim_start();
+    let error = result.get("is_error").and_then(Value::as_bool) == Some(true);
+    if !error && text.starts_with(APPROVED) {
+        Verdict::Approved
+    } else if text.starts_with(REJECTED) {
+        Verdict::Rejected
+    } else {
+        Verdict::Unknown
+    }
 }
 
 /// `policy` from the script's `--json`.
@@ -64,16 +194,24 @@ fn parse_policy(json: &str) -> Result<Vec<String>, String> {
         .map_err(|err| format!("{SCRIPT} --json: {err}"))
 }
 
-/// Write the file. A policy list that couldn't be read approves nothing,
-/// rather than leave the last plan's paths standing.
-fn write(dir: &Path, plan: &str, policy: Result<Vec<String>, String>) {
-    let paths = match policy {
-        Ok(policy) => approved(&named(plan, dir), &policy, plan, |rel| {
+/// Write the file. A plan not approved, or a policy list that couldn't
+/// be read, approves nothing, rather than leave the last plan's paths
+/// standing. `policy` is read only for an approved plan.
+fn write(dir: &Path, plan: &str, verdict: Verdict, policy: Result<Vec<String>, String>) {
+    let paths = match (verdict, policy) {
+        (Verdict::Approved, Ok(policy)) => approved(&named(plan, dir), &policy, plan, |rel| {
             dir.join(rel).is_dir()
         }),
-        Err(why) => {
+        (Verdict::Approved, Err(why)) => {
             tracing::warn!(
                 "approved paths: reading the policy list in {}: {why}; approving none",
+                dir.display()
+            );
+            Vec::new()
+        }
+        (verdict, _) => {
+            tracing::info!(
+                "approved paths: the plan in {} isn't approved ({verdict:?}); approving none",
                 dir.display()
             );
             Vec::new()
@@ -369,6 +507,7 @@ mod tests {
         write(
             dir.path(),
             "Edit `CLAUDE.md` and `.githooks`.",
+            Verdict::Approved,
             Ok(policy()),
         );
         let read = |p: &Path| -> serde_json::Value {
@@ -379,9 +518,109 @@ mod tests {
             serde_json::json!({"paths": [".githooks/", "CLAUDE.md"]})
         );
         // Approved again after changes: the new plan's paths replace them.
-        write(dir.path(), "Only `src/a.ts` now.", Ok(policy()));
+        write(
+            dir.path(),
+            "Only `src/a.ts` now.",
+            Verdict::Approved,
+            Ok(policy()),
+        );
         assert_eq!(read(dir.path()), serde_json::json!({"paths": []}));
-        write(dir.path(), "Edit `CLAUDE.md`.", Err("no node".into()));
+        write(
+            dir.path(),
+            "Edit `CLAUDE.md`.",
+            Verdict::Approved,
+            Err("no node".into()),
+        );
         assert_eq!(read(dir.path()), serde_json::json!({"paths": []}));
+    }
+
+    /// A transcript: the plan put up, then each of `results` its answer
+    /// (`(is_error, text)`), the last one's id the latest plan's.
+    fn transcript(results: &[(bool, &str)]) -> String {
+        let mut lines = vec![r#"{"type":"user","message":{"content":"fix it"}}"#.to_string()];
+        for (n, (error, text)) in results.iter().enumerate() {
+            let id = format!("toolu_{n}");
+            lines.push(
+                serde_json::json!({"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "id": id, "name": "ExitPlanMode",
+                     "input": {"plan": "Edit `CLAUDE.md`."}}
+                ]}})
+                .to_string(),
+            );
+            lines.push(
+                serde_json::json!({"type": "user", "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": id, "is_error": error,
+                     "content": text}
+                ]}})
+                .to_string(),
+            );
+        }
+        lines.join("\n") + "\n"
+    }
+
+    const YES: &str = "User has approved your plan. You can now start coding. Start with \
+        updating your todo list if applicable\n\nYour plan has been saved to: /x.md";
+    const NO: &str = "The user doesn't want to proceed with this tool use. The tool use was \
+        rejected (eg. if it was a file edit, the new_string was NOT written to the file). \
+        To tell you how to proceed, the user said:\nnot CLAUDE.md";
+
+    #[test]
+    fn the_verdict_is_the_latest_plan_s_answer() {
+        assert_eq!(verdict(&transcript(&[(false, YES)])), Verdict::Approved);
+        assert_eq!(verdict(&transcript(&[(true, NO)])), Verdict::Rejected);
+        // Approved once, then a new plan sent back: not approved.
+        assert_eq!(
+            verdict(&transcript(&[(false, YES), (true, NO)])),
+            Verdict::Rejected
+        );
+        assert_eq!(
+            verdict(&transcript(&[(true, NO), (false, YES)])),
+            Verdict::Approved
+        );
+        // Its answer as text parts.
+        let parts = transcript(&[(false, YES)]).replace(
+            &serde_json::to_string(YES).unwrap(),
+            &serde_json::json!([{"type": "text", "text": YES}]).to_string(),
+        );
+        assert_eq!(verdict(&parts), Verdict::Approved);
+        // The approval's words in an error aren't an approval.
+        assert_eq!(verdict(&transcript(&[(true, YES)])), Verdict::Unknown);
+        // A plan up with its answer not written down yet.
+        let mut pending = transcript(&[(false, YES)]);
+        pending.truncate(pending.trim_end().rfind('\n').unwrap() + 1);
+        assert_eq!(verdict(&pending), Verdict::Pending);
+        assert_eq!(verdict("{}\nnot json\n"), Verdict::Unknown);
+    }
+
+    #[test]
+    fn an_unreadable_transcript_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(verdict_in(None), Verdict::Unknown);
+        assert_eq!(
+            verdict_in(Some(&dir.path().join("gone.jsonl"))),
+            Verdict::Unknown
+        );
+        let file = dir.path().join("s.jsonl");
+        std::fs::write(&file, transcript(&[(false, YES)])).unwrap();
+        assert_eq!(verdict_in(Some(&file)), Verdict::Approved);
+    }
+
+    #[test]
+    fn a_plan_not_approved_clears_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let read = || -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(FILE)).unwrap()).unwrap()
+        };
+        let plan = "Edit `CLAUDE.md`.";
+        write(dir.path(), plan, Verdict::Approved, Ok(policy()));
+        assert_eq!(read(), serde_json::json!({"paths": ["CLAUDE.md"]}));
+        // Sent back: the earlier approval's paths go too.
+        write(dir.path(), plan, Verdict::Rejected, Ok(policy()));
+        assert_eq!(read(), serde_json::json!({"paths": []}));
+        for not_known in [Verdict::Unknown, Verdict::Pending] {
+            write(dir.path(), plan, Verdict::Approved, Ok(policy()));
+            write(dir.path(), plan, not_known, Ok(policy()));
+            assert_eq!(read(), serde_json::json!({"paths": []}), "{not_known:?}");
+        }
     }
 }

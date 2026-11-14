@@ -7,9 +7,12 @@
 //!   line is `ORION-VERDICT: <already-fixed|duplicate|not-reproducible|
 //!   wont-build> <reason>`, the no-change card asks whether to close the
 //!   ticket instead ([`parse_verdict`]).
-//! - **Building**: the plan approved. The protected policy files it names
-//!   are written to the worktree's `.orion/approved-paths.json` for the
-//!   repo's guard, afresh on every approval (`approved_paths`).
+//! - **Building**: the plan answered — approved, or sent back with
+//!   changes, which runs the session again too. Approved (its transcript
+//!   says so), the protected policy files it names are written to the
+//!   worktree's `.orion/approved-paths.json` for the repo's guard, afresh
+//!   on every approval; sent back, or not known, the file is emptied
+//!   (`approved_paths`).
 //! - **PrOpen**, **Merged**: a pull request on its branch, open, merged.
 //! - **Parked**: the ticket left your hands — Backlog, canceled, done by
 //!   someone else, or no longer yours — and its session is archived.
@@ -132,8 +135,9 @@ enum Do {
     Stalled(String, AgentId),
     Dead(String),
     Archive(AgentId),
-    /// A plan approved in the worktree at this path.
-    Approved(std::path::PathBuf, String),
+    /// A plan answered in the worktree at this path by this session:
+    /// approved, or sent back — its transcript says which.
+    Approved(std::path::PathBuf, String, AgentId),
     /// Your cards on the ticket closed, with this note: what they were
     /// about has ended.
     Close(String, &'static str),
@@ -203,7 +207,9 @@ pub(crate) fn follow(app: &mut App) {
                 }
             }
             Do::Archive(session) => super::owner::archive(app, session),
-            Do::Approved(dir, plan) => super::approved_paths::approve(app, dir, plan),
+            Do::Approved(dir, plan, session) => {
+                super::approved_paths::approve(app, dir, plan, &session)
+            }
             Do::Close(id, note) => super::owner::close_cards(app, &id, note),
         }
     }
@@ -404,7 +410,7 @@ fn step(
             rec(Rec::Answered(Some("approved".into())));
             entry.asking = false;
             if let (Some(plan), Some(w)) = (entry.plan.take(), checkout) {
-                todo.push(Do::Approved(w.path.clone(), plan));
+                todo.push(Do::Approved(w.path.clone(), plan, session.clone()));
             }
         }
     }
