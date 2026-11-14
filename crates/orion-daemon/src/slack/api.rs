@@ -42,19 +42,47 @@ impl Api {
         Self { base, tokens }
     }
 
+    fn token(&self, who: As) -> &str {
+        match who {
+            As::App => &self.tokens.app,
+            As::Bot => &self.tokens.bot,
+            As::User => &self.tokens.user,
+        }
+    }
+
     /// POST `method` with a JSON body as `who`. Slack answers 200 with
     /// `ok: false` and an `error` code for most failures; that code is the
     /// error here (`invalid_auth`, `channel_not_found`), as is a non-2xx
     /// status or curl failing to reach Slack at all.
     pub fn call(&self, method: &str, who: As, body: &Value) -> Result<Value, String> {
-        let token = match who {
-            As::App => &self.tokens.app,
-            As::Bot => &self.tokens.bot,
-            As::User => &self.tokens.user,
-        };
+        let token = self.token(who);
         let url = format!("{}/{method}", self.base);
         let headers = ["Content-Type: application/json; charset=utf-8".to_string()];
         let body = body.to_string();
+        let response = orion_core::http::request(&orion_core::http::Request {
+            method: "POST",
+            url: &url,
+            headers: &headers,
+            bearer: Some(token),
+            body: Some(body.as_bytes()),
+            timeout_secs: 15,
+        })?;
+        reply(method, response.status, &response.body)
+    }
+
+    /// POST `method` as `who` with form fields — for the methods that take
+    /// no JSON body (`users.lookupByEmail`, the `files.*` uploads). Its
+    /// reply reads as [`Api::call`]'s.
+    pub fn call_form(
+        &self,
+        method: &str,
+        who: As,
+        fields: &[(&str, &str)],
+    ) -> Result<Value, String> {
+        let token = self.token(who);
+        let url = format!("{}/{method}", self.base);
+        let headers = ["Content-Type: application/x-www-form-urlencoded".to_string()];
+        let body = form(fields);
         let response = orion_core::http::request(&orion_core::http::Request {
             method: "POST",
             url: &url,
@@ -126,6 +154,64 @@ impl Api {
         self.call("chat.update", As::Bot, &body).map(drop)
     }
 
+    /// `users.lookupByEmail` as the bot: the Slack id of whoever has
+    /// `email` in the workspace. Nobody is Slack's `users_not_found`; a
+    /// bot without `users:read.email` is `missing_scope`.
+    pub fn lookup_by_email(&self, email: &str) -> Result<String, String> {
+        let reply = self.call_form("users.lookupByEmail", As::Bot, &[("email", email)])?;
+        match reply["user"]["id"].as_str() {
+            Some(id) => Ok(id.to_string()),
+            None => Err("users.lookupByEmail gave no user".into()),
+        }
+    }
+
+    /// Upload `bytes` as `filename` into the thread `thread_ts` of
+    /// `channel`, as the bot, the way Slack now wants it: ask for an
+    /// upload URL (`files.getUploadURLExternal`), send the bytes there,
+    /// then share the file (`files.completeUploadExternal`). A bot
+    /// without `files:write` is `missing_scope`.
+    pub fn upload(
+        &self,
+        channel: &str,
+        thread_ts: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let length = bytes.len().to_string();
+        let ticket = self.call_form(
+            "files.getUploadURLExternal",
+            As::Bot,
+            &[("filename", filename), ("length", &length)],
+        )?;
+        let (url, id) = (str_at(&ticket, "upload_url"), str_at(&ticket, "file_id"));
+        if url.is_empty() || id.is_empty() {
+            return Err("files.getUploadURLExternal gave no upload_url".into());
+        }
+        let headers = ["Content-Type: application/octet-stream".to_string()];
+        let sent = orion_core::http::request(&orion_core::http::Request {
+            method: "POST",
+            url: &url,
+            headers: &headers,
+            bearer: None,
+            body: Some(bytes),
+            timeout_secs: 60,
+        })?;
+        if !sent.ok() {
+            return Err(format!("the upload answered HTTP {}", sent.status));
+        }
+        let files = json!([{ "id": id, "title": filename }]).to_string();
+        self.call_form(
+            "files.completeUploadExternal",
+            As::Bot,
+            &[
+                ("files", &files),
+                ("channel_id", channel),
+                ("thread_ts", thread_ts),
+            ],
+        )
+        .map(drop)
+    }
+
     /// `views.open` as the bot: `view` as a modal, for the press whose
     /// `trigger_id` this is (it lasts three seconds).
     pub fn views_open(&self, trigger_id: &str, view: &Value) -> Result<(), String> {
@@ -143,6 +229,26 @@ fn reply(method: &str, status: u16, body: &[u8]) -> Result<Value, String> {
         _ if status == 429 => Err("ratelimited".into()),
         _ => Err(format!("{method} answered HTTP {status}")),
     }
+}
+
+/// `fields` as an `application/x-www-form-urlencoded` body.
+fn form(fields: &[(&str, &str)]) -> String {
+    let encode = |text: &str| {
+        text.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                b' ' => "+".to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect::<String>()
+    };
+    fields
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode(k), encode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
 }
 
 fn str_at(v: &Value, key: &str) -> String {
@@ -167,6 +273,17 @@ mod tests {
         assert_eq!(
             reply("x", 502, b"<html>"),
             Err("x answered HTTP 502".into())
+        );
+    }
+
+    #[test]
+    fn a_form_body_is_url_encoded() {
+        assert_eq!(
+            form(&[
+                ("email", "ann+qa@example.com"),
+                ("files", r#"[{"id":"F 1"}]"#)
+            ]),
+            "email=ann%2Bqa%40example.com&files=%5B%7B%22id%22%3A%22F+1%22%7D%5D"
         );
     }
 

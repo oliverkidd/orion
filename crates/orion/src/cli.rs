@@ -192,6 +192,24 @@ pub(crate) enum Command {
     /// leaves it out.
     #[command(subcommand, hide = true)]
     Autofix(AutofixCommand),
+    /// What a factory agent runs to hand orion its pull request's facts.
+    ///
+    /// Run from inside a session the bug fixer or the feature builder
+    /// started, once its draft pull request is open: orion writes the top
+    /// of the PR's body from these facts, with its verdict. You never
+    /// need to run it yourself, so `orion --help` leaves it out.
+    #[command(subcommand, hide = true)]
+    Pr(PrCommand),
+    /// Read or build the decisions orion records at merge.
+    ///
+    /// After a pull request merges, orion reads the sessions that built it
+    /// and records the decisions you made — rules, constraints, how you want
+    /// agents to work — in `.orion/knowledge/` in the project's main
+    /// checkout, a git repository of its own. Agents read it before they
+    /// plan; `for` prints the pages for the files they will touch, and
+    /// `backfill` records the pull requests merged before orion started.
+    #[command(subcommand, after_help = KNOWLEDGE_EXAMPLES)]
+    Knowledge(KnowledgeCommand),
     /// Locate this machine's settings.
     ///
     /// Settings live in `config.json`, with `config.local.json` over it for
@@ -356,6 +374,95 @@ pub(crate) enum AutofixCommand {
 }
 
 #[derive(Subcommand)]
+pub(crate) enum PrCommand {
+    /// A pull request's facts, for the top orion writes.
+    ///
+    /// `init` prints the skeleton; fill it in, then `set` hands it over.
+    /// orion keeps the facts in a hidden block in the PR's body and
+    /// works the verdict out from them and from GitHub.
+    #[command(subcommand, after_help = PR_FACTS_EXAMPLES)]
+    Facts(PrFactsCommand),
+}
+
+const PR_FACTS_EXAMPLES: &str = "\
+Examples:
+  orion pr facts init > /tmp/facts.json   the skeleton to fill in
+  orion pr facts set /tmp/facts.json      hand it over for this branch's PR
+  orion pr facts set - --pr 2108 < f.json the same from stdin, for PR #2108";
+
+#[derive(Subcommand)]
+pub(crate) enum PrFactsCommand {
+    /// Print the facts skeleton to fill in.
+    ///
+    /// Every field, each holding what goes in it: what users get (at most
+    /// two sentences), proof, gaps, your calls (each tagged product, arch,
+    /// security, dep, scope, copy or ux), the flag, the docs touched and
+    /// whether the plan was followed.
+    #[command(after_help = "Example:\n  orion pr facts init > /tmp/facts.json")]
+    Init,
+    /// Hand orion the filled-in facts.
+    ///
+    /// Checks them — a placeholder left in, or a call without a known tag,
+    /// is refused — and leaves them for orion, which rewrites the top of
+    /// the PR's body on its next look.
+    #[command(after_help = PR_FACTS_EXAMPLES)]
+    Set {
+        /// The filled-in JSON, or `-` to read it from stdin.
+        file: String,
+        /// The pull request, by URL or number (default: the current
+        /// branch's).
+        #[arg(long, value_name = "PR")]
+        pr: Option<String>,
+    },
+}
+
+const KNOWLEDGE_EXAMPLES: &str = "\
+Examples:
+  orion knowledge for src/auth/login.ts   the pages for a file
+  orion knowledge backfill --project riplo-os --since 2026-06-01
+                                          record what merged since June";
+
+#[derive(Subcommand)]
+pub(crate) enum KnowledgeCommand {
+    /// Print the recorded decisions for some files.
+    ///
+    /// Maps the paths to topics by their words and by the paths the
+    /// recorded entries cite, and prints at most 4 topic pages (2,400
+    /// words). With no topic matching, prints the index.
+    #[command(after_help = KNOWLEDGE_EXAMPLES)]
+    For {
+        /// The files or folders, relative to the current directory.
+        #[arg(required = true, num_args = 1.., value_name = "PATH")]
+        paths: Vec<String>,
+        /// The project, by name or directory (default: the one the
+        /// current directory is in).
+        #[arg(long, value_name = "NAME")]
+        project: Option<String>,
+    },
+    /// Record the pull requests merged since a date.
+    ///
+    /// Lists the merged pull requests, joins each to the Claude and
+    /// Cursor transcripts that worked on it (by branch, or by links to
+    /// it), and harvests them oldest first with Opus, as at merge; then
+    /// checks every topic against the code as it is now. Pull requests
+    /// recorded before are skipped, so it can be run again. Needs gh and
+    /// a Claude account, not the TUI.
+    #[command(
+        after_help = KNOWLEDGE_EXAMPLES,
+        // Two lines: on one it runs past a 60-column terminal.
+        override_usage = "orion knowledge backfill --project <NAME>\n         --since <DATE>"
+    )]
+    Backfill {
+        /// The project, by name or directory.
+        #[arg(long, value_name = "NAME")]
+        project: String,
+        /// The first merge date to include, as YYYY-MM-DD.
+        #[arg(long, value_name = "DATE")]
+        since: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub(crate) enum ConfigCommand {
     /// Print where each settings file lives.
     ///
@@ -363,4 +470,39 @@ pub(crate) enum ConfigCommand {
     /// checkout, say; `ORION_DATA_DIR` moves them all.
     #[command(after_help = "Example:\n  orion config path")]
     Path,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("orion").chain(args.iter().copied()))
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    #[test]
+    fn pr_facts_init_and_set_parse() {
+        assert!(matches!(
+            parse(&["pr", "facts", "init"]).command,
+            Some(Command::Pr(PrCommand::Facts(PrFactsCommand::Init)))
+        ));
+        let Some(Command::Pr(PrCommand::Facts(PrFactsCommand::Set { file, pr }))) =
+            parse(&["pr", "facts", "set", "f.json"]).command
+        else {
+            panic!("not a set");
+        };
+        assert_eq!((file.as_str(), pr), ("f.json", None));
+        let Some(Command::Pr(PrCommand::Facts(PrFactsCommand::Set { file, pr }))) =
+            parse(&["pr", "facts", "set", "-", "--pr", "2108"]).command
+        else {
+            panic!("not a set");
+        };
+        assert_eq!((file.as_str(), pr.as_deref()), ("-", Some("2108")));
+    }
+
+    #[test]
+    fn pr_facts_set_needs_a_file() {
+        assert!(Cli::try_parse_from(["orion", "pr", "facts", "set"]).is_err());
+    }
 }

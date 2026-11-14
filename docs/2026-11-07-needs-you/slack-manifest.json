@@ -19,8 +19,11 @@
     "scopes": {
       "bot": [
         "chat:write",
+        "files:write",
         "im:write",
-        "im:history"
+        "im:history",
+        "users:read",
+        "users:read.email"
       ],
       "user": [
         "channels:history",

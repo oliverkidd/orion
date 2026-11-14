@@ -2,7 +2,7 @@
 //! at once, all of them together and each on its own, and each
 //! automation's own settings, keyed by its id ([`super::Automation::id`]).
 //! Global, never per project. Every key has a default, so a config with
-//! none of them behaves as Settings › Automations describes.
+//! none of them behaves as Settings › Factory describes.
 
 use super::Automation;
 use serde::{Deserialize, Serialize};
@@ -12,8 +12,13 @@ use std::ops::RangeInclusive;
 /// The most automation sessions running at once, out of the box. A saved
 /// `max_running` is kept as it is, whatever this says.
 pub const DEFAULT_MAX_RUNNING: u8 = 3;
-/// The overall cap `←`/`→` step through in Settings › Automations.
+/// The overall cap `←`/`→` step through in Settings › Factory.
 pub const MAX_RUNNING_RANGE: RangeInclusive<u8> = 1..=20;
+/// How many factory items may wait on you before new tickets wait too,
+/// out of the box.
+pub const DEFAULT_ATTENTION_CAP: u8 = 5;
+/// The range **Things waiting on you** steps through.
+pub const ATTENTION_RANGE: RangeInclusive<u8> = 1..=20;
 /// One automation's own cap: `←`/`→` step through these, and a step up
 /// from the top is "any".
 pub const OWN_CAP_RANGE: RangeInclusive<u8> = 1..=10;
@@ -34,6 +39,9 @@ pub struct AutomationsSettings {
     /// Whether automation agents run end-to-end tests on this machine
     /// ([`LocalE2e::rule`], added to every automation agent's prompt).
     pub local_e2e: LocalE2e,
+    /// New tickets wait while this many factory items need you
+    /// ([`super::attention`]): **Things waiting on you**.
+    pub attention_cap: u8,
 }
 
 /// End-to-end tests on this machine, for every automation agent: never
@@ -80,6 +88,7 @@ impl Default for AutomationsSettings {
             max_running: DEFAULT_MAX_RUNNING,
             per: BTreeMap::new(),
             local_e2e: LocalE2e::default(),
+            attention_cap: DEFAULT_ATTENTION_CAP,
         }
     }
 }
@@ -173,10 +182,25 @@ impl AutomationsSettings {
         }
     }
 
-    /// `←`/`→` on **Sessions at once**: the overall cap a step down or up,
-    /// kept in [`MAX_RUNNING_RANGE`].
+    /// `←`/`→` on **Agents working at once**: the overall cap a step down
+    /// or up, kept in [`MAX_RUNNING_RANGE`].
     pub fn step_cap(&mut self, step: i8) {
         self.max_running = stepped(self.max_running, step, &MAX_RUNNING_RANGE);
+    }
+
+    /// The attention cap, kept in [`ATTENTION_RANGE`]: a hand-edited 0
+    /// would stop every new ticket without saying so.
+    pub fn attention_cap(&self) -> usize {
+        usize::from(
+            self.attention_cap
+                .clamp(*ATTENTION_RANGE.start(), *ATTENTION_RANGE.end()),
+        )
+    }
+
+    /// `←`/`→` on **Things waiting on you**: a step down or up, kept in
+    /// [`ATTENTION_RANGE`].
+    pub fn step_attention(&mut self, step: i8) {
+        self.attention_cap = stepped(self.attention_cap, step, &ATTENTION_RANGE);
     }
 
     /// `←`/`→` on `which`'s **At most at once**: its own cap a step down

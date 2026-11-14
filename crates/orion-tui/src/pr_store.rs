@@ -203,14 +203,20 @@ impl PrStatus {
         self.standing.is_open()
     }
 
-    /// What the row goes red for, while the pull request is still open:
-    /// a merged or closed one is past needing its branch resolved.
+    /// What the row goes red for: an open pull request that is asking for a
+    /// review. A merged or closed one is past needing its branch resolved,
+    /// and a draft isn't asking anyone yet: its conflicts and checks are
+    /// still in `health` for the surfaces that spell them out quietly (the
+    /// PR PREVIEW, the modal's filters), never the needs-you red.
     pub fn trouble(&self) -> Option<Trouble> {
-        self.is_open().then(|| self.health.trouble()).flatten()
+        (self.standing == Standing::Open)
+            .then(|| self.health.trouble())
+            .flatten()
     }
 
-    /// The badge's word: the trouble's while there is one, else the
-    /// state's (`ready`, `draft`, `merged`, `closed`).
+    /// The badge's word: the trouble's while a ready pull request has one,
+    /// else the state's (`ready`, `draft`, `merged`, `closed`) — so a
+    /// draft reads `draft` whatever its health.
     pub fn word(&self) -> &'static str {
         self.standing.word(self.trouble())
     }
@@ -322,5 +328,35 @@ impl PrStore {
                     .newest()
                     .is_some_and(|at| now.saturating_duration_since(at) < RETIRED_KEEP)
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A draft's badge reads `draft` and asks for no one, whatever its
+    /// health says; the same pull request marked ready reads `conflicts`.
+    #[test]
+    fn a_drafts_word_is_draft_whatever_its_health() {
+        let draft = PrStatus {
+            standing: Standing::Draft,
+            health: Health {
+                conflicts: true,
+                checks: Checks::Failing,
+            },
+            conflicts_known: true,
+            checks_known: true,
+            ..PrStatus::default()
+        };
+        assert_eq!(draft.trouble(), None);
+        assert_eq!(draft.word(), "draft");
+        assert!(draft.health.conflicts, "the fact itself is kept");
+        let ready = PrStatus {
+            standing: Standing::Open,
+            ..draft
+        };
+        assert_eq!(ready.trouble(), Some(Trouble::Conflicts));
+        assert_eq!(ready.word(), "conflicts");
     }
 }

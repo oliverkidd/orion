@@ -377,7 +377,7 @@ pub async fn lookup(dir: &Path) -> Lookup {
 /// replying to an inline thread on your own PR files a review.
 static VIEWER: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
 
-async fn viewer_login() -> Option<&'static str> {
+pub(crate) async fn viewer_login() -> Option<&'static str> {
     VIEWER
         .get_or_init(|| async {
             let out = gh(None, &["api", "user", "--jq", ".login"], TIMEOUT).await?;
@@ -1643,6 +1643,14 @@ pub fn duration_label(secs: i64) -> String {
     }
 }
 
+/// Epoch milliseconds of an RFC 3339 stamp, fractional seconds kept —
+/// Linear's `updatedAt`. None for anything else.
+pub fn rfc3339_ms(stamp: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(stamp)
+        .ok()
+        .map(|t| t.timestamp_millis())
+}
+
 /// Unix seconds of an RFC 3339 stamp as GitHub writes them —
 /// `2026-10-02T23:16:11Z`, or with fractional seconds or an offset. None
 /// for anything else, an empty string included.
@@ -2614,10 +2622,10 @@ mod tests {
         assert_eq!(bare[0].section(), PrSection::Yours);
     }
 
-    /// Trouble is an open pull request's: a merged or closed one is past
-    /// needing its branch resolved, whatever the cached answer says; a
-    /// draft's conflict still needs a person. Conflicts outrank failing
-    /// checks when both hold.
+    /// Trouble is a ready pull request's: a merged or closed one is past
+    /// needing its branch resolved, whatever the cached answer says, and a
+    /// draft isn't asking anyone yet — its conflict comes back the moment
+    /// it is marked ready. Conflicts outrank failing checks when both hold.
     #[test]
     fn trouble_is_an_open_pull_requests_and_conflicts_come_first() {
         let both = Health {
@@ -2650,10 +2658,12 @@ mod tests {
         pr.answered_state = STATE_OPEN.into();
         assert_eq!(trouble(&pr), Some(Trouble::Conflicts));
         pr.answered_draft = true;
+        assert_eq!(trouble(&pr), None, "a draft isn't asking anyone yet");
+        pr.answered_draft = false;
         assert_eq!(
             trouble(&pr),
             Some(Trouble::Conflicts),
-            "a draft's conflict still needs resolving"
+            "marked ready, its conflict needs resolving"
         );
     }
 

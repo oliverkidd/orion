@@ -414,6 +414,33 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE phone_messages ADD COLUMN reason TEXT;
     ",
+    // 37: FACTORY MESSAGES — each factory card the bot posted
+    // (`ClientRequest::PostFactoryCard`), by the TUI's key, so a second
+    // post under that key edits the message in place and a press on it
+    // finds the card after a restart (`factory`). `recipient` is the
+    // Slack user it went to: besides the owner, the only one whose
+    // presses count. `text` and `blocks` are what shows, for rewriting it
+    // after a modal's submit; `image` the picture last uploaded into its
+    // thread. Tied to no agent.
+    "
+    CREATE TABLE factory_messages (
+      key         TEXT PRIMARY KEY,
+      channel     TEXT NOT NULL,
+      ts          TEXT NOT NULL,
+      recipient   TEXT NOT NULL,
+      created_at  INTEGER NOT NULL,
+      text        TEXT NOT NULL DEFAULT '',
+      blocks      TEXT NOT NULL DEFAULT '[]',
+      image       TEXT
+    );
+    CREATE INDEX factory_messages_at ON factory_messages(channel, ts);
+    ",
+    // 38: when a factory message was last posted or edited, so one
+    // nothing has touched in a week is pruned ([`FACTORY_MESSAGES_KEEP_MS`]).
+    // 0 on the rows before it: their `created_at` stands in.
+    "
+    ALTER TABLE factory_messages ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 fn phone_kind_str(kind: orion_core::away::PhoneKind) -> &'static str {
@@ -448,6 +475,11 @@ pub type TreeRows = (Vec<Project>, Vec<Worktree>, Vec<Agent>, Vec<TerminalTab>);
 /// following rather than every one ever read.
 const PR_SEEN_KEEP_MS: i64 = 180 * 24 * 60 * 60 * 1000;
 
+/// How long a factory message nothing has posted or edited is kept
+/// ([`Store::prune_factory_messages`]): as long as the TUI keeps a card
+/// that is done with.
+pub const FACTORY_MESSAGES_KEEP_MS: i64 = 7 * orion_core::clock::DAY_MS;
+
 impl Store {
     /// Open (or create) the store at `path` and bring it up to date.
     /// `claude_accounts` is every Claude account id `claude_accounts` in
@@ -468,6 +500,9 @@ impl Store {
         // year go. Best effort — a prune that failed is a few rows kept.
         if let Err(err) = store.prune_pr_seen(now_ms() - PR_SEEN_KEEP_MS) {
             tracing::warn!("pull-request read marks not pruned: {err:#}");
+        }
+        if let Err(err) = store.prune_factory_messages(now_ms() - FACTORY_MESSAGES_KEEP_MS) {
+            tracing::warn!("factory messages not pruned: {err:#}");
         }
         Ok(store)
     }
@@ -1178,6 +1213,81 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    // ---- factory messages ----
+
+    /// Record where the card under `m.key` was posted, or what it shows
+    /// now. Its first `created_at` is kept; `updated_at` is now.
+    pub fn upsert_factory_message(&self, m: &crate::factory::FactoryMessage) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO factory_messages
+               (key, channel, ts, recipient, created_at, text, blocks, image, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?5)
+             ON CONFLICT(key) DO UPDATE SET channel = ?2, ts = ?3, recipient = ?4,
+               text = ?6, blocks = ?7, image = ?8, updated_at = ?5",
+            params![
+                m.key,
+                m.channel,
+                m.ts,
+                m.recipient,
+                now_ms(),
+                m.text,
+                m.blocks,
+                m.image.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the factory messages last posted or edited before `before`
+    /// (epoch ms): a press on one is ignored, a post under its key starts
+    /// a new message. How many went.
+    pub fn prune_factory_messages(&self, before: i64) -> Result<usize> {
+        Ok(self.conn.lock().unwrap().execute(
+            "DELETE FROM factory_messages WHERE max(created_at, updated_at) < ?1",
+            params![before],
+        )?)
+    }
+
+    /// The card posted under `key`, if one was.
+    pub fn factory_message(&self, key: &str) -> Result<Option<crate::factory::FactoryMessage>> {
+        self.factory_messages_where("key = ?1", params![key])
+            .map(|mut found| found.pop())
+    }
+
+    /// The card that is message `ts` in `channel`, if it is one.
+    pub fn factory_message_at(
+        &self,
+        channel: &str,
+        ts: &str,
+    ) -> Result<Option<crate::factory::FactoryMessage>> {
+        self.factory_messages_where("channel = ?1 AND ts = ?2", params![channel, ts])
+            .map(|mut found| found.pop())
+    }
+
+    fn factory_messages_where(
+        &self,
+        filter: &str,
+        args: impl rusqlite::Params,
+    ) -> Result<Vec<crate::factory::FactoryMessage>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT key, channel, ts, recipient, text, blocks, image
+               FROM factory_messages WHERE {filter}"
+        ))?;
+        let rows = stmt.query_map(args, |r| {
+            Ok(crate::factory::FactoryMessage {
+                key: r.get(0)?,
+                channel: r.get(1)?,
+                ts: r.get(2)?,
+                recipient: r.get(3)?,
+                text: r.get(4)?,
+                blocks: r.get(5)?,
+                image: r.get::<_, Option<String>>(6)?.map(PathBuf::from),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     // ---- point lookups ----
 
     pub fn get_project(&self, id: &ProjectId) -> Result<Option<Project>> {
@@ -1597,6 +1707,43 @@ mod tests {
         assert_eq!(store.agent_pr_url(&agents[3].id).unwrap(), None);
     }
 
+    /// A factory card is found by its key (a second post edits it) and by
+    /// where it sits (a press on it); a second post under the key moves
+    /// what it shows, never adds a row.
+    #[test]
+    fn factory_messages_are_kept_by_key_and_found_by_place() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.factory_message("pr:x:verdict").unwrap().is_none());
+        let mut m = crate::factory::FactoryMessage {
+            key: "issue:RIPLO-1:thin".into(),
+            channel: "D2".into(),
+            ts: "100.1".into(),
+            recipient: "U2".into(),
+            text: "RIPLO-1".into(),
+            blocks: "[]".into(),
+            image: None,
+        };
+        store.upsert_factory_message(&m).unwrap();
+        assert_eq!(store.factory_message(&m.key).unwrap(), Some(m.clone()));
+        m.blocks = r#"[{"type":"context"}]"#.into();
+        m.image = Some(PathBuf::from("/tmp/grid.png"));
+        store.upsert_factory_message(&m).unwrap();
+        assert_eq!(
+            store.factory_message_at("D2", "100.1").unwrap(),
+            Some(m.clone())
+        );
+        assert!(store.factory_message_at("D1", "100.1").unwrap().is_none());
+        // Touched just now: a week's prune keeps it, a later one doesn't.
+        assert_eq!(
+            store
+                .prune_factory_messages(now_ms() - FACTORY_MESSAGES_KEEP_MS)
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.prune_factory_messages(now_ms() + 1).unwrap(), 1);
+        assert!(store.factory_message(&m.key).unwrap().is_none());
+    }
+
     /// Read marks are keyed by PR URL and outlive the worktree they were
     /// noticed on, so they live in their own table with no foreign key: no
     /// row here is ever cascaded away by a checkout being deleted.
@@ -1955,6 +2102,7 @@ mod tests {
     fn table_names_without_workspaces() -> Vec<String> {
         [
             "agents",
+            "factory_messages",
             "links",
             "phone_messages",
             "pr_seen",

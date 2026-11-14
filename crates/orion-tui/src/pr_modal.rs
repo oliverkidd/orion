@@ -1862,11 +1862,7 @@ fn row_line(
     let title = truncate(stands.title_or(&pr.title), room);
     let shown = title.chars().count();
     let lit: Vec<usize> = title_positions.into_iter().filter(|&p| p < shown).collect();
-    let title_color = if stands.is_draft() && trouble.is_none() {
-        th.faint
-    } else {
-        th.text
-    };
+    let title_color = if stands.is_draft() { th.faint } else { th.text };
     spans.extend(fuzzy_highlight_styled(
         &title,
         &lit,
@@ -1901,20 +1897,23 @@ fn row_line(
 /// blank where either has nothing to say — when `marks`, then the state
 /// word the BAND puts after `#42`, [`WORD_W`] wide: the trouble's
 /// (`conflicts`, `failing`), else `ready` or `draft`, in `pr_row::look`'s
-/// colours.
+/// colours. On a draft the marks keep their glyphs but go faint with the
+/// rest of the row: nothing on a draft is coloured, since it isn't asking
+/// anyone yet.
 fn status_spans(pr: &OpenPr, status: &PrStatus, marks: bool, th: Theme) -> Vec<Span<'static>> {
     let trouble = status.trouble();
     let word = status.word();
     let look = crate::pr_row::look(status.standing, trouble, th);
+    let tint = |c| if status.is_draft() { th.faint } else { c };
     let checks = pr.meta.checks.map(|_| match status.health.checks {
-        Checks::Failing => ("✗", th.err),
-        Checks::Pending => ("◐", th.warn),
-        _ => ("✓", th.ok),
+        Checks::Failing => ("✗", tint(th.err)),
+        Checks::Pending => ("◐", tint(th.warn)),
+        _ => ("✓", tint(th.ok)),
     });
     let review = match pr.meta.review {
-        Review::Approved => Some(("✓", th.ok)),
-        Review::Changes => Some(("✗", th.err)),
-        Review::Required => Some(("○", th.muted)),
+        Review::Approved => Some(("✓", tint(th.ok))),
+        Review::Changes => Some(("✗", tint(th.err))),
+        Review::Required => Some(("○", tint(th.muted))),
         Review::None => None,
     };
     let mark = |glyph: Option<(&'static str, ratatui::style::Color)>| match glyph {
@@ -4567,6 +4566,49 @@ mod tests {
         for w in [60u16, 80, 100, 160] {
             screen(&mut app, w, 30);
         }
+    }
+
+    /// A draft that conflicts and fails is faint end to end — the `↗`,
+    /// the title, both marks and its `draft` word — with no red anywhere:
+    /// it isn't asking anyone yet.
+    #[test]
+    fn a_conflicting_draft_row_is_faint_end_to_end() {
+        let mut row = rich(42, "Half done", "me", true);
+        row.answered_draft = true;
+        row.answered = crate::pull_request::Answered {
+            conflicts: Some(true),
+            checks: Some(Checks::Failing),
+        };
+        row.meta.review = Review::Changes;
+        let (app, _) = app_with(vec![row.clone()], true);
+        let th = app.theme;
+        let now = orion_core::clock::now_secs() as i64;
+        let cols = RowCols::of(std::slice::from_ref(&row), now);
+        let line = row_line(
+            &row,
+            &app.prs.status_or_open(&row.url),
+            &[],
+            None,
+            &cols,
+            120,
+            now,
+            th,
+        );
+        let faint = |needle: &str| {
+            let span = line
+                .spans
+                .iter()
+                .find(|s| s.content.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} missing: {line:?}"));
+            assert_eq!(span.style.fg, Some(th.faint), "{needle}: {line:?}");
+        };
+        for needle in ["↗", "Half done", "✗", "draft"] {
+            faint(needle);
+        }
+        assert!(
+            line.spans.iter().all(|s| s.style.fg != Some(th.err)),
+            "no red on a draft: {line:?}"
+        );
     }
 
     fn url(number: u64) -> String {

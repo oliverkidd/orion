@@ -1,5 +1,6 @@
 //! The NEEDS YOU board's cards: one per thing waiting on you, offered by
-//! a [`CardSource`] — the agents, Linear, code reviews, Slack, meetings —
+//! a [`CardSource`] — the agents, the factory's cards, Linear, code
+//! reviews, Slack, meetings —
 //! and laid out in three [`Column`]s of [`Section`]s.
 //!
 //! **Done** and **Snooze** are kept in `<data dir>/needs-you.json`
@@ -117,6 +118,7 @@ impl CardKey {
                 format!("slack:{channel}:{}", root.as_deref().unwrap_or(""))
             }
             CardTarget::Meeting { id } => format!("meeting:{id}"),
+            CardTarget::Factory { key } => format!("factory:{key}"),
         })
     }
 }
@@ -146,6 +148,11 @@ pub enum CardTarget {
     },
     Meeting {
         id: String,
+    },
+    /// A software factory card posted to you on Slack and still open, by
+    /// its key (`factory::cards`): Enter offers its buttons.
+    Factory {
+        key: String,
     },
 }
 

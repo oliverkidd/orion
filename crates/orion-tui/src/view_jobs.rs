@@ -133,6 +133,14 @@ pub enum Answer {
     /// A pull request's conflicted files, or the CONFLICT RESOLVER's merge
     /// or commit, landed (`crate::conflicts`).
     Conflicts(crate::conflicts::Answer),
+    /// How full an agent's context is, and its last words, off its
+    /// transcript, for the PR fixer's router
+    /// (`automations::pr_fixer::router::measure`).
+    FixerContext {
+        agent: orion_core::AgentId,
+        used: Option<f64>,
+        said: Vec<String>,
+    },
 }
 
 /// A view's way onto the blocking pool and back. Cheap to clone — the

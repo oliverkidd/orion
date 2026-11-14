@@ -27,6 +27,7 @@ pub mod dropped_files;
 pub mod editor;
 pub mod editor_term;
 pub mod event_loop;
+pub(crate) mod factory;
 pub mod fetch;
 pub mod field_mouse;
 pub mod file_tabs;
@@ -44,6 +45,7 @@ pub mod ipc;
 pub mod key_combo;
 pub mod keymap;
 pub mod keys;
+pub mod knowledge;
 pub mod launcher;
 pub mod linear;
 pub mod linear_cache;
@@ -67,6 +69,7 @@ pub mod paths_util;
 pub mod perf;
 pub mod phone;
 pub mod pr_actions;
+pub mod pr_body;
 pub mod pr_cache;
 pub mod pr_checkout;
 pub mod pr_modal;
@@ -136,6 +139,15 @@ pub fn run_config(op: ConfigOp) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `orion pr facts init|set`, as the CLI parsed it.
+pub use pr_body::cli::FactsOp as PrFactsOp;
+
+/// `orion pr facts init|set`: the agent hands orion a pull request's
+/// facts (see [`pr_body::cli`]).
+pub fn run_pr_facts(op: PrFactsOp) -> Result<()> {
+    pr_body::cli::run(op)
 }
 
 /// `orion doctor [--json]`: what this machine has of what orion leans on,

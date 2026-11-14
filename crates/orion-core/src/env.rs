@@ -9,6 +9,11 @@ use std::time::Duration;
 /// Id of the agent a hook or CLI invocation is running inside. Set on every
 /// agent PTY, scrubbed from plain terminals.
 pub const AGENT_ID: &str = "ORION_AGENT_ID";
+/// The AUTOMATION that started the session (`Agent::automation`:
+/// `bug_fixer`, `pr_fixer`, …), set on its PTY and on no other — so a
+/// repo's commit and PR skills can tell an unattended run from a person
+/// and take their unattended path.
+pub const AUTOMATION: &str = "ORION_AUTOMATION";
 /// Base URL of the daemon's hook receiver, set on agent PTYs.
 pub const API_URL: &str = "ORION_API_URL";
 /// Bearer token the hook receiver expects, set on agent PTYs.
@@ -134,6 +139,12 @@ pub const GROK_HOME: &str = "GROK_HOME";
 /// Env vars that identify an agent session to the daemon. They are set on
 /// every agent PTY and must never leak into plain terminals.
 pub const AGENT_SESSION_VARS: &[&str] = &[AGENT_ID, API_URL, API_TOKEN];
+
+/// What every PTY drops from the daemon's own environment before it sets
+/// its own: [`AGENT_SESSION_VARS`] and [`AUTOMATION`], which an agent PTY
+/// sets afresh when it has one. A daemon started from inside a session
+/// never passes that session's identity on.
+pub const SCRUBBED_SESSION_VARS: &[&str] = &[AGENT_ID, API_URL, API_TOKEN, AUTOMATION];
 
 /// `TERM` every PTY child is given. The pane is orion's own grid — a vt100
 /// parser the TUI repaints through ratatui — and that grid keeps 24-bit

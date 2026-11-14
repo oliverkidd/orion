@@ -555,6 +555,7 @@ mod tests {
                         checks: vec!["unit".into()],
                     }),
                     attempts: 1,
+                    ..Default::default()
                 },
             )]
             .into_iter()

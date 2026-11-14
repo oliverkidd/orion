@@ -115,6 +115,18 @@ pub struct LinearIssue {
     /// Linear names neither.
     #[serde(default)]
     pub reporter: String,
+    /// The reporter's Linear id, when a member of the workspace filed it;
+    /// empty for one that came in through an integration.
+    #[serde(default)]
+    pub reporter_id: String,
+    /// The reporter's email, when a member filed it: where the factory's
+    /// thin-ticket question goes (`automations::linear_builder`).
+    #[serde(default)]
+    pub reporter_email: String,
+    /// The attachments that aren't GitHub pull requests — screenshots,
+    /// files, links — by URL.
+    #[serde(default)]
+    pub files: Vec<String>,
     /// Assigned to the configured user: the `My issues` tab's, else
     /// `Other issues`'.
     #[serde(default)]
@@ -1750,7 +1762,7 @@ impl WorkPr {
 /// `identifier` (`ENG-12`): the identifier, any case, with no letter or
 /// digit before it and no digit after — `eng-12-fix`, `feat/ENG-12` and
 /// `ENG-12: fix login` do, `eng-123` doesn't.
-fn names_issue(branch: &str, identifier: &str) -> bool {
+pub(crate) fn names_issue(branch: &str, identifier: &str) -> bool {
     let (branch, id) = (branch.to_ascii_lowercase(), identifier.to_ascii_lowercase());
     if id.is_empty() {
         return false;
@@ -5572,7 +5584,7 @@ fn comment_lines(
 pub(crate) const ISSUE_FIELDS: &str =
     "id identifier title url description priority createdAt updatedAt completedAt \
     state { name type color position } labels { nodes { name color } } project { name color } \
-    assignee { id displayName } creator { displayName } externalUserCreator { name } \
+    assignee { id displayName } creator { id displayName email } externalUserCreator { name } \
     team { id } \
     attachments(first: 25) { nodes { url metadata } pageInfo { hasNextPage } }";
 
@@ -5742,6 +5754,124 @@ async fn create_issue(
     json.pointer("/data/issueCreate/issue")
         .and_then(issue_from)
         .ok_or_else(|| "Linear did not say which issue it made".into())
+}
+
+// ---- the factory's writes (`automations::linear_builder`) ----
+//
+// Keyed by the Linear key itself rather than a checkout: the bug fixer
+// and the feature builder hold the key a ticket came in under.
+
+/// `issueUpdate` with its input as a variable: the factory's assignee and
+/// state writes.
+pub(crate) const ISSUE_UPDATE: &str = "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }";
+/// `commentCreate` — a closing note on a ticket the factory cancels.
+pub(crate) const COMMENT_CREATE: &str =
+    "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }";
+/// `issueRelationCreate` — one ticket a duplicate of another.
+pub(crate) const RELATION_CREATE: &str = "mutation($input: IssueRelationCreateInput!) { issueRelationCreate(input: $input) { success } }";
+/// One team's workflow states, for a state looked up by type or name.
+pub(crate) const TEAM_STATES_QUERY: &str =
+    "query($id: String!) { team(id: $id) { states { nodes { id name type position } } } }";
+
+/// Assign `issue_id` to `user` — a Linear user id — or to nobody.
+pub(crate) async fn assign(key: &str, issue_id: &str, user: Option<&str>) -> Result<(), String> {
+    let variables = serde_json::json!({ "id": issue_id, "input": { "assigneeId": user } });
+    let json = graphql(key, ISSUE_UPDATE, variables).await?;
+    mutation_result(&json, "issueUpdate", "Linear did not assign the issue")
+}
+
+/// Move `issue_id` to the workflow state `state_id`.
+pub(crate) async fn move_to(key: &str, issue_id: &str, state_id: &str) -> Result<(), String> {
+    let variables = serde_json::json!({ "id": issue_id, "input": { "stateId": state_id } });
+    let json = graphql(key, ISSUE_UPDATE, variables).await?;
+    mutation_result(&json, "issueUpdate", "Linear did not move the issue")
+}
+
+/// Comment `body` (markdown) on `issue_id`.
+pub(crate) async fn comment(key: &str, issue_id: &str, body: &str) -> Result<(), String> {
+    let variables = serde_json::json!({ "input": { "issueId": issue_id, "body": body } });
+    let json = graphql(key, COMMENT_CREATE, variables).await?;
+    mutation_result(&json, "commentCreate", "Linear did not add the comment")
+}
+
+/// Mark `issue_id` a duplicate of `of` — an id or an identifier
+/// (`RIPLO-12`), which Linear takes alike.
+pub(crate) async fn mark_duplicate(key: &str, issue_id: &str, of: &str) -> Result<(), String> {
+    let variables = serde_json::json!({ "input": {
+        "issueId": issue_id,
+        "relatedIssueId": of,
+        "type": "duplicate",
+    } });
+    let json = graphql(key, RELATION_CREATE, variables).await?;
+    mutation_result(
+        &json,
+        "issueRelationCreate",
+        "Linear did not mark the duplicate",
+    )
+}
+
+/// Team `team_id`'s workflow states, in Linear's `position` order.
+pub(crate) async fn team_states(key: &str, team_id: &str) -> Result<Vec<LinearState>, String> {
+    let json = graphql(key, TEAM_STATES_QUERY, serde_json::json!({ "id": team_id })).await?;
+    parse_team_states(&json)
+}
+
+/// The states in an answer to [`TEAM_STATES_QUERY`].
+pub(crate) fn parse_team_states(json: &serde_json::Value) -> Result<Vec<LinearState>, String> {
+    let nodes = json
+        .pointer("/data/team/states/nodes")
+        .and_then(|n| n.as_array())
+        .ok_or_else(|| graphql_error(json).unwrap_or_else(|| "Linear sent no states".into()))?;
+    let mut states: Vec<(f64, LinearState)> = nodes
+        .iter()
+        .filter_map(|s| {
+            Some((
+                s.get("position").and_then(|p| p.as_f64()).unwrap_or(0.0),
+                LinearState {
+                    id: s.get("id")?.as_str()?.to_string(),
+                    name: s.get("name")?.as_str()?.to_string(),
+                    kind: json_text(s, "/type"),
+                    color: String::new(),
+                },
+            ))
+        })
+        .collect();
+    states.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Ok(states.into_iter().map(|(_, s)| s).collect())
+}
+
+/// Where the factory closes a ticket it builds nothing for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CloseAs {
+    /// Done: a `completed` state.
+    Done,
+    /// Canceled: a `canceled` state that isn't the Duplicate one.
+    Canceled,
+    /// Duplicate: a `canceled` state named "Duplicate" when the team has
+    /// one, else Canceled.
+    Duplicate,
+}
+
+/// The state among a team's `states` a ticket closed `as_` goes to: by
+/// type, and by name where a type has several — Done named "Done" before
+/// another completed state, Canceled never the Duplicate state.
+pub(crate) fn state_for(states: &[LinearState], as_: CloseAs) -> Option<&LinearState> {
+    let named = |s: &LinearState, name: &str| s.name.trim().eq_ignore_ascii_case(name);
+    let of_kind = |kind: &'static str| states.iter().filter(move |s| s.kind == kind);
+    let canceled = || {
+        of_kind("canceled")
+            .find(|s| named(s, "Canceled") || named(s, "Cancelled"))
+            .or_else(|| of_kind("canceled").find(|s| !named(s, "Duplicate")))
+    };
+    match as_ {
+        CloseAs::Done => of_kind("completed")
+            .find(|s| named(s, "Done"))
+            .or_else(|| of_kind("completed").next()),
+        CloseAs::Canceled => canceled(),
+        CloseAs::Duplicate => of_kind("canceled")
+            .find(|s| named(s, "Duplicate"))
+            .or_else(canceled),
+    }
 }
 
 /// A mutation's answer: `Ok` when `data.<field>.success` is true, else
@@ -6159,6 +6289,16 @@ fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
         reporter: Some(text("/creator/displayName"))
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| text("/externalUserCreator/name")),
+        reporter_id: text("/creator/id"),
+        reporter_email: text("/creator/email"),
+        files: value
+            .pointer("/attachments/nodes")
+            .and_then(|n| n.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|node| IssuePr::from_json(node).is_none())
+            .filter_map(|node| node.get("url")?.as_str().map(str::to_string))
+            .collect(),
         mine: false,
         created_at: text("/createdAt"),
         updated_at: text("/updatedAt"),
@@ -6477,6 +6617,9 @@ pub(crate) mod tests {
             assignee: String::new(),
             assignee_id: String::new(),
             reporter: String::new(),
+            reporter_id: String::new(),
+            reporter_email: String::new(),
+            files: Vec::new(),
             mine: true,
             created_at: String::new(),
             updated_at: String::new(),
@@ -7760,7 +7903,10 @@ pub(crate) mod tests {
         );
         assert!(query.contains("{ assignee: { null: true } }"), "{query}");
         assert!(query.contains("pageInfo { hasNextPage }"), "{query}");
-        assert!(query.contains("creator { displayName }"), "{query}");
+        assert!(
+            query.contains("creator { id displayName email }"),
+            "{query}"
+        );
         assert!(query.contains("me: viewer { id displayName }"), "{query}");
         assert!(
             query.contains(
@@ -10381,5 +10527,108 @@ pub(crate) mod tests {
                 "couldn't take ENG-2 off the PR it moved from: Entity not found"
             ))
         );
+    }
+
+    /// The factory's writes ask Linear as its schema has it: `issueUpdate`
+    /// with an `IssueUpdateInput`, `commentCreate`, `issueRelationCreate`
+    /// of type `duplicate`, and a team's states by type and name.
+    #[test]
+    fn the_factory_writes_ask_linear_as_its_schema_has_it() {
+        assert!(ISSUE_UPDATE.contains("$input: IssueUpdateInput!"));
+        assert!(ISSUE_UPDATE.contains("issueUpdate(id: $id, input: $input) { success }"));
+        assert!(COMMENT_CREATE.contains("commentCreate(input: $input) { success }"));
+        assert!(COMMENT_CREATE.contains("$input: CommentCreateInput!"));
+        assert!(RELATION_CREATE.contains("$input: IssueRelationCreateInput!"));
+        assert!(RELATION_CREATE.contains("issueRelationCreate(input: $input) { success }"));
+        assert!(TEAM_STATES_QUERY
+            .contains("team(id: $id) { states { nodes { id name type position } } }"));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sent = with_graphql_stub(
+            |_, query| {
+                Ok(match query {
+                    q if q.contains("commentCreate") => {
+                        serde_json::json!({"data": {"commentCreate": {"success": true}}})
+                    }
+                    q if q.contains("issueRelationCreate") => {
+                        serde_json::json!({"data": {"issueRelationCreate": {"success": true}}})
+                    }
+                    _ => serde_json::json!({"data": {"issueUpdate": {"success": true}}}),
+                })
+            },
+            || {
+                rt.block_on(async {
+                    assign("k", "i1", None).await.unwrap();
+                    assign("k", "i1", Some("u1")).await.unwrap();
+                    super::move_to("k", "i1", "s-done").await.unwrap();
+                    comment("k", "i1", "Can't reproduce").await.unwrap();
+                    mark_duplicate("k", "i1", "ENG-9").await.unwrap();
+                });
+                graphql_sent()
+            },
+        );
+        assert_eq!(
+            sent,
+            [
+                serde_json::json!({"id": "i1", "input": {"assigneeId": null}}),
+                serde_json::json!({"id": "i1", "input": {"assigneeId": "u1"}}),
+                serde_json::json!({"id": "i1", "input": {"stateId": "s-done"}}),
+                serde_json::json!({"input": {"issueId": "i1", "body": "Can't reproduce"}}),
+                serde_json::json!({"input": {"issueId": "i1", "relatedIssueId": "ENG-9", "type": "duplicate"}}),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_closed_ticket_finds_its_state_by_type_then_name() {
+        let json = serde_json::json!({"data": {"team": {"states": {"nodes": [
+            {"id": "c2", "name": "Duplicate", "type": "canceled", "position": 6.0},
+            {"id": "d0", "name": "Released", "type": "completed", "position": 5.0},
+            {"id": "d1", "name": "Done", "type": "completed", "position": 4.0},
+            {"id": "c1", "name": "Canceled", "type": "canceled", "position": 7.0},
+            {"id": "t", "name": "Todo", "type": "unstarted", "position": 1.0}
+        ]}}}});
+        let states = parse_team_states(&json).unwrap();
+        assert_eq!(states[0].name, "Todo", "in position order");
+        let id = |as_| state_for(&states, as_).map(|s| s.id.as_str());
+        assert_eq!(id(CloseAs::Done), Some("d1"));
+        assert_eq!(id(CloseAs::Canceled), Some("c1"));
+        assert_eq!(id(CloseAs::Duplicate), Some("c2"));
+        // No Duplicate state: Canceled. No state named Canceled: any
+        // canceled one that isn't the Duplicate.
+        let plain: Vec<LinearState> = states.iter().filter(|s| s.id != "c2").cloned().collect();
+        assert_eq!(
+            state_for(&plain, CloseAs::Duplicate).map(|s| s.id.as_str()),
+            Some("c1")
+        );
+        let odd: Vec<LinearState> = states.iter().filter(|s| s.id != "c1").cloned().collect();
+        assert_eq!(
+            state_for(&odd, CloseAs::Canceled),
+            None,
+            "never the Duplicate state"
+        );
+        assert!(parse_team_states(&serde_json::json!({"errors": [{"message": "nope"}]})).is_err());
+    }
+
+    /// The reporter's id and email, and the attachments that aren't pull
+    /// requests, are read off every issue.
+    #[test]
+    fn an_issue_says_who_reported_it_and_what_is_attached() {
+        let node = serde_json::json!({
+            "id": "i1", "identifier": "ENG-1", "url": "https://linear.app/x/issue/ENG-1",
+            "creator": {"id": "u2", "displayName": "Ana", "email": "ana@x.co"},
+            "attachments": {"nodes": [
+                {"url": "https://github.com/o/r/pull/7", "metadata": {"number": 7}},
+                {"url": "https://uploads.linear.app/a/b/shot.png", "metadata": {}}
+            ]}
+        });
+        let issue = issue_from(&node).unwrap();
+        assert_eq!(issue.reporter, "Ana");
+        assert_eq!(issue.reporter_id, "u2");
+        assert_eq!(issue.reporter_email, "ana@x.co");
+        assert_eq!(issue.prs.len(), 1);
+        assert_eq!(issue.files, ["https://uploads.linear.app/a/b/shot.png"]);
     }
 }

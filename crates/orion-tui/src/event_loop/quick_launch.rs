@@ -153,6 +153,19 @@ pub(crate) fn submit_unattended(
     submit(app, launch, text, out);
 }
 
+/// A launch you approved away from any box — a week in review fix's
+/// **Approve fix k**, on Slack or in Needs you: the QUICK PROMPT's own
+/// last step, as though a box had been opened on `launch` and `text`
+/// typed into it.
+pub(crate) fn submit_approved(
+    app: &mut App,
+    launch: QuickLaunch,
+    text: String,
+    out: &mut Vec<ClientRequest>,
+) {
+    submit(app, launch, text, out);
+}
+
 /// What every launch the screen follows does at once: the new session is
 /// put where it can be seen without the keys going with it. The PANE
 /// beside the grid unfolds if `^~` had folded it away; the Ack lands the

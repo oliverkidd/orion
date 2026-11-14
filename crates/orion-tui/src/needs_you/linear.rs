@@ -570,11 +570,11 @@ mod tests {
         app.automations
             .linear_builder
             .queue
-            .push(crate::automations::linear_builder::Group {
-                which: crate::automations::Automation::BugFixer,
-                project: ProjectId("p".into()),
-                issues: vec![ticket("ENG-1", "unstarted", "Todo")],
-            });
+            .push(crate::automations::linear_builder::Group::of(
+                crate::automations::Automation::BugFixer,
+                ProjectId("p".into()),
+                vec![ticket("ENG-1", "unstarted", "Todo")],
+            ));
         assert_eq!(titles(&app), ["ENG-2 Fix login"]);
     }
 

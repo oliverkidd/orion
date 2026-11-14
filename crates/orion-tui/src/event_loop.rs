@@ -47,7 +47,7 @@ use host_terminal::{
     on_host_resize, reassert_modes, repaint, report_working_directory, setup_terminal,
     take_worker_panic, watch_held_key, MODE_REASSERT,
 };
-pub(crate) use quick_launch::submit_unattended;
+pub(crate) use quick_launch::{submit_approved, submit_unattended};
 pub use release_watch::ReleaseWatch;
 
 /// Wheel step for the pull-request reading pane, in lines. Prose wants a
@@ -446,6 +446,11 @@ async fn main_loop(
     let (automations_tx, mut automations_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::automations::Answer>();
     app.automations.tx = Some(automations_tx);
+    // PR BODY AND VERDICT: what a factory pull request's gather, write
+    // and merge answer (`pr_body`).
+    let (pr_body_tx, mut pr_body_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::pr_body::Answer>();
+    app.pr_body.tx = Some(pr_body_tx);
     crate::automations::linear_builder::load(&mut app);
     crate::automations::meeting_takeaways::load(&mut app);
     let mut next_metrics_poll = tokio::time::Instant::now();
@@ -532,12 +537,23 @@ async fn main_loop(
                 for (url, number, dir) in crate::automations::pr_fixer::due_fetches(&mut app) {
                     spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
                 }
+                // PR BODY: each factory pull request whose top may be due
+                // a rewrite.
+                for (url, number, dir) in crate::pr_body::due_fetches(&mut app) {
+                    spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
+                }
                 // AUTOMATIONS: each runner's turn — the PR fixer's queued
                 // asks among them.
                 crate::automations::tick(&mut app, &mut out);
                 // BASE SYNC: the most overdue project's root fetched, and
                 // fast-forwarded when it sits on the base branch.
                 crate::base_sync::tick(&mut app);
+                // KNOWLEDGE: the session snapshot, harvests left queued,
+                // and the daily card of new rules.
+                crate::knowledge::tick(&mut app);
+                // FACTORY: every few hours, the bugs that followed each
+                // run's merge.
+                crate::factory::follow_ups::tick(&mut app);
                 // Who each CLAUDE ACCOUNT is signed in as, on a slower
                 // beat of its own: a `/login` typed in a session's pane
                 // renames its account here.
@@ -859,6 +875,11 @@ async fn main_loop(
             answer = needs_you_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::needs_you::land(&mut app, answer);
+                }
+            }
+            answer = pr_body_rx.recv() => {
+                if let Some(answer) = answer {
+                    crate::pr_body::land(&mut app, answer);
                 }
             }
             answer = automations_rx.recv() => {
@@ -2371,6 +2392,8 @@ fn land_pr_detail(
     }
     // A watched pull request's checks, for AUTOFIX.
     crate::automations::pr_fixer::land_detail(app, &url, detail.as_ref(), out);
+    // A factory pull request's top and verdict.
+    crate::pr_body::land_detail(app, &url, detail.as_ref());
     match detail {
         Some(detail) => {
             let retired = !app.prs.status_or_open(&url).is_open();
@@ -3351,7 +3374,7 @@ fn dispatch_input(app: &mut App, event: Event, out: &mut Vec<ClientRequest>) {
                 if let Some(term) = &app.term {
                     let session = term.sref.clone();
                     let data = pasted(term.parser.screen(), &text);
-                    typed_into(app, &session);
+                    owner_typed_into(app, &session);
                     out.push(ClientRequest::Input { session, data });
                 }
             }
@@ -3473,7 +3496,7 @@ pub(crate) fn paste_unsent(
         return false;
     };
     term.set_scroll(0);
-    typed_into(app, session);
+    owner_typed_into(app, session);
     out.push(ClientRequest::Input {
         session: session.clone(),
         data: bracketed(text),
@@ -3743,6 +3766,7 @@ fn send_follow_up(app: &mut App, out: &mut Vec<ClientRequest>) {
         return;
     }
     app.follow_up = None;
+    note_owner_typed(app, &SessionRef::Agent(id.clone()));
     // The pane goes to the session being prompted: the answer is about to
     // land there, and the user asked for it by name. (The LAUNCHER VIEW's
     // modal deliberately does not — see `send_turn`.) After the send, so a
@@ -3762,7 +3786,7 @@ fn send_follow_up(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// cold since the daemon started, still gets the turn. Nothing attaches,
 /// so prompting a card need not disturb what the pane is showing. False
 /// when the row went away under the box.
-fn send_turn(
+pub(crate) fn send_turn(
     app: &mut App,
     id: &AgentId,
     text: String,
@@ -3809,6 +3833,20 @@ fn typed_into(app: &mut App, session: &SessionRef) {
         .cloned()
     {
         app.ensure_project_tab(&project);
+    }
+}
+
+/// The owner typed into `session` — a key, a paste, a dropped file:
+/// [`typed_into`], and the time noted ([`App::typed_at`]).
+fn owner_typed_into(app: &mut App, session: &SessionRef) {
+    note_owner_typed(app, session);
+    typed_into(app, session);
+}
+
+/// Note that the owner just typed into `session` ([`App::typed_at`]).
+fn note_owner_typed(app: &mut App, session: &SessionRef) {
+    if let SessionRef::Agent(id) = session {
+        app.typed_at.insert(id.clone(), std::time::Instant::now());
     }
 }
 
@@ -4087,7 +4125,7 @@ fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
                 }
                 if let Some(data) = keys::encode_key(&key, term.kitty_flags) {
                     let session = term.sref.clone();
-                    typed_into(app, &session);
+                    owner_typed_into(app, &session);
                     out.push(ClientRequest::Input { session, data });
                 }
             }
@@ -4779,6 +4817,10 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             "posted on the pull request as you, through gh — markdown".into(),
             String::new(),
         ),
+        PromptKind::FactoryText { key, label, .. } => {
+            let (title, label) = crate::needs_you::factory::prompt_text(app, key, label);
+            (title.into(), label.into(), String::new())
+        }
         PromptKind::RenameAgent { id } => {
             let current = app
                 .tree
@@ -5960,6 +6002,9 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
         Answer::ClipboardImage(pasted) => land_clipboard_image(app, pasted),
         Answer::Flash(message) => app.flash = Some(crate::flash::Flash::failed(message)),
         Answer::Conflicts(answer) => crate::conflicts::land(app, answer),
+        Answer::FixerContext { agent, used, said } => {
+            crate::automations::pr_fixer::router::land_context(app, agent, used, said)
+        }
         Answer::ClientRss(bytes) => land_client_rss(app, bytes),
         Answer::Slow { ticket } => match &mut app.overlay {
             Some(Overlay::Diff(view)) => crate::git_diff::diff_slow(view, ticket),
@@ -6646,7 +6691,7 @@ fn send_location_to_agent(app: &mut App, out: &mut Vec<ClientRequest>) {
             return;
         }
     } else {
-        typed_into(app, &session);
+        owner_typed_into(app, &session);
         out.push(ClientRequest::Input {
             session,
             data: text.into_bytes(),
@@ -6783,7 +6828,7 @@ fn archive_agent(app: &mut App, id: AgentId) {
 
 /// The archive itself: release the pane if it shows the agent, then ask
 /// the daemon. From the dialog's Enter (`run_pending_action`).
-fn archive_agent_now(app: &mut App, id: AgentId, out: &mut Vec<ClientRequest>) {
+pub(crate) fn archive_agent_now(app: &mut App, id: AgentId, out: &mut Vec<ClientRequest>) {
     detach_if_attached(app, &SessionRef::Agent(id.clone()), out);
     optimistic::set_archived(app, id, true, out);
 }
@@ -7987,6 +8032,16 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 let hover = menu.hover;
                 activate::menu_row(app, hover, out);
             }
+            // A FACTORY card's menu (Enter on it on the NEEDS YOU BOARD):
+            // `1`–`9` press the button of that number at once.
+            KeyCode::Char(c @ '1'..='9')
+                if key.modifiers.is_empty()
+                    && crate::needs_you::factory::numbered_row(menu, c).is_some() =>
+            {
+                if let Some(row) = crate::needs_you::factory::numbered_row(menu, c) {
+                    activate::menu_row(app, row, out);
+                }
+            }
             _ => {}
         },
         Overlay::Prompt(prompt) => match key.code {
@@ -8331,6 +8386,9 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
                 {
                     crate::needs_you::reply::open(app)
                 }
+                // A digit types here, FACTORY card or not: a search may
+                // start with one. A card's buttons take digits once Enter
+                // has opened them as a menu (`needs_you::factory`).
                 _ => {
                     if palette.query.handle_key(&key).changed() {
                         palette.apply_filter();
@@ -8986,6 +9044,7 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.animations = cfg.animations;
     app.diff_tree = cfg.diff_tree_view;
     app.automations.settings = cfg.automations.clone();
+    app.pr_body.settings = cfg.factory.clone();
     // Turned off, the readout goes at once; the poll stops with it.
     app.spotify_enabled = cfg.spotify;
     if !cfg.spotify && app.spotify.take().is_some() {
@@ -9526,6 +9585,7 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         // is not swapped, not unfolded and not focused, so one card after
         // another can be prompted without ever stepping into a session.
         PromptKind::FollowUp { id } => {
+            note_owner_typed(app, &SessionRef::Agent(id.clone()));
             send_turn(app, &id, value, true, out);
         }
         PromptKind::RenameAgent { id } => optimistic::rename_agent(app, id, value, out),
@@ -9576,6 +9636,9 @@ fn submit_prompt(app: &mut App, prompt: PromptDialog, out: &mut Vec<ClientReques
         }
         PromptKind::MicrosoftAppId { client_id } => {
             crate::microsoft::submit_app_id(app, client_id, &value);
+        }
+        PromptKind::FactoryText { key, action, .. } => {
+            crate::needs_you::factory::press(app, &key, &action, Some(value));
         }
         PromptKind::EditLink { id } => {
             send(app, out, |req_id| ClientRequest::UpdateLink {
@@ -9800,6 +9863,12 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         }
         MenuAction::DuplicateAgent(id) => launcher::duplicate_agent(app, id),
         MenuAction::OpenLinearIssue { project, id } => crate::linear::open_at(app, &project, &id),
+        MenuAction::FactoryPress {
+            key,
+            action,
+            label,
+            asks_text,
+        } => crate::needs_you::factory::chosen(app, key, action, label, asks_text),
         MenuAction::ContinueOn { id, harness } => {
             launcher::continue_on_harness(app, id, harness, out)
         }
@@ -13206,6 +13275,15 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             crate::phone::away_changed(app, away, by_hand);
         }
         ServerEvent::SlackStatus { status } => crate::phone::slack_changed(app, status),
+        ServerEvent::FactoryAction {
+            key,
+            action,
+            text,
+            by,
+        } => crate::factory::cards::on_action(app, &key, &action, text, by.is_owner),
+        ServerEvent::FactoryCardFailed { key, reason } => {
+            crate::factory::cards::on_failed(app, &key, reason)
+        }
         event @ ServerEvent::SlackMessage { .. } => {
             if let Some((message, json)) = crate::needs_you::slack::Message::of(event) {
                 crate::needs_you::slack::heard(app, message, &json);
@@ -37222,6 +37300,78 @@ mod tests {
             .filter(|a| matches!(a, Ask::Post { .. }))
             .cloned()
             .collect()
+    }
+
+    /// A digit on the NEEDS YOU BOARD types — a search may start with
+    /// one — even on a FACTORY card; the card's buttons take digits only
+    /// once Enter has opened them as a menu.
+    #[test]
+    fn a_factory_cards_buttons_take_digits_only_from_its_menu() {
+        use crate::factory::cards::{self, Button, Card as SlackCard, CardState, Recipient};
+        with_seeded_presets(|| {
+            let mut app = parity_tree();
+            let mut out = Vec::new();
+            let key = "week:2026-11-14";
+            cards::post(
+                &mut app,
+                SlackCard {
+                    key: key.into(),
+                    to: Recipient::Owner,
+                    context: "Week in review".into(),
+                    title: "The week".into(),
+                    body: vec!["Two fixes".into()],
+                    buttons: vec![
+                        Button::tap("approve", "Approve"),
+                        Button::tap("skip", "Skip"),
+                    ],
+                    image: None,
+                },
+            );
+            let state = |app: &App| {
+                app.factory_cards
+                    .iter()
+                    .find(|p| p.card.key == key)
+                    .map(|p| p.state.clone())
+            };
+            press(&mut app, KeyCode::Char('k'), KeyModifiers::SUPER, &mut out);
+            drawn_board_hits(&mut app);
+            let on_card = |app: &App| {
+                match &app.overlay {
+                Some(Overlay::Palette(p)) => p.board.selected().is_some_and(|c| {
+                    matches!(&c.target, crate::needs_you::model::CardTarget::Factory { key: k } if k == key)
+                }),
+                _ => false,
+            }
+            };
+            for _ in 0..20 {
+                if on_card(&app) {
+                    break;
+                }
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            }
+            assert!(on_card(&app), "the cursor on the factory card");
+
+            press(&mut app, KeyCode::Char('2'), KeyModifiers::NONE, &mut out);
+            assert_eq!(state(&app), Some(CardState::Open), "not pressed");
+            let Some(Overlay::Palette(palette)) = &app.overlay else {
+                panic!("the palette went");
+            };
+            assert_eq!(palette.query.as_str(), "2", "typed into the search");
+
+            press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
+            drawn_board_hits(&mut app);
+            for _ in 0..20 {
+                if on_card(&app) {
+                    break;
+                }
+                press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert!(matches!(app.overlay, Some(Overlay::Menu(_))), "its menu");
+            press(&mut app, KeyCode::Char('2'), KeyModifiers::NONE, &mut out);
+            assert!(app.overlay.is_none(), "the menu went");
+            assert_eq!(state(&app), Some(CardState::Closed("Skip".into())));
+        });
     }
 
     /// Enter on a SLACK card opens it in Slack and marks it done, so an

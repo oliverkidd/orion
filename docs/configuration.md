@@ -148,7 +148,10 @@ by name (`#eng`), which orion asks Slack for once per channel; a keyword matches
 message, any case. **Banner and sound** rings the feedback sound and, while orion's window is in
 the background, posts a desktop notification naming the sender. An app made from an older copy of
 the manifest lacks the `channels:read` and `groups:read` user scopes that name channels: add them
-under OAuth & Permissions and reinstall.
+under OAuth & Permissions and reinstall. The factory's Slack cards also need the bot scopes
+`users:read`, `users:read.email` (a card to a ticket's reporter, found by email) and `files:write`
+(a PR's pictures in its card's thread); phone messages work without them, and the first card that
+needs one says to reinstall the app.
 
 **MICROSOFT 365.**
 - **Status:** the email you signed in as.
@@ -214,12 +217,13 @@ file: orion keeps them in the macOS Keychain, under services named `dev.orion.<s
 
 ### Automations
 
-Set in Settings › Automations (see [Automations](sessions.md#automations)); `⌘J` only shows what
+Set in Settings › Factory (see [Automations](sessions.md#automations)); `⌘J` only shows what
 they are doing. Global, never per project.
 
 ```json
 { "automations": {
     "max_running": 3,
+    "attention_cap": 5,
     "local_e2e": "never",
     "per": {
       "pr_fixer": { "on": true, "max_running": 1, "extra_steer": "" },
@@ -230,9 +234,10 @@ they are doing. Global, never per project.
 
 | Key | Default | What it does |
 |---|---|---|
-| `automations.max_running` | `3` | No automation starts a session while this many automation sessions are running, all automations together (at work or waiting on you). **Sessions at once, all automations** in Settings › Automations, `←` / `→` 1 to 20. A value saved before the default came down from 5 is kept as it is. |
+| `automations.max_running` | `3` | No automation starts a session while this many automation sessions are running, all automations together (at work or waiting on you). **Agents working at once** in Settings › Factory, `←` / `→` 1 to 20. A value saved before the default came down from 5 is kept as it is. |
+| `automations.attention_cap` | `5` | New Linear tickets wait — the bug fixer and the feature builder start none — while this many factory items wait on you: factory sessions waiting on a plan or a question, and the factory cards you haven't acted on. **Things waiting on you** in Settings › Factory, `←` / `→` 1 to 20. |
 | `automations.per.<id>.max_running` | `1` for `pr_fixer`, `bug_fixer` and `feature_builder`; any for `blue_sky` | No more than this many of the automation's own sessions run at once, under the overall cap too — `0` is any, only the overall cap applying. **At most at once** in its section, `←` / `→` 1 to 10, then any. Week in review and meeting takeaways have none: they never run more than one. |
-| `automations.local_e2e` | `never` | Whether automation agents that write code (PR fixer, bug fixer, feature builder, Blue sky builder) run end-to-end tests on this machine: `never` leaves them to CI on the pull request and runs only the unit tests for what changed; `covering` runs only the e2e specs that cover the change, never the full suite. The rule is added to every such agent's prompt, before its Extra steer. **E2E tests on this machine** in Settings › Automations, `←` / `→` or Enter. |
+| `automations.local_e2e` | `never` | Whether automation agents that write code (PR fixer, bug fixer, feature builder, Blue sky builder) run end-to-end tests on this machine: `never` leaves them to CI on the pull request and runs only the unit tests for what changed; `covering` runs only the e2e specs that cover the change, never the full suite. The rule is added to every such agent's prompt, before its Extra steer. **E2E tests on this machine** in Settings › Factory, `←` / `→` or Enter. |
 | `automations.per.<id>.on` | `true` for `pr_fixer`, `meeting_takeaways` and `blue_sky`, else `false` | The automation on or off. Ids: `pr_fixer`, `bug_fixer`, `feature_builder`, `week_review`, `meeting_takeaways`, `blue_sky`. |
 | `automations.per.<id>.extra_steer` | `""` | Added to every prompt the automation sends, after a blank line, as `Extra steer: …`. |
 | `automations.per.<id>.preset` | none | The preset `⌘U` picked in place of the automation's own system preset, by name. A name no preset has falls back to the system preset. |
@@ -256,6 +261,7 @@ These have no row.
 | `diff_tree_view` | `true` | Whether `⌘E` lists files as a tree. `⌘B` in the viewer flips it and writes it here. |
 | `onboarded` | `false` | Whether setup has been seen. Kept in `config.local.json`; delete it, or run **Run setup** (palette) or `orion setup`, to see it again. |
 | `seen_version` | `""` | The release this machine last showed **What's new** for. Kept in `config.local.json`. |
+| `factory.auto_merge` | `false` | A factory pull request (one the bug fixer or the feature builder opened) whose verdict is **Merge** merges on its own, once its checks have settled, instead of waiting for your tap on its card. Marked ready first if it is a draft. |
 
 ## Claude accounts
 
@@ -349,7 +355,7 @@ be renamed or deleted. On it `Enter` edits and `^R` puts orion's text back. On o
 
 Presets are picked, never managed, elsewhere: `⌘U` / `^X` in the QUICK PROMPT — the box `Enter` opens on
 a Linear issue or a todo — **Agent presets** in the palette, `⌘U` over an agent's locked pane, which
-pastes the text in at the caret, and `⌘U` in Settings › Automations, which picks the preset an
+pastes the text in at the caret, and `⌘U` in Settings › Factory, which picks the preset an
 automation is told by in place of its system preset.
 
 ## Setup command
@@ -518,6 +524,10 @@ Everything orion writes under its data dir:
 | `needs-you.json` | which Needs you cards are done or snoozed, and the Slack cards | a done card until no source offers it; a snooze for its hour |
 | `automations/linear-builder.json` | every Linear ticket the bug fixer and feature builder have picked up, so none is picked up twice | — |
 | `automations/meeting-takeaways.json` | each meeting's takeaways and where they stand | two weeks after the meeting |
+| `pr-facts/` | the facts each factory agent handed over with `orion pr facts set`, one file per pull request | — |
+| `automations/pr-body.json` | per factory pull request: its ticket, whether its plan was posted, the verdict last recorded, its tier, and the card last sent | — |
+| `automations/factory-cards.json` | every software factory card sent on Slack and where it stands, so cards are closed and edited after a restart | a closed card 7 days after it was posted |
+| `pr-body/` | the picture grids downloaded for verdict cards | — |
 | `quick_prompt_drafts.json` | unsent QUICK PROMPT text | until it is sent or cleared |
 | `attachments/` | files dropped or pasted into a prompt | 7 days |
 | `fresh/config.json` | fresh's config | — |
@@ -555,7 +565,10 @@ Everything orion writes under its data dir:
 | `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |
 
 The DAEMON sets `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` on every agent so its hooks
-can reach it; they are not for you to set. Empty and unset mean the same.
+can reach it; they are not for you to set. A session an automation started also gets
+`ORION_AUTOMATION`, set to the automation's id (`bug_fixer`, `feature_builder`, `pr_fixer`, …), so a
+repo's commit and PR skills can take their unattended path; a session you started has none. Empty
+and unset mean the same.
 
 ## Compatibility
 

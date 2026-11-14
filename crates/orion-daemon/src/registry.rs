@@ -3104,20 +3104,13 @@ impl Daemon {
         };
 
         let mut session_env = launch_env;
-        session_env.extend([
-            (env::AGENT_ID.into(), agent.id.to_string()),
-            (
-                env::API_URL.into(),
-                format!("http://127.0.0.1:{}", self.hook_env.port),
-            ),
-            (env::API_TOKEN.into(), self.hook_env.token.clone()),
-        ]);
+        session_env.extend(agent_session_env(agent, &self.hook_env));
         let spec = SpawnSpec {
             program,
             args,
             cwd: worktree.path.clone(),
             env: session_env,
-            scrub_env: env::AGENT_SESSION_VARS,
+            scrub_env: env::SCRUBBED_SESSION_VARS,
             cols,
             rows,
             scan_ports: false,
@@ -3339,7 +3332,7 @@ impl Daemon {
             args,
             cwd: worktree.path.clone(),
             env: vec![],
-            scrub_env: env::AGENT_SESSION_VARS,
+            scrub_env: env::SCRUBBED_SESSION_VARS,
             cols,
             rows,
             // A run's dev server says where it listens; a setup's install
@@ -3694,6 +3687,26 @@ fn relocation_prompt(relocate: bool, worktree: &Worktree) -> Option<String> {
             worktree.path.display()
         )
     })
+}
+
+/// The variables that tell an agent's PTY who it is: its id, the hook
+/// receiver and its token — and, for a session an AUTOMATION started,
+/// `ORION_AUTOMATION` with the automation's id, which the repo's commit
+/// and PR skills read to take their unattended path. A session you
+/// started has no such variable.
+fn agent_session_env(agent: &Agent, hook: &HookEnv) -> Vec<(String, String)> {
+    let mut vars = vec![
+        (env::AGENT_ID.into(), agent.id.to_string()),
+        (
+            env::API_URL.into(),
+            format!("http://127.0.0.1:{}", hook.port),
+        ),
+        (env::API_TOKEN.into(), hook.token.clone()),
+    ];
+    if let Some(automation) = &agent.automation {
+        vars.push((env::AUTOMATION.into(), automation.clone()));
+    }
+    vars
 }
 
 /// The checkout the test wrapper boots every spawn in.
@@ -5128,6 +5141,53 @@ pub(crate) mod tests {
         // No env, no export: the line is the CLI's alone.
         let (_, args) = login_shell_wrap("/bin/sh", &[], "claude", &["--resume".into()]);
         assert_eq!(args[3], format!("{PANE_ENV} claude '--resume'"));
+    }
+
+    /// A session an automation started is told which one
+    /// (`ORION_AUTOMATION`), beside its id and the hook receiver; a
+    /// session you started has no such variable.
+    #[test]
+    fn an_automations_session_gets_orion_automation() {
+        let hook = HookEnv {
+            port: 4242,
+            token: "tok".into(),
+        };
+        let agent = |automation: Option<&str>| Agent {
+            id: AgentId("a1".into()),
+            worktree_id: WorktreeId("w".into()),
+            name: "a".into(),
+            status: AgentStatus::Fresh,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind: AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            session_id: None,
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: false,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+            automation: automation.map(str::to_string),
+        };
+        let var = |vars: &[(String, String)], name: &str| {
+            vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+        };
+        let started = agent_session_env(&agent(Some("bug_fixer")), &hook);
+        assert_eq!(var(&started, env::AUTOMATION).as_deref(), Some("bug_fixer"));
+        assert_eq!(var(&started, env::AGENT_ID).as_deref(), Some("a1"));
+        assert_eq!(
+            var(&started, env::API_URL).as_deref(),
+            Some("http://127.0.0.1:4242")
+        );
+        let yours = agent_session_env(&agent(None), &hook);
+        assert_eq!(var(&yours, env::AUTOMATION), None);
+        assert!(
+            env::SCRUBBED_SESSION_VARS.contains(&env::AUTOMATION),
+            "never inherited from the daemon's own environment"
+        );
     }
 
     /// The resume safeguards look for a Claude session's transcript where

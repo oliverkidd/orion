@@ -37,11 +37,11 @@ pub struct Look {
 /// base, or a check is failing (`trouble`) — does need a person, so its
 /// arrow and badge take the crimson a session that needs you wears, the
 /// title staying muted so the badge word (`conflicts`, `failing`) is the
-/// loud part. It outranks a draft's faint — a draft's conflict still needs
-/// a person — and applies only while the pull request is open: a merged or
-/// closed one is past resolving.
+/// loud part. Trouble applies only to a pull request that is ready for
+/// review: a draft keeps its faint, since it isn't asking anyone yet, and a
+/// merged or closed one is past resolving.
 pub fn look(standing: Standing, trouble: Option<Trouble>, th: Theme) -> Look {
-    if trouble.is_some() && standing.is_open() {
+    if trouble.is_some() && standing == Standing::Open {
         return Look {
             glyph: th.err,
             label: th.muted,
@@ -158,9 +158,9 @@ mod tests {
     /// the needs-you crimson on its arrow, rail and badge in every theme,
     /// the same crimson whether the trouble is one or the other: the badge
     /// word tells them apart, the color says "needs you". The title stays
-    /// muted so the word is the loud part. A draft's faint gives way to it;
-    /// a merged or closed pull request is past resolving and keeps its own
-    /// look.
+    /// muted so the word is the loud part. A draft keeps its faint — it
+    /// isn't asking anyone yet — and a merged or closed pull request is
+    /// past resolving: each keeps its own look.
     #[test]
     fn a_pull_request_in_trouble_wears_the_needs_you_red() {
         for name in crate::theme::THEMES {
@@ -173,7 +173,11 @@ mod tests {
             };
             for trouble in [Trouble::Conflicts, Trouble::FailingChecks] {
                 assert_eq!(look(Standing::Open, Some(trouble), th), red, "{name}");
-                assert_eq!(look(Standing::Draft, Some(trouble), th), red, "{name}");
+                assert_eq!(
+                    look(Standing::Draft, Some(trouble), th),
+                    look(Standing::Draft, None, th),
+                    "{name}: a draft stays faint"
+                );
                 assert_eq!(
                     look(Standing::Merged, Some(trouble), th),
                     look(Standing::Merged, None, th),

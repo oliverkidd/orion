@@ -1423,6 +1423,33 @@ fn submit_merge(app: &mut App) {
     });
 }
 
+/// A factory verdict card's **Merge** (`pr_body`): pull request `number`
+/// marked ready first when it is a `draft`, then merged as the merge form
+/// would — the method this project last merged by (else the first the
+/// repo allows), its branch `head` deleted unless the repo does that
+/// itself. The flash it leaves, or why it didn't merge.
+pub(crate) async fn merge_from_card(
+    dir: &Path,
+    number: u64,
+    draft: bool,
+    head: &str,
+    base: &str,
+) -> Result<String, String> {
+    if draft {
+        let n = number.to_string();
+        run_piped(gh(dir, &["pr", "ready", n.as_str()]), "", REQUEST_TIMEOUT).await?;
+    }
+    let (allowed, auto_delete) = repo_merge_options(dir).await;
+    let wanted = crate::config::Config::load().merge_method(dir);
+    let method = match allowed.contains(&wanted) {
+        true => wanted,
+        false => allowed.first().copied().unwrap_or(wanted),
+    };
+    let branch = (!auto_delete && !head.is_empty() && head != base).then_some(head);
+    let fate = merge(dir, number, method, false, false, base, branch).await?;
+    Ok(merged_message(number, base, method, false, &fate))
+}
+
 /// Merge pull request `number` into `base` — or switch auto-merge on for
 /// it — and delete `branch` on origin once it is merged
 /// ([`retire_merged_branch`]). What became of it.

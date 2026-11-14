@@ -30,6 +30,12 @@
 //!   (every number a pull request that was sent, every owner its author)
 //!   and [`finish`] appends how many were merged and not listed — exact,
 //!   because nothing was asked to add it up.
+//! * **So is the factory's section.** The software factory's run records
+//!   in the week (`factory::runs`) go in as context, and [`finish`]
+//!   appends a `## Factory` section orion writes itself, a run a line
+//!   (`factory::week::summary`). Once the run is over, the factory's
+//!   weekly retro is asked through the same writer and posts the week's
+//!   card (`factory::week`).
 //!
 //! A run is kept under the DATA DIR as `reviews/all/<to>/<project>.md`,
 //! one a project, with a `meta.json` beside them ([`Meta`]), the newest
@@ -303,11 +309,17 @@ pub struct Material {
     pub prs: Vec<MergedPr>,
     pub issues: Vec<DoneIssue>,
     pub todos: Vec<DoneTodo>,
+    /// The software factory's runs in the period
+    /// (`factory::runs::RunRecord`), the latest first.
+    pub(crate) factory: Vec<crate::factory::runs::RunRecord>,
 }
 
 impl Material {
     fn is_empty(&self) -> bool {
-        self.prs.is_empty() && self.issues.is_empty() && self.todos.is_empty()
+        self.prs.is_empty()
+            && self.issues.is_empty()
+            && self.todos.is_empty()
+            && self.factory.is_empty()
     }
 
     /// Pull requests from more than one project: a bare `#12` would then
@@ -440,10 +452,12 @@ pub enum Source {
     Prs,
     Issues,
     Todos,
+    /// The software factory's run records.
+    Factory,
 }
 
 impl Source {
-    pub const ALL: [Source; 3] = [Source::Prs, Source::Issues, Source::Todos];
+    pub const ALL: [Source; 4] = [Source::Prs, Source::Issues, Source::Todos, Source::Factory];
 
     fn index(self) -> usize {
         self as usize
@@ -454,6 +468,7 @@ impl Source {
             Source::Prs => "Merged pull requests",
             Source::Issues => "Linear issues done",
             Source::Todos => "Todos ticked",
+            Source::Factory => "Factory runs",
         }
     }
 }
@@ -478,12 +493,13 @@ fn projects_in(app: &App, project: &ProjectId, wher: Where) -> Vec<(ProjectId, S
 /// team calls the state it waits in after that (`In Dev`, `In Staging`),
 /// its work landed. `Just mine` keeps what is yours; `Everyone` keeps all
 /// of it and leaves the todos out, which are nobody else's. An issue two
-/// projects' lists both hold is taken once.
+/// projects' lists both hold is taken once. The factory's runs are those
+/// that did anything in the range, in the project's checkout.
 pub fn gather(
     app: &App,
     project: &ProjectId,
     scope: Scope,
-    picks: [bool; 3],
+    picks: [bool; 4],
     now: i64,
 ) -> Material {
     let days = scope.range.days();
@@ -554,6 +570,17 @@ pub fn gather(
         if picks[Source::Todos.index()] && mine {
             let items = app.todos.get(&dir).map(|file| file.items.as_slice());
             push_ticked(&mut material, items.into_iter().flatten(), since);
+        }
+        if picks[Source::Factory.index()] {
+            let ours: Vec<_> = app
+                .week_review
+                .factory
+                .iter()
+                .filter(|r| crate::factory::week::checkout_of(app, r).as_ref() == Some(&dir))
+                .cloned()
+                .collect();
+            let week = crate::factory::week::in_week(&ours, since * 1000, now * 1000);
+            material.factory.extend(week);
         }
     }
     // Blue sky's ideas ticked: every one in a review of all projects, and
@@ -731,6 +758,13 @@ The asker's own notes, for context only: what was on their mind. Never a point b
 
 ";
 
+const FACTORY_INTRO: &str = "
+## The software factory's runs in the period
+
+Tickets orion's agents built, each with its pull request. For context only: they are points through their pull requests like any other, never by themselves, and orion adds its own Factory section after the review.
+
+";
+
 /// What the model is asked, whole: the brief — `rules` its own rules for
 /// what earns a line, the automation's preset's text and extra steer —
 /// the shape, and every pull request, issue and todo of `material`.
@@ -841,6 +875,16 @@ pub fn prompt(
         text.push_str(TODOS_INTRO);
         for todo in &material.todos {
             text.push_str(&format!("- {}\n", todo.text.replace('\n', " ")));
+        }
+    }
+    if !material.factory.is_empty() {
+        text.push_str(FACTORY_INTRO);
+        for run in &material.factory {
+            text.push_str(&format!("- {} · {}", run.identifier, run.title.trim()));
+            if let Some(url) = &run.pr_url {
+                text.push_str(&format!(" · {url}"));
+            }
+            text.push('\n');
         }
     }
     text.push_str(&format!(
@@ -1121,7 +1165,8 @@ pub fn check(
 /// the model wrapped it in gone, each area's points numbered from 1
 /// whatever the model numbered them, and the line no model was asked to
 /// count appended — how many pull requests were merged and are not
-/// listed.
+/// listed — then, when the factory ran, its own `## Factory` section in
+/// plain words, a bullet a run (`factory::week::summary`).
 pub fn finish(reply: &str, material: &Material) -> String {
     let several = material.several_projects();
     let known: HashSet<String> = material
@@ -1172,6 +1217,12 @@ pub fn finish(reply: &str, material: &Material) -> String {
             "\n\n+ {} merged, not listed",
             plural(unlisted, "other pull request", "other pull requests")
         ));
+    }
+    if !material.factory.is_empty() {
+        text.push_str("\n\n## Factory\n");
+        for line in crate::factory::week::summary(&material.factory) {
+            text.push_str(&format!("\n- {line}"));
+        }
     }
     text.push('\n');
     text
@@ -1413,6 +1464,9 @@ pub struct Run {
     pub started: Instant,
     /// GitHub and Linear are still being asked: nothing is written yet.
     pub fetching: bool,
+    /// The factory's run records are still being read off disk
+    /// ([`Answer::Factory`]): nothing is written yet.
+    pub reading_factory: bool,
     /// What is still being asked, or waiting to be asked again.
     pub ingest: Vec<Ingest>,
     /// Every project with changes, once everything asked has answered.
@@ -1544,6 +1598,26 @@ pub enum Answer {
         result: Result<Reply, String>,
         secs: u64,
     },
+    /// The factory's retro on the week came back (`factory::week`).
+    Retro(RetroReply),
+    /// A run's factory run records, read off the loop.
+    Factory(FactoryRecords),
+}
+
+/// The factory's run records read for run `run`.
+#[derive(Debug)]
+pub struct FactoryRecords {
+    run: u64,
+    records: Vec<crate::factory::runs::RunRecord>,
+}
+
+/// The retro's answer, with the retro it fills and the checkouts the
+/// week's runs worked in.
+#[derive(Debug)]
+pub struct RetroReply {
+    retro: crate::factory::week::Retro,
+    weeks: Vec<PathBuf>,
+    result: Result<String, String>,
 }
 
 /// The WEEK IN REVIEW's state on the [`App`]: it outlives every screen,
@@ -1569,6 +1643,10 @@ pub struct State {
     pub failed: Option<Failure>,
     /// The runs kept, newest first, as of the last one kept ([`reload`]).
     pub kept: Vec<Saved>,
+    /// The software factory's run records, read as a run starts.
+    pub(crate) factory: Vec<crate::factory::runs::RunRecord>,
+    /// Each week's retro, by its last day (`factory::week`).
+    pub(crate) retros: HashMap<String, crate::factory::week::Retro>,
     next_id: u64,
 }
 
@@ -1719,7 +1797,7 @@ pub fn split(app: &App, scope: Scope, now: i64) -> Vec<Part> {
     let mut slugs = HashSet::new();
     let mut parts = Vec::new();
     for (id, name, _) in every_project(app) {
-        let material = gather(app, &id, scope, [true; 3], now);
+        let material = gather(app, &id, scope, [true; 4], now);
         if material.is_empty() {
             continue;
         }
@@ -1795,12 +1873,28 @@ fn start(app: &mut App, needs: impl FnOnce(&App) -> Vec<Need>) -> Result<(), Str
     let needs = needs(app);
     app.week_review.failed = None;
     app.week_review.next_id += 1;
+    let id = app.week_review.next_id;
+    // The factory's records, read off the loop, only for a run the loop
+    // started.
+    let factory_tx = app
+        .week_review
+        .tx
+        .clone()
+        .filter(|_| app.week_review.root.is_some());
+    if let Some(tx) = &factory_tx {
+        let tx = tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let records = crate::factory::runs::all();
+            let _ = tx.send(Answer::Factory(FactoryRecords { run: id, records }));
+        });
+    }
     app.week_review.run = Some(Run {
-        id: app.week_review.next_id,
+        id,
         scope,
         asked: orion_core::clock::now_secs() as i64,
         started: Instant::now(),
         fetching: true,
+        reading_factory: factory_tx.is_some(),
         ingest: needs
             .iter()
             .map(|need| Ingest {
@@ -1834,7 +1928,7 @@ fn advance(app: &mut App) {
         .week_review
         .run
         .as_ref()
-        .is_some_and(|r| r.fetching && r.ingest.is_empty());
+        .is_some_and(|r| r.fetching && r.ingest.is_empty() && !r.reading_factory);
     if !ready {
         return;
     }
@@ -1942,6 +2036,19 @@ pub fn land_answer(app: &mut App, answer: Answer) {
             result,
             secs,
         } => land_written(app, run, part, result, secs),
+        Answer::Retro(RetroReply {
+            retro,
+            weeks,
+            result,
+        }) => crate::factory::week::landed(app, retro, &weeks, result),
+        Answer::Factory(FactoryRecords { run, records }) => {
+            let ours = app.week_review.run.as_mut().filter(|r| r.id == run);
+            if let Some(r) = ours {
+                r.reading_factory = false;
+                app.week_review.factory = records;
+                advance(app);
+            }
+        }
     }
     app.dirty = true;
 }
@@ -2152,6 +2259,7 @@ fn finish_run(app: &mut App) {
         })
         .collect();
     let written = run.parts.len() - failed.len();
+    start_retro(app, &run);
     if let Some(root) = app.week_review.root.clone() {
         if written == 0 {
             let _ = std::fs::remove_dir_all(run.dir(&root));
@@ -2188,6 +2296,34 @@ fn finish_run(app: &mut App) {
             view.tab = at.unwrap_or(0);
         }
     }
+}
+
+/// The factory's weekly retro on the run's week, once the run is over:
+/// one more ask through [`write`], on the run's account, model and
+/// effort, whose answer lands as [`Answer::Retro`]. Nothing without a
+/// channel, or with no factory run in the week.
+fn start_retro(app: &mut App, run: &Run) {
+    let Some(tx) = app.week_review.tx.clone() else {
+        return;
+    };
+    let (_, to) = run.scope.period(run.asked);
+    let since = run.asked - run.scope.range.days() * DAY_SECS;
+    let records =
+        crate::factory::week::in_week(&app.week_review.factory, since * 1000, run.asked * 1000);
+    let to = to.format("%Y-%m-%d").to_string();
+    let Some((retro, weeks, text)) = crate::factory::week::ask(app, &records, &to, &run.name())
+    else {
+        return;
+    };
+    let (model, effort, account) = (run.model.clone(), run.effort.clone(), run.account.clone());
+    tokio::spawn(async move {
+        let result = write(text, model, effort, account).await.map(|r| r.text);
+        let _ = tx.send(Answer::Retro(RetroReply {
+            retro,
+            weeks,
+            result,
+        }));
+    });
 }
 
 /// `⌘W` on the run being written: what is still being written is
@@ -2581,6 +2717,15 @@ fn review_lines(
                 spans.push(Span::styled(part.clone(), Style::default().fg(th.muted)));
                 lines.push(Line::from(spans));
             }
+        } else if let Some(body) = raw.strip_prefix("- ") {
+            // A plain bullet: a run of the Factory section.
+            for (i, part) in wrap(body, width.saturating_sub(2)).into_iter().enumerate() {
+                let lead = if i == 0 { "• " } else { "  " };
+                lines.push(Line::from(vec![
+                    Span::styled(lead, Style::default().fg(th.muted)),
+                    Span::styled(part, Style::default().fg(th.text)),
+                ]));
+            }
         } else if raw.starts_with('+') {
             lines.push(Line::default());
             lines.push(Line::from(Span::styled(
@@ -2728,6 +2873,35 @@ fn item_lines(material: &Material, now: i64, width: usize, th: Theme) -> Vec<Lin
                 &todo.text,
                 ("", th.dim),
                 &ago(todo.done_at),
+                width,
+                th,
+            ));
+        }
+    }
+    if !material.factory.is_empty() {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.push(rule(Source::Factory.label(), material.factory.len()));
+        let ref_w = material
+            .factory
+            .iter()
+            .map(|r| r.identifier.chars().count())
+            .max()
+            .unwrap_or(0);
+        for run in &material.factory {
+            let word = match (&run.verdict, run.merged_at_ms) {
+                (_, Some(_)) => "merged",
+                (Some(verdict), None) => verdict.as_str(),
+                (None, None) => "open",
+            };
+            lines.push(item_line(
+                ("◆", th.accent),
+                &run.identifier,
+                ref_w,
+                &run.title,
+                (word, th.merged),
+                &ago(run.last_at_ms() / 1000),
                 width,
                 th,
             ));
@@ -3017,6 +3191,9 @@ mod tests {
             assignee: "Ada".into(),
             assignee_id: String::new(),
             reporter: String::new(),
+            reporter_id: String::new(),
+            reporter_email: String::new(),
+            files: Vec::new(),
             mine,
             created_at: String::new(),
             updated_at: String::new(),
@@ -3140,7 +3317,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let all = [true; 3];
+        let all = [true; 4];
         let mine = gather(&app, &project, Scope::default(), all, now);
         assert_eq!(mine.prs.len(), 2, "the two you opened");
         assert_eq!(mine.issues.len(), 1, "yours, inside the week");
@@ -3151,7 +3328,7 @@ mod tests {
         let team = gather(&app, &project, everyone, all, now);
         assert_eq!((team.prs.len(), team.issues.len()), (3, 2));
         assert!(team.todos.is_empty(), "todos are yours alone");
-        let no_prs = gather(&app, &project, everyone, [false, true, true], now);
+        let no_prs = gather(&app, &project, everyone, [false, true, true, true], now);
         assert!(no_prs.prs.is_empty());
 
         // A second project sharing the Linear workspace lists the same issue.
@@ -3208,7 +3385,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let material = gather(&app, &project, Scope::default(), [true; 3], now);
+        let material = gather(&app, &project, Scope::default(), [true; 4], now);
         let ids: Vec<&str> = material
             .issues
             .iter()
@@ -3220,7 +3397,13 @@ mod tests {
             stamp(now, 1),
             "the merge's date"
         );
-        let no_prs = gather(&app, &project, Scope::default(), [false, true, true], now);
+        let no_prs = gather(
+            &app,
+            &project,
+            Scope::default(),
+            [false, true, true, true],
+            now,
+        );
         assert_eq!(no_prs.issues.len(), 1, "the merges count, listed or not");
     }
 
@@ -3254,6 +3437,7 @@ mod tests {
                 text: "check the editor".into(),
                 done_at: now,
             }],
+            ..Material::default()
         };
         let people = legend(&material.prs);
         let everyone = Scope {
@@ -3324,7 +3508,7 @@ AL Ada L · GR Grace
             whose: Whose::Everyone,
             ..Scope::default()
         };
-        let material = gather(&app, &project, everyone, [true; 3], now);
+        let material = gather(&app, &project, everyone, [true; 4], now);
         let people = legend(&material.prs);
         assert_eq!(check(REVIEW, &material, &people), Vec::<String>::new());
 
@@ -3361,7 +3545,7 @@ AL Ada L · GR Grace
             whose: Whose::Everyone,
             ..Scope::default()
         };
-        let material = gather(&app, &project, everyone, [true; 3], now);
+        let material = gather(&app, &project, everyone, [true; 4], now);
         let two = REVIEW.replace(
             "\n## Speed · GR\n1. Large documents open at once · GR · #398\n",
             "",
@@ -3389,6 +3573,79 @@ AL Ada L · GR Grace
             .replace("2. Panels widen", "7. Panels widen")
             .replace("   - Say:", "    - Say:");
         assert_eq!(finish(&through, &material), all);
+    }
+
+    /// The factory's runs in the project's checkout and the week are
+    /// gathered, go in the prompt as context, and come back as a
+    /// `## Factory` section orion writes, drawn a bullet a run.
+    #[test]
+    fn the_factory_gets_a_section_of_its_own() {
+        use crate::factory::runs::RunRecord;
+        let (mut app, project, now) = app_with_week();
+        let run = |id: &str, checkout: &str, at_secs: i64| RunRecord {
+            identifier: id.into(),
+            title: format!("Ticket {id}"),
+            checkout: Some(checkout.into()),
+            merged_at_ms: Some(at_secs * 1000),
+            pr_url: Some(format!("https://github.com/o/r/pull/{}", at_secs % 100)),
+            verdict: Some("skim".into()),
+            ..RunRecord::default()
+        };
+        app.week_review.factory = vec![
+            run("RIPLO-1", "/nonexistent/orion-week-review", now - 60),
+            run("RIPLO-2", "/elsewhere", now - 60),
+            run(
+                "RIPLO-3",
+                "/nonexistent/orion-week-review",
+                now - 30 * DAY_SECS,
+            ),
+        ];
+        let material = gather(&app, &project, Scope::default(), [true; 4], now);
+        let ids: Vec<&str> = material
+            .factory
+            .iter()
+            .map(|r| r.identifier.as_str())
+            .collect();
+        assert_eq!(ids, ["RIPLO-1"], "this project's, this week's");
+        let none = gather(
+            &app,
+            &project,
+            Scope::default(),
+            [true, true, true, false],
+            now,
+        );
+        assert!(none.factory.is_empty());
+
+        let text = prompt(&material, &[], Scope::default(), "demo", "", now);
+        assert!(text.contains("## The software factory's runs in the period"));
+        assert!(text.contains("- RIPLO-1 · Ticket RIPLO-1 · https://github.com/o/r/pull/"));
+
+        let kept = finish(REVIEW, &material);
+        let section = kept.split("## Factory\n").nth(1).expect(&kept);
+        assert!(
+            section.starts_with("\n- RIPLO-1 Ticket RIPLO-1: merged "),
+            "{section}"
+        );
+        assert!(section.contains(", verdict Skim. It never asked you anything."));
+        assert_eq!(
+            count_points(&kept),
+            count_points(&finish(REVIEW, &Material::default()))
+        );
+        let th = App::new().theme;
+        let drawn: Vec<String> = review_lines(&kept, &[], 80, None, th)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(
+            drawn.iter().any(|l| l.trim_end() == "Factory"),
+            "{drawn:#?}"
+        );
+        assert!(
+            drawn
+                .iter()
+                .any(|l| l.starts_with("• RIPLO-1 Ticket RIPLO-1: merged")),
+            "{drawn:#?}"
+        );
     }
 
     /// A review is written through a Claude account orion runs: the one
