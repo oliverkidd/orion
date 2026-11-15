@@ -263,7 +263,9 @@ pub struct CreateForm {
 }
 
 impl CreateForm {
-    /// A new pull request from `from`, its Draft box off.
+    /// A new pull request from `from`, its Draft box off, opened on the
+    /// mode row: ←/→ switch Feature branch / Promote at once, as they switch
+    /// tabs in every other modal, and ↓ or Tab goes into the fields.
     fn new(project: ProjectId, dir: PathBuf, from: String) -> Self {
         Self {
             project,
@@ -279,7 +281,7 @@ impl CreateForm {
             title: TextInput::new(),
             body: TextInput::multiline(),
             draft: false,
-            field: CreateField::Title,
+            field: CreateField::Mode,
             heads: None,
             bases: None,
             typed: false,
@@ -2126,7 +2128,6 @@ fn land_branches(
     let from_base = form.base.as_deref() == Some(form.from.trim());
     if !form.mode_chosen && from_base && form.promote_pair().is_some() {
         form.set_mode(CreateMode::Promote);
-        form.field = CreateField::Title;
     }
     if !form.typed {
         form.focus(form.field);
@@ -3481,7 +3482,11 @@ esac
             );
             let form = create_form(&mut app).cloned().expect("the form");
             assert_eq!(form.mode, CreateMode::Promote, "from the base: a promotion");
-            assert_eq!(form.field, CreateField::Title);
+            assert_eq!(
+                form.field,
+                CreateField::Mode,
+                "opens on the mode row, so ←/→ switch at once"
+            );
             let answer = rx.recv().await.expect("the promotion");
             land_answer(&mut app, answer);
             let form = create_form(&mut app).cloned().expect("the form");

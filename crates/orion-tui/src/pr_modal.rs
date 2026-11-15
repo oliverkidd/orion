@@ -2781,7 +2781,7 @@ mod tests {
                 panic!("{form:?}");
             };
             assert_eq!(create.from.as_str(), "feature/login");
-            assert_eq!(create.field, CreateField::Title);
+            assert_eq!(create.field, CreateField::Mode, "opens on the mode row");
             handle_key(&mut app, key(KeyCode::Char('q')), &mut out);
             assert!(view(&app).query.is_empty(), "the form took the letter");
             let shot = screen(&mut app, 140, 34);
