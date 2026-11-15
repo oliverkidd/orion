@@ -1,0 +1,29 @@
+crates/orion-tui/src/pr_body/dispatch.rs
+  s_0ea5bf705342bd::t_6ca120840253d4 10,19-25,141-177,182-183,186,188-191,196,199,202,208,210-212,220,226
+  s_0ea5bf705342bd::t_1e75474aa468a5 416-468,476-484,489-503
+  s_0ea5bf705342bd::t_dc55c871c4babb 469-475,485-488
+crates/orion-tui/src/pr_body/mod.rs
+  s_0ea5bf705342bd::t_dc55c871c4babb 915
+  s_0ea5bf705342bd::t_4ad2af83a6aff1 29-31,177-179,629-631,710-729,757,835-838,905-914,1049-1051,1474,1478-1541,1546-1550,1554
+  s_0ea5bf705342bd::t_6cc29a0b1e567f 19-24,32-33
+crates/orion-tui/src/pr_body/verdict.rs
+  s_0ea5bf705342bd::t_a8bd7ecc95ae7c 6-7,11-16,237-267,320-322,543-544,546,549-577
+docs/2026-11-14-software-factory/software-factory.md
+  s_0ea5bf705342bd::t_d58de22de922cd 30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "41c29b1382a8984bc94ff1b7a6f629d0974349b2",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
