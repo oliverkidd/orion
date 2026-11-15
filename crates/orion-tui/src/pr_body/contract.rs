@@ -12,6 +12,9 @@
 //! visible_paths = ["apps/web/src/**/*.tsx", "**/*.css"]
 //! # The repo's rules for agents, listed on the PR when touched.
 //! rule_paths = ["CLAUDE.md", "AGENTS.md", "agent_docs/**"]
+//! # The workflow that takes the pictures, by file name. Without it orion
+//! # looks for the one active workflow named for keyframes or pictures.
+//! pictures_workflow = "pr-keyframes.yml"
 //!
 //! [limits.bug]
 //! lines = 3000
@@ -71,6 +74,10 @@ pub struct Contract {
     pub risky_paths: Vec<String>,
     pub visible_paths: Vec<String>,
     pub rule_paths: Vec<String>,
+    /// The pictures workflow's file name (`pr-keyframes.yml`), which
+    /// orion runs again for a PR whose flow came after its push
+    /// (`super::dispatch`). None: found by its name.
+    pub pictures_workflow: Option<String>,
     pub limits: Limits,
 }
 
@@ -88,6 +95,7 @@ impl Default for Contract {
             ]
             .map(String::from)
             .to_vec(),
+            pictures_workflow: None,
             limits: Limits::default(),
         }
     }
@@ -208,6 +216,7 @@ files = 5
         .unwrap();
         assert_eq!(c.risky_paths, ["supabase/migrations/**"]);
         assert_eq!(c.rule_paths, ["CLAUDE.md"]);
+        assert_eq!(c.pictures_workflow, None);
         assert_eq!(
             c.limits.bug,
             Limit {
@@ -288,6 +297,18 @@ files = 5
         ));
         assert!(matches_any(&c.rule_paths, "scripts/automation-guard.mjs"));
         assert!(matches_any(&c.rule_paths, "apps/web/CLAUDE.md"));
+        // It names no pictures workflow: orion finds `pr-keyframes.yml`.
+        assert_eq!(c.pictures_workflow, None);
+    }
+
+    #[test]
+    fn the_pictures_workflow_can_be_named() {
+        let c = parse(r#"pictures_workflow = "pr-keyframes.yml""#).unwrap();
+        assert_eq!(c.pictures_workflow.as_deref(), Some("pr-keyframes.yml"));
+        assert!(
+            parse("pictures_workflow = 3").is_err(),
+            "a file name, not a number"
+        );
     }
 
     #[test]

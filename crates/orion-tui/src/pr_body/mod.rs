@@ -15,7 +15,9 @@
 //!   off the loop ([`gather`]): the repo's contract on the base branch, the
 //!   commits' messages, the pictures job's `pictures.json` on
 //!   `pr-screenshots` (its grid downloaded for the card), and, until it is
-//!   posted, the approved plan from the builder's transcript. A PR whose
+//!   posted, the approved plan from the builder's transcript. A visible
+//!   PR without pictures whose flow came after its push has the pictures
+//!   job run for it, once per head ([`dispatch`]). A PR whose
 //!   [`signature`] hasn't moved since its last gather isn't gathered
 //!   again until its repo's contract is due a new read ([`CONTRACT_TTL`]);
 //!   its commits' messages are read once per head.
@@ -44,6 +46,7 @@
 pub mod cli;
 pub mod contract;
 pub mod cubic;
+pub mod dispatch;
 pub mod facts;
 pub mod pictures;
 pub mod render;
@@ -166,6 +169,9 @@ struct Remembered {
     tier: Option<String>,
     card: Option<CardSent>,
     auto_merged: bool,
+    /// The head the pictures job was last run for by hand ([`dispatch`]):
+    /// never twice for one head.
+    pictures_dispatched: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -521,6 +527,7 @@ fn land_detail_unsaved(app: &mut App, url: &str, detail: Option<&PrDetail>) {
         .flatten()
         .and_then(|id| app.tree.agents.iter().find(|a| &a.id == id))
         .cloned();
+    let pictures_dispatched = app.pr_body.remembered(url).pictures_dispatched.clone();
     let messages = app
         .pr_body
         .messages
@@ -539,6 +546,7 @@ fn land_detail_unsaved(app: &mut App, url: &str, detail: Option<&PrDetail>) {
         messages,
         builder,
         cache: data_dir().map(|d| d.join("pr-body")),
+        pictures_dispatched,
     };
     tokio::spawn(async move {
         let gathered = gather(job).await;
@@ -597,6 +605,8 @@ struct Job {
     builder: Option<orion_core::Agent>,
     /// Where the grid picture is downloaded for the card.
     cache: Option<PathBuf>,
+    /// The head the pictures job was last run for by hand.
+    pictures_dispatched: Option<String>,
 }
 
 /// Everything the verdict needs. A None is "couldn't ask": nothing is
@@ -611,6 +621,8 @@ pub struct Gathered {
     pictures: Option<pictures::Manifest>,
     grid_file: Option<PathBuf>,
     plan: Option<String>,
+    /// The head the pictures job was just run for, by hand.
+    dispatched: Option<String>,
 }
 
 /// What lands on the loop.
@@ -689,6 +701,27 @@ async fn gather(job: Job) -> Gathered {
             }
         }
     }
+    let dispatched = match (&contract, &manifest) {
+        (Some(Ok(rules)), Some(found))
+            if dispatch::wanted(
+                &job.detail,
+                &rules.visible_paths,
+                found,
+                job.pictures_dispatched.as_deref(),
+            ) =>
+        {
+            let gh = dispatch::Gh {
+                owner: &job.owner,
+                repo: &job.repo,
+            };
+            let repo = format!("{}/{}", job.owner, job.repo);
+            let workflow = rules.pictures_workflow.as_deref();
+            dispatch::run(&gh, &repo, &job.detail, workflow)
+                .await
+                .then(|| job.detail.head_sha.clone())
+        }
+        _ => None,
+    };
     let plan = match job.builder.clone() {
         Some(agent) => {
             // Finding the transcript lists the account's project dirs.
@@ -713,6 +746,7 @@ async fn gather(job: Job) -> Gathered {
         pictures: manifest,
         grid_file,
         plan,
+        dispatched,
     }
 }
 
@@ -789,6 +823,10 @@ fn land_gathered(app: &mut App, g: Gathered) {
     let url = g.job.url.clone();
     if let Some(t) = app.pr_body.tracked.get_mut(&url) {
         t.gathering = false;
+    }
+    if let Some(head) = &g.dispatched {
+        app.pr_body.remembered(&url).pictures_dispatched = Some(head.clone());
+        app.pr_body.save();
     }
     let (Some(read), Some(messages), Some(manifest)) = (&g.contract, &g.messages, &g.pictures)
     else {
@@ -1405,6 +1443,7 @@ mod tests {
                 messages: None,
                 builder: None,
                 cache: None,
+                pictures_dispatched: None,
             },
             fresh_contract: false,
             contract: None,
@@ -1412,7 +1451,51 @@ mod tests {
             pictures: None,
             grid_file: None,
             plan: None,
+            dispatched: None,
         }
+    }
+
+    #[test]
+    fn a_dispatch_is_remembered_so_the_next_gather_skips_that_head() {
+        let mut app = App::new();
+        let mut g = gathered();
+        g.dispatched = Some("abc".into());
+        land_gathered(&mut app, g);
+        let remembered = app.pr_body.remembered(URL);
+        assert_eq!(remembered.pictures_dispatched.as_deref(), Some("abc"));
+        let detail = PrDetail {
+            number: 7,
+            base: "dev".into(),
+            head_sha: "abc".into(),
+            files: vec![crate::pull_request::PrFile {
+                path: "apps/web/a.tsx".into(),
+                additions: 1,
+                deletions: 0,
+                change: String::new(),
+            }],
+            ..Default::default()
+        };
+        let visible = ["apps/web/**".to_string()];
+        let none = pictures::Manifest::default();
+        let dispatched = remembered.pictures_dispatched.clone();
+        assert!(!dispatch::wanted(
+            &detail,
+            &visible,
+            &none,
+            dispatched.as_deref()
+        ));
+        let pushed = PrDetail {
+            head_sha: "def".into(),
+            ..detail
+        };
+        assert!(
+            dispatch::wanted(&pushed, &visible, &none, dispatched.as_deref()),
+            "a new push"
+        );
+        // Remembered across runs.
+        let json = serde_json::to_string(&app.pr_body.memory().clone()).unwrap();
+        let back: Memory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.prs[URL].pictures_dispatched.as_deref(), Some("abc"));
     }
 
     #[test]
