@@ -7,6 +7,11 @@
 //! orion this daemon was started from as `orion open-link <url>`, which
 //! opens the link in the session's account's **Open links in**, as a click
 //! in its pane does.
+//!
+//! gh, Python's `webbrowser` and other tools split `BROWSER` on whitespace,
+//! so the shim lives at `~/.orion/bin`, out of macOS's `Application
+//! Support`; a path that still has whitespace in it (a home folder with a
+//! space) is never handed out, and sessions keep the system default.
 
 use std::io;
 use std::os::unix::fs::PermissionsExt as _;
@@ -56,9 +61,13 @@ pub fn write(at: &Path, orion: &Path) -> io::Result<bool> {
 
 /// At daemon start: write the shim for the orion this daemon runs as —
 /// the binary the TUI spawned it from (`current_exe`). The path sessions'
-/// `BROWSER` gets, or None when it couldn't be written: then they keep
+/// `BROWSER` gets, or None when there is none fit to give: then they keep
 /// whatever `BROWSER` they had, and their links the default browser.
 pub fn install() -> Option<PathBuf> {
+    let Some(at) = paths::link_shim_path() else {
+        tracing::warn!("link shim not written: no home folder to put it in");
+        return None;
+    };
     let orion = match std::env::current_exe() {
         Ok(orion) => orion,
         Err(err) => {
@@ -66,13 +75,25 @@ pub fn install() -> Option<PathBuf> {
             return None;
         }
     };
-    let at = paths::link_shim_path();
-    match write(&at, &orion) {
+    install_at(&at, &orion)
+}
+
+/// [`install`] at `at`: None, and nothing written, when `at` has whitespace
+/// in it — a `BROWSER` other tools would split is worse than none.
+fn install_at(at: &Path, orion: &Path) -> Option<PathBuf> {
+    if at.to_string_lossy().chars().any(char::is_whitespace) {
+        tracing::warn!(
+            shim = %at.display(),
+            "link shim not written: its path has whitespace, which tools splitting BROWSER would break on"
+        );
+        return None;
+    }
+    match write(at, orion) {
         Ok(rewritten) => {
             if rewritten {
                 tracing::info!(shim = %at.display(), orion = %orion.display(), "link shim written");
             }
-            Some(at)
+            Some(at.to_path_buf())
         }
         Err(err) => {
             tracing::warn!(%err, shim = %at.display(), "link shim not written");
@@ -154,5 +175,22 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert_eq!(left, ["orion-open-link"], "no temp file left behind");
+    }
+
+    /// A shim path with whitespace in it is never handed out — gh and
+    /// Python's `webbrowser` split `BROWSER` on it — and nothing is
+    /// written there; one without is written and handed out.
+    #[test]
+    fn a_shim_path_with_whitespace_is_not_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let orion = Path::new("/a/orion");
+        for spaced in ["Application Support", "tab\there"] {
+            let at = dir.path().join(spaced).join("bin/orion-open-link");
+            assert_eq!(install_at(&at, orion), None, "{spaced:?}");
+            assert!(!at.parent().unwrap().exists(), "nothing written");
+        }
+        let at = dir.path().join(".orion/bin/orion-open-link");
+        assert_eq!(install_at(&at, orion), Some(at.clone()));
+        assert_eq!(std::fs::read_to_string(&at).unwrap(), content(orion));
     }
 }

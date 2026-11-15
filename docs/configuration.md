@@ -84,9 +84,10 @@ no profile). Several accounts can share one browser on separate profiles. It is 
 ⌘-clicked in the pane, which your terminal opens itself.
 
 Links a session's CLI opens itself, such as a newly published Artifact or an OAuth sign-in, follow
-the same choice: orion points each session's `BROWSER` at `<data dir>/bin/orion-open-link`, a shim
+the same choice: orion points each session's `BROWSER` at `~/.orion/bin/orion-open-link`, a shim
 the daemon writes that runs `orion open-link <url>`. A `BROWSER` in the harness's own `env`
-overrides this.
+overrides this. If that path has whitespace in it (a home folder with a space), which tools such as
+gh split `BROWSER` on, orion leaves `BROWSER` unset and those links go to the default browser.
 
 ### Projects
 

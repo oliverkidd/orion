@@ -70,8 +70,17 @@ pub fn db_path() -> PathBuf {
 
 /// The LINK SHIM every agent PTY's `BROWSER` names: a script the daemon
 /// writes that runs `orion open-link` (see `orion_daemon::link_shim`).
-pub fn link_shim_path() -> PathBuf {
-    data_dir().join("bin").join("orion-open-link")
+/// `~/.orion/bin/orion-open-link`, not under the data dir: gh, Python's
+/// `webbrowser` and others split `BROWSER` on whitespace, and macOS's
+/// `Application Support` has a space. `ORION_DATA_DIR` moves it into that
+/// dir, so tests and parallel instances keep it beside their state. None
+/// when there is no home to put it in.
+pub fn link_shim_path() -> Option<PathBuf> {
+    let dir = match env::non_empty(env::DATA_DIR) {
+        Some(dir) => PathBuf::from(dir),
+        None => env::home_dir()?.join(".orion"),
+    };
+    Some(dir.join("bin").join("orion-open-link"))
 }
 
 /// User settings file (JSON) — the portable layer, which a backup copies.
@@ -168,6 +177,10 @@ mod tests {
         assert_eq!(db_path(), data.join("orion.db"));
         assert_eq!(config_path(), data.join("config.json"));
         assert_eq!(config_local_path(), data.join("config.local.json"));
+        assert_eq!(
+            link_shim_path(),
+            Some(data.join("bin").join("orion-open-link"))
+        );
         // Logs follow the data override so isolated instances keep their
         // logs beside their state.
         assert_eq!(log_dir(), data.join("state"));
@@ -197,6 +210,18 @@ mod tests {
         assert_ne!(runtime_dir(), runtime, "empty override must fall through");
         assert_ne!(data_dir(), data, "empty override must fall through");
         assert_ne!(log_dir(), data.join("state"));
+        // Without the override the shim sits in ~/.orion, out of the data
+        // dir and its `Application Support` space.
+        assert_eq!(
+            link_shim_path(),
+            Some(
+                crate::env::home_dir()
+                    .unwrap()
+                    .join(".orion")
+                    .join("bin")
+                    .join("orion-open-link")
+            )
+        );
         assert!(
             runtime_dir().is_absolute() && data_dir().is_absolute(),
             "defaults are absolute: {} / {}",
