@@ -16,19 +16,21 @@
 //!   commits' messages, the pictures job's `pictures.json` on
 //!   `pr-screenshots` (its grid downloaded for the card), and, until it is
 //!   posted, the approved plan from the builder's transcript. A visible
-//!   PR without pictures whose flow came after its push has the pictures
-//!   job run for it, once per head ([`dispatch`]). A PR whose
-//!   [`signature`] hasn't moved since its last gather isn't gathered
-//!   again until its repo's contract is due a new read ([`CONTRACT_TTL`]);
-//!   its commits' messages are read once per head.
+//!   PR without pictures is looked at for pictures on their way, and one
+//!   whose flow came after its push has the pictures job run for it, once
+//!   per head ([`dispatch`]). A PR whose [`signature`] hasn't moved since
+//!   its last gather isn't gathered again until its repo's contract is
+//!   due a new read ([`CONTRACT_TTL`]); its commits' messages are read
+//!   once per head.
 //! - **Landing** ([`land`]). The verdict ([`verdict::verdict`]) and the
 //!   top ([`render::render`]); the body is written (`gh pr edit
 //!   --body-file -`) only when its bytes differ. The plan goes up once as
 //!   a "Plan as approved" comment. The verdict goes to the run record, and
-//!   — once the checks have settled — out as a card (`factory::cards`),
-//!   edited in place as it changes; a PR gone Blocked has its card closed
-//!   (the fixer says when it gives up). With `factory.auto_merge` on, a
-//!   Merge-tier PR merges without a tap.
+//!   — once the checks have settled and no pictures are on their way —
+//!   out as a card (`factory::cards`), edited in place as it changes; a
+//!   PR gone Blocked has its card closed (the fixer says when it gives
+//!   up). With `factory.auto_merge` on, a Merge-tier PR merges without a
+//!   tap.
 //! - **Merged or closed** anywhere — from the card, the PULL REQUESTS
 //!   MODAL or GitHub — closes the card once ([`finished`]): a body that
 //!   lands no longer open says so, and each GIT POLL looks at what `prs`
@@ -172,6 +174,9 @@ struct Remembered {
     /// The head the pictures job was last run for by hand ([`dispatch`]):
     /// never twice for one head.
     pictures_dispatched: Option<String>,
+    /// When it was (epoch ms): its card waits [`dispatch::WAIT_MS`] for
+    /// the pictures.
+    pictures_dispatched_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -621,8 +626,9 @@ pub struct Gathered {
     pictures: Option<pictures::Manifest>,
     grid_file: Option<PathBuf>,
     plan: Option<String>,
-    /// The head the pictures job was just run for, by hand.
-    dispatched: Option<String>,
+    /// What was found of pictures on their way, for a visible PR without
+    /// them at its head; None when not looked at.
+    look: Option<dispatch::Look>,
 }
 
 /// What lands on the loop.
@@ -701,24 +707,26 @@ async fn gather(job: Job) -> Gathered {
             }
         }
     }
-    let dispatched = match (&contract, &manifest) {
-        (Some(Ok(rules)), Some(found))
-            if dispatch::wanted(
-                &job.detail,
-                &rules.visible_paths,
-                found,
-                job.pictures_dispatched.as_deref(),
-            ) =>
-        {
-            let gh = dispatch::Gh {
-                owner: &job.owner,
-                repo: &job.repo,
-            };
-            let repo = format!("{}/{}", job.owner, job.repo);
-            let workflow = rules.pictures_workflow.as_deref();
-            dispatch::run(&gh, &repo, &job.detail, workflow)
-                .await
-                .then(|| job.detail.head_sha.clone())
+    let look = match (&contract, &manifest) {
+        (Some(Ok(rules)), Some(found)) => {
+            let signal = pictures::of(&job.detail, &rules.visible_paths, found);
+            if signal.visible && !signal.shown {
+                let may_run = dispatch::wanted(
+                    &job.detail,
+                    &rules.visible_paths,
+                    found,
+                    job.pictures_dispatched.as_deref(),
+                );
+                let gh = dispatch::Gh {
+                    owner: &job.owner,
+                    repo: &job.repo,
+                };
+                let repo = format!("{}/{}", job.owner, job.repo);
+                let workflow = rules.pictures_workflow.as_deref();
+                Some(dispatch::look(&gh, &repo, &job.detail, workflow, may_run).await)
+            } else {
+                None
+            }
         }
         _ => None,
     };
@@ -746,7 +754,7 @@ async fn gather(job: Job) -> Gathered {
         pictures: manifest,
         grid_file,
         plan,
-        dispatched,
+        look,
     }
 }
 
@@ -824,8 +832,10 @@ fn land_gathered(app: &mut App, g: Gathered) {
     if let Some(t) = app.pr_body.tracked.get_mut(&url) {
         t.gathering = false;
     }
-    if let Some(head) = &g.dispatched {
-        app.pr_body.remembered(&url).pictures_dispatched = Some(head.clone());
+    if g.look.is_some_and(|l| l.dispatched) {
+        let remembered = app.pr_body.remembered(&url);
+        remembered.pictures_dispatched = Some(g.job.detail.head_sha.clone());
+        remembered.pictures_dispatched_at_ms = Some(orion_core::clock::now_ms());
         app.pr_body.save();
     }
     let (Some(read), Some(messages), Some(manifest)) = (&g.contract, &g.messages, &g.pictures)
@@ -892,7 +902,17 @@ fn land_gathered(app: &mut App, g: Gathered) {
         post_plan(app, &url, plan);
     }
     record(app, &url, &g.job.factory.identifier, &v, &cubic);
-    let settled = !detail.checks.iter().any(|c| c.state == CheckState::Running);
+    let remembered = app.pr_body.remembered(&url);
+    let pictures_coming = g.look.is_some_and(|look| {
+        dispatch::coming(
+            look,
+            &detail.head_sha,
+            remembered.pictures_dispatched.as_deref(),
+            remembered.pictures_dispatched_at_ms,
+            orion_core::clock::now_ms(),
+        )
+    });
+    let settled = !detail.checks.iter().any(|c| c.state == CheckState::Running) && !pictures_coming;
     card(app, &g, &v, g.grid_file.as_deref(), settled);
     if settled && v.tier == Tier::Merge && app.pr_body.settings.auto_merge {
         let remembered = app.pr_body.remembered(&url);
@@ -1026,9 +1046,9 @@ fn verdict_card(
 }
 
 /// Post, edit or close the PR's card. Merge, Skim and Review go out once
-/// the checks have settled, and again when the tier or the head moves;
-/// Blocked closes an open card (the fixer's own card says when it gives
-/// up).
+/// `settled` — the checks have, and no pictures are on their way — and
+/// again when the tier or the head moves; Blocked closes an open card
+/// (the fixer's own card says when it gives up).
 fn card(app: &mut App, g: &Gathered, v: &Verdict, image: Option<&Path>, settled: bool) {
     let url = &g.job.url;
     let detail = &g.job.detail;
@@ -1451,18 +1471,87 @@ mod tests {
             pictures: None,
             grid_file: None,
             plan: None,
-            dispatched: None,
+            look: None,
         }
+    }
+
+    /// A visible PR (its `PR pictures` check ran) without pictures, read
+    /// whole, its checks settled.
+    fn visible_without_pictures() -> Gathered {
+        let mut g = gathered();
+        g.job.detail.checks = vec![crate::pull_request::PrCheck {
+            name: pictures::CHECK.into(),
+            workflow: String::new(),
+            state: CheckState::Passed,
+            word: "SUCCESS".into(),
+            started: String::new(),
+            completed: String::new(),
+            url: String::new(),
+        }];
+        g.job.facts.gaps = vec!["No pictures: only shows with two sessions in one table".into()];
+        g.contract = Some(Ok(contract::Contract::default()));
+        g.messages = Some(vec![]);
+        g.pictures = Some(pictures::Manifest::default());
+        g
+    }
+
+    #[test]
+    fn a_visible_change_without_pictures_is_a_review_card_unless_they_are_coming() {
+        let flow = dispatch::Look {
+            flow: true,
+            ..Default::default()
+        };
+        // Its flow is up and a run for it is going: the card waits.
+        let mut app = App::new();
+        let mut g = visible_without_pictures();
+        g.look = Some(dispatch::Look {
+            going: true,
+            ..flow
+        });
+        land_gathered(&mut app, g);
+        assert!(app.outbox.is_empty(), "pictures on their way");
+        assert_eq!(app.pr_body.remembered(URL).tier.as_deref(), Some("review"));
+        // orion ran the job for this head just now: it waits too, for
+        // half an hour.
+        let mut g = visible_without_pictures();
+        g.look = Some(dispatch::Look {
+            dispatched: true,
+            ..flow
+        });
+        land_gathered(&mut app, g);
+        assert!(app.outbox.is_empty(), "the job just run");
+        let mut g = visible_without_pictures();
+        g.look = Some(flow);
+        land_gathered(&mut app, g);
+        assert!(app.outbox.is_empty(), "within half an hour of the run");
+        app.pr_body.remembered(URL).pictures_dispatched_at_ms =
+            Some(orion_core::clock::now_ms() - dispatch::WAIT_MS);
+        let mut g = visible_without_pictures();
+        g.look = Some(flow);
+        land_gathered(&mut app, g);
+        assert_eq!(
+            posted_card(&app).card.body[0],
+            "*Review*: no pictures: only shows with two sessions in one table"
+        );
+        // Nothing on its way at all: a Review card at once.
+        let mut app = App::new();
+        land_gathered(&mut app, visible_without_pictures());
+        assert!(posted_card(&app).card.body[0].starts_with("*Review*: no pictures"));
     }
 
     #[test]
     fn a_dispatch_is_remembered_so_the_next_gather_skips_that_head() {
         let mut app = App::new();
         let mut g = gathered();
-        g.dispatched = Some("abc".into());
+        g.look = Some(dispatch::Look {
+            flow: true,
+            going: false,
+            dispatched: true,
+        });
         land_gathered(&mut app, g);
         let remembered = app.pr_body.remembered(URL);
         assert_eq!(remembered.pictures_dispatched.as_deref(), Some("abc"));
+        assert!(remembered.pictures_dispatched_at_ms.is_some());
         let detail = PrDetail {
             number: 7,
             base: "dev".into(),

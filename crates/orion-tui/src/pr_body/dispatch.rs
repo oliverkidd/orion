@@ -7,7 +7,7 @@
 //! the PR first and uploads its flow after is left with a visible change
 //! and no pictures, and nothing runs the job again. So, from the gather
 //! (off the loop), orion runs it by hand — `gh workflow run <workflow>
-//! --ref <base> -f pr=<n>` — once per head ([`wanted`], then [`run`])
+//! --ref <base> -f pr=<n>` — once per head ([`wanted`], then [`look`])
 //! when all of these hold:
 //!
 //! - the PR is visible and its pictures aren't shown at its head, and no
@@ -15,6 +15,13 @@
 //! - nothing was dispatched for that head before (pr_body's memory);
 //! - its flow is on `pr-screenshots`;
 //! - no run of the workflow for this PR is queued or in progress.
+//!
+//! The same look ([`look`]) is made for every visible PR without pictures
+//! at its head, to tell whether its pictures are on their way
+//! ([`coming`]): its flow is up, and a run for it is queued or in
+//! progress or orion ran the job for this head in the last [`WAIT_MS`].
+//! While they are, its verdict card waits for them rather than going out
+//! as Review with no pictures.
 //!
 //! The workflow is the contract's `pictures_workflow`, else the one active
 //! workflow whose path or name says keyframes or pictures ([`discover`]):
@@ -131,39 +138,78 @@ impl Ask for Gh<'_> {
     }
 }
 
-/// Run the pictures job for PR `detail` (one [`wanted`] already passed)
-/// when its flow is there and no run for it is going, through `workflow`
-/// (the contract's) or the one [`discover`] finds. True when dispatched.
-pub(crate) async fn run<A: Ask>(
+/// How long after orion runs the pictures job for a head the PR's card
+/// waits for the pictures, though no run for it shows: 30 minutes.
+pub const WAIT_MS: i64 = 30 * 60 * 1000;
+
+/// What [`look`] found of PR's pictures on their way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Look {
+    /// Its flow is on the pictures branch.
+    pub flow: bool,
+    /// A run of the pictures workflow for it is queued or in progress.
+    pub going: bool,
+    /// The workflow was run for it just now.
+    pub dispatched: bool,
+}
+
+/// Whether PR's pictures are on their way to `head`, from what [`look`]
+/// found and the head the job was last run for by hand (`dispatched`, at
+/// `dispatched_at_ms`): its flow is up, and a run for it is going or
+/// orion's own ran for this head within [`WAIT_MS`] of `now_ms`.
+pub fn coming(
+    look: Look,
+    head: &str,
+    dispatched: Option<&str>,
+    dispatched_at_ms: Option<i64>,
+    now_ms: i64,
+) -> bool {
+    let lately = !head.is_empty()
+        && dispatched == Some(head)
+        && dispatched_at_ms.is_some_and(|at| now_ms.saturating_sub(at) < WAIT_MS);
+    look.flow && (look.going || look.dispatched || lately)
+}
+
+/// Look at PR `detail`'s pictures on their way — its flow, and a run of
+/// `workflow` (the contract's) or the one [`discover`] finds going for it
+/// — and, when `may_run` (one [`wanted`] passed), run the job for it if
+/// the flow is there and no run is going.
+pub(crate) async fn look<A: Ask>(
     ask: &A,
     repo: &str,
     detail: &PrDetail,
     workflow: Option<&str>,
-) -> bool {
+    may_run: bool,
+) -> Look {
     let number = detail.number;
     if ask.flow(number).await != Some(true) {
-        return false;
+        return Look::default();
     }
+    let mut found = Look {
+        flow: true,
+        ..Look::default()
+    };
     let workflow = match workflow.map(str::trim).filter(|w| !w.is_empty()) {
         Some(named) => named.to_string(),
         None => {
             let Some(json) = ask.workflows().await else {
-                return false;
+                return found;
             };
             match discover(&json) {
-                Ok(found) => found,
+                Ok(named) => named,
                 Err(why) => {
                     say_once(repo, &why);
-                    return false;
+                    return found;
                 }
             }
         }
     };
     let Some(runs) = ask.runs(&workflow).await else {
-        return false;
+        return found;
     };
-    if going(&runs, detail) {
-        return false;
+    found.going = going(&runs, detail);
+    if found.going || !may_run {
+        return found;
     }
     match ask.dispatch(&workflow, detail.base.trim(), number).await {
         Ok(()) => {
@@ -171,13 +217,13 @@ pub(crate) async fn run<A: Ask>(
                 "pr_body: ran {workflow} for {repo}#{number} at {}: its flow came after the push",
                 detail.head_sha
             );
-            true
+            found.dispatched = true;
         }
         Err(why) => {
             tracing::warn!("pr_body: running {workflow} for {repo}#{number}: {why}");
-            false
         }
     }
+    found
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -365,6 +411,94 @@ mod tests {
 
     fn visible() -> Vec<String> {
         vec!["apps/web/src/components/**".into()]
+    }
+
+    /// A look that may run the job: true when it did.
+    async fn run(fake: &Fake, repo: &str, detail: &PrDetail, workflow: Option<&str>) -> bool {
+        look(fake, repo, detail, workflow, true).await.dispatched
+    }
+
+    #[tokio::test]
+    async fn a_look_says_what_is_on_its_way_and_runs_the_job_only_when_it_may() {
+        let fake = Fake::with_flow();
+        let found = look(&fake, "o/r", &pr(), Some("k.yml"), false).await;
+        assert_eq!(
+            found,
+            Look {
+                flow: true,
+                ..Look::default()
+            }
+        );
+        assert!(fake.dispatched().is_empty(), "not wanted: only looked");
+        let fake = Fake {
+            runs: r#"[{"status": "queued", "event": "pull_request", "headSha": "abc123"}]"#.into(),
+            ..Fake::with_flow()
+        };
+        let found = look(&fake, "o/r", &pr(), Some("k.yml"), true).await;
+        assert!(found.flow && found.going && !found.dispatched);
+        let fake = Fake::default();
+        assert_eq!(
+            look(&fake, "o/r", &pr(), Some("k.yml"), true).await,
+            Look::default(),
+            "no flow"
+        );
+    }
+
+    #[test]
+    fn pictures_are_coming_while_a_run_goes_or_for_half_an_hour_after_orion_s() {
+        let flow = Look {
+            flow: true,
+            ..Look::default()
+        };
+        let going = Look {
+            going: true,
+            ..flow
+        };
+        let now = 10 * WAIT_MS;
+        assert!(coming(going, "abc", None, None, now));
+        assert!(coming(
+            Look {
+                dispatched: true,
+                ..flow
+            },
+            "abc",
+            None,
+            None,
+            now
+        ));
+        assert!(coming(
+            flow,
+            "abc",
+            Some("abc"),
+            Some(now - WAIT_MS + 1),
+            now
+        ));
+        assert!(
+            !coming(flow, "abc", Some("abc"), Some(now - WAIT_MS), now),
+            "half an hour on"
+        );
+        assert!(
+            !coming(flow, "abc", Some("old"), Some(now), now),
+            "run for an older head"
+        );
+        assert!(!coming(flow, "abc", Some("abc"), None, now), "when unknown");
+        assert!(
+            !coming(flow, "abc", None, None, now),
+            "flow up, nothing run"
+        );
+        assert!(
+            !coming(
+                Look {
+                    flow: false,
+                    ..going
+                },
+                "abc",
+                Some("abc"),
+                Some(now),
+                now
+            ),
+            "no flow"
+        );
     }
 
     const WORKFLOWS: &str = r#"{"total_count": 3, "workflows": [

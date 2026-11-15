@@ -3,10 +3,16 @@
 //!
 //! | Tier | When |
 //! |---|---|
-//! | Blocked | CI red; a check still cancelled at head; a conflict on a ready PR; an open Cubic P0, or an open P1 the agent hasn't declared; a visible change with no pictures |
-//! | Review | a risky path from the contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a `security`, `dep` or `arch` call; over the size limit; a contract that doesn't parse |
+//! | Blocked | CI red; a check still cancelled at head; a conflict on a ready PR; an open Cubic P0, or an open P1 the agent hasn't declared |
+//! | Review | a visible change with no pictures at its head; a risky path from the contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a `security`, `dep` or `arch` call; over the size limit; a contract that doesn't parse |
 //! | Skim | a visible change with pictures |
 //! | Merge | everything else |
+//!
+//! Blocked is only for what the PR fixer resolves. Nothing resolves
+//! missing pictures — some changes can't be staged by the picture flow —
+//! so they are Review, with the agent's pictures gap when it gave one
+//! ([`no_pictures`]); while pictures are on their way the card waits
+//! instead (`super::dispatch::coming`).
 //!
 //! Sizes leave out lockfiles, `.changeset/`, `docs/`, `*.snap` and
 //! `*.json` ([`counted`]).
@@ -228,6 +234,37 @@ pub fn size_words(size: Size) -> String {
     )
 }
 
+/// `no pictures`, and after it the agent's gap that speaks of pictures
+/// when it gave one, less any heading of its own: `No before/after
+/// pictures: only shows with two sessions` reads `no pictures: only shows
+/// with two sessions`.
+pub fn no_pictures(facts: &Facts) -> String {
+    let speaks = |s: &str| {
+        let s = s.to_ascii_lowercase();
+        s.contains("picture") || s.contains("screenshot")
+    };
+    let Some(gap) = facts.gaps.iter().map(|g| g.trim()).find(|g| speaks(g)) else {
+        return "no pictures".into();
+    };
+    let why = match gap.split_once(':') {
+        Some((head, rest)) if speaks(head) => rest.trim(),
+        _ => gap,
+    };
+    let why = why.trim_end_matches('.');
+    if why.is_empty() {
+        return "no pictures".into();
+    }
+    // `The change…` reads `the change…`; `UI only…` stays.
+    let mut chars = why.chars();
+    let why = match (chars.next(), chars.next()) {
+        (Some(first), Some(second)) if first.is_uppercase() && !second.is_uppercase() => {
+            format!("{}{}", first.to_lowercase(), &why[first.len_utf8()..])
+        }
+        _ => why.to_string(),
+    };
+    format!("no pictures: {why}")
+}
+
 /// The verdict on `pr`, from its facts, the repo's contract (or why it
 /// couldn't be read), Cubic, the commits' `Hook:` trailers, the pictures
 /// and the kind.
@@ -278,11 +315,11 @@ pub fn verdict(
             format!("{} Cubic P1 open", p1 - declared.len()),
         );
     }
-    if pictures.visible && !pictures.shown {
-        say(Tier::Blocked, "visible change with no pictures".into());
-    }
 
     // Review.
+    if pictures.visible && !pictures.shown {
+        say(Tier::Review, no_pictures(facts));
+    }
     if let Err(why) = contract {
         say(Tier::Review, why.clone());
     }
@@ -503,14 +540,42 @@ mod tests {
         assert_tier(&i, Tier::Blocked, "1 Cubic P1 open");
     }
 
+    // ---- Review, one rule each ----
+
     #[test]
-    fn a_visible_change_without_pictures_blocks() {
+    fn a_visible_change_without_pictures_is_review_with_the_agent_s_gap() {
         let mut i = In::new();
         i.pictures.visible = true;
-        assert_tier(&i, Tier::Blocked, "visible change with no pictures");
+        let v = i.run();
+        assert_eq!(v.line(), "**Review**: no pictures");
+        // riplo-os#2131's gap, its heading left off.
+        i.facts.gaps = vec![
+            "No local browser run (CI runs the table-collab pack)".into(),
+            "No before/after pictures: the change only shows with two sessions in one \
+             table, which the single-session picture flow cannot stage"
+                .into(),
+        ];
+        assert_eq!(
+            i.run().line(),
+            "**Review**: no pictures: the change only shows with two sessions in one table, \
+             which the single-session picture flow cannot stage"
+        );
+        i.facts.gaps = vec!["Screenshots skipped, the preview was down.".into()];
+        assert_tier(
+            &i,
+            Tier::Review,
+            "no pictures: screenshots skipped, the preview was down",
+        );
+        i.facts.gaps = vec!["UI pictures need a second account".into()];
+        assert_tier(
+            &i,
+            Tier::Review,
+            "no pictures: UI pictures need a second account",
+        );
+        // Old pictures and new ones: Skim.
+        i.pictures.shown = true;
+        assert_eq!(i.run().tier, Tier::Skim);
     }
-
-    // ---- Review, one rule each ----
 
     #[test]
     fn a_risky_path_is_review() {
