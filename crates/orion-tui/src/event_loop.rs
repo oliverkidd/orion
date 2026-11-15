@@ -27161,6 +27161,46 @@ mod tests {
         });
     }
 
+    /// **Open links in** on a browser this Mac doesn't have: the footer
+    /// offers `i`, and `i` then Enter run its Homebrew cask in the modal.
+    #[test]
+    fn settings_installs_a_missing_link_browser() {
+        with_config_json(
+            r#"{"harnesses": {"claude": {"browser": {"app": "Vivaldi"}}}}"#,
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::write(dir.path().join("brew"), "#!/bin/sh\n").unwrap();
+                let path = std::env::join_paths([dir.path()]).unwrap();
+                crate::config::with_search_path(path, || {
+                    let (tab, row) =
+                        crate::config::locate_agent("claude", crate::config::HarnessField::Browser)
+                            .unwrap();
+                    let mut app = App::new();
+                    let mut out = Vec::new();
+                    app.overlay = Some(Overlay::Settings(SettingsView::new(tab, row, false)));
+                    let mut terminal = Terminal::new(TestBackend::new(140, 34)).unwrap();
+                    terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
+                    let text = buffer_text(&terminal);
+                    assert!(text.contains("Vivaldi · not installed"), "{text}");
+                    assert!(text.contains("i install"), "{text}");
+
+                    press(&mut app, KeyCode::Char('i'), KeyModifiers::NONE, &mut out);
+                    press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+                    let ran = crate::install::take_ran();
+                    assert_eq!(ran.len(), 1, "{ran:?}");
+                    assert_eq!(ran[0].args, ["install", "--cask", "vivaldi"]);
+
+                    // Installed, the row has nothing to install.
+                    crate::open_url::with_installed(&["Vivaldi"], || {
+                        let cfg = crate::config::Config::load();
+                        let tools = crate::install::Tools::here();
+                        assert!(crate::install::settings_row_plan(&cfg, tab, row, &tools).is_none());
+                    });
+                });
+            },
+        );
+    }
+
     /// An agent's Enabled row, its CLI missing: `i` asks to run its
     /// installer (the question in the explanation's place, Enter the run
     /// on the border), Enter runs it in the modal, and Esc leaves it unrun.

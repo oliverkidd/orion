@@ -2390,7 +2390,7 @@ impl Config {
                 }
             }
             HarnessField::Browser => format!(
-                "The browser links from {label}'s sessions open in; type a profile after Chrome or Firefox (Chrome Profile 1). Other links open in the default browser"
+                "The browser links from {label}'s sessions open in — this Mac's browsers first, then ones i installs; type a profile after Chrome, Brave, Edge, Vivaldi, Firefox or Zen (Chrome Profile 1). Other links open in the default browser"
             ),
         };
         if let Some(problem) = descriptor.problem() {
@@ -4824,63 +4824,69 @@ mod tests {
     /// the choice is `harnesses.<id>.browser`, round-tripped by a save.
     #[test]
     fn each_claude_account_picks_the_browser_its_links_open_in() {
-        let mut cfg: Config = serde_json::from_str(
-            r#"{"claude_accounts": [{"id": "claude-b", "config_dir": "~/.claude-b"}]}"#,
-        )
-        .unwrap();
-        let browsers: Vec<String> = cfg
-            .agent_rows()
-            .into_iter()
-            .filter(|(_, field)| *field == HarnessField::Browser)
-            .map(|(id, _)| id)
-            .collect();
-        assert_eq!(browsers, ["claude", "claude-b"]);
-        assert_eq!(
-            cfg.agent_value("claude-b", HarnessField::Browser),
-            "default"
-        );
-        // Nothing chosen writes nothing.
-        cfg.set_link_browser("claude-b", None);
-        assert!(!cfg.harnesses.contains_key("claude-b"));
+        // Chrome and Firefox are on this Mac; Arc isn't.
+        crate::open_url::with_installed(&["Chrome", "Firefox"], || {
+            let mut cfg: Config = serde_json::from_str(
+                r#"{"claude_accounts": [{"id": "claude-b", "config_dir": "~/.claude-b"}]}"#,
+            )
+            .unwrap();
+            let browsers: Vec<String> = cfg
+                .agent_rows()
+                .into_iter()
+                .filter(|(_, field)| *field == HarnessField::Browser)
+                .map(|(id, _)| id)
+                .collect();
+            assert_eq!(browsers, ["claude", "claude-b"]);
+            assert_eq!(
+                cfg.agent_value("claude-b", HarnessField::Browser),
+                "default"
+            );
+            // Nothing chosen writes nothing.
+            cfg.set_link_browser("claude-b", None);
+            assert!(!cfg.harnesses.contains_key("claude-b"));
 
-        let (tab, row) = locate_in(&cfg, "claude-b", HarnessField::Browser).unwrap();
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.agent_value("claude-b", HarnessField::Browser), "Safari");
-        cfg.cycle(tab, row, -1);
-        assert_eq!(
-            cfg.agent_value("claude-b", HarnessField::Browser),
-            "default"
-        );
-        assert_eq!(cfg.harnesses["claude-b"].browser, None);
-        cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.agent_value("claude-b", HarnessField::Browser), "Arc");
+            let (tab, row) = locate_in(&cfg, "claude-b", HarnessField::Browser).unwrap();
+            cfg.cycle(tab, row, 1);
+            assert_eq!(cfg.agent_value("claude-b", HarnessField::Browser), "Safari");
+            cfg.cycle(tab, row, -1);
+            assert_eq!(
+                cfg.agent_value("claude-b", HarnessField::Browser),
+                "default"
+            );
+            assert_eq!(cfg.harnesses["claude-b"].browser, None);
+            cfg.cycle(tab, row, -1);
+            assert_eq!(
+                cfg.agent_value("claude-b", HarnessField::Browser),
+                "Arc · not installed"
+            );
 
-        cfg.set_link_browser("claude-b", crate::open_url::parse("Chrome Profile 2"));
-        assert_eq!(
-            cfg.agent_value("claude-b", HarnessField::Browser),
-            "Chrome · Profile 2"
-        );
-        assert_eq!(cfg.agent_value("claude", HarnessField::Browser), "default");
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        let saved: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            saved["harnesses"]["claude-b"]["browser"],
-            serde_json::json!({"app": "Chrome", "profile": "Profile 2"})
-        );
-        let mut loaded = load_from(&path);
-        assert_eq!(
-            loaded.link_browser("claude-b"),
-            cfg.link_browser("claude-b")
-        );
-        // A step moves to the next browser, without Chrome's profile.
-        loaded.cycle(tab, row, 1);
-        assert_eq!(
-            loaded.agent_value("claude-b", HarnessField::Browser),
-            "Firefox"
-        );
+            cfg.set_link_browser("claude-b", crate::open_url::parse("Chrome Profile 2"));
+            assert_eq!(
+                cfg.agent_value("claude-b", HarnessField::Browser),
+                "Chrome · Profile 2"
+            );
+            assert_eq!(cfg.agent_value("claude", HarnessField::Browser), "default");
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.json");
+            cfg.save_to(&path).unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(
+                saved["harnesses"]["claude-b"]["browser"],
+                serde_json::json!({"app": "Chrome", "profile": "Profile 2"})
+            );
+            let mut loaded = load_from(&path);
+            assert_eq!(
+                loaded.link_browser("claude-b"),
+                cfg.link_browser("claude-b")
+            );
+            // A step moves to the next browser, without Chrome's profile.
+            loaded.cycle(tab, row, 1);
+            assert_eq!(
+                loaded.agent_value("claude-b", HarnessField::Browser),
+                "Firefox"
+            );
+        });
     }
 
     /// A second Claude account's own entry survives the Accounts tab

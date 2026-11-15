@@ -74,9 +74,12 @@ links in** row. `i` on a harness whose CLI is missing installs it.
 
 **Open links in** is the browser links from that account's sessions open in: a link ⌥- or ^-clicked
 in its pane, and the pull request `⇧V` or a card's menu opens from its card. `←`/`→` step `default`,
-`Safari`, `Chrome`, `Firefox`, `Arc`; `Enter` types it, with a profile after Chrome or Firefox
-(`Chrome Profile 1` opens Chrome's `--profile-directory=Profile 1`, `Firefox work` its `-P work`;
-any other app's name works too, with no profile). It is stored as `harnesses.<id>.browser`, `{"app":
+then the browsers in your Applications folders, then the rest of `Safari`, `Chrome`, `Firefox`,
+`Brave`, `Edge`, `Vivaldi`, `Zen`, `Opera`, `Arc`, each marked `not installed`; `i` on one of those
+runs its Homebrew cask (`brew install --cask vivaldi`). `Enter` types it, with a profile after
+Chrome, Brave, Edge, Vivaldi, Firefox or Zen (`Chrome Profile 1` opens Chrome's
+`--profile-directory=Profile 1`, `Firefox work` its `-P work`; any other app's name works too, with
+no profile). Several accounts can share one browser on separate profiles. It is stored as `harnesses.<id>.browser`, `{"app":
 "Chrome", "profile": "Profile 1"}`. Every other link goes to the default browser, as does a URL
 ⌘-clicked in the pane, which your terminal opens itself.
 

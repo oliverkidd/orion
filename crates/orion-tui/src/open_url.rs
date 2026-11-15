@@ -12,11 +12,25 @@ use orion_core::harness::LinkBrowser;
 struct Browser {
     /// What the row shows and the config stores (`harnesses.<id>.browser.app`).
     name: &'static str,
-    /// The app `open -a` names.
+    /// The app `open -a` names, and its bundle in an Applications folder
+    /// (`<app>.app`).
     app: &'static str,
     /// The arguments that open a profile, by its name — None for a browser
     /// with no command-line profile.
     profile: Option<fn(&str) -> Vec<String>>,
+    /// Homebrew's cask for it — None for Safari, which comes with macOS —
+    /// and its download page, for `i` on a browser that isn't installed.
+    cask: Option<(&'static str, &'static str)>,
+}
+
+/// Chromium's profile flag, which every browser built on it takes.
+fn chromium_profile(p: &str) -> Vec<String> {
+    vec![format!("--profile-directory={p}")]
+}
+
+/// Firefox's profile flag, which Zen, built on it, takes too.
+fn firefox_profile(p: &str) -> Vec<String> {
+    vec!["-P".into(), p.into()]
 }
 
 const BROWSERS: &[Browser] = &[
@@ -24,53 +38,131 @@ const BROWSERS: &[Browser] = &[
         name: "Safari",
         app: "Safari",
         profile: None,
+        cask: None,
     },
     Browser {
         name: "Chrome",
         app: "Google Chrome",
-        profile: Some(|p| vec![format!("--profile-directory={p}")]),
+        profile: Some(chromium_profile),
+        cask: Some(("google-chrome", "https://www.google.com/chrome/")),
     },
     Browser {
         name: "Firefox",
         app: "Firefox",
-        profile: Some(|p| vec!["-P".into(), p.into()]),
+        profile: Some(firefox_profile),
+        cask: Some(("firefox", "https://www.mozilla.org/firefox/")),
+    },
+    Browser {
+        name: "Brave",
+        app: "Brave Browser",
+        profile: Some(chromium_profile),
+        cask: Some(("brave-browser", "https://brave.com/download/")),
+    },
+    Browser {
+        name: "Edge",
+        app: "Microsoft Edge",
+        profile: Some(chromium_profile),
+        cask: Some(("microsoft-edge", "https://www.microsoft.com/edge/download")),
+    },
+    Browser {
+        name: "Vivaldi",
+        app: "Vivaldi",
+        profile: Some(chromium_profile),
+        cask: Some(("vivaldi", "https://vivaldi.com/download/")),
+    },
+    Browser {
+        name: "Zen",
+        app: "Zen",
+        profile: Some(firefox_profile),
+        cask: Some(("zen", "https://zen-browser.app/download/")),
+    },
+    Browser {
+        name: "Opera",
+        app: "Opera",
+        profile: None,
+        cask: Some(("opera", "https://www.opera.com/download")),
     },
     Browser {
         name: "Arc",
         app: "Arc",
         profile: None,
+        cask: Some(("arc", "https://arc.net")),
     },
 ];
 
 /// What **Open links in** says, and stores, for the system's own browser.
 pub const DEFAULT: &str = "default";
 
-/// The values **Open links in**'s ←/→ steps through: `default`, then each
-/// browser by name.
+/// The values **Open links in**'s ←/→ steps through: `default`, the
+/// browsers this Mac has, then the ones it doesn't — each of those a row
+/// `i` installs.
 pub fn choices() -> Vec<String> {
+    let (here, missing): (Vec<&Browser>, Vec<&Browser>) =
+        BROWSERS.iter().partition(|b| is_installed(b));
     std::iter::once(DEFAULT)
-        .chain(BROWSERS.iter().map(|b| b.name))
+        .chain(here.into_iter().chain(missing).map(|b| b.name))
         .map(String::from)
         .collect()
 }
 
+/// Whether `browser`'s app is in an Applications folder — the system's or
+/// the user's. Safari comes with macOS. A test has only Safari, plus what
+/// it names ([`with_installed`]).
+fn is_installed(browser: &Browser) -> bool {
+    if browser.cask.is_none() {
+        return true;
+    }
+    #[cfg(test)]
+    return INSTALLED.with(|names| names.borrow().contains(&browser.name));
+    #[cfg(not(test))]
+    {
+        let bundle = format!("{}.app", browser.app);
+        std::iter::once(std::path::PathBuf::from("/"))
+            .chain(orion_core::env::home_dir())
+            .any(|root| root.join("Applications").join(&bundle).is_dir())
+    }
+}
+
+/// Whether the browser **Open links in** stores as `name` is on this Mac:
+/// None for a name that isn't one of orion's browsers (an app typed by
+/// name, or a CLI).
+pub fn installed(name: &str) -> Option<bool> {
+    known(name).map(is_installed)
+}
+
+/// How the browser stored as `name` gets onto this Mac, when it isn't
+/// there: its Homebrew cask, and its download page. None for one that is
+/// installed, or that orion doesn't know.
+pub fn missing_cask(name: &str) -> Option<(&'static str, &'static str, &'static str)> {
+    let browser = known(name)?;
+    let (cask, link) = browser.cask?;
+    (!is_installed(browser)).then_some((browser.name, cask, link))
+}
+
+/// The browser stored, or typed, as `app`: by orion's name for it
+/// (`Brave`) or its app's (`Brave Browser`), in any case.
 fn known(app: &str) -> Option<&'static Browser> {
+    let app = app.trim();
     BROWSERS
         .iter()
-        .find(|b| b.name.eq_ignore_ascii_case(app.trim()))
+        .find(|b| b.name.eq_ignore_ascii_case(app) || b.app.eq_ignore_ascii_case(app))
 }
 
 /// The row's value for a stored choice: `default`, `Chrome`, or
-/// `Chrome · Profile 1`.
+/// `Chrome · Profile 1` — with `· not installed` after a browser this Mac
+/// doesn't have.
 pub fn label(browser: Option<&LinkBrowser>) -> String {
-    match browser {
-        None => DEFAULT.into(),
-        Some(LinkBrowser { app, profile: None }) => app.clone(),
-        Some(LinkBrowser {
-            app,
-            profile: Some(p),
-        }) => format!("{app} · {p}"),
+    let Some(LinkBrowser { app, profile }) = browser else {
+        return DEFAULT.into();
+    };
+    let mut label = app.clone();
+    if let Some(p) = profile {
+        label.push_str(&format!(" · {p}"));
     }
+    if installed(app) == Some(false) {
+        label.push_str(" · not installed");
+    }
+    label
 }
 
 /// What the row's prompt holds for a stored choice: the browser, then the
@@ -86,21 +178,32 @@ pub fn typed(browser: Option<&LinkBrowser>) -> String {
 }
 
 /// Read the row's prompt: empty or `default` is the system's browser; a
-/// known browser's name may be followed by a profile (`Chrome Profile 1`,
-/// `firefox work`); anything else is an app's name, whole, for `open -a`.
+/// known browser's name, or its app's (`Brave Browser`), may be followed
+/// by a profile (`Chrome Profile 1`, `firefox work`); anything else is an
+/// app's name, whole, for `open -a`.
 pub fn parse(text: &str) -> Option<LinkBrowser> {
     let text = text.trim();
     if text.is_empty() || text.eq_ignore_ascii_case(DEFAULT) {
         return None;
     }
-    let (head, rest) = text.split_once(' ').unwrap_or((text, ""));
-    let Some(browser) = known(head) else {
+    // The longest name the text starts with, as a whole word: `Brave
+    // Browser work` is Brave's app, then a profile.
+    let lower = text.to_ascii_lowercase();
+    let found = BROWSERS
+        .iter()
+        .flat_map(|b| [(b, b.app), (b, b.name)])
+        .filter(|(_, word)| {
+            let word = word.to_ascii_lowercase();
+            lower == word || lower.starts_with(&format!("{word} "))
+        })
+        .max_by_key(|(_, word)| word.len());
+    let Some((browser, word)) = found else {
         return Some(LinkBrowser {
             app: text.into(),
             profile: None,
         });
     };
-    let rest = rest.trim();
+    let rest = text[word.len()..].trim();
     Some(LinkBrowser {
         app: browser.name.into(),
         profile: (!rest.is_empty()).then(|| rest.to_string()),
@@ -112,7 +215,7 @@ pub fn parse(text: &str) -> Option<LinkBrowser> {
 /// profile, `open -na <App> --args <flags> <url>` — `--args` reaches only
 /// an app being launched, so `-n` launches one, which hands the URL to the
 /// running browser under that profile. A profile on a browser without one
-/// (Safari, Arc, an app typed by name) is ignored.
+/// (Safari, Opera, Arc, an app typed by name) is ignored.
 pub fn open_args(url: &str, browser: Option<&LinkBrowser>) -> Vec<String> {
     let Some(choice) = browser else {
         return vec![url.into()];
@@ -175,6 +278,21 @@ pub(crate) fn open_in_app(bundle: &std::path::Path, path: &std::path::Path) -> b
     let mut open = std::process::Command::new("open");
     open.arg("-a").arg(bundle).arg(path);
     spawn_and_reap(open, "open in app")
+}
+
+#[cfg(test)]
+thread_local! {
+    static INSTALLED: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` with the browsers `names` installed, as well as Safari.
+#[cfg(test)]
+pub(crate) fn with_installed<T>(names: &[&'static str], f: impl FnOnce() -> T) -> T {
+    let prev = INSTALLED.with(|cell| cell.replace(names.to_vec()));
+    let out = f();
+    INSTALLED.with(|cell| cell.replace(prev));
+    out
 }
 
 #[cfg(test)]
@@ -243,6 +361,23 @@ mod tests {
             (Some(pick("Chrome", None)), &["-a", "Google Chrome", URL]),
             (Some(pick("Firefox", None)), &["-a", "Firefox", URL]),
             (Some(pick("Arc", None)), &["-a", "Arc", URL]),
+            (Some(pick("Brave", None)), &["-a", "Brave Browser", URL]),
+            (Some(pick("Edge", None)), &["-a", "Microsoft Edge", URL]),
+            (
+                Some(pick("Vivaldi", Some("Profile 3"))),
+                &[
+                    "-na",
+                    "Vivaldi",
+                    "--args",
+                    "--profile-directory=Profile 3",
+                    URL,
+                ],
+            ),
+            (
+                Some(pick("Zen", Some("work"))),
+                &["-na", "Zen", "--args", "-P", "work", URL],
+            ),
+            (Some(pick("Opera", Some("x"))), &["-a", "Opera", URL]),
             (
                 Some(pick("Chrome", Some("Profile 1"))),
                 &[
@@ -263,9 +398,17 @@ mod tests {
             // A stored name in another case still finds its app.
             (Some(pick("chrome", None)), &["-a", "Google Chrome", URL]),
             // An app typed by name goes to `open -a` as it is.
+            (Some(pick("SigmaOS", Some("x"))), &["-a", "SigmaOS", URL]),
+            // A choice stored by its app's name still finds its profile flag.
             (
                 Some(pick("Brave Browser", Some("x"))),
-                &["-a", "Brave Browser", URL],
+                &[
+                    "-na",
+                    "Brave Browser",
+                    "--args",
+                    "--profile-directory=x",
+                    URL,
+                ],
             ),
             (
                 Some(pick("Chrome", Some("  "))),
@@ -287,17 +430,61 @@ mod tests {
             Some(pick("Chrome", Some("Profile 1")))
         );
         assert_eq!(parse("firefox  work "), Some(pick("Firefox", Some("work"))));
-        assert_eq!(parse("Brave Browser"), Some(pick("Brave Browser", None)));
+        assert_eq!(parse("Brave Browser"), Some(pick("Brave", None)));
+        assert_eq!(
+            parse("brave browser Profile 2"),
+            Some(pick("Brave", Some("Profile 2")))
+        );
+        assert_eq!(parse("Microsoft Edge"), Some(pick("Edge", None)));
+        assert_eq!(
+            parse("Zenith"),
+            Some(pick("Zenith", None)),
+            "a whole word only"
+        );
+        assert_eq!(parse("SigmaOS"), Some(pick("SigmaOS", None)));
         // What the row shows, typed back, is what it stored.
         for stored in [pick("Chrome", Some("Profile 1")), pick("Arc", None)] {
             assert_eq!(parse(&typed(Some(&stored))), Some(stored));
         }
-        assert_eq!(
-            label(Some(&pick("Chrome", Some("Profile 1")))),
-            "Chrome · Profile 1"
-        );
+        with_installed(&["Chrome"], || {
+            assert_eq!(
+                label(Some(&pick("Chrome", Some("Profile 1")))),
+                "Chrome · Profile 1"
+            )
+        });
         assert_eq!(label(None), "default");
-        assert_eq!(choices(), ["default", "Safari", "Chrome", "Firefox", "Arc"]);
+    }
+
+    /// ←/→ step the browsers this Mac has first, then the ones it doesn't,
+    /// which the row marks and `i` installs by their cask.
+    #[test]
+    fn installed_browsers_come_first_and_missing_ones_say_so() {
+        with_installed(&["Firefox", "Brave"], || {
+            assert_eq!(
+                choices(),
+                [
+                    "default", "Safari", "Firefox", "Brave", "Chrome", "Edge", "Vivaldi", "Zen",
+                    "Opera", "Arc"
+                ]
+            );
+            assert_eq!(label(Some(&pick("Brave", Some("Work")))), "Brave · Work");
+            assert_eq!(label(Some(&pick("Safari", None))), "Safari");
+            assert_eq!(
+                label(Some(&pick("Edge", Some("Profile 2")))),
+                "Edge · Profile 2 · not installed"
+            );
+            // An app typed by name is the user's word; orion can't tell.
+            assert_eq!(label(Some(&pick("Orion", None))), "Orion");
+            assert_eq!(installed("Orion"), None);
+
+            assert_eq!(
+                missing_cask("vivaldi"),
+                Some(("Vivaldi", "vivaldi", "https://vivaldi.com/download/"))
+            );
+            assert_eq!(missing_cask("Brave"), None, "installed");
+            assert_eq!(missing_cask("Safari"), None, "comes with macOS");
+            assert_eq!(missing_cask("Orion"), None, "not one of orion's");
+        });
     }
 
     #[test]

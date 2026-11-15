@@ -102,11 +102,15 @@ pub(crate) const GHOSTTY_LINK: &str = "https://ghostty.org/download";
 /// The program [`ghostty_plan`] installs.
 pub const GHOSTTY: &str = "ghostty";
 
-/// Whether `program` is here: on PATH — or Ghostty's app in an
-/// Applications folder, which is what ⇧T opens, whatever PATH holds (a
+/// Whether `program` is here: a browser **Open links in** names, in an
+/// Applications folder ([`crate::open_url::installed`]); on PATH — or
+/// Ghostty's app in an Applications folder, which is what ⇧T opens, whatever PATH holds (a
 /// cask install leaves `ghostty` off a PATH without Homebrew's bin). A
 /// test goes by its PATH alone.
 pub fn installed(program: &str) -> bool {
+    if let Some(here) = crate::open_url::installed(program) {
+        return here;
+    }
     if let Some(app) = outside_app(program) {
         return !cfg!(test)
             && crate::outside_editor::find(app, &crate::outside_editor::Places::here()).is_some();
@@ -200,6 +204,19 @@ pub fn app_plan(word: &str, brew: Option<&Path>) -> Option<Plan> {
 /// The cask puts `ghostty` on PATH as well as the app in /Applications.
 pub fn ghostty_plan(brew: Option<&Path>) -> Plan {
     brew_plan(GHOSTTY, "ghostty", true, GHOSTTY_LINK, brew)
+}
+
+/// How the browser **Open links in** stores as `name` gets onto a Mac:
+/// its cask. None for one that's installed, or that orion doesn't know.
+pub fn browser_plan(name: &str, brew: Option<&Path>) -> Option<Plan> {
+    let (name, cask, link) = crate::open_url::missing_cask(name)?;
+    Some(brew_plan(name, cask, true, link, brew))
+}
+
+/// Whether `program` is an app rather than a CLI: missing after its
+/// install means the install failed, not that PATH is stale.
+fn is_app(program: &str) -> bool {
+    program == GHOSTTY || crate::open_url::installed(program).is_some()
 }
 
 /// The agent CLIs orion can install, by the program a harness runs: each
@@ -358,11 +375,16 @@ impl Tools {
     pub fn ghostty_plan(&self) -> Plan {
         ghostty_plan(self.brew.as_deref())
     }
+
+    pub fn browser_plan(&self, name: &str) -> Option<Plan> {
+        browser_plan(name, self.brew.as_deref())
+    }
 }
 
 /// The plan behind a SETTINGS OVERLAY row whose program isn't on PATH —
-/// a CLAUDE ACCOUNT's or a harness's CLI on its Enabled row. None on any
-/// other row, or when the program is there.
+/// a CLAUDE ACCOUNT's or a harness's CLI on its Enabled row — or whose
+/// **Open links in** browser isn't on this Mac. None on any other row, or
+/// when the program is there.
 pub fn settings_row_plan(
     cfg: &crate::config::Config,
     tab: usize,
@@ -374,6 +396,9 @@ pub fn settings_row_plan(
         let id = match (cfg.account_row(index), cfg.agent_row(index)) {
             (Some(AccountRow::Account(id)), _) => id,
             (None, Some((id, HarnessField::Enabled))) => id,
+            (None, Some((id, HarnessField::Browser))) => {
+                return tools.browser_plan(&cfg.link_browser(&id)?.app);
+            }
             _ => return None,
         };
         let program = cfg.effective_harness_by_id(&id).program;
@@ -458,7 +483,7 @@ pub fn take_ran() -> Vec<Command> {
 pub fn outcome(program: &str, installed: bool) -> String {
     if installed {
         format!("✓ {program} is installed")
-    } else if program == GHOSTTY {
+    } else if is_app(program) {
         // An app, not a CLI: missing means the install itself failed.
         format!("✗ {program} didn't install — the installer's output said why; i tries again")
     } else {
@@ -483,10 +508,10 @@ pub fn exited(app: &mut App) {
     vim.title = format!(
         "{} — {}",
         vim.title,
-        match (installed, program.as_str()) {
+        match (installed, is_app(&program)) {
             (true, _) => "installed",
-            (false, GHOSTTY) => "failed",
-            (false, _) => "not on PATH",
+            (false, true) => "failed",
+            (false, false) => "not on PATH",
         }
     );
     app.flash = Some(outcome_flash(&program, installed, " — Enter closes"));
