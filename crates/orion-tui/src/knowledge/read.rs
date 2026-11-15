@@ -1,12 +1,19 @@
-//! The READ PATH: what agents get from the store. Every builder prompt
-//! carries the index and where the pages are ([`prompt_context`]); `orion
-//! knowledge for <paths…>` prints the pages for the files an agent is
-//! about to touch ([`pages_for`]).
+//! The READ PATH: what agents get, read from their own checkout — the
+//! harvested pages as the branch they work on has them, so a harvest is
+//! seen once its pull request merges, not before. Every builder prompt
+//! carries the index and lists the hand-written records
+//! ([`prompt_context`]); `orion knowledge for <paths…>` prints the pages
+//! for the files an agent is about to touch ([`pages_for`]). Paths are
+//! repo-relative throughout.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
-use super::store::{Entry, Store, ACTIVE};
+use super::records::{self, Checkout};
+use super::store::{self, Entry, Store, ACTIVE, DECISIONS, DIR};
+
+/// What every builder prompt's knowledge ends on.
+pub(crate) const RECORDS_WIN: &str =
+    "Accepted records in .orion/decisions/ win over the harvested pages.";
 
 /// The most topics `orion knowledge for` prints.
 pub(crate) const FOR_TOPICS: usize = 4;
@@ -54,18 +61,36 @@ const NOISE: &[&str] = &[
     "misc",
 ];
 
-/// The store's index for a builder's prompt, with where its topic pages
-/// are; empty when `project` (its main checkout) has no store yet.
-pub(crate) fn prompt_context(project: &Path) -> String {
-    let store = Store::of(project);
-    let Some(index) = store.index() else {
+/// What a builder's prompt carries from `checkout` (its worktree): the
+/// harvested index, where the pages are, and the hand-written records'
+/// titles and paths. Empty when the checkout has neither.
+pub(crate) fn prompt_context(checkout: &Checkout) -> String {
+    let files = checkout.files(DECISIONS);
+    let index_path = format!("{DIR}/index.md");
+    let index = files
+        .iter()
+        .find(|(path, _)| *path == index_path)
+        .map(|(_, text)| store::unmarked(text).trim().to_string())
+        .filter(|i| !i.is_empty());
+    let records = records::from_files(&files);
+    if index.is_none() && records.is_empty() {
         return String::new();
-    };
-    format!(
-        "{}\n\nBefore planning, read the topic pages for the areas you'll touch at {}. Accepted records in docs/decisions/ win over them.",
-        index.trim_end(),
-        store.dir.display()
-    )
+    }
+    let mut out = Vec::new();
+    if let Some(index) = index {
+        out.push(index);
+        out.push(format!(
+            "Before planning, read the topic pages for the areas you'll touch, in `{DIR}/` (`orion knowledge for <paths…>` prints them)."
+        ));
+    }
+    if !records.is_empty() {
+        out.push(format!(
+            "Hand-written decision records:\n{}",
+            records::listing(&records)
+        ));
+    }
+    out.push(RECORDS_WIN.to_string());
+    out.join("\n\n")
 }
 
 /// The words of a path or topic worth matching on.
@@ -142,10 +167,9 @@ pub(crate) fn pages_for(store: &Store, paths: &[String]) -> String {
     if topics.is_empty() {
         return match store.index() {
             Some(index) => format!(
-                "No topic page matches those paths. The index:\n\n{index}\nPages are at {}.\n",
-                store.dir.display()
+                "No topic page matches those paths. The index:\n\n{index}\nPages are in {DIR}/.\n"
             ),
-            None => format!("No knowledge recorded yet at {}.\n", store.dir.display()),
+            None => format!("No knowledge recorded yet in {DIR}/.\n"),
         };
     }
     let mut out = String::new();
@@ -157,7 +181,7 @@ pub(crate) fn pages_for(store: &Store, paths: &[String]) -> String {
         if left == 0 {
             break;
         }
-        out.push_str(&format!("<!-- {} -->\n", store.page_path(&topic).display()));
+        out.push_str(&format!("<!-- {DIR}/{} -->\n", store::page_file(&topic)));
         let n = page.split_whitespace().count();
         if n <= left {
             out.push_str(page.trim_end());
@@ -254,15 +278,34 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_carries_the_index_and_the_pages_path() {
-        let (repo, store) = store_with(&[("auth/login", "# auth/login\n")], &[]);
-        assert_eq!(prompt_context(repo.path()), "");
-        store.write_index("app").unwrap();
-        let ctx = prompt_context(repo.path());
-        assert!(ctx.starts_with("# Knowledge: app\n"));
-        assert!(ctx.ends_with(&format!(
-            "read the topic pages for the areas you'll touch at {}. Accepted records in docs/decisions/ win over them.",
-            store.dir.display()
-        )));
+    fn the_prompt_reads_the_sessions_worktree_with_repo_relative_paths() {
+        let wt = tempfile::tempdir().unwrap();
+        let checkout = Checkout::Dir(wt.path().to_path_buf());
+        assert_eq!(prompt_context(&checkout), "", "nothing recorded yet");
+        crate::knowledge::records::tests::decisions(wt.path());
+        let ctx = prompt_context(&checkout);
+        assert!(ctx.starts_with("# Knowledge: app\n\nBefore planning, read the topic pages for the areas you'll touch, in `.orion/decisions/harvested/`"), "{ctx}");
+        assert!(!ctx.contains("orion:harvested"), "no marker: {ctx}");
+        assert!(ctx.contains("Hand-written decision records:\n- 0002-billing — `.orion/decisions/0002-billing.md`\n- Sessions last 30 days — `.orion/decisions/auth/0001-sessions.md`"), "{ctx}");
+        assert!(ctx.ends_with(RECORDS_WIN));
+        assert!(
+            !ctx.contains(&wt.path().display().to_string()),
+            "no absolute path: {ctx}"
+        );
+
+        // Records alone, before any harvest has merged.
+        std::fs::remove_dir_all(wt.path().join(DIR)).unwrap();
+        let ctx = prompt_context(&checkout);
+        assert!(ctx.starts_with("Hand-written decision records:"), "{ctx}");
+    }
+
+    #[test]
+    fn pages_name_their_repo_relative_path() {
+        let (_repo, store) = store_with(&[("auth/login", "# auth/login\n")], &[]);
+        let out = pages_for(&store, &["src/auth/login.ts".into()]);
+        assert!(
+            out.starts_with("<!-- .orion/decisions/harvested/auth/login.md -->\n# auth/login"),
+            "{out}"
+        );
     }
 }

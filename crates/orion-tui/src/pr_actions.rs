@@ -1100,7 +1100,7 @@ impl MergeMethod {
         }
     }
 
-    fn flag(self) -> &'static str {
+    pub(crate) fn flag(self) -> &'static str {
         match self {
             MergeMethod::Squash => "--squash",
             MergeMethod::Merge => "--merge",
@@ -1359,7 +1359,7 @@ async fn repo_merge_options(dir: &Path) -> (Vec<MergeMethod>, bool) {
 }
 
 /// `gh repo view`'s answer to [`repo_merge_options`]'s fields.
-fn parse_merge_options(json: &str) -> Option<(Vec<MergeMethod>, bool)> {
+pub(crate) fn parse_merge_options(json: &str) -> Option<(Vec<MergeMethod>, bool)> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let allowed = |key: &str| v.get(key).and_then(|x| x.as_bool()).unwrap_or(true);
     let methods: Vec<MergeMethod> = [

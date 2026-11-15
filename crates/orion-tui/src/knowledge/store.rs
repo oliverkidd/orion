@@ -1,22 +1,31 @@
-//! The KNOWLEDGE STORE: `<project main checkout>/.orion/knowledge/`, a
-//! git repository of its own that only orion writes.
+//! The HARVESTED PAGES: `.orion/decisions/harvested/` in a checkout of
+//! the repo, committed like any other file and changed only through
+//! orion's knowledge pull request (`super::share`).
 //!
 //! - `index.md`: at most [`INDEX_LINES`] lines, one per topic with its
 //!   scope and rule count — what every builder prompt carries;
 //! - `<area>/<topic>.md`: a topic page in the fixed sections
 //!   ([`SECTIONS`]), each rule ending in a hidden `<!-- k… -->` list of
 //!   the entries it stands on, so a veto can take one out;
-//! - `entries.jsonl`: every entry ever extracted, with its status;
-//! - `sources/<pr>.md`: the condensed dossier the entries came from.
+//! - `entries.jsonl`: every entry ever extracted, with its status.
+//!
+//! Every file orion writes starts with [`MARKER`]. orion owns only
+//! [`DIR`]: everything else under [`DECISIONS`] is a hand-written record,
+//! read-only to orion ([`Store::write`] refuses any path outside). The
+//! condensed dossiers stay on this machine (`super::local`).
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Where the store sits in a project's main checkout.
-pub(crate) const DIR: &str = ".orion/knowledge";
+/// The repo's decision records, hand-written and harvested.
+pub(crate) const DECISIONS: &str = ".orion/decisions";
+/// The part of [`DECISIONS`] orion owns, and the only one it writes.
+pub(crate) const DIR: &str = ".orion/decisions/harvested";
+/// The first line of every file orion writes.
+pub(crate) const MARKER: &str =
+    "<!-- orion:harvested — written by orion; edit through a PR, it is regenerated -->";
 /// The most lines `index.md` may have.
 pub(crate) const INDEX_LINES: usize = 40;
 /// A topic page's sections, in order.
@@ -141,12 +150,12 @@ pub(crate) fn topic_path(topic: &str) -> String {
     }
 }
 
-/// A project's knowledge store.
+/// The harvested pages of one checkout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Store {
-    /// The project's main checkout.
+    /// The checkout: a session's worktree, or orion's working clone.
     pub repo: PathBuf,
-    /// `<repo>/.orion/knowledge`.
+    /// `<repo>/.orion/decisions/harvested`.
     pub dir: PathBuf,
 }
 
@@ -158,57 +167,26 @@ impl Store {
         }
     }
 
-    /// Whether it has been made.
-    pub(crate) fn exists(&self) -> bool {
-        self.dir.join(".git").exists()
-    }
-
-    /// Make it on first use: the folders, and its own git repository.
-    pub(crate) fn init(&self) -> Result<(), String> {
-        std::fs::create_dir_all(self.dir.join("sources"))
-            .map_err(|e| format!("couldn't make {}: {e}", self.dir.display()))?;
-        if !self.dir.join(".git").exists() {
-            crate::git_proc::run(&self.dir, &["init", "-q"])?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn entries_path(&self) -> PathBuf {
         self.dir.join("entries.jsonl")
     }
 
-    /// Every entry recorded, oldest first. A line that doesn't read is
-    /// skipped.
+    /// Every entry recorded, oldest first. A line that doesn't read (the
+    /// marker among them) is skipped.
     pub(crate) fn entries(&self) -> Vec<Entry> {
-        std::fs::read_to_string(self.entries_path())
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect()
+        read_entries(&std::fs::read_to_string(self.entries_path()).unwrap_or_default())
     }
 
     /// Add `new` to the end of `entries.jsonl`.
     pub(crate) fn append(&self, new: &[Entry]) -> Result<(), String> {
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.entries_path())
-            .map_err(|e| format!("couldn't open entries.jsonl: {e}"))?;
-        for entry in new {
-            let line = serde_json::to_string(entry).map_err(|e| e.to_string())?;
-            writeln!(file, "{line}").map_err(|e| e.to_string())?;
-        }
-        Ok(())
+        let mut all = self.entries();
+        all.extend(new.iter().cloned());
+        self.save_entries(&all)
     }
 
     /// Write `all` as the whole of `entries.jsonl`.
     pub(crate) fn save_entries(&self, all: &[Entry]) -> Result<(), String> {
-        let mut text = String::new();
-        for entry in all {
-            text.push_str(&serde_json::to_string(entry).map_err(|e| e.to_string())?);
-            text.push('\n');
-        }
-        write(&self.entries_path(), &text)
+        self.write(&self.entries_path(), &render_entries(all)?)
     }
 
     /// Every topic with a page, sorted.
@@ -216,7 +194,7 @@ impl Store {
         let mut topics = Vec::new();
         for area in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
             let name = area.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || name == "sources" || !area.path().is_dir() {
+            if name.starts_with('.') || !area.path().is_dir() {
                 continue;
             }
             for page in std::fs::read_dir(area.path())
@@ -235,37 +213,29 @@ impl Store {
     }
 
     pub(crate) fn page_path(&self, topic: &str) -> PathBuf {
-        self.dir.join(format!("{}.md", topic_path(topic)))
+        self.dir.join(page_file(topic))
     }
 
+    /// `topic`'s page as the checkout has it, [`MARKER`] left off.
     pub(crate) fn page(&self, topic: &str) -> Option<String> {
-        std::fs::read_to_string(self.page_path(topic)).ok()
+        std::fs::read_to_string(self.page_path(topic))
+            .ok()
+            .map(|t| unmarked(&t).to_string())
     }
 
     pub(crate) fn write_page(&self, topic: &str, text: &str) -> Result<(), String> {
-        write(&self.page_path(topic), text)
-    }
-
-    pub(crate) fn source_path(&self, pr: u64) -> PathBuf {
-        self.dir.join("sources").join(format!("{pr}.md"))
-    }
-
-    pub(crate) fn write_source(&self, pr: u64, dossier: &str) -> Result<(), String> {
-        write(&self.source_path(pr), dossier)
-    }
-
-    /// Whether pull request `pr` was harvested already.
-    pub(crate) fn harvested(&self, pr: u64) -> bool {
-        self.source_path(pr).exists()
+        self.write(&self.page_path(topic), text)
     }
 
     pub(crate) fn index_path(&self) -> PathBuf {
         self.dir.join("index.md")
     }
 
+    /// `index.md`, [`MARKER`] left off; None while there is none.
     pub(crate) fn index(&self) -> Option<String> {
         std::fs::read_to_string(self.index_path())
             .ok()
+            .map(|t| unmarked(&t).to_string())
             .filter(|i| !i.trim().is_empty())
     }
 
@@ -276,39 +246,11 @@ impl Store {
             .into_iter()
             .filter_map(|t| Some((t.clone(), self.page(&t)?)))
             .collect();
-        write(&self.index_path(), &render_index(project, &pages))
+        self.write(&self.index_path(), &render_index(project, &pages))
     }
 
-    /// Commit everything changed, as `message`. False when nothing had.
-    pub(crate) fn commit(&self, message: &str) -> Result<bool, String> {
-        if !self.exists() {
-            return Err("the knowledge store has no git repository".into());
-        }
-        crate::git_proc::run(&self.dir, &["add", "-A"])?;
-        if crate::git_proc::run(&self.dir, &["diff", "--cached", "--quiet"]).is_ok() {
-            return Ok(false);
-        }
-        crate::git_proc::run(
-            &self.dir,
-            &[
-                "-c",
-                "user.name=orion",
-                "-c",
-                "user.email=orion@localhost",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "commit",
-                "-q",
-                "-m",
-                message,
-            ],
-        )?;
-        Ok(true)
-    }
-
-    /// Mark `id` vetoed, take it out of its page, and commit.
+    /// Mark `id` vetoed, and take it out of its page and the index. The
+    /// caller commits and pushes (`super::share`).
     pub(crate) fn veto(&self, id: &str, project: &str) -> Result<(), String> {
         let mut all = self.entries();
         let Some(entry) = all.iter_mut().find(|e| e.id == id) else {
@@ -321,17 +263,103 @@ impl Store {
             self.write_page(&topic, &without_ids(&page, &[id]))?;
         }
         self.write_index(project)?;
-        self.commit(&format!("veto {id}"))?;
         Ok(())
+    }
+
+    /// Whether orion may write `path`: a file inside [`DIR`], with no `..`
+    /// or other way out of it.
+    pub(crate) fn may_write(&self, path: &Path) -> bool {
+        use std::path::Component;
+        path.strip_prefix(&self.dir).is_ok_and(|rest| {
+            rest.components().count() > 0
+                && rest.components().all(|c| matches!(c, Component::Normal(_)))
+        })
+    }
+
+    /// Write `text` to `path`, its folders made and [`MARKER`] its first
+    /// line. Refused anywhere outside [`DIR`]: the hand-written records
+    /// beside it are never orion's to change.
+    pub(crate) fn write(&self, path: &Path, text: &str) -> Result<(), String> {
+        if !self.may_write(path) {
+            return Err(format!(
+                "orion writes only under {DIR}/, not {}",
+                path.display()
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, marked(text))
+            .map_err(|e| format!("couldn't write {}: {e}", path.display()))
     }
 }
 
-/// Write `text` to `path`, its folders made.
-fn write(path: &Path, text: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+/// `topic`'s page, relative to [`DIR`].
+pub(crate) fn page_file(topic: &str) -> String {
+    format!("{}.md", topic_path(topic))
+}
+
+/// `text` with [`MARKER`] as its first line, once.
+pub(crate) fn marked(text: &str) -> String {
+    format!("{MARKER}\n{}", unmarked(text))
+}
+
+/// `text` without its [`MARKER`] line.
+pub(crate) fn unmarked(text: &str) -> &str {
+    match text.strip_prefix(MARKER) {
+        Some(rest) => rest.strip_prefix('\n').unwrap_or(rest),
+        None => text,
     }
-    std::fs::write(path, text).map_err(|e| format!("couldn't write {}: {e}", path.display()))
+}
+
+/// `entries.jsonl`'s text as entries: a line that doesn't read is skipped.
+pub(crate) fn read_entries(text: &str) -> Vec<Entry> {
+    text.lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// `all` as `entries.jsonl`'s text, one entry a line ([`MARKER`] goes on
+/// when it is written).
+pub(crate) fn render_entries(all: &[Entry]) -> Result<String, String> {
+    let mut text = String::new();
+    for entry in all {
+        text.push_str(&serde_json::to_string(entry).map_err(|e| e.to_string())?);
+        text.push('\n');
+    }
+    Ok(text)
+}
+
+/// A page made from its entries alone, with no model: what a rebuild
+/// writes for a topic both sides changed (`super::share`). Rules,
+/// constraints and questions in force; vetoed and dropped entries left
+/// out.
+pub(crate) fn render_page(topic: &str, entries: &[&Entry]) -> String {
+    let mut sections: [Vec<String>; 3] = Default::default();
+    let mut scope: Vec<&str> = Vec::new();
+    for e in entries.iter().filter(|e| e.status == ACTIVE) {
+        for path in &e.applies_to {
+            if !scope.contains(&path.as_str()) {
+                scope.push(path);
+            }
+        }
+        let call = if e.by == "agent" { " (agent call)" } else { "" };
+        let at = match e.kind.as_str() {
+            "constraint" => 1,
+            "question" => 2,
+            _ => 0,
+        };
+        sections[at].push(format!("- {} (#{}){call} <!-- {} -->", e.rule, e.pr, e.id));
+    }
+    let mut out = format!("# {topic}\nScope: {}\n", scope.join(", "));
+    for (i, name) in SECTIONS.iter().enumerate() {
+        out.push_str(&format!("\n## {name}\n"));
+        for line in sections.get(i).into_iter().flatten() {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// The ids a page line cites, in its `<!-- … -->`.
@@ -428,11 +456,15 @@ pub(crate) fn render_index(project: &str, pages: &[(String, String)]) -> String 
     lines.join("\n") + "\n"
 }
 
-/// Whether the repo at `repo` ignores the store. Asked of the store's
-/// own folder, not `.orion/`, which also holds files a repo commits
-/// (`.orion/pr-contract.toml`).
+/// Whether the repo at `repo` ignores [`DECISIONS`] — or the harvested
+/// pages in it — so harvested rules can't be committed and shared.
 pub(crate) fn ignored(repo: &Path) -> bool {
-    crate::git_proc::read(repo, &["check-ignore", "-q", ".orion/knowledge/"]).is_ok()
+    let index = format!("{DIR}/index.md");
+    crate::git_proc::read(
+        repo,
+        &["check-ignore", "--no-index", ".orion/decisions/", &index],
+    )
+    .is_ok()
 }
 
 #[cfg(test)]
@@ -485,41 +517,110 @@ mod tests {
         assert_eq!(rule_count(&page), 2);
     }
 
-    #[test]
-    fn a_store_is_made_once_and_commits_its_changes() {
-        let repo = tempfile::tempdir().unwrap();
-        let store = Store::of(repo.path());
-        assert!(!store.exists());
-        store.init().unwrap();
-        assert!(store.exists() && store.dir.join("sources").is_dir());
-        store.init().unwrap();
-
-        let entry = Entry {
-            id: "k12-1".into(),
+    fn entry(id: &str, topic: &str, kind: &str, by: &str) -> Entry {
+        Entry {
+            id: id.into(),
             pr: 12,
-            topic: "auth/login".into(),
-            rule: "Login returns to the page the user came from".into(),
-            by: "owner".into(),
+            topic: topic.into(),
+            kind: kind.into(),
+            rule: format!("rule {id}"),
+            by: by.into(),
             status: ACTIVE.into(),
             ..Entry::default()
-        };
-        store.append(std::slice::from_ref(&entry)).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_file_orion_writes_is_marked_and_reads_back_without_it() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = Store::of(repo.path());
+        store
+            .append(&[entry("k12-1", "auth/login", "decision", "owner")])
+            .unwrap();
         store.write_page("auth/login", PAGE).unwrap();
-        store.write_source(12, "dossier").unwrap();
         store.write_index("demo").unwrap();
-        assert!(store.commit("harvest #12").unwrap());
-        assert!(!store.commit("nothing").unwrap(), "nothing changed");
-        let log = crate::git_proc::read(&store.dir, &["log", "--format=%s"]).unwrap();
-        assert_eq!(log.trim(), "harvest #12");
-        assert!(store.harvested(12) && !store.harvested(13));
+        for file in ["entries.jsonl", "auth/login.md", "index.md"] {
+            let text = std::fs::read_to_string(store.dir.join(file)).unwrap();
+            assert!(text.starts_with(&format!("{MARKER}\n")), "{file}: {text}");
+            assert_eq!(text.matches(MARKER).count(), 1, "{file}");
+        }
+        assert_eq!(store.page("auth/login").unwrap(), PAGE);
+        assert!(store.index().unwrap().starts_with("# Knowledge: demo\n"));
+        assert_eq!(store.entries().len(), 1, "the marker line is skipped");
         assert_eq!(store.topics(), vec!["auth/login"]);
-        assert!(store.index().unwrap().contains("`auth/login`"));
+        // Written twice, still one marker.
+        store.write_page("auth/login", &marked(PAGE)).unwrap();
+        assert_eq!(store.page("auth/login").unwrap(), PAGE);
 
         store.veto("k12-1", "demo").unwrap();
         assert_eq!(store.entries()[0].status, VETOED);
-        let log = crate::git_proc::read(&store.dir, &["log", "--format=%s"]).unwrap();
-        assert_eq!(log.lines().next(), Some("veto k12-1"));
         assert!(store.page("auth/login").unwrap().contains("<!-- k30-2 -->"));
+    }
+
+    #[test]
+    fn the_writer_refuses_anything_outside_the_harvested_folder() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = Store::of(repo.path());
+        let record = repo.path().join(DECISIONS).join("0001-auth.md");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, "# Auth\nHand-written.\n").unwrap();
+        for outside in [
+            record.clone(),
+            repo.path().join(DECISIONS).join("harvested-not/x.md"),
+            store.dir.join("../0001-auth.md"),
+            store.dir.join("auth/../../0001-auth.md"),
+            store.dir.clone(),
+            repo.path().join("README.md"),
+            PathBuf::from("/tmp/x.md"),
+        ] {
+            let refused = store.write(&outside, "over").unwrap_err();
+            assert!(refused.starts_with("orion writes only under"), "{refused}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(&record).unwrap(),
+            "# Auth\nHand-written.\n",
+            "the record is untouched"
+        );
+        // A topic can't climb out either: its path is made of kebab parts.
+        assert_eq!(
+            store.page_path("../../0001-auth"),
+            store.dir.join("general/0001-auth.md")
+        );
+        assert!(store.write(&store.dir.join("a/b.md"), "fine").is_ok());
+    }
+
+    #[test]
+    fn a_rebuilt_page_is_made_from_its_entries() {
+        let mut gone = entry("k12-4", "auth/login", "decision", "owner");
+        gone.status = VETOED.into();
+        let mut scoped = entry("k12-1", "auth/login", "decision", "owner");
+        scoped.applies_to = vec!["src/auth".into()];
+        let entries = [
+            scoped,
+            entry("k12-2", "auth/login", "constraint", "owner"),
+            entry("k12-3", "auth/login", "decision", "agent"),
+            gone,
+        ];
+        let refs: Vec<&Entry> = entries.iter().collect();
+        let page = render_page("auth/login", &refs);
+        assert_eq!(
+            page,
+            "# auth/login\nScope: src/auth\n\n## Rules in force\n- rule k12-1 (#12) <!-- k12-1 -->\n- rule k12-3 (#12) (agent call) <!-- k12-3 -->\n\n## Constraints\n- rule k12-2 (#12) <!-- k12-2 -->\n\n## Open questions\n\n## Replaced\n"
+        );
+        assert_eq!(rule_count(&page), 3);
+    }
+
+    #[test]
+    fn the_gitignore_check_asks_about_the_decisions_folder() {
+        let repo = tempfile::tempdir().unwrap();
+        crate::git_proc::run(repo.path(), &["init", "-q"]).unwrap();
+        assert!(!ignored(repo.path()));
+        std::fs::write(repo.path().join(".gitignore"), ".orion/pr-contract.toml\n").unwrap();
+        assert!(!ignored(repo.path()));
+        std::fs::write(repo.path().join(".gitignore"), ".orion/\n").unwrap();
+        assert!(ignored(repo.path()));
+        std::fs::write(repo.path().join(".gitignore"), "harvested/\n").unwrap();
+        assert!(ignored(repo.path()), "the harvested pages alone");
     }
 
     #[test]

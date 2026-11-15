@@ -75,11 +75,24 @@ const FACTS_EVERY: Duration = Duration::from_secs(30);
 const FORGET_AFTER_MS: i64 = 7 * orion_core::clock::DAY_MS;
 
 /// `factory` in the config file. No screen shows it yet.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FactorySettings {
     /// A Merge-tier factory PR merges without the owner's tap. Off.
     pub auto_merge: bool,
+    /// orion merges its own knowledge pull request once the daily card's
+    /// veto window has passed (`crate::knowledge`). On; off, the owner
+    /// merges it by hand.
+    pub knowledge_auto_merge: bool,
+}
+
+impl Default for FactorySettings {
+    fn default() -> Self {
+        FactorySettings {
+            auto_merge: false,
+            knowledge_auto_merge: true,
+        }
+    }
 }
 
 /// What `gh` says when what was asked for isn't there.
@@ -1246,6 +1259,22 @@ pub(crate) fn send_back(app: &mut App, pr_url: &str, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orion_merges_its_knowledge_pr_unless_switched_off() {
+        let read = |json: &str| serde_json::from_str::<FactorySettings>(json).unwrap();
+        assert!(FactorySettings::default().knowledge_auto_merge);
+        assert!(!FactorySettings::default().auto_merge);
+        let older = read(r#"{"auto_merge": true}"#);
+        assert!(
+            older.auto_merge && older.knowledge_auto_merge,
+            "a file from before the switch"
+        );
+        assert!(!read(r#"{"knowledge_auto_merge": false}"#).knowledge_auto_merge);
+        let cfg: crate::config::Config =
+            serde_json::from_str(r#"{"factory": {"knowledge_auto_merge": false}}"#).unwrap();
+        assert!(!cfg.factory.knowledge_auto_merge);
+    }
 
     #[test]
     fn a_pull_request_url_splits_into_its_parts() {

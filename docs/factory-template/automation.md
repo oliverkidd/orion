@@ -13,7 +13,7 @@ orion's launch prompt is the owner's standing agreement: committing, pushing and
 ## 2. Read what's known
 
 - Read the knowledge index orion gave you, then the topic pages for the areas you'll touch: `orion knowledge for <paths…>` prints them.
-- Accepted records in `docs/decisions/` win over the knowledge pages.
+- Accepted records in `.orion/decisions/` win over the harvested pages in `.orion/decisions/harvested/`.
 
 ## 3. Plan
 

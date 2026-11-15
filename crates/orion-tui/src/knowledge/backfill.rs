@@ -2,19 +2,21 @@
 //! the one-off harvest of the pull requests merged before orion kept a
 //! snapshot. Each merged PR is joined to its transcripts by branch or by
 //! the PR URLs they mention ([`super::transcripts::join`]) and harvested
-//! oldest first, as at merge; then every topic gets a staleness pass
-//! against the code as origin's base has it now (a temporary checkout,
-//! `harvest::CheckTree`; with none, the pass is skipped). Runs from the
-//! CLI, with no TUI.
+//! oldest first, as at merge, into the knowledge branch — one commit a
+//! batch of [`BATCH`], pushed and proposed in the same pull request as
+//! the harvests at merge (`super::share`); then every topic gets a
+//! staleness pass against the code as origin's base has it now (a
+//! temporary checkout, `harvest::CheckTree`; with none, the pass is
+//! skipped), committed the same way. Runs from the CLI, with no TUI.
 
 use std::path::Path;
-use std::time::Duration;
 
 use serde_json::Value;
 
 use super::condense;
-use super::harvest::{self, Model, Outcome, Session};
-use super::store::Store;
+use super::harvest::{self, Model, Outcome, Session, Target};
+use super::records;
+use super::share::{Gh, Published, Sharer};
 use super::transcripts::{self, Found, Merged, Scan};
 
 /// Branches everyone's work passes through: a session on one isn't a
@@ -22,7 +24,8 @@ use super::transcripts::{self, Found, Merged, Scan};
 const BASES: &[&str] = &[
     "main", "master", "dev", "develop", "staging", "trunk", "HEAD",
 ];
-const GH_TIMEOUT: Duration = Duration::from_secs(120);
+/// How many pull requests one commit of a backfill holds.
+pub(crate) const BATCH: usize = 10;
 
 /// A pull request to harvest, and its transcripts.
 pub(crate) type Todo = (Listed, Vec<Found>);
@@ -44,6 +47,20 @@ pub(crate) struct Summary {
     pub failed: Vec<(u64, String)>,
     /// Topics the staleness pass changed.
     pub stale: Vec<String>,
+    /// The knowledge pull request the harvests went to, and the head
+    /// pushed to it last.
+    pub pr: Option<super::share::Pr>,
+    pub head: String,
+}
+
+impl Summary {
+    /// Where a publish left the pull request.
+    fn published(&mut self, published: Published) {
+        if let Some(pr) = published.pr {
+            self.pr = Some(pr);
+            self.head = published.head;
+        }
+    }
 }
 
 impl Summary {
@@ -61,6 +78,9 @@ impl Summary {
         }
         if !self.stale.is_empty() {
             lines.push(format!("Staleness pass changed: {}", self.stale.join(", ")));
+        }
+        if let Some(pr) = &self.pr {
+            lines.push(format!("Proposed in #{}: {}", pr.number, pr.url));
         }
         lines
     }
@@ -87,7 +107,7 @@ pub(crate) fn read_list(json: &str) -> Vec<Listed> {
 /// The pull requests to harvest, oldest first, each with its transcripts:
 /// every listed one not harvested yet that has any.
 pub(crate) fn plan(
-    store: &Store,
+    harvested: &dyn Fn(u64) -> bool,
     prs: &[Listed],
     scans: &[Scan],
     bases: &[String],
@@ -103,7 +123,7 @@ pub(crate) fn plan(
     let mut todo = Vec::new();
     let mut skipped = Vec::new();
     for pr in prs {
-        if store.harvested(pr.number) {
+        if harvested(pr.number) {
             skipped.push((pr.number, "harvested before".into()));
             continue;
         }
@@ -145,14 +165,11 @@ pub(crate) fn bases(root: &Path) -> Vec<String> {
 }
 
 /// `github.com/owner/name` for the repo at `root`.
-async fn repo_slug(root: &Path) -> Result<String, String> {
-    let url = crate::pull_request::gh(
-        Some(root),
-        &["repo", "view", "--json", "url", "--jq", ".url"],
-        GH_TIMEOUT,
-    )
-    .await
-    .ok_or("gh couldn't say which GitHub repo this is")?;
+async fn repo_slug(gh: &dyn Gh, root: &Path) -> Result<String, String> {
+    let url = gh
+        .run(root, &["repo", "view", "--json", "url", "--jq", ".url"])
+        .await
+        .map_err(|why| format!("gh couldn't say which GitHub repo this is: {why}"))?;
     let url = url.trim();
     Ok(url
         .strip_prefix("https://")
@@ -161,44 +178,42 @@ async fn repo_slug(root: &Path) -> Result<String, String> {
         .to_string())
 }
 
-/// Backfill project `project` (main checkout `root`) from the pull
-/// requests merged since `since` (`YYYY-MM-DD`), saying how it goes on
-/// `say`.
+/// Backfill the project `share` writes for from the pull requests
+/// merged since `since` (`YYYY-MM-DD`), saying how it goes on `say`.
 pub(crate) async fn run(
     model: &dyn Model,
-    root: &Path,
-    project: &str,
+    share: &Sharer<'_>,
     since: &str,
     say: &mut (dyn FnMut(&str) + Send),
 ) -> Result<Summary, String> {
-    let store = Store::of(root);
-    store.init()?;
+    let root = share.main.as_path();
+    let gh = share.gh;
     let search = format!("merged:>={since}");
-    let list = crate::pull_request::gh(
-        Some(root),
-        &[
-            "pr",
-            "list",
-            "--state",
-            "merged",
-            "--search",
-            &search,
-            "--limit",
-            "1000",
-            "--json",
-            "number,headRefName,mergedAt",
-        ],
-        GH_TIMEOUT,
-    )
-    .await
-    .ok_or("gh couldn't list the merged pull requests")?;
+    let list = gh
+        .run(
+            root,
+            &[
+                "pr",
+                "list",
+                "--state",
+                "merged",
+                "--search",
+                &search,
+                "--limit",
+                "1000",
+                "--json",
+                "number,headRefName,mergedAt",
+            ],
+        )
+        .await
+        .map_err(|why| format!("gh couldn't list the merged pull requests: {why}"))?;
     let prs = read_list(&list);
     say(&format!(
         "{} pull requests merged since {since}.",
         prs.len()
     ));
 
-    let slug = repo_slug(root).await?;
+    let slug = repo_slug(gh, root).await?;
     let folder = orion_core::Project::folder_name(root);
     let found = transcripts::list(
         &transcripts::claude_roots(),
@@ -218,63 +233,112 @@ pub(crate) async fn run(
     .await
     .map_err(|e| e.to_string())?;
 
-    let (todo, skipped) = plan(&store, &prs, &scans, &bases(root));
+    let (todo, skipped) = {
+        let branch = share.open().await?;
+        let store = branch.store();
+        let harvested =
+            |pr: u64| share.local.has_source(pr) || store.entries().iter().any(|e| e.pr == pr);
+        plan(&harvested, &prs, &scans, &bases(root))
+    };
     let mut summary = Summary {
         skipped,
         ..Summary::default()
     };
     say(&format!("{} to harvest.", todo.len()));
-    for (n, (pr, found)) in todo.iter().enumerate() {
-        say(&format!(
-            "[{}/{}] #{} ({} transcripts)…",
-            n + 1,
-            todo.len(),
-            pr.number,
-            found.len()
-        ));
-        let gathered = harvest::gather_pr(root, pr.number).await;
-        let (info, comments) = match gathered {
-            Ok(g) => g,
-            Err(why) => {
-                summary.failed.push((pr.number, why));
-                continue;
-            }
+    let mut done = 0;
+    for batch in todo.chunks(BATCH) {
+        let branch = share.open().await?;
+        let store = branch.store();
+        let records = records::for_check_in(&branch.clone);
+        let to = Target {
+            store: &store,
+            local: &share.local,
+            project: &share.project,
+            records: &records,
         };
-        let found = found.clone();
-        let sessions = tokio::task::spawn_blocking(move || {
-            found.iter().filter_map(session_of).collect::<Vec<_>>()
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        let (outcome, unchecked) =
-            harvest::harvest_merge(model, &store, project, root, &info, &comments, &sessions).await;
-        if let Some(why) = unchecked {
-            say(&format!("  not checked against the code: {why}"));
+        let mut numbers = Vec::new();
+        for (pr, found) in batch {
+            done += 1;
+            say(&format!(
+                "[{done}/{}] #{} ({} transcripts)…",
+                todo.len(),
+                pr.number,
+                found.len()
+            ));
+            let (info, comments) = match harvest::gather_pr(gh, root, pr.number).await {
+                Ok(g) => g,
+                Err(why) => {
+                    summary.failed.push((pr.number, why));
+                    continue;
+                }
+            };
+            let found = found.clone();
+            let sessions = tokio::task::spawn_blocking(move || {
+                found.iter().filter_map(session_of).collect::<Vec<_>>()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            let (outcome, unchecked) =
+                harvest::harvest_merge(model, &to, root, &info, &comments, &sessions).await;
+            if let Some(why) = unchecked {
+                say(&format!("  not checked against the code: {why}"));
+            }
+            match outcome {
+                Ok(outcome) => {
+                    say(&format!(
+                        "  {} rules kept, {} dropped",
+                        outcome.kept, outcome.dropped
+                    ));
+                    numbers.push(format!("#{}", outcome.pr));
+                    summary.harvested.push(outcome);
+                }
+                Err(why) => {
+                    say(&format!("  failed: {why}"));
+                    summary.failed.push((pr.number, why));
+                }
+            }
         }
-        match outcome {
-            Ok(outcome) => {
-                say(&format!(
-                    "  {} rules kept, {} dropped",
-                    outcome.kept, outcome.dropped
-                ));
-                summary.harvested.push(outcome);
-            }
-            Err(why) => {
-                say(&format!("  failed: {why}"));
-                summary.failed.push((pr.number, why));
-            }
+        if !numbers.is_empty() {
+            let message = format!("knowledge: backfill {}", numbers.join(", "));
+            let published = share.publish(&branch, &message).await?;
+            say_published(say, &published);
+            summary.published(published);
         }
     }
     say("Staleness pass over every topic…");
     match harvest::CheckTree::of_base(root).await {
         Ok(tree) => {
-            let stale = harvest::staleness(model, &store, project, &tree.path).await;
+            let stale = async {
+                let branch = share.open().await?;
+                let store = branch.store();
+                let records = records::for_check_in(&branch.clone);
+                let to = Target {
+                    store: &store,
+                    local: &share.local,
+                    project: &share.project,
+                    records: &records,
+                };
+                let stale = harvest::staleness(model, &to, &tree.path).await?;
+                let published = share.publish(&branch, "knowledge: staleness check").await?;
+                Ok::<_, String>((stale, published))
+            }
+            .await;
             tree.remove().await;
-            summary.stale = stale?;
+            let (stale, published) = stale?;
+            say_published(say, &published);
+            summary.published(published);
+            summary.stale = stale;
         }
         Err(why) => say(&format!("  skipped, no checkout to read: {why}")),
     }
     Ok(summary)
+}
+
+/// Where a batch went.
+fn say_published(say: &mut (dyn FnMut(&str) + Send), published: &Published) {
+    if let Some(pr) = &published.pr {
+        say(&format!("  proposed in #{} {}", pr.number, pr.url));
+    }
 }
 
 #[cfg(test)]
@@ -309,9 +373,7 @@ mod tests {
     #[test]
     fn the_plan_skips_what_was_harvested_and_what_has_no_transcripts() {
         let repo = tempfile::tempdir().unwrap();
-        let store = Store::of(repo.path());
-        store.init().unwrap();
-        store.write_source(4, "done").unwrap();
+        let harvested = |pr: u64| pr == 4;
         let prs = read_list(
             r#"[{"number": 4, "headRefName": "a", "mergedAt": "1"},
                 {"number": 5, "headRefName": "b", "mergedAt": "2"},
@@ -323,7 +385,7 @@ mod tests {
             scan("/t/s2.jsonl", Shape::Claude, &["dev"], &[(7, 3)]),
             scan("/t/c1.jsonl", Shape::Cursor, &[], &[(5, 2), (7, 1)]),
         ];
-        let (todo, skipped) = plan(&store, &prs, &scans, &bases(repo.path()));
+        let (todo, skipped) = plan(&harvested, &prs, &scans, &bases(repo.path()));
         let todo: Vec<(u64, Vec<String>)> = todo
             .iter()
             .map(|(p, f)| (p.number, f.iter().map(Found::session).collect()))

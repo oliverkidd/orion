@@ -1,4 +1,4 @@
-//! HARVEST: one merged pull request into the store. Its dossier (the PR's
+//! HARVEST: one merged pull request into the harvested pages. Its dossier (the PR's
 //! description and thread, and the condensed sessions that built it) is
 //! read by Opus for entries ([`extract`]); the guards hold those to what
 //! the owner said ([`super::guards`]); each topic they touch is checked
@@ -6,9 +6,11 @@
 //! may read a checkout of the merge ([`check_topic`], [`CheckTree`]): a
 //! temporary detached worktree, since the main checkout may not have the
 //! merge yet. With no such checkout the entries are merged unchecked, at
-//! low confidence, rather than lost. Then the pages,
-//! `entries.jsonl`, `index.md` and the dossier are written and committed
-//! as `harvest #<pr>`.
+//! low confidence, rather than lost. Then the pages, `entries.jsonl` and
+//! `index.md` are written into the knowledge branch's checkout, and the
+//! dossier kept on this machine; the caller commits and proposes them
+//! (`super::share`). The repo's hand-written records are context to both
+//! calls, and always win over a harvested rule.
 //!
 //! The model is a [`Model`]: the real one runs the Claude CLI
 //! ([`ClaudeCli`]); a test hands in its own answers.
@@ -22,6 +24,8 @@ use serde_json::{json, Value};
 
 use super::condense::Line;
 use super::guards;
+use super::local::Local;
+use super::share::Gh;
 use super::store::{Entry, Store, ACTIVE, DROPPED, SECTIONS};
 use crate::oneshot::{self, Account};
 
@@ -84,7 +88,8 @@ You get the topic, its current page (or none yet) and new entries, each with an 
 - check its confirm_by, and the rule itself, against the code as it is now; drop it when it doesn't hold, saying why;
 - when it repeats a rule already on the page, merge the two into that rule, citing every PR;
 - mark an existing rule superseded (move it to Replaced, saying by what) only when a new entry clearly reverses it;
-- otherwise, when they conflict, list the conflict under Open questions.
+- otherwise, when they conflict, list the conflict under Open questions;
+- when an entry or a rule contradicts one of the hand-written records you are given, drop it (its why names the record) or list it under Open questions citing the record's path: a record always wins, and you never change one.
 
 Write the whole page in Markdown, at most {PAGE_WORDS} words, in exactly this shape:
 # <topic>
@@ -99,6 +104,9 @@ Each bullet is one rule of at most 30 words, then the PRs it came from, as (#123
 Reply with one JSON value and nothing else: {{"page": "<the whole page>", "dropped": [{{"id": "k…", "why": "…"}}]}}"#
     )
 }
+
+/// What both calls are told of the hand-written records.
+const RECORDS_RULE: &str = "The repo's hand-written decision records (in .orion/decisions/, outside harvested/) are authoritative and read-only. A record always wins: never record a rule that contradicts one; drop it, or list it under Open questions citing the record's path. Never restate a record as a rule.";
 
 /// What the staleness pass adds: no new entries, every rule checked.
 const STALE_TASK: &str = "There are no new entries. Check every rule and constraint on the page against the code as it is now. One that no longer holds moves to Replaced, saying why, its id comment kept; list its ids under dropped. Leave the rest as they are.";
@@ -305,21 +313,33 @@ pub(crate) struct Extracted {
     pub skipped: Vec<String>,
 }
 
+/// The records as a prompt gives them.
+fn records_part(records: &str) -> String {
+    match records.trim() {
+        "" => "The repo's hand-written decision records: (none)".into(),
+        records => {
+            format!("The repo's hand-written decision records (read-only; they win):\n{records}")
+        }
+    }
+}
+
 /// Ask the model for `dossier`'s entries, with the store's `index` to
-/// pick topics from.
+/// pick topics from and the hand-written `records` to defer to.
 pub(crate) async fn extract(
     model: &dyn Model,
     dossier: &Dossier,
     index: Option<&str>,
+    records: &str,
 ) -> Result<Extracted, String> {
     let index = index.unwrap_or("(none yet)");
     let prompt = format!(
-        "The repo's existing knowledge index:\n{index}\n\nThe dossier:\n\n{}",
+        "The repo's existing knowledge index:\n{index}\n\n{}\n\nThe dossier:\n\n{}",
+        records_part(records),
         dossier.text
     );
     let reply = model
         .ask(ModelAsk {
-            system: format!("{EXTRACT_SYSTEM}\n\n{JSON_ONLY}"),
+            system: format!("{EXTRACT_SYSTEM}\n\n{RECORDS_RULE}\n\n{JSON_ONLY}"),
             prompt,
             cwd: None,
             read_tools: false,
@@ -358,6 +378,7 @@ pub(crate) struct Checked {
 pub(crate) async fn check_topic(
     model: &dyn Model,
     store: &Store,
+    records: &str,
     topic: &str,
     new: &[Entry],
     code: Result<&Path, &str>,
@@ -381,16 +402,19 @@ pub(crate) async fn check_topic(
             )
         }
     };
-    let prompt = format!("Topic: {topic}\n\nCurrent page:\n{page}\n\n{task}");
+    let prompt = format!(
+        "Topic: {topic}\n\n{}\n\nCurrent page:\n{page}\n\n{task}",
+        records_part(records)
+    );
     let ask = match code {
         Ok(dir) => ModelAsk {
-            system: check_system(),
+            system: format!("{}\n\n{RECORDS_RULE}", check_system()),
             prompt,
             cwd: Some(dir.to_path_buf()),
             read_tools: true,
         },
         Err(_) => ModelAsk {
-            system: format!("{}\n\n{UNCHECKED}", check_system()),
+            system: format!("{}\n\n{RECORDS_RULE}\n\n{UNCHECKED}", check_system()),
             prompt,
             cwd: None,
             read_tools: false,
@@ -447,14 +471,33 @@ pub(crate) struct Outcome {
     pub topics: Vec<String>,
 }
 
-/// Harvest the merged `pr` of the repo at `root` into `store`: its
-/// dossier from `comments` and `sessions`, checked against a checkout of
-/// the merge ([`CheckTree::of_merge`], removed after). The outcome, and
-/// why the entries went unchecked when there was no checkout to read.
+/// Where a harvest writes: the knowledge branch's checkout, this
+/// machine's folder for the dossiers, and what it reads besides.
+pub(crate) struct Target<'a> {
+    /// The harvested pages, in the working clone.
+    pub store: &'a Store,
+    pub local: &'a Local,
+    pub project: &'a str,
+    /// The hand-written records, as the calls read them
+    /// (`super::records::for_check`).
+    pub records: &'a str,
+}
+
+impl Target<'_> {
+    /// Whether pull request `pr` was harvested: here, or by anyone whose
+    /// harvest the branch has.
+    pub(crate) fn harvested(&self, pr: u64) -> bool {
+        self.local.has_source(pr) || self.store.entries().iter().any(|e| e.pr == pr)
+    }
+}
+
+/// Harvest the merged `pr` of the repo at `root` into `to`: its dossier
+/// from `comments` and `sessions`, checked against a checkout of the
+/// merge ([`CheckTree::of_merge`], removed after). The outcome, and why
+/// the entries went unchecked when there was no checkout to read.
 pub(crate) async fn harvest_merge(
     model: &dyn Model,
-    store: &Store,
-    project: &str,
+    to: &Target<'_>,
     root: &Path,
     pr: &Pr,
     comments: &[Comment],
@@ -462,7 +505,7 @@ pub(crate) async fn harvest_merge(
 ) -> (Result<Outcome, String>, Option<String>) {
     let dossier = dossier(pr, comments, sessions);
     let tree = CheckTree::of_merge(root, pr).await;
-    let outcome = harvest(model, store, project, pr, &dossier, code_at(&tree)).await;
+    let outcome = harvest(model, to, pr, &dossier, code_at(&tree)).await;
     match tree {
         Ok(tree) => {
             tree.remove().await;
@@ -472,22 +515,21 @@ pub(crate) async fn harvest_merge(
     }
 }
 
-/// Harvest `pr` from `dossier` into `store` (made if it isn't yet), and
-/// commit it as `harvest #<pr>`, the entries checked against the code at
-/// `code` ([`CheckTree::of_merge`]) — or, with none (`Err`, why), kept
-/// unchecked at low confidence with a note saying so. Nothing is written
-/// unless every step worked.
+/// Harvest `pr` from `dossier` into `to`, the entries checked against
+/// the code at `code` ([`CheckTree::of_merge`]) — or, with none (`Err`,
+/// why), kept unchecked at low confidence with a note saying so. Nothing
+/// is written unless every step worked; nothing is committed (the caller
+/// does, `super::share`).
 pub(crate) async fn harvest(
     model: &dyn Model,
-    store: &Store,
-    project: &str,
+    to: &Target<'_>,
     pr: &Pr,
     dossier: &Dossier,
     code: Result<&Path, &str>,
 ) -> Result<Outcome, String> {
-    store.init()?;
+    let store = to.store;
     let index = store.index();
-    let extracted = extract(model, dossier, index.as_deref()).await?;
+    let extracted = extract(model, dossier, index.as_deref(), to.records).await?;
     let guarded = guards::apply(extracted.entries, &dossier.owner_lines);
     let mut dropped = guarded.dropped.len();
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -516,7 +558,7 @@ pub(crate) async fn harvest(
     }
     let mut pages = Vec::new();
     for (topic, new) in &by_topic {
-        let checked = check_topic(model, store, topic, new, code).await?;
+        let checked = check_topic(model, store, to.records, topic, new, code).await?;
         for (id, why) in &checked.dropped {
             if let Some(e) = entries.iter_mut().find(|e| &e.id == id) {
                 e.status = DROPPED.into();
@@ -537,10 +579,9 @@ pub(crate) async fn harvest(
             source.push_str(&format!("- {s}\n"));
         }
     }
-    store.write_source(pr.number, &source)?;
     store.append(&entries)?;
-    store.write_index(project)?;
-    store.commit(&format!("harvest #{}", pr.number))?;
+    store.write_index(to.project)?;
+    to.local.write_source(pr.number, &source)?;
     Ok(Outcome {
         pr: pr.number,
         kept: entries.iter().filter(|e| e.status == ACTIVE).count(),
@@ -551,18 +592,18 @@ pub(crate) async fn harvest(
 
 /// The staleness pass: every topic's rules checked against the code at
 /// `code` (the base as origin has it, [`CheckTree::of_base`]), the ones
-/// that no longer hold moved to Replaced. Committed as `staleness
-/// check`. The topics changed.
+/// that no longer hold moved to Replaced. Not committed (the caller
+/// does). The topics changed.
 pub(crate) async fn staleness(
     model: &dyn Model,
-    store: &Store,
-    project: &str,
+    to: &Target<'_>,
     code: &Path,
 ) -> Result<Vec<String>, String> {
+    let store = to.store;
     let mut changed = Vec::new();
     let mut entries = store.entries();
     for topic in store.topics() {
-        let checked = match check_topic(model, store, &topic, &[], Ok(code)).await {
+        let checked = match check_topic(model, store, to.records, &topic, &[], Ok(code)).await {
             Ok(checked) => checked,
             Err(why) => {
                 tracing::warn!("knowledge: staleness check of {topic} failed: {why}");
@@ -581,8 +622,7 @@ pub(crate) async fn staleness(
         }
     }
     store.save_entries(&entries)?;
-    store.write_index(project)?;
-    store.commit("staleness check")?;
+    store.write_index(to.project)?;
     Ok(changed)
 }
 
@@ -699,7 +739,7 @@ fn remove_tree(repo: &Path, path: &Path) {
 }
 
 /// The repo's base branch: origin's default, else `main`.
-fn default_base(repo: &Path) -> String {
+pub(crate) fn default_base(repo: &Path) -> String {
     crate::git_proc::read(
         repo,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
@@ -712,39 +752,36 @@ fn default_base(repo: &Path) -> String {
 
 // ---- gathering, from GitHub ----
 
-const GH_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// Pull request `number` of the repo at `root`, with its thread: the
 /// conversation, the reviews and the comments on lines.
-pub(crate) async fn gather_pr(root: &Path, number: u64) -> Result<(Pr, Vec<Comment>), String> {
+pub(crate) async fn gather_pr(
+    gh: &dyn Gh,
+    root: &Path,
+    number: u64,
+) -> Result<(Pr, Vec<Comment>), String> {
     let n = number.to_string();
-    let view = crate::pull_request::gh(
-        Some(root),
-        &[
-            "pr",
-            "view",
-            &n,
-            "--json",
-            "number,url,title,body,headRefName,baseRefName,mergeCommit,mergedAt,comments,reviews",
-        ],
-        GH_TIMEOUT,
-    )
-    .await
-    .ok_or_else(|| format!("gh couldn't read PR #{number}"))?;
+    let view = gh
+        .run(
+            root,
+            &[
+                "pr",
+                "view",
+                &n,
+                "--json",
+                "number,url,title,body,headRefName,baseRefName,mergeCommit,mergedAt,comments,reviews",
+            ],
+        )
+        .await
+        .map_err(|why| format!("gh couldn't read PR #{number}: {why}"))?;
     let view: Value = serde_json::from_str(&view).map_err(|e| e.to_string())?;
     let path = format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments");
-    let lines = crate::pull_request::gh(
-        Some(root),
-        &["api", &path, "--paginate", "--jq", ".[]"],
-        GH_TIMEOUT,
-    )
-    .await
-    .unwrap_or_default();
-    // The gh user: who "OWNER" is on the thread.
-    let me = crate::pull_request::viewer_login()
+    let lines = gh
+        .run(root, &["api", &path, "--paginate", "--jq", ".[]"])
         .await
         .unwrap_or_default();
-    Ok(read_pr(&view, &lines, me))
+    // The gh user: who "OWNER" is on the thread.
+    let me = gh.login().await.unwrap_or_default();
+    Ok(read_pr(&view, &lines, &me))
 }
 
 /// `gh pr view`'s JSON and the line comments (one JSON object a line)
@@ -990,13 +1027,40 @@ pub(crate) mod tests {
         assert!(d.text.len() < DOSSIER_CHARS);
     }
 
+    /// A checkout to harvest into, and a folder for the dossiers.
+    pub(crate) struct Bench {
+        pub repo: tempfile::TempDir,
+        pub store: Store,
+        pub local: Local,
+    }
+
+    impl Bench {
+        pub(crate) fn new() -> Self {
+            let repo = tempfile::tempdir().unwrap();
+            let store = Store::of(repo.path());
+            let local = Local::at("01P", &repo.path().join("local"));
+            Bench { repo, store, local }
+        }
+
+        pub(crate) fn target<'a>(&'a self, records: &'a str) -> Target<'a> {
+            Target {
+                store: &self.store,
+                local: &self.local,
+                project: "app",
+                records,
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn a_harvest_guards_checks_writes_and_commits() {
-        let repo = tempfile::tempdir().unwrap();
-        let store = Store::of(repo.path());
+    async fn a_harvest_guards_checks_and_writes() {
+        let into = Bench::new();
+        let (repo, store) = (&into.repo, &into.store);
         let model = Scripted::new(vec![extraction(), checked_page()]);
         let d = dossier(&pr(), &[], &sessions());
-        let out = harvest(&model, &store, "app", &pr(), &d, Ok(repo.path()))
+        let records =
+            "### Sessions last 30 days (.orion/decisions/0001-sessions.md)\nDecided with legal.";
+        let out = harvest(&model, &into.target(records), &pr(), &d, Ok(repo.path()))
             .await
             .unwrap();
         assert_eq!(
@@ -1044,32 +1108,41 @@ pub(crate) mod tests {
             .index()
             .unwrap()
             .contains("- `auth/login` — src/auth — 1 rule"));
-        let source = std::fs::read_to_string(store.source_path(12)).unwrap();
+        let source = std::fs::read_to_string(into.local.source_path(12)).unwrap();
         assert!(source.contains("## Considered and skipped\n- the redirect refactor"));
-        let log = crate::git_proc::read(&store.dir, &["log", "--format=%s"]).unwrap();
-        assert_eq!(log.trim(), "harvest #12");
+        assert!(
+            !store.dir.join("sources").exists(),
+            "no dossier in the repo"
+        );
+        assert!(into.target("").harvested(12) && !into.target("").harvested(13));
+        // The records are context to both calls, and win.
+        for ask in asked.iter() {
+            assert!(ask.prompt.contains(records), "{}", ask.prompt);
+            assert!(ask.system.contains(RECORDS_RULE));
+        }
     }
 
     #[tokio::test]
     async fn a_failed_check_writes_nothing() {
-        let repo = tempfile::tempdir().unwrap();
-        let store = Store::of(repo.path());
+        let into = Bench::new();
         let model = Scripted::new(vec![extraction(), r#"{"page": "nonsense"}"#.into()]);
         let d = dossier(&pr(), &[], &sessions());
-        assert!(harvest(&model, &store, "app", &pr(), &d, Ok(repo.path()))
-            .await
-            .is_err());
-        assert!(store.entries().is_empty());
-        assert!(!store.harvested(12));
+        assert!(
+            harvest(&model, &into.target(""), &pr(), &d, Ok(into.repo.path()))
+                .await
+                .is_err()
+        );
+        assert!(into.store.entries().is_empty());
+        assert!(!into.target("").harvested(12));
     }
 
     #[tokio::test]
     async fn with_no_checkout_the_entries_are_kept_unchecked_at_low_confidence() {
-        let repo = tempfile::tempdir().unwrap();
-        let store = Store::of(repo.path());
+        let into = Bench::new();
+        let store = &into.store;
         let model = Scripted::new(vec![extraction(), checked_page()]);
         let d = dossier(&pr(), &[], &sessions());
-        let out = harvest(&model, &store, "app", &pr(), &d, Err("no origin"))
+        let out = harvest(&model, &into.target(""), &pr(), &d, Err("no origin"))
             .await
             .unwrap();
         assert_eq!(
@@ -1154,10 +1227,10 @@ pub(crate) mod tests {
     async fn a_merge_is_harvested_against_its_checkout_or_said_unchecked() {
         let tmp = tempfile::tempdir().unwrap();
         let (clone, merged) = merged_after_clone(tmp.path(), 4343);
-        let store = Store::of(&clone);
+        let into = Bench::new();
         let model = Scripted::new(vec![extraction(), checked_page()]);
         let (out, unchecked) =
-            harvest_merge(&model, &store, "app", &clone, &merged, &[], &sessions()).await;
+            harvest_merge(&model, &into.target(""), &clone, &merged, &[], &sessions()).await;
         assert_eq!(out.unwrap().pr, 4343);
         assert_eq!(unchecked, None);
         let asked = std::mem::take(&mut *model.asked.lock().unwrap());
@@ -1168,10 +1241,17 @@ pub(crate) mod tests {
 
         // Nothing to fetch from: harvested all the same, saying why.
         let bare = tempfile::tempdir().unwrap();
-        let store = Store::of(bare.path());
+        let into = Bench::new();
         let model = Scripted::new(vec![extraction(), checked_page()]);
-        let (out, unchecked) =
-            harvest_merge(&model, &store, "app", bare.path(), &pr(), &[], &sessions()).await;
+        let (out, unchecked) = harvest_merge(
+            &model,
+            &into.target(""),
+            bare.path(),
+            &pr(),
+            &[],
+            &sessions(),
+        )
+        .await;
         assert_eq!(out.unwrap().kept, 2);
         assert!(unchecked.is_some_and(|why| why.contains("couldn't fetch")));
         assert!(model.asked.lock().unwrap()[1].cwd.is_none());

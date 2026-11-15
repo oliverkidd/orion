@@ -1,16 +1,19 @@
-//! The SESSION SNAPSHOT: `<data_dir>/automations/sessions-by-branch.json`,
-//! which sessions sat on which branch of which project. A harvest at merge
+//! The SESSION SNAPSHOT: `<data_dir>/knowledge/<project id>/snapshot.json`,
+//! which sessions sat on which branch of the project. A harvest at merge
 //! reads it, so a session's id outlives the worktree it ran in. It also
-//! remembers each project's main checkout by name, which is how the CLI
-//! finds a project with no TUI running.
+//! keeps the project's name and main checkout, which is how the CLI finds
+//! a project with no TUI running ([`known`]).
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use orion_core::clock::DAY_MS;
 use serde::{Deserialize, Serialize};
 
-const FILE: &str = "sessions-by-branch.json";
+use super::local::Local;
+
+/// Where the snapshot of every project was kept before each project had
+/// its own: read once, for a project that has none yet.
+const OLD_FILE: &str = "sessions-by-branch.json";
 /// How long a branch is kept after its last session was seen.
 const KEEP_MS: i64 = 180 * DAY_MS;
 /// How far a known session's last sighting may drift before it is worth
@@ -30,78 +33,75 @@ pub(crate) struct Session {
     pub seen_at: i64,
 }
 
-/// The sessions of one branch of one project.
+/// The sessions of one branch.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Branch {
-    pub project: String,
-    /// The project's main checkout.
-    pub root: PathBuf,
     pub branch: String,
     pub sessions: Vec<Session>,
 }
 
+/// One project's snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Snapshot {
-    /// Project name → its main checkout.
-    pub projects: BTreeMap<String, PathBuf>,
+    /// The project's name.
+    pub name: String,
+    /// Its main checkout.
+    pub root: PathBuf,
     pub branches: Vec<Branch>,
 }
 
 /// One session sitting on a branch right now, as the tree shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Sighting {
-    pub project: String,
-    pub root: PathBuf,
     pub branch: String,
     pub session: Session,
 }
 
-impl Snapshot {
-    pub(crate) fn path() -> PathBuf {
-        crate::automations::state_dir().join(FILE)
-    }
+/// One project as the tree shows it, with its sessions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Seen {
+    pub id: String,
+    pub name: String,
+    pub root: PathBuf,
+    pub sightings: Vec<Sighting>,
+}
 
-    pub(crate) fn load_from(path: &Path) -> Snapshot {
+impl Snapshot {
+    pub(crate) fn load_from(path: &Path) -> Option<Snapshot> {
         std::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
     }
 
-    pub(crate) fn load() -> Snapshot {
-        Self::load_from(&Self::path())
+    /// `local`'s snapshot: its file, else what the old shared one kept of
+    /// the project at `root`.
+    pub(crate) fn load(local: &Local, root: &Path) -> Snapshot {
+        Self::load_from(&local.snapshot_path()).unwrap_or_else(|| Snapshot {
+            root: root.to_path_buf(),
+            branches: old_branches(&crate::automations::state_dir().join(OLD_FILE), root),
+            ..Snapshot::default()
+        })
     }
 
     pub(crate) fn save_to(&self, path: &Path) -> Result<(), String> {
         crate::pr_cache::write_json_atomic(path, self).map_err(|e| e.to_string())
     }
 
-    /// Take in what the tree shows now: each project's checkout, and each
-    /// session on its branch — a new one added, a known one's time moved.
-    /// Branches unseen for [`KEEP_MS`] go. Whether anything changed.
-    pub(crate) fn note(
-        &mut self,
-        projects: &[(String, PathBuf)],
-        seen: &[Sighting],
-        now: i64,
-    ) -> bool {
+    /// Take in what the tree shows now: the project's name and checkout,
+    /// and each session on its branch — a new one added, a known one's
+    /// time moved. Branches unseen for [`KEEP_MS`] go. Whether anything
+    /// changed.
+    pub(crate) fn note(&mut self, name: &str, root: &Path, seen: &[Sighting], now: i64) -> bool {
         let before = self.clone();
-        for (name, root) in projects {
-            self.projects.insert(name.clone(), root.clone());
-        }
+        self.name = name.to_string();
+        self.root = root.to_path_buf();
         for s in seen {
-            let at = match self
-                .branches
-                .iter()
-                .position(|b| b.root == s.root && b.branch == s.branch)
-            {
+            let at = match self.branches.iter().position(|b| b.branch == s.branch) {
                 Some(at) => at,
                 None => {
                     self.branches.push(Branch {
-                        project: s.project.clone(),
-                        root: s.root.clone(),
                         branch: s.branch.clone(),
                         sessions: Vec::new(),
                     });
@@ -109,7 +109,6 @@ impl Snapshot {
                 }
             };
             let branch = &mut self.branches[at];
-            branch.project = s.project.clone();
             match branch.sessions.iter_mut().find(|x| x.id == s.session.id) {
                 Some(known) if now - known.seen_at < DRIFT_MS && known.cwd == s.session.cwd => {}
                 Some(known) => *known = s.session.clone(),
@@ -126,33 +125,70 @@ impl Snapshot {
         *self != before
     }
 
-    /// The sessions that sat on `branch` of the project at `root`.
-    pub(crate) fn sessions_on(&self, root: &Path, branch: &str) -> Vec<Session> {
+    /// The sessions that sat on `branch`.
+    pub(crate) fn sessions_on(&self, branch: &str) -> Vec<Session> {
         self.branches
             .iter()
-            .filter(|b| b.root == root && b.branch == branch)
+            .filter(|b| b.branch == branch)
             .flat_map(|b| b.sessions.clone())
             .collect()
     }
-
-    /// The main checkout of the project called `name`.
-    pub(crate) fn root_of(&self, name: &str) -> Option<PathBuf> {
-        self.projects.get(name).cloned()
-    }
 }
 
-/// What the tree shows: each project, and each session with an id on a
-/// worktree's branch — an archived one left out, as it sits nowhere now.
-pub(crate) fn sightings(
-    tree: &crate::app::Tree,
-    now: i64,
-) -> (Vec<(String, PathBuf)>, Vec<Sighting>) {
-    let projects = tree
+/// The branches the old shared snapshot at `path` kept for the project
+/// at `root`.
+fn old_branches(path: &Path, root: &Path) -> Vec<Branch> {
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct OldBranch {
+        root: PathBuf,
+        branch: String,
+        sessions: Vec<Session>,
+    }
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Old {
+        branches: Vec<OldBranch>,
+    }
+    let old: Old = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    old.branches
+        .into_iter()
+        .filter(|b| b.root == root)
+        .map(|b| Branch {
+            branch: b.branch,
+            sessions: b.sessions,
+        })
+        .collect()
+}
+
+/// Every project orion has a snapshot of: its folder and snapshot.
+pub(crate) fn known() -> Vec<(Local, Snapshot)> {
+    Local::all()
+        .into_iter()
+        .filter_map(|local| {
+            let snap = Snapshot::load_from(&local.snapshot_path())?;
+            Some((local, snap))
+        })
+        .collect()
+}
+
+/// What the tree shows: each project, with each session with an id on
+/// one of its worktrees' branches — an archived one left out, as it sits
+/// nowhere now.
+pub(crate) fn sightings(tree: &crate::app::Tree, now: i64) -> Vec<Seen> {
+    let mut seen: Vec<Seen> = tree
         .projects
         .iter()
-        .map(|p| (p.name.clone(), p.repo_path.clone()))
+        .map(|p| Seen {
+            id: p.id.to_string(),
+            name: p.name.clone(),
+            root: p.repo_path.clone(),
+            sightings: Vec::new(),
+        })
         .collect();
-    let mut seen = Vec::new();
     for agent in tree.agents.iter().filter(|a| !a.archived) {
         let Some(id) = agent.session_id.as_deref().filter(|id| !id.is_empty()) else {
             continue;
@@ -160,15 +196,16 @@ pub(crate) fn sightings(
         let Some(worktree) = tree.worktrees.iter().find(|w| w.id == agent.worktree_id) else {
             continue;
         };
-        let Some(project) = tree.projects.iter().find(|p| p.id == worktree.project_id) else {
-            continue;
-        };
         if worktree.branch.is_empty() {
             continue;
         }
-        seen.push(Sighting {
-            project: project.name.clone(),
-            root: project.repo_path.clone(),
+        let Some(project) = seen
+            .iter_mut()
+            .find(|p| p.id == worktree.project_id.as_str())
+        else {
+            continue;
+        };
+        project.sightings.push(Sighting {
             branch: worktree.branch.clone(),
             session: Session {
                 id: id.to_string(),
@@ -178,7 +215,7 @@ pub(crate) fn sightings(
             },
         });
     }
-    (projects, seen)
+    seen
 }
 
 #[cfg(test)]
@@ -187,8 +224,6 @@ mod tests {
 
     fn sighting(branch: &str, id: &str, at: i64) -> Sighting {
         Sighting {
-            project: "app".into(),
-            root: "/src/app".into(),
             branch: branch.into(),
             session: Session {
                 id: id.into(),
@@ -202,38 +237,57 @@ mod tests {
     #[test]
     fn sessions_are_kept_by_branch_past_their_worktree() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(FILE);
+        let local = Local::at("01P", dir.path());
+        let root = Path::new("/src/app");
         let mut snap = Snapshot::default();
-        let projects = vec![("app".to_string(), PathBuf::from("/src/app"))];
-        assert!(snap.note(&projects, &[sighting("fix-a", "s1", 1_000)], 1_000));
-        assert!(snap.note(&projects, &[sighting("fix-a", "s2", 2_000)], 2_000));
+        assert!(snap.note("app", root, &[sighting("fix-a", "s1", 1_000)], 1_000));
+        assert!(snap.note("app", root, &[sighting("fix-a", "s2", 2_000)], 2_000));
         let drifted = 2_000 + DRIFT_MS;
         assert!(
             !snap.note(
-                &projects,
+                "app",
+                root,
                 &[sighting("fix-a", "s2", drifted - 1)],
                 drifted - 1
             ),
             "less than a day's drift"
         );
         assert!(
-            snap.note(&projects, &[sighting("fix-a", "s2", drifted)], drifted),
+            snap.note("app", root, &[sighting("fix-a", "s2", drifted)], drifted),
             "a day's drift"
         );
-        snap.save_to(&path).unwrap();
+        snap.save_to(&local.snapshot_path()).unwrap();
 
         // The worktree is gone: nothing sits on the branch any more.
-        let mut back = Snapshot::load_from(&path);
-        assert!(!back.note(&projects, &[], 5_000));
+        let mut back = Snapshot::load(&local, root);
+        assert!(!back.note("app", root, &[], 5_000));
         let ids: Vec<String> = back
-            .sessions_on(Path::new("/src/app"), "fix-a")
+            .sessions_on("fix-a")
             .into_iter()
             .map(|s| s.id)
             .collect();
         assert_eq!(ids, vec!["s1", "s2"]);
-        assert_eq!(back.root_of("app"), Some(PathBuf::from("/src/app")));
+        assert_eq!((back.name.as_str(), back.root.as_path()), ("app", root));
 
-        assert!(back.note(&projects, &[], drifted + KEEP_MS));
+        assert!(back.note("app", root, &[], drifted + KEEP_MS));
         assert!(back.branches.is_empty(), "long gone branches go");
+    }
+
+    #[test]
+    fn the_old_shared_snapshot_seeds_each_project_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join(OLD_FILE);
+        std::fs::write(
+            &old,
+            r#"{"projects": {"app": "/src/app"}, "branches": [
+                {"project": "app", "root": "/src/app", "branch": "fix-a", "sessions": [{"id": "s1", "harness": "claude", "cwd": "/wt/fix-a", "seen_at": 1}]},
+                {"project": "web", "root": "/src/web", "branch": "fix-b", "sessions": [{"id": "s9"}]}
+            ]}"#,
+        )
+        .unwrap();
+        let branches = old_branches(&old, Path::new("/src/app"));
+        assert_eq!(branches.len(), 1);
+        assert_eq!(branches[0].branch, "fix-a");
+        assert_eq!(branches[0].sessions[0].id, "s1");
     }
 }

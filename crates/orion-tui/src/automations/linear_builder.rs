@@ -1004,11 +1004,22 @@ pub fn context(app: &App, group: &Group) -> String {
     } else {
         out.push_str(&related.join("\n"));
     }
-    // KNOWLEDGE (track F): the store's index for this repo, empty while
-    // it has none.
+    // KNOWLEDGE (track F): the harvested index and the hand-written
+    // records, as the session's worktree will have them. It isn't cut yet
+    // — the daemon cuts it from the base when it starts the session — so
+    // they are read from that base's commit.
     let repo = app.tree.projects.iter().find(|p| p.id == group.project);
     if let Some(index) = repo
-        .map(|p| crate::knowledge::prompt_context(&p.repo_path))
+        .and_then(|p| {
+            let setting = crate::config::base_branch_of(Some(&p.repo_path));
+            let rev = crate::commit_list::resolve_base_cached(&p.repo_path, &setting)?;
+            Some(crate::knowledge::prompt_context(
+                &crate::knowledge::Checkout::Rev {
+                    repo: p.repo_path.clone(),
+                    rev,
+                },
+            ))
+        })
         .filter(|i| !i.trim().is_empty())
     {
         out.push_str(&format!(

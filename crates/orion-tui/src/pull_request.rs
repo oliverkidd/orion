@@ -233,7 +233,7 @@ pub(crate) async fn gh(
 /// out. [`lookup`] reads it — `gh pr view` says "no pull request" and
 /// "no network" with the same exit code and only the message apart — and
 /// [`list`], to tell a query GitHub refused from one that never reached it.
-async fn run_gh(
+pub(crate) async fn run_gh(
     dir: Option<&Path>,
     args: &[&str],
     timeout: std::time::Duration,
@@ -521,7 +521,7 @@ fn rollup_state(rollup: &serde_json::Value) -> Checks {
 /// Any failure fails the lot; else anything still running leaves the lot
 /// pending; else a cancelled job leaves it cancelled; else it passes — a
 /// skipped or neutral job is not a failure, and nor is a cancelled one.
-fn checks(rollup: &[serde_json::Value]) -> Checks {
+pub(crate) fn checks(rollup: &[serde_json::Value]) -> Checks {
     latest_runs(rollup)
         .into_iter()
         .map(|entry| check_state(&check_word(entry)).as_checks())

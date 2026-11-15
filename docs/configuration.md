@@ -271,6 +271,7 @@ These have no row.
 | `onboarded` | `false` | Whether setup has been seen. Kept in `config.local.json`; delete it, or run **Run setup** (palette) or `orion setup`, to see it again. |
 | `seen_version` | `""` | The release this machine last showed **What's new** for. Kept in `config.local.json`. |
 | `factory.auto_merge` | `false` | A factory pull request (one the bug fixer or the feature builder opened) whose verdict is **Merge** merges on its own, once its checks have settled, instead of waiting for your tap on its card. Marked ready first if it is a draft. |
+| `factory.knowledge_auto_merge` | `true` | orion merges its own knowledge pull request (`orion/knowledge-<login>`, the rules it harvested at merge) once the daily card's veto window has passed: two hours after the card, at once on **All fine**. It merges only a pull request GitHub says is mergeable, with no failing check (a running one is waited for) and the head orion last pushed, by the project's merge method, never forced; a merge refused twice is said on a card. `false` leaves the merge to you. See [Knowledge](how-it-works.md#knowledge). |
 
 ## Claude accounts
 
@@ -536,6 +537,10 @@ Everything orion writes under its data dir:
 | `pr-facts/` | the facts each factory agent handed over with `orion pr facts set`, one file per pull request | — |
 | `automations/pr-body.json` | per factory pull request: its ticket, whether its plan was posted, the verdict last recorded, its tier, and the card last sent | — |
 | `automations/factory-cards.json` | every software factory card sent on Slack and where it stands, so cards are closed and edited after a restart | a closed card 7 days after it was posted |
+| `knowledge/<project id>/sources/` | the condensed dossier each harvested pull request was read from (`<pr>.md`); never committed | — |
+| `knowledge/<project id>/queue.json`, `state.json` | merged pull requests waiting to be harvested; the daily knowledge card's rules and vetoes, the knowledge pull request and its veto window | a daily card's rules: 7 days |
+| `knowledge/<project id>/snapshot.json` | which sessions sat on which branch, so a harvest finds their transcripts after the worktree is gone; the project's name and main checkout, for `orion knowledge` | a branch 180 days after a session was last seen on it |
+| `knowledge/<project id>/repo/` | orion's working clone of the project (`git clone --shared` of the main checkout), where it commits harvested pages to `orion/knowledge-<login>` and pushes them for its pull request. The harvested pages themselves are committed in the repo, in `.orion/decisions/harvested/` | — |
 | `pr-body/` | the picture grids downloaded for verdict cards | — |
 | `quick_prompt_drafts.json` | unsent QUICK PROMPT text | until it is sent or cleared |
 | `attachments/` | files dropped or pasted into a prompt | 7 days |

@@ -204,10 +204,12 @@ pub(crate) enum Command {
     ///
     /// After a pull request merges, orion reads the sessions that built it
     /// and records the decisions you made — rules, constraints, how you want
-    /// agents to work — in `.orion/knowledge/` in the project's main
-    /// checkout, a git repository of its own. Agents read it before they
-    /// plan; `for` prints the pages for the files they will touch, and
-    /// `backfill` records the pull requests merged before orion started.
+    /// agents to work — in `.orion/decisions/harvested/` in the repo,
+    /// proposed in one pull request of yours (`orion/knowledge-<login>`).
+    /// Once it merges, agents read the pages before they plan, beside the
+    /// records written by hand in `.orion/decisions/`, which win. `for`
+    /// prints the pages for the files they will touch, and `backfill`
+    /// records the pull requests merged before orion started.
     #[command(subcommand, after_help = KNOWLEDGE_EXAMPLES)]
     Knowledge(KnowledgeCommand),
     /// Locate this machine's settings.
@@ -439,6 +441,7 @@ Examples:
 pub(crate) enum KnowledgeCommand {
     /// Print the recorded decisions for some files.
     ///
+    /// Reads `.orion/decisions/harvested/` in the checkout it runs in.
     /// Maps the paths to topics by their words and by the paths the
     /// recorded entries cite, and prints at most 4 topic pages (2,400
     /// words). With no topic matching, prints the index.
@@ -447,8 +450,8 @@ pub(crate) enum KnowledgeCommand {
         /// The files or folders, relative to the current directory.
         #[arg(required = true, num_args = 1.., value_name = "PATH")]
         paths: Vec<String>,
-        /// The project, by name or directory (default: the one the
-        /// current directory is in).
+        /// The project, by name or directory, to read from its main
+        /// checkout (default: the checkout the current directory is in).
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
     },
@@ -456,10 +459,11 @@ pub(crate) enum KnowledgeCommand {
     ///
     /// Lists the merged pull requests, joins each to the Claude and
     /// Cursor transcripts that worked on it (by branch, or by links to
-    /// it), and harvests them oldest first with Opus, as at merge; then
-    /// checks every topic against the code as it is now. Pull requests
-    /// recorded before are skipped, so it can be run again. Needs gh and
-    /// a Claude account, not the TUI.
+    /// it), and harvests them oldest first with Opus, as at merge, into
+    /// your knowledge pull request, a commit a batch; then checks every
+    /// topic against the code as it is now. Pull requests recorded before
+    /// are skipped, so it can be run again. Needs gh and a Claude account,
+    /// not the TUI.
     #[command(
         after_help = KNOWLEDGE_EXAMPLES,
         // Two lines: on one it runs past a 60-column terminal.

@@ -1359,7 +1359,8 @@ pub struct Config {
     /// settings (`crate::automations::config`).
     pub automations: crate::automations::config::AutomationsSettings,
     /// The software factory's switches that have no screen yet:
-    /// `factory.auto_merge` (`crate::pr_body`).
+    /// `factory.auto_merge` (`crate::pr_body`) and
+    /// `factory.knowledge_auto_merge` (`crate::knowledge`).
     pub factory: crate::pr_body::FactorySettings,
     /// Keys the files held that this build could not read; they loaded as
     /// defaults. Never written: [`Config::save`] reads it to leave those

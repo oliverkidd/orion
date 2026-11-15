@@ -828,7 +828,9 @@ request. They work the same way; each has its own labels and its own preset (**B
   screenshots (Linear's uploads, downloaded to `attachments/<ticket>/` in orion's data dir), for a
   bug up to 8 **Related tickets** from its team (open, or closed in the last 90 days) to look for a
   pattern in, **Related work to check** (the project's open drafts and recent merges), the repo's
-  knowledge index, and "Phase a large task, or propose a multi-agent workflow." As a ⌘L launch does,
+  harvested knowledge index and its hand-written decision records (`.orion/decisions/`, as the base
+  the worktree is cut from has them; see [Knowledge](how-it-works.md#knowledge)), and "Phase a large
+  task, or propose a multi-agent workflow." As a ⌘L launch does,
   it moves the tickets to In Progress and attaches the draft pull request to them when it opens.
   `ORION_AUTOMATION` is set in the session.
 - **Your approval.** Every plan waits for you like any other: in Needs you, and on your phone when

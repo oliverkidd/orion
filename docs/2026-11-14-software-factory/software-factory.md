@@ -30,7 +30,7 @@ The repo side is a separate plan, carried out in riplo-os by another session: th
 | Verdict | orion computes it from facts. Blocked: CI red; a conflict on a ready PR; an open Cubic P0 or P1; a visible change with no pictures. Review: a risky path from the repo's contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a [security], [dep] or [arch] call; or the size limits (bug: 3,000 changed lines or 60 files; feature: 5,000 or 70, excluding lockfiles, changesets, docs, snapshots and JSON). Skim: a visible change with pictures. Merge: everything else. |
 | Merging | Nothing merges without the owner's tap. Auto-merge is built but switched off. There is no revert machinery. |
 | Fixing | One branch, one agent. Red CI on a draft is fixed at once and repeatedly until green; conflicts are never fixed while the PR is a draft. Once the owner marks it ready, conflicts are fixed. The branch's own agent gets the work as a new turn when it's idle and under 75% of its context; when busy, it's queued until idle; above 75%, one fresh fixer gets a handover. Never two at once. Green fixers are archived. The owner's GitHub comments go to the branch's agent and are done in that PR. |
-| Knowledge | At merge, orion harvests every session that worked on the PR, plus the PR thread and Cubic. It extracts with **Opus**, and an entry credited to the owner must quote an OWNER line word for word, or it is downgraded to the agent. Each entry is checked against the merged code, then merged into topic pages. The store is gitignored at `<main checkout>/.orion/knowledge/`, with its own git history; only orion writes it. A daily card lists new owner rules, each with a veto. There is a one-off backfill of the sessions since June, plus a staleness check. |
+| Knowledge | At merge, orion harvests every session that worked on the PR, plus the PR thread and Cubic. It extracts with **Opus**, and an entry credited to the owner must quote an OWNER line word for word, or it is downgraded to the agent. Each entry is checked against the merged code, then merged into topic pages. It is committed in the repo, in `.orion/decisions/harvested/`, beside the hand-written decision records in `.orion/decisions/`, which are authoritative and read-only to orion: a harvested rule that contradicts one is dropped or left an open question. orion writes through one pull request per person (`orion/knowledge-<login>`), never a push to the base, and merges it itself after the daily card's veto window (`factory.knowledge_auto_merge`). Condensed transcripts and dossiers stay on the machine. A daily card lists new owner rules, each with a veto. There is a one-off backfill of the sessions since June, plus a staleness check. |
 | Slack | Every card (list in §8) goes to the owner's DM, and is mirrored as a Needs-you card. The thin-ticket DM goes to the reporter. |
 | Settings | Settings › Automations becomes **Factory**: "Agents working at once" (the overall cap), "Things waiting on you" (new, default 5: new tickets wait while this many factory items need the owner), and each runner on or off. |
 | Records | One JSON record per run. There are no metrics, judges, alarms or replay. Week in review gets a Factory section. A weekly retro proposes at most 3 fixes. Usage is not tracked and nothing pauses on usage. |
@@ -49,7 +49,7 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
 | C. Prompts | The builder and fixer prompt layers, and their tests | B (same file: do after B, or as part of B) |
 | D. PR body and verdict | A new `pr_body` module: facts, verdict, render, `orion pr` CLI | A (picture upload, cards) |
 | E. Fixing | The quiet-drafts plan, amended; the router; the review-comment relay | A (cards) |
-| F. Knowledge | A new `knowledge` module: store, harvest, daily card, backfill, `orion knowledge` CLI | A (cards) |
+| F. Knowledge | A new `knowledge` module: harvested pages, the knowledge pull request, harvest, daily card and merge, backfill, `orion knowledge` CLI | A (cards) |
 | G. Cards, records, week in review | The Needs-you factory source, run records, the week-in-review Factory section, the retro | A, B, D |
 
 ---
@@ -239,13 +239,14 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
 
 ## F. Knowledge (new `crates/orion-tui/src/knowledge/` module, `orion knowledge` CLI)
 
-1. **Store.**
-   - Lives at `<project main checkout>/.orion/knowledge/` and is created on first use.
-   - On first use, `git init` it if it has no `.git`.
-   - If `.orion/` isn't ignored by the repo (`git check-ignore`), show a one-time card asking the owner to add it to `.gitignore`.
-   - Layout: `index.md` (at most 40 lines: one line per topic with scope and rule count), `<area>/<topic>.md`, `entries.jsonl`, and `sources/<pr>.md` (the condensed dossier the entries came from).
+1. **Where it lives.**
+   - **In the repo.** orion owns only `.orion/decisions/harvested/`: `index.md` (at most 40 lines: one line per topic with scope and rule count), `<area>/<topic>.md` and `entries.jsonl`. Every file it writes starts with `<!-- orion:harvested — written by orion; edit through a PR, it is regenerated -->`.
+   - Every other file under `.orion/decisions/` is a hand-written record, in whatever layout the repo chooses (riplo-os is moving its 17 there). Read-only to orion, always: the writer refuses any path outside `harvested/`.
+   - **On the machine,** `<data_dir>/knowledge/<project id>/`: `sources/<pr>.md` (the condensed dossier), the harvest queue and state, and the session snapshot. Nothing local goes in the repo.
+   - If the repo ignores `.orion/decisions/` (`git check-ignore`), show a one-time card: "<project> ignores .orion/decisions/, so harvested rules can't be shared", and harvest nothing.
+   - **Writing through a pull request.** A private working clone per project at `<data_dir>/knowledge/<project id>/repo`, made with `git clone --shared` of the main checkout, origin set to its origin URL (not `git worktree add`: the daemon adopts linked checkouts as rows). One branch per person, `orion/knowledge-<gh login>`, fetched and rebased on `origin/<base>` before each write (base: the project's Base branch as the PR form resolves it, else origin's default). Commit only `harvested/`, push only that branch with `--force-with-lease`, and keep exactly one open PR for it: create it ("Knowledge: rules harvested from merged PRs") or update its body, which lists the harvested PRs and the new or changed rules, credited. Never push to the base, never open a second PR. A rebase conflict rebuilds the harvested pages from `entries.jsonl` on top of `origin/<base>`, then pushes with the lease. `git` and `gh` are injected, so tests never reach a remote.
 2. **Session snapshot.**
-   - Keep `<data_dir>/automations/sessions-by-branch.json`, updated whenever an agent with a `claude_session_id` sits on a branch. It records project, branch, session ids, harness and cwd.
+   - Keep `<data_dir>/knowledge/<project id>/snapshot.json`, updated whenever an agent with a `claude_session_id` sits on a branch. It records the project's name and main checkout, and per branch its session ids, harness and cwd.
    - Merge detection and worktree deletion both read it, so session ids survive worktree deletion.
 3. **Harvest at merge.** On `App::note_merge_landed` for a PR, queued and run one at a time in the background:
    1. **Gather:**
@@ -265,19 +266,23 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
       - `by: owner` needs a `quote` that appears, whitespace-normalised, in an OWNER line of the dossier; otherwise set `by: agent, confidence: low`;
       - drop entries whose rule matches the one-off list (`--no-verify`, "push it", "run the e2e", "just one pr", "dismiss" and similar), or whose quote is only an authorisation;
       - strip secrets and emails.
-   5. **Check and merge**, per topic touched: a second `claude -p --model opus` call, run in the project's main checkout with `--allowedTools Read Grep Glob`. It gets the current topic page plus the new entries and must:
+   5. **Check and merge**, per topic touched: a second `claude -p --model opus` call, run in a checkout of the merge with `--allowedTools Read Grep Glob`. It gets the current topic page plus the new entries, and the hand-written records (titles and short bodies, under a budget) as read-only context, and must:
       - drop entries whose `confirm_by` doesn't hold in the code;
       - merge duplicates into the existing rule, citing every PR;
       - mark a rule superseded only when the new entry clearly reverses it;
       - otherwise list a conflict under Open questions;
+      - drop a rule that contradicts a hand-written record, or list it under Open questions citing the record: a record always wins (the extraction prompt says so too);
       - return the new page, at most 600 words, in the fixed sections: Rules in force, Constraints, Open questions, Replaced.
 
-      Write the page, append to `entries.jsonl`, regenerate `index.md`, and `git commit` in the store with "harvest #<pr>".
-4. **Daily card.** At 18:30 local, if new owner, owner-pick or plan entries were added since the last card, post "N new rules recorded as yours today", with [Veto k] per rule and [All fine].
-   - A veto marks the entry `vetoed` in `entries.jsonl`, regenerates its page without it, and commits "veto <id>".
+      Write the page into the knowledge branch, append to `entries.jsonl`, regenerate `index.md`, commit "knowledge: harvest #<pr>", push, and update the pull request.
+4. **Daily card and merge.** At 18:30 local, if new owner, owner-pick or plan entries were added since the last card, post "N new rules recorded as yours today", with [Veto k] per rule, [All fine] and a link button to the knowledge PR.
+   - A veto marks the entry `vetoed` in `entries.jsonl` on the branch, regenerates its page without it, commits "knowledge: veto <id>" and pushes.
+   - With `factory.knowledge_auto_merge` on (the default), the card opens a veto window: 2 hours, or until All fine. Once it has passed (or the next time orion runs after), orion merges the PR with `gh pr merge --match-head-commit`, by the project's merge method as the PR form picks it (no `--auto`: riplo-os doesn't allow it). Only when the PR is mergeable, no check is failing (pending checks wait for a later tick) and its head is the commit orion last pushed. Never forced or admin-merged. After merging, the branch is reset to the new `origin/<base>`; a later veto lands in the next day's PR.
+   - A conflict uses the rebuild path, then pushes. A refused merge is retried once on the next tick, then a card says "Knowledge PR #n can't merge: <reason>" with a link button.
 5. **Read path.**
-   - `context()` (track C) adds the store's `index.md` and the line "Before planning, read the topic pages for the areas you'll touch at <absolute path>. Accepted records in docs/decisions/ win over them."
-   - `orion knowledge for <paths…>` prints the relevant topic pages. It maps paths to topics by keyword and by the paths cited in entries, at most 4 topics and 2,400 words.
+   - `prompt_context` reads a session's checkout, not the main one: the committed `harvested/index.md`, and the hand-written records' titles and paths, repo-relative, then "Accepted records in .orion/decisions/ win over the harvested pages." `context()` (track C) reads it from the commit the new worktree is cut from, since the worktree doesn't exist yet when the prompt is written.
+   - Unmerged harvests aren't visible to agents until their PR merges. That's intended.
+   - `orion knowledge for <paths…>` prints the relevant topic pages from the checkout it runs in. It maps paths to topics by keyword and by the paths cited in entries, at most 4 topics and 2,400 words.
 6. **Backfill.** `orion knowledge backfill --project <name> --since <date>`:
    1. list merged PRs since the date;
    2. join them to transcripts by git branch (Claude JSONL `gitBranch`), or by `…/pull/<n>` mentioned 3 or more times;
@@ -285,13 +290,18 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
    4. run steps 3.2–3.5 for each PR, oldest first;
    5. run a final staleness pass per topic: the same check call against the current code, which drops or marks replaced rules that no longer hold.
 
+   It writes into the same branch and PR: one commit per batch of 10 PRs, and one for the staleness pass.
+
    Print a summary, and post a card when it's done.
 7. **Tests:**
    - condensing on a fixture transcript (Claude and Cursor shapes);
    - the quote guard;
    - the one-off filter;
    - index generation;
-   - store init and commit;
+   - the write guard, and hand-written records left untouched;
+   - one PR per branch (create versus update), branch naming, push with a lease, the rebuild on conflict;
+   - the merge window, the merge preconditions (failing, pending, foreign head, conflicting) and the setting;
+   - the prompt context read from a worktree; the gitignore check;
    - path-to-topic mapping;
    - the backfill join on fixtures.
 
@@ -337,6 +347,8 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
 ## Owner actions (not code)
 
 - Merge riplo-os PR #2108, and the riplo-os factory PRs from the other session.
+- In riplo-os, move the hand-written decision records into `.orion/decisions/` (any layout), and make sure `.gitignore` doesn't cover `.orion/decisions/`.
+- Nothing to merge by hand: orion merges its knowledge PR after the daily veto window. To review each one yourself instead, set `factory.knowledge_auto_merge` to `false`.
 - Reinstall the Slack app once track A lands, for the new scopes.
 - Set `"cleanupPeriodDays": 365` in each Claude config's `settings.json` (`~/.claude*/settings.json`). Transcripts then survive until harvested, and the backfill can still reach October's sessions.
 - Set the automation caps to 3 overall and 1 per runner until this ships. Retire the "PR autofix" preset.
@@ -362,7 +374,7 @@ cargo test -p orion --test e2e_tui
 Then the dry run:
 1. Install the build locally, with the daemon restarted.
 2. Approve 3–5 Todo tickets (a small bug, a mid feature, a UI change).
-3. Watch each run end to end: intake → plan card → build → commit skill → draft PR with rendered top and verdict card → CI fixing → merge → harvest commit in `.orion/knowledge` → daily card.
+3. Watch each run end to end: intake → plan card → build → commit skill → draft PR with rendered top and verdict card → CI fixing → merge → harvest commit on `orion/knowledge-<login>` and its PR → daily card → the knowledge PR merged after the window.
 4. Fix what breaks, then switch the factory on.
 
 ## Appendix: harvest extraction spec (prompt text)
@@ -398,6 +410,14 @@ Each entry: stream, kind, topic, rule (≤30 words, true without the ticket), ap
 recorded"), by, confidence, quote, options_rejected, confirm_by (a symbol, test, command or file to check it
 still holds; never a line number), source_at.
 Return JSON: {"entries":[...], "considered_and_skipped":["..."]}.
+```
+
+Both the extraction and the check-and-merge call get the repo's hand-written records, and this rule after the spec:
+
+```text
+The repo's hand-written decision records (in .orion/decisions/, outside harvested/) are authoritative and
+read-only. A record always wins: never record a rule that contradicts one; drop it, or list it under Open
+questions citing the record's path. Never restate a record as a rule.
 ```
 
 `kcondense.py` behaviour, for the Rust port:
