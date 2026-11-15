@@ -22,9 +22,10 @@ use crate::ui::truncate;
 /// How much of a failure's first line is worth showing.
 const WHY_CUT: usize = 120;
 
-/// What [`run_json`] adds to the system prompt: the reply is parsed, so
-/// anything around the JSON is a failure.
-const JSON_ONLY: &str = "Reply with one JSON value and nothing else: no prose, no code fences.";
+/// What [`run_json`] adds to the system prompt: the reply is parsed.
+/// Prose or a fence around the JSON is read past, but costs nothing to
+/// ask against.
+const JSON_ONLY: &str = "Reply with the JSON value only: no prose, no code fence.";
 
 /// The Claude account an ask goes through: one of the accounts orion runs
 /// sessions on — its own program, with the config dir that pins it — run
@@ -147,14 +148,32 @@ pub(crate) async fn run_in(
     parse_reply(&out)
 }
 
-/// [`run`], told to answer in JSON only, with the answer parsed as `T`. A
-/// reply wrapped in a ```json fence is unwrapped first.
+/// [`run`], told to answer in JSON only, with the answer parsed as `T`
+/// ([`parse_json`]). A reply that doesn't read is asked for once more,
+/// told so ([`asked_again`]).
 pub async fn run_json<T: DeserializeOwned>(mut ask: Ask) -> Result<T, String> {
     ask.system = match ask.system.trim() {
         "" => JSON_ONLY.to_string(),
         system => format!("{system}\n\n{JSON_ONLY}"),
     };
+    let why = match parse_json(&run(ask.clone()).await?.text) {
+        Ok(answer) => return Ok(answer),
+        Err(why) => why,
+    };
+    tracing::info!("oneshot: asking again, {why}");
+    ask.prompt = asked_again(&ask.prompt, NOT_JSON_VALUE);
     parse_json(&run(ask).await?.text)
+}
+
+/// What a reply that didn't read as JSON gets added to its prompt when it
+/// is asked again: an ask after a JSON object, and after any JSON value.
+pub(crate) const NOT_JSON_OBJECT: &str =
+    "Your last reply wasn't valid JSON; reply with the JSON object only.";
+const NOT_JSON_VALUE: &str = "Your last reply wasn't valid JSON; reply with the JSON value only.";
+
+/// `prompt` with `nudge` after it, for the one ask again.
+pub(crate) fn asked_again(prompt: &str, nudge: &str) -> String {
+    format!("{}\n\n{nudge}", prompt.trim_end())
 }
 
 /// `claude -p --output-format json`'s answer: the text under `result`,
@@ -177,22 +196,91 @@ pub fn parse_reply(json: &str) -> Result<Reply, String> {
     })
 }
 
-/// A model's JSON answer as `T`, out of a ```json (or bare ```) fence
-/// when it wrapped one.
+/// How many JSON values one reply is searched for the one asked for.
+const VALUES_TRIED: usize = 3;
+/// How much of a reply that didn't read its error quotes, in chars.
+const REPLY_QUOTED: usize = 200;
+
+/// A model's JSON answer as `T` ([`parse_json_where`], any `T` fits).
 pub(crate) fn parse_json<T: DeserializeOwned>(text: &str) -> Result<T, String> {
-    serde_json::from_str(unfenced(text))
-        .map_err(|e| truncate(&format!("the model's JSON did not read: {e}"), WHY_CUT))
+    parse_json_where(text, |_: &T| true)
 }
 
-/// `text` without the code fence around it, if it has one.
-fn unfenced(text: &str) -> &str {
+/// A model's JSON answer as a `T` that `fits`, however it was wrapped: out
+/// of a ```json (or bare ```) fence when it has one, else from its first
+/// `{` or `[` — prose before it and anything after it are skipped. When a
+/// value isn't the shape asked for, the next one in the reply is tried,
+/// up to [`VALUES_TRIED`]. The error says what went wrong and quotes the
+/// start of the reply.
+pub(crate) fn parse_json_where<T: DeserializeOwned>(
+    text: &str,
+    fits: impl Fn(&T) -> bool,
+) -> Result<T, String> {
     let text = text.trim();
-    let Some(rest) = text.strip_prefix("```") else {
-        return text;
+    if text.is_empty() {
+        return Err("the model replied with nothing".into());
+    }
+    let mut misfit = None;
+    let mut unread = None;
+    for part in [fenced(text), Some(text)].into_iter().flatten() {
+        for value in json_values(part, &mut unread) {
+            match serde_json::from_value::<T>(value) {
+                Ok(answer) if fits(&answer) => return Ok(answer),
+                Ok(_) => {
+                    misfit.get_or_insert_with(String::new);
+                }
+                Err(e) => {
+                    misfit.get_or_insert_with(|| format!(": {e}"));
+                }
+            }
+        }
+    }
+    let why = match (misfit, unread) {
+        (Some(why), _) => format!("the model's JSON was not the shape asked for{why}"),
+        (None, Some(why)) => format!("the model's JSON did not read: {why}"),
+        (None, None) => "the model's reply had no JSON in it".to_string(),
     };
-    // The info string (`json`) runs to the end of the opening line.
+    let said = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    Err(format!(
+        "{why}; it replied: {}",
+        truncate(&said, REPLY_QUOTED)
+    ))
+}
+
+/// The body of the first code fence in `text`, when it has one: from the
+/// line after the opening ``` (and its info string, `json`) to the
+/// closing one, or the end.
+fn fenced(text: &str) -> Option<&str> {
+    let (_, rest) = text.split_once("```")?;
     let body = rest.split_once('\n').map_or("", |(_, body)| body);
-    body.trim_end().strip_suffix("```").unwrap_or(body).trim()
+    Some(body.split_once("```").map_or(body, |(body, _)| body))
+}
+
+/// Up to [`VALUES_TRIED`] JSON objects or arrays in `text`, each read from
+/// a `{` or `[` — the first, then the next after what was read — and
+/// nothing after it; the first that didn't read says why in `unread`.
+fn json_values(text: &str, unread: &mut Option<String>) -> Vec<serde_json::Value> {
+    let mut values = Vec::new();
+    let mut from = 0;
+    for _ in 0..VALUES_TRIED {
+        let Some(start) = text[from..].find(['{', '[']).map(|at| from + at) else {
+            break;
+        };
+        let mut read =
+            serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>();
+        match read.next() {
+            Some(Ok(value)) => {
+                values.push(value);
+                from = start + read.byte_offset();
+            }
+            Some(Err(e)) => {
+                unread.get_or_insert_with(|| e.to_string());
+                from = start + 1;
+            }
+            None => break,
+        }
+    }
+    values
 }
 
 #[cfg(test)]
@@ -243,6 +331,78 @@ mod tests {
             parse_json::<Shape>("```\n{\"n\": 3}\n```"),
             Ok(Shape { n: 3 })
         );
-        assert!(parse_json::<Shape>("Sure! {\"n\": 4}").is_err());
+        assert_eq!(
+            parse_json::<Shape>("Here it is [checked]:\n```json\n{\"n\": 4}\n```\nDone."),
+            Ok(Shape { n: 4 }),
+            "prose around a fence, a bracket in it"
+        );
+    }
+
+    #[test]
+    fn prose_before_the_json_and_text_after_it_are_read_past() {
+        assert_eq!(
+            parse_json::<Shape>("I read the code. Here's the page:\n{\"n\": 5}"),
+            Ok(Shape { n: 5 })
+        );
+        // What failed the backfill: "trailing characters at line 2 column 1".
+        assert_eq!(
+            parse_json::<Shape>("{\"n\": 6}\nAll entries hold."),
+            Ok(Shape { n: 6 })
+        );
+        assert_eq!(
+            parse_json::<Shape>("{\"n\": 7}\n{\"n\": 8}"),
+            Ok(Shape { n: 7 }),
+            "the first of two"
+        );
+    }
+
+    #[test]
+    fn a_value_not_in_shape_gives_way_to_the_next() {
+        assert_eq!(
+            parse_json::<Shape>("{\"m\": 1}\n{\"n\": 9}"),
+            Ok(Shape { n: 9 })
+        );
+        let page = |v: &serde_json::Value| v.get("page").is_some_and(|p| p.is_string());
+        let v = parse_json_where("[1] then {\"note\": 1} then {\"page\": \"p\"}", page).unwrap();
+        assert_eq!(v["page"], "p");
+        assert!(
+            parse_json_where("[1] [2] [3] {\"page\": \"p\"}", page).is_err(),
+            "three tried, and no more"
+        );
+    }
+
+    #[test]
+    fn a_reply_with_no_json_says_why_and_how_it_began() {
+        assert_eq!(
+            parse_json::<Shape>("  \n"),
+            Err("the model replied with nothing".into())
+        );
+        let none = parse_json::<Shape>("I couldn't check this one.\nSorry.").unwrap_err();
+        assert_eq!(
+            none,
+            "the model's reply had no JSON in it; it replied: I couldn't check this one. Sorry."
+        );
+        let broken = parse_json::<Shape>("{\"n\": }").unwrap_err();
+        assert!(
+            broken.starts_with("the model's JSON did not read: expected value"),
+            "{broken}"
+        );
+        let wrong =
+            parse_json::<Shape>(&format!("{{\"m\": \"{}\"}}", "x".repeat(400))).unwrap_err();
+        assert!(
+            wrong.starts_with("the model's JSON was not the shape asked for: missing field `n`"),
+            "{wrong}"
+        );
+        let quoted = wrong.split_once("; it replied: ").unwrap().1;
+        assert_eq!(quoted.chars().count(), REPLY_QUOTED);
+        assert!(quoted.starts_with("{\"m\": \"xxx") && quoted.ends_with('…'));
+    }
+
+    #[test]
+    fn an_ask_again_ends_with_the_nudge() {
+        assert_eq!(
+            asked_again("Read this.\n", NOT_JSON_OBJECT),
+            "Read this.\n\nYour last reply wasn't valid JSON; reply with the JSON object only."
+        );
     }
 }

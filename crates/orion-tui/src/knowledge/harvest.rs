@@ -101,7 +101,7 @@ Scope: <the paths or features it covers, on one line>
 
 Each bullet is one rule of at most 30 words, then the PRs it came from, as (#123, #130), then an HTML comment with the ids of every entry it stands on: <!-- k123-1 k130-2 -->. Keep the id comment of every rule you keep. Rules in force: decisions, conventions, preferences, tooling, gotchas. Constraints: facts about the world that limit behaviour. A rule the agent decided, not the owner, ends with "(agent call)".
 
-Reply with one JSON value and nothing else: {{"page": "<the whole page>", "dropped": [{{"id": "k…", "why": "…"}}]}}"#
+Your reply, after any reading, is one JSON object: {{"page": "<the whole page>", "dropped": [{{"id": "k…", "why": "…"}}]}}"#
     )
 }
 
@@ -114,8 +114,9 @@ const STALE_TASK: &str = "There are no new entries. Check every rule and constra
 /// What the check is told when there is no checkout to read.
 const UNCHECKED: &str = "This time the code can't be read and you have no tools. Don't check the new entries against the code and drop none of them for not holding: merge them into the page as the rules above say, and leave dropped empty.";
 
-/// What the extraction is told on top of the spec.
-const JSON_ONLY: &str = "Reply with one JSON value and nothing else: no prose, no code fences.";
+/// What both calls are told last, in their rules and at the end of the
+/// prompt: the reply is parsed.
+const JSON_ONLY: &str = "Reply with the JSON object only: no prose, no code fence.";
 
 /// One ask of the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,19 +334,20 @@ pub(crate) async fn extract(
 ) -> Result<Extracted, String> {
     let index = index.unwrap_or("(none yet)");
     let prompt = format!(
-        "The repo's existing knowledge index:\n{index}\n\n{}\n\nThe dossier:\n\n{}",
+        "The repo's existing knowledge index:\n{index}\n\n{}\n\nThe dossier:\n\n{}\n\n{JSON_ONLY}",
         records_part(records),
         dossier.text
     );
-    let reply = model
-        .ask(ModelAsk {
-            system: format!("{EXTRACT_SYSTEM}\n\n{RECORDS_RULE}\n\n{JSON_ONLY}"),
-            prompt,
-            cwd: None,
-            read_tools: false,
-        })
-        .await?;
-    let v: Value = oneshot::parse_json(&reply)?;
+    let ask = ModelAsk {
+        system: format!("{EXTRACT_SYSTEM}\n\n{RECORDS_RULE}\n\n{JSON_ONLY}"),
+        prompt,
+        cwd: None,
+        read_tools: false,
+    };
+    let v = ask_json(model, ask, |v| {
+        v.get("entries").is_some_and(Value::is_array) || v.get("considered_and_skipped").is_some()
+    })
+    .await?;
     let entries = v
         .get("entries")
         .and_then(Value::as_array)
@@ -361,6 +363,26 @@ pub(crate) async fn extract(
         .filter_map(|s| s.as_str().map(str::to_string))
         .collect();
     Ok(Extracted { entries, skipped })
+}
+
+/// Ask `model`, and read its reply as a JSON object that `fits`
+/// ([`oneshot::parse_json_where`]). One that doesn't is asked once more,
+/// told so; only then is it a failure (the PR's harvest fails).
+async fn ask_json(
+    model: &dyn Model,
+    ask: ModelAsk,
+    fits: fn(&Value) -> bool,
+) -> Result<Value, String> {
+    let why = match oneshot::parse_json_where(&model.ask(ask.clone()).await?, fits) {
+        Ok(v) => return Ok(v),
+        Err(why) => why,
+    };
+    tracing::info!("knowledge: asking again, {why}");
+    let again = ModelAsk {
+        prompt: oneshot::asked_again(&ask.prompt, oneshot::NOT_JSON_OBJECT),
+        ..ask
+    };
+    oneshot::parse_json_where(&model.ask(again).await?, fits)
 }
 
 /// What a check-and-merge returned.
@@ -403,25 +425,27 @@ pub(crate) async fn check_topic(
         }
     };
     let prompt = format!(
-        "Topic: {topic}\n\n{}\n\nCurrent page:\n{page}\n\n{task}",
+        "Topic: {topic}\n\n{}\n\nCurrent page:\n{page}\n\n{task}\n\n{JSON_ONLY}",
         records_part(records)
     );
     let ask = match code {
         Ok(dir) => ModelAsk {
-            system: format!("{}\n\n{RECORDS_RULE}", check_system()),
+            system: format!("{}\n\n{RECORDS_RULE}\n\n{JSON_ONLY}", check_system()),
             prompt,
             cwd: Some(dir.to_path_buf()),
             read_tools: true,
         },
         Err(_) => ModelAsk {
-            system: format!("{}\n\n{RECORDS_RULE}\n\n{UNCHECKED}", check_system()),
+            system: format!(
+                "{}\n\n{RECORDS_RULE}\n\n{UNCHECKED}\n\n{JSON_ONLY}",
+                check_system()
+            ),
             prompt,
             cwd: None,
             read_tools: false,
         },
     };
-    let reply = model.ask(ask).await?;
-    let v: Value = oneshot::parse_json(&reply)?;
+    let v = ask_json(model, ask, |v| v.get("page").is_some_and(Value::is_string)).await?;
     let mut page = v
         .get("page")
         .and_then(Value::as_str)
@@ -1137,6 +1161,61 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_reply_that_isnt_json_is_asked_for_once_more() {
+        let into = Bench::new();
+        let model = Scripted::new(vec![
+            "I read the dossier and found three rules.".into(),
+            extraction(),
+            format!(
+                "Checked against the code:\n```json\n{}\n```\nAll done.",
+                checked_page()
+            ),
+        ]);
+        let d = dossier(&pr(), &[], &sessions());
+        let out = harvest(&model, &into.target(""), &pr(), &d, Ok(into.repo.path()))
+            .await
+            .unwrap();
+        assert_eq!((out.kept, out.dropped), (1, 2));
+        let asked = model.asked.lock().unwrap();
+        assert_eq!(asked.len(), 3, "the extraction twice, the check once");
+        assert!(asked[0].prompt.ends_with(JSON_ONLY));
+        assert_eq!(
+            asked[1].prompt,
+            oneshot::asked_again(&asked[0].prompt, oneshot::NOT_JSON_OBJECT)
+        );
+        assert_eq!(asked[1].system, asked[0].system);
+        assert!(
+            asked[2].prompt.ends_with(JSON_ONLY),
+            "the check read first time"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_isnt_json_twice_fails_the_harvest() {
+        let into = Bench::new();
+        let model = Scripted::new(vec![
+            extraction(),
+            "Sorry, I couldn't read the code.".into(),
+            r#"{"dropped": []}"#.into(),
+        ]);
+        let d = dossier(&pr(), &[], &sessions());
+        let why = harvest(&model, &into.target(""), &pr(), &d, Ok(into.repo.path()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            why,
+            "the model's JSON was not the shape asked for; it replied: {\"dropped\": []}"
+        );
+        assert_eq!(
+            model.asked.lock().unwrap().len(),
+            3,
+            "asked again once, no more"
+        );
+        assert!(into.store.entries().is_empty());
+        assert!(!into.target("").harvested(12));
+    }
+
+    #[tokio::test]
     async fn with_no_checkout_the_entries_are_kept_unchecked_at_low_confidence() {
         let into = Bench::new();
         let store = &into.store;
@@ -1152,7 +1231,9 @@ pub(crate) mod tests {
         );
         let asked = model.asked.lock().unwrap();
         assert!(!asked[1].read_tools && asked[1].cwd.is_none());
-        assert!(asked[1].system.ends_with(UNCHECKED));
+        assert!(asked[1]
+            .system
+            .ends_with(&format!("{UNCHECKED}\n\n{JSON_ONLY}")));
         let entries = store.entries();
         assert!(entries
             .iter()
