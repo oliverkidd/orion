@@ -10,6 +10,7 @@ pub mod factory;
 pub mod git;
 pub mod hooks;
 pub mod lifecycle;
+pub mod link_shim;
 pub mod metrics;
 pub mod open_files;
 pub mod phone;
@@ -122,6 +123,10 @@ async fn serve() -> Result<()> {
     tracing::info!(port = hook_env.port, "hook receiver listening");
 
     let daemon = registry::Daemon::new(store, hook_env);
+    // Before anything spawns: every agent PTY's `BROWSER` names it.
+    if let Some(shim) = link_shim::install() {
+        let _ = daemon.link_shim.set(shim);
+    }
     if let Some(note) = relocation_note {
         tracing::info!("{note}");
         daemon.boot_notes.lock().unwrap().push(note);

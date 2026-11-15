@@ -114,6 +114,10 @@ pub struct Daemon {
     sessions: Mutex<HashMap<SessionRef, Arc<PtySession>>>,
     pub(crate) status_machines: Mutex<HashMap<AgentId, AgentStatusMachine>>,
     pub hook_env: HookEnv,
+    /// The LINK SHIM every agent PTY's `BROWSER` names (`link_shim`): set
+    /// once at start, before any spawn — unset when it couldn't be
+    /// written, and in tests.
+    pub link_shim: std::sync::OnceLock<PathBuf>,
     /// Shared with the hook HTTP server, which reads agent rows to decide
     /// auto-title injection.
     pub store: Arc<Store>,
@@ -212,6 +216,7 @@ impl Daemon {
             sessions: Mutex::new(HashMap::new()),
             status_machines: Mutex::new(HashMap::new()),
             hook_env,
+            link_shim: std::sync::OnceLock::new(),
             store,
             events,
             session_installs,
@@ -3143,8 +3148,7 @@ impl Daemon {
             )
         };
 
-        let mut session_env = launch_env;
-        session_env.extend(agent_session_env(agent, &self.hook_env));
+        let session_env = self.session_env(agent, launch_env);
         let spec = SpawnSpec {
             program,
             args,
@@ -3177,6 +3181,25 @@ impl Daemon {
         }
         self.install_session(session.clone());
         Ok(session)
+    }
+
+    /// What an agent's PTY is given over the daemon's scrubbed environment:
+    /// its harness's own `env` (`launch_env`), the session's identity and
+    /// the hook receiver, and `BROWSER` at the LINK SHIM, so a link the CLI
+    /// opens itself goes to the account's **Open links in** — unless the
+    /// harness's `env` sets a `BROWSER` of its own, which wins.
+    fn session_env(
+        &self,
+        agent: &Agent,
+        launch_env: Vec<(String, String)>,
+    ) -> Vec<(String, String)> {
+        let browser_set = launch_env.iter().any(|(name, _)| name == env::BROWSER);
+        let mut vars = launch_env;
+        vars.extend(agent_session_env(agent, &self.hook_env));
+        if let Some(shim) = self.link_shim.get().filter(|_| !browser_set) {
+            vars.push((env::BROWSER.into(), shim.display().to_string()));
+        }
+        vars
     }
 
     /// A resumed session (`claude --resume` / `codex resume` /
@@ -5233,6 +5256,59 @@ pub(crate) mod tests {
         assert!(
             env::SCRUBBED_SESSION_VARS.contains(&env::AUTOMATION),
             "never inherited from the daemon's own environment"
+        );
+    }
+
+    /// Every session's `BROWSER` is the LINK SHIM, so a link its CLI opens
+    /// itself goes to its account's browser — unless the harness's own
+    /// `env` names a `BROWSER`, which wins.
+    #[test]
+    fn a_session_opens_links_through_the_shim_unless_its_harness_says_otherwise() {
+        let daemon = test_daemon();
+        let agent = Agent {
+            id: AgentId("a1".into()),
+            worktree_id: WorktreeId("w".into()),
+            name: "a".into(),
+            status: AgentStatus::Fresh,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind: AgentKind::Claude,
+            custom_harness: Some("claude-work".into()),
+            model: None,
+            effort: None,
+            session_id: None,
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: false,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+            automation: None,
+        };
+        let browsers = |vars: &[(String, String)]| {
+            vars.iter()
+                .filter(|(k, _)| k == env::BROWSER)
+                .map(|(_, v)| v.clone())
+                .collect::<Vec<_>>()
+        };
+        let harness_env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/c".to_string())];
+        assert!(
+            browsers(&daemon.session_env(&agent, harness_env.clone())).is_empty(),
+            "no shim written, no BROWSER"
+        );
+
+        let shim = PathBuf::from("/data/bin/orion-open-link");
+        daemon.link_shim.set(shim.clone()).unwrap();
+        let vars = daemon.session_env(&agent, harness_env);
+        assert_eq!(browsers(&vars), ["/data/bin/orion-open-link"]);
+        assert!(vars.iter().any(|(k, v)| k == env::AGENT_ID && v == "a1"));
+        assert!(vars.iter().any(|(k, _)| k == "CLAUDE_CONFIG_DIR"));
+
+        let yours = vec![(env::BROWSER.to_string(), "/usr/bin/firefox".to_string())];
+        assert_eq!(
+            browsers(&daemon.session_env(&agent, yours)),
+            ["/usr/bin/firefox"],
+            "the harness's own BROWSER wins"
         );
     }
 

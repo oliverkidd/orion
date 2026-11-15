@@ -277,6 +277,19 @@ pub(crate) enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Open a link in this session's account's browser.
+    ///
+    /// What a session's CLI runs, through the shim orion points its
+    /// `BROWSER` at, to open a link itself — a newly published Artifact,
+    /// an OAuth sign-in: the session's account's **Open links in** picks
+    /// the browser and profile, as for a link clicked in its pane. Outside
+    /// a session, or with no browser picked, it is plain `open <url>`.
+    /// Exits non-zero when the link didn't open.
+    #[command(hide = true, name = "open-link")]
+    OpenLink {
+        /// The link to open.
+        url: String,
+    },
     /// Installer hook: print the cutover note only when a live daemon is on
     /// a different build than this binary (see `make install` / install.sh).
     #[command(hide = true, name = "_stale-daemon-note")]
@@ -499,6 +512,17 @@ mod tests {
             panic!("not a set");
         };
         assert_eq!((file.as_str(), pr.as_deref()), ("-", Some("2108")));
+    }
+
+    #[test]
+    fn open_link_takes_one_url() {
+        let url = "https://claude.ai/code/artifact/abc?x=1&y=2";
+        let Some(Command::OpenLink { url: got }) = parse(&["open-link", url]).command else {
+            panic!("not an open-link");
+        };
+        assert_eq!(got, url);
+        assert!(Cli::try_parse_from(["orion", "open-link"]).is_err());
+        assert!(Cli::try_parse_from(["orion", "open-link", "a", "b"]).is_err());
     }
 
     #[test]

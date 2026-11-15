@@ -68,6 +68,12 @@ pub fn db_path() -> PathBuf {
     data_dir().join("orion.db")
 }
 
+/// The LINK SHIM every agent PTY's `BROWSER` names: a script the daemon
+/// writes that runs `orion open-link` (see `orion_daemon::link_shim`).
+pub fn link_shim_path() -> PathBuf {
+    data_dir().join("bin").join("orion-open-link")
+}
+
 /// User settings file (JSON) — the portable layer, which a backup copies.
 /// Lives beside the DB so `ORION_DATA_DIR` isolates it
 /// for tests and parallel instances too; `ORION_CONFIG_FILE` moves this one

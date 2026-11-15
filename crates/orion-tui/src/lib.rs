@@ -259,6 +259,25 @@ pub fn run_open(files: Vec<String>) -> Result<()> {
     runtime()?.block_on(ipc::open_files_for_current_agent(&files))
 }
 
+/// `orion open-link <url>` — a link a session's CLI opens itself, through
+/// the LINK SHIM its `BROWSER` names, opened in the browser its account's
+/// **Open links in** picks (see `open_url::open_link`). `agent` is the
+/// session's `ORION_AGENT_ID`, `account` how its account is found. False
+/// when open(1) failed.
+pub fn open_link(
+    url: &str,
+    agent: Option<&str>,
+    account: impl FnOnce(&str) -> Option<String>,
+) -> bool {
+    open_url::open_link(
+        url,
+        agent,
+        account,
+        config::Config::load,
+        open_url::run_open,
+    )
+}
+
 /// `orion spawn "<task>" [--kind <kind>] [--worktree <name> [--base <ref>]]`
 /// — start a new agent session beside the current one, or in another
 /// worktree of its project (see `ipc::spawn_sibling_for_current_agent`).

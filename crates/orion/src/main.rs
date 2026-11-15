@@ -57,6 +57,20 @@ fn main() -> Result<()> {
         Some(Command::Knowledge(KnowledgeCommand::Backfill { project, since })) => {
             orion_tui::knowledge::cli_backfill(project, since)
         }
+        Some(Command::OpenLink { url }) => {
+            // The session's account, from the database the daemon keeps:
+            // read-only, and no round trip. A miss opens the default way.
+            let agent = orion_core::env::non_empty(orion_core::env::AGENT_ID);
+            let account = |id: &str| {
+                orion_daemon::store::Store::agent_account(&orion_core::paths::db_path(), id)
+                    .ok()
+                    .flatten()
+            };
+            if !orion_tui::open_link(&url, agent.as_deref(), account) {
+                anyhow::bail!("couldn't open {url}");
+            }
+            Ok(())
+        }
         Some(Command::Ssh { host, path }) => ssh::run_ssh(&host, path.as_deref()),
         Some(Command::Setup) => {
             orion_tui::reset_setup();

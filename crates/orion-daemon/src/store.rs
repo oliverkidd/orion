@@ -507,6 +507,28 @@ impl Store {
         Ok(store)
     }
 
+    /// The account session `id` runs on — the registry id its harness goes
+    /// by (`claude`, `claude-work`, `codex`) — read straight from the
+    /// database at `path`, for `orion open-link` inside the session: no
+    /// daemon round trip, and nothing written. Opened read-only and never
+    /// migrated. None for a session the database doesn't have.
+    pub fn agent_account(path: &Path, id: &str) -> Result<Option<String>> {
+        use rusqlite::{OpenFlags, OptionalExtension as _};
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("open {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(1))?;
+        let row = conn
+            .query_row(
+                "SELECT kind, custom_harness FROM agents WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(kind, custom)| {
+            orion_core::harness::registry_id(parse_agent_kind(&kind), custom.as_deref()).to_string()
+        }))
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -1905,6 +1927,36 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
         }
+    }
+
+    /// `orion open-link` reads the account a session runs on from the
+    /// database the daemon has open, without writing to it.
+    #[test]
+    fn a_sessions_account_reads_from_the_database_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("orion.db");
+        let store = Store::open(&path, &[]).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO projects (id, name, repo_path, sort_order, created_at) VALUES ('p1', 'p', '/tmp/p', 0, 0);
+                 INSERT INTO worktrees (id, project_id, path, branch, is_main, sort_order, created_at) VALUES ('w1', 'p1', '/tmp/p', 'main', 1, 0, 0);
+                 INSERT INTO agents (id, worktree_id, name, created_at, kind, custom_harness) VALUES ('a1', 'w1', 'a', 0, 'claude', 'claude-work');
+                 INSERT INTO agents (id, worktree_id, name, created_at, kind) VALUES ('a2', 'w1', 'b', 0, 'codex');",
+            )
+            .unwrap();
+        assert_eq!(
+            Store::agent_account(&path, "a1").unwrap().as_deref(),
+            Some("claude-work")
+        );
+        assert_eq!(
+            Store::agent_account(&path, "a2").unwrap().as_deref(),
+            Some("codex")
+        );
+        assert_eq!(Store::agent_account(&path, "gone").unwrap(), None);
+        assert!(Store::agent_account(&dir.path().join("none.db"), "a1").is_err());
     }
 
     /// A database already at v21 gains nullable PR launch context without

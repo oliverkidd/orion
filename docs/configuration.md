@@ -83,6 +83,11 @@ no profile). Several accounts can share one browser on separate profiles. It is 
 "Chrome", "profile": "Profile 1"}`. Every other link goes to the default browser, as does a URL
 ⌘-clicked in the pane, which your terminal opens itself.
 
+Links a session's CLI opens itself, such as a newly published Artifact or an OAuth sign-in, follow
+the same choice: orion points each session's `BROWSER` at `<data dir>/bin/orion-open-link`, a shim
+the daemon writes that runs `orion open-link <url>`. A `BROWSER` in the harness's own `env`
+overrides this.
+
 ### Projects
 
 One block per project in the tree, each row reading and writing that project's entry in
@@ -320,7 +325,7 @@ CLI):
 | `effort_default` | the effort new sessions get (Claude `--effort`, Codex `model_reasoning_effort`, Cursor a model suffix, Grok `--effort`); `"default"` passes none |
 | `models` | the model rows its pickers offer: `[{"id": "big-1", "hint": "the big one"}]` |
 | `env` | environment variables for its CLI, exported after your login shell's profile runs; a leading `~/` is expanded, `null` clears it |
-| `browser` | a Claude account's **Open links in**: `{"app": "Chrome", "profile": "Profile 1"}`; absent is the default browser. Only orion's window reads it |
+| `browser` | a Claude account's **Open links in**: `{"app": "Chrome", "profile": "Profile 1"}`; absent is the default browser. Read by orion's window and by `orion open-link`, which each session's `BROWSER` runs |
 
 An id no built-in or account holds adds a CLI by the name of its program: `"agy": {}` launches
 `agy` with `--model`, the first prompt as its last argument, and status from the process. A broken

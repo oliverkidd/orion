@@ -18,6 +18,12 @@ pub const AUTOMATION: &str = "ORION_AUTOMATION";
 pub const API_URL: &str = "ORION_API_URL";
 /// Bearer token the hook receiver expects, set on agent PTYs.
 pub const API_TOKEN: &str = "ORION_API_TOKEN";
+/// The program a CLI opens a link with — Claude Code runs it with the URL
+/// as its one argument, in place of `open`. Every agent PTY gets orion's
+/// link shim here (`<data dir>/bin/orion-open-link`, which runs `orion
+/// open-link`), so a link the session opens itself goes to its account's
+/// **Open links in**; a `BROWSER` in the harness's own `env` wins.
+pub const BROWSER: &str = "BROWSER";
 /// Overrides the runtime dir holding the socket and pidfile.
 pub const RUNTIME_DIR: &str = "ORION_RUNTIME_DIR";
 /// Overrides the data dir holding the database, config and logs.

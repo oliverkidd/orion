@@ -242,7 +242,7 @@ pub fn open_args(url: &str, browser: Option<&LinkBrowser>) -> Vec<String> {
 /// allowlist is defense in depth: the link scanner only ever produces
 /// http(s) URLs, but the text comes from untrusted PTY output.
 pub(crate) fn open_url(url: &str, account: Option<&str>) -> bool {
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
+    if !is_web(url) {
         return false;
     }
     if cfg!(test) {
@@ -254,14 +254,67 @@ pub(crate) fn open_url(url: &str, account: Option<&str>) -> bool {
         });
         return true;
     }
-    let cfg = account.map(|_| crate::config::Config::load());
+    let mut open = std::process::Command::new("open");
+    open.args(account_open_args(url, account, crate::config::Config::load));
+    spawn_and_reap(open, "open url")
+}
+
+/// An http(s) link — the only kind a browser choice applies to.
+fn is_web(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// open(1)'s arguments for `url` in the browser account `account`'s **Open
+/// links in** picks: [`open_args`] over the config `load` reads, which it
+/// reads only for an account.
+fn account_open_args(
+    url: &str,
+    account: Option<&str>,
+    load: impl FnOnce() -> crate::config::Config,
+) -> Vec<String> {
+    let cfg = account.map(|_| load());
     let browser = cfg
         .as_ref()
         .zip(account)
         .and_then(|(cfg, id)| cfg.link_browser(id));
-    let mut open = std::process::Command::new("open");
-    open.args(open_args(url, browser));
-    spawn_and_reap(open, "open url")
+    open_args(url, browser)
+}
+
+/// `orion open-link <url>`: what a session's CLI runs, through `BROWSER`
+/// and the daemon's LINK SHIM, to open a link itself — a newly published
+/// Artifact, an OAuth sign-in. `agent` is the session it runs in (its
+/// `ORION_AGENT_ID`) and `account` finds the account that session runs
+/// on; the link then opens as a click in its pane does, in that account's
+/// **Open links in**. No session, one orion can't find, no browser
+/// picked, or a link that isn't http(s), is plain `open <url>` — what the
+/// CLI would have run itself. `open` runs open(1) with the arguments and
+/// says whether it succeeded.
+pub(crate) fn open_link(
+    url: &str,
+    agent: Option<&str>,
+    account: impl FnOnce(&str) -> Option<String>,
+    load: impl FnOnce() -> crate::config::Config,
+    open: impl FnOnce(&[String]) -> bool,
+) -> bool {
+    let args = if is_web(url) {
+        let account = agent.and_then(account);
+        account_open_args(url, account.as_deref(), load)
+    } else {
+        vec![url.to_string()]
+    };
+    open(&args)
+}
+
+/// Run open(1) with `args` and wait for it: whether LaunchServices took
+/// the link. `orion open-link` is a one-shot the CLI waits on, so unlike a
+/// click it can wait to learn, and say so with its exit status.
+pub(crate) fn run_open(args: &[String]) -> bool {
+    use std::process::Stdio;
+    std::process::Command::new("open")
+        .args(args)
+        .stdin(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 /// The account a session's links open for: the registry id its harness
@@ -497,6 +550,62 @@ mod tests {
             take_opened_as(),
             [(URL.to_string(), Some("claude-2".to_string()))]
         );
+    }
+
+    /// `orion open-link` from a session opens in that session's account's
+    /// browser and profile; with no browser picked, no session, or a
+    /// session orion can't find, it is plain `open <url>`.
+    #[test]
+    fn a_link_a_session_opens_follows_its_accounts_browser() {
+        let mut cfg = crate::config::Config::default();
+        cfg.set_link_browser("claude-work", Some(pick("Chrome", Some("Profile 1"))));
+        let route = |agent: Option<&str>, url: &str| {
+            let mut ran = None;
+            let ok = open_link(
+                url,
+                agent,
+                |id| match id {
+                    "a-work" => Some("claude-work".into()),
+                    "a-plain" => Some("claude".into()),
+                    _ => None,
+                },
+                || cfg.clone(),
+                |args| {
+                    ran = Some(args.to_vec());
+                    true
+                },
+            );
+            assert!(ok);
+            ran.expect("open ran")
+        };
+        assert_eq!(
+            route(Some("a-work"), URL),
+            [
+                "-na",
+                "Google Chrome",
+                "--args",
+                "--profile-directory=Profile 1",
+                URL
+            ]
+        );
+        assert_eq!(route(Some("a-plain"), URL), [URL], "no browser picked");
+        assert_eq!(route(Some("unknown"), URL), [URL], "no such session");
+        assert_eq!(route(None, URL), [URL], "no ORION_AGENT_ID");
+        assert_eq!(
+            route(Some("a-work"), "file:///tmp/x.html"),
+            ["file:///tmp/x.html"],
+            "not a web link: as the CLI would have opened it"
+        );
+
+        // No session: neither the database nor the config is read.
+        let ok = open_link(
+            URL,
+            None,
+            |_| panic!("looked up"),
+            || panic!("config read"),
+            |_| false,
+        );
+        assert!(!ok, "a failed open says so");
     }
 
     /// Every open(1) orion runs goes through here: a `Command::new("open")`
