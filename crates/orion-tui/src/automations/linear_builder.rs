@@ -950,8 +950,9 @@ const RELATED_DAYS: i64 = 14;
 
 /// What goes at the preset's `{task}`: the tickets in full and their
 /// screenshots; a bug's related tickets; the project's open draft pull
-/// requests and the ones merged lately; the repo's knowledge index; and
-/// the word on large work.
+/// requests and the ones merged lately that look related to the tickets
+/// (`intake::related_prs`); the repo's knowledge index; and the word on
+/// large work.
 pub fn context(app: &App, group: &Group) -> String {
     let mut out = format!(
         "## Linear tickets\n\n{}\n\n",
@@ -978,29 +979,37 @@ pub fn context(app: &App, group: &Group) -> String {
     }
     out.push_str("## Related work to check\n\n");
     let since = chrono::Utc::now() - chrono::Duration::days(RELATED_DAYS);
-    let mut related = Vec::new();
+    // Every open draft and lately merged pull request, with its line.
+    let mut candidates: Vec<(&crate::pull_request::OpenPr, String)> = Vec::new();
     if let Some(prs) = app.open_prs.get(&group.project) {
         for pr in &prs.list {
             if app.prs.status_or_open(&pr.url).is_draft() || pr.answered_draft {
-                related.push(format!(
-                    "- #{} {} (open draft) {}",
-                    pr.number, pr.title, pr.url
-                ));
+                let line = format!("- #{} {} (open draft) {}", pr.number, pr.title, pr.url);
+                candidates.push((pr, line));
             }
         }
         for pr in &prs.merged {
             let merged = chrono::DateTime::parse_from_rfc3339(&pr.meta.merged_at);
             if merged.is_ok_and(|at| at >= since) {
                 let day = pr.meta.merged_at.get(..10).unwrap_or_default();
-                related.push(format!(
-                    "- #{} {} (merged {day}) {}",
-                    pr.number, pr.title, pr.url
-                ));
+                let line = format!("- #{} {} (merged {day}) {}", pr.number, pr.title, pr.url);
+                candidates.push((pr, line));
             }
         }
     }
-    if related.is_empty() {
+    // Only the ones that look related to the tickets, best first.
+    let named: Vec<(&str, &str)> = candidates
+        .iter()
+        .map(|(pr, _)| (pr.title.as_str(), pr.head.as_str()))
+        .collect();
+    let related: Vec<&str> = intake::related_prs(&group.issues, &named)
+        .into_iter()
+        .map(|i| candidates[i].1.as_str())
+        .collect();
+    if candidates.is_empty() {
         out.push_str("Nothing open as a draft or merged lately.");
+    } else if related.is_empty() {
+        out.push_str("None look related.");
     } else {
         out.push_str(&related.join("\n"));
     }
@@ -3374,5 +3383,219 @@ mod tests {
         assert!(ledger.prune_previous(KEEP_MS + 1));
         assert_eq!(ledger.previous.keys().collect::<Vec<_>>(), ["old"]);
         assert_eq!(ledger.previous_at.keys().collect::<Vec<_>>(), ["old"]);
+    }
+
+    /// RIPLO-1290, a custom-font warning's wording, against the project's
+    /// unrelated pull requests of the day, some sharing a word with it.
+    fn font_warning() -> LinearIssue {
+        LinearIssue {
+            title: "Custom font warning wording is confusing".into(),
+            description: "When a deck uses a custom font that isn't installed, the warning \
+                says 'Font missing'. Reword it to say PowerPoint will substitute the font \
+                when the deck is exported."
+                .into(),
+            ..issue("RIPLO-1290", &["Bug"])
+        }
+    }
+
+    const UNRELATED: &[(&str, &str)] = &[
+        (
+            "Think-cell exports keep their chart colours",
+            "oliver/think-cell-export-colours",
+        ),
+        (
+            "Tear down staging when its PR closes",
+            "kim/staging-teardown",
+        ),
+        ("Pin Node to 20.11 in CI", "oliver/pin-node-20"),
+        ("Bump eslint to 9", "dependabot/npm_and_yarn/eslint-9"),
+        (
+            "Deck thumbnails load lazily",
+            "kim/riplo-1301-lazy-thumbnails",
+        ),
+        ("Silence the lint warning in CI", "oliver/lint-warnings"),
+        (
+            "Think-cell tables export as native tables",
+            "ana/riplo-1288-think-cell-tables",
+        ),
+        ("Staging seeds a demo workspace", "ana/staging-seed"),
+        (
+            "Fix login redirect loop on Safari",
+            "kim/riplo-1277-safari-login",
+        ),
+        ("Pin Node in the Dockerfile too", "oliver/pin-node-docker"),
+    ];
+
+    /// "Related work to check" lists only the pull requests that share the
+    /// tickets' words — the rare ones weighing most — best first, at most
+    /// six; none qualifying says so instead of listing everything.
+    #[test]
+    fn related_work_is_only_the_pull_requests_that_look_related() {
+        let tickets = [font_warning()];
+        // The live run's case: nothing of the day's work is about fonts.
+        assert_eq!(
+            intake::related_prs(&tickets, UNRELATED),
+            Vec::<usize>::new()
+        );
+        // Two that are, among them: the closer one first.
+        let mut prs = UNRELATED.to_vec();
+        prs.push((
+            "Embed custom fonts in exported decks",
+            "kim/riplo-1250-embed-fonts",
+        ));
+        prs.push((
+            "Reword the missing custom font warning",
+            "ana/riplo-1240-custom-font-warning",
+        ));
+        let n = UNRELATED.len();
+        assert_eq!(intake::related_prs(&tickets, &prs), [n + 1, n]);
+        // At most six.
+        let many: Vec<(&str, &str)> = (0..9)
+            .map(|_| ("Custom font warning wording", "ana/custom-font-warning"))
+            .collect();
+        assert_eq!(
+            intake::related_prs(&tickets, &many).len(),
+            intake::RELATED_PRS_KEPT
+        );
+
+        // In the context: "None look related", or only the related ones.
+        let mut app = app_with_project();
+        let drafts = |prs: &[(&str, &str)]| {
+            let list = prs
+                .iter()
+                .enumerate()
+                .map(|(i, (title, head))| {
+                    let mut pr = pr(i as u64 + 1, title, head);
+                    pr.answered_draft = true;
+                    pr
+                })
+                .collect();
+            open_prs(list, Vec::new())
+        };
+        let group = Group::of(Automation::BugFixer, p(), tickets.to_vec());
+        let text = context(&app, &group);
+        assert!(
+            text.contains("## Related work to check\n\nNothing open as a draft or merged lately."),
+            "{text}"
+        );
+        app.open_prs.insert(p(), drafts(UNRELATED));
+        let text = context(&app, &group);
+        assert!(
+            text.contains("## Related work to check\n\nNone look related."),
+            "{text}"
+        );
+        assert!(!text.contains("Think-cell"), "{text}");
+        app.open_prs.insert(p(), drafts(&prs));
+        let text = context(&app, &group);
+        assert!(
+            text.contains(&format!(
+                "## Related work to check\n\n- #{} Reword the missing custom font warning (open draft)",
+                n + 2
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("Embed custom fonts") && !text.contains("Think-cell"),
+            "{text}"
+        );
+    }
+
+    /// An entry an earlier orion wrote: Building on `eng-7-crash` with its
+    /// session `s7`, and no history.
+    fn leftover(app: &mut App) {
+        building(app, Stage::Building);
+        let entry = app
+            .automations
+            .linear_builder
+            .ledger
+            .issues
+            .get_mut("uuid-ENG-7")
+            .unwrap();
+        entry.history.clear();
+        entry.owner_id.clear();
+        entry.team_id.clear();
+        app.open_prs.insert(p(), open_prs(Vec::new(), Vec::new()));
+    }
+
+    /// A leftover from before the factory — no history, at work by its
+    /// stage, its session gone or archived, no pull request on its branch —
+    /// is let go quietly, to be picked up afresh; miss any one of those and
+    /// it is followed like any other entry.
+    #[test]
+    fn a_leftover_from_an_earlier_orion_is_let_go_quietly() {
+        fn ledger(app: &App) -> &Ledger {
+            &app.automations.linear_builder.ledger
+        }
+        // Its session gone: let go, with no card, its branch kept as an
+        // earlier run's.
+        let mut app = app_with_project();
+        leftover(&mut app);
+        app.tree.agents.clear();
+        follow(&mut app);
+        assert!(!picked_up(&app, "uuid-ENG-7"));
+        assert!(ledger(&app).previous["uuid-ENG-7"].contains("eng-7-crash"));
+        assert!(app.factory_cards.is_empty(), "{:?}", app.factory_cards);
+        // Its session archived: the same.
+        let mut app = app_with_project();
+        leftover(&mut app);
+        app.tree.agents[0].archived = true;
+        follow(&mut app);
+        assert!(!picked_up(&app, "uuid-ENG-7"));
+        assert!(app.factory_cards.is_empty());
+
+        // Written by this orion (it has a history): followed, Dead in time.
+        let mut app = app_with_project();
+        building(&mut app, Stage::Building);
+        app.open_prs.insert(p(), open_prs(Vec::new(), Vec::new()));
+        app.tree.agents.clear();
+        follow(&mut app);
+        assert_eq!(stage_of(&app), Stage::Building);
+        assert!(ledger(&app).issues["uuid-ENG-7"].gone_since.is_some());
+
+        // Not at work by its stage: kept as it is.
+        let mut app = app_with_project();
+        leftover(&mut app);
+        app.tree.agents.clear();
+        app.automations
+            .linear_builder
+            .ledger
+            .issues
+            .get_mut("uuid-ENG-7")
+            .unwrap()
+            .stage = Stage::Parked;
+        follow(&mut app);
+        assert_eq!(stage_of(&app), Stage::Parked);
+
+        // Its session still there: kept, and followed.
+        let mut app = app_with_project();
+        leftover(&mut app);
+        follow(&mut app);
+        assert_eq!(stage_of(&app), Stage::Building);
+        assert!(ledger(&app).issues["uuid-ENG-7"].gone_since.is_none());
+
+        // A pull request open on its branch: kept, as PrOpen.
+        let mut app = app_with_project();
+        leftover(&mut app);
+        app.tree.agents.clear();
+        app.open_prs.insert(
+            p(),
+            open_prs(vec![pr(9, "ENG-7: fix", "eng-7-crash")], Vec::new()),
+        );
+        follow(&mut app);
+        assert_eq!(stage_of(&app), Stage::PrOpen);
+        assert!(app.factory_cards.is_empty());
+
+        // Not before the project's pull requests have been read, nor before
+        // the daemon's tree has its project.
+        let mut app = app_with_project();
+        leftover(&mut app);
+        app.tree.agents.clear();
+        app.open_prs.clear();
+        follow(&mut app);
+        assert!(picked_up(&app, "uuid-ENG-7"));
+        app.open_prs.insert(p(), open_prs(Vec::new(), Vec::new()));
+        app.tree.projects.clear();
+        follow(&mut app);
+        assert!(picked_up(&app, "uuid-ENG-7"));
     }
 }

@@ -26,6 +26,10 @@
 //!   — out of Triage and Todo, canceled, done, unassigned or someone
 //!   else's — to be checked afresh should it come back.
 //! - A thin ticket's reporter is reminded once, after [`PING_MS`].
+//! - A **leftover** an earlier orion wrote — no history, its session gone,
+//!   no pull request — is let go quietly, to be picked up afresh
+//!   ([`drop_leftovers`]). One whose session is there is followed like any
+//!   other.
 //!
 //! Your cards on a ticket close as what they were about ends: Stalled
 //! when its session runs again or a pull request opens, Dead when its
@@ -155,7 +159,13 @@ pub(crate) fn follow(app: &mut App) {
         let open_prs = &app.open_prs;
         let lists = &app.linear;
         let shared = &mut app.automations.linear_builder;
-        let mut changed = false;
+        let ctx = Ctx {
+            tree,
+            reasons,
+            open_prs,
+            lists,
+        };
+        let mut changed = drop_leftovers(&mut shared.ledger, ctx, now);
         shared.ledger.issues.retain(|id, entry| {
             if now - entry.at > KEEP_MS {
                 changed = true;
@@ -163,19 +173,7 @@ pub(crate) fn follow(app: &mut App) {
             }
             let before = entry.clone();
             let mut rec = |r: Rec| records.push((entry_identifier(&before), r));
-            let keep = step(
-                id,
-                entry,
-                now,
-                Ctx {
-                    tree,
-                    reasons,
-                    open_prs,
-                    lists,
-                },
-                &mut rec,
-                &mut todo,
-            );
+            let keep = step(id, entry, now, ctx, &mut rec, &mut todo);
             changed |= !keep || *entry != before;
             keep
         });
@@ -475,6 +473,51 @@ fn step(
         todo.push(Do::Stalled(id.to_string(), session));
     }
     true
+}
+
+/// Whether `entry` is a leftover from before the factory: written by an
+/// earlier orion (no history), at work by its stage, its session gone or
+/// archived and no pull request on its branch. Only once the daemon's
+/// tree has its project and its project's pull requests have been read,
+/// so a leftover is never mistaken while orion is still starting.
+fn leftover(ctx: Ctx, entry: &Entry) -> bool {
+    let known = ctx.tree.projects.iter().any(|p| p.id == entry.project)
+        && ctx.open_prs.contains_key(&entry.project);
+    let gone = entry.session.as_ref().is_some_and(|session| {
+        !ctx.tree
+            .agents
+            .iter()
+            .any(|a| &a.id == session && !a.archived)
+    });
+    entry.history.is_empty() && entry.stage.is_active() && known && gone && !has_pr(ctx, entry)
+}
+
+/// Let go, quietly, the leftovers an earlier orion wrote ([`leftover`]):
+/// no Dead card each, and the ticket, still yours in Todo, is picked up
+/// afresh — its old branch kept in `Ledger::previous`, so its worktree
+/// doesn't hold it back. Whether any were.
+fn drop_leftovers(ledger: &mut super::Ledger, ctx: Ctx, now: i64) -> bool {
+    let ids: Vec<String> = ledger
+        .issues
+        .iter()
+        .filter(|(_, entry)| leftover(ctx, entry))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &ids {
+        let Some(entry) = ledger.issues.remove(id) else {
+            continue;
+        };
+        tracing::info!(
+            "automations: let go of {} ({}, on {}), left over from an earlier orion: its session is gone",
+            entry.identifier,
+            entry.stage.name(),
+            entry.branch,
+        );
+        if !entry.branch.is_empty() {
+            ledger.add_previous(id.clone(), entry.branch, now);
+        }
+    }
+    !ids.is_empty()
 }
 
 /// The note on a card closed because its ticket left your hands.

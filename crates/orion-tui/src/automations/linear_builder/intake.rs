@@ -17,6 +17,8 @@
 //! - A bug's group gets its team's **related tickets** ([`related`]), and
 //!   every group its tickets' **attachments**, downloaded from Linear
 //!   ([`download`]).
+//! - Its prompt's **related work** is the project's open drafts and
+//!   lately merged pull requests that share its words ([`related_prs`]).
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -418,6 +420,79 @@ pub(crate) fn rank(bug: &[LinearIssue], candidates: Vec<LinearIssue>) -> Vec<Rel
             title: c.title,
             status: c.status,
         })
+        .collect()
+}
+
+// ---- related pull requests ----
+
+/// How many pull requests "Related work to check" lists at most.
+pub(crate) const RELATED_PRS_KEPT: usize = 6;
+/// The least share of a pull request's weighted words the tickets must
+/// share for it to count as related.
+const RELATED_PR_SHARE: f64 = 0.25;
+/// The least number of words a related pull request shares with them:
+/// one word in common is a coincidence.
+const RELATED_PR_WORDS: usize = 2;
+
+/// The words a pull request's title or branch, or a ticket, is matched
+/// on: [`words`] less numbers and the words every pull request uses.
+fn pr_words(text: &str) -> BTreeSet<String> {
+    const BOILERPLATE: &[&str] = &[
+        "fix", "fixes", "fixed", "add", "adds", "added", "update", "updates", "updated", "bump",
+        "bumps", "chore", "feat", "refactor", "wip", "draft", "make", "makes", "use", "uses",
+        "now", "new", "more", "less", "don", "won",
+    ];
+    words(text)
+        .into_iter()
+        .filter(|w| !w.chars().all(|c| c.is_ascii_digit()) && !BOILERPLATE.contains(&w.as_str()))
+        .collect()
+}
+
+/// Which of `prs` — each a `(title, branch)` — look related to `tickets`
+/// (their titles and descriptions), best first, at most
+/// [`RELATED_PRS_KEPT`], as indices into `prs`.
+///
+/// Each word is weighted by how rare it is among `prs` (its inverse
+/// document frequency), so the words every branch carries — an author's
+/// prefix, the team's key — count for little. A pull request is related
+/// when it shares at least [`RELATED_PR_WORDS`] words with the tickets
+/// and they carry at least [`RELATED_PR_SHARE`] of its own words' weight.
+pub(crate) fn related_prs(tickets: &[LinearIssue], prs: &[(&str, &str)]) -> Vec<usize> {
+    let target: BTreeSet<String> = tickets
+        .iter()
+        .flat_map(|i| pr_words(&format!("{} {}", i.title, i.description)))
+        .collect();
+    let theirs: Vec<BTreeSet<String>> = prs
+        .iter()
+        .map(|(title, branch)| pr_words(&format!("{title} {branch}")))
+        .collect();
+    let mut df: HashMap<&str, usize> = HashMap::new();
+    for word in theirs.iter().flatten() {
+        *df.entry(word.as_str()).or_default() += 1;
+    }
+    let n = prs.len() as f64;
+    let idf = |w: &str| (1.0 + n / df.get(w).copied().unwrap_or(1) as f64).ln();
+    let mut scored: Vec<(f64, f64, usize)> = theirs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, words)| {
+            let total: f64 = words.iter().map(|w| idf(w)).sum();
+            let shared: Vec<&String> = words.intersection(&target).collect();
+            let weight: f64 = shared.iter().map(|w| idf(w)).sum();
+            let share = if total > 0.0 { weight / total } else { 0.0 };
+            (shared.len() >= RELATED_PR_WORDS && share >= RELATED_PR_SHARE)
+                .then_some((share, weight, i))
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then_with(|| b.1.total_cmp(&a.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    scored
+        .into_iter()
+        .take(RELATED_PRS_KEPT)
+        .map(|(_, _, i)| i)
         .collect()
 }
 
