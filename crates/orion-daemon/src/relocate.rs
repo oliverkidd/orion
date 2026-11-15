@@ -25,9 +25,18 @@
 //!   checkout, which does not move. A Python virtualenv records its own
 //!   path and has to be recreated; a Rust `target/` rebuilds once.
 //!
+//! - **What a moved checkout leaves behind goes too.** A folder in the old
+//!   place that git no longer lists and that holds nothing but orion's own
+//!   hook files (`.claude/settings.local.json` and the like — a session
+//!   that respawned on the old path wrote them after the move) is removed,
+//!   unless some process still has it as its working directory. The old
+//!   folder itself goes once nothing is left in it but Finder's
+//!   `.DS_Store` and links that point nowhere.
+//!
 //! What it did and what it left goes to the first client to subscribe, as
 //! one flash (`Daemon::boot_notes`), and to the log.
 
+use crate::hooks::installer;
 use crate::registry::canonical_or_raw;
 use crate::store::Store;
 use crate::{containers, git};
@@ -64,15 +73,19 @@ pub async fn relocate_legacy_worktrees(store: &Store) -> Option<String> {
             }
         };
         let candidates: Vec<PathBuf> = linked
-            .into_iter()
+            .iter()
             .filter(|path| {
                 path.parent().map(canonical_or_raw).as_deref() == Some(legacy_canon.as_path())
             })
             .filter(|path| seen.insert(canonical_or_raw(path)))
+            .cloned()
             .collect();
         if !candidates.is_empty() {
             relocate_project(store, repo, &candidates, &mut report).await;
         }
+        // The list from before the moves: a checkout that moved is gone
+        // from the old folder, and one left in place is still on it.
+        clear_leftovers(&legacy, &linked, &mut report).await;
         remove_if_empty(&legacy);
     }
     report.note()
@@ -86,12 +99,14 @@ struct Report {
     stopped: Vec<String>,
     left: Vec<(PathBuf, String)>,
     venvs: Vec<PathBuf>,
+    /// Folders a moved checkout left behind, removed.
+    cleared: usize,
 }
 
 impl Report {
     fn note(&self) -> Option<String> {
         let total: usize = self.moved.iter().map(|(_, n)| n).sum();
-        if total == 0 && self.left.is_empty() {
+        if total == 0 && self.left.is_empty() && self.cleared == 0 {
             return None;
         }
         let mut parts = Vec::new();
@@ -105,6 +120,13 @@ impl Report {
                 "moved {total} worktree{} into {}",
                 if total == 1 { "" } else { "s" },
                 homes.join(", ")
+            ));
+        }
+        if self.cleared > 0 {
+            parts.push(format!(
+                "removed {} folder{} a moved worktree left behind",
+                self.cleared,
+                if self.cleared == 1 { "" } else { "s" }
             ));
         }
         if !self.stopped.is_empty() {
@@ -315,14 +337,100 @@ fn holders_of(
     holders
 }
 
+/// Remove what moved checkouts left in the old folder `legacy`: each
+/// folder in it that git no longer lists among `checkouts` and that holds
+/// only orion's own files ([`only_orion_leftovers`]). One still some
+/// process's working directory — a session of the last daemon not quite
+/// dead, a shell left there — stays, for a later restart.
+async fn clear_leftovers(legacy: &Path, checkouts: &[PathBuf], report: &mut Report) {
+    let Ok(entries) = std::fs::read_dir(legacy) else {
+        return;
+    };
+    let checkouts: HashSet<PathBuf> = checkouts.iter().map(|p| canonical_or_raw(p)).collect();
+    let leftovers: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.symlink_metadata().is_ok_and(|m| m.is_dir()))
+        .filter(|p| !checkouts.contains(&canonical_or_raw(p)))
+        .filter(|p| only_orion_leftovers(p))
+        .collect();
+    if leftovers.is_empty() {
+        return;
+    }
+    let holders = wait_for_holders(&leftovers).await;
+    for dir in leftovers {
+        if let Some(cmds) = holders.get(&canonical_or_raw(&dir)) {
+            tracing::info!(dir = %dir.display(), held_by = ?cmds, "relocate: leftover folder still in use; it goes on a later restart");
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {
+                tracing::info!(dir = %dir.display(), "relocate: removed a folder a moved worktree left behind");
+                report.cleared += 1;
+            }
+            Err(e) => {
+                tracing::warn!(dir = %dir.display(), error = %e, "relocate: leftover folder not removed")
+            }
+        }
+    }
+}
+
+/// Whether everything under `dir` is orion's own: the hook files its
+/// installers write into a checkout ([`installer::EXCLUDED`]), Finder's
+/// `.DS_Store`, and the folders holding them. Anything else — a source
+/// file, a symlink, a file of the user's — and the folder is not ours to
+/// remove.
+fn only_orion_leftovers(dir: &Path) -> bool {
+    fn walk(root: &Path, dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else {
+                return false;
+            };
+            let path = entry.path();
+            let Ok(meta) = path.symlink_metadata() else {
+                return false;
+            };
+            if meta.is_dir() {
+                if !walk(root, &path) {
+                    return false;
+                }
+                continue;
+            }
+            if entry.file_name() == ".DS_Store" {
+                continue;
+            }
+            let managed = path.strip_prefix(root).is_ok_and(|rel| {
+                installer::EXCLUDED
+                    .iter()
+                    .any(|file| rel == Path::new(file))
+            });
+            if !meta.is_file() || !managed {
+                return false;
+            }
+        }
+        true
+    }
+    walk(dir, dir)
+}
+
 /// Remove the old folder once nothing is left in it but Finder's
-/// `.DS_Store`.
+/// `.DS_Store` and symlinks that point nowhere (a shared `node_modules`
+/// link to a checkout that is gone).
 fn remove_if_empty(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let names: Vec<_> = entries.flatten().map(|e| e.file_name()).collect();
-    if names.iter().all(|n| n == ".DS_Store") {
+    let entries: Vec<_> = entries.flatten().collect();
+    let dangling = |e: &std::fs::DirEntry| {
+        e.path().symlink_metadata().is_ok_and(|m| m.is_symlink()) && !e.path().exists()
+    };
+    if entries
+        .iter()
+        .all(|e| e.file_name() == ".DS_Store" || dangling(e))
+    {
         if let Err(e) = std::fs::remove_dir_all(dir) {
             tracing::warn!(dir = %dir.display(), error = %e, "relocate: old worktrees folder not removed");
         } else {
@@ -403,6 +511,7 @@ mod tests {
                 "still in use by zsh".into(),
             )],
             venvs: vec![PathBuf::from("/w/.orion-worktrees/repo/py")],
+            cleared: 0,
         };
         assert_eq!(
             report.note().unwrap(),
@@ -467,5 +576,103 @@ mod tests {
             None,
             "nothing left to move"
         );
+    }
+
+    /// A repo with an old `repo-worktrees` folder, and a store with its
+    /// project, for the leftover sweeps.
+    fn repo_with_old_folder(root: &Path) -> (PathBuf, PathBuf, Store) {
+        let repo = root.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_in(&repo, &["init", "-b", "main"]);
+        git_in(&repo, &["commit", "--allow-empty", "-m", "init"]);
+        let legacy = root.join("repo-worktrees");
+        std::fs::create_dir(&legacy).unwrap();
+        let store = Store::open(&root.join("orion.db"), &[]).unwrap();
+        store
+            .insert_project(&orion_core::Project {
+                id: orion_core::ProjectId::generate(),
+                name: "repo".into(),
+                repo_path: repo.clone(),
+                sort_order: 0,
+            })
+            .unwrap();
+        (repo, legacy, store)
+    }
+
+    /// A folder holding only the hook file a session wrote after its
+    /// checkout moved away.
+    fn leftover(legacy: &Path, name: &str) -> PathBuf {
+        let dir = legacy.join(name);
+        std::fs::create_dir_all(dir.join(".claude")).unwrap();
+        std::fs::write(dir.join(".claude/settings.local.json"), "{}").unwrap();
+        std::fs::write(dir.join(".DS_Store"), "").unwrap();
+        dir
+    }
+
+    /// What a moved checkout left — a folder of orion's hook files and a
+    /// `node_modules` link to a checkout that is gone — goes, and the old
+    /// folder with it.
+    #[tokio::test]
+    async fn a_moved_checkouts_leftovers_go_and_the_old_folder_with_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (_repo, legacy, store) = repo_with_old_folder(&root);
+        leftover(&legacy, "feat");
+        std::os::unix::fs::symlink(root.join("gone/node_modules"), legacy.join("node_modules"))
+            .unwrap();
+
+        let note = relocate_legacy_worktrees(&store).await.unwrap();
+
+        assert_eq!(note, "Removed 1 folder a moved worktree left behind");
+        assert!(!legacy.exists(), "the old folder went");
+    }
+
+    /// Anything that isn't orion's keeps its folder: a file of the user's
+    /// in a leftover, a checkout git still lists, a loose file.
+    #[tokio::test]
+    async fn what_isnt_orions_stays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let (repo, legacy, store) = repo_with_old_folder(&root);
+        let ours = leftover(&legacy, "ours");
+        let theirs = leftover(&legacy, "theirs");
+        std::fs::write(theirs.join("notes.txt"), "mine").unwrap();
+        let log = legacy.join("hook.log");
+        std::fs::write(&log, "a log").unwrap();
+        // A checkout still in the old place (it would move, but the new
+        // place is taken): git lists it, so it is never a leftover.
+        let held = legacy.join("held");
+        git_in(
+            &repo,
+            &["worktree", "add", &held.to_string_lossy(), "-b", "held"],
+        );
+        std::fs::create_dir_all(root.join(".orion-worktrees/repo/held")).unwrap();
+
+        relocate_legacy_worktrees(&store).await;
+
+        assert!(!ours.exists(), "orion's leftover went");
+        assert!(theirs.join("notes.txt").is_file(), "the user's file stayed");
+        assert!(log.is_file(), "the loose file stayed");
+        assert!(held.join(".git").is_file(), "the checkout stayed");
+    }
+
+    #[test]
+    fn a_folder_is_orions_only_when_every_file_in_it_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(only_orion_leftovers(&empty));
+        let hooks = leftover(tmp.path(), "hooks");
+        assert!(only_orion_leftovers(&hooks));
+        std::fs::create_dir_all(hooks.join(".cursor/rules")).unwrap();
+        std::fs::write(hooks.join(".cursor/rules/orion-title.mdc"), "").unwrap();
+        assert!(only_orion_leftovers(&hooks));
+        std::fs::write(hooks.join(".cursor/rules/mine.mdc"), "").unwrap();
+        assert!(!only_orion_leftovers(&hooks));
+        let linked = leftover(tmp.path(), "linked");
+        let file = linked.join(".claude/settings.local.json");
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink("/nowhere", &file).unwrap();
+        assert!(!only_orion_leftovers(&linked), "a symlink is never ours");
     }
 }

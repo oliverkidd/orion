@@ -609,6 +609,22 @@ impl Store {
         Ok(())
     }
 
+    /// Everything standing on worktree `from` — sessions, terminals,
+    /// links — moves onto `to`, in one transaction: what folds two rows
+    /// for one MOVED CHECKOUT into one without losing either's children.
+    pub fn move_worktree_children(&self, from: &WorktreeId, to: &WorktreeId) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for table in ["agents", "terminals", "links"] {
+            tx.execute(
+                &format!("UPDATE {table} SET worktree_id = ?2 WHERE worktree_id = ?1"),
+                params![from.as_str(), to.as_str()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// A project rooted at a checkout that moved on disk (`relocate`).
     pub fn update_project_repo_path(&self, id: &ProjectId, path: &Path) -> Result<()> {
         self.conn.lock().unwrap().execute(

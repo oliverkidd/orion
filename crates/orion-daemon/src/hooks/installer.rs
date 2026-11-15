@@ -243,8 +243,9 @@ fn managed_group(endpoint: &str, event: &str, matcher: Option<&str>) -> Value {
 }
 
 /// The checkout-local files the installers here write, as `info/exclude`
-/// lines: orion's, not the project's.
-const EXCLUDED: &[&str] = &[
+/// lines: orion's, not the project's. Also what WORKTREE RELOCATION
+/// counts as orion's own leftovers in an old worktrees folder.
+pub(crate) const EXCLUDED: &[&str] = &[
     ".claude/settings.local.json",
     ".cursor/hooks.json",
     ".cursor/rules/orion-title.mdc",
