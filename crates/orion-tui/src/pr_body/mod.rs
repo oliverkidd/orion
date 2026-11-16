@@ -181,6 +181,10 @@ struct Remembered {
     /// When it was (epoch ms): its card waits [`dispatch::WAIT_MS`] for
     /// the pictures.
     pictures_dispatched_at_ms: Option<i64>,
+    /// The head and flow the pictures job is known to have run for
+    /// ([`dispatch::Ran`]): a flow uploaded again at the same head is run
+    /// once more, the same flow never twice.
+    pictures_ran: Option<dispatch::Ran>,
     /// The head its agent was last sent back for pictures that show no
     /// difference ([`NO_DIFFERENCE`]): never twice for one head.
     no_difference_sent: Option<String>,
@@ -540,6 +544,7 @@ fn land_detail_unsaved(app: &mut App, url: &str, detail: Option<&PrDetail>) {
         .and_then(|id| app.tree.agents.iter().find(|a| &a.id == id))
         .cloned();
     let pictures_dispatched = app.pr_body.remembered(url).pictures_dispatched.clone();
+    let pictures_ran = app.pr_body.remembered(url).pictures_ran.clone();
     let messages = app
         .pr_body
         .messages
@@ -559,6 +564,7 @@ fn land_detail_unsaved(app: &mut App, url: &str, detail: Option<&PrDetail>) {
         builder,
         cache: data_dir().map(|d| d.join("pr-body")),
         pictures_dispatched,
+        pictures_ran,
     };
     tokio::spawn(async move {
         let gathered = gather(job).await;
@@ -619,6 +625,8 @@ struct Job {
     cache: Option<PathBuf>,
     /// The head the pictures job was last run for by hand.
     pictures_dispatched: Option<String>,
+    /// The head and flow it is known to have run for.
+    pictures_ran: Option<dispatch::Ran>,
 }
 
 /// Everything the verdict needs. A None is "couldn't ask": nothing is
@@ -721,11 +729,12 @@ async fn gather(job: Job) -> Gathered {
         (Some(Ok(rules)), Some(found)) => {
             let signal = pictures::of(&job.detail, &rules.visible_paths, found);
             if signal.visible && !signal.shown {
-                let may_run = dispatch::wanted(
+                let may_run = dispatch::wanted(&job.detail, &rules.visible_paths, found);
+                let ran = dispatch::ran_at_head(
                     &job.detail,
-                    &rules.visible_paths,
-                    found,
+                    job.pictures_ran.as_ref(),
                     job.pictures_dispatched.as_deref(),
+                    found,
                 );
                 let gh = dispatch::Gh {
                     owner: &job.owner,
@@ -733,7 +742,7 @@ async fn gather(job: Job) -> Gathered {
                 };
                 let repo = format!("{}/{}", job.owner, job.repo);
                 let workflow = rules.pictures_workflow.as_deref();
-                Some(dispatch::look(&gh, &repo, &job.detail, workflow, may_run).await)
+                Some(dispatch::look(&gh, &repo, &job.detail, workflow, may_run, ran.as_ref()).await)
             } else {
                 None
             }
@@ -871,11 +880,34 @@ fn land_gathered(app: &mut App, g: Gathered) {
     if let Some(t) = app.pr_body.tracked.get_mut(&url) {
         t.gathering = false;
     }
-    if g.look.is_some_and(|l| l.dispatched) {
+    if let Some(look) = &g.look {
+        let head = g.job.detail.head_sha.trim().to_string();
+        let taken_here = g
+            .pictures
+            .as_ref()
+            .is_some_and(|m| !head.is_empty() && m.head_sha.trim() == head);
         let remembered = app.pr_body.remembered(&url);
-        remembered.pictures_dispatched = Some(g.job.detail.head_sha.clone());
-        remembered.pictures_dispatched_at_ms = Some(orion_core::clock::now_ms());
-        app.pr_body.save();
+        let known_here = remembered
+            .pictures_ran
+            .as_ref()
+            .is_some_and(|r| r.head == head);
+        if look.dispatched {
+            remembered.pictures_dispatched = Some(head.clone());
+            remembered.pictures_dispatched_at_ms = Some(orion_core::clock::now_ms());
+            remembered.pictures_ran = Some(dispatch::Ran {
+                head,
+                flow: look.flow_sha.clone(),
+            });
+            app.pr_body.save();
+        } else if taken_here && !known_here && look.flow_sha.is_some() {
+            // Taken at this head by a run orion didn't start: with the
+            // flow that is up now.
+            remembered.pictures_ran = Some(dispatch::Ran {
+                head,
+                flow: look.flow_sha.clone(),
+            });
+            app.pr_body.save();
+        }
     }
     let (Some(read), Some(messages), Some(manifest)) = (&g.contract, &g.messages, &g.pictures)
     else {
@@ -937,7 +969,7 @@ fn land_gathered(app: &mut App, g: Gathered) {
     }
     record(app, &url, &g.job.factory.identifier, &v, &cubic);
     let remembered = app.pr_body.remembered(&url);
-    let pictures_coming = g.look.is_some_and(|look| {
+    let pictures_coming = g.look.as_ref().is_some_and(|look| {
         dispatch::coming(
             look,
             &detail.head_sha,
@@ -1533,6 +1565,7 @@ mod tests {
                 builder: None,
                 cache: None,
                 pictures_dispatched: None,
+                pictures_ran: None,
             },
             fresh_contract: false,
             contract: None,
@@ -1576,7 +1609,7 @@ mod tests {
         let mut g = visible_without_pictures();
         g.look = Some(dispatch::Look {
             going: true,
-            ..flow
+            ..flow.clone()
         });
         land_gathered(&mut app, g);
         assert!(app.outbox.is_empty(), "pictures on their way");
@@ -1586,12 +1619,12 @@ mod tests {
         let mut g = visible_without_pictures();
         g.look = Some(dispatch::Look {
             dispatched: true,
-            ..flow
+            ..flow.clone()
         });
         land_gathered(&mut app, g);
         assert!(app.outbox.is_empty(), "the job just run");
         let mut g = visible_without_pictures();
-        g.look = Some(flow);
+        g.look = Some(flow.clone());
         land_gathered(&mut app, g);
         assert!(app.outbox.is_empty(), "within half an hour of the run");
         app.pr_body.remembered(URL).pictures_dispatched_at_ms =
@@ -1610,51 +1643,57 @@ mod tests {
     }
 
     #[test]
-    fn a_dispatch_is_remembered_so_the_next_gather_skips_that_head() {
+    fn a_dispatch_is_remembered_with_its_flow_so_the_next_gather_skips_it() {
         let mut app = App::new();
         let mut g = gathered();
         g.look = Some(dispatch::Look {
             flow: true,
-            going: false,
+            flow_sha: Some("f1".into()),
             dispatched: true,
+            ..Default::default()
         });
         land_gathered(&mut app, g);
         let remembered = app.pr_body.remembered(URL);
         assert_eq!(remembered.pictures_dispatched.as_deref(), Some("abc"));
         assert!(remembered.pictures_dispatched_at_ms.is_some());
-        let detail = PrDetail {
-            number: 7,
-            base: "dev".into(),
-            head_sha: "abc".into(),
-            files: vec![crate::pull_request::PrFile {
-                path: "apps/web/a.tsx".into(),
-                additions: 1,
-                deletions: 0,
-                change: String::new(),
-            }],
-            ..Default::default()
-        };
-        let visible = ["apps/web/**".to_string()];
-        let none = pictures::Manifest::default();
-        let dispatched = remembered.pictures_dispatched.clone();
-        assert!(!dispatch::wanted(
-            &detail,
-            &visible,
-            &none,
-            dispatched.as_deref()
-        ));
-        let pushed = PrDetail {
-            head_sha: "def".into(),
-            ..detail
-        };
-        assert!(
-            dispatch::wanted(&pushed, &visible, &none, dispatched.as_deref()),
-            "a new push"
-        );
+        let ran = remembered.pictures_ran.clone().expect("what ran");
+        assert!(ran.covers("abc", "f1"), "{ran:?}");
+        assert!(!ran.covers("abc", "f2"), "a flow uploaded again");
+        assert!(!ran.covers("def", "f1"), "a new push");
         // Remembered across runs.
         let json = serde_json::to_string(&app.pr_body.memory().clone()).unwrap();
         let back: Memory = serde_json::from_str(&json).unwrap();
         assert_eq!(back.prs[URL].pictures_dispatched.as_deref(), Some("abc"));
+        assert_eq!(back.prs[URL].pictures_ran, Some(ran));
+    }
+
+    #[test]
+    fn pictures_taken_at_the_head_remember_the_flow_they_were_taken_with() {
+        let mut app = app_listing_the_pr();
+        let mut g = showing_no_difference("abc");
+        g.look = Some(dispatch::Look {
+            flow: true,
+            flow_sha: Some("f1".into()),
+            ..Default::default()
+        });
+        land_gathered(&mut app, g);
+        let ran = app.pr_body.remembered(URL).pictures_ran.clone();
+        assert_eq!(
+            ran,
+            Some(dispatch::Ran {
+                head: "abc".into(),
+                flow: Some("f1".into()),
+            })
+        );
+        // The agent uploads its flow again: the next look runs the job.
+        let none = pictures::Manifest::default();
+        let detail = PrDetail {
+            head_sha: "abc".into(),
+            ..Default::default()
+        };
+        let at_head = dispatch::ran_at_head(&detail, ran.as_ref(), None, &none).unwrap();
+        assert!(!at_head.covers("abc", "f2"));
+        assert!(at_head.covers("abc", "f1"));
     }
 
     /// An app with `URL` on its project's open list, at head `abc`: the

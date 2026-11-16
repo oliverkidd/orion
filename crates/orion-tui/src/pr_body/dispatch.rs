@@ -7,12 +7,16 @@
 //! the PR first and uploads its flow after is left with a visible change
 //! and no pictures, and nothing runs the job again. So, from the gather
 //! (off the loop), orion runs it by hand — `gh workflow run <workflow>
-//! --ref <base> -f pr=<n>` — once per head ([`wanted`], then [`look`])
-//! when all of these hold:
+//! --ref <base> -f pr=<n>` — once per head and flow ([`wanted`], then
+//! [`look`]) when all of these hold:
 //!
-//! - the PR is visible and its pictures aren't shown at its head, and no
-//!   `pictures.json` was taken at that head (the job ran there already);
-//! - nothing was dispatched for that head before (pr_body's memory);
+//! - the PR is visible and its pictures aren't shown at its head: no
+//!   `pictures.json` was taken at that head, or the one taken there shows
+//!   no difference in any frame;
+//! - the job hasn't run for that head with the flow that is up now
+//!   ([`Ran`], pr_body's memory, keyed on the head and the flow file's
+//!   blob sha): an agent sent back to stage its pictures again re-uploads
+//!   its flow at the same head, and that new flow is run once more;
 //! - its flow is on `pr-screenshots`;
 //! - no run of the workflow for this PR is queued or in progress.
 //!
@@ -34,35 +38,71 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::pictures::{self, Manifest};
 use crate::pull_request::PrDetail;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Whether PR `detail` is one to run the pictures job for, before asking
-/// GitHub anything: visible, not shown, the job not run at this head, and
-/// not dispatched for it already (`dispatched`, from memory).
-pub fn wanted(
+/// What the pictures job is known to have run for: a head, and the blob
+/// sha of the flow it ran with on the pictures branch. A flow of None is
+/// any flow: a run remembered from before flows were told apart, or
+/// pictures taken at the head before orion saw which flow was up.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ran {
+    pub head: String,
+    pub flow: Option<String>,
+}
+
+impl Ran {
+    /// Whether the job has run for `head` with the flow `flow`.
+    pub fn covers(&self, head: &str, flow: &str) -> bool {
+        self.head == head && self.flow.as_deref().is_none_or(|f| f == flow)
+    }
+}
+
+/// What the job has run for at PR `detail`'s head, from pr_body's memory:
+/// `ran` when it is for this head; else the head orion last dispatched
+/// for, from before flows were remembered; else, when `pictures.json` was
+/// taken at this head, the flow that is up now (until orion learns its
+/// sha). None when it hasn't run at this head.
+pub fn ran_at_head(
     detail: &PrDetail,
-    visible_paths: &[String],
-    manifest: &Manifest,
+    ran: Option<&Ran>,
     dispatched: Option<&str>,
-) -> bool {
+    manifest: &Manifest,
+) -> Option<Ran> {
     let head = detail.head_sha.trim();
-    if head.is_empty() || detail.base.trim().is_empty() || dispatched == Some(head) {
+    if let Some(ran) = ran.filter(|r| r.head == head) {
+        return Some(ran.clone());
+    }
+    let taken_here = !head.is_empty() && manifest.head_sha.trim() == head;
+    (dispatched == Some(head) || taken_here).then(|| Ran {
+        head: head.to_string(),
+        flow: None,
+    })
+}
+
+/// Whether PR `detail` is one to run the pictures job for, before asking
+/// GitHub anything: visible and not shown, with no pictures taken at this
+/// head or ones there that show no difference. Whether its flow has run
+/// at this head already is [`look`]'s to say, once it knows the flow.
+pub fn wanted(detail: &PrDetail, visible_paths: &[String], manifest: &Manifest) -> bool {
+    let head = detail.head_sha.trim();
+    if head.is_empty() || detail.base.trim().is_empty() {
         return false;
     }
     let signal = pictures::of(detail, visible_paths, manifest);
-    signal.visible && !signal.shown && manifest.head_sha.trim() != head
+    signal.visible && !signal.shown && (manifest.head_sha.trim() != head || signal.no_difference)
 }
 
 /// What [`run`] asks GitHub: `gh` for real ([`Gh`]), canned in tests.
 pub(crate) trait Ask {
-    /// Whether PR `number`'s flow is on the pictures branch; None when
-    /// `gh` couldn't ask.
-    async fn flow(&self, number: u64) -> Option<bool>;
+    /// PR `number`'s flow on the pictures branch: its blob sha, None
+    /// inside when it isn't there; None when `gh` couldn't ask.
+    async fn flow(&self, number: u64) -> Option<Option<String>>;
     /// The repo's workflows, as `actions/workflows` answers.
     async fn workflows(&self) -> Option<String>;
     /// `workflow`'s latest runs, as `gh run list --json` answers.
@@ -88,15 +128,15 @@ impl Gh<'_> {
 }
 
 impl Ask for Gh<'_> {
-    async fn flow(&self, number: u64) -> Option<bool> {
+    async fn flow(&self, number: u64) -> Option<Option<String>> {
         let endpoint = format!(
             "repos/{}/contents/pr-{number}/flow.keyframes.ts?ref={}",
             self.full(),
             pictures::BRANCH
         );
         match self.gh(&["api", &endpoint, "--jq", ".sha"]).await {
-            Ok(_) => Some(true),
-            Err(why) if super::not_found(&why) => Some(false),
+            Ok(sha) => Some(Some(sha.trim().to_string())),
+            Err(why) if super::not_found(&why) => Some(None),
             Err(why) => {
                 tracing::info!(
                     "pr_body: looking for the flow of {}#{number}: {why}",
@@ -143,10 +183,12 @@ impl Ask for Gh<'_> {
 pub const WAIT_MS: i64 = 30 * 60 * 1000;
 
 /// What [`look`] found of PR's pictures on their way.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Look {
     /// Its flow is on the pictures branch.
     pub flow: bool,
+    /// The flow's blob sha there, when it is.
+    pub flow_sha: Option<String>,
     /// A run of the pictures workflow for it is queued or in progress.
     pub going: bool,
     /// The workflow was run for it just now.
@@ -158,7 +200,7 @@ pub struct Look {
 /// `dispatched_at_ms`): its flow is up, and a run for it is going or
 /// orion's own ran for this head within [`WAIT_MS`] of `now_ms`.
 pub fn coming(
-    look: Look,
+    look: &Look,
     head: &str,
     dispatched: Option<&str>,
     dispatched_at_ms: Option<i64>,
@@ -173,20 +215,24 @@ pub fn coming(
 /// Look at PR `detail`'s pictures on their way — its flow, and a run of
 /// `workflow` (the contract's) or the one [`discover`] finds going for it
 /// — and, when `may_run` (one [`wanted`] passed), run the job for it if
-/// the flow is there and no run is going.
+/// the flow is there, the job hasn't run at this head with that flow
+/// (`ran`, from [`ran_at_head`]) and no run is going.
 pub(crate) async fn look<A: Ask>(
     ask: &A,
     repo: &str,
     detail: &PrDetail,
     workflow: Option<&str>,
     may_run: bool,
+    ran: Option<&Ran>,
 ) -> Look {
     let number = detail.number;
-    if ask.flow(number).await != Some(true) {
+    let Some(Some(sha)) = ask.flow(number).await else {
         return Look::default();
-    }
+    };
+    let may_run = may_run && !ran.is_some_and(|r| r.covers(detail.head_sha.trim(), &sha));
     let mut found = Look {
         flow: true,
+        flow_sha: Some(sha),
         ..Look::default()
     };
     let workflow = match workflow.map(str::trim).filter(|w| !w.is_empty()) {
@@ -348,16 +394,16 @@ mod tests {
     /// Canned answers, and every call made.
     #[derive(Default)]
     struct Fake {
-        flow: Option<bool>,
+        flow: Option<Option<String>>,
         workflows: Option<String>,
         runs: String,
         calls: RefCell<Vec<String>>,
     }
 
     impl Ask for Fake {
-        async fn flow(&self, number: u64) -> Option<bool> {
+        async fn flow(&self, number: u64) -> Option<Option<String>> {
             self.calls.borrow_mut().push(format!("flow {number}"));
-            self.flow
+            self.flow.clone()
         }
         async fn workflows(&self) -> Option<String> {
             self.calls.borrow_mut().push("workflows".into());
@@ -378,7 +424,7 @@ mod tests {
     impl Fake {
         fn with_flow() -> Fake {
             Fake {
-                flow: Some(true),
+                flow: Some(Some("f1".into())),
                 runs: "[]".into(),
                 ..Default::default()
             }
@@ -415,17 +461,20 @@ mod tests {
 
     /// A look that may run the job: true when it did.
     async fn run(fake: &Fake, repo: &str, detail: &PrDetail, workflow: Option<&str>) -> bool {
-        look(fake, repo, detail, workflow, true).await.dispatched
+        look(fake, repo, detail, workflow, true, None)
+            .await
+            .dispatched
     }
 
     #[tokio::test]
     async fn a_look_says_what_is_on_its_way_and_runs_the_job_only_when_it_may() {
         let fake = Fake::with_flow();
-        let found = look(&fake, "o/r", &pr(), Some("k.yml"), false).await;
+        let found = look(&fake, "o/r", &pr(), Some("k.yml"), false, None).await;
         assert_eq!(
             found,
             Look {
                 flow: true,
+                flow_sha: Some("f1".into()),
                 ..Look::default()
             }
         );
@@ -434,11 +483,11 @@ mod tests {
             runs: r#"[{"status": "queued", "event": "pull_request", "headSha": "abc123"}]"#.into(),
             ..Fake::with_flow()
         };
-        let found = look(&fake, "o/r", &pr(), Some("k.yml"), true).await;
+        let found = look(&fake, "o/r", &pr(), Some("k.yml"), true, None).await;
         assert!(found.flow && found.going && !found.dispatched);
         let fake = Fake::default();
         assert_eq!(
-            look(&fake, "o/r", &pr(), Some("k.yml"), true).await,
+            look(&fake, "o/r", &pr(), Some("k.yml"), true, None).await,
             Look::default(),
             "no flow"
         );
@@ -452,14 +501,14 @@ mod tests {
         };
         let going = Look {
             going: true,
-            ..flow
+            ..flow.clone()
         };
         let now = 10 * WAIT_MS;
-        assert!(coming(going, "abc", None, None, now));
+        assert!(coming(&going, "abc", None, None, now));
         assert!(coming(
-            Look {
+            &Look {
                 dispatched: true,
-                ..flow
+                ..flow.clone()
             },
             "abc",
             None,
@@ -467,30 +516,33 @@ mod tests {
             now
         ));
         assert!(coming(
-            flow,
+            &flow,
             "abc",
             Some("abc"),
             Some(now - WAIT_MS + 1),
             now
         ));
         assert!(
-            !coming(flow, "abc", Some("abc"), Some(now - WAIT_MS), now),
+            !coming(&flow, "abc", Some("abc"), Some(now - WAIT_MS), now),
             "half an hour on"
         );
         assert!(
-            !coming(flow, "abc", Some("old"), Some(now), now),
+            !coming(&flow, "abc", Some("old"), Some(now), now),
             "run for an older head"
         );
-        assert!(!coming(flow, "abc", Some("abc"), None, now), "when unknown");
         assert!(
-            !coming(flow, "abc", None, None, now),
+            !coming(&flow, "abc", Some("abc"), None, now),
+            "when unknown"
+        );
+        assert!(
+            !coming(&flow, "abc", None, None, now),
             "flow up, nothing run"
         );
         assert!(
             !coming(
-                Look {
+                &Look {
                     flow: false,
-                    ..going
+                    ..going.clone()
                 },
                 "abc",
                 Some("abc"),
@@ -568,7 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_flow_no_dispatch() {
-        for flow in [Some(false), None] {
+        for flow in [Some(None), None] {
             let fake = Fake {
                 flow,
                 ..Fake::with_flow()
@@ -640,39 +692,113 @@ mod tests {
     }
 
     #[test]
-    fn wanted_once_per_head_for_a_visible_pr_without_pictures() {
+    fn wanted_for_a_visible_pr_without_pictures_that_show_a_change() {
         let none = Manifest::default();
-        assert!(wanted(&pr(), &visible(), &none, None));
-        assert!(wanted(&pr(), &visible(), &none, Some("older")));
-        assert!(
-            !wanted(&pr(), &visible(), &none, Some("abc123")),
-            "dispatched for this head"
-        );
-        assert!(!wanted(&pr(), &[], &none, None), "not visible");
+        assert!(wanted(&pr(), &visible(), &none));
+        assert!(!wanted(&pr(), &[], &none), "not visible");
         let ran_here = Manifest {
             head_sha: "abc123".into(),
             ..Default::default()
         };
         assert!(
-            !wanted(&pr(), &visible(), &ran_here, None),
+            !wanted(&pr(), &visible(), &ran_here),
             "the job ran at this head"
         );
+        let grid = pictures::Grid {
+            file: "g.png".into(),
+            url: "https://x/g.png".into(),
+        };
         let stale = Manifest {
             head_sha: "older".into(),
-            grids: vec![pictures::Grid {
-                file: "g.png".into(),
-                url: "https://x/g.png".into(),
+            grids: vec![grid.clone()],
+            ..Default::default()
+        };
+        assert!(
+            wanted(&pr(), &visible(), &stale),
+            "pictures of an older push"
+        );
+        let nothing_shown = Manifest {
+            head_sha: "abc123".into(),
+            grids: vec![grid],
+            frames: vec![pictures::Frame {
+                verdict: "no visible difference".into(),
+                difference: Some(0.0),
+                ..Default::default()
             }],
             ..Default::default()
         };
         assert!(
-            wanted(&pr(), &visible(), &stale, None),
-            "pictures of an older push"
+            wanted(&pr(), &visible(), &nothing_shown),
+            "pictures here that show no difference"
         );
         let no_base = PrDetail {
             base: String::new(),
             ..pr()
         };
-        assert!(!wanted(&no_base, &visible(), &none, None));
+        assert!(!wanted(&no_base, &visible(), &none));
+    }
+
+    #[test]
+    fn what_ran_at_the_head_comes_from_memory_or_the_pictures_taken_there() {
+        let none = Manifest::default();
+        let ran = |head: &str, flow: Option<&str>| Ran {
+            head: head.into(),
+            flow: flow.map(String::from),
+        };
+        let remembered = ran("abc123", Some("f1"));
+        assert_eq!(
+            ran_at_head(&pr(), Some(&remembered), None, &none),
+            Some(remembered)
+        );
+        let older = ran("older", Some("f1"));
+        assert_eq!(ran_at_head(&pr(), Some(&older), None, &none), None);
+        // Dispatched here before flows were remembered: any flow.
+        assert_eq!(
+            ran_at_head(&pr(), None, Some("abc123"), &none),
+            Some(ran("abc123", None))
+        );
+        // Taken here by the job on the push: whatever flow is up.
+        let taken = Manifest {
+            head_sha: "abc123".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            ran_at_head(&pr(), Some(&older), None, &taken),
+            Some(ran("abc123", None))
+        );
+        assert!(ran("abc123", None).covers("abc123", "f9"));
+        assert!(!ran("abc123", Some("f1")).covers("abc123", "f2"));
+        assert!(!ran("older", Some("f1")).covers("abc123", "f1"));
+    }
+
+    #[tokio::test]
+    async fn a_new_flow_at_the_same_head_runs_the_job_once_more() {
+        let ran = Ran {
+            head: "abc123".into(),
+            flow: Some("f1".into()),
+        };
+        // The same head, the same flow: not again.
+        let fake = Fake::with_flow();
+        let found = look(&fake, "o/r", &pr(), Some("k.yml"), true, Some(&ran)).await;
+        assert!(found.flow && !found.dispatched, "{found:?}");
+        assert!(fake.dispatched().is_empty());
+        // The same head, the flow uploaded again: once more.
+        let fake = Fake {
+            flow: Some(Some("f2".into())),
+            ..Fake::with_flow()
+        };
+        let found = look(&fake, "o/r", &pr(), Some("k.yml"), true, Some(&ran)).await;
+        assert!(found.dispatched, "{found:?}");
+        assert_eq!(found.flow_sha.as_deref(), Some("f2"));
+        assert_eq!(fake.dispatched(), ["dispatch k.yml --ref dev -f pr=2130"]);
+        // Still guarded by a run in progress.
+        let fake = Fake {
+            flow: Some(Some("f2".into())),
+            runs: r#"[{"status": "in_progress", "event": "pull_request", "headSha": "abc123"}]"#
+                .into(),
+            ..Fake::with_flow()
+        };
+        let found = look(&fake, "o/r", &pr(), Some("k.yml"), true, Some(&ran)).await;
+        assert!(found.going && !found.dispatched);
     }
 }
