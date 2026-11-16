@@ -1,8 +1,9 @@
 //! The board's FACTORY cards: every software factory card posted to you
-//! on Slack and still open (`App::factory_cards`, `factory::cards`) — a
-//! plan, a question, a verdict, the day's new rules, the week's fixes —
-//! mirrored in the AGENTS column, marked `◆`, with the Slack card's own
-//! buttons.
+//! and still open (`App::factory_cards`, `factory::cards`) — a plan, a
+//! question, a verdict, the day's new rules, the week's fixes — in the
+//! AGENTS column, marked `◆`, with the Slack card's own buttons. While
+//! you are at the desk this is where a card is answered: it reaches
+//! Slack only once you go away.
 //!
 //! - **Enter** on one opens its buttons as a menu, the card's words above
 //!   them; there **1–9** presses the button of that number at once. On

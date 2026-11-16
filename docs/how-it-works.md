@@ -339,7 +339,10 @@
   session that opens a newer dialog while its message about the last one is still up has that
   message updated to `↓ Moved on: a newer question is below`, its buttons gone, and the new one
   posted under it; a message already up about the same dialog is never posted twice. A session
-  answered at the desk instead has its DM updated to say "Answered in Orion", its buttons gone. The daemon
+  answered at the desk instead has its DM updated to say "Answered in Orion", its buttons gone. The
+  software factory's cards follow the same away: while you are at the desk none goes to Slack, and
+  each shows in orion instead (see [The software factory's cards](sessions.md#factory-cards)); as you
+  go away, the ones still open go to Slack, once each, and new ones go straight there. The daemon
   holds one Socket Mode websocket to Slack (reopened with backoff when it drops), keeps which message
   is which session's (and what it was about) in its database so a reply or a modal finds its session
   after a restart, and forwards

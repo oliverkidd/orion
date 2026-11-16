@@ -29,6 +29,12 @@ use ratatui::Frame;
 /// header rows, the blank one under them and the question along the
 /// bottom, with the editor keeping its full height.
 pub(super) const BOX_SIZE: (u16, u16) = (92, 18);
+/// What a session's badge says while a software factory card about it
+/// waits on you (`factory::cards::place_of`).
+const FACTORY_CARD_BADGE: &str = " ◆ card";
+/// What a checkout's rule wears ahead of its pull request while a card
+/// about it, with no live session, waits on you.
+const FACTORY_CARD_MARK: &str = "◆ ";
 /// The PROJECT PICKER's width, and the most rows it lists before scrolling.
 const PICKER_W: u16 = 64;
 const PICKER_ROWS: u16 = 14;
@@ -1819,11 +1825,18 @@ fn rule_tail_width(block: usize) -> usize {
 /// crimson — and the counts as facts rather than statuses: the files in
 /// the diff's modified sand, the lines in its pastels, the commits muted.
 fn rule_facts(app: &App, band: &crate::launcher::Band, th: Theme) -> RuleFacts {
-    let pr = band.pr.as_ref().map_or_else(Vec::new, |pr| {
+    let mut pr = band.pr.as_ref().map_or_else(Vec::new, |pr| {
         let look = crate::pr_row::look(pr.standing, pr.trouble, th);
         let badge = (format!(" {}", pr.badge()), look.badge);
         crate::pr_row::spans(look, &format!("#{}", pr.number), usize::MAX, Some(badge))
     });
+    // A software factory card about the checkout with no live session to
+    // wear it: `◆` ahead of the pull request.
+    let place = crate::factory::cards::Place::Worktree(band.worktree.clone());
+    if crate::factory::cards::waiting_at(app, &place) > 0 {
+        let mark = Span::styled(FACTORY_CARD_MARK, Style::default().fg(th.accent));
+        pr.insert(0, mark);
+    }
     let files = app.worktree_changes(&band.worktree).filter(|n| *n > 0);
     let lines = files.and(app.worktree_lines(&band.worktree));
     let (ahead, behind) = app.worktree_ahead_behind(&band.worktree);
@@ -2332,6 +2345,15 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
     // A session stopped on a usage limit says so where its age goes, in
     // the red its frame is: the reason it is waiting on you.
     let limit = a.limit_reached().filter(|_| !pending);
+    // A software factory card about it, open and to you: `◆ card`, in
+    // the accent the Needs you board marks it with.
+    let cards = match archived || pending {
+        true => 0,
+        false => crate::factory::cards::waiting_at(
+            app,
+            &crate::factory::cards::Place::Session(a.id.clone()),
+        ),
+    };
     // How long ago it was filed, on an archived card, rather than when its
     // turn last moved: the status behind it stopped being news the moment
     // it was put away. A row archived before the stamp existed carries 0
@@ -2342,6 +2364,8 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
         PENDING_SESSION_BADGE.to_string()
     } else if let Some(limit) = limit {
         format!(" {}", limit.label())
+    } else if cards > 0 {
+        FACTORY_CARD_BADGE.to_string()
     } else if a.unseen {
         " done".to_string()
     } else {
@@ -2349,6 +2373,8 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
     };
     let ago_style = if limit.is_some() {
         Style::default().fg(th.err)
+    } else if cards > 0 {
+        Style::default().fg(th.accent)
     } else if a.unseen && !pending && !archived {
         Style::default().fg(th.done)
     } else {

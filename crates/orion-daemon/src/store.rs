@@ -441,6 +441,17 @@ const MIGRATIONS: &[&str] = &[
     "
     ALTER TABLE factory_messages ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
     ",
+    // 39: FACTORY CARDS HELD — an owner's factory card posted while they
+    // were at the desk, kept here instead of going to Slack (`factory`):
+    // orion shows it, and it goes to Slack once, if it is still open,
+    // when they go away. `card` is the whole `FactoryCard` as JSON.
+    "
+    CREATE TABLE factory_held (
+      key         TEXT PRIMARY KEY,
+      card        TEXT NOT NULL,
+      created_at  INTEGER NOT NULL
+    );
+    ",
 ];
 
 fn phone_kind_str(kind: orion_core::away::PhoneKind) -> &'static str {
@@ -1278,11 +1289,65 @@ impl Store {
 
     /// Forget the factory messages last posted or edited before `before`
     /// (epoch ms): a press on one is ignored, a post under its key starts
-    /// a new message. How many went.
+    /// a new message. A card held as long goes too. How many messages
+    /// went.
     pub fn prune_factory_messages(&self, before: i64) -> Result<usize> {
-        Ok(self.conn.lock().unwrap().execute(
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM factory_held WHERE created_at < ?1",
+            params![before],
+        )?;
+        Ok(conn.execute(
             "DELETE FROM factory_messages WHERE max(created_at, updated_at) < ?1",
             params![before],
+        )?)
+    }
+
+    /// Hold `card` while you are at the desk: kept instead of posted,
+    /// replacing one held under its key.
+    pub fn hold_factory_card(&self, card: &orion_core::FactoryCard) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO factory_held (key, card, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET card = ?2",
+            params![card.key, serde_json::to_string(card)?, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Forget the card held under `key`: whether there was one.
+    pub fn drop_held_factory_card(&self, key: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM factory_held WHERE key = ?1", params![key])?
+            > 0)
+    }
+
+    /// Every card held, oldest first, taken: each comes back once.
+    pub fn take_held_factory_cards(&self) -> Result<Vec<orion_core::FactoryCard>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let cards: Vec<String> = {
+            let mut stmt =
+                tx.prepare("SELECT card FROM factory_held ORDER BY created_at, rowid")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        tx.execute("DELETE FROM factory_held", [])?;
+        tx.commit()?;
+        Ok(cards
+            .iter()
+            .filter_map(|card| serde_json::from_str(card).ok())
+            .collect())
+    }
+
+    /// Whether any card is held.
+    pub fn any_held_factory_cards(&self) -> Result<bool> {
+        Ok(self.conn.lock().unwrap().query_row(
+            "SELECT EXISTS(SELECT 1 FROM factory_held)",
+            [],
+            |r| r.get(0),
         )?)
     }
 
@@ -1782,6 +1847,48 @@ mod tests {
         assert!(store.factory_message(&m.key).unwrap().is_none());
     }
 
+    /// A card held while you are at the desk is kept by key, dropped when
+    /// it is answered in orion, and taken to Slack once: a second take
+    /// finds nothing.
+    #[test]
+    fn held_factory_cards_are_taken_once() {
+        let store = Store::open_in_memory().unwrap();
+        let card = |key: &str, text: &str| orion_core::FactoryCard {
+            key: key.into(),
+            to: orion_core::CardRecipient::Owner,
+            text: text.into(),
+            blocks: serde_json::json!([]),
+            image: None,
+        };
+        assert!(!store.any_held_factory_cards().unwrap());
+        store
+            .hold_factory_card(&card("pr:a:verdict", "first"))
+            .unwrap();
+        store
+            .hold_factory_card(&card("issue:R-1:stalled", "x"))
+            .unwrap();
+        store
+            .hold_factory_card(&card("pr:a:verdict", "again"))
+            .unwrap();
+        store
+            .hold_factory_card(&card("issue:R-2:dead", "y"))
+            .unwrap();
+        assert!(store.drop_held_factory_card("issue:R-2:dead").unwrap());
+        assert!(!store.drop_held_factory_card("issue:R-2:dead").unwrap());
+        assert!(store.any_held_factory_cards().unwrap());
+        let taken = store.take_held_factory_cards().unwrap();
+        let texts: Vec<(&str, &str)> = taken
+            .iter()
+            .map(|c| (c.key.as_str(), c.text.as_str()))
+            .collect();
+        assert_eq!(
+            texts,
+            [("pr:a:verdict", "again"), ("issue:R-1:stalled", "x")]
+        );
+        assert!(store.take_held_factory_cards().unwrap().is_empty());
+        assert!(!store.any_held_factory_cards().unwrap());
+    }
+
     /// Read marks are keyed by PR URL and outlive the worktree they were
     /// noticed on, so they live in their own table with no foreign key: no
     /// row here is ever cascaded away by a checkout being deleted.
@@ -2170,6 +2277,7 @@ mod tests {
     fn table_names_without_workspaces() -> Vec<String> {
         [
             "agents",
+            "factory_held",
             "factory_messages",
             "links",
             "phone_messages",

@@ -1,6 +1,8 @@
 //! AWAY DETECTION: whether you are at the desk, for the phone bridge
-//! (`phone`). The rule is `orion_core::away`'s; this reads its signals off
-//! the Mac every 5 s and keeps the hand flag (⌘⇧A, `ClientRequest::SetAway`).
+//! (`phone`) and the factory's cards (`factory`, held at the desk and
+//! sent to Slack as you go). The rule is `orion_core::away`'s; this reads
+//! its signals off the Mac every 5 s and keeps the hand flag (⌘⇧A,
+//! `ClientRequest::SetAway`).
 //!
 //! - **Idle**: `HIDIdleTime` from `ioreg -c IOHIDSystem -d 4`, nanoseconds
 //!   since the last key or mouse movement.
@@ -76,11 +78,14 @@ impl AwayWatch {
 }
 
 impl Daemon {
-    /// AWAY BY HAND on or off (`ClientRequest::SetAway`).
-    pub fn set_away_by_hand(&self, on: bool) {
+    /// AWAY BY HAND on or off (`ClientRequest::SetAway`); away now, the
+    /// factory cards held go to Slack.
+    pub fn set_away_by_hand(self: &Arc<Self>, on: bool) {
         if let Some(event) = self.away.update(|s| s.by_hand = on) {
             self.broadcast(event);
         }
+        let daemon = self.clone();
+        tokio::spawn(async move { daemon.factory_flush().await });
     }
 
     fn note_away_signals(&self, signals: Signals) {
@@ -110,7 +115,15 @@ pub async fn watch(daemon: Arc<Daemon>, period: Option<Duration>) {
             false => Signals::default(),
         };
         daemon.note_away_signals(signals);
+        daemon.factory_flush().await;
     }
+}
+
+/// The minute of the local day now (0–1439), for the quiet hours.
+pub fn local_minute() -> u32 {
+    use chrono::Timelike;
+    let now = chrono::Local::now();
+    now.hour() * 60 + now.minute()
 }
 
 /// The poll period: 5 s, or `ORION_AWAY_POLL_MS` (`0` is off).

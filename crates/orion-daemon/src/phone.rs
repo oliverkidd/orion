@@ -968,12 +968,9 @@ impl Daemon {
     /// outside quiet hours, and `away.phone` lists it.
     fn phone_sends(&self, kind: PhoneKind) -> bool {
         let settings = crate::config::Config::load().away;
-        let minute = {
-            use chrono::Timelike;
-            let now = chrono::Local::now();
-            now.hour() * 60 + now.minute()
-        };
-        self.away.is_away() && !settings.is_quiet(minute) && settings.sends(kind)
+        self.away.is_away()
+            && !settings.is_quiet(crate::away::local_minute())
+            && settings.sends(kind)
     }
 
     /// Post `agent`'s phone message, at once.

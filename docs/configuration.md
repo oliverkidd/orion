@@ -141,6 +141,10 @@ connects it and `o` disconnects it. GITHUB AND LINEAR is two switches (below). A
 | Send to your phone while away | `questions, plans, crashes` | `←→` steps through every mix of the three, down to `nothing`. |
 | Quiet hours | `22:00 to 07:00` | Nothing goes to your phone between them. `Enter` types them (`22:00 to 07:00`, `22:00-07:00`); empty is `off`. |
 
+The software factory's Slack cards follow the same rule: a card to you goes to Slack only while you
+are away and outside quiet hours. At the desk it shows in orion instead, and goes to Slack, once, if
+it is still open when you go away.
+
 **SLACK** — the **Workspace** row says which workspace orion is signed in to, `connecting…`, what
 is wrong, or `not connected`. `c` on it asks for the three tokens of the Orion Slack app in turn —
 the app-level token (`xapp-…`), the bot token (`xoxb-…`) and the user token (`xoxp-…`) — and saves
@@ -536,7 +540,7 @@ Everything orion writes under its data dir:
 | `automations/meeting-takeaways.json` | each meeting's takeaways and where they stand | two weeks after the meeting |
 | `pr-facts/` | the facts each factory agent handed over with `orion pr facts set`, one file per pull request | — |
 | `automations/pr-body.json` | per factory pull request: its ticket, whether its plan was posted, the verdict last recorded, its tier, and the card last sent | — |
-| `automations/factory-cards.json` | every software factory card sent on Slack and where it stands, so cards are closed and edited after a restart | a closed card 7 days after it was posted |
+| `automations/factory-cards.json` | every software factory card posted (shown in orion, and on Slack once you are away) and where it stands, so cards are closed and edited after a restart | a closed card 7 days after it was posted |
 | `knowledge/<project id>/sources/` | the condensed dossier each harvested pull request was read from (`<pr>.md`); never committed | — |
 | `knowledge/<project id>/queue.json`, `state.json` | merged pull requests waiting to be harvested; the daily knowledge card's rules and vetoes, the knowledge pull request and its veto window | a daily card's rules: 7 days |
 | `knowledge/<project id>/snapshot.json` | which sessions sat on which branch, so a harvest finds their transcripts after the worktree is gone; the project's name and main checkout, for `orion knowledge` | a branch 180 days after a session was last seen on it |

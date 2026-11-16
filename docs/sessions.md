@@ -744,6 +744,16 @@ Automations                          2 of at most 3 running · caps in Settings
 - **Tagged sessions.** Every session an automation starts is an ordinary row on the grid, its
   automation's name ahead of what it runs on (`PR fixer · opus high`), and Needs you labels it the
   same way. orion keeps the tag with the session, across restarts.
+- **Cards.** <a id="factory-cards"></a>What the factory needs you for — a pull request's verdict, a
+  plan with nothing to build, a stalled session, a ticket held for you — is a card. While you are at
+  the laptop none of them goes to Slack: the card shows in orion, as `◆ card` where the row of the
+  session it is about shows its age (on the worktree's rule, `◆` ahead of its pull request, when no
+  session of it is live), as a line in the footer when it arrives (`◆ ENG-7 Crash · ⌘K to answer`),
+  and on the Needs you board (`⌘K`), where `Enter` lists its buttons and `1`–`9` presses one. Once you
+  count as away (the screen locked, idle, or `⌘⇧A`; see
+  [How it works](how-it-works.md#phone-bridge)) and it isn't quiet hours, the cards still open go to
+  Slack, once each, and new ones go straight there. A press in either place closes the card in the
+  other. A thin ticket's question to its reporter goes to them on Slack whoever is at the desk.
 - Settings are global, never per project. See [Configuration](configuration.md#automations).
 
 ### The PR fixer

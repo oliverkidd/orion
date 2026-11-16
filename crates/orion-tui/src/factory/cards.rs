@@ -4,6 +4,15 @@
 //! one Slack message from orion's bot, built here and posted by the
 //! daemon (`ClientRequest::PostFactoryCard`).
 //!
+//! - **At the desk, in orion**: a card to you reaches Slack only while
+//!   you are away — the daemon holds it otherwise, and sends what is
+//!   still open, once each, as you go (`orion_daemon::factory`). Every
+//!   card to you shows in orion either way: a `◆` on the row of the
+//!   session it is about, or of its worktree when no session is live
+//!   ([`place_of`]); a line in the footer as a new one arrives while you
+//!   are here; and the Needs you board (`needs_you::factory`), whose
+//!   Enter opens its buttons. A press in either place closes it in the
+//!   other.
 //! - **The message** is in the phone's style: a context line
 //!   `● Bug fixer · riplo-os · 10:42`, the card's title as the header,
 //!   one section per body line (Slack mrkdwn, `*bold*`), then its
@@ -45,6 +54,7 @@ use serde_json::{json, Value};
 
 use crate::app::App;
 use crate::ui::truncate;
+use orion_core::{AgentId, WorktreeId};
 
 /// How long a closed (or never posted) card is kept after it was posted.
 pub(crate) const FORGET_AFTER_MS: i64 = 7 * orion_core::clock::DAY_MS;
@@ -156,6 +166,17 @@ pub(crate) fn post(app: &mut App, card: Card) {
     if unchanged {
         return;
     }
+    let fresh = !app
+        .factory_cards
+        .iter()
+        .any(|p| p.card.key == card.key && p.state == CardState::Open);
+    if fresh && card.to == Recipient::Owner && !app.away {
+        let key = crate::hints::key_or(&app.keymap, crate::keymap::Action::Palette, "⌘K");
+        app.flash = Some(crate::flash::Flash::note(format!(
+            "◆ {} · {key} to answer",
+            card.title
+        )));
+    }
     let time = chrono::Local::now().format("%H:%M").to_string();
     let request = ClientRequest::PostFactoryCard {
         card: wire(&card, &blocks(&card, &time)),
@@ -176,6 +197,82 @@ pub(crate) fn post(app: &mut App, card: Card) {
     }
     save(app);
     app.dirty = true;
+}
+
+/// Where an open card to you shows in orion besides Needs you.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Place {
+    /// On the row of the live session it is about.
+    Session(AgentId),
+    /// On its worktree's rule, with no session of it live.
+    Worktree(WorktreeId),
+}
+
+/// Where the card under `key` shows: an `issue:` card on its ticket's
+/// session (else worktree); a `pr:` or `fix:` card on the session of the
+/// factory ticket whose pull request it is about, else the worktree on
+/// that pull request's branch. Knowledge, setup and week cards are about
+/// no checkout: None.
+pub(crate) fn place_of(app: &App, key: &str) -> Option<Place> {
+    let builder = &app.automations.linear_builder.ledger;
+    let (prefix, rest) = key.split_once(':')?;
+    let entry = match prefix {
+        "issue" => {
+            let (id, _) = crate::automations::linear_builder::owner::parse_key(key)?;
+            builder.issues.get(id)
+        }
+        "pr" | "fix" => {
+            let url = rest.rsplit_once(':').map_or(rest, |(url, _)| url);
+            let entry = builder
+                .issues
+                .values()
+                .find(|e| e.pr_url.as_deref() == Some(url));
+            if entry.is_none() {
+                return pr_worktree(app, url).map(Place::Worktree);
+            }
+            entry
+        }
+        _ => None,
+    }?;
+    let live = entry
+        .session
+        .as_ref()
+        .filter(|id| app.tree.agents.iter().any(|a| &a.id == *id && !a.archived));
+    if let Some(id) = live {
+        return Some(Place::Session(id.clone()));
+    }
+    if entry.branch.is_empty() {
+        return None;
+    }
+    app.tree
+        .worktrees
+        .iter()
+        .find(|w| !w.is_main && w.project_id == entry.project && w.branch == entry.branch)
+        .map(|w| Place::Worktree(w.id.clone()))
+}
+
+/// The worktree on the branch of the open pull request at `url`.
+fn pr_worktree(app: &App, url: &str) -> Option<WorktreeId> {
+    let (project, pr) = app.open_prs.iter().find_map(|(project, open)| {
+        open.list
+            .iter()
+            .find(|pr| pr.url == url)
+            .map(|pr| (project, pr))
+    })?;
+    app.tree
+        .worktrees
+        .iter()
+        .find(|w| &w.project_id == project && w.branch == pr.head)
+        .map(|w| w.id.clone())
+}
+
+/// How many open cards to you show at `place`.
+pub(crate) fn waiting_at(app: &App, place: &Place) -> usize {
+    app.factory_cards
+        .iter()
+        .filter(|p| p.state == CardState::Open && p.card.to == Recipient::Owner)
+        .filter(|p| place_of(app, &p.card.key).as_ref() == Some(place))
+        .count()
 }
 
 /// Where the card under `key` stands, if it was posted.

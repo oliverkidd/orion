@@ -34,6 +34,17 @@
 //!   `ServerEvent::FactoryAction`, after the message is updated in place
 //!   to `✓ <label>` with its buttons gone. The TUI may rewrite it after
 //!   with `UpdateFactoryCard`.
+//! - **Only while you are away**: a card to you goes to Slack only while
+//!   you count as away (`away`, the phone's own rule) and outside quiet
+//!   hours, with Slack connected ([`Daemon::factory_to_slack`]). At the
+//!   desk it is held instead (the store's `factory_held`): the TUI shows
+//!   every card it posts in orion — a badge on its session, a line in the
+//!   footer, Needs you — and its buttons work there. As you go away,
+//!   every card still held goes to Slack, once ([`Daemon::factory_flush`],
+//!   on each away poll and on ⌘⇧A); one answered in orion first was
+//!   dropped by its `UpdateFactoryCard` and never goes. A card already on
+//!   Slack is edited there whoever is at the desk, and a card to someone
+//!   else (the thin-ticket DM) never waits ([`post_route`]).
 //! - **Scopes**: a bot installed before the factory lacks
 //!   `users:read.email` and `files:write`. Phone messages never need
 //!   them; a card that does fails as `MissingScope`, and the TUI says
@@ -253,6 +264,26 @@ fn failure(error: &str, scope: &str) -> FactoryCardFailure {
     }
 }
 
+/// Where a post goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostRoute {
+    /// To Slack: posted, or the message under its key edited.
+    Slack,
+    /// Held, for orion to show, until you go away.
+    Hold,
+}
+
+/// Where a card to `to` goes: a card to someone else, and one already on
+/// Slack (`on_slack`), go there; a card to you goes only while
+/// `to_slack` — you are away — and is held otherwise.
+pub fn post_route(to: &CardRecipient, to_slack: bool, on_slack: bool) -> PostRoute {
+    match to {
+        CardRecipient::Email(_) => PostRoute::Slack,
+        CardRecipient::Owner if to_slack || on_slack => PostRoute::Slack,
+        CardRecipient::Owner => PostRoute::Hold,
+    }
+}
+
 /// Run `call` against Slack off the async workers.
 async fn blocking<T: Send + 'static>(
     call: impl FnOnce() -> Result<T, String> + Send + 'static,
@@ -282,13 +313,70 @@ impl Daemon {
     }
 
     async fn factory_send(self: &Arc<Self>, card: FactoryCard, may_post: bool) {
+        let _one_at_a_time = SENDING.lock().await;
         let key = card.key.clone();
+        if may_post {
+            let on_slack = self.store.factory_message(&key).ok().flatten().is_some();
+            if post_route(&card.to, self.factory_to_slack(), on_slack) == PostRoute::Hold {
+                if let Err(e) = self.store.hold_factory_card(&card) {
+                    tracing::warn!(error = %e, %key, "factory card not held");
+                }
+                return;
+            }
+            // Going to Slack now: nothing waits under its key any more.
+            let _ = self.store.drop_held_factory_card(&key);
+        } else if self.store.drop_held_factory_card(&key).unwrap_or(false) {
+            // Closed in orion before it ever reached Slack.
+            tracing::info!(%key, "held factory card closed in orion");
+            return;
+        }
         if let Err(reason) = self.factory_send_or_fail(card, may_post).await {
             tracing::warn!(%key, ?reason, "factory card not posted");
             self.broadcast(ServerEvent::FactoryCardFailed { key, reason });
         }
     }
 
+    /// Whether a card to you goes to Slack now: Slack is connected, you
+    /// count as away, and it isn't quiet hours — the phone's own rule.
+    pub(crate) fn factory_to_slack(&self) -> bool {
+        let settings = crate::config::Config::load().away;
+        self.slack.connected()
+            && self.away.is_away()
+            && !settings.is_quiet(crate::away::local_minute())
+    }
+
+    /// Every card held while you were at the desk, to Slack now that you
+    /// are away — each once. One Slack drops on the way is held again.
+    pub(crate) async fn factory_flush(self: &Arc<Self>) {
+        // The store first: it is cheap, and nothing is held most ticks.
+        if !self.store.any_held_factory_cards().unwrap_or(false) || !self.factory_to_slack() {
+            return;
+        }
+        let _one_at_a_time = SENDING.lock().await;
+        let cards = match self.store.take_held_factory_cards() {
+            Ok(cards) => cards,
+            Err(e) => {
+                tracing::warn!(error = %e, "held factory cards not read");
+                return;
+            }
+        };
+        tracing::info!(cards = cards.len(), "away: held factory cards to Slack");
+        for card in cards {
+            let key = card.key.clone();
+            match self.factory_send_or_fail(card.clone(), true).await {
+                Ok(()) => {}
+                Err(FactoryCardFailure::NotConnected) => {
+                    let _ = self.store.hold_factory_card(&card);
+                }
+                Err(reason) => {
+                    tracing::warn!(%key, ?reason, "held factory card not posted");
+                    self.broadcast(ServerEvent::FactoryCardFailed { key, reason });
+                }
+            }
+        }
+    }
+
+    /// Post or edit `card` on Slack. The caller holds [`SENDING`].
     async fn factory_send_or_fail(
         self: &Arc<Self>,
         card: FactoryCard,
@@ -298,7 +386,6 @@ impl Daemon {
             .slack
             .session()
             .ok_or(FactoryCardFailure::NotConnected)?;
-        let _one_at_a_time = SENDING.lock().await;
         let blocks: Vec<Value> = card.blocks.as_array().cloned().unwrap_or_default();
         let shown = Value::from(blocks.clone()).to_string();
         let posted = self.store.factory_message(&card.key).ok().flatten();
@@ -521,6 +608,42 @@ mod tests {
         // The phone's own buttons, and a value with no action, are not ours.
         assert_eq!(route_action(&press("U1", "orion_option_0", "0")), None);
         assert_eq!(route_action(&press("U1", "orion_factory_0", "nokey")), None);
+    }
+
+    #[test]
+    fn a_card_to_you_waits_while_you_are_at_the_desk() {
+        let owner = CardRecipient::Owner;
+        // At the desk: held, for orion to show; nothing goes to Slack.
+        assert_eq!(post_route(&owner, false, false), PostRoute::Hold);
+        // Away: to Slack.
+        assert_eq!(post_route(&owner, true, false), PostRoute::Slack);
+        // Already on Slack (posted while away): edited there either way.
+        assert_eq!(post_route(&owner, false, true), PostRoute::Slack);
+        // A reporter's question is theirs: it never waits on you.
+        let reporter = CardRecipient::Email("ann@example.com".into());
+        assert_eq!(post_route(&reporter, false, false), PostRoute::Slack);
+    }
+
+    /// At the desk a post is held and nothing reaches Slack; closed in
+    /// orion, the held card is dropped, so going away later sends nothing.
+    #[tokio::test]
+    async fn a_card_held_then_closed_in_orion_never_reaches_slack() {
+        let daemon = crate::registry::tests::test_daemon();
+        let card = FactoryCard {
+            key: "issue:R-1:stalled".into(),
+            to: CardRecipient::Owner,
+            text: "R-1".into(),
+            blocks: json!([]),
+            image: None,
+        };
+        let mut events = daemon.events.subscribe();
+        daemon.factory_send(card.clone(), true).await;
+        assert!(daemon.store.any_held_factory_cards().unwrap(), "held");
+        assert!(daemon.store.factory_message(&card.key).unwrap().is_none());
+        assert!(events.try_recv().is_err(), "no failure: nothing was sent");
+        daemon.factory_send(card.clone(), false).await;
+        assert!(!daemon.store.any_held_factory_cards().unwrap(), "dropped");
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

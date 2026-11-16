@@ -3009,6 +3009,69 @@ mod tests {
         assert_eq!(super::super::attention(&app), 0);
     }
 
+    /// At the desk a card shows in orion: a footer line as it arrives, a
+    /// badge on its session's row — or, the session gone, its worktree's —
+    /// and the Needs you board; acted on in orion, it goes from all three
+    /// and its close goes to the daemon (which drops it or edits Slack).
+    #[test]
+    fn a_card_at_the_desk_shows_on_its_session_and_in_needs_you() {
+        use crate::factory::cards::{place_of, waiting_at, Place};
+        use crate::needs_you::model::CardSource;
+        let mut app = app_with_project();
+        app.away = false;
+        building(&mut app, Stage::Building);
+        owner::post_stalled(&mut app, "uuid-ENG-7", None);
+        let key = "issue:uuid-ENG-7:stalled";
+        let flash = app.flash.as_deref().unwrap_or_default().to_string();
+        assert!(flash.starts_with("◆ ENG-7 Crash"), "{flash}");
+        let session = Place::Session(AgentId("s7".into()));
+        assert_eq!(place_of(&app, key), Some(session.clone()));
+        assert_eq!(waiting_at(&app, &session), 1);
+        assert_eq!(crate::needs_you::factory::Factory.cards(&app).len(), 1);
+        // Its session archived: the worktree wears it instead.
+        app.tree.agents[0].archived = true;
+        let worktree = Place::Worktree(WorktreeId("w7".into()));
+        assert_eq!(place_of(&app, key), Some(worktree.clone()));
+        assert_eq!(waiting_at(&app, &worktree), 1);
+        app.tree.agents[0].archived = false;
+        // Answered in orion: gone everywhere, and closed for the daemon.
+        app.outbox.clear();
+        crate::needs_you::factory::press(&mut app, key, "continue", None);
+        assert_eq!(waiting_at(&app, &session), 0);
+        assert!(crate::needs_you::factory::Factory.cards(&app).is_empty());
+        assert!(app
+            .outbox
+            .iter()
+            .any(|r| matches!(r, ClientRequest::UpdateFactoryCard { key: k, .. } if k == key)));
+        // Away, a new card says nothing in the footer: it is on Slack.
+        app.away = true;
+        app.flash = None;
+        owner::post_dead(&mut app, "uuid-ENG-7");
+        assert_eq!(app.flash, None);
+    }
+
+    /// A verdict card shows on the session of the ticket whose pull
+    /// request it is about.
+    #[test]
+    fn a_pr_card_shows_on_its_tickets_session() {
+        use crate::factory::cards::{place_of, Place};
+        let mut app = app_with_project();
+        building(&mut app, Stage::PrOpen);
+        let url = "https://github.com/o/r/pull/9";
+        app.automations
+            .linear_builder
+            .ledger
+            .issues
+            .get_mut("uuid-ENG-7")
+            .unwrap()
+            .pr_url = Some(url.into());
+        assert_eq!(
+            place_of(&app, &format!("pr:{url}:verdict")),
+            Some(Place::Session(AgentId("s7".into())))
+        );
+        assert_eq!(place_of(&app, "week:2026-11-14"), None);
+    }
+
     /// A parked ticket moved back to Todo starts afresh: its kept worktree
     /// is its own ended run, not someone at work on it, and the new run
     /// gets a branch of its own.
