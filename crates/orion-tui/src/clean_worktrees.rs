@@ -88,9 +88,12 @@ pub enum Answer {
         found: Vec<Found>,
     },
     /// A branch delete after its checkout went; `Err` says why it didn't.
+    /// `counted` when it is one of a Clean unused worktrees batch, whose
+    /// flash counts them; else it is said by name.
     BranchDeleted {
         branch: String,
         result: Result<(), String>,
+        counted: bool,
     },
 }
 
@@ -101,8 +104,9 @@ pub struct Shared {
     /// which check inline.
     pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
     /// Branches to delete once the daemon removes their checkout: the
-    /// repository to run git in, and the branch.
-    pub branch_after: HashMap<WorktreeId, (PathBuf, String)>,
+    /// repository to run git in, the branch, and whether the batch's
+    /// flash counts it ([`Answer::BranchDeleted`]).
+    pub branch_after: HashMap<WorktreeId, (PathBuf, String, bool)>,
     /// Branches deleted since the last Enter, for the flash.
     pub branches_deleted: usize,
     /// The check in flight, at most one: each open starts its own and
@@ -406,7 +410,12 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
             // The first worktree, past its project's header.
             view.cursor = usize::from(!view.rows.is_empty());
         }
-        Answer::BranchDeleted { branch, result } => match result {
+        Answer::BranchDeleted {
+            branch,
+            result,
+            counted,
+        } => match result {
+            Ok(()) if !counted => app.flash = Some(Flash::done(format!("deleted branch {branch}"))),
             Ok(()) => {
                 app.clean_worktrees.branches_deleted += 1;
                 app.flash = Some(Flash::done(format!(
@@ -439,7 +448,7 @@ fn delete(app: &mut App, out: &mut Vec<ClientRequest>) {
         if let Some(p) = app.tree.projects.iter().find(|p| &p.id == project) {
             app.clean_worktrees
                 .branch_after
-                .insert(id.clone(), (p.repo_path.clone(), branch.clone()));
+                .insert(id.clone(), (p.repo_path.clone(), branch.clone(), true));
         }
     }
     app.clean_worktrees.branches_deleted = 0;
@@ -459,21 +468,56 @@ fn delete(app: &mut App, out: &mut Vec<ClientRequest>) {
 /// The daemon removed worktree `id`: when its branch was to go with it,
 /// delete that now, off the loop — if it still has nothing unpushed.
 pub(crate) fn removed(app: &mut App, id: &WorktreeId) {
-    let Some((repo, branch)) = app.clean_worktrees.branch_after.remove(id) else {
+    let Some((repo, branch, counted)) = app.clean_worktrees.branch_after.remove(id) else {
         return;
     };
+    delete_branch_later(app, repo, branch, counted);
+}
+
+/// Delete local `branch` of `repo` off the loop, as [`delete_pushed_branch`]
+/// may, the outcome flashed ([`Answer::BranchDeleted`], `counted` in a
+/// batch's total); a branch that isn't there is passed over without a word.
+pub(crate) fn delete_branch_later(app: &App, repo: PathBuf, branch: String, counted: bool) {
     let Some(tx) = app.clean_worktrees.tx.clone() else {
         return;
     };
     tokio::task::spawn_blocking(move || {
-        let rev = format!("refs/heads/{branch}");
-        let result = match unpushed(&repo, &rev) {
-            Some(0) => crate::git_proc::run(&repo, &["branch", "-D", &branch]).map(|_| ()),
-            Some(n) => Err(format!("{} on no remote", plural(n, "commit"))),
-            None => Err("git couldn't read it".into()),
+        let result = match delete_pushed_branch(&repo, &branch) {
+            Ok(false) => return,
+            done => done.map(|_| ()),
         };
-        let _ = tx.send(Answer::BranchDeleted { branch, result });
+        let _ = tx.send(Answer::BranchDeleted {
+            branch,
+            result,
+            counted,
+        });
     });
+}
+
+/// `branch` of `repo` to go once the daemon has removed worktree `id`
+/// ([`removed`]), said by name — how **Not for the factory** takes a
+/// ticket's branch with its checkout.
+pub(crate) fn branch_goes_with(app: &mut App, id: WorktreeId, repo: PathBuf, branch: String) {
+    app.clean_worktrees
+        .branch_after
+        .insert(id, (repo, branch, false));
+}
+
+/// Delete local `branch` of `repo` when every commit on it is on a remote
+/// — nothing of it is only here. `Ok(false)` when there is no such branch;
+/// `Err` says why it was kept (git won't delete a branch a worktree has
+/// checked out). Remote branches are never touched. Runs git: off the
+/// loop.
+pub(crate) fn delete_pushed_branch(repo: &Path, branch: &str) -> Result<bool, String> {
+    let rev = format!("refs/heads/{branch}");
+    if crate::git_proc::read(repo, &["rev-parse", "--verify", "-q", &rev]).is_err() {
+        return Ok(false);
+    }
+    match unpushed(repo, &rev) {
+        Some(0) => crate::git_proc::run(repo, &["branch", "-D", branch]).map(|_| true),
+        Some(n) => Err(format!("{} on no remote", plural(n, "commit"))),
+        None => Err("git couldn't read it".into()),
+    }
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
@@ -974,5 +1018,53 @@ mod tests {
         // Gone from disk: clean, with no branch to delete.
         assert_eq!(v.rows.len(), 3);
         assert!(v.rows.iter().all(|r| r.state == BranchState::None));
+    }
+
+    /// A branch whose every commit is on a remote goes; one with a commit
+    /// only here stays and says why; one that isn't there is passed over.
+    #[test]
+    fn only_a_branch_with_nothing_only_here_is_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |at: &Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(at)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let origin = dir.path().join("origin.git");
+        git(
+            dir.path(),
+            &["init", "-q", "--bare", "-b", "dev", "origin.git"],
+        );
+        git(
+            dir.path(),
+            &["clone", "-q", origin.to_str().unwrap(), "repo"],
+        );
+        let repo = dir.path().join("repo");
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "seed"]);
+        git(&repo, &["push", "-q", "origin", "HEAD:dev"]);
+        git(&repo, &["branch", "pushed"]);
+        git(&repo, &["checkout", "-q", "-b", "local"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "only here"]);
+        git(&repo, &["checkout", "-q", "dev"]);
+
+        assert_eq!(delete_pushed_branch(&repo, "pushed"), Ok(true));
+        assert_eq!(
+            delete_pushed_branch(&repo, "local"),
+            Err("1 commit on no remote".to_string())
+        );
+        assert_eq!(delete_pushed_branch(&repo, "never-was"), Ok(false));
+        assert_eq!(delete_pushed_branch(&repo, "pushed"), Ok(false), "gone now");
     }
 }

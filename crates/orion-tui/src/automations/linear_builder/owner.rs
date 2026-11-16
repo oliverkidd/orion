@@ -778,7 +778,10 @@ pub(crate) fn not_for_the_factory(
 /// Remove the worktree `entry`'s session worked in, through orion's own
 /// delete (its hooks and containers with it) — once git, off the loop,
 /// says it is clean and every commit is on a remote or the base
-/// ([`super::skip::why_keep`]). One kept says why in the footer.
+/// ([`super::skip::why_keep`]) — and its local branch after it, when
+/// every commit on that is on a remote
+/// ([`crate::clean_worktrees::delete_pushed_branch`]). One kept says why
+/// in the footer. With no worktree left, a branch left behind goes alone.
 fn remove_worktree(app: &mut App, entry: &Entry) {
     let Some(w) = app
         .tree
@@ -787,18 +790,11 @@ fn remove_worktree(app: &mut App, entry: &Entry) {
         .find(|w| !w.is_main && w.project_id == entry.project && w.branch == entry.branch)
         .cloned()
     else {
+        delete_left_branch(app, entry);
         return;
     };
-    let base = app
-        .tree
-        .projects
-        .iter()
-        .find(|p| p.id == w.project_id)
-        .map(|p| {
-            crate::config::Config::load()
-                .project(&p.repo_path)
-                .base_branch
-        })
+    let base = repo_of_project(app, &w.project_id)
+        .map(|repo| crate::config::Config::load().project(&repo).base_branch)
         .unwrap_or_default();
     match app.automations.tx.clone() {
         Some(tx) => {
@@ -815,10 +811,49 @@ fn remove_worktree(app: &mut App, entry: &Entry) {
     }
 }
 
-/// [`remove_worktree`]'s check landed: removed, or kept with why.
+/// The repository of `project`.
+fn repo_of_project(app: &App, project: &orion_core::ProjectId) -> Option<std::path::PathBuf> {
+    app.tree
+        .projects
+        .iter()
+        .find(|p| &p.id == project)
+        .map(|p| p.repo_path.clone())
+}
+
+/// `entry`'s branch, its worktree gone already: deleted when nothing of
+/// it is only here — never one a checkout (the main one too) has out, nor
+/// the project's base.
+fn delete_left_branch(app: &App, entry: &Entry) {
+    let branch = &entry.branch;
+    let checked_out = app
+        .tree
+        .worktrees
+        .iter()
+        .any(|w| w.project_id == entry.project && &w.branch == branch);
+    let Some(repo) = repo_of_project(app, &entry.project) else {
+        return;
+    };
+    let base = crate::config::Config::load().project(&repo).base_branch;
+    if branch.is_empty() || checked_out || *branch == base {
+        return;
+    }
+    crate::clean_worktrees::delete_branch_later(app, repo, branch.clone(), false);
+}
+
+/// [`remove_worktree`]'s check landed: removed, its branch to go after
+/// it, or kept with why.
 pub(crate) fn worktree_checked(app: &mut App, id: orion_core::WorktreeId, keep: Option<String>) {
     match keep {
         None => {
+            let gone = app
+                .tree
+                .worktrees
+                .iter()
+                .find(|w| w.id == id)
+                .and_then(|w| Some((repo_of_project(app, &w.project_id)?, w.branch.clone())));
+            if let Some((repo, branch)) = gone.filter(|(_, b)| !b.is_empty()) {
+                crate::clean_worktrees::branch_goes_with(app, id.clone(), repo, branch);
+            }
             let mut out = Vec::new();
             crate::event_loop::delete_worktrees(app, vec![id], &mut out);
             app.outbox.extend(out);

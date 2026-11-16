@@ -12,7 +12,10 @@
 //! 4. its worktree removed through the daemon, as the TUI removes one (its
 //!    delete hooks and containers with it) — only when it is clean and
 //!    every commit on it is on a remote or the base ([`why_keep`]), else
-//!    kept, and why said ("kept: 2 unpushed commits");
+//!    kept, and why said ("kept: 2 unpushed commits") — and then its local
+//!    branch, when every commit on it is on a remote
+//!    ([`crate::clean_worktrees::delete_pushed_branch`]): nothing of it is
+//!    only on this machine;
 //! 5. the ticket marked parked and `skipped` in the builder ledger, which
 //!    a running orion takes up on its next tick ([`super::Shared::
 //!    adopt_skips`]), so it never restarts or nudges the session.
@@ -56,6 +59,9 @@ pub(crate) trait Outside {
     async fn archive(&mut self, session: &AgentId) -> Result<(), String>;
     /// Remove worktree `id` through the daemon.
     async fn remove_worktree(&mut self, id: &WorktreeId) -> Result<(), String>;
+    /// Delete `project`'s local `branch` when every commit on it is on a
+    /// remote: whether there was one, or why it was kept.
+    fn delete_branch(&mut self, project: &ProjectId, branch: &str) -> Result<bool, String>;
 }
 
 /// The ledger's id of the ticket `target` names: an id, an identifier, or
@@ -189,18 +195,38 @@ pub(crate) async fn skip(
         Some(session) => say(format!("· the session {session} is archived already")),
         None => say("· no session to archive".into()),
     }
-    match outside.worktree(&entry.project, &entry.branch) {
+    let checkout_gone = match outside.worktree(&entry.project, &entry.branch) {
         Some((wid, path, base)) => {
             let shown = path.display().to_string();
             match outside.why_keep(&path, &base) {
-                Some(why) => say(format!("· worktree {shown} {why}")),
+                Some(why) => {
+                    say(format!("· worktree {shown} {why}"));
+                    false
+                }
                 None => match outside.remove_worktree(&wid).await {
-                    Ok(()) => say(format!("✓ remove the worktree {shown}")),
-                    Err(why) => say(format!("✗ remove the worktree {shown}: {why}")),
+                    Ok(()) => {
+                        say(format!("✓ remove the worktree {shown}"));
+                        true
+                    }
+                    Err(why) => {
+                        say(format!("✗ remove the worktree {shown}: {why}"));
+                        false
+                    }
                 },
             }
         }
-        None => say("· no worktree to remove".into()),
+        None => {
+            say("· no worktree to remove".into());
+            true
+        }
+    };
+    if checkout_gone && !entry.branch.is_empty() {
+        let branch = &entry.branch;
+        match outside.delete_branch(&entry.project, branch) {
+            Ok(true) => say(format!("✓ delete the branch {branch}")),
+            Ok(false) => say(format!("· no local branch {branch}")),
+            Err(why) => say(format!("· branch {branch} kept: {why}")),
+        }
     }
     // Read again: orion may have written it meanwhile.
     match mark(ledger_path, &ids) {
@@ -243,6 +269,17 @@ pub struct Known {
 /// worktree, the daemon for the archive and the removal.
 pub(crate) struct Live(pub Known);
 
+impl Live {
+    /// The repository of `project`.
+    fn repo(&self, project: &ProjectId) -> Option<&Path> {
+        self.0
+            .projects
+            .iter()
+            .find(|(id, _)| *id == project.0)
+            .map(|(_, repo)| repo.as_path())
+    }
+}
+
 impl Outside for Live {
     fn sessions_named(&self, _name: &str) -> Vec<String> {
         self.0.named.clone()
@@ -253,8 +290,7 @@ impl Outside for Live {
     }
 
     fn linear_key(&self, project: &ProjectId) -> Option<String> {
-        let (_, dir) = self.0.projects.iter().find(|(id, _)| *id == project.0)?;
-        crate::linear::read_linear_key(dir)
+        crate::linear::read_linear_key(self.repo(project)?)
     }
 
     fn worktree(&self, project: &ProjectId, branch: &str) -> Option<(WorktreeId, PathBuf, String)> {
@@ -267,11 +303,8 @@ impl Outside for Live {
             .iter()
             .find(|(_, p, b, _)| *p == project.0 && b == branch)?;
         let base = self
-            .0
-            .projects
-            .iter()
-            .find(|(id, _)| *id == project.0)
-            .map(|(_, repo)| crate::config::Config::load().project(repo).base_branch)
+            .repo(project)
+            .map(|repo| crate::config::Config::load().project(repo).base_branch)
             .unwrap_or_default();
         Some((WorktreeId(id.clone()), path.clone(), base))
     }
@@ -294,6 +327,11 @@ impl Outside for Live {
         crate::ipc::delete_worktree(id)
             .await
             .map_err(|e| format!("{e:#}"))
+    }
+
+    fn delete_branch(&mut self, project: &ProjectId, branch: &str) -> Result<bool, String> {
+        let repo = self.repo(project).ok_or("its project isn't known")?;
+        crate::clean_worktrees::delete_pushed_branch(repo, branch)
     }
 }
 
@@ -369,6 +407,11 @@ mod tests {
             self.calls.push(format!("remove {id}"));
             Ok(())
         }
+
+        fn delete_branch(&mut self, _project: &ProjectId, branch: &str) -> Result<bool, String> {
+            self.calls.push(format!("delete branch {branch}"));
+            Ok(true)
+        }
     }
 
     fn ledger_with(dir: &Path, pr: Option<&str>) -> PathBuf {
@@ -418,6 +461,7 @@ mod tests {
                 &format!("lin_key: close the draft {url}"),
                 "archive s7",
                 "remove w7",
+                "delete branch eng-7-crash",
             ]
         );
         assert_eq!(
@@ -430,6 +474,7 @@ mod tests {
                 &format!("✓ close the draft {url}"),
                 "✓ archive the session s7",
                 "✓ remove the worktree /wt/eng-7-crash",
+                "✓ delete the branch eng-7-crash",
                 "✓ mark it parked in the builder ledger",
             ]
         );
@@ -465,6 +510,10 @@ mod tests {
             ]
         );
         assert!(!outside.calls.iter().any(|c| c.starts_with("remove")));
+        assert!(
+            !outside.calls.iter().any(|c| c.starts_with("delete branch")),
+            "a kept worktree keeps its branch"
+        );
         assert!(read(&path).unwrap().issues["uuid-ENG-7"].skipped);
     }
 

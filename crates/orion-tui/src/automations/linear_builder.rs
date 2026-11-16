@@ -3693,6 +3693,14 @@ mod tests {
             "{:?}",
             app.outbox
         );
+        assert!(
+            app.clean_worktrees
+                .branch_after
+                .get(&orion_core::WorktreeId("w7".into()))
+                .is_some_and(|(_, _, counted)| !counted),
+            "its branch goes once the worktree has: {:?}",
+            app.clean_worktrees.branch_after
+        );
         assert_eq!(
             owner::taken_off("Sam Lee"),
             "Taken off the factory by Sam Lee"

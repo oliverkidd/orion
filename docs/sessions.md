@@ -922,7 +922,10 @@ request. They work the same way; each has its own labels and its own preset (**B
   state, and closes the draft pull request it opened, with a comment saying why. Then the session's
   worktree is removed through orion's own delete, its delete hooks and containers with it — only when
   it has no uncommitted changes and every commit on it is on a remote branch or the base; otherwise it
-  is kept, and the footer says why (`kept: 2 unpushed commits`). The intake never picks the ticket up
+  is kept, and the footer says why (`kept: 2 unpushed commits`). Once the worktree is gone (or there
+  was none), its local branch is deleted too when every commit on it is on a remote, so nothing of it
+  is only on your machine; a branch with a commit only here is kept and says so. Remote branches are
+  never touched. The intake never picks the ticket up
   again while it carries the label. From a shell, `orion factory skip <ticket or session name>
   [--backlog]` does the same (Triage unless `--backlog`), printing each step as it goes, and marks
   the ticket parked in the builder ledger
