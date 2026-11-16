@@ -93,10 +93,19 @@ const ISSUE_CUT: usize = 1500;
 const FRESH: Duration = Duration::from_secs(5 * 60);
 /// How long one page of descriptions may take.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(45);
-/// How many pages [`fetch_merged`] reads before it gives up on a week: a
-/// guard against a walk that never ends, set where no repo's week reaches
-/// — a thousand merged pull requests touched in seven days.
-const PAGES_MAX: usize = 10;
+/// How many pull requests one page of [`BODIES_QUERY`] asks for. Each
+/// one's line counts are worked out from its diff while GitHub answers,
+/// and GitHub gives a query about ten seconds before it answers 502: a
+/// hundred busy pull requests ran past that every time, and every retry
+/// asked for the same hundred. Twenty-five answer in a few seconds.
+const BODIES_PAGE: usize = 25;
+/// The smallest page [`fetch_merged`] halves down to when a page fails,
+/// before it gives the fetch up to the retries.
+const BODIES_PAGE_MIN: usize = 5;
+/// How many pull requests [`fetch_merged`] reads before it gives up on a
+/// week: a guard against a walk that never ends, set where no repo's
+/// week reaches — a thousand merged pull requests touched in seven days.
+const WALK_MAX: usize = 1000;
 /// How long the write may take before it is given up on.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(300);
 /// How many times a project's review is sent before it is given up on:
@@ -413,18 +422,44 @@ pub async fn fetch_merged(
     days: i64,
 ) -> Option<Vec<MergedPr>> {
     let since = now - days * DAY_SECS;
-    let page_size = format!("n={}", crate::pull_request::MERGED_PAGE);
+    walk_merged(&project, since, |n, after| {
+        let dir = dir.clone();
+        async move {
+            let page_size = format!("n={n}");
+            let cursor = after.map(|c| format!("after={c}"));
+            let mut vars = vec![page_size.as_str()];
+            if let Some(cursor) = &cursor {
+                vars.push(cursor.as_str());
+            }
+            crate::pull_request::repo_graphql(&dir, BODIES_QUERY, &vars, FETCH_TIMEOUT).await
+        }
+    })
+    .await
+}
+
+/// [`fetch_merged`]'s walk through the pages, each asked of `ask` as
+/// `(page size, cursor)`. A page GitHub doesn't answer is asked again at
+/// half the size, down to [`BODIES_PAGE_MIN`]; the size it settles on
+/// carries on for the pages after it.
+async fn walk_merged<F, Fut>(project: &str, since: i64, mut ask: F) -> Option<Vec<MergedPr>>
+where
+    F: FnMut(usize, Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Option<String>>,
+{
+    let mut size = BODIES_PAGE;
     let mut rows = Vec::new();
     let mut after: Option<String> = None;
-    for _ in 0..PAGES_MAX {
-        let cursor = after.take().map(|c| format!("after={c}"));
-        let mut vars = vec![page_size.as_str()];
-        if let Some(cursor) = &cursor {
-            vars.push(cursor.as_str());
-        }
-        let out =
-            crate::pull_request::repo_graphql(&dir, BODIES_QUERY, &vars, FETCH_TIMEOUT).await?;
-        let page = parse_page(&out, &project, since)?;
+    let mut read = 0;
+    while read < WALK_MAX {
+        let page = match ask(size, after.clone()).await {
+            Some(out) => parse_page(&out, project, since)?,
+            None if size > BODIES_PAGE_MIN => {
+                size = (size / 2).max(BODIES_PAGE_MIN);
+                continue;
+            }
+            None => return None,
+        };
+        read += size;
         rows.extend(page.rows);
         match page.more {
             Some(cursor) => after = Some(cursor),
@@ -3274,6 +3309,61 @@ mod tests {
         let end = parse_page(&page(false, "2026-10-08T09:00:00Z"), "demo", since).expect("a page");
         assert_eq!(end.more, None, "GitHub has no more");
         assert!(parse_page("{}", "demo", since).is_none());
+    }
+
+    /// GitHub answers 502 to a page of busy pull requests it can't count
+    /// the lines of in time: the walk asks again at half the size, keeps
+    /// that size for the pages after, and gives up only once the
+    /// smallest page fails too.
+    #[tokio::test]
+    async fn a_page_github_doesnt_answer_is_asked_again_smaller() {
+        let since = rfc3339_secs("2026-10-10T10:00:00Z").unwrap() - DAYS * DAY;
+        let page = |number: u64, next: Option<&str>| {
+            let info = match next {
+                Some(c) => format!(r#"{{"hasNextPage":true,"endCursor":"{c}"}}"#),
+                None => r#"{"hasNextPage":false,"endCursor":null}"#.to_string(),
+            };
+            format!(
+                r#"{{"data":{{"repository":{{"pullRequests":{{"pageInfo":{info},"nodes":[
+                  {{"number":{number},"url":"https://github.com/o/r/pull/{number}","title":"T",
+                    "mergedAt":"2026-10-09T10:00:00Z","updatedAt":"2026-10-09T10:00:00Z",
+                    "author":{{"__typename":"User","login":"ada"}}}}]}}}}}}}}"#
+            )
+        };
+        let asked = std::cell::RefCell::new(Vec::new());
+        let got = walk_merged("demo", since, |n, after: Option<String>| {
+            asked.borrow_mut().push((n, after.clone()));
+            let answer = match (n, after.as_deref()) {
+                (n, _) if n > 12 => None,
+                (_, None) => Some(page(40, Some("c1"))),
+                (_, Some(_)) => Some(page(39, None)),
+            };
+            async move { answer }
+        })
+        .await
+        .expect("the week, read at a size GitHub answers");
+        assert_eq!(
+            got.iter().map(|pr| pr.number).collect::<Vec<_>>(),
+            vec![40, 39]
+        );
+        assert_eq!(
+            asked.into_inner(),
+            vec![
+                (BODIES_PAGE, None),
+                (BODIES_PAGE / 2, None),
+                (BODIES_PAGE / 2, Some("c1".to_string())),
+            ],
+            "halved once, and the half kept for the next page"
+        );
+
+        let mut sizes = Vec::new();
+        let none = walk_merged("demo", since, |n, _| {
+            sizes.push(n);
+            async { None }
+        })
+        .await;
+        assert!(none.is_none(), "the smallest page failing gives up");
+        assert_eq!(sizes.last(), Some(&BODIES_PAGE_MIN));
     }
 
     /// Initials come from the name, else the login, and two people never
