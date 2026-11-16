@@ -1,0 +1,26 @@
+crates/orion-tui/src/linear.rs
+  s_0ea5bf705342bd::t_12179af6dd6047 3063-3065,3069,3074-3077,3131-3132,3140,3143-3155,7151
+  s_0ea5bf705342bd::t_fd43c62ca20d5f 3142
+  s_0ea5bf705342bd::t_3e2154bea33c81 3891-3892
+  s_0ea5bf705342bd::t_8b6b8f9394f60a 7136,7147,9223-9225,9231-9245
+  s_0ea5bf705342bd::t_3b9e545e4ad7dc 7066-7135,7137-7146,7148-7150
+  s_0ea5bf705342bd::t_633d1e24076d07 7152
+docs/keys.md
+  s_0ea5bf705342bd::t_6000bf0f05e2d8 369
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "524907868dcf72b271e7c8214e161ed0d47e5686",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
