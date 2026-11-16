@@ -22,15 +22,18 @@
 //!   its last gather isn't gathered again until its repo's contract is
 //!   due a new read ([`CONTRACT_TTL`]); its commits' messages are read
 //!   once per head.
-//! - **Landing** ([`land`]). The verdict ([`verdict::verdict`]) and the
-//!   top ([`render::render`]); the body is written (`gh pr edit
-//!   --body-file -`) only when its bytes differ. The plan goes up once as
-//!   a "Plan as approved" comment. The verdict goes to the run record, and
-//!   — once the checks have settled and no pictures are on their way —
-//!   out as a card (`factory::cards`), edited in place as it changes; a
-//!   PR gone Blocked has its card closed (the fixer says when it gives
-//!   up). With `factory.auto_merge` on, a Merge-tier PR merges without a
-//!   tap.
+//! - **Landing** ([`land`]). The verdict ([`verdict::verdict`]), the
+//!   rows with their dots ([`rows::top`]) and the top
+//!   ([`render::render`]); the body is written (`gh pr edit --body-file
+//!   -`) only when its bytes differ. A visible PR whose pictures show no
+//!   difference in any frame has its agent sent back, once per head, to
+//!   stage the state its change affects ([`NO_DIFFERENCE`]). The plan
+//!   goes up once as a "Plan as approved" comment. The verdict goes to
+//!   the run record, and — once the checks have settled and no pictures
+//!   are on their way — out as a card (`factory::cards`), edited in
+//!   place as it changes; a PR gone Blocked has its card closed (the
+//!   fixer says when it gives up). With `factory.auto_merge` on, a
+//!   Merge-tier PR merges without a tap.
 //! - **Merged or closed** anywhere — from the card, the PULL REQUESTS
 //!   MODAL or GitHub — closes the card once ([`finished`]): a body that
 //!   lands no longer open says so, and each GIT POLL looks at what `prs`
@@ -52,6 +55,7 @@ pub mod dispatch;
 pub mod facts;
 pub mod pictures;
 pub mod render;
+pub mod rows;
 pub mod trailers;
 pub mod verdict;
 
@@ -177,6 +181,9 @@ struct Remembered {
     /// When it was (epoch ms): its card waits [`dispatch::WAIT_MS`] for
     /// the pictures.
     pictures_dispatched_at_ms: Option<i64>,
+    /// The head its agent was last sent back for pictures that show no
+    /// difference ([`NO_DIFFERENCE`]): never twice for one head.
+    no_difference_sent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -629,6 +636,9 @@ pub struct Gathered {
     /// What was found of pictures on their way, for a visible PR without
     /// them at its head; None when not looked at.
     look: Option<dispatch::Look>,
+    /// How long the build took, from its run record
+    /// ([`rows::build_ms`]).
+    build_ms: Option<i64>,
 }
 
 /// What lands on the loop.
@@ -730,6 +740,18 @@ async fn gather(job: Job) -> Gathered {
         }
         _ => None,
     };
+    let identifier = job.factory.identifier.clone();
+    let build_ms = match identifier.is_empty() {
+        true => None,
+        false => tokio::task::spawn_blocking(move || {
+            crate::factory::runs::read(&identifier)
+                .as_ref()
+                .and_then(rows::build_ms)
+        })
+        .await
+        .ok()
+        .flatten(),
+    };
     let plan = match job.builder.clone() {
         Some(agent) => {
             // Finding the transcript lists the account's project dirs.
@@ -755,49 +777,66 @@ async fn gather(job: Job) -> Gathered {
         grid_file,
         plan,
         look,
+        build_ms,
     }
 }
 
 // ---- landing ----
 
-/// The rows the verdict doesn't fill.
-fn rows(g: &Gathered, rules: &contract::Contract, cubic: &cubic::Cubic) -> render::Rows {
+/// The top's sentence, rows and notes.
+fn top(
+    g: &Gathered,
+    rules: &contract::Contract,
+    cubic: &cubic::Cubic,
+    pictures: &pictures::Pictures,
+    kind: Kind,
+) -> rows::Top {
     let detail = &g.job.detail;
-    let facts = &g.job.facts;
-    let mut risk = vec![verdict::size_words(verdict::size(detail))];
-    risk.extend(verdict::risky_note(detail, rules));
-    risk.push(match facts.flag.as_deref().map(str::trim) {
-        Some(flag) if !flag.is_empty() => format!("behind flag `{flag}`"),
-        _ => "no flag".to_string(),
-    });
-    risk.push(
-        match (
-            facts.plan_followed.followed,
-            facts.plan_followed.deviations.is_empty(),
-        ) {
-            (true, true) => "on plan".to_string(),
-            (_, false) => format!("off plan: {}", facts.plan_followed.deviations.join("; ")),
-            (false, true) => "off plan".to_string(),
-        },
+    let total = verdict::Size {
+        lines: detail.additions + detail.deletions,
+        files: detail.changed_files.max(detail.files.len() as u64),
+        added: detail.additions,
+        removed: detail.deletions,
+    };
+    rows::top(&rows::Inputs {
+        facts: &g.job.facts,
+        size: verdict::size(detail),
+        total,
+        kind,
+        rules,
+        build_ms: g.build_ms,
+        pictures,
+        cubic,
+        rule_files: verdict::touched(detail, &rules.rule_paths),
+        risky: verdict::touched(detail, &rules.risky_paths),
+        checks: detail.checks.iter().map(|c| c.name.as_str()).collect(),
+    })
+}
+
+/// What the PR's agent is told when every frame of its pictures shows no
+/// difference.
+pub const NO_DIFFERENCE: &str = "Your pictures flow shows no visible difference in any frame: \
+     set up the state your change affects (data, open menus, hover) and upload the flow again.";
+
+/// Send the agent of the PR at `url` back for pictures that show no
+/// difference, through the PR fixer's router — once for `head`.
+fn send_back_no_difference(app: &mut App, url: &str, head: &str) {
+    if head.is_empty() || app.pr_body.remembered(url).no_difference_sent.as_deref() == Some(head) {
+        return;
+    }
+    let mut out = Vec::new();
+    let sent = crate::automations::pr_fixer::send_words(
+        app,
+        url,
+        NO_DIFFERENCE.to_string(),
+        verdict::NO_DIFFERENCE,
+        &mut out,
     );
-    let rule_files = verdict::touched(detail, &rules.rule_paths);
-    let docs: Vec<&str> = facts
-        .docs_touched
-        .iter()
-        .map(|d| d.trim())
-        .filter(|d| !d.is_empty())
-        .collect();
-    render::Rows {
-        risk: risk.join("; "),
-        cubic: cubic.summary(),
-        rule_files: match rule_files.is_empty() {
-            true => "none touched".to_string(),
-            false => verdict::some_of(&rule_files, 4),
-        },
-        knowledge: match docs.is_empty() {
-            true => "no docs changed".to_string(),
-            false => format!("docs: {}", verdict::some_of(&docs, 4)),
-        },
+    app.outbox.extend(out);
+    if sent {
+        tracing::info!("pr_body: sent {url} back at {head}: its pictures show no difference");
+        app.pr_body.remembered(url).no_difference_sent = Some(head.to_string());
+        app.pr_body.save();
     }
 }
 
@@ -888,13 +927,8 @@ fn land_gathered(app: &mut App, g: Gathered) {
         .shown
         .then(|| pics.grid().map(|p| p.url.clone()))
         .flatten();
-    let body = render::render(
-        &detail.body,
-        facts,
-        &v,
-        &rows(&g, rules, &cubic),
-        grid.as_deref(),
-    );
+    let top = top(&g, rules, &cubic, &pics, kind);
+    let body = render::render(&detail.body, facts, &v, &top, grid.as_deref());
     if !render::same(&body, &detail.body) {
         write_body(app, &url, &body);
     }
@@ -913,7 +947,10 @@ fn land_gathered(app: &mut App, g: Gathered) {
         )
     });
     let settled = !detail.checks.iter().any(|c| c.state == CheckState::Running) && !pictures_coming;
-    card(app, &g, &v, g.grid_file.as_deref(), settled);
+    if pics.visible && pics.no_difference && !pictures_coming {
+        send_back_no_difference(app, &url, &detail.head_sha);
+    }
+    card(app, &g, &v, &top, g.grid_file.as_deref(), settled);
     if settled && v.tier == Tier::Merge && app.pr_body.settings.auto_merge {
         let remembered = app.pr_body.remembered(&url);
         if !remembered.auto_merged {
@@ -993,27 +1030,34 @@ fn card_key(url: &str) -> String {
 }
 
 /// The verdict card for a PR, per the card catalogue.
+/// The verdict line, the rows with their dots, then what users get and
+/// the link: the card leads with the dots, as the PR's top does.
 fn verdict_card(
     url: &str,
     detail: &PrDetail,
-    facts: &Facts,
+    top: &rows::Top,
     v: &Verdict,
     factory: &Factory,
     image: Option<&Path>,
 ) -> Card {
-    let mut body = vec![
-        format!("*{}*: {}", v.tier.word(), escape(&v.why().join("; "))),
-        format!("<{url}|#{} on GitHub>", detail.number),
-        escape(facts.what_users_get.trim()),
-    ];
-    if !facts.your_calls.is_empty() {
-        let calls: Vec<String> = facts
-            .your_calls
+    let mut body = vec![format!(
+        "*{}*: {}",
+        v.tier.word(),
+        escape(&v.why().join("; "))
+    )];
+    if !top.rows.is_empty() {
+        let rows: Vec<String> = top
+            .rows
             .iter()
-            .map(|c| format!("• [{}] {}: {}", c.tag, escape(&c.call), escape(&c.picked)))
+            .map(|r| format!("{} *{}*: {}", r.dot.mark(), r.label, escape(&r.cell)))
             .collect();
-        body.push(format!("*Your calls*\n{}", calls.join("\n")));
+        body.push(rows.join("\n"));
     }
+    let sentence = top.sentence.trim();
+    if !sentence.is_empty() {
+        body.push(escape(sentence));
+    }
+    body.push(format!("<{url}|#{} on GitHub>", detail.number));
     if v.tier == Tier::Review {
         let look: Vec<String> = v
             .why()
@@ -1049,7 +1093,14 @@ fn verdict_card(
 /// `settled` — the checks have, and no pictures are on their way — and
 /// again when the tier or the head moves; Blocked closes an open card
 /// (the fixer's own card says when it gives up).
-fn card(app: &mut App, g: &Gathered, v: &Verdict, image: Option<&Path>, settled: bool) {
+fn card(
+    app: &mut App,
+    g: &Gathered,
+    v: &Verdict,
+    top: &rows::Top,
+    image: Option<&Path>,
+    settled: bool,
+) {
     let url = &g.job.url;
     let detail = &g.job.detail;
     let key = card_key(url);
@@ -1076,7 +1127,7 @@ fn card(app: &mut App, g: &Gathered, v: &Verdict, image: Option<&Path>, settled:
     if sent.as_ref() == Some(&now) {
         return;
     }
-    let card = verdict_card(url, detail, &g.job.facts, v, &g.job.factory, image);
+    let card = verdict_card(url, detail, top, v, &g.job.factory, image);
     cards::post(app, card);
     app.pr_body.remembered(url).card = Some(now);
     app.pr_body.save();
@@ -1390,9 +1441,21 @@ mod tests {
             title: "Fix the login loop".into(),
             ..Default::default()
         };
-        let facts = Facts {
-            what_users_get: "No more <loop>.".into(),
-            ..Default::default()
+        let top = rows::Top {
+            sentence: "No more <loop>.".into(),
+            rows: vec![
+                rows::Row {
+                    dot: rows::Dot::Green,
+                    label: "Size",
+                    cell: "+3 −1 in 1 file".into(),
+                },
+                rows::Row {
+                    dot: rows::Dot::Amber,
+                    label: "Your calls",
+                    cell: "1: sign-in <wording>".into(),
+                },
+            ],
+            notes: vec![],
         };
         let reason = |tier, text: &str| verdict::Reason {
             tier,
@@ -1406,7 +1469,7 @@ mod tests {
             let card = verdict_card(
                 "https://github.com/o/r/pull/7",
                 &detail,
-                &facts,
+                &top,
                 &v,
                 &factory,
                 Some(Path::new("/g.png")),
@@ -1415,6 +1478,12 @@ mod tests {
             assert_eq!(card.context, "Bug fixer · riplo-os");
             assert_eq!(card.body.last().unwrap(), "_Verdict right?_");
             assert!(card.body.contains(&"No more &lt;loop&gt;.".to_string()));
+            // The dots lead, right under the verdict.
+            assert_eq!(
+                card.body[1],
+                "🟢 *Size*: +3 −1 in 1 file\n🟡 *Your calls*: 1: sign-in &lt;wording&gt;"
+            );
+            assert_eq!(card.body[3], "<https://github.com/o/r/pull/7|#7 on GitHub>");
             (
                 card.buttons
                     .iter()
@@ -1472,6 +1541,7 @@ mod tests {
             grid_file: None,
             plan: None,
             look: None,
+            build_ms: None,
         }
     }
 
@@ -1587,6 +1657,137 @@ mod tests {
         assert_eq!(back.prs[URL].pictures_dispatched.as_deref(), Some("abc"));
     }
 
+    /// An app with `URL` on its project's open list, at head `abc`: the
+    /// fixer's router can reach it.
+    fn app_listing_the_pr() -> App {
+        let mut app = App::new();
+        let project = ProjectId("p".into());
+        app.tree.projects.push(orion_core::Project {
+            id: project.clone(),
+            name: "repo".into(),
+            repo_path: "/tmp/repo".into(),
+            sort_order: 0,
+        });
+        app.tree.worktrees.push(orion_core::Worktree {
+            id: orion_core::WorktreeId("root".into()),
+            project_id: project.clone(),
+            path: "/tmp/repo".into(),
+            branch: "main".into(),
+            is_main: true,
+            sort_order: 0,
+        });
+        let now = Instant::now();
+        app.open_prs.insert(
+            project,
+            crate::app::OpenPrs {
+                merged: Vec::new(),
+                list: vec![crate::pull_request::OpenPr {
+                    number: 7,
+                    title: "Add things".into(),
+                    url: URL.into(),
+                    answered_draft: false,
+                    answered: Default::default(),
+                    head: "feat".into(),
+                    mine: true,
+                    head_sha: "abc".into(),
+                    meta: Default::default(),
+                }],
+                at: now,
+                due: now,
+                step: Duration::from_secs(15),
+            },
+        );
+        app
+    }
+
+    /// A visible PR whose pictures, taken at `head`, show no difference in
+    /// any frame.
+    fn showing_no_difference(head: &str) -> Gathered {
+        let mut g = visible_without_pictures();
+        g.job.detail.head_sha = head.into();
+        g.pictures = Some(pictures::Manifest {
+            head_sha: head.into(),
+            grids: vec![pictures::Grid {
+                file: "grid-01.png".into(),
+                url: "https://x/grid-01.png".into(),
+            }],
+            frames: vec![
+                pictures::Frame {
+                    verdict: "no visible difference".into(),
+                    difference: Some(0.0),
+                    ..Default::default()
+                },
+                pictures::Frame {
+                    verdict: "no visible difference".into(),
+                    difference: Some(0.0),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        g
+    }
+
+    /// The words the fixer's router launched a fresh fixer with, if any.
+    fn launched_with(app: &App) -> Vec<String> {
+        app.outbox
+            .iter()
+            .filter_map(|r| match r {
+                orion_core::ClientRequest::CreatePrAgent {
+                    starting_prompt, ..
+                } => starting_prompt.clone(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pictures_showing_no_difference_are_review_and_send_the_agent_back_once_a_head() {
+        let mut app = app_listing_the_pr();
+        land_gathered(&mut app, showing_no_difference("abc"));
+        let posted = posted_card(&app);
+        assert_eq!(posted.card.body[0], "*Review*: pictures show no difference");
+        assert!(
+            posted.card.body[1].contains("🔴 *Pictures*: no visible difference in any frame"),
+            "{:?}",
+            posted.card.body
+        );
+        assert!(posted.card.image.is_none(), "no grid that shows nothing");
+        let sent = launched_with(&app);
+        assert_eq!(sent.len(), 1, "{:?}", app.outbox);
+        assert!(sent[0].contains(NO_DIFFERENCE), "{}", sent[0]);
+        assert_eq!(
+            app.pr_body.remembered(URL).no_difference_sent.as_deref(),
+            Some("abc")
+        );
+        // The same head again: not sent twice.
+        let (outbox, queued) = (app.outbox.len(), app.autofix.queued.len());
+        land_gathered(&mut app, showing_no_difference("abc"));
+        assert_eq!(app.outbox.len(), outbox, "{:?}", app.outbox);
+        assert_eq!(app.autofix.queued.len(), queued);
+        // A new push whose pictures still show nothing: once more.
+        land_gathered(&mut app, showing_no_difference("def"));
+        assert_eq!(
+            app.pr_body.remembered(URL).no_difference_sent.as_deref(),
+            Some("def")
+        );
+        assert!(
+            app.autofix.queued.len() > queued || app.outbox.len() > outbox,
+            "sent for the new head"
+        );
+        // Pictures that show the change send nothing.
+        let mut app = app_listing_the_pr();
+        let mut g = showing_no_difference("abc");
+        if let Some(m) = g.pictures.as_mut() {
+            m.frames[0].verdict = "changed".into();
+            m.frames[0].difference = Some(0.2);
+        }
+        land_gathered(&mut app, g);
+        assert!(launched_with(&app).is_empty());
+        assert_eq!(app.pr_body.remembered(URL).no_difference_sent, None);
+        assert!(posted_card(&app).card.body[0].starts_with("*Skim*"));
+    }
+
     #[test]
     fn the_card_waits_for_settled_checks_goes_once_and_closes_when_blocked() {
         use orion_core::ClientRequest;
@@ -1599,25 +1800,67 @@ mod tests {
                 text: "why".into(),
             }],
         };
-        card(&mut app, &g, &v(Tier::Merge), None, false);
+        card(
+            &mut app,
+            &g,
+            &v(Tier::Merge),
+            &rows::Top::default(),
+            None,
+            false,
+        );
         assert!(app.outbox.is_empty(), "checks still running");
-        card(&mut app, &g, &v(Tier::Merge), None, true);
+        card(
+            &mut app,
+            &g,
+            &v(Tier::Merge),
+            &rows::Top::default(),
+            None,
+            true,
+        );
         assert!(matches!(
             app.outbox.last(),
             Some(ClientRequest::PostFactoryCard { .. })
         ));
         let sent = app.outbox.len();
-        card(&mut app, &g, &v(Tier::Merge), None, true);
+        card(
+            &mut app,
+            &g,
+            &v(Tier::Merge),
+            &rows::Top::default(),
+            None,
+            true,
+        );
         assert_eq!(app.outbox.len(), sent, "same tier, same head: not again");
-        card(&mut app, &g, &v(Tier::Review), None, true);
+        card(
+            &mut app,
+            &g,
+            &v(Tier::Review),
+            &rows::Top::default(),
+            None,
+            true,
+        );
         assert_eq!(app.outbox.len(), sent + 1, "a new tier edits it in place");
-        card(&mut app, &g, &v(Tier::Blocked), None, true);
+        card(
+            &mut app,
+            &g,
+            &v(Tier::Blocked),
+            &rows::Top::default(),
+            None,
+            true,
+        );
         assert!(matches!(
             app.outbox.last(),
             Some(ClientRequest::UpdateFactoryCard { .. })
         ));
         let closed = app.outbox.len();
-        card(&mut app, &g, &v(Tier::Blocked), None, true);
+        card(
+            &mut app,
+            &g,
+            &v(Tier::Blocked),
+            &rows::Top::default(),
+            None,
+            true,
+        );
         assert_eq!(app.outbox.len(), closed, "closed once");
     }
 
@@ -1637,7 +1880,14 @@ mod tests {
     /// its page loaded at that head.
     fn app_with_card() -> App {
         let mut app = App::new();
-        card(&mut app, &gathered(), &verdict_of(Tier::Merge), None, true);
+        card(
+            &mut app,
+            &gathered(),
+            &verdict_of(Tier::Merge),
+            &rows::Top::default(),
+            None,
+            true,
+        );
         app.pr_body.remembered(URL).tier = Some("merge".into());
         app.pr_detail.insert(
             URL.into(),

@@ -4,7 +4,7 @@
 //! | Tier | When |
 //! |---|---|
 //! | Blocked | CI red; a check still cancelled at head; a conflict on a ready PR; an open Cubic P0, or an open P1 the agent hasn't declared |
-//! | Review | a visible change with no pictures at its head; a risky path from the contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a `security`, `dep` or `arch` call; over the size limit; a contract that doesn't parse |
+//! | Review | a visible change with no pictures at its head, or with pictures that show no difference; a risky path from the contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a `security`, `dep` or `arch` call; over the size limit; a contract that doesn't parse |
 //! | Skim | a visible change with pictures |
 //! | Merge | everything else |
 //!
@@ -12,7 +12,9 @@
 //! missing pictures — some changes can't be staged by the picture flow —
 //! so they are Review, with the agent's pictures gap when it gave one
 //! ([`no_pictures`]); while pictures are on their way the card waits
-//! instead (`super::dispatch::coming`).
+//! instead (`super::dispatch::coming`). Pictures whose every frame shows
+//! no difference are no pictures: Review, "pictures show no difference"
+//! (`super::pictures::Manifest::no_difference`).
 //!
 //! Sizes leave out lockfiles, `.changeset/`, `docs/`, `*.snap` and
 //! `*.json` ([`counted`]).
@@ -87,7 +89,7 @@ impl Kind {
         }
     }
 
-    fn limit(self, contract: &Contract) -> Limit {
+    pub fn limit(self, contract: &Contract) -> Limit {
         match self {
             Kind::Bug => contract.limits.bug,
             Kind::Feature => contract.limits.feature,
@@ -125,11 +127,26 @@ impl Verdict {
     }
 }
 
-/// Changed lines and files, after the exclusions.
+/// Changed lines and files, after the exclusions: `lines` is `added`
+/// and `removed` together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Size {
     pub lines: u64,
     pub files: u64,
+    pub added: u64,
+    pub removed: u64,
+}
+
+impl Size {
+    /// Over `limit`, in lines or in files.
+    pub fn over(self, limit: Limit) -> bool {
+        self.lines > limit.lines || self.files > limit.files
+    }
+
+    /// Under half `limit`, in lines and in files.
+    pub fn under_half(self, limit: Limit) -> bool {
+        self.lines * 2 < limit.lines && self.files * 2 < limit.files
+    }
 }
 
 const LOCKFILES: [&str; 12] = [
@@ -166,21 +183,29 @@ pub fn counted(path: &str) -> bool {
 /// The PR's size. GitHub lists only the first hundred files; whatever
 /// lies past them is counted in full, since it can't be sorted.
 pub fn size(pr: &PrDetail) -> Size {
-    let (mut lines, mut files, mut listed_lines) = (0, 0, 0);
+    let (mut added, mut removed, mut files) = (0, 0, 0);
+    let (mut listed_added, mut listed_removed) = (0, 0);
     for f in &pr.files {
-        let n = f.additions + f.deletions;
-        listed_lines += n;
+        listed_added += f.additions;
+        listed_removed += f.deletions;
         if counted(&f.path) {
-            lines += n;
+            added += f.additions;
+            removed += f.deletions;
             files += 1;
         }
     }
     let unlisted_files = pr.changed_files.saturating_sub(pr.files.len() as u64);
     if unlisted_files > 0 {
         files += unlisted_files;
-        lines += (pr.additions + pr.deletions).saturating_sub(listed_lines);
+        added += pr.additions.saturating_sub(listed_added);
+        removed += pr.deletions.saturating_sub(listed_removed);
     }
-    Size { lines, files }
+    Size {
+        lines: added + removed,
+        files,
+        added,
+        removed,
+    }
 }
 
 /// The contract's paths the PR touches, by the list `of` picks.
@@ -211,7 +236,7 @@ pub fn some_of(items: &[&str], at_most: usize) -> String {
     }
 }
 
-fn thousands(n: u64) -> String {
+pub fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::new();
     for (i, c) in s.chars().enumerate() {
@@ -239,31 +264,47 @@ pub fn size_words(size: Size) -> String {
 /// pictures: only shows with two sessions` reads `no pictures: only shows
 /// with two sessions`.
 pub fn no_pictures(facts: &Facts) -> String {
+    match pictures_gap(facts) {
+        Some(why) => format!("no pictures: {why}"),
+        None => "no pictures".into(),
+    }
+}
+
+/// Why there are no pictures, as the agent said: its short
+/// `pictures_label`, else the gap that speaks of pictures less any
+/// heading of its own, lowercased to follow a colon.
+pub fn pictures_gap(facts: &Facts) -> Option<String> {
     let speaks = |s: &str| {
         let s = s.to_ascii_lowercase();
         s.contains("picture") || s.contains("screenshot")
     };
-    let Some(gap) = facts.gaps.iter().map(|g| g.trim()).find(|g| speaks(g)) else {
-        return "no pictures".into();
-    };
-    let why = match gap.split_once(':') {
-        Some((head, rest)) if speaks(head) => rest.trim(),
-        _ => gap,
+    let label = facts.pictures_label.trim();
+    let why = match label.is_empty() {
+        false => label,
+        true => {
+            let gap = facts.gaps.iter().map(|g| g.trim()).find(|g| speaks(g))?;
+            match gap.split_once(':') {
+                Some((head, rest)) if speaks(head) => rest.trim(),
+                _ => gap,
+            }
+        }
     };
     let why = why.trim_end_matches('.');
     if why.is_empty() {
-        return "no pictures".into();
+        return None;
     }
     // `The change…` reads `the change…`; `UI only…` stays.
     let mut chars = why.chars();
-    let why = match (chars.next(), chars.next()) {
+    Some(match (chars.next(), chars.next()) {
         (Some(first), Some(second)) if first.is_uppercase() && !second.is_uppercase() => {
             format!("{}{}", first.to_lowercase(), &why[first.len_utf8()..])
         }
         _ => why.to_string(),
-    };
-    format!("no pictures: {why}")
+    })
 }
+
+/// The reason pictures that show nothing give.
+pub const NO_DIFFERENCE: &str = "pictures show no difference";
 
 /// The verdict on `pr`, from its facts, the repo's contract (or why it
 /// couldn't be read), Cubic, the commits' `Hook:` trailers, the pictures
@@ -318,7 +359,10 @@ pub fn verdict(
 
     // Review.
     if pictures.visible && !pictures.shown {
-        say(Tier::Review, no_pictures(facts));
+        match pictures.no_difference {
+            true => say(Tier::Review, NO_DIFFERENCE.into()),
+            false => say(Tier::Review, no_pictures(facts)),
+        }
     }
     if let Err(why) = contract {
         say(Tier::Review, why.clone());
@@ -348,7 +392,7 @@ pub fn verdict(
     }
     let size = size(pr);
     let limit = kind.limit(rules);
-    if size.lines > limit.lines || size.files > limit.files {
+    if size.over(limit) {
         say(
             Tier::Review,
             format!(
@@ -578,6 +622,24 @@ mod tests {
     }
 
     #[test]
+    fn pictures_that_show_no_difference_are_review_like_missing_ones() {
+        let mut i = In::new();
+        i.pictures.visible = true;
+        i.pictures.no_difference = true;
+        i.facts.gaps = vec!["No pictures: needs two sessions".into()];
+        let v = i.run();
+        assert_eq!(v.line(), "**Review**: pictures show no difference");
+        // The agent's short label, when it gave one, says why there are none.
+        let mut i = In::new();
+        i.pictures.visible = true;
+        i.facts.pictures_label = "needs two sessions".into();
+        assert_eq!(
+            i.run().line(),
+            "**Review**: no pictures: needs two sessions"
+        );
+    }
+
+    #[test]
     fn a_risky_path_is_review() {
         let mut i = In::new();
         i.contract = Ok(Contract {
@@ -735,7 +797,9 @@ mod tests {
             size(&pr),
             Size {
                 lines: 10,
-                files: 1
+                files: 1,
+                added: 10,
+                removed: 0,
             }
         );
     }
@@ -746,13 +810,16 @@ mod tests {
             files: vec![file("Cargo.lock", 500)],
             changed_files: 3,
             additions: 600,
+            deletions: 40,
             ..Default::default()
         };
         assert_eq!(
             size(&pr),
             Size {
-                lines: 100,
-                files: 2
+                lines: 140,
+                files: 2,
+                added: 100,
+                removed: 40,
             }
         );
     }

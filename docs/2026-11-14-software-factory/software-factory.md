@@ -27,7 +27,7 @@ The repo side is a separate plan, carried out in riplo-os by another session: th
 | No change | A plan whose first line is `ORION-VERDICT: <already-fixed|duplicate|not-reproducible|wont-build> <reason>` gives a card [Close ticket] [Build anyway…]. Close sets the ticket to Done (already fixed), Duplicate (with the duplicate relation when the reason names an id), or Canceled with a comment (the other two). It never goes back to Todo. |
 | Asking | The agent asks only for: plan approval; a [product] choice users notice beyond the ticket with no safe default; going against a recorded rule; schema, auth, payments, security, a new external service or a big dependency; or being blocked after one recovery attempt. [copy] and [ux] calls take the Recommended option and are listed as "Your calls" on the PR. |
 | Commits | Through the repo's `riplo-write-commit-msg` / `riplo-split-and-submit-prs` skills (generic: "the repo's commit and PR skills") in unattended mode. The env var `ORION_AUTOMATION=<automation id>` is set on every automation session. Cubic loops until no P1 is open; a P1 may be dismissed only with a reason on the PR; the same P1 back 3 times ends the loop and forces Review. No local e2e by default: CI runs it. Never `--no-verify`. |
-| Verdict | orion computes it from facts. Blocked, only for what the PR fixer resolves: CI red; checks cancelled (re-run); a conflict on a ready PR; an open Cubic P0, or a P1 not dismissed or declared. Review: a visible change with no pictures at its head ("no pictures", plus the agent's pictures gap from the facts when it gave one, e.g. "no pictures: only shows with two sessions in one table"); a risky path from the repo's contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a [security], [dep] or [arch] call; or the size limits (bug: 3,000 changed lines or 60 files; feature: 5,000 or 70, excluding lockfiles, changesets, docs, snapshots and JSON). Skim: a visible change with pictures. Merge: everything else. While pictures are on their way (the PR's flow is on `pr-screenshots`, and a pictures-workflow run for it is queued or in progress, or orion ran the job for this head in the last 30 minutes) the card waits for them. |
+| Verdict | orion computes it from facts. Blocked, only for what the PR fixer resolves: CI red; checks cancelled (re-run); a conflict on a ready PR; an open Cubic P0, or a P1 not dismissed or declared. Review: a visible change with no pictures at its head ("no pictures", plus the agent's pictures label or gap from the facts when it gave one, e.g. "no pictures: only shows with two sessions in one table"), or whose pictures show no difference (every frame of `pictures.json` says "no visible difference", or every difference is 0: "pictures show no difference", and orion sends the PR's agent back once per head to stage the state the change affects and upload its flow again); a risky path from the repo's contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a [security], [dep] or [arch] call; or the size limits (bug: 3,000 changed lines or 60 files; feature: 5,000 or 70, excluding lockfiles, changesets, docs, snapshots and JSON). Skim: a visible change with pictures. Merge: everything else. While pictures are on their way (the PR's flow is on `pr-screenshots`, and a pictures-workflow run for it is queued or in progress, or orion ran the job for this head in the last 30 minutes) the card waits for them. |
 | Merging | Nothing merges without the owner's tap. Auto-merge is built but switched off. There is no revert machinery. |
 | Fixing | One branch, one agent. Red CI on a draft is fixed at once and repeatedly until green; conflicts are never fixed while the PR is a draft. Once the owner marks it ready, conflicts are fixed. The branch's own agent gets the work as a new turn when it's idle and under 75% of its context; when busy, it's queued until idle; above 75%, one fresh fixer gets a handover. Never two at once. Green fixers are archived. The owner's GitHub comments go to the branch's agent and are done in that PR. |
 | Knowledge | At merge, orion harvests every session that worked on the PR, plus the PR thread and Cubic. It extracts with **Opus**, and an entry credited to the owner must quote an OWNER line word for word, or it is downgraded to the agent. Each entry is checked against the merged code, then merged into topic pages. It is committed in the repo, in `.orion/decisions/harvested/`, beside the hand-written decision records in `.orion/decisions/`, which are authoritative and read-only to orion: a harvested rule that contradicts one is dropped or left an open question. orion writes through one pull request per person (`orion/knowledge-<login>`), never a push to the base, and merges it itself after the daily card's veto window (`factory.knowledge_auto_merge`). Condensed transcripts and dossiers stay on the machine. A daily card lists new owner rules, each with a veto. There is a one-off backfill of the sessions since June, plus a staleness check. |
@@ -174,13 +174,15 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
 1. **Facts.**
    - The agent runs `orion pr facts init` (prints a JSON skeleton), fills it, then `orion pr facts set <file>`. orion stores the facts in a hidden block in the PR body: `<!-- orion:facts {json} -->`.
    - Fields:
-     - `what_users_get` (≤2 sentences);
-     - `proof` (list);
-     - `gaps` (list);
-     - `your_calls` (list of `{call, picked, alternative, tag}`);
+     - `what_users_get` (one plain sentence, ≤30 words);
+     - `proof` (list: only what the PR's checks don't show, such as a manual run);
+     - `gaps` (list) and `gaps_label` (≤8 words);
+     - `pictures_label` (≤8 words: why a visible change has no pictures);
+     - `your_calls` (list of `{call, picked, alternative, tag, label}`, the label ≤4 words);
      - `flag` (name or null);
      - `docs_touched` (list);
-     - `plan_followed` (bool plus deviations).
+     - `plan_followed` (bool, deviations, and a `label` of ≤8 words when off plan).
+   - The labels are what the table shows. `orion pr facts set` refuses a document that leaves out a label its row needs or runs one over its words, so cells are never cut mid-sentence.
    - The CLI talks to the TUI through the daemon or a local file under `<data_dir>/pr-facts/<pr-url-hash>.json`, whichever is simpler. The TUI's poller applies it.
 2. **Verdict.**
    - `pr_body::verdict(facts, pr_detail, contract, cubic, trailers, pictures, kind) -> Verdict { tier, reasons }`, following the Decisions table.
@@ -193,10 +195,22 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
 3. **Render.**
    - Write the top of the body:
      - line 1: the verdict with its reason ("**Skim**: visible change, pictures below");
-     - then 8 rows: What users get, Risk, Proof, Gaps, Your calls, Cubic, Rule files, Knowledge;
-     - then the first picture grid when there is one;
-     - then the agent's longer notes inside `<details>`.
-   - At most 180 words above the fold.
+     - then what users get, as one plain sentence;
+     - then the table (`pr_body/rows.rs`). Every row starts with a dot: 🟢, 🟡, 🔴, or ⚪ when there is nothing to judge. Each cell is at most 12 words. Rows, in order:
+
+       | Row | 🟢 | 🟡 | 🔴 | ⚪ |
+       |---|---|---|---|---|
+       | Size: lines added/removed, files, build time (first stage to PR open, from the run record) | under half the contract's limit for the kind | under the limit | over it | |
+       | Plan | on plan | off plan in places, with the shortest reason | not followed | |
+       | Your calls | none | count plus short labels | | |
+       | Pictures | shown, and they show a change | | missing, or no difference in any frame, with the agent's reason | none needed |
+       | Cubic | clean | findings dismissed (with the count), unresolved, or below P1 | an open P0, or an open P1 not declared | |
+       | Gaps | | the agent's short label | | none |
+       | Rule files, Knowledge (only when touched) | | what was touched | | |
+
+     - Size is for the owner to judge only: it tells agents nothing and sets no budget.
+     - then the first picture grid when there is one (pictures that show no difference aren't shown);
+     - then the Notes fold (`<details>`): whatever a row had to say past its cell, under a heading per row; the proof the checks don't already show (a manual run; never "typecheck passed" or "unit tests pass"); risky paths and the flag; then the agent's own description.
    - Re-render when the head sha, checks, Cubic comments or facts change. Write only when the bytes differ (`gh pr edit --body-file -`).
    - Never touch a PR without facts. Only factory PRs (builder-ledger branches) get rendered.
 4. **Plan comment.** On the first render, post the approved plan (the ExitPlanMode input from the builder's transcript) as a PR comment headed "Plan as approved", once.
@@ -337,7 +351,7 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
 | Urgent | owner | "Urgent priority. Start now? <n> things are waiting on you." | Start · Leave |
 | Thin ticket | reporter | "Hi <first name>, an agent is ready to pick this up but needs a bit more first: what you did, what you expected instead, a screenshot. Please add it to the Linear ticket; it's unassigned until then." | Open ticket · I've updated it |
 | Thin ticket (fallback) | owner | "RIPLO-n needs more detail and its reporter can't be asked on Slack." | Open ticket · Start anyway |
-| PR: Merge / Skim / Review | owner | verdict line, what users get, Your calls, "look at" lines (Review), grid image (Skim) | per §D.5 · Verdict right? 👍 👎 |
+| PR: Merge / Skim / Review | owner | verdict line, the top's rows with their dots, what users get, "look at" lines (Review), grid image (Skim) | per §D.5 · Verdict right? 👍 👎 |
 | Can't fix | owner | "CI still red after 3 fixes: <check>. Attempts in the thread." | Open PR · Reply… · Park |
 | Stalled | owner | "Stopped without a PR or a question 10 minutes ago. Last thing it said: …" | Continue · Reply… · Park |
 | Setup missing | owner | "<project> has no factory workflow doc / tools list." | Open template |

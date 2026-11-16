@@ -14,6 +14,12 @@
 //! - **Shown** when `pictures.json` names at least one grid and was taken
 //!   at the PR's current head: pictures of an older push don't count.
 //!   The grid in the body and on the card is the first one.
+//! - **No difference** when they were taken at the head but every frame
+//!   says `no visible difference`, or every frame's difference is 0
+//!   ([`Manifest::no_difference`]): the flow never reached the state the
+//!   change affects. Those don't count as shown either — the verdict
+//!   treats them as missing, and the PR's agent is sent back once per head
+//!   to stage that state (`super::NO_DIFFERENCE`).
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -77,11 +83,34 @@ pub struct Manifest {
     pub notes: Vec<String>,
 }
 
+/// What a frame that shows nothing changed says.
+const NO_VISIBLE_DIFFERENCE: &str = "no visible difference";
+
+impl Manifest {
+    /// Whether its pictures show nothing: it has frames, and every one
+    /// says `no visible difference`, or every one has a difference of 0.
+    /// A frame that is `new` (no difference to measure) is a change.
+    pub fn no_difference(&self) -> bool {
+        let frames = &self.frames;
+        !frames.is_empty()
+            && (frames
+                .iter()
+                .all(|f| f.verdict.trim().eq_ignore_ascii_case(NO_VISIBLE_DIFFERENCE))
+                || frames
+                    .iter()
+                    .all(|f| f.difference.is_some_and(|d| d <= 0.0)))
+    }
+}
+
 /// The pictures signal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Pictures {
     pub visible: bool,
+    /// Pictures taken at the head that show the change.
     pub shown: bool,
+    /// Pictures were taken at the head, but no frame shows a difference:
+    /// not shown.
+    pub no_difference: bool,
     /// The first grid, when shown.
     pub grid: Option<Grid>,
 }
@@ -110,15 +139,18 @@ pub fn of(detail: &PrDetail, visible_paths: &[String], manifest: &Manifest) -> P
     let current = !manifest.head_sha.trim().is_empty()
         && !detail.head_sha.trim().is_empty()
         && manifest.head_sha.trim() == detail.head_sha.trim();
-    let grid = manifest
+    let taken = manifest
         .grids
         .iter()
         .find(|g| !g.url.trim().is_empty())
         .filter(|_| current)
         .cloned();
+    let no_difference = taken.is_some() && manifest.no_difference();
+    let grid = taken.filter(|_| !no_difference);
     Pictures {
         visible: touched || ran,
         shown: grid.is_some(),
+        no_difference,
         grid,
     }
 }
@@ -296,6 +328,41 @@ mod tests {
         };
         assert!(!of(&at("abc123"), &[], &empty).shown);
         assert!(!of(&at(""), &[], &Manifest::default()).shown);
+    }
+
+    fn frame(verdict: &str, difference: Option<f64>) -> Frame {
+        Frame {
+            verdict: verdict.into(),
+            difference,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pictures_whose_every_frame_shows_no_difference_are_not_shown() {
+        let mut m = parse_contents(&contents(MANIFEST));
+        assert!(!m.no_difference(), "a changed frame and a new one");
+        m.frames = vec![
+            frame("no visible difference", Some(0.0)),
+            frame("No visible difference", Some(0.001)),
+        ];
+        assert!(m.no_difference(), "every verdict says so");
+        let p = of(&at("abc123"), &[], &m);
+        assert!(!p.shown && p.no_difference && p.grid().is_none(), "{p:?}");
+        m.frames = vec![frame("changed", Some(0.0)), frame("blank", Some(0.0))];
+        assert!(m.no_difference(), "every difference is 0");
+        m.frames = vec![
+            frame("no visible difference", Some(0.0)),
+            frame("new", None),
+        ];
+        assert!(!m.no_difference(), "a new frame is a change");
+        m.frames = vec![];
+        assert!(!m.no_difference(), "no frames to judge");
+        assert!(of(&at("abc123"), &[], &m).shown);
+        // An older push's pictures are neither.
+        m.frames = vec![frame("no visible difference", Some(0.0))];
+        let stale = of(&at("def456"), &[], &m);
+        assert!(!stale.shown && !stale.no_difference);
     }
 
     #[test]

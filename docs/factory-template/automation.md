@@ -50,10 +50,11 @@ Every other call — `[copy]`, `[ux]` and the rest — takes the Recommended opt
 ## 7. Pictures
 
 - A change users can see needs before-and-after pictures. Push and let the repo's pictures job in CI take them; don't take them by hand unless the repo says how.
+- Pictures only count when they show the change. Set up the state it affects in the flow (data, open menus, hover): if every frame shows no visible difference, orion sends the PR back to you.
 
 ## 8. Facts
 
-- Run `orion pr facts init`, fill in the JSON it prints — what users get, the proof, the gaps, your calls, the flag, the docs touched, whether the plan was followed — and run `orion pr facts set <file>`.
+- Run `orion pr facts init`, fill in the JSON it prints — what users get in one plain sentence, the proof CI's checks don't already show, the gaps, your calls, the flag, the docs touched, whether the plan was followed, and the short labels the PR's table shows — and run `orion pr facts set <file>`.
 - orion writes the top of the PR from those facts, with its verdict. Don't write that part yourself.
 
 ## 9. Stop

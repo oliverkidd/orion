@@ -8,6 +8,13 @@
 //! TUI's poller picks it up from there, and keeps it in the PR's body as a
 //! hidden block, `<!-- orion:facts {json} -->` ([`block`]), so a PR
 //! carries its facts wherever it is read from.
+//!
+//! The top's table holds at most about twelve words a cell, so the agent
+//! is asked for the short labels its rows need — a call's in at most
+//! [`CALL_LABEL_WORDS`], why it went off plan, the gaps and why there are
+//! no pictures in at most [`LABEL_WORDS`] — and `set` refuses a document
+//! that leaves one out or runs over ([`Facts::problems`]). The long words
+//! go in the top's Notes fold.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +25,13 @@ use sha2::{Digest, Sha256};
 /// five; it takes the Recommended option on `copy` and `ux` and lists the
 /// call. `security`, `dep` and `arch` send the PR to Review.
 pub const TAGS: [&str; 7] = ["product", "arch", "security", "dep", "scope", "copy", "ux"];
+
+/// The most words a call's label may have.
+pub const CALL_LABEL_WORDS: usize = 4;
+/// The most words any other label may have.
+pub const LABEL_WORDS: usize = 8;
+/// The most words `what_users_get` may have: one plain sentence.
+pub const SENTENCE_WORDS: usize = 30;
 
 /// A call the agent made on the owner's behalf.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +45,9 @@ pub struct Call {
     pub alternative: String,
     /// One of [`TAGS`].
     pub tag: String,
+    /// The call in at most [`CALL_LABEL_WORDS`] words, for the table
+    /// (`sign-in button wording`).
+    pub label: String,
 }
 
 /// Whether the build kept to the approved plan.
@@ -40,6 +57,16 @@ pub struct PlanFollowed {
     pub followed: bool,
     /// Where it went its own way, and why.
     pub deviations: Vec<String>,
+    /// Why it went off plan in at most [`LABEL_WORDS`] words, for the
+    /// table; empty when on plan.
+    pub label: String,
+}
+
+impl PlanFollowed {
+    /// Whether the build went its own way anywhere.
+    pub fn off(&self) -> bool {
+        !self.followed || self.deviations.iter().any(|d| !d.trim().is_empty())
+    }
 }
 
 impl Default for PlanFollowed {
@@ -47,6 +74,7 @@ impl Default for PlanFollowed {
         Self {
             followed: true,
             deviations: Vec::new(),
+            label: String::new(),
         }
     }
 }
@@ -55,12 +83,18 @@ impl Default for PlanFollowed {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Facts {
-    /// At most two sentences: what changes for the people who use it.
+    /// One plain sentence: what changes for the people who use it.
     pub what_users_get: String,
-    /// How it was shown to work: tests added, checks run, pictures.
+    /// How it was shown to work beyond what the PR's checks show: a manual
+    /// run, a script. Not the tests or checks CI runs.
     pub proof: Vec<String>,
     /// What wasn't done or checked.
     pub gaps: Vec<String>,
+    /// The gaps in at most [`LABEL_WORDS`] words, for the table.
+    pub gaps_label: String,
+    /// Why a change users can see has no pictures, in at most
+    /// [`LABEL_WORDS`] words; empty when it has them or needs none.
+    pub pictures_label: String,
     pub your_calls: Vec<Call>,
     /// The feature flag it is behind, if any.
     pub flag: Option<String>,
@@ -71,21 +105,62 @@ pub struct Facts {
 
 impl Facts {
     /// What is wrong with a filled-in document, so `set` refuses it:
-    /// nothing said of users, a placeholder left in, a call without its
-    /// tag.
+    /// nothing said of users, or more than a sentence; a placeholder left
+    /// in; a call without its tag; a label the table needs left out or
+    /// too long.
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
         if self.what_users_get.trim().is_empty() {
             out.push("what_users_get is empty".to_string());
         }
+        let said = words(&self.what_users_get);
+        if said > SENTENCE_WORDS {
+            out.push(format!(
+                "what_users_get has {said} words: say it in one plain sentence of at most \
+                 {SENTENCE_WORDS}"
+            ));
+        }
         let mut texts: Vec<(&str, &str)> = vec![("what_users_get", &self.what_users_get)];
         texts.extend(self.proof.iter().map(|p| ("proof", p.as_str())));
         texts.extend(self.gaps.iter().map(|g| ("gaps", g.as_str())));
+        texts.extend([
+            ("gaps_label", self.gaps_label.as_str()),
+            ("pictures_label", self.pictures_label.as_str()),
+            ("plan_followed.label", self.plan_followed.label.as_str()),
+        ]);
+        let mut label = |field: &str, text: &str, needed: bool, at_most: usize| {
+            let n = words(text);
+            if needed && n == 0 {
+                out.push(format!(
+                    "{field} is empty: the table needs it, in at most {at_most} words"
+                ));
+            } else if n > at_most {
+                out.push(format!("{field} has {n} words; at most {at_most}"));
+            }
+        };
+        let has_gaps = self.gaps.iter().any(|g| !g.trim().is_empty());
+        label("gaps_label", &self.gaps_label, has_gaps, LABEL_WORDS);
+        label("pictures_label", &self.pictures_label, false, LABEL_WORDS);
+        label(
+            "plan_followed.label",
+            &self.plan_followed.label,
+            self.plan_followed.off(),
+            LABEL_WORDS,
+        );
+        for call in &self.your_calls {
+            label(
+                &format!("your_calls: \"{}\" label", call.call),
+                &call.label,
+                true,
+                CALL_LABEL_WORDS,
+            );
+        }
         for call in &self.your_calls {
             texts.extend([
                 ("your_calls.call", call.call.as_str()),
                 ("your_calls.picked", call.picked.as_str()),
                 ("your_calls.alternative", call.alternative.as_str()),
+                ("your_calls.label", call.label.as_str()),
             ]);
             if !TAGS.contains(&call.tag.as_str()) {
                 out.push(format!(
@@ -109,22 +184,102 @@ impl Facts {
 /// in it.
 pub fn skeleton() -> String {
     let facts = Facts {
-        what_users_get: "<at most two sentences: what changes for the people who use it>".into(),
-        proof: vec!["<how you showed it works: a test, a check, a picture>".into()],
+        what_users_get: "<one plain sentence: what changes for the people who use it>".into(),
+        proof: vec![
+            "<only what the PR's checks don't show, such as a manual run; not the tests or \
+             checks CI runs; leave the list empty if nothing>"
+                .into(),
+        ],
         gaps: vec![
             "<what you didn't do or couldn't check; leave the list empty if nothing>".into(),
         ],
+        gaps_label: "<the gaps in at most 8 words; empty if there are none>".into(),
+        pictures_label: "<why a change users can see has no pictures, in at most 8 words; \
+                         empty otherwise>"
+            .into(),
         your_calls: vec![Call {
             call: "<a choice you made for the owner>".into(),
             picked: "<what you picked>".into(),
             alternative: "<the option you didn't>".into(),
             tag: "copy".into(),
+            label: "<the call in at most 4 words>".into(),
         }],
         flag: None,
         docs_touched: Vec::new(),
-        plan_followed: PlanFollowed::default(),
+        plan_followed: PlanFollowed {
+            label: "<why you went off plan, in at most 8 words; empty if on plan>".into(),
+            ..PlanFollowed::default()
+        },
     };
     serde_json::to_string_pretty(&facts).unwrap_or_default()
+}
+
+/// How many words `text` has.
+pub fn words(text: &str) -> usize {
+    text.split_whitespace().count()
+}
+
+/// The proof the PR's checks don't already show: an item that speaks of
+/// tests, types, lint, CI or one of `checks` by name is left out, unless
+/// it says it was run by hand (`ran the export locally`).
+pub fn beyond_checks<'a>(proof: &'a [String], checks: &[&str]) -> Vec<&'a str> {
+    const BY_HAND: [&str; 6] = [
+        "manual",
+        "locally",
+        "by hand",
+        "clicked",
+        "tried",
+        "on the preview",
+    ];
+    const CI: [&str; 14] = [
+        "test",
+        "typecheck",
+        "type check",
+        "type-check",
+        "tsc",
+        "lint",
+        "clippy",
+        "fmt",
+        "format",
+        "ci",
+        "check",
+        "build",
+        "e2e",
+        "spec",
+    ];
+    proof
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .filter(|p| {
+            let lower = p.to_ascii_lowercase();
+            if BY_HAND.iter().any(|w| lower.contains(w)) {
+                return true;
+            }
+            let restates = CI
+                .iter()
+                .copied()
+                .chain(checks.iter().map(|c| c.trim()))
+                .any(|w| speaks_of(&lower, w));
+            !restates
+        })
+        .collect()
+}
+
+/// Whether `lower` (lowercased) names `word`: as a phrase when it has a
+/// space, else as a word of its own or with `s`, `es`, `ed` or `ing` on.
+fn speaks_of(lower: &str, word: &str) -> bool {
+    let word = word.to_ascii_lowercase();
+    if word.is_empty() {
+        return false;
+    }
+    if word.contains(' ') {
+        return lower.contains(&word);
+    }
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .filter_map(|said| said.strip_prefix(word.as_str()))
+        .any(|rest| matches!(rest, "" | "s" | "es" | "ed" | "ing"))
 }
 
 const OPEN: &str = "<!-- orion:facts ";
@@ -220,13 +375,16 @@ mod tests {
                 picked: "Sign in".into(),
                 alternative: "Log in".into(),
                 tag: "copy".into(),
+                label: "sign-in wording".into(),
             }],
             flag: Some("new-login".into()),
             docs_touched: vec!["docs/auth.md".into()],
             plan_followed: PlanFollowed {
                 followed: false,
                 deviations: vec!["kept the old cookie name".into()],
+                label: "kept the old cookie name".into(),
             },
+            ..Default::default()
         }
     }
 
@@ -256,6 +414,65 @@ mod tests {
         let mut bad = sample();
         bad.your_calls[0].tag = "vibes".into();
         assert_eq!(bad.problems().len(), 1);
+    }
+
+    #[test]
+    fn the_labels_the_table_needs_are_asked_for_and_kept_short() {
+        let mut f = sample();
+        f.your_calls[0].label = String::new();
+        f.plan_followed.label = String::new();
+        f.gaps = vec!["no second account to test sharing with".into()];
+        let problems = f.problems();
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(
+            problems[0].starts_with("gaps_label is empty"),
+            "{problems:?}"
+        );
+        assert!(problems[1].starts_with("plan_followed.label is empty"));
+        assert!(problems[2].contains("\"Button copy\" label is empty"));
+        f.your_calls[0].label = "the words on the sign-in button".into();
+        f.plan_followed.label = "kept the old cookie name".into();
+        f.gaps_label = "sharing untested".into();
+        f.pictures_label = "one two three four five six seven eight nine".into();
+        let problems = f.problems();
+        assert_eq!(
+            problems,
+            [
+                "pictures_label has 9 words; at most 8",
+                "your_calls: \"Button copy\" label has 6 words; at most 4",
+            ]
+        );
+        // On plan needs no label; nor do no gaps.
+        let mut f = sample();
+        f.plan_followed = PlanFollowed::default();
+        assert!(f.problems().is_empty());
+        // One plain sentence.
+        f.what_users_get = "word ".repeat(SENTENCE_WORDS + 1);
+        assert!(f.problems()[0].contains("one plain sentence"));
+    }
+
+    #[test]
+    fn proof_the_checks_already_show_is_left_out() {
+        let proof: Vec<String> = [
+            "typecheck passed",
+            "Unit tests pass",
+            "added a unit test for the redirect",
+            "CI green",
+            "storybook-a11y green",
+            "Ran the export locally against a 10k-row table",
+            "Opened the dialog on the preview and saved twice",
+            "Measured the bundle: 2 KB smaller",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            beyond_checks(&proof, &["storybook-a11y", "unit"]),
+            [
+                "Ran the export locally against a 10k-row table",
+                "Opened the dialog on the preview and saved twice",
+                "Measured the bundle: 2 KB smaller",
+            ]
+        );
     }
 
     #[test]
