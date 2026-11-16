@@ -5925,6 +5925,14 @@ pub(crate) fn state_for(states: &[LinearState], as_: CloseAs) -> Option<&LinearS
     }
 }
 
+/// A team's Backlog: its `backlog` state named "Backlog", else its first.
+pub(crate) fn backlog_state(states: &[LinearState]) -> Option<&LinearState> {
+    let backlog = || states.iter().filter(|s| s.kind == "backlog");
+    backlog()
+        .find(|s| s.name.trim().eq_ignore_ascii_case("Backlog"))
+        .or_else(|| backlog().next())
+}
+
 /// A mutation's answer: `Ok` when `data.<field>.success` is true, else
 /// Linear's own error, else `refused`.
 pub(crate) fn mutation_result(

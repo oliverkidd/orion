@@ -59,6 +59,7 @@ pub(crate) mod approved_paths;
 pub mod intake;
 pub(crate) mod owner;
 pub(crate) mod setup;
+pub(crate) mod skip;
 pub(crate) mod stages;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -356,6 +357,11 @@ pub struct Entry {
     /// approves (`approved_paths`). Taken when it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
+    /// Taken off the factory (**Not for the factory**, from orion or
+    /// `orion factory skip`): parked for good. A running orion adopts one
+    /// the CLI wrote ([`Shared::adopt_skips`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
 }
 
 impl Default for Entry {
@@ -383,6 +389,7 @@ impl Default for Entry {
             stalled: false,
             asking: false,
             plan: None,
+            skipped: false,
         }
     }
 }
@@ -523,6 +530,8 @@ pub struct Shared {
     /// Linear writes waiting to be sent, each under its project's key
     /// ([`owner::send_writes`]).
     pub(crate) writes: Vec<(ProjectId, owner::Write)>,
+    /// When the ledger file was last read for skips ([`Self::adopt_skips`]).
+    skips_read: Option<std::time::SystemTime>,
 }
 
 impl Shared {
@@ -535,6 +544,35 @@ impl Shared {
                 .queue
                 .iter()
                 .any(|g| g.issues.iter().any(|i| i.id == issue_id))
+    }
+
+    /// Take up the tickets `orion factory skip` took off the factory since
+    /// the file was last read: each entry on disk marked `skipped` replaces
+    /// this run's, so the next save keeps it and nothing here restarts or
+    /// nudges its session. Whether any was taken up.
+    pub(crate) fn adopt_skips(&mut self) -> bool {
+        let Some(path) = &self.path else {
+            return false;
+        };
+        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if modified.is_none() || modified == self.skips_read {
+            return false;
+        }
+        self.skips_read = modified;
+        let Some(disk) = std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Ledger>(&bytes).ok())
+        else {
+            return false;
+        };
+        let mut adopted = false;
+        for (id, entry) in disk.issues.into_iter().filter(|(_, e)| e.skipped) {
+            if !self.ledger.issues.get(&id).is_some_and(|e| e.skipped) {
+                self.ledger.issues.insert(id, entry);
+                adopted = true;
+            }
+        }
+        adopted
     }
 
     pub(crate) fn save(&self) {
@@ -2797,7 +2835,12 @@ mod tests {
         let labels: Vec<&str> = c.card.buttons.iter().map(|b| b.label.as_str()).collect();
         assert_eq!(
             labels,
-            ["Close ticket", "Build anyway…", "Not for the factory"]
+            [
+                "Close ticket",
+                "Build anyway…",
+                "Not for the factory: leave as is",
+                "Not for the factory: to Backlog"
+            ]
         );
         assert!(c.card.buttons[1].asks_text);
         // Once per verdict.
@@ -3082,7 +3125,7 @@ mod tests {
     /// factory**.
     #[test]
     fn every_card_about_a_ticket_offers_not_for_the_factory() {
-        use orion_core::factory_card::NOT_FOR_FACTORY;
+        use orion_core::factory_card::{NOT_FOR_FACTORY, NOT_FOR_FACTORY_BACKLOG};
         let mut app = app_with_project();
         building(&mut app, Stage::Approving);
         app.automations
@@ -3098,10 +3141,16 @@ mod tests {
         owner::post_dead(&mut app, "uuid-ENG-7");
         for what in ["nochange", "stalled", "dead"] {
             let c = card(&app, &format!("issue:uuid-ENG-7:{what}"));
-            let last = c.card.buttons.last().unwrap();
+            let last: Vec<(&str, &str)> = c.card.buttons[c.card.buttons.len() - 2..]
+                .iter()
+                .map(|b| (b.action.as_str(), b.label.as_str()))
+                .collect();
             assert_eq!(
-                (last.action.as_str(), last.label.as_str()),
-                (NOT_FOR_FACTORY, "Not for the factory"),
+                last,
+                [
+                    (NOT_FOR_FACTORY, "Not for the factory: leave as is"),
+                    (NOT_FOR_FACTORY_BACKLOG, "Not for the factory: to Backlog"),
+                ],
                 "{what}"
             );
         }
@@ -3153,10 +3202,60 @@ mod tests {
             .linear_builder
             .writes
             .iter()
-            .any(|(_, w)| matches!(w, Write::Close { .. } | Write::Assign { .. })));
+            .any(|(_, w)| matches!(
+                w,
+                Write::Close { .. } | Write::Assign { .. } | Write::ToBacklog { .. }
+            )));
         assert_eq!(
             owner::taken_off("Sam Lee"),
             "Taken off the factory by Sam Lee"
+        );
+        // To Backlog: the same, and the ticket moved to its team's Backlog.
+        let mut app = app_with_project();
+        building(&mut app, Stage::Building);
+        owner::post_stalled(&mut app, "uuid-ENG-7", None);
+        let backlog = orion_core::factory_card::NOT_FOR_FACTORY_BACKLOG;
+        crate::factory::cards::on_action(&mut app, key, backlog, None, true);
+        assert_eq!(stage_of(&app), Stage::Parked);
+        let writes: Vec<&Write> = app
+            .automations
+            .linear_builder
+            .writes
+            .iter()
+            .map(|(_, w)| w)
+            .collect();
+        assert!(matches!(
+            writes[..],
+            [
+                Write::Label { .. },
+                Write::TakenOff { .. },
+                Write::ToBacklog { .. }
+            ]
+        ));
+        let states = |kinds: &[(&str, &str)]| -> Vec<crate::linear::LinearState> {
+            kinds
+                .iter()
+                .map(|(name, kind)| crate::linear::LinearState {
+                    id: name.to_lowercase(),
+                    name: name.to_string(),
+                    kind: kind.to_string(),
+                    color: String::new(),
+                })
+                .collect()
+        };
+        let team = states(&[
+            ("Icebox", "backlog"),
+            ("Backlog", "backlog"),
+            ("Todo", "unstarted"),
+        ]);
+        assert_eq!(
+            crate::linear::backlog_state(&team).map(|s| s.name.as_str()),
+            Some("Backlog")
+        );
+        let team = states(&[("Later", "backlog"), ("Todo", "unstarted")]);
+        assert_eq!(
+            crate::linear::backlog_state(&team).map(|s| s.name.as_str()),
+            Some("Later")
         );
         // Someone else's press on a card counts for nothing.
         let mut app = app_with_project();
@@ -3194,7 +3293,7 @@ mod tests {
         };
         // The verdict card.
         let mut app = with_pr();
-        owner::not_for_the_factory_pr(&mut app, url, "", &format!("pr:{url}:verdict"));
+        owner::not_for_the_factory_pr(&mut app, url, "", &format!("pr:{url}:verdict"), false);
         assert_eq!(stage_of(&app), Stage::Parked);
         assert!(closes_draft(&app));
         // The session's menu offers it, and it does the same.
@@ -3204,7 +3303,7 @@ mod tests {
             owner::ticket_of_session(&app, &s7).as_deref(),
             Some("uuid-ENG-7")
         );
-        owner::not_for_the_factory_session(&mut app, &s7);
+        owner::not_for_the_factory_session(&mut app, &s7, false);
         assert_eq!(stage_of(&app), Stage::Parked);
         assert!(closes_draft(&app));
         assert_eq!(owner::ticket_of_session(&app, &s7), None, "parked");
@@ -3217,6 +3316,32 @@ mod tests {
         assert!(owner::is_open_draft(&view("OPEN", true)));
         assert!(!owner::is_open_draft(&view("OPEN", false)));
         assert!(!owner::is_open_draft(&view("MERGED", true)));
+    }
+
+    /// A ticket `orion factory skip` marked in the ledger file is taken up
+    /// by a running orion: parked, and never restarted, nudged or written
+    /// back over.
+    #[test]
+    fn a_running_orion_takes_up_a_skip_written_to_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("linear-builder.json");
+        let mut app = app_with_project();
+        building(&mut app, Stage::Building);
+        let shared = &mut app.automations.linear_builder;
+        shared.path = Some(path.clone());
+        shared.save();
+        assert!(!shared.adopt_skips(), "its own save holds no skip");
+        let mut disk = shared.ledger.clone();
+        let entry = disk.issues.get_mut("uuid-ENG-7").unwrap();
+        entry.set_stage(Stage::Parked, crate::app::now_ms());
+        entry.skipped = true;
+        // Later, so the file's time moves.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+        follow(&mut app);
+        assert_eq!(stage_of(&app), Stage::Parked);
+        let saved: Ledger = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved.issues["uuid-ENG-7"].skipped, "kept on the next save");
     }
 
     /// A ticket labelled `factory-skip` is never picked up, in any case of
@@ -3351,7 +3476,16 @@ mod tests {
         let c = card(&app, "issue:uuid-ENG-7:stalled");
         assert!(c.card.body[0].starts_with("Stopped without a PR or a question 10 minutes ago."));
         let actions: Vec<&str> = c.card.buttons.iter().map(|b| b.action.as_str()).collect();
-        assert_eq!(actions, ["continue", "reply", "park", "not_for_factory"]);
+        assert_eq!(
+            actions,
+            [
+                "continue",
+                "reply",
+                "park",
+                "not_for_factory",
+                "not_for_factory_backlog"
+            ]
+        );
         follow(&mut app);
         assert_eq!(app.factory_cards.len(), 1, "once");
         crate::factory::cards::on_action(&mut app, "issue:uuid-ENG-7:stalled", "park", None, true);

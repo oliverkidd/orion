@@ -478,6 +478,10 @@ pub struct Store {
 
 pub type TreeRows = (Vec<Project>, Vec<Worktree>, Vec<Agent>, Vec<TerminalTab>);
 
+/// [`Store::sessions_and_projects`]: session ids, and `(project id,
+/// repository)` pairs.
+pub type SessionsAndProjects = (Vec<String>, Vec<(String, PathBuf)>);
+
 /// How long a pull request's read mark outlives the last time it was read
 /// ([`Store::prune_pr_seen`]). Long, because losing one is not free: a
 /// pull request still open then, with comments on it, reads as unread once
@@ -538,6 +542,27 @@ impl Store {
         Ok(row.map(|(kind, custom)| {
             orion_core::harness::registry_id(parse_agent_kind(&kind), custom.as_deref()).to_string()
         }))
+    }
+
+    /// The ids of the live sessions named `name` (any case), and the
+    /// repository of every project by id, read straight from the database
+    /// at `path` for `orion factory skip`: read-only, never migrated.
+    pub fn sessions_and_projects(path: &Path, name: &str) -> Result<SessionsAndProjects> {
+        use rusqlite::OpenFlags;
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .with_context(|| format!("open {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(1))?;
+        let sessions = conn
+            .prepare("SELECT id FROM agents WHERE archived = 0 AND lower(name) = lower(?1)")?
+            .query_map(params![name.trim()], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let projects = conn
+            .prepare("SELECT id, repo_path FROM projects")?
+            .query_map([], |r| {
+                Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?)))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((sessions, projects))
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -2064,6 +2089,10 @@ mod tests {
         );
         assert_eq!(Store::agent_account(&path, "gone").unwrap(), None);
         assert!(Store::agent_account(&dir.path().join("none.db"), "a1").is_err());
+        // `orion factory skip` finds a session by name, any case.
+        let (named, projects) = Store::sessions_and_projects(&path, "B").unwrap();
+        assert_eq!(named, ["a2"]);
+        assert_eq!(projects, [("p1".to_string(), PathBuf::from("/tmp/p"))]);
     }
 
     /// A database already at v21 gains nullable PR launch context without

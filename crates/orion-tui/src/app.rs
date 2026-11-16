@@ -410,8 +410,12 @@ pub enum MenuAction {
         id: String,
     },
     /// A factory session's **Not for the factory**: its ticket taken off
-    /// the factory (`linear_builder::owner::not_for_the_factory_session`).
-    NotForFactory(AgentId),
+    /// the factory, moved to Backlog or left as it is
+    /// (`linear_builder::owner::not_for_the_factory_session`).
+    NotForFactory {
+        id: AgentId,
+        backlog: bool,
+    },
     /// A button of a software factory card on the NEEDS YOU BOARD:
     /// pressed as its Slack twin is, or — one that asks for words — a box
     /// for them first (`needs_you::factory`).

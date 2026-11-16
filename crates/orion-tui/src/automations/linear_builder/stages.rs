@@ -150,6 +150,9 @@ enum Do {
 /// Bring the ledger up to date with the sessions, the pull requests and
 /// Linear: see the module's doc.
 pub(crate) fn follow(app: &mut App) {
+    if app.automations.linear_builder.adopt_skips() {
+        app.automations.linear_builder.save();
+    }
     let now = crate::app::now_ms();
     let mut todo: Vec<Do> = Vec::new();
     let mut records: Vec<(String, Rec)> = Vec::new();

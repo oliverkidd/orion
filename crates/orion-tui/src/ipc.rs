@@ -363,6 +363,21 @@ pub async fn stand_down_current_agent(reason: &str) -> Result<()> {
     Ok(())
 }
 
+/// `orion factory skip`: archive session `id`, as the TUI's Archive does.
+/// Never spawns a daemon: with none running there is nothing to archive.
+pub async fn archive_agent(id: &AgentId) -> Result<()> {
+    let Ok(stream) = try_connect(&paths::socket_path()).await else {
+        bail!("no orion daemon is running");
+    };
+    let mut conn = handshake(stream).await?;
+    let archive = ClientRequest::ArchiveAgent {
+        req_id: ONE_SHOT_REQ_ID,
+        id: id.clone(),
+    };
+    write_frame(&mut conn.stream, &archive).await?;
+    await_ack(&mut conn, ONE_SHOT_REQ_ID).await
+}
+
 /// CLI: `orion spawn "<task>" [--kind <claude|codex|cursor>]` from inside
 /// an agent session — ask the daemon to start a new agent beside this one,
 /// in the same worktree, opening on `task` as its first prompt. The caller

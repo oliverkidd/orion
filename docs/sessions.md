@@ -885,14 +885,20 @@ request. They work the same way; each has its own labels and its own preset (**B
   the factory**; a dead one's card has **Open ticket**, **Park** and **Not for the factory**. Each
   stage, each question and when you answered go into the run's record
   (`automations/runs/<ticket>.json` in orion's data dir).
-- **Not for the factory.** A ticket the factory shouldn't have taken comes off it for good: the
-  button is on the No change, Stalled and dead cards, on the pull request's verdict card, on a
-  factory session's plan and question on your phone, and in the session's menu in orion (right-click
-  its row). It parks the ticket as **Park** does — its session archived, its cards closed — closes
-  the draft pull request it opened, with a comment saying why, labels the ticket `factory-skip`
-  (made in its team if the team has no such label) and comments "Taken off the factory by <you>".
-  The ticket's status stays where it is, so your own triage decides what happens to it next; the
-  intake never picks it up again while it carries the label.
+- **Not for the factory.** A ticket the factory shouldn't have taken comes off it for good. It is
+  two choices, **Not for the factory: leave as is** and **Not for the factory: to Backlog**, on the
+  No change, Stalled and dead cards, on the pull request's verdict card, on a factory session's plan
+  and question on your phone, and in the session's menu in orion (right-click its row). Either parks
+  the ticket as **Park** does — its session archived, its cards closed — labels it `factory-skip`
+  (made in its team if the team has no such label), comments "Taken off the factory by <you>" and
+  closes the draft pull request it opened, with a comment saying why. **Leave as is** keeps the
+  ticket's status (Triage, usually), so your own triage decides what happens to it next; **to
+  Backlog** moves it to the team's Backlog. The intake never picks it up again while it carries the
+  label. From a shell, `orion factory skip <ticket or session name> [--backlog]` does the same,
+  printing each step as it goes, and marks the ticket parked in the builder ledger
+  (`automations/linear-builder.json`), which a running orion takes up on its next tick so it never
+  restarts or nudges the session. An orion built before that command keeps its own copy of the
+  ledger and may write it back; the label still keeps the ticket off the intake.
 - **The panel.** **RUNNING** lists each session: `planning`, `plan to approve`, `building`, a ticket
   `waiting on you` or `waiting on its reporter`, or `queued, 5 running` while the cap is full.
   **DONE THIS WEEK** lists the ones that finished.

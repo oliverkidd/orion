@@ -527,11 +527,16 @@ pub mod factory_card {
     pub const ACTION_LINK: &str = "orion_factory_link";
     /// Between a button value's key and its action (`<key>|<action>`).
     pub const SEP: char = '|';
-    /// **Not for the factory**: the action every factory card about a
-    /// ticket offers, which takes the ticket off the factory.
+    /// **Not for the factory**: what every factory card about a ticket
+    /// offers, which takes the ticket off the factory — its status left
+    /// as it is ([`NOT_FOR_FACTORY`]) or moved to the team's Backlog
+    /// ([`NOT_FOR_FACTORY_BACKLOG`]).
     pub const NOT_FOR_FACTORY: &str = "not_for_factory";
-    /// Its label.
+    pub const NOT_FOR_FACTORY_BACKLOG: &str = "not_for_factory_backlog";
+    /// Its name, and each choice's label.
     pub const NOT_FOR_FACTORY_LABEL: &str = "Not for the factory";
+    pub const NOT_FOR_FACTORY_LEAVE_LABEL: &str = "Not for the factory: leave as is";
+    pub const NOT_FOR_FACTORY_BACKLOG_LABEL: &str = "Not for the factory: to Backlog";
     /// The key a press about a session rather than a card goes by
     /// (`session:<agent id>`): **Not for the factory** on a factory
     /// session's phone message.

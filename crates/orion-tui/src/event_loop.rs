@@ -7463,18 +7463,27 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         items.splice(at..at, links);
         return items;
     }
-    // A factory session: **Not for the factory**, after Archive, which it
-    // does too — and more.
+    // A factory session: **Not for the factory**'s two choices, after
+    // Archive, which each does too — and more.
     if crate::automations::linear_builder::owner::ticket_of_session(app, &a.id).is_some() {
         if let Some(at) = items
             .iter()
             .position(|item| matches!(item.action, MenuAction::ArchiveAgent(_)))
         {
-            let item = MenuItem::destructive(
-                orion_core::factory_card::NOT_FOR_FACTORY_LABEL,
-                MenuAction::NotForFactory(a.id.clone()),
+            use orion_core::factory_card::{
+                NOT_FOR_FACTORY_BACKLOG_LABEL, NOT_FOR_FACTORY_LEAVE_LABEL,
+            };
+            let choice = |label: &str, backlog| {
+                let id = a.id.clone();
+                MenuItem::destructive(label, MenuAction::NotForFactory { id, backlog })
+            };
+            items.splice(
+                at + 1..at + 1,
+                [
+                    choice(NOT_FOR_FACTORY_LEAVE_LABEL, false),
+                    choice(NOT_FOR_FACTORY_BACKLOG_LABEL, true),
+                ],
             );
-            items.insert(at + 1, item);
         }
     }
     let Some(w) = app
@@ -9889,8 +9898,10 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         }
         MenuAction::RenameAgent(id) => open_prompt(app, PromptKind::RenameAgent { id }),
         MenuAction::ArchiveAgent(id) => archive_agent(app, id),
-        MenuAction::NotForFactory(id) => {
-            crate::automations::linear_builder::owner::not_for_the_factory_session(app, &id)
+        MenuAction::NotForFactory { id, backlog } => {
+            crate::automations::linear_builder::owner::not_for_the_factory_session(
+                app, &id, backlog,
+            )
         }
         MenuAction::UnarchiveAgent(id) => activate::unarchive(app, id, out),
         MenuAction::DeleteAgent(id) => {

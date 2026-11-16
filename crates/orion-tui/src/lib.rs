@@ -150,6 +150,30 @@ pub fn run_pr_facts(op: PrFactsOp) -> Result<()> {
     pr_body::cli::run(op)
 }
 
+/// `orion factory skip <ticket or session> [--backlog]`: **Not for the
+/// factory** from a shell (see `automations::linear_builder::skip`).
+/// `sessions` are the ids of the live sessions named `target`, `projects`
+/// every project's id and repository: what the daemon's database says.
+pub fn run_factory_skip(
+    target: String,
+    backlog: bool,
+    sessions: Vec<String>,
+    projects: Vec<(String, std::path::PathBuf)>,
+) -> Result<()> {
+    use automations::linear_builder::skip;
+    let mut live = skip::Live { sessions, projects };
+    let path = skip::ledger_path();
+    runtime()?
+        .block_on(skip::skip(
+            &path,
+            &target,
+            backlog,
+            &mut live,
+            &mut |line| println!("{line}"),
+        ))
+        .map_err(|why| anyhow::anyhow!(why))
+}
+
 /// `orion doctor [--json]`: what this machine has of what orion leans on,
 /// a line each with the fix for whatever is missing (see [`doctor`]).
 /// False when something orion can't do without is missing.

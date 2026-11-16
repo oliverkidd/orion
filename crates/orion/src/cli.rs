@@ -213,6 +213,12 @@ pub(crate) enum Command {
     /// `consolidate` merges the topics down to about 60.
     #[command(subcommand, after_help = KNOWLEDGE_EXAMPLES)]
     Knowledge(KnowledgeCommand),
+    /// Take a ticket off the software factory.
+    ///
+    /// The bug fixer and the feature builder build Linear tickets on their
+    /// own; `skip` is their cards' **Not for the factory**, from a shell.
+    #[command(subcommand, after_help = FACTORY_EXAMPLES)]
+    Factory(FactoryCommand),
     /// Locate this machine's settings.
     ///
     /// Settings live in `config.json`, with `config.local.json` over it for
@@ -496,6 +502,32 @@ pub(crate) enum KnowledgeCommand {
     },
 }
 
+const FACTORY_EXAMPLES: &str = "\
+Examples:
+  orion factory skip ENG-7              off the factory, its status kept
+  orion factory skip crash-fix --backlog
+                                        by its session's name, to Backlog";
+
+#[derive(Subcommand)]
+pub(crate) enum FactoryCommand {
+    /// Take a ticket off the factory for good.
+    ///
+    /// Labels the ticket `factory-skip`, which the intake never picks up
+    /// until someone removes it, comments "Taken off the factory by
+    /// <you>", closes the draft pull request its session opened, archives
+    /// the session and marks the ticket parked in the builder ledger. Its
+    /// status stays where it is, unless --backlog. Each step prints how it
+    /// went. Works with or without orion running.
+    #[command(after_help = FACTORY_EXAMPLES)]
+    Skip {
+        /// The ticket (`ENG-7`) or the name of the session working on it.
+        target: String,
+        /// Move the ticket to its team's Backlog too.
+        #[arg(long)]
+        backlog: bool,
+    },
+}
+
 #[derive(Subcommand)]
 pub(crate) enum ConfigCommand {
     /// Print where each settings file lives.
@@ -544,6 +576,24 @@ mod tests {
         assert_eq!(got, url);
         assert!(Cli::try_parse_from(["orion", "open-link"]).is_err());
         assert!(Cli::try_parse_from(["orion", "open-link", "a", "b"]).is_err());
+    }
+
+    #[test]
+    fn factory_skip_takes_a_target_and_an_optional_backlog() {
+        let Some(Command::Factory(FactoryCommand::Skip { target, backlog })) =
+            parse(&["factory", "skip", "ENG-7"]).command
+        else {
+            panic!("not a skip");
+        };
+        assert_eq!((target.as_str(), backlog), ("ENG-7", false));
+        let Some(Command::Factory(FactoryCommand::Skip { target, backlog })) =
+            parse(&["factory", "skip", "crash-fix", "--backlog"]).command
+        else {
+            panic!("not a skip");
+        };
+        assert_eq!((target.as_str(), backlog), ("crash-fix", true));
+        assert!(Cli::try_parse_from(["orion", "factory", "skip"]).is_err());
+        assert!(Cli::try_parse_from(["orion", "factory", "skip", "a", "b"]).is_err());
     }
 
     #[test]

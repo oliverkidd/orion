@@ -5,7 +5,8 @@ mod upgrade;
 use anyhow::Result;
 use clap::Parser;
 use cli::{
-    AutofixCommand, Cli, Command, ConfigCommand, KnowledgeCommand, PrCommand, PrFactsCommand,
+    AutofixCommand, Cli, Command, ConfigCommand, FactoryCommand, KnowledgeCommand, PrCommand,
+    PrFactsCommand,
 };
 use std::path::Path;
 
@@ -59,6 +60,14 @@ fn main() -> Result<()> {
         }
         Some(Command::Knowledge(KnowledgeCommand::Consolidate { project })) => {
             orion_tui::knowledge::cli_consolidate(project)
+        }
+        Some(Command::Factory(FactoryCommand::Skip { target, backlog })) => {
+            // Read-only, straight from the daemon's database: the sessions
+            // named so, and where each project's Linear key lives.
+            let db = orion_core::paths::db_path();
+            let (sessions, projects) =
+                orion_daemon::store::Store::sessions_and_projects(&db, &target)?;
+            orion_tui::run_factory_skip(target, backlog, sessions, projects)
         }
         Some(Command::OpenLink { url }) => {
             // The session's account, from the database the daemon keeps:
