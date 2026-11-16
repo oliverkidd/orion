@@ -7,8 +7,10 @@
 //! tools it names ([`run_in`]).
 //!
 //! Every model call orion makes outside a session goes through here —
-//! the week in review, the automations' briefs, the meeting takeaways —
-//! so the command, its account and its failures are said one way.
+//! the week in review, the automations' briefs, the meeting takeaways,
+//! the knowledge harvest and a ticket's intake — so the command, its
+//! account and its failures are said one way. The knowledge steps and
+//! the intake read their model and effort from config ([`ModelChoice`]).
 
 use std::path::Path;
 use std::time::Duration;

@@ -831,9 +831,14 @@ request. They work the same way; each has its own labels and its own preset (**B
   `automations/linear-builder.json` in its data dir, and Needs you stops showing its assignment.
 - **Never twice.** A ticket already linked to an orion worktree, or whose name is in a worktree's
   branch, an open pull request's title, body or branch, or a live session's title or branch, is
-  skipped (said once in the log). One a model judges very like a live session's work comes to you
-  as a card in Slack: "Looks like the work in your *session* session (why)." — **Start anyway** or
-  **Skip**.
+  skipped (said once in the log). One the intake's model judges very like a live session's work
+  comes to you as a card in Slack: "Looks like the work in your *session* session (why)." —
+  **Start anyway** or **Skip**.
+- **One ask a look.** A look's new tickets go to a cheap model (`automations.intake_model`, Haiku
+  at low effort) in one call that answers all three questions — very like a live session's work,
+  which project, together or apart — and only when there is something to ask: one ticket, one
+  project and no live session asks nothing. A ticket the model was asked about and placed nowhere
+  isn't asked about again until it changes in Linear.
 - **Urgent.** An Urgent ticket doesn't start on its own: a card asks "Urgent priority. Start now?
   N things are waiting on you." — **Start** or **Leave**.
 - **Thin tickets.** A ticket whose description is under 20 words, with nothing attached and no
@@ -845,9 +850,11 @@ request. They work the same way; each has its own labels and its own preset (**B
   detail and its reporter can't be asked on Slack", **Open ticket** · **Start anyway**), and nothing
   is unassigned. Nothing is written to the ticket's comments.
 - **Which project.** A key only one project uses sends its tickets there. When several projects
-  share a key, a model reads each ticket and each project's **What it is** line and picks one.
-- **Together or apart.** When several new tickets land for one project at once, a model joins only
-  the ones that clearly share a cause or a component; the rest get a session each.
+  share a key, a ticket whose labels or Linear project name exactly one of them goes there, and so
+  does one whose team's tickets have only ever gone to one; otherwise the model reads the ticket and
+  each project's **What it is** line and picks one.
+- **Together or apart.** When several new tickets land at once, the model joins only the ones in
+  one project that clearly share a cause or a component; the rest get a session each.
 - **The workflow doc.** A project starts nothing until it has `agent_docs/automation.md`, its
   factory workflow: a card says so once ("*project* has no factory workflow doc"), with **Open
   template**, which writes orion's template (`docs/factory-template/automation.md`) to
@@ -864,8 +871,10 @@ request. They work the same way; each has its own labels and its own preset (**B
   bug up to 8 **Related tickets** from its team (open, or closed in the last 90 days) to look for a
   pattern in, **Related work to check** (the project's open drafts and recent merges), the repo's
   harvested knowledge index and its hand-written decision records (`.orion/decisions/`, as the base
-  the worktree is cut from has them; see [Knowledge](how-it-works.md#knowledge)), and "Phase a large
-  task, or propose a multi-agent workflow." As a ⌘L launch does,
+  the worktree is cut from has them; see [Knowledge](how-it-works.md#knowledge)), the areas and
+  topics to note rules on, and "Phase a large task, or propose a multi-agent workflow." Its last
+  step, after `orion pr facts set`, is `orion knowledge note`: the lasting rules it learned, which
+  orion records when the pull request merges instead of reading the whole of it again. As a ⌘L launch does,
   it moves the tickets to In Progress and attaches the draft pull request to them when it opens.
   `ORION_AUTOMATION` is set in the session.
 - **Your approval.** Every plan waits for you like any other: in Needs you, and on your phone when

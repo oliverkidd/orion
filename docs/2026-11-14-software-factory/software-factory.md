@@ -19,7 +19,7 @@ The repo side is a separate plan, carried out in riplo-os by another session: th
 | Area | Decision |
 |---|---|
 | Intake | Tickets assigned to you, carrying a Bug or Feature Request label (the runner's labels), in **Triage or Todo** (`triage`, `unstarted`). **Backlog is never picked up**; moving a ticket to Todo starts it. No `factory` label. No launch spacing. |
-| Duplicates | Never start a ticket already linked to an orion worktree or session (yours included), named by an open PR's title, body or branch, or judged by a cheap model to be very similar to a live session. A likely match gives a card: [Start anyway] [Skip]. |
+| Duplicates | Never start a ticket already linked to an orion worktree or session (yours included), named by an open PR's title, body or branch, or judged by a cheap model to be very similar to a live session. A likely match gives a card: [Start anyway] [Skip]. The similarity check, routing and grouping are one Haiku call a look, made only for tickets not seen before (see [Fewer background calls](#fewer-background-calls)). |
 | Urgent | An Urgent ticket gives a card [Start] [Leave] instead of starting. |
 | Thin tickets | Under 20 words with no attachment: orion DMs the **reporter** on Slack and **unassigns the owner**. The reporter's "I've updated it" reassigns the ticket to the owner, and it is picked up again. If the reporter isn't on Slack, is the owner, or is external, it becomes a card to the owner instead. Nothing is written to Linear comments. |
 | Bug patterns | For a bug, orion puts related tickets in the context (open, plus closed in the last 90 days, same team, ranked by similarity). The agent says in the plan if they look like one cause, and offers "fix the pattern" next to "fix this bug". |
@@ -30,11 +30,11 @@ The repo side is a separate plan, carried out in riplo-os by another session: th
 | Verdict | orion computes it from facts. Blocked, only for what the PR fixer resolves: CI red; checks cancelled (re-run); a conflict on a ready PR; an open Cubic P0, or a P1 not dismissed or declared. Review: a visible change with no pictures at its head ("no pictures", plus the agent's pictures label or gap from the facts when it gave one, e.g. "no pictures: only shows with two sessions in one table"), or whose pictures show no difference (every frame of `pictures.json` says "no visible difference", or every difference is 0: "pictures show no difference", and orion sends the PR's agent back once per head to stage the state the change affects and upload its flow again); a risky path from the repo's contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a [security], [dep] or [arch] call; or the size limits (bug: 3,000 changed lines or 60 files; feature: 5,000 or 70, excluding lockfiles, changesets, docs, snapshots and JSON). Skim: a visible change with pictures. Merge: everything else. While pictures are on their way (the PR's flow is on `pr-screenshots`, and a pictures-workflow run for it is queued or in progress, or orion ran the job for this head in the last 30 minutes) the card waits for them. |
 | Merging | Nothing merges without the owner's tap. Auto-merge is built but switched off. There is no revert machinery. |
 | Fixing | One branch, one agent. Red CI on a draft is fixed at once and repeatedly until green; conflicts are never fixed while the PR is a draft. Once the owner marks it ready, conflicts are fixed. The branch's own agent gets the work as a new turn when it's idle and under 75% of its context; when busy, it's queued until idle; above 75%, one fresh fixer gets a handover. Never two at once. Green fixers are archived. The owner's GitHub comments go to the branch's agent and are done in that PR. |
-| Knowledge | At merge, orion harvests every session that worked on the PR, plus the PR thread and Cubic. It extracts with **Opus**, and an entry credited to the owner must quote an OWNER line word for word, or it is downgraded to the agent. Each entry is checked against the merged code, then merged into topic pages. It is committed in the repo, in `.orion/decisions/harvested/`, beside the hand-written decision records in `.orion/decisions/`, which are authoritative and read-only to orion: a harvested rule that contradicts one is dropped or left an open question. orion writes through one pull request per person (`orion/knowledge-<login>`), never a push to the base, and merges it itself after the daily card's veto window (`factory.knowledge_auto_merge`). Condensed transcripts and dossiers stay on the machine. A daily card lists new owner rules, each with a veto. There is a one-off backfill of the sessions since June, plus a staleness check. |
+| Knowledge | At merge, orion harvests every session that worked on the PR, plus the PR thread and Cubic. A PR a person built is one **Opus** call that extracts, checks each entry against the merged code and writes the topic pages; a factory PR whose session noted its rules (`orion knowledge note`) skips the extraction, and each topic its notes touch is checked and merged by one call. An entry credited to the owner must quote an OWNER line word for word, or it is downgraded to the agent. It is committed in the repo, in `.orion/decisions/harvested/`, beside the hand-written decision records in `.orion/decisions/`, which are authoritative and read-only to orion: a harvested rule that contradicts one is dropped or left an open question. orion writes through one pull request per person (`orion/knowledge-<login>`), never a push to the base, and merges it itself after the daily card's veto window (`factory.knowledge_auto_merge`). Condensed transcripts and dossiers stay on the machine. A daily card lists new owner rules, each with a veto. There is a one-off backfill of the sessions since June, and a weekly staleness check of the topics whose files changed. |
 | Slack | Every card (list in §8) goes to the owner's DM while they are away (the phone's away and quiet hours), and is mirrored as a Needs-you card. At the desk it stays in orion (a badge on its session or worktree, a footer line, Needs you); the open ones go to Slack once as the owner goes away. The thin-ticket DM goes to the reporter. |
 | Settings | Settings › Automations becomes **Factory**: "Agents working at once" (the overall cap), "Things waiting on you" (new, default 5: new tickets wait while this many factory items need the owner), and each runner on or off. |
 | Records | One JSON record per run. There are no metrics, judges, alarms or replay. Week in review gets a Factory section. A weekly retro proposes at most 3 fixes. Usage is not tracked and nothing pauses on usage. |
-| Model | Opus 5.5 high for builders and fixers, as today, and for the knowledge harvest. |
+| Model | Opus 5.5 high for builders and fixers, as today, and for the knowledge harvest and the weekly staleness check; Sonnet low for consolidating topics; Haiku low for intake. Each background step's model is a setting (`knowledge.models.*`, `automations.intake_model`). |
 
 ## How the work is split
 
@@ -90,7 +90,7 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
    1. `linear::LinkStore::branch_of(id)` / `work_of`, and any orion worktree whose branch `names_issue`;
    2. any open PR in `App::prs` whose title, body or branch names the identifier;
    3. any live agent (non-archived) whose title or branch names the identifier;
-   4. a cheap-model similarity check (the same sonnet-low path `place()` already uses), comparing the ticket's title and description with each live session's title and first prompt.
+   4. a cheap-model similarity check, comparing the ticket's title and description with each live session's title and first prompt. Since [Fewer background calls](#fewer-background-calls) it is part of the one Haiku call a look that also routes and groups.
 
    A hit on 1–3 skips silently and logs "RIPLO-n is being worked on in <where>" once. A hit on 4 makes a card: Possible duplicate, [Start anyway] [Skip].
 3. **Urgent.** Priority 1 makes a card [Start] [Leave] instead of launching.
@@ -276,7 +276,7 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
       - writes to docs.
 
       Tool output is dropped. Port this from the reference script `kcondense.py` described in this plan's appendix. The dossier is saved to `sources/<pr>.md`.
-   3. **Extract** with `claude -p --model opus --output-format json`, prompted with the appendix spec and the dossier. Use the existing one-shot helper week review uses. It returns entries.
+   3. **Extract** with `claude -p --model opus --output-format json`, prompted with the appendix spec and the dossier. Use the existing one-shot helper week review uses. It returns entries. (Since [Fewer background calls](#fewer-background-calls), steps 3 and 5 are one call for a PR a person built, and a factory PR's noted rules skip step 3.)
    4. **Guards, applied by code:**
       - `by: owner` needs a `quote` that appears, whitespace-normalised, in an OWNER line of the dossier; otherwise set `by: agent, confidence: low`;
       - drop entries whose rule matches the one-off list (`--no-verify`, "push it", "run the e2e", "just one pr", "dismiss" and similar), or whose quote is only an authorisation;
@@ -303,9 +303,9 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
    2. join them to transcripts by git branch (Claude JSONL `gitBranch`), or by `…/pull/<n>` mentioned 3 or more times;
    3. include Cursor transcripts (`~/.cursor/projects/*/agent-transcripts/*/*.jsonl`) joined by PR-URL mentions (2 or more);
    4. run steps 3.2–3.5 for each PR, oldest first;
-   5. run a final staleness pass per topic: the same check call against the current code, which drops or marks replaced rules that no longer hold.
+   5. ~~run a final staleness pass per topic~~ — dropped: each PR is checked against its own merge, and the weekly pass re-checks the topics whose files change after.
 
-   It writes into the same branch and PR: one commit per batch of 10 PRs, and one for the staleness pass.
+   It writes into the same branch and PR: one commit per batch of 10 PRs.
 
    Print a summary, and post a card when it's done.
 7. **Tests:**
@@ -392,6 +392,20 @@ Then the dry run:
 2. Approve 3–5 Todo tickets (a small bug, a mid feature, a UI change).
 3. Watch each run end to end: intake → plan card → build → commit skill → draft PR with rendered top and verdict card → CI fixing → merge → harvest commit on `orion/knowledge-<login>` and its PR → daily card → the knowledge PR merged after the window.
 4. Fix what breaks, then switch the factory on.
+
+## Fewer background calls
+
+Added 2026-11-16: every background model call goes through `crates/orion-tui/src/oneshot.rs`, and there were too many of them.
+
+| Step | Before | After |
+|---|---|---|
+| Harvest of a PR a person built | an Opus extraction, then an Opus check-and-merge per topic touched (typically 3–5 calls) | one Opus call with the read tools, in a checkout of the merge with the knowledge branch's pages laid out: it extracts, checks against the code and returns the pages. The verbatim-quote guard, the one-off filter and the secret scrub still run in code on the reply. Kept on Opus: a benchmark showed cheaper models invent or loosen rules here. |
+| Harvest of a factory PR | the same 3–5 calls | the builder's last step, `orion knowledge note <file>`, hands over its lasting rules in the extraction's shape, on the areas and topics its prompt lists; at merge there is no extraction, only the check-and-merge, one call per topic touched |
+| Staleness | one call per topic, at the end of every backfill | weekly, only the topics whose `applies_to` paths changed since the commit each was last checked at (kept in the project's knowledge state), one batched call per area |
+| Consolidation and page merging | Opus | Sonnet, low effort |
+| Intake | up to three Sonnet calls per look with new tickets (similarity, routing, grouping per project), and a ticket the model couldn't place asked about again every 2 minutes | one Haiku call per look, only for tickets not seen before (a ticket asked about and placed nowhere waits until it changes); routing is plain code when a ticket's labels, Linear project or team name exactly one project |
+
+Each step's model and effort is read from config: `knowledge.models.harvest`, `.consolidate`, `.staleness`, and `automations.intake_model`, each `{"model", "effort"}`, a part left out taken from the default above.
 
 ## Appendix: harvest extraction spec (prompt text)
 

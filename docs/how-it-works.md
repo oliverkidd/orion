@@ -594,9 +594,25 @@ then `Extra steer: …` when the automation has one.
 
 ## Knowledge
 
-When a pull request merges, orion harvests it: the PR's thread and the condensed transcripts of the
-sessions that built it go to Opus for the decisions you made, which code holds to your own words and
-a second call checks against the merged code and merges into topic pages. Where it all lives:
+When a pull request merges, orion harvests it, two ways:
+
+- **A pull request a person built** is one Opus call: the PR's thread and the condensed transcripts
+  of the sessions that built it, read in a checkout of the merge with the knowledge branch's pages
+  laid out in it. The call extracts the decisions you made, checks each against the merged code and
+  returns the topic pages they go on. Code then holds every entry to your own words: a rule credited
+  to you must quote you word for word or is marked an agent's call, and a one-off authorisation comes
+  off the pages.
+- **A factory pull request** whose session noted what it learned (`orion knowledge note`, the
+  builder's last step, in the same shape as a harvest's entries and on the topics its prompt lists)
+  isn't read again: its noted rules are held to your words the same way, then each topic they touch
+  is checked against the merged code and merged by one call.
+
+Once a week orion checks the rules again, but only on the topics whose files changed: it remembers
+the base commit each topic was last checked at, diffs the base since, and puts the topics whose
+`applies_to` paths changed to the model, one call an area. A rule that no longer holds moves to
+Replaced. Each step's model and effort is a setting (`knowledge.models`, see
+[Configuration](configuration.md)): Opus for the harvest and the weekly check, Sonnet at low effort
+for consolidating topics. Where it all lives:
 
 - **In the repo, `.orion/decisions/`.** orion owns only `harvested/`: `index.md` (at most 40 lines),
   one `<area>/<topic>.md` page a topic and `entries.jsonl`, each file starting with an
@@ -612,7 +628,7 @@ a second call checks against the merged code and merges into topic pages. Where 
   rebuilt from `entries.jsonl` on top of the base. The change is committed (`knowledge: harvest
   #<pr>`), that branch alone pushed with `--force-with-lease`, and its one pull request opened or
   its body updated: the PRs harvested and the new or changed rules, each credited to who decided it.
-  A backfill or a staleness pass is one commit a batch.
+  A backfill is one commit a batch of 10, and the weekly check one commit when it changed a page.
 - **Merged after the daily card.** At 18:30 a card lists the rules recorded as yours since the last
   one, each with **Veto k**, plus **All fine** and the pull request's link; a veto takes the rule out
   on the branch and pushes. Two hours later — at once on All fine, or the next time orion runs after
@@ -622,14 +638,15 @@ a second call checks against the merged code and merges into topic pages. Where 
   conflict is rebuilt and pushed; a refusal is tried once more, then a card says why. After the
   merge the branch starts again from the new base, so a later veto lands in the next day's pull
   request.
-- **Read from the session's checkout.** A builder's prompt carries the harvested index and lists the
-  records' titles and paths, repo-relative, ending "Accepted records in .orion/decisions/ win over
-  the harvested pages." — read from the commit its worktree is cut from, since the worktree doesn't
-  exist yet when the prompt is written. `orion knowledge for <paths…>` reads the checkout it runs
+- **Read from the session's checkout.** A builder's prompt carries the harvested index, the areas
+  and topics it notes rules on, and lists the records' titles and paths, repo-relative, ending
+  "Accepted records in .orion/decisions/ win over the harvested pages." — read from the commit its
+  worktree is cut from, since the worktree doesn't exist yet when the prompt is written. `orion knowledge for <paths…>` reads the checkout it runs
   in. A harvest reaches agents once its pull request merges, not before.
 - **Kept on this machine, `<data_dir>/knowledge/<project id>/`:** the condensed dossiers
-  (`sources/<pr>.md`), the harvest queue, the cards' state and the session snapshot. None of it is
-  committed. If the repo's `.gitignore` covers `.orion/decisions/`, nothing is harvested, and a card
+  (`sources/<pr>.md`), the harvest queue, the cards' state, the commit each topic was last checked
+  at, and the session snapshot; a factory session's notes wait in `<data_dir>/knowledge-notes/`
+  until its pull request is harvested. None of it is committed. If the repo's `.gitignore` covers `.orion/decisions/`, nothing is harvested, and a card
   says so once.
 
 Settings and key overrides live in [Configuration](configuration.md). The process model, the IPC CODEC and
