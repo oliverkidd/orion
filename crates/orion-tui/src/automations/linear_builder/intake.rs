@@ -15,9 +15,16 @@
 //! - **Urgent** (priority 1) and **thin** ([`is_thin`]: a description
 //!   under [`THIN_WORDS`] words with nothing attached and no image) are
 //!   held on a card ([`super::owner`]) unless you cleared the ticket.
-//! - **Very like a live session's work** ([`similar`]): the cheap model
-//!   compares it with every live session's title and first prompt; a
-//!   match is held on a card too.
+//! - **One ask a look** ([`prompt`], [`Sorted`]): a look's new tickets go
+//!   to the cheap model (`automations.intake_model`, Haiku at low effort)
+//!   in one call, which says which are **very like a live session's
+//!   work** (compared with every live session's title and first prompt; a
+//!   match is held on a card too), which **project** each goes to, and how
+//!   they **group**. A ticket whose labels, Linear project or team name
+//!   one project is routed by code ([`route_by_rule`]), and with nothing
+//!   to compare, route or group there is no call. A ticket the model was
+//!   asked about and put nowhere isn't asked about again until it changes
+//!   ([`unseen`]).
 //! - A bug's group gets its team's **related tickets** ([`related`]), and
 //!   every group its tickets' **attachments**, downloaded from Linear
 //!   ([`download`]).
@@ -242,7 +249,8 @@ pub(crate) fn live_sessions(app: &App) -> Vec<LiveSession> {
 
 /// What `place` needs besides the tickets: the Linear key they came in
 /// under, the live sessions, the tickets you cleared, where attachments
-/// go, and the project a held ticket is kept under.
+/// go, the project a held ticket is kept under, and the projects each
+/// Linear team's tickets went to before ([`teams_of`]).
 #[derive(Debug, Clone)]
 pub struct Extras {
     pub(crate) key: Option<String>,
@@ -250,6 +258,7 @@ pub struct Extras {
     pub(crate) cleared: BTreeSet<String>,
     pub(crate) attachments: PathBuf,
     pub(crate) home: ProjectId,
+    pub(crate) teams: HashMap<String, BTreeSet<ProjectId>>,
 }
 
 /// A ticket the model judged very like a live session's work.
@@ -261,28 +270,6 @@ pub struct Possible {
     pub(crate) session: String,
     pub(crate) agent: AgentId,
     pub(crate) why: String,
-}
-
-const SIMILAR_SYSTEM: &str = "You compare new Linear tickets with the coding sessions already \
-running. For each ticket, name a session only when it is very likely already doing the same \
-work: the same bug or the same feature, not merely the same area. Reply with a JSON object \
-mapping each ticket's identifier to {\"session\": the session's exact name or null, \"why\": \
-one short clause}.";
-
-/// What the similarity check asks.
-pub(crate) fn similar_prompt(tickets: &[LinearIssue], sessions: &[LiveSession]) -> String {
-    let mut out = String::from("Sessions:\n");
-    for s in sessions {
-        let prompt = match s.first_prompt.trim() {
-            "" => "(no prompt seen)",
-            p => p,
-        };
-        out.push_str(&format!("- {}: {prompt}\n", s.name));
-    }
-    out.push_str("\nTickets:\n\n");
-    let lines: Vec<String> = tickets.iter().map(super::ticket_line).collect();
-    out.push_str(&lines.join("\n\n"));
-    out
 }
 
 /// One ticket's answer.
@@ -336,29 +323,159 @@ pub(crate) fn judged(
     (keep, possible)
 }
 
-/// The similarity check: asked only for the tickets you haven't cleared,
-/// and only when there is a live session to compare with.
-pub(crate) async fn similar(
-    which: Automation,
-    account: &Option<crate::oneshot::Account>,
-    tickets: Vec<LinearIssue>,
-    extras: &Extras,
-) -> (Vec<LinearIssue>, Vec<Possible>) {
-    let asked: Vec<LinearIssue> = tickets
-        .iter()
-        .filter(|t| !extras.cleared.contains(&t.id))
-        .cloned()
-        .collect();
-    if asked.is_empty() || extras.sessions.is_empty() {
-        return (tickets, Vec::new());
+// ---- the one ask ----
+
+/// The rules of the one ask a look's new tickets get.
+pub(crate) const INTAKE_SYSTEM: &str = "You sort new Linear tickets for a team of coding agents, all in one reply. Answer only the parts you are asked for.
+- similar: for each ticket listed under Compare, name a running session only when it is very likely already doing the same work: the same bug or the same feature, not merely the same area.
+- project: for each ticket listed under Route, the exact name of the one project its work would be done in.
+- groups: when asked to group, the tickets one engineer should fix together in one branch, in the same project. Join tickets only where they clearly share a cause or a component; when in doubt, keep a ticket on its own. Every ticket appears in exactly one group.
+Reply with one JSON object: {\"similar\": {\"<ticket>\": {\"session\": \"<exact session name>\" or null, \"why\": \"<one short clause>\"}}, \"project\": {\"<ticket>\": \"<exact project name>\"}, \"groups\": [[\"<ticket>\"]]}";
+
+/// What the one ask answers: a part not asked for is empty.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub(crate) struct Sorted {
+    pub similar: HashMap<String, Match>,
+    pub project: HashMap<String, String>,
+    pub groups: Vec<Vec<String>>,
+}
+
+/// The one ask for `tickets`: `compare` against the live `sessions`,
+/// `route` among the `candidates`, and whether to `group`. None when
+/// there is nothing to ask.
+pub(crate) fn prompt(
+    tickets: &[LinearIssue],
+    compare: &[&LinearIssue],
+    sessions: &[LiveSession],
+    route: &[&LinearIssue],
+    candidates: &[super::Candidate],
+    group: bool,
+) -> Option<String> {
+    if compare.is_empty() && route.is_empty() && !group {
+        return None;
     }
-    let reply = super::ask_json(
-        account,
-        SIMILAR_SYSTEM,
-        similar_prompt(&asked, &extras.sessions),
-    )
-    .await;
-    judged(which, tickets, extras, reply)
+    let ids = |list: &[&LinearIssue]| {
+        list.iter()
+            .map(|t| t.identifier.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut out = String::new();
+    if !compare.is_empty() {
+        out.push_str("Sessions:\n");
+        for s in sessions {
+            let prompt = match s.first_prompt.trim() {
+                "" => "(no prompt seen)",
+                p => p,
+            };
+            out.push_str(&format!("- {}: {prompt}\n", s.name));
+        }
+        out.push('\n');
+    }
+    if !route.is_empty() {
+        out.push_str("Projects:\n");
+        for c in candidates {
+            let about = match c.about.trim() {
+                "" => "(no description yet)",
+                about => about,
+            };
+            out.push_str(&format!("- {}: {about}\n", c.name));
+        }
+        out.push('\n');
+    }
+    out.push_str("Tickets:\n\n");
+    let lines: Vec<String> = tickets.iter().map(super::ticket_line).collect();
+    out.push_str(&lines.join("\n\n"));
+    out.push_str("\n\n");
+    out.push_str(&match compare.is_empty() {
+        true => "Compare: none, leave similar empty.\n".to_string(),
+        false => format!("Compare with the sessions: {}\n", ids(compare)),
+    });
+    out.push_str(&match route.is_empty() {
+        true => "Route: none, leave project empty.\n".to_string(),
+        false => format!("Route: {}\n", ids(route)),
+    });
+    out.push_str(match group {
+        true => "Group: yes.",
+        false => "Group: no, leave groups empty.",
+    });
+    Some(out)
+}
+
+/// A name as a label or a project is matched on: its letters and digits,
+/// lowercased.
+fn name_key(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// The project `ticket` goes to by plain code, when one does: the only
+/// candidate; else the one project its labels or its Linear project
+/// name; else the one project its team's tickets have gone to (`teams`).
+/// None leaves it to the model.
+pub(crate) fn route_by_rule(
+    ticket: &LinearIssue,
+    candidates: &[super::Candidate],
+    teams: &HashMap<String, BTreeSet<ProjectId>>,
+) -> Option<ProjectId> {
+    if let [only] = candidates {
+        return Some(only.project.clone());
+    }
+    let tags: BTreeSet<String> = ticket
+        .labels
+        .iter()
+        .map(|l| name_key(&l.name))
+        .chain(ticket.project.iter().map(|p| name_key(&p.name)))
+        .filter(|k| !k.is_empty())
+        .collect();
+    let named: BTreeSet<&ProjectId> = candidates
+        .iter()
+        .filter(|c| tags.contains(&name_key(&c.name)))
+        .map(|c| &c.project)
+        .collect();
+    match named.len() {
+        1 => return named.into_iter().next().cloned(),
+        0 => {}
+        _ => return None,
+    }
+    let went: Vec<&ProjectId> = teams
+        .get(&ticket.team_id)?
+        .iter()
+        .filter(|p| candidates.iter().any(|c| &c.project == *p))
+        .collect();
+    match went.as_slice() {
+        [only] => Some((*only).clone()),
+        _ => None,
+    }
+}
+
+/// The projects each Linear team's tickets went to, from the ledger.
+pub(crate) fn teams_of(ledger: &super::Ledger) -> HashMap<String, BTreeSet<ProjectId>> {
+    let mut teams: HashMap<String, BTreeSet<ProjectId>> = HashMap::new();
+    for e in ledger.issues.values().filter(|e| !e.team_id.is_empty()) {
+        teams
+            .entry(e.team_id.clone())
+            .or_default()
+            .insert(e.project.clone());
+    }
+    teams
+}
+
+/// `tickets` less the repeats: one asked about before (`seen`, by id, at
+/// the `updated_at` it was asked at) and not changed since — unless you
+/// cleared it.
+pub(crate) fn unseen(
+    seen: &HashMap<String, String>,
+    cleared: &BTreeSet<String>,
+    tickets: Vec<LinearIssue>,
+) -> Vec<LinearIssue> {
+    tickets
+        .into_iter()
+        .filter(|t| cleared.contains(&t.id) || seen.get(&t.id) != Some(&t.updated_at))
+        .collect()
 }
 
 // ---- related tickets ----

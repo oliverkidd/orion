@@ -541,6 +541,10 @@ pub struct Shared {
     next_look: HashMap<Automation, Instant>,
     /// Tickets said once to be worked on elsewhere.
     said: HashSet<String>,
+    /// Tickets the intake ask answered for and put nowhere, by id, at the
+    /// `updated_at` they were asked at: not asked about again until they
+    /// change (`intake::unseen`).
+    pub(crate) intake_seen: HashMap<String, String>,
     /// Projects whose missing workflow doc has had its card this run.
     pub(crate) setup_carded: HashSet<String>,
     /// Linear writes waiting to be sent, each under its project's key
@@ -729,12 +733,15 @@ pub enum Answer {
     },
     /// Tickets routed and grouped; `released` are the ones that could not
     /// be placed, to be looked at again; `possible` the ones the model
-    /// judged very like a live session's work, to ask you about.
+    /// judged very like a live session's work, to ask you about; `seen`
+    /// the released ones the model answered for, with the `updated_at`
+    /// they were asked at: not asked about again until they change.
     Placed {
         which: Automation,
         groups: Vec<Group>,
         released: Vec<String>,
         possible: Vec<intake::Possible>,
+        seen: Vec<(String, String)>,
     },
     /// Whether a ticket taken off the factory may have its worktree removed:
     /// `keep` says why not (`owner::remove_worktree`).
@@ -782,7 +789,9 @@ pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
             groups,
             released,
             possible,
+            seen,
         } => {
+            app.automations.linear_builder.intake_seen.extend(seen);
             placed(app, groups, released, possible);
             if app.automations.is_on(which) {
                 launch_queued(app, which, out);
@@ -836,6 +845,9 @@ fn fetched(app: &mut App, which: Automation, projects: Vec<ProjectId>, issues: V
             intake::Check::Thin => owner::thin(app, which, &home, &ticket),
         }
     }
+    // Nothing new since the last look: no ask.
+    let shared = &app.automations.linear_builder;
+    let tickets = intake::unseen(&shared.intake_seen, &shared.ledger.cleared, tickets);
     if tickets.is_empty() {
         return;
     }
@@ -870,12 +882,14 @@ fn fetched(app: &mut App, which: Automation, projects: Vec<ProjectId>, issues: V
         cleared: app.automations.linear_builder.ledger.cleared.clone(),
         attachments: orion_core::paths::data_dir().join("attachments"),
         home,
+        teams: intake::teams_of(&app.automations.linear_builder.ledger),
     };
     let shared = &mut app.automations.linear_builder;
     shared.claimed.extend(tickets.iter().map(|t| t.id.clone()));
-    let account = crate::oneshot::factory_account(&crate::config::Config::load());
+    let cfg = crate::config::Config::load();
+    let ask = crate::oneshot::factory_account(&cfg).map(|a| intake_ask(&cfg.automations, a));
     tokio::spawn(async move {
-        let answer = place(which, tickets, candidates, account, extras).await;
+        let answer = place(which, tickets, candidates, ask, extras).await;
         let _ = tx.send(super::Answer::LinearBuilder(answer));
     });
 }
@@ -1142,78 +1156,33 @@ pub struct Candidate {
     pub about: String,
 }
 
-/// The model and effort routing and grouping are asked at.
-const PLACE_MODEL: &str = "sonnet";
-const PLACE_EFFORT: &str = "low";
+/// How long the one intake ask may take.
 const PLACE_TIMEOUT: Duration = Duration::from_secs(120);
 
-const ROUTE_SYSTEM: &str = "You route Linear tickets to the software project each belongs to. \
-You are given the tickets and the projects, each with one line saying what it is. Pick the one \
-project each ticket's work would be done in. Reply with a JSON object mapping each ticket's \
-identifier to the exact name of its project.";
-
-const GROUP_SYSTEM: &str = "You group Linear tickets that one engineer should fix together in \
-one branch. Join tickets only where they clearly share a cause or a component; when in doubt, \
-keep a ticket on its own. Reply with a JSON array of groups, each an array of ticket \
-identifiers; every ticket appears in exactly one group.";
-
-/// One ticket as routing and grouping read it.
+/// One ticket as the intake ask reads it.
 fn ticket_line(issue: &LinearIssue) -> String {
     let desc = crate::ui::truncate(issue.description.trim(), 1200);
     format!("### {}: {}\n{desc}", issue.identifier, issue.title)
 }
 
-/// What routing asks.
-pub fn route_prompt(tickets: &[LinearIssue], candidates: &[Candidate]) -> String {
-    let mut out = String::from("Projects:\n");
-    for c in candidates {
-        let about = match c.about.trim() {
-            "" => "(no description yet)",
-            about => about,
-        };
-        out.push_str(&format!("- {}: {about}\n", c.name));
-    }
-    out.push_str("\nTickets:\n\n");
-    let lines: Vec<String> = tickets.iter().map(ticket_line).collect();
-    out.push_str(&lines.join("\n\n"));
-    out
-}
-
-/// What grouping asks.
-pub fn group_prompt(tickets: &[LinearIssue]) -> String {
-    let lines: Vec<String> = tickets.iter().map(ticket_line).collect();
-    format!("Tickets:\n\n{}", lines.join("\n\n"))
-}
-
-/// Each ticket with the project it goes to: the one candidate when there
-/// is one, else the project the model named. A ticket the model put
-/// nowhere it could — or every ticket, when the ask failed — comes back
-/// in the second list, to be looked at again.
+/// Each ticket with the project it goes to: the one code routed it to
+/// (`rules`, by ticket id), else the project the model named in `reply`.
+/// A ticket the model put nowhere it could — or every ticket left to it,
+/// when the ask failed — comes back in the second list, to be looked at
+/// again.
 pub fn routed(
     tickets: Vec<LinearIssue>,
     candidates: &[Candidate],
-    reply: Option<Result<HashMap<String, String>, String>>,
+    rules: &HashMap<String, ProjectId>,
+    reply: &HashMap<String, String>,
 ) -> (Vec<(ProjectId, LinearIssue)>, Vec<LinearIssue>) {
-    if let [only] = candidates {
-        return (
-            tickets
-                .into_iter()
-                .map(|t| (only.project.clone(), t))
-                .collect(),
-            Vec::new(),
-        );
-    }
-    let reply = match reply {
-        Some(Ok(reply)) => reply,
-        Some(Err(why)) => {
-            tracing::warn!("automations: routing Linear tickets: {why}");
-            HashMap::new()
-        }
-        None => HashMap::new(),
-    };
     let mut placed = Vec::new();
     let mut left = Vec::new();
     for ticket in tickets {
+        if let Some(project) = rules.get(&ticket.id) {
+            placed.push((project.clone(), ticket));
+            continue;
+        }
         let named = reply.get(&ticket.identifier).and_then(|name| {
             candidates
                 .iter()
@@ -1256,57 +1225,114 @@ pub fn grouped(
     groups
 }
 
-/// One routing or grouping ask of the one-shot model on `account`.
-async fn ask_json<T: serde::de::DeserializeOwned>(
-    account: &Option<crate::oneshot::Account>,
-    system: &str,
-    prompt: String,
-) -> Result<T, String> {
-    let account = account.clone().ok_or("no Claude account is switched on")?;
-    crate::oneshot::run_json(crate::oneshot::Ask {
-        prompt,
-        system: system.into(),
+/// The one intake ask as `settings` has it (`automations.intake_model`),
+/// on `account`: its prompt and rules filled in by [`place`].
+pub(crate) fn intake_ask(
+    settings: &AutomationsSettings,
+    account: crate::oneshot::Account,
+) -> crate::oneshot::Ask {
+    let choice = settings.intake_model();
+    crate::oneshot::Ask {
+        prompt: String::new(),
+        system: String::new(),
         account,
-        model: PLACE_MODEL.into(),
-        effort: PLACE_EFFORT.into(),
+        model: choice.model,
+        effort: choice.effort,
         timeout: PLACE_TIMEOUT,
-    })
-    .await
+    }
 }
 
-/// Route `tickets` among `candidates` and group them per project, through
-/// the one-shot model on `account` — first setting aside, to ask you
-/// about, any the model judges very like a live session's work
-/// ([`intake::similar`]); then a bug's group gets its team's related
-/// tickets, and every group its tickets' attachments, downloaded.
+/// [`place_with`] through the one-shot model, `ask` ([`intake_ask`]) the
+/// account and model it goes to; None, with no account switched on,
+/// fails the ask.
 pub async fn place(
     which: Automation,
     tickets: Vec<LinearIssue>,
     candidates: Vec<Candidate>,
-    account: Option<crate::oneshot::Account>,
+    ask: Option<crate::oneshot::Ask>,
     extras: intake::Extras,
 ) -> Answer {
-    let (tickets, possible) = intake::similar(which, &account, tickets, &extras).await;
-    let reply = match candidates.len() {
-        1 => None,
-        _ => Some(ask_json(&account, ROUTE_SYSTEM, route_prompt(&tickets, &candidates)).await),
+    place_with(
+        which,
+        tickets,
+        candidates,
+        extras,
+        |system, prompt| async move {
+            let mut ask = ask.ok_or("no Claude account is switched on")?;
+            ask.system = system;
+            ask.prompt = prompt;
+            crate::oneshot::run_json::<intake::Sorted>(ask).await
+        },
+    )
+    .await
+}
+
+/// Sort a look's new `tickets` with at most one ask of the model
+/// (`ask`, given the rules and the prompt — [`intake::prompt`]): which
+/// are very like a live session's work (set aside, to ask you about),
+/// which project each goes to (by code where its labels or team name one,
+/// [`intake::route_by_rule`]) and how each project's group. With nothing
+/// to compare, route or group, nothing is asked. Then a bug's group gets
+/// its team's related tickets, and every group its tickets' attachments,
+/// downloaded.
+pub(crate) async fn place_with<F, Fut>(
+    which: Automation,
+    tickets: Vec<LinearIssue>,
+    candidates: Vec<Candidate>,
+    extras: intake::Extras,
+    ask: F,
+) -> Answer
+where
+    F: FnOnce(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<intake::Sorted, String>>,
+{
+    let compare: Vec<&LinearIssue> = match extras.sessions.is_empty() {
+        true => Vec::new(),
+        false => tickets
+            .iter()
+            .filter(|t| !extras.cleared.contains(&t.id))
+            .collect(),
     };
-    let (placed, left) = routed(tickets, &candidates, reply);
+    let rules: HashMap<String, ProjectId> = tickets
+        .iter()
+        .filter_map(|t| {
+            let project = intake::route_by_rule(t, &candidates, &extras.teams)?;
+            Some((t.id.clone(), project))
+        })
+        .collect();
+    let route: Vec<&LinearIssue> = tickets
+        .iter()
+        .filter(|t| !rules.contains_key(&t.id))
+        .collect();
+    let prompt = intake::prompt(
+        &tickets,
+        &compare,
+        &extras.sessions,
+        &route,
+        &candidates,
+        tickets.len() > 1,
+    );
+    let (sorted, answered) = match prompt {
+        None => (intake::Sorted::default(), true),
+        Some(prompt) => match ask(intake::INTAKE_SYSTEM.to_string(), prompt).await {
+            Ok(sorted) => (sorted, true),
+            Err(why) => {
+                tracing::warn!("automations: sorting new Linear tickets: {why}");
+                (intake::Sorted::default(), false)
+            }
+        },
+    };
+    let (tickets, possible) = intake::judged(which, tickets, &extras, Ok(sorted.similar));
+    let (placed, left) = routed(tickets, &candidates, &rules, &sorted.project);
     let mut by_project: BTreeMap<ProjectId, Vec<LinearIssue>> = BTreeMap::new();
     for (project, ticket) in placed {
         by_project.entry(project).or_default().push(ticket);
     }
     let mut groups = Vec::new();
     for (project, tickets) in by_project {
-        let made = match tickets.len() {
-            1 => vec![tickets],
-            _ => {
-                let reply = ask_json(&account, GROUP_SYSTEM, group_prompt(&tickets)).await;
-                grouped(tickets, reply)
-            }
-        };
         groups.extend(
-            made.into_iter()
+            grouped(tickets, Ok(sorted.groups.clone()))
+                .into_iter()
                 .map(|issues| Group::of(which, project.clone(), issues)),
         );
     }
@@ -1318,11 +1344,20 @@ pub async fn place(
             group.files = intake::download(key, &group.issues, &extras.attachments).await;
         }
     }
+    // Asked about and put nowhere: not asked about again until it changes.
+    let seen = match answered {
+        true => left
+            .iter()
+            .map(|t| (t.id.clone(), t.updated_at.clone()))
+            .collect(),
+        false => Vec::new(),
+    };
     Answer::Placed {
         which,
         groups,
         released: left.into_iter().map(|t| t.id).collect(),
         possible,
+        seen,
     }
 }
 
@@ -1753,34 +1788,281 @@ mod tests {
     }
 
     #[test]
-    fn routing_needs_no_ask_for_one_project_and_reads_the_reply_for_several() {
-        let tickets = vec![issue("ENG-1", &[]), issue("ENG-2", &[])];
-        let one = [candidate("web")];
-        let (placed, left) = routed(tickets.clone(), &one, None);
-        assert!(left.is_empty());
-        assert!(placed.iter().all(|(p, _)| p == &one[0].project));
-
+    fn routing_takes_codes_rule_first_then_reads_the_reply() {
+        let tickets = vec![
+            issue("ENG-1", &[]),
+            issue("ENG-2", &[]),
+            issue("ENG-3", &[]),
+        ];
         let several = [candidate("web"), candidate("api")];
+        let rules = HashMap::from([("uuid-ENG-3".to_string(), several[0].project.clone())]);
         let reply = HashMap::from([
             ("ENG-1".to_string(), "API".to_string()),
             ("ENG-2".to_string(), "mobile".to_string()),
+            ("ENG-3".to_string(), "api".to_string()),
         ]);
-        let (placed, left) = routed(tickets.clone(), &several, Some(Ok(reply)));
-        assert_eq!(placed.len(), 1);
-        assert_eq!(placed[0].0, several[1].project);
-        assert_eq!(placed[0].1.identifier, "ENG-1");
+        let (placed, left) = routed(tickets.clone(), &several, &rules, &reply);
+        let placed: Vec<(&str, &str)> = placed
+            .iter()
+            .map(|(p, t)| (p.0.as_str(), t.identifier.as_str()))
+            .collect();
+        assert_eq!(
+            placed,
+            [("p-api", "ENG-1"), ("p-web", "ENG-3")],
+            "code's rule wins"
+        );
         assert_eq!(
             left[0].identifier, "ENG-2",
             "a project nobody has is let go"
         );
 
-        let (placed, left) = routed(tickets, &several, Some(Err("no account".into())));
-        assert!(placed.is_empty());
-        assert_eq!(left.len(), 2, "a failed ask lets every ticket go");
+        let (placed, left) = routed(tickets, &several, &rules, &HashMap::new());
+        assert_eq!(placed.len(), 1);
+        assert_eq!(
+            left.len(),
+            2,
+            "a failed ask lets every ticket left to it go"
+        );
+    }
 
-        let prompt = route_prompt(&[issue("ENG-1", &[])], &several);
-        assert!(prompt.contains("- web: web does things"), "{prompt}");
-        assert!(prompt.contains("### ENG-1: Ticket ENG-1"), "{prompt}");
+    /// Plain code routes a ticket whose labels, Linear project or team
+    /// name exactly one project; anything else is the model's.
+    #[test]
+    fn routing_is_plain_code_when_a_label_or_team_names_one_project() {
+        let several = [candidate("web-app"), candidate("api")];
+        let none = HashMap::new();
+        let one = [candidate("web-app")];
+        assert_eq!(
+            intake::route_by_rule(&issue("ENG-1", &[]), &one, &none),
+            Some(one[0].project.clone()),
+            "the only project"
+        );
+        assert_eq!(
+            intake::route_by_rule(&issue("ENG-1", &["Bug", "Web App"]), &several, &none),
+            Some(several[0].project.clone()),
+            "a label names it"
+        );
+        let in_project = LinearIssue {
+            project: Some(LinearTag {
+                name: "API".into(),
+                ..LinearTag::default()
+            }),
+            ..issue("ENG-2", &["Bug"])
+        };
+        assert_eq!(
+            intake::route_by_rule(&in_project, &several, &none),
+            Some(several[1].project.clone()),
+            "its Linear project names it"
+        );
+        assert_eq!(
+            intake::route_by_rule(&issue("ENG-3", &["web-app", "api"]), &several, &none),
+            None,
+            "two named: the model's"
+        );
+        let on_team = |team: &str| LinearIssue {
+            team_id: team.into(),
+            ..issue("ENG-4", &["Bug"])
+        };
+        let mut ledger = Ledger::default();
+        for (n, (team, project)) in [
+            ("t1", "p-api"),
+            ("t1", "p-api"),
+            ("t2", "p-api"),
+            ("t2", "p-web-app"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            ledger.issues.insert(
+                format!("i{n}"),
+                Entry {
+                    team_id: team.to_string(),
+                    project: ProjectId(project.to_string()),
+                    ..Entry::default()
+                },
+            );
+        }
+        let teams = intake::teams_of(&ledger);
+        assert_eq!(
+            intake::route_by_rule(&on_team("t1"), &several, &teams),
+            Some(several[1].project.clone()),
+            "its team's tickets all went to one project"
+        );
+        assert_eq!(
+            intake::route_by_rule(&on_team("t2"), &several, &teams),
+            None,
+            "two: the model's"
+        );
+        assert_eq!(
+            intake::route_by_rule(&on_team("t9"), &several, &teams),
+            None
+        );
+    }
+
+    fn extras_with(sessions: Vec<intake::LiveSession>) -> intake::Extras {
+        intake::Extras {
+            key: None,
+            sessions,
+            cleared: BTreeSet::new(),
+            attachments: PathBuf::from("/tmp"),
+            home: p(),
+            teams: HashMap::new(),
+        }
+    }
+
+    /// A look's new tickets cost one ask, for every part at once; a look
+    /// with nothing to ask costs none, and a ticket the model put nowhere
+    /// isn't asked about again until it changes.
+    #[test]
+    fn intake_makes_one_call_for_new_tickets_and_none_for_repeats() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let candidates = vec![candidate("web"), candidate("api")];
+        let session = intake::LiveSession {
+            id: AgentId("s1".into()),
+            name: "login loop".into(),
+            first_prompt: "Fix the login redirect loop".into(),
+        };
+        let tickets = vec![
+            issue("ENG-1", &["Bug", "web"]),
+            issue("ENG-2", &["Bug"]),
+            issue("ENG-3", &["Bug"]),
+            LinearIssue {
+                updated_at: "2026-11-16T09:00:00Z".into(),
+                ..issue("ENG-4", &["Bug"])
+            },
+        ];
+        let calls = std::cell::Cell::new(0);
+        let answer = rt.block_on(place_with(
+            Automation::BugFixer,
+            tickets.clone(),
+            candidates.clone(),
+            extras_with(vec![session.clone()]),
+            |system, prompt| {
+                calls.set(calls.get() + 1);
+                assert_eq!(system, intake::INTAKE_SYSTEM);
+                assert!(
+                    prompt.contains("- login loop: Fix the login redirect loop"),
+                    "{prompt}"
+                );
+                assert!(prompt.contains("- web: web does things"), "{prompt}");
+                assert!(prompt.contains("### ENG-1: Ticket ENG-1"), "{prompt}");
+                assert!(prompt.contains("Compare with the sessions: ENG-1, ENG-2, ENG-3, ENG-4\n"));
+                assert!(
+                    prompt.contains("Route: ENG-2, ENG-3, ENG-4\n"),
+                    "ENG-1's label routes it: {prompt}"
+                );
+                assert!(prompt.ends_with("Group: yes."));
+                async {
+                    Ok(serde_json::from_value(serde_json::json!({
+                        "similar": {"ENG-3": {"session": "login loop", "why": "the same redirect"}},
+                        "project": {"ENG-2": "api", "ENG-3": "api"},
+                        "groups": [["ENG-1"], ["ENG-2", "ENG-3"]]
+                    }))
+                    .unwrap())
+                }
+            },
+        ));
+        assert_eq!(calls.get(), 1, "similar, project and groups in one ask");
+        let Answer::Placed {
+            groups,
+            released,
+            possible,
+            seen,
+            ..
+        } = answer
+        else {
+            panic!("not placed");
+        };
+        let groups: Vec<(&str, Vec<&str>)> = groups
+            .iter()
+            .map(|g| {
+                (
+                    g.project.0.as_str(),
+                    g.issues.iter().map(|i| i.identifier.as_str()).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(groups, [("p-api", vec!["ENG-2"]), ("p-web", vec!["ENG-1"])]);
+        assert_eq!(possible.len(), 1);
+        assert_eq!(possible[0].issue.identifier, "ENG-3");
+        assert_eq!(released, ["uuid-ENG-4"]);
+        assert_eq!(
+            seen,
+            [("uuid-ENG-4".to_string(), "2026-11-16T09:00:00Z".to_string())]
+        );
+
+        // The next look: ENG-4 again, as it was, is no new ticket.
+        let mut app = app_with_project();
+        land(
+            &mut app,
+            Answer::Placed {
+                which: Automation::BugFixer,
+                groups: Vec::new(),
+                released,
+                possible: Vec::new(),
+                seen,
+            },
+            &mut Vec::new(),
+        );
+        let shared = &app.automations.linear_builder;
+        let again = intake::unseen(
+            &shared.intake_seen,
+            &shared.ledger.cleared,
+            vec![tickets[3].clone()],
+        );
+        assert!(again.is_empty(), "a repeat is never asked about");
+        let changed = LinearIssue {
+            updated_at: "2026-11-16T10:00:00Z".into(),
+            ..tickets[3].clone()
+        };
+        assert_eq!(
+            intake::unseen(&shared.intake_seen, &shared.ledger.cleared, vec![changed]).len(),
+            1,
+            "changed since: asked again"
+        );
+
+        // One ticket, one project, no session: nothing to ask.
+        let answer = rt.block_on(place_with(
+            Automation::BugFixer,
+            vec![issue("ENG-5", &["Bug"])],
+            vec![candidate("web")],
+            extras_with(Vec::new()),
+            |_, _| async {
+                panic!("asked with nothing to ask");
+                #[allow(unreachable_code)]
+                Err(String::new())
+            },
+        ));
+        let Answer::Placed { groups, .. } = answer else {
+            panic!("not placed");
+        };
+        assert_eq!(groups.len(), 1);
+
+        // A failed ask: every ticket left to it goes, to be asked again.
+        let answer = rt.block_on(place_with(
+            Automation::BugFixer,
+            tickets[1..2].to_vec(),
+            candidates,
+            extras_with(Vec::new()),
+            |_, _| async { Err("timed out".to_string()) },
+        ));
+        let Answer::Placed { released, seen, .. } = answer else {
+            panic!("not placed");
+        };
+        assert_eq!(released, ["uuid-ENG-2"]);
+        assert!(seen.is_empty(), "a failed ask is tried again");
+    }
+
+    #[test]
+    fn the_intake_ask_is_at_the_model_its_setting_names() {
+        let mut settings = AutomationsSettings::default();
+        let ask = intake_ask(&settings, crate::oneshot::Account::default());
+        assert_eq!((ask.model.as_str(), ask.effort.as_str()), ("haiku", "low"));
+        settings.intake_model = crate::oneshot::ModelChoice::new("sonnet", "");
+        let ask = intake_ask(&settings, crate::oneshot::Account::default());
+        assert_eq!((ask.model.as_str(), ask.effort.as_str()), ("sonnet", "low"));
     }
 
     fn app_with_project() -> App {
@@ -2328,6 +2610,7 @@ mod tests {
             cleared: ["uuid-ENG-3".to_string()].into(),
             attachments: PathBuf::from("/tmp"),
             home: p(),
+            teams: HashMap::new(),
         };
         let tickets = vec![
             issue("ENG-1", &["Bug"]),
@@ -2354,11 +2637,6 @@ mod tests {
             Err("timed out".into()),
         );
         assert_eq!((keep.len(), possible.len()), (3, 0));
-        let prompt = intake::similar_prompt(&keep, &extras.sessions);
-        assert!(
-            prompt.contains("- login loop: Fix the login redirect loop"),
-            "{prompt}"
-        );
 
         // Held: a card to you, Start anyway · Skip.
         let mut app = app_with_project();
@@ -3804,28 +4082,15 @@ mod tests {
             env: Vec::new(),
             label: "default".into(),
         };
-        let extras = intake::Extras {
-            key: None,
-            sessions: Vec::new(),
-            cleared: Default::default(),
-            attachments: std::env::temp_dir(),
-            home: ProjectId("p".into()),
-        };
+        let ask = intake_ask(&AutomationsSettings::default(), account);
         let answer = rt.block_on(place(
             Automation::BugFixer,
-            tickets.clone(),
+            tickets,
             candidates,
-            Some(account.clone()),
-            extras,
+            Some(ask),
+            extras_with(Vec::new()),
         ));
-        println!("routed: {answer:#?}");
-        // Both on one project, to see the grouping ask's answer too.
-        let grouped: Result<Vec<Vec<String>>, String> = rt.block_on(ask_json(
-            &Some(account),
-            GROUP_SYSTEM,
-            group_prompt(&tickets),
-        ));
-        println!("grouped: {grouped:#?}");
+        println!("sorted: {answer:#?}");
         let Answer::Placed {
             groups, released, ..
         } = answer
@@ -3834,7 +4099,6 @@ mod tests {
         };
         assert!(released.is_empty(), "{released:?}");
         assert_eq!(groups.len(), 2);
-        assert!(grouped.is_ok(), "{grouped:?}");
     }
 
     #[test]
