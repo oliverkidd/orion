@@ -3060,20 +3060,21 @@ pub(crate) mod keys {
     /// as an agent is given them — the TODOS MODAL's own copy key. A
     /// selection in the filter line copies that instead.
     pub const COPY: Key = crate::todos::view::keys::COPY;
+    /// The reading pane a page at a time, and to its top or its end.
+    pub const PAGE: Key = crate::nav::PAGE.doing("scroll");
+    pub const ENDS: Key = crate::nav::ENDS.doing("top/end");
     #[cfg(test)]
     pub const ALL: &[Key] = &[
         MARK, ROWS, CONFIRM, BROWSER, REFRESH, STATUS, PRIORITY, ASSIGN, ATTACH, WORKTREE, PICK,
-        SET, LEVEL, LINK, GO, NEW, FILE, TEAM, TABS, FILTER, JUMP, SELECT, COPY,
+        SET, LEVEL, LINK, GO, NEW, FILE, TEAM, TABS, FILTER, JUMP, SELECT, COPY, PAGE, ENDS,
     ];
 }
 
 /// The keys along the modal's bottom edge, for browsing or for picking
-/// the issues a pull request attaches to — what fits a 120-column window
-/// (the modal's border there, its scroll position kept clear, cuts `⌘N`
-/// first). The rest are in `docs/keys.md`: `←`/`→` the tabs the strip
-/// shows, `⌘F` the filter its line names, `⇧↑`/`⇧↓`, `⌘↑`/`⌘↓`, `⌘C`,
-/// `⌘U`, `⌘.`, `⇧Tab`, `⌘O` (the `↗` on the page) and `⌘R`. Esc clears a
-/// typed filter first.
+/// the issues a pull request attaches to: every key the list answers to,
+/// what acts on the issues first and the ways round the list after, so a
+/// narrow border drops the moves before the verbs ([`crate::hints::fit`]).
+/// Esc clears a typed filter first.
 pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     let esc = if !view.query.is_empty() {
@@ -3127,8 +3128,8 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
         LinearMode::Browse => keys::CONFIRM.hint(),
         LinearMode::Attach { .. } => keys::CONFIRM.hint_as("attach marked to this PR"),
     };
-    // An issue's own properties, then a new one: a narrow border cuts
-    // the hints from the right.
+    // An issue's own properties, what else a marked set goes to, then
+    // the ways round the list: a narrow border cuts from the right.
     let mut hints = vec![
         mark,
         confirm.kept(),
@@ -3136,10 +3137,22 @@ pub(crate) fn hints(view: &LinearView) -> Vec<crate::hints::Hint> {
         keys::PRIORITY.hint(),
         keys::ASSIGN.hint(),
     ];
+    // Browsing only: picking for a pull request, these have nowhere to go.
     if view.mode == LinearMode::Browse {
-        hints.push(keys::NEW.hint());
+        hints.extend([keys::NEW.hint(), keys::WORKTREE.hint(), keys::ATTACH.hint()]);
     }
-    hints.push(Hint::new("Esc", esc));
+    hints.extend([
+        keys::COPY.hint(),
+        keys::BROWSER.hint(),
+        keys::FILTER.hint(),
+        keys::REFRESH.hint(),
+        keys::TABS.hint(),
+        keys::SELECT.hint(),
+        keys::JUMP.hint(),
+        keys::PAGE.hint(),
+        keys::ENDS.hint(),
+        Hint::new("Esc", esc),
+    ]);
     hints
 }
 
@@ -3875,6 +3888,8 @@ fn view_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
             let other = view.tab.other();
             switch_tab(app, other);
         }
+        // keys::PAGE and keys::ENDS, by code alone, so a page key held with
+        // a modifier still scrolls.
         KeyCode::PageDown => view.scroll_by(page),
         KeyCode::PageUp => view.scroll_by(-page),
         KeyCode::Home => view.scroll = 0,
@@ -7048,6 +7063,93 @@ pub(crate) mod tests {
         assert_eq!(view.marked, BTreeSet::from(["1".into(), "3".into()]));
     }
 
+    /// The bottom border names every key the list answers to — `⌘.`,
+    /// `⌘U`, `⌘C`, `⌘F` and the moves as well as the verbs — the ones a
+    /// pull request's pick has no use for left off it; a wide window shows
+    /// them all, a narrow one drops the moves first and keeps `Enter` and
+    /// `Esc`.
+    #[test]
+    fn the_border_names_every_key_the_list_answers_to() {
+        let (mut app, _dir, _rx) = paired();
+        browse_marked(&mut app);
+        let labels =
+            |view: &LinearView| -> Vec<String> { hints(view).into_iter().map(|h| h.key).collect() };
+        let every = [
+            keys::MARK,
+            keys::CONFIRM,
+            keys::STATUS,
+            keys::PRIORITY,
+            keys::ASSIGN,
+            keys::WORKTREE,
+            keys::ATTACH,
+            keys::NEW,
+            keys::COPY,
+            keys::BROWSER,
+            keys::FILTER,
+            keys::REFRESH,
+            keys::TABS,
+            keys::SELECT,
+            keys::JUMP,
+            keys::PAGE,
+            keys::ENDS,
+        ];
+        let browse = labels(the_view(&app));
+        for key in every {
+            assert!(
+                browse.contains(&key.label()),
+                "{} missing: {browse:?}",
+                key.label()
+            );
+        }
+        assert!(browse.contains(&"Esc".to_string()));
+        crate::hints::assert_hints_from(&hints(the_view(&app)), keys::ALL);
+
+        // On the search line `↓` takes the place of `Space`.
+        let mut search = the_view(&app).clone();
+        search.focus = LinearFocus::Search;
+        assert!(labels(&search).contains(&keys::ROWS.label()));
+        assert!(!labels(&search).contains(&keys::MARK.label()));
+
+        // Picking issues for a pull request: no worktree, PR or new issue.
+        let mut attach = the_view(&app).clone();
+        attach.mode = LinearMode::Attach {
+            pr_url: "u".into(),
+            pr_number: 1,
+            back: Box::new(crate::pr_modal::PullRequestsView::new(
+                ProjectId("p1".into()),
+                "demo".into(),
+                "/tmp/demo".into(),
+            )),
+        };
+        let picking = labels(&attach);
+        for key in [keys::WORKTREE, keys::ATTACH, keys::NEW] {
+            assert!(
+                !picking.contains(&key.label()),
+                "{} on the PR pick",
+                key.label()
+            );
+        }
+        assert!(picking.contains(&keys::COPY.label()));
+
+        // Wide enough, the border shows every one of them.
+        let wide = shot(&mut app, 300, 40);
+        let border = line_with(&wide, "Esc unmark");
+        for key in every {
+            assert!(
+                border.contains(&format!("{} {}", key.label(), key.does)),
+                "{} {} not on the border: {border}",
+                key.label(),
+                key.does
+            );
+        }
+        // Narrow, whole hints go from the right: the verb and Esc stay.
+        let narrow = shot(&mut app, 100, 30);
+        let border = line_with(&narrow, "Esc unmark");
+        assert!(border.contains("Enter agent on marked"), "{border}");
+        assert!(border.contains("Esc unmark"), "{border}");
+        assert!(!border.contains("Home/End"), "{border}");
+    }
+
     /// The view opens on the search line, where `space` is a word break;
     /// ↓ hands the rows the keys and `space` marks there; ↑ off the top
     /// row, or typing, hands them back.
@@ -9118,17 +9220,29 @@ pub(crate) mod tests {
         assert_eq!(selected_id(&app).as_deref(), Some("ENG-3"));
     }
 
-    /// The keys row fits a 120-column window whole — the issue's own keys
-    /// and `⌘N` among them — and the rest are left to `docs/keys.md`.
+    /// In a 120-column window the keys row keeps its first hints whole —
+    /// the issue's own keys and `⌘N` among them — and drops the rest from
+    /// the right end, `Esc` kept.
     #[test]
     fn the_key_row_fits_a_120_column_window() {
         let mut app = view_on(vec![issue("1", "ENG-1", "Login")]);
         let screen = shot(&mut app, 120, 30);
         let border = line_with(&screen, "Esc close");
-        for hint in hints(the_view(&app)) {
-            let said = format!("{} {}", hint.key, hint.does);
-            assert!(border.contains(&said), "{said} missing from\n{border}");
-        }
+        let all = hints(the_view(&app));
+        let shown: Vec<&crate::hints::Hint> = all
+            .iter()
+            .filter(|h| border.contains(&format!("{} {}", h.key, h.does)))
+            .collect();
+        let verbs: Vec<&crate::hints::Hint> = all
+            .iter()
+            .filter(|h| h.key != "Esc")
+            .take(shown.len() - 1)
+            .collect();
+        assert_eq!(
+            shown.iter().filter(|h| h.key != "Esc").collect::<Vec<_>>(),
+            verbs.iter().collect::<Vec<_>>(),
+            "a run from the left, then Esc:\n{border}"
+        );
         assert!(border.contains("⌘N new issue"), "{border}");
         assert!(!border.contains("⌘R"), "{border}");
     }
