@@ -17,7 +17,12 @@
 //!   **Continue on** (`ClientRequest::ContinueAgentOn`), which copies its
 //!   transcript into the new account's config dir and resumes the same
 //!   session id there. A session mid-turn waits until its turn is over;
-//!   no running turn is ever cut short ([`plan`]).
+//!   no running turn is ever cut short ([`plan`]). One waiting on you —
+//!   a plan to approve, a question — is told once it is up on the new
+//!   account to put it to you again ([`reprompt`]): the resume comes back
+//!   at the CLI's input box, its dialog gone. Its factory card stays as
+//!   it was. The move is kept on disk (`<data_dir>/automations/
+//!   factory-move.json`), so a restart carries on with it.
 //! - **At the limit.** When the factory account reports a usage limit the
 //!   factory pauses (`super::limit`), says so once, and offers to move the
 //!   factory to the next account: one key sets this, which moves it.
@@ -25,6 +30,7 @@
 use chrono::Local;
 use orion_core::harness::HarnessDescriptor;
 use orion_core::{Agent, AgentId, AgentKind, AgentStatus, ClientRequest};
+use serde::{Deserialize, Serialize};
 
 use super::limit::{self, Pause};
 use crate::agent_presets::AgentPreset;
@@ -46,10 +52,12 @@ pub struct State {
     pub paused: Option<Pause>,
     /// The reset of the pause the notice was given for: one notice a pause.
     pub noticed: Option<i64>,
+    /// Whether the move a last run left on disk has been taken up.
+    pub resumed: bool,
 }
 
 /// The factory's sessions on their way to another account.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Move {
     /// The account's registry id, and what the screens call it.
     pub to: String,
@@ -58,6 +66,41 @@ pub struct Move {
     pub waiting: Vec<AgentId>,
     /// How many have been sent over.
     pub sent: usize,
+    /// Sessions sent over while waiting on you, each with the turn that
+    /// puts its plan or question to you again once it is up on the new
+    /// account ([`reprompt`]).
+    #[serde(default)]
+    pub reprompts: Vec<Reprompt>,
+}
+
+/// A moved session's turn to send once it runs on the new account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reprompt {
+    pub id: AgentId,
+    pub text: String,
+    /// When it was sent over, in ms: one that never arrives is let go
+    /// after [`REPROMPT_GIVE_UP_MS`].
+    pub at_ms: i64,
+}
+
+/// How long a reprompt waits for its session to come up on the new
+/// account — a move the daemon refused never does.
+const REPROMPT_GIVE_UP_MS: i64 = 10 * 60 * 1000;
+
+/// What a session moved while waiting on a plan's approval is told.
+pub const PLAN_AGAIN: &str = "You were moved to another account. Your plan is still waiting for approval: present it again for approval exactly as before.";
+/// What one moved while waiting on its question is told.
+pub const QUESTION_AGAIN: &str = "You were moved to another account. Your question is still waiting for an answer: re-ask your question with AskUserQuestion exactly as before.";
+
+/// The turn a session waiting on `reason` is sent after its move: a plan
+/// presented again, a question asked again. None for anything else — a
+/// permission prompt comes back as the session carries on.
+pub fn reprompt(reason: Option<&orion_core::WaitReason>) -> Option<&'static str> {
+    match reason? {
+        orion_core::WaitReason::Plan { .. } => Some(PLAN_AGAIN),
+        orion_core::WaitReason::Question { .. } => Some(QUESTION_AGAIN),
+        _ => None,
+    }
 }
 
 // ---- the setting ----
@@ -267,19 +310,34 @@ pub fn set(app: &mut App, choice: Option<String>) {
                 label,
                 waiting,
                 sent: 0,
+                reprompts: Vec::new(),
             })
         }
     };
+    save_move(app.automations.account.moving.as_ref());
     app.dirty = true;
 }
 
-/// Send over every session of the move under way whose turn is over.
+/// Send over every session of the move under way whose turn is over, and
+/// the turn that restores its prompt to each one that has arrived.
 fn advance(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let Some(moving) = app.automations.account.moving.take() else {
+    let Some(mut moving) = app.automations.account.moving.take() else {
         return;
     };
+    let before = moving.clone();
     let (send, waiting) = plan(&app.tree.agents, &moving.waiting, &moving.to);
+    let now = crate::app::now_ms();
     for id in &send {
+        let text = reprompt(app.needs_you.reasons.get(id));
+        if let (Some(text), Some(agent)) = (text, app.tree.agents.iter().find(|a| &a.id == id)) {
+            if agent.status == AgentStatus::NeedsFeedback {
+                moving.reprompts.push(Reprompt {
+                    id: id.clone(),
+                    text: text.to_string(),
+                    at_ms: now,
+                });
+            }
+        }
         let harness = moving.to.clone();
         let id = id.clone();
         crate::event_loop::send(app, out, |req_id| ClientRequest::ContinueAgentOn {
@@ -288,23 +346,118 @@ fn advance(app: &mut App, out: &mut Vec<ClientRequest>) {
             harness,
         });
     }
-    let sent = moving.sent + send.len();
-    if waiting.is_empty() {
-        if sent > 0 {
+    moving.sent += send.len();
+    moving.waiting = waiting;
+    let (due, left) = arrived(&app.tree.agents, moving.reprompts, &moving.to, now);
+    moving.reprompts = left;
+    for (id, text) in due {
+        crate::event_loop::send_turn(app, &id, text, false, out);
+    }
+    if moving.waiting.is_empty() && moving.reprompts.is_empty() {
+        if moving.sent > 0 {
             app.flash = Some(Flash::done(format!(
                 "The factory runs on {} now: {} moved",
                 moving.label,
-                crate::flash::plural(sent, "session")
+                crate::flash::plural(moving.sent, "session")
             )));
         }
+        save_move(None);
         app.dirty = true;
         return;
     }
-    app.automations.account.moving = Some(Move {
-        waiting,
-        sent,
-        ..moving
-    });
+    if moving != before {
+        save_move(Some(&moving));
+    }
+    app.automations.account.moving = Some(moving);
+}
+
+/// The reprompts whose sessions are up on `to` now — `(id, text)` to send
+/// — and the ones still on their way. One whose session is gone, or that
+/// has waited past [`REPROMPT_GIVE_UP_MS`], is let go.
+pub fn arrived(
+    agents: &[Agent],
+    reprompts: Vec<Reprompt>,
+    to: &str,
+    now_ms: i64,
+) -> (Vec<(AgentId, String)>, Vec<Reprompt>) {
+    let mut due = Vec::new();
+    let mut left = Vec::new();
+    for r in reprompts {
+        let Some(agent) = agents.iter().find(|a| a.id == r.id && !a.archived) else {
+            continue;
+        };
+        if account_of(agent) == to && agent.alive && agent.status != AgentStatus::Running {
+            due.push((r.id, r.text));
+        } else if now_ms - r.at_ms < REPROMPT_GIVE_UP_MS {
+            left.push(r);
+        }
+    }
+    (due, left)
+}
+
+// ---- the move on disk ----
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FILE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with the move kept at `path`. Under test, with none named,
+/// nothing is kept.
+#[cfg(test)]
+pub fn with_move_file<T>(path: std::path::PathBuf, f: impl FnOnce() -> T) -> T {
+    let before = TEST_FILE.with(|p| p.replace(Some(path)));
+    let out = f();
+    TEST_FILE.with(|p| *p.borrow_mut() = before);
+    out
+}
+
+fn move_file() -> Option<std::path::PathBuf> {
+    #[cfg(test)]
+    {
+        TEST_FILE.with(|p| p.borrow().clone())
+    }
+    #[cfg(not(test))]
+    {
+        Some(super::state_dir().join("factory-move.json"))
+    }
+}
+
+/// Keep `moving` for a restart to take up; None forgets it.
+fn save_move(moving: Option<&Move>) {
+    let Some(path) = move_file() else {
+        return;
+    };
+    let Some(moving) = moving else {
+        let _ = std::fs::remove_file(path);
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let written = serde_json::to_string_pretty(moving)
+        .map_err(|e| e.to_string())
+        .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()));
+    if let Err(e) = written {
+        tracing::warn!("factory: couldn't keep the move: {e}");
+    }
+}
+
+/// The move a last run left on disk, if any.
+fn load_move() -> Option<Move> {
+    let text = std::fs::read_to_string(move_file()?).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Take up the move a last run left, once, as the first tick runs.
+fn resume_move(app: &mut App) {
+    if std::mem::replace(&mut app.automations.account.resumed, true) {
+        return;
+    }
+    if app.automations.account.moving.is_none() {
+        app.automations.account.moving = load_move();
+    }
 }
 
 // ---- the limit ----
@@ -446,6 +599,7 @@ pub fn tick(app: &mut App, out: &mut Vec<ClientRequest>) {
         }
         (None, None) => {}
     }
+    resume_move(app);
     advance(app, out);
 }
 
@@ -489,7 +643,9 @@ mod tests {
         std::fs::write(&path, two_accounts(dir.path())).unwrap();
         crate::agent_presets::with_presets_path(dir.path().join("agent_presets.json"), || {
             crate::config::with_config_path(path, || {
-                limit::with_file(dir.path().join("pause.json"), || f(dir.path()))
+                limit::with_file(dir.path().join("pause.json"), || {
+                    with_move_file(dir.path().join("move.json"), || f(dir.path()))
+                })
             })
         })
     }
@@ -688,6 +844,137 @@ mod tests {
                 .flash
                 .as_deref()
                 .is_some_and(|f| f.contains("3 sessions moved")));
+        });
+    }
+
+    /// A session moved while waiting on its plan or its question is told,
+    /// once it is up on the new account, to put it to you again; one at
+    /// rest is told nothing.
+    #[test]
+    fn a_session_waiting_on_you_gets_its_prompt_back_after_the_move() {
+        in_config(|_| {
+            let mut app = App::new();
+            app.tree.agents = vec![
+                session("planner", AgentStatus::NeedsFeedback, Some("claude-work")),
+                session("asker", AgentStatus::NeedsFeedback, Some("claude-work")),
+                session("idle", AgentStatus::Finished, Some("claude-work")),
+            ];
+            app.needs_you.reasons.insert(
+                AgentId("planner".into()),
+                orion_core::WaitReason::Plan {
+                    plan: "Do it.".into(),
+                },
+            );
+            app.needs_you.reasons.insert(
+                AgentId("asker".into()),
+                orion_core::WaitReason::Question {
+                    questions: Vec::new(),
+                },
+            );
+            set(&mut app, Some("claude-personal".into()));
+            let mut out = Vec::new();
+            advance(&mut app, &mut out);
+            assert_eq!(out.len(), 3, "three moves, no turn yet: {out:?}");
+            let moving = app.automations.account.moving.clone().unwrap();
+            let texts: Vec<(&str, &str)> = moving
+                .reprompts
+                .iter()
+                .map(|r| (r.id.0.as_str(), r.text.as_str()))
+                .collect();
+            assert_eq!(texts, [("planner", PLAN_AGAIN), ("asker", QUESTION_AGAIN)]);
+            assert!(PLAN_AGAIN.contains("present it again for approval exactly as before"));
+            assert!(QUESTION_AGAIN.contains("re-ask your question with AskUserQuestion"));
+
+            // Not there yet: nothing typed.
+            out.clear();
+            advance(&mut app, &mut out);
+            assert!(out.is_empty());
+            // The daemon's upserts: each on the new account, at rest.
+            for agent in &mut app.tree.agents {
+                agent.custom_harness = Some("claude-personal".into());
+                agent.status = AgentStatus::Finished;
+            }
+            advance(&mut app, &mut out);
+            let turns: Vec<(String, String)> = out
+                .iter()
+                .map(|req| match req {
+                    ClientRequest::SendTurn { id, text, .. } => (id.0.clone(), text.clone()),
+                    other => panic!("only turns: {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                turns,
+                [
+                    ("planner".to_string(), PLAN_AGAIN.to_string()),
+                    ("asker".to_string(), QUESTION_AGAIN.to_string()),
+                ]
+            );
+            assert_eq!(app.automations.account.moving, None, "done");
+        });
+    }
+
+    #[test]
+    fn a_reprompt_waits_for_its_session_and_gives_up_on_one_that_never_comes() {
+        let to = "claude-personal";
+        let r = |id: &str| Reprompt {
+            id: AgentId(id.into()),
+            text: PLAN_AGAIN.into(),
+            at_ms: 0,
+        };
+        let agents = vec![
+            session("there", AgentStatus::Finished, Some(to)),
+            session("busy", AgentStatus::Running, Some(to)),
+            session("stuck", AgentStatus::Finished, Some("claude-work")),
+        ];
+        let reprompts = vec![r("there"), r("busy"), r("stuck"), r("gone")];
+        let (due, left) = arrived(&agents, reprompts.clone(), to, 1);
+        assert_eq!(due, [(AgentId("there".into()), PLAN_AGAIN.to_string())]);
+        let ids: Vec<&str> = left.iter().map(|r| r.id.0.as_str()).collect();
+        assert_eq!(ids, ["busy", "stuck"]);
+        let (_, left) = arrived(&agents, reprompts, to, REPROMPT_GIVE_UP_MS);
+        assert!(left.is_empty(), "let go after the wait");
+        assert_eq!(reprompt(None), None);
+        assert_eq!(
+            reprompt(Some(&orion_core::WaitReason::Permission {
+                tool: "Bash".into()
+            })),
+            None
+        );
+    }
+
+    /// The move is kept on disk as it goes: a restart — a new app —
+    /// takes it up on its first tick and finishes it.
+    #[test]
+    fn a_move_survives_a_restart() {
+        in_config(|_| {
+            let mut app = App::new();
+            app.tree.agents = vec![
+                session("busy", AgentStatus::Running, Some("claude-work")),
+                session("idle", AgentStatus::Finished, Some("claude-work")),
+            ];
+            set(&mut app, Some("claude-personal".into()));
+            let mut out = Vec::new();
+            advance(&mut app, &mut out);
+            assert_eq!(out.len(), 1);
+            let kept = load_move().expect("kept on disk");
+            assert_eq!(kept.waiting, [AgentId("busy".into())]);
+            assert_eq!(kept.sent, 1);
+
+            // orion restarts: the busy session's turn has ended meanwhile.
+            let mut again = App::new();
+            again.tree.agents = vec![
+                session("busy", AgentStatus::Finished, Some("claude-work")),
+                session("idle", AgentStatus::Finished, Some("claude-personal")),
+            ];
+            out.clear();
+            tick(&mut again, &mut out);
+            assert!(matches!(
+                out.as_slice(),
+                [ClientRequest::ContinueAgentOn { id, harness, .. }]
+                    if id.0 == "busy" && harness == "claude-personal"
+            ));
+            assert_eq!(again.automations.account.moving, None);
+            assert_eq!(load_move(), None, "done: forgotten");
         });
     }
 

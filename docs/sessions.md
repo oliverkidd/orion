@@ -752,6 +752,9 @@ Automations                          2 of at most 3 running · caps in Settings
   carried over as **Continue on** does — its conversation copied into the new account's config dir
   and resumed there under the same session — once its turn is over. A session mid-turn waits, and
   its turn is never cut short; the row reads `moving, N waiting for their turn to end` meanwhile.
+  One waiting on you comes back at its input box, so once it is up on the new account it is told
+  to put its plan up for approval again, or ask its question again; its card stays as it was. A
+  move under way is kept across a restart of orion.
 - **At the limit.** When the factory account hits a usage limit — a model ask refused with
   `You've hit your weekly limit · resets …`, or a factory session stopped on it — the factory
   pauses until the limit resets: no automation starts a session or looks for work, asks on that
