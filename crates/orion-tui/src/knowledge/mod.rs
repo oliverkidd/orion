@@ -284,7 +284,7 @@ fn sharer_for(project_name: &str) -> Result<(share::Sharer<'static>, local::Loca
         main: root.clone(),
         local: local.clone(),
         project: name,
-        base: share::base_of(&root),
+        base: runtime()?.block_on(share::base_of(&root, &share::GhCli)),
     };
     Ok((share, local))
 }

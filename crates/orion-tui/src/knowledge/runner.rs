@@ -322,13 +322,10 @@ fn hold_for_reset(job: Job) {
     });
 }
 
-/// The project at `root` (`local`'s), as orion writes its knowledge: its
-/// base branch found off the loop.
+/// The project at `root` (`local`'s), as orion writes its knowledge, on
+/// the base [`share::base_of`] finds.
 async fn sharer(local: &Local, root: &Path, project: &str) -> Result<Sharer<'static>, String> {
-    let at = root.to_path_buf();
-    let base = tokio::task::spawn_blocking(move || share::base_of(&at))
-        .await
-        .map_err(|e| e.to_string())?;
+    let base = share::base_of(root, &GH).await;
     Ok(Sharer {
         git: &GIT,
         gh: &GH,
@@ -578,7 +575,7 @@ async fn run_staleness(local: &Local, root: &Path, project: &str) -> Result<Vec<
         return Ok(Vec::new());
     }
     let share = sharer(local, root, project).await?;
-    let tree = harvest::CheckTree::of_base(root).await?;
+    let tree = harvest::CheckTree::of_base(root, &share.base).await?;
     let result = async {
         let branch = share.open().await?;
         let store = branch.store();

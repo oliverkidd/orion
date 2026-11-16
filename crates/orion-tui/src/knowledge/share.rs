@@ -140,14 +140,98 @@ pub(crate) fn branch_for(login: &str) -> String {
     format!("{PREFIX}{}", safe.trim_matches('-'))
 }
 
-/// The branch a project's pull requests go to, as orion's PR form picks
-/// it: the project's **Base branch** when origin (or the checkout) has
-/// it, else origin's default, else `main`. Runs git: off the loop.
-pub(crate) fn base_of(main: &Path) -> String {
-    let setting = crate::config::base_branch_of(Some(main));
-    crate::commit_list::branch_ref(main, &setting)
-        .map(|b| b.strip_prefix("origin/").map(str::to_string).unwrap_or(b))
-        .unwrap_or_else(|| super::harvest::default_base(main))
+/// The branch the knowledge pull request goes to: the project's **Base
+/// branch** when this machine sets one that origin (or the checkout) has;
+/// else the branch most of the repo's recent merged pull requests went
+/// into ([`most_merged_into`]) — where its work lands, and so what its
+/// agents read, though origin's default may be a release branch nobody
+/// merges into; else origin's default, else `main`. Asking GitHub, not
+/// a setting, is what puts every engineer's knowledge pull request on
+/// the same branch.
+pub(crate) async fn base_of(main: &Path, gh: &dyn Gh) -> String {
+    let at = main.to_path_buf();
+    let set = tokio::task::spawn_blocking(move || {
+        let setting = crate::config::base_branch_of(Some(&at));
+        crate::commit_list::branch_ref(&at, &setting)
+            .map(|b| b.strip_prefix("origin/").map(str::to_string).unwrap_or(b))
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(base) = set {
+        return base;
+    }
+    if let Some(base) = merged_base(main, gh).await {
+        return base;
+    }
+    let at = main.to_path_buf();
+    tokio::task::spawn_blocking(move || super::harvest::default_base(&at))
+        .await
+        .unwrap_or_else(|_| "main".into())
+}
+
+/// How many recent merged pull requests [`base_of`] reads.
+const MERGED_LOOK: &str = "30";
+/// How long the branch they went into is kept before GitHub is asked
+/// again: one ask an hour, not one a harvest, and one answer through a
+/// backfill.
+const MERGED_FOR: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Each repo's [`most_merged_into`], and when GitHub said it.
+static MERGED_BASES: std::sync::Mutex<
+    std::collections::BTreeMap<PathBuf, (String, std::time::Instant)>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The branch most of the repo at `main`'s recent merged pull requests
+/// went into, asked of GitHub at most once in [`MERGED_FOR`] — and its
+/// last answer while GitHub doesn't give one.
+async fn merged_base(main: &Path, gh: &dyn Gh) -> Option<String> {
+    let known = MERGED_BASES.lock().ok().and_then(|m| m.get(main).cloned());
+    if let Some((base, _)) = known.as_ref().filter(|(_, at)| at.elapsed() < MERGED_FOR) {
+        return Some(base.clone());
+    }
+    let args = [
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--limit",
+        MERGED_LOOK,
+        "--json",
+        "baseRefName",
+    ];
+    // GitHub not answering keeps the last answer, so a blip never moves
+    // the pull request to origin's default.
+    let Some(base) = gh
+        .run(main, &args)
+        .await
+        .ok()
+        .as_deref()
+        .and_then(most_merged_into)
+    else {
+        return known.map(|(base, _)| base);
+    };
+    if let Ok(mut m) = MERGED_BASES.lock() {
+        m.insert(
+            main.to_path_buf(),
+            (base.clone(), std::time::Instant::now()),
+        );
+    }
+    Some(base)
+}
+
+/// The branch most of the pull requests in `json` (`gh pr list --json
+/// baseRefName`, newest first) went into; of a tie, the newest one's.
+pub(crate) fn most_merged_into(json: &str) -> Option<String> {
+    let list: Vec<Value> = serde_json::from_str(json).ok()?;
+    let bases: Vec<String> = list
+        .iter()
+        .map(|pr| str_at(pr, "baseRefName"))
+        .filter(|b| !b.is_empty())
+        .collect();
+    let count = |b: &String| bases.iter().filter(|x| *x == b).count();
+    let most = bases.iter().map(count).max()?;
+    bases.iter().find(|b| count(b) == most).cloned()
 }
 
 /// One project's knowledge, as it is written and proposed.
@@ -350,11 +434,29 @@ impl Sharer<'_> {
             clone: self.local.clone_dir(),
             _lock: lock,
         };
-        if self.git(&["rebase", "-q", &base_ref]).await.is_err() {
+        let rebased = self.git(&["rebase", "-q", &base_ref]).await.is_ok();
+        if !rebased {
             let _ = self.git(&["rebase", "--abort"]).await;
+        }
+        // A branch forked from another base — an older orion went to
+        // origin's default — rebases that base's own commits on too: only
+        // the harvested pages are the branch's, so it is rebuilt.
+        if !rebased || self.strays_from(&base_ref).await {
             self.rebuild(&branch).await?;
         }
         Ok(branch)
+    }
+
+    /// Whether HEAD changes anything but the harvested pages on
+    /// `base_ref`.
+    async fn strays_from(&self, base_ref: &str) -> bool {
+        let prefix = format!("{DIR}/");
+        self.git(&["diff", "--name-only", base_ref, "HEAD"])
+            .await
+            .is_ok_and(|out| {
+                out.lines()
+                    .any(|p| !p.trim().is_empty() && !p.starts_with(&prefix))
+            })
     }
 
     /// The text of `path` at `rev`, if it has one.
@@ -491,6 +593,7 @@ impl Sharer<'_> {
             };
             store.write(&store.repo.join(&path), &text)?;
         }
+        store.keep_product()?;
         store.write_index(&self.project)?;
         self.commit(&format!("knowledge: rebuilt on {}", self.base))
             .await?;
@@ -593,7 +696,7 @@ impl Sharer<'_> {
                     "--state",
                     "open",
                     "--json",
-                    "number,url",
+                    "number,url,baseRefName",
                     "--limit",
                     "10",
                 ],
@@ -602,16 +705,23 @@ impl Sharer<'_> {
         let open = serde_json::from_str::<Value>(&list)
             .ok()
             .and_then(|v| v.as_array().and_then(|a| a.first()).cloned())
-            .map(|v| Pr {
-                number: crate::pull_request::u64_at(&v, "number"),
-                url: str_at(&v, "url"),
+            .map(|v| {
+                let pr = Pr {
+                    number: crate::pull_request::u64_at(&v, "number"),
+                    url: str_at(&v, "url"),
+                };
+                (pr, str_at(&v, "baseRefName"))
             })
-            .filter(|pr| pr.number > 0);
-        if let Some(pr) = open {
+            .filter(|(pr, _)| pr.number > 0);
+        if let Some((pr, on)) = open {
             let n = pr.number.to_string();
-            self.gh
-                .run(dir, &["pr", "edit", &n, "--body", body])
-                .await?;
+            // One opened on another branch (an older orion went to
+            // origin's default) moves to the base.
+            let mut edit = vec!["pr", "edit", n.as_str(), "--body", body];
+            if !on.is_empty() && on != self.base {
+                edit.extend(["--base", self.base.as_str()]);
+            }
+            self.gh.run(dir, &edit).await?;
             return Ok(pr);
         }
         let out = self
@@ -1217,6 +1327,86 @@ pub(crate) mod tests {
                 .trim(),
             "dev never moved"
         );
+    }
+
+    #[tokio::test]
+    async fn a_branch_forked_from_another_base_keeps_only_its_pages() {
+        let w = World::new();
+        // origin's main: dev and a release commit dev hasn't.
+        let other = w.tmp.path().join("other");
+        git(w.tmp.path(), &["clone", "-q", "origin.git", "other"]);
+        git(&other, &["checkout", "-q", "-b", "main"]);
+        std::fs::write(other.join("release.txt"), "1.0").unwrap();
+        git(&other, &["add", "."]);
+        git(&other, &["commit", "-q", "-m", "release"]);
+        git(&other, &["push", "-q", "origin", "main"]);
+        let (git_, gh) = (LocalGit::default(), FakeGh::new("ann"));
+        let on_main = Sharer {
+            base: "main".into(),
+            ..w.sharer(&git_, &gh)
+        };
+        let branch = on_main.open().await.unwrap();
+        harvest_into(&branch.store(), &entry("k12-1", 12, "auth/login", "owner"));
+        gh.on("pr list", Ok("[]"));
+        on_main
+            .publish(&branch, "knowledge: harvest #12")
+            .await
+            .unwrap();
+        drop(branch);
+
+        let branch = w.sharer(&git_, &gh).open().await.unwrap();
+        assert!(
+            !branch.clone.join("release.txt").exists(),
+            "main's commit left behind"
+        );
+        let ids: Vec<String> = branch.store().entries().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec!["k12-1"]);
+    }
+
+    #[tokio::test]
+    async fn an_open_pull_request_on_another_branch_moves_to_the_base() {
+        let w = World::new();
+        let (git, gh) = (LocalGit::default(), FakeGh::new("ann"));
+        let share = w.sharer(&git, &gh);
+        let branch = share.open().await.unwrap();
+        harvest_into(&branch.store(), &entry("k12-1", 12, "auth/login", "owner"));
+        gh.on(
+            "pr list",
+            Ok(r#"[{"number": 77, "url": "https://github.com/o/app/pull/77", "baseRefName": "main"}]"#),
+        );
+        let out = share
+            .publish(&branch, "knowledge: harvest #12")
+            .await
+            .unwrap();
+        assert_eq!(out.pr.unwrap().number, 77);
+        assert_eq!(gh.verbs(), vec!["pr list", "pr edit"]);
+        let edit = gh.call("pr edit").unwrap();
+        assert_eq!(edit[edit.len() - 2..], ["--base", "dev"]);
+    }
+
+    #[test]
+    fn the_base_is_where_most_merged_pull_requests_went() {
+        let list = |bases: &[&str]| {
+            serde_json::to_string(
+                &bases
+                    .iter()
+                    .map(|b| serde_json::json!({"baseRefName": b}))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            most_merged_into(&list(&["dev", "main", "dev", "dev"])).as_deref(),
+            Some("dev"),
+            "work lands on dev; main only takes releases"
+        );
+        assert_eq!(
+            most_merged_into(&list(&["main", "dev"])).as_deref(),
+            Some("main"),
+            "a tie goes to the newest"
+        );
+        assert_eq!(most_merged_into("[]"), None);
+        assert_eq!(most_merged_into("not json"), None);
     }
 
     #[tokio::test]

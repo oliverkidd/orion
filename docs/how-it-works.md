@@ -594,7 +594,15 @@ then `Extra steer: …` when the automation has one.
 
 ## Knowledge
 
-When a pull request merges, orion harvests it, two ways:
+When a pull request merges, orion harvests it for product knowledge only: what the product does and
+why — the decisions you made, the constraints it lives under, the questions you left open. How agents
+work in the repo (its tooling, scripts, local stack, tests, CI and workflow) is never harvested: that
+belongs in the repo's own hand-written agent docs. An entry of that kind is dropped, whether a harvest
+or a factory session's note offers it (`orion knowledge note` refuses it), and an older harvest's —
+the engineering stream, and the `engineering-tooling` and `testing-and-ci` areas — comes out the next
+time orion writes the pages, or at once with `orion knowledge backfill` (its first commit, even with
+nothing new to harvest): off `entries.jsonl` and its pages, a page left with no rule removed, and
+a retired area's product rules moved to the nearest product area. Two ways:
 
 - **A pull request a person built** is one Opus call: the PR's thread and the condensed transcripts
   of the sessions that built it, read in a checkout of the merge with the knowledge branch's pages
@@ -628,8 +636,11 @@ for consolidating topics. Where it all lives:
 - **Proposed in a pull request, never pushed to the base.** orion keeps a private working clone per
   project, `<data_dir>/knowledge/<project id>/repo` — `git clone --shared` of the main checkout, its
   origin the same; not a linked worktree, which the DAEMON would adopt as a row. Each write fetches
-  your branch, `orion/knowledge-<gh login>`, and rebases it on the project's base branch (the one
-  orion's PR form opens pull requests against); a rebase that conflicts is given up and the pages
+  your branch, `orion/knowledge-<gh login>`, and rebases it on the project's base branch: the
+  **Base branch** setting when this machine sets one, else the branch most of the repo's last 30
+  merged pull requests went into — so everyone's knowledge lands where the work does (`dev`, say, in
+  a repo whose default is a release `main`) whether or not they set it — else origin's default. A
+  knowledge pull request found open on another branch is moved to it. A rebase that conflicts is given up and the pages
   rebuilt from `entries.jsonl` on top of the base. The change is committed (`knowledge: harvest
   #<pr>`), that branch alone pushed with `--force-with-lease`, and its one pull request opened or
   its body updated: the PRs harvested and the new or changed rules, each credited to who decided it.

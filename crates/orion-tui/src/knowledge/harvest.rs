@@ -58,26 +58,26 @@ const PAGE_SLACK: usize = PAGE_WORDS / 4;
 const CORRECTION_CUT: usize = 300;
 const CORRECTIONS_MAX: usize = 20;
 
-/// What a harvest extracts, and from what: the plan's appendix, word for
-/// word, up to the fields of an entry ([`ENTRY_FIELDS`]).
+/// What a harvest extracts, and from what: the plan's appendix, up to the
+/// fields of an entry ([`ENTRY_FIELDS`]) — product knowledge only, since
+/// the engineering stream was dropped (`Store::keep_product`).
 pub(crate) const EXTRACT_RULES: &str = r#"You are reading one merged pull request's dossier: its description, review comments and the condensed
 transcripts of the agent sessions that built it. "OWNER" lines are the repo owner. "AGENT ASKED" / "OWNER
 ANSWERED" are questions and answers. "AGENT PLAN" is a plan. Tool output was removed.
 Extract only what a future agent working a different ticket in this repo would need, so it works the way
 the owner wants without asking him again.
 
-Streams. product: decision (a choice between behaviours the owner made, picked or approved), constraint (a
-fact about the world that limits behaviour, with evidence), question (the owner hedged or left it open; never
-turn a hedge into a decision). Write a product entry only if a user or client AI would notice it, a future
-agent reading only the code could undo it, and the owner owned it (or an agent made a call he should be able
-to overturn). engineering: gotcha (a trap that cost time, and what avoids it), tooling (how to reach access,
-data, logs or environments, and what is allowed), convention (a rule the owner enforced that no lint, type or
-test does), preference (how the owner wants agents to work with him, stated by him).
+Only product knowledge: what the product does and why. stream is always "product", kind one of: decision (a
+choice between behaviours the owner made, picked or approved), constraint (a fact about the world that limits
+behaviour, with evidence), question (the owner hedged or left it open; never turn a hedge into a decision).
+Write an entry only if a user or client AI would notice it, a future agent reading only the code could undo
+it, and the owner owned it (or an agent made a call he should be able to overturn).
 
-Never extract: progress, handovers; anything only true for this ticket; one-off authorisations ("use
---no-verify", "push it", "run the e2e", "just one PR here"): these are never precedent; mechanisms readable
-from code; test choices or refactors with no behaviour choice; anything lint, types or tests enforce;
-client names, emails or secrets.
+Never extract: how agents work in the repo — tooling, scripts, the local stack, environments, git, hooks,
+tests, CI, reviews, docs or how the owner wants agents to work with him (the repo's own agent docs hold those,
+not you); progress, handovers; anything only true for this ticket; one-off authorisations ("use --no-verify",
+"push it", "run the e2e", "just one PR here"): these are never precedent; mechanisms readable from code;
+refactors with no behaviour choice; anything lint, types or tests enforce; client names, emails or secrets.
 
 by: owner (he said it; quote ≤2 lines verbatim from an OWNER line, required), owner-pick (he picked an
 agent's option; quote the question and the picked label), plan (in a plan he approved; ≤ medium), review (a
@@ -105,7 +105,7 @@ Scope: <what it covers, in under 15 words; no file paths>
 ## Open questions
 ## Replaced
 
-Each bullet is one rule of at most 30 words, then the PRs it came from, as (#123, #130), then an HTML comment with the ids of every entry it stands on: <!-- k123-1 k130-2 -->. Keep the id comment of every rule you keep. Name a file path in a rule only when the rule needs it. Rules in force: decisions, conventions, preferences, tooling, gotchas. Constraints: facts about the world that limit behaviour. A rule the agent decided, not the owner, ends with "(agent call)"."#
+Each bullet is one rule of at most 30 words, then the PRs it came from, as (#123, #130), then an HTML comment with the ids of every entry it stands on: <!-- k123-1 k130-2 -->. Keep the id comment of every rule you keep. Name a file path in a rule only when the rule needs it. Rules in force: decisions. Constraints: facts about the world that limit behaviour. A rule the agent decided, not the owner, ends with "(agent call)"."#
     )
 }
 
@@ -652,7 +652,7 @@ fn area_others(topics: &[(String, String)], topic: &str) -> Vec<(String, String)
 /// goes on the page in its area whose name shares a word with it, when
 /// one does.
 fn place(areas: &Areas, topics: &[(String, String)], e: &Entry) -> String {
-    let topic = areas.topic(&e.topic, &e.stream);
+    let topic = areas.topic(&e.topic);
     if !e.new_topic.is_empty() || topics.iter().any(|(t, _)| *t == topic) {
         return topic;
     }
@@ -692,7 +692,7 @@ pub(crate) async fn harvest(
 
 /// The entries `pr` came with, numbered on from those it has, stamped,
 /// and held to the owner's words ([`guards`]): the kept, and how many the
-/// guards dropped. Unchecked (`code` is `Err`), each is at low confidence
+/// guards dropped — an engineering entry among them, never kept. Unchecked (`code` is `Err`), each is at low confidence
 /// with a note saying why.
 fn stamped(
     store: &Store,
@@ -701,6 +701,11 @@ fn stamped(
     entries: Vec<Entry>,
     code: Result<&Path, &str>,
 ) -> (Vec<Entry>, usize) {
+    // How agents work is the repo's agent docs' to say, not orion's.
+    let mut entries = entries;
+    let offered = entries.len();
+    entries.retain(|e| !e.is_engineering());
+    let engineering = offered - entries.len();
     let guarded = guards::apply(entries, &dossier.owner_lines);
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let first = store.entries().iter().filter(|e| e.pr == pr.number).count() + 1;
@@ -723,7 +728,7 @@ fn stamped(
             e
         })
         .collect();
-    (kept, guarded.dropped.len())
+    (kept, guarded.dropped.len() + engineering)
 }
 
 /// The rules a factory session noted for `pr`, recorded as a harvest
@@ -778,7 +783,7 @@ async fn merge_noted(
         let mut page_text = checked.page;
         let mut kept_here = new.len();
         for (id, to_topic) in &checked.moved {
-            let to_topic = areas.topic(to_topic, "");
+            let to_topic = areas.topic(to_topic);
             let Some(e) = new.iter().find(|e| &e.id == id) else {
                 continue;
             };
@@ -824,6 +829,7 @@ async fn merge_noted(
             .collect::<String>()
     );
     store.append(&entries)?;
+    store.keep_product()?;
     areas.save(store)?;
     store.write_index(to.project)?;
     to.local.write_source(pr.number, &source)?;
@@ -975,10 +981,10 @@ pub(crate) async fn harvest_whole(
             continue;
         };
         let cited: Vec<&str> = raw.lines().flat_map(store::line_ids).collect();
-        let Some(first_on) = standing.iter().find(|e| cited.contains(&e.id.as_str())) else {
+        if !standing.iter().any(|e| cited.contains(&e.id.as_str())) {
             continue;
-        };
-        let topic = areas.topic(key, &first_on.stream);
+        }
+        let topic = areas.topic(key);
         if pages.contains_key(&topic) {
             continue;
         }
@@ -1044,6 +1050,7 @@ pub(crate) async fn harvest_whole(
         }
     }
     store.append(&entries)?;
+    store.keep_product()?;
     areas.save(store)?;
     store.write_index(to.project)?;
     to.local.write_source(pr.number, &source)?;
@@ -1351,12 +1358,12 @@ impl CheckTree {
         .map_err(|e| e.to_string())?
     }
 
-    /// The base of the repo at `repo` as origin has it now: what the
-    /// staleness pass reads.
-    pub(crate) async fn of_base(repo: &Path) -> Result<CheckTree, String> {
+    /// `base` of the repo at `repo` as origin has it now: what the
+    /// staleness pass reads (`super::share::base_of`).
+    pub(crate) async fn of_base(repo: &Path, base: &str) -> Result<CheckTree, String> {
         let repo = repo.to_path_buf();
+        let base = base.to_string();
         tokio::task::spawn_blocking(move || {
-            let base = default_base(&repo);
             CheckTree::make(&repo, &base, &format!("origin/{base}"), "staleness")
         })
         .await
@@ -2019,6 +2026,9 @@ pub(crate) mod tests {
             json!({"stream": "product", "kind": "decision", "topic": "editor/fonts",
              "new_topic": "Fonts on text boxes", "rule": "Fonts fall back to Inter", "by": "agent"}),
             // An area that isn't one: moved to the nearest listed.
+            json!({"stream": "product", "kind": "decision", "topic": "deploys/rollbacks",
+             "new_topic": "What a rollback keeps", "rule": "A rollback keeps the open deck", "by": "agent"}),
+            // How agents work: never kept.
             json!({"stream": "engineering", "kind": "gotcha", "topic": "e2e/local-runs",
              "new_topic": "Running e2e locally", "rule": "Probe ws before a local e2e run", "by": "agent"}),
         ]
@@ -2029,8 +2039,8 @@ pub(crate) mod tests {
             "moved": [{"id": "k12-2", "to": "editor/text-boxes"}]})
         .to_string();
         let text_boxes = json!({"page": "# editor/text-boxes\nScope: text boxes and fonts\n\n## Rules in force\n- Text grows the box (#3) <!-- k3-1 -->\n- Text never shrinks below 8pt (#12) <!-- k12-1 -->\n- Fonts fall back to Inter (#12) <!-- k12-2 -->\n"}).to_string();
-        let e2e = json!({"page": "# testing-and-ci/local-runs\nScope: Running e2e locally\n\n## Rules in force\n- Probe ws before a local e2e run (#12) (agent call) <!-- k12-3 -->\n"}).to_string();
-        let model = Scripted::new(vec![fonts, text_boxes, e2e]);
+        let rollbacks = json!({"page": "# platform-and-infra/rollbacks\nScope: What a rollback keeps\n\n## Rules in force\n- A rollback keeps the open deck (#12) (agent call) <!-- k12-3 -->\n"}).to_string();
+        let model = Scripted::new(vec![fonts, text_boxes, rollbacks]);
         let d = dossier(&pr(), &[], &sessions());
         let out = harvest(
             &model,
@@ -2044,7 +2054,7 @@ pub(crate) mod tests {
         .unwrap();
         assert_eq!(
             out.topics,
-            vec!["editor/text-boxes", "testing-and-ci/local-runs"],
+            vec!["editor/text-boxes", "platform-and-infra/rollbacks"],
             "no page for fonts: its one entry moved"
         );
 
@@ -2061,8 +2071,13 @@ pub(crate) mod tests {
         assert!(asked[1].prompt.contains("\"id\": \"k12-2\""));
         assert!(asked[2]
             .prompt
-            .starts_with("Topic: testing-and-ci/local-runs\n"));
-        assert_eq!(asked.len(), 3, "one call a topic touched");
+            .starts_with("Topic: platform-and-infra/rollbacks\n"));
+        assert_eq!(
+            asked.len(),
+            3,
+            "one call a topic touched; none for the engineering entry"
+        );
+        assert!(asked.iter().all(|a| !a.prompt.contains("Probe ws")));
 
         let topics: Vec<(String, String)> = store
             .entries()
@@ -2074,7 +2089,7 @@ pub(crate) mod tests {
             vec![
                 ("k12-1".into(), "editor/text-boxes".into()),
                 ("k12-2".into(), "editor/text-boxes".into()),
-                ("k12-3".into(), "testing-and-ci/local-runs".into()),
+                ("k12-3".into(), "platform-and-infra/rollbacks".into()),
             ]
         );
         assert_eq!(store.page("editor/fonts"), None);
@@ -2083,7 +2098,7 @@ pub(crate) mod tests {
             vec![
                 "editor/tables",
                 "editor/text-boxes",
-                "testing-and-ci/local-runs"
+                "platform-and-infra/rollbacks"
             ]
         );
     }

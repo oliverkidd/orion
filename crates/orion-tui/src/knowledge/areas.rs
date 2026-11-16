@@ -223,56 +223,26 @@ pub(crate) const SEED: &[(&str, &str, &[&str])] = &[
             "queue",
         ],
     ),
-    (
-        "engineering-tooling",
-        "How agents work in the repo: local stack, scripts, docs, git and workflow.",
-        &[
-            "tooling",
-            "tools",
-            "tool",
-            "workflow",
-            "docs",
-            "internal",
-            "script",
-            "scripts",
-            "lint",
-            "dev",
-            "local",
-            "stack",
-            "git",
-            "hooks",
-            "conventions",
-            "repo",
-            "monorepo",
-            "engineering",
-            "agents",
-            "code",
-            "build",
-        ],
-    ),
-    (
-        "testing-and-ci",
-        "Unit and e2e tests, fixtures, CI checks and how to run them.",
-        &[
-            "test",
-            "tests",
-            "testing",
-            "e2e",
-            "ci",
-            "playwright",
-            "vitest",
-            "jest",
-            "fixtures",
-            "fixture",
-            "checks",
-            "visual",
-        ],
-    ),
 ];
 
-/// Where a topic with no fitting area goes: engineering entries to the
-/// first, product ones to the second.
-const CATCH_ALL: (&str, &str) = ("engineering-tooling", "workspace");
+/// Where a topic with no fitting area goes.
+const CATCH_ALL: &str = "workspace";
+
+/// Areas orion once kept for how agents work in the repo: its tooling,
+/// scripts, tests and CI. The harvest is product knowledge only now —
+/// that kind belongs in the repo's own hand-written agent docs — so an
+/// `areas.md` that lists one loses it ([`Areas::load`]), and its pages'
+/// product rules move to the nearest listed area
+/// (`super::store::Store::keep_product`).
+pub(crate) const RETIRED: &[&str] = &["engineering-tooling", "testing-and-ci"];
+
+/// Whether `topic` (`area/topic`) sits in a [`RETIRED`] area.
+pub(crate) fn is_retired(topic: &str) -> bool {
+    topic
+        .split('/')
+        .next()
+        .is_some_and(|area| RETIRED.contains(&area))
+}
 
 /// The file the areas live in, relative to [`super::store::DIR`].
 pub(crate) const FILE: &str = "areas.md";
@@ -332,7 +302,7 @@ pub(crate) fn nearest(folder: &str) -> &'static str {
                 .find(|(name, _, keys)| *name == w || keys.contains(&w.as_str()))
                 .map(|(name, _, _)| *name)
         })
-        .unwrap_or(CATCH_ALL.1)
+        .unwrap_or(CATCH_ALL)
 }
 
 impl Areas {
@@ -342,7 +312,11 @@ impl Areas {
     pub(crate) fn load(store: &Store) -> Areas {
         let mut areas = std::fs::read_to_string(store.dir.join(FILE))
             .ok()
-            .map(|t| parse(super::store::unmarked(&t)))
+            .map(|t| {
+                let mut read = parse(super::store::unmarked(&t));
+                read.list.retain(|a| !RETIRED.contains(&a.name.as_str()));
+                read
+            })
             .filter(|a| !a.list.is_empty())
             .unwrap_or_default();
         for folder in record_folders(&store.repo) {
@@ -407,26 +381,20 @@ impl Areas {
 
     /// `raw` as a topic in a listed area: `area/topic`, kebab-case; its
     /// area moved to the nearest listed one when it isn't one — by the
-    /// area's words, then the topic's, else `stream`'s catch-all.
-    pub(crate) fn topic(&self, raw: &str, stream: &str) -> String {
+    /// area's words, then the topic's, else the catch-all.
+    pub(crate) fn topic(&self, raw: &str) -> String {
         let path = topic_path(raw);
         let (area, name) = path.split_once('/').unwrap_or(("general", &path));
         if self.has(area) {
             return path;
         }
         let placed = self.area_for(area).or_else(|| self.area_for(name));
-        let area = placed.unwrap_or_else(|| {
-            let fallback = match stream {
-                "engineering" => CATCH_ALL.0,
-                _ => CATCH_ALL.1,
-            };
-            match self.has(fallback) {
-                true => fallback.to_string(),
-                false => self
-                    .list
-                    .first()
-                    .map_or("general".into(), |a| a.name.clone()),
-            }
+        let area = placed.unwrap_or_else(|| match self.has(CATCH_ALL) {
+            true => CATCH_ALL.to_string(),
+            false => self
+                .list
+                .first()
+                .map_or("general".into(), |a| a.name.clone()),
         });
         format!("{area}/{name}")
     }
@@ -568,31 +536,35 @@ mod tests {
     fn a_topic_must_sit_in_a_listed_area() {
         let mut areas = Areas::default();
         areas.add_record_folder("indicator-key");
-        let t = |raw: &str, stream: &str| areas.topic(raw, stream);
-        assert_eq!(t("editor/text-boxes", "product"), "editor/text-boxes");
+        let t = |raw: &str| areas.topic(raw);
+        assert_eq!(t("editor/text-boxes"), "editor/text-boxes");
+        assert_eq!(t("editor-shapes/curly"), "editor/curly");
+        assert_eq!(t("indicator-key/delete"), "editor/delete");
+        assert_eq!(t("mcp/branding"), "ai-and-mcp/branding");
         assert_eq!(
-            t("tooling/local-stack", "engineering"),
-            "engineering-tooling/local-stack"
-        );
-        assert_eq!(
-            t("e2e/local-runs", "engineering"),
-            "testing-and-ci/local-runs"
-        );
-        assert_eq!(t("editor-shapes/curly", "product"), "editor/curly");
-        assert_eq!(t("indicator-key/delete", "product"), "editor/delete");
-        assert_eq!(t("mcp/branding", "product"), "ai-and-mcp/branding");
-        assert_eq!(
-            t("data-migrations/backfills", "engineering"),
+            t("data-migrations/backfills"),
             "platform-and-infra/backfills"
         );
         // The area says nothing; the topic's name does.
-        assert_eq!(
-            t("general/billing", "product"),
-            "access-and-accounts/billing"
-        );
-        // Nothing does: the stream's catch-all.
-        assert_eq!(t("zzz/qqq", "engineering"), "engineering-tooling/qqq");
-        assert_eq!(t("zzz/qqq", "product"), "workspace/qqq");
+        assert_eq!(t("general/billing"), "access-and-accounts/billing");
+        // Nothing does: the catch-all. A retired area is never one.
+        assert_eq!(t("zzz/qqq"), "workspace/qqq");
+        assert_eq!(t("engineering-tooling/ui-patterns"), "editor/ui-patterns");
+        assert_eq!(t("testing-and-ci/ci-workflows"), "workspace/ci-workflows");
+    }
+
+    #[test]
+    fn an_areas_md_listing_a_retired_area_loses_it() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = Store::of(repo.path());
+        std::fs::create_dir_all(&store.dir).unwrap();
+        std::fs::write(
+            store.dir.join(FILE),
+            "# Knowledge areas\n\n- `editor` — The editor.\n- `engineering-tooling` — How agents work.\n- `testing-and-ci` — Tests and CI.\n",
+        )
+        .unwrap();
+        assert_eq!(Areas::load(&store).names(), vec!["editor"]);
+        assert!(SEED.iter().all(|(name, _, _)| !RETIRED.contains(name)));
     }
 
     #[test]

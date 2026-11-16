@@ -16,6 +16,8 @@ use super::store::{topic_path, Entry};
 
 /// Who a noted rule may be credited to: the harvest's own `by`s.
 const BY: &[&str] = &["owner", "owner-pick", "plan", "review", "agent"];
+/// The kinds of a product entry: all a note may be.
+const KINDS: &[&str] = &["decision", "constraint", "question"];
 
 /// One pull request's notes on disk.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -69,6 +71,19 @@ pub(crate) fn parse(text: &str, areas: &Areas) -> Result<Vec<Value>, Vec<String>
                     areas.names().join(", ")
                 ));
             }
+        }
+        if e.is_engineering() {
+            problems.push(format!(
+                "entry {n} ({}) is about how agents work, not the product: orion records product rules only, and the repo's own agent docs hold the rest",
+                e.rule
+            ));
+        }
+        if !e.is_engineering() && !e.kind.is_empty() && !KINDS.contains(&e.kind.as_str()) {
+            problems.push(format!(
+                "entry {n}'s kind is {}, not one of {}",
+                e.kind,
+                KINDS.join(", ")
+            ));
         }
         if !e.by.is_empty() && !BY.contains(&e.by.as_str()) {
             problems.push(format!(
@@ -136,11 +151,28 @@ mod tests {
         let good = json!({"entries": [
             {"stream": "product", "kind": "decision", "topic": "editor/text-boxes",
              "rule": "Text never shrinks below 8pt", "by": "owner", "quote": "never below 8pt"},
-            {"stream": "engineering", "kind": "gotcha", "topic": "testing-and-ci/local-runs",
-             "new_topic": "Running e2e locally", "rule": "Probe ws first", "by": "agent"}
+            {"stream": "product", "kind": "constraint", "topic": "editor/fonts",
+             "new_topic": "Fonts the editor offers", "rule": "Webfonts load before first paint", "by": "agent"}
         ]})
         .to_string();
         assert_eq!(parse(&good, &areas).unwrap().len(), 2);
+        let engineering = json!({"entries": [
+            {"stream": "engineering", "kind": "gotcha", "topic": "editor/local-runs",
+             "rule": "Probe ws first", "by": "agent"}
+        ]})
+        .to_string();
+        let gotcha = json!({"entries": [
+            {"stream": "product", "kind": "gotcha", "topic": "editor/x", "rule": "R", "by": "agent"}
+        ]})
+        .to_string();
+        assert_eq!(
+            parse(&gotcha, &areas).unwrap_err(),
+            vec!["entry 1's kind is gotcha, not one of decision, constraint, question".to_string()]
+        );
+        assert_eq!(
+            parse(&engineering, &areas).unwrap_err(),
+            vec!["entry 1 (Probe ws first) is about how agents work, not the product: orion records product rules only, and the repo's own agent docs hold the rest".to_string()]
+        );
         assert_eq!(
             parse("[]", &areas).unwrap().len(),
             0,

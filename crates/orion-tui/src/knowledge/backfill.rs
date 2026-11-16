@@ -11,6 +11,12 @@
 //! topics whose files change after (`super::runner`). Runs from the CLI,
 //! with no TUI.
 //!
+//! It starts by taking out what orion no longer keeps — the engineering
+//! rules and retired areas an older harvest wrote
+//! (`super::store::Store::keep_product`) — proposed as a commit of its
+//! own, so a backfill with nothing new to harvest is how a repo whose
+//! knowledge already merged is cleaned up.
+//!
 //! A usage limit stops it at the first pull request it refuses
 //! ([`harvest_each`]): what was harvested is committed and proposed, and
 //! the rest wait for a run after the reset — none of them is tried
@@ -33,6 +39,8 @@ use super::transcripts::{self, Found, Merged, Scan};
 const BASES: &[&str] = &[
     "main", "master", "dev", "develop", "staging", "trunk", "HEAD",
 ];
+/// The commit that takes out what isn't product knowledge.
+const PRODUCT_ONLY: &str = "knowledge: product rules only";
 /// How many pull requests one commit of a backfill holds.
 pub(crate) const BATCH: usize = 10;
 
@@ -261,6 +269,17 @@ pub(crate) async fn run(
         skipped,
         ..Summary::default()
     };
+    {
+        let branch = share.open().await?;
+        let store = branch.store();
+        if store.keep_product()? {
+            store.write_index(&share.project)?;
+            say("Took out the rules about how agents work, not the product.");
+            let published = share.publish(&branch, PRODUCT_ONLY).await?;
+            say_published(say, &published);
+            summary.published(published);
+        }
+    }
     say(&format!("{} to harvest.", todo.len()));
     let mut done = 0;
     // Harvested since the topics were last consolidated.

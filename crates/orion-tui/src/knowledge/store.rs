@@ -15,6 +15,10 @@
 //!   against the code, so the weekly staleness check one person's orion
 //!   ran spares everyone else's ([`TopicCheck`]).
 //!
+//! Only product knowledge is kept: how agents work in the repo — its
+//! tooling, scripts, tests and CI, the old engineering stream — is the
+//! repo's own hand-written agent docs' to say ([`Store::keep_product`]).
+//!
 //! Every file orion writes starts with [`MARKER`]. orion owns only
 //! [`DIR`]: everything else under [`DECISIONS`] is a hand-written record,
 //! read-only to orion ([`Store::write`] refuses any path outside). The
@@ -49,6 +53,10 @@ const RULE_SECTIONS: [&str; 2] = ["Rules in force", "Constraints"];
 pub(crate) const ACTIVE: &str = "active";
 pub(crate) const DROPPED: &str = "dropped";
 pub(crate) const VETOED: &str = "vetoed";
+
+/// The stream of entries about how agents work in the repo, not the
+/// product ([`Entry::is_engineering`]): never kept.
+pub(crate) const ENGINEERING: &str = "engineering";
 
 /// One extracted entry, as `entries.jsonl` keeps it: the extraction
 /// spec's fields, plus where it came from and what became of it.
@@ -127,6 +135,13 @@ impl Entry {
             ..Entry::default()
         };
         (!entry.rule.is_empty()).then_some(entry)
+    }
+
+    /// Whether it is how agents work rather than what the product does:
+    /// the engineering stream older harvests extracted, which orion no
+    /// longer keeps ([`Store::keep_product`]).
+    pub(crate) fn is_engineering(&self) -> bool {
+        self.stream == ENGINEERING
     }
 
     /// Whether the daily card lists it: the owner's own, his pick, or a
@@ -315,6 +330,74 @@ impl Store {
             let _ = std::fs::remove_dir(folder);
         }
         Ok(())
+    }
+
+    /// Keep only product knowledge: every engineering entry
+    /// ([`Entry::is_engineering`]) taken out of `entries.jsonl` and off
+    /// its page; a page in a retired area ([`super::areas::RETIRED`])
+    /// moved, with what product rules it still has, to the nearest listed
+    /// area — merged into the page there when there is one; a page left
+    /// citing no entry removed; `areas.md` written without the retired
+    /// areas. Whether anything changed. The caller writes the index and
+    /// commits.
+    pub(crate) fn keep_product(&self) -> Result<bool, String> {
+        let retired = super::areas::is_retired;
+        let all = self.entries();
+        let gone: std::collections::HashSet<&str> = all
+            .iter()
+            .filter(|e| e.is_engineering())
+            .map(|e| e.id.as_str())
+            .collect();
+        // What runs on every write, so the check reads nothing it needn't.
+        let clean = gone.is_empty()
+            && !self.topics().iter().any(|t| retired(t))
+            && !all.iter().any(|e| retired(&e.topic));
+        if clean {
+            return Ok(false);
+        }
+        let areas = super::areas::Areas::load(self);
+        let cites = |page: &str| page.lines().any(|l| !line_ids(l).is_empty());
+        let gone: Vec<&str> = gone.into_iter().collect();
+        let mut moved: BTreeMap<String, String> = BTreeMap::new();
+        for (topic, page) in &self.pages() {
+            let left = without_ids(page, &gone);
+            if !retired(topic) {
+                match (left == *page, cites(&left)) {
+                    (true, _) => {}
+                    (false, true) => self.write_page(topic, &left)?,
+                    (false, false) => self.remove_page(topic)?,
+                }
+                continue;
+            }
+            self.remove_page(topic)?;
+            if !cites(&left) {
+                continue;
+            }
+            let to = areas.topic(topic);
+            let left = tidy_page(&to, &left, None);
+            let text = match self.page(&to) {
+                Some(there) => super::consolidate::keep_every_id(&there, &[(topic.clone(), left)]),
+                None => left,
+            };
+            self.write_page(&to, &text)?;
+            moved.insert(topic.clone(), to);
+        }
+        let kept: Vec<Entry> = all
+            .into_iter()
+            .filter(|e| !e.is_engineering())
+            .map(|mut e| {
+                if retired(&e.topic) {
+                    e.topic = moved
+                        .get(&e.topic)
+                        .cloned()
+                        .unwrap_or_else(|| areas.topic(&e.topic));
+                }
+                e
+            })
+            .collect();
+        self.save_entries(&kept)?;
+        areas.save(self)?;
+        Ok(true)
     }
 
     /// Mark `id` vetoed, and take it out of its page and the index. The
@@ -739,11 +822,91 @@ mod tests {
     }
 
     #[test]
-    fn the_index_never_runs_past_its_lines() {
-        let order: Vec<String> = crate::knowledge::areas::SEED
-            .iter()
-            .map(|(name, _, _)| name.to_string())
+    fn only_product_knowledge_is_kept() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = Store::of(repo.path());
+        let entry = |id: &str, stream: &str, topic: &str| Entry {
+            id: id.into(),
+            stream: stream.into(),
+            topic: topic.into(),
+            rule: format!("rule {id}"),
+            status: ACTIVE.into(),
+            ..Entry::default()
+        };
+        store
+            .append(&[
+                entry("k1-1", "product", "editor/text"),
+                entry("k1-2", ENGINEERING, "editor/text"),
+                entry("k2-1", ENGINEERING, "engineering-tooling/local-stack"),
+                entry("k3-1", "product", "engineering-tooling/ui-patterns"),
+                entry("k4-1", ENGINEERING, "testing-and-ci/ci"),
+                entry("k5-1", "product", "editor/ui-patterns"),
+            ])
+            .unwrap();
+        let page = |topic: &str, ids: &[&str]| {
+            let rules: String = ids
+                .iter()
+                .map(|id| format!("- rule {id} <!-- {id} -->\n"))
+                .collect();
+            format!("# {topic}\nScope: s\n\n## Rules in force\n{rules}\n## Constraints\n\n## Open questions\n\n## Replaced\n")
+        };
+        for (topic, ids) in [
+            ("editor/text", &["k1-1", "k1-2"][..]),
+            ("engineering-tooling/local-stack", &["k2-1"]),
+            ("engineering-tooling/ui-patterns", &["k3-1"]),
+            ("testing-and-ci/ci", &["k4-1"]),
+            ("editor/ui-patterns", &["k5-1"]),
+        ] {
+            store.write_page(topic, &page(topic, ids)).unwrap();
+        }
+        store
+            .write(
+                &store.dir.join(crate::knowledge::areas::FILE),
+                "# Knowledge areas\n\n- `editor` — The editor.\n- `engineering-tooling` — How agents work.\n- `testing-and-ci` — Tests.\n",
+            )
+            .unwrap();
+
+        assert!(store.keep_product().unwrap());
+        let left: Vec<(String, String)> = store
+            .entries()
+            .into_iter()
+            .map(|e| (e.id, e.topic))
             .collect();
+        assert_eq!(
+            left,
+            vec![
+                ("k1-1".into(), "editor/text".into()),
+                ("k3-1".into(), "editor/ui-patterns".into()),
+                ("k5-1".into(), "editor/ui-patterns".into()),
+            ]
+        );
+        assert_eq!(store.topics(), vec!["editor/text", "editor/ui-patterns"]);
+        let text = store.page("editor/text").unwrap();
+        assert!(
+            text.contains("<!-- k1-1 -->") && !text.contains("k1-2"),
+            "{text}"
+        );
+        // The retired area's product rule joins the page already there.
+        let merged = store.page("editor/ui-patterns").unwrap();
+        assert!(merged.starts_with("# editor/ui-patterns\n"), "{merged}");
+        assert!(
+            merged.contains("- rule k5-1 <!-- k5-1 -->\n- rule k3-1 <!-- k3-1 -->\n"),
+            "{merged}"
+        );
+        assert!(!store.dir.join("engineering-tooling").exists());
+        assert!(!store.dir.join("testing-and-ci").exists());
+        let areas = std::fs::read_to_string(store.dir.join(crate::knowledge::areas::FILE)).unwrap();
+        assert!(
+            !areas.contains("engineering-tooling") && !areas.contains("testing-and-ci"),
+            "{areas}"
+        );
+        // Nothing left to take out.
+        assert!(!store.keep_product().unwrap());
+    }
+
+    #[test]
+    fn the_index_never_runs_past_its_lines() {
+        let order: Vec<String> = (0..10).map(|n| format!("area-{n}")).collect();
         // 300 topics: in five listed areas, and in 40 areas of their own.
         let pages: Vec<(String, String)> = (0..300)
             .map(|i| {

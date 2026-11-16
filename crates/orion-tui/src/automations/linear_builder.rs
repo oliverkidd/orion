@@ -107,7 +107,7 @@ Follow `agent_docs/automation.md`. Every plan goes to the owner for approval. Wh
 
 ## Last step
 
-After `orion pr facts set`, record the lasting rules you learned (what a future agent on another ticket would need, as the owner said or approved it) with `orion knowledge note <file>`. The file is `{\"entries\": [...]}`, each entry a harvest's: stream, kind, topic (one listed under Topics to note rules on unless none fits; a new one needs new_topic), rule, applies_to, why, by, confidence, quote (the owner's words, verbatim, when by is owner), confirm_by. Write `{\"entries\": []}` when there are none. orion records them when the pull request merges."
+After `orion pr facts set`, record the lasting product rules you learned (what the product does and why, that a future agent on another ticket would need, as the owner said or approved it — never how agents work: tooling, tests, CI or workflow belong in the repo's agent docs) with `orion knowledge note <file>`. The file is `{\"entries\": [...]}`, each entry a harvest's: stream (always product), kind (decision, constraint or question), topic (one listed under Topics to note rules on unless none fits; a new one needs new_topic), rule, applies_to, why, by, confidence, quote (the owner's words, verbatim, when by is owner), confirm_by. Write `{\"entries\": []}` when there are none. orion records them when the pull request merges."
     };
 }
 
@@ -2276,7 +2276,7 @@ mod tests {
                 "Follow `agent_docs/automation.md`",
                 "ORION-VERDICT: <already-fixed|duplicate|not-reproducible|wont-build> <reason>",
                 "## Last step",
-                "After `orion pr facts set`, record the lasting rules you learned",
+                "After `orion pr facts set`, record the lasting product rules you learned",
                 "`orion knowledge note <file>`",
             ] {
                 assert!(text.contains(layer), "{layer}");

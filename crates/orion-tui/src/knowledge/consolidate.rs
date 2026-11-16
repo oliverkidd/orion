@@ -339,16 +339,8 @@ pub(crate) async fn consolidate(
             .filter(|e| e.status == ACTIVE)
             .map(|e| e.topic.clone()),
     );
-    let stream_of = |topic: &str| {
-        entries
-            .iter()
-            .find(|e| e.topic == topic)
-            .map_or("", |e| e.stream.as_str())
-    };
-    let placed: BTreeMap<String, String> = topics
-        .iter()
-        .map(|t| (t.clone(), areas.topic(t, stream_of(t))))
-        .collect();
+    let placed: BTreeMap<String, String> =
+        topics.iter().map(|t| (t.clone(), areas.topic(t))).collect();
     let rules_of = |topic: &str| -> Vec<String> {
         entries
             .iter()
@@ -446,10 +438,11 @@ pub(crate) async fn consolidate(
     for e in entries.iter_mut() {
         e.topic = match map.get(&e.topic) {
             Some(new) => new.clone(),
-            None => areas.topic(&e.topic, &e.stream),
+            None => areas.topic(&e.topic),
         };
     }
     store.save_entries(&entries)?;
+    store.keep_product()?;
     areas.save(store)?;
     store.write_index(to.project)?;
     let merged = made
@@ -489,7 +482,7 @@ mod tests {
             id: id.into(),
             pr: id[1..].split('-').next().unwrap().parse().unwrap(),
             topic: topic.into(),
-            stream: "engineering".into(),
+            stream: "product".into(),
             kind: "decision".into(),
             rule: rule.into(),
             by: "owner".into(),
@@ -507,31 +500,26 @@ mod tests {
 
     fn answer(ask: &ModelAsk) -> String {
         if ask.system.starts_with("You keep the topic list") {
-            assert!(
-                ask.prompt.starts_with("Area: engineering-tooling"),
-                "{}",
-                ask.prompt
-            );
+            assert!(ask.prompt.starts_with("Area: editor"), "{}", ask.prompt);
             return json!({
                 "topics": {
-                    "tooling/local-stack": "engineering-tooling/local-stack",
-                    "workflow/local-stack-runs": "local-stack",
-                    "docs/agent-docs": "engineering-tooling/agent-docs"
+                    "canvas/snapping": "editor/snapping",
+                    "snap/guides": "snapping",
+                    "shape/handles": "editor/handles"
                 },
-                "scopes": {"engineering-tooling/local-stack": "Running the local stack: start, stop, `src/x.ts` and health"}
+                "scopes": {"editor/snapping": "Snapping shapes: grid, guides, `src/x.ts` and modifiers"}
             })
             .to_string();
         }
         // The merge: two pages into one, k2-1 left out by the model.
         assert!(
-            ask.prompt
-                .starts_with("Topic: engineering-tooling/local-stack\n"),
+            ask.prompt.starts_with("Topic: editor/snapping\n"),
             "{}",
             ask.prompt
         );
-        assert!(ask.prompt.contains("### tooling/local-stack\n"));
-        assert!(ask.prompt.contains("### workflow/local-stack-runs\n"));
-        json!({"page": "# whatever\nScope: x\n\n## Rules in force\n- Each worktree runs its own stack (#1, #3) <!-- k1-1 k3-1 -->\n\n## Constraints\n\n## Open questions\n\n## Replaced\n"}).to_string()
+        assert!(ask.prompt.contains("### canvas/snapping\n"));
+        assert!(ask.prompt.contains("### snap/guides\n"));
+        json!({"page": "# whatever\nScope: x\n\n## Rules in force\n- Shapes snap to the grid and guides (#1, #3) <!-- k1-1 k3-1 -->\n\n## Constraints\n\n## Open questions\n\n## Replaced\n"}).to_string()
     }
 
     #[tokio::test]
@@ -539,61 +527,53 @@ mod tests {
         let into = Bench::new();
         let store = &into.store;
         let entries = vec![
-            entry(
-                "k1-1",
-                "tooling/local-stack",
-                "Each worktree runs its own stack",
-            ),
-            entry("k2-1", "tooling/local-stack", "just start wipes .next"),
-            entry(
-                "k3-1",
-                "workflow/local-stack-runs",
-                "One stack per worktree",
-            ),
-            entry("k4-1", "docs/agent-docs", "Docs live in agent_docs"),
-            entry("k5-1", "e2e/local-runs", "Probe ws before e2e"),
+            entry("k1-1", "canvas/snapping", "Shapes snap to the grid"),
+            entry("k2-1", "canvas/snapping", "Alt turns snapping off"),
+            entry("k3-1", "snap/guides", "Shapes snap to guides"),
+            entry("k4-1", "shape/handles", "Handles stay 8px"),
+            entry("k5-1", "billing/invoices", "Invoices show VAT"),
         ];
         store.append(&entries).unwrap();
         store
             .write_page(
-                "tooling/local-stack",
+                "canvas/snapping",
                 &page(
-                    "tooling/local-stack",
-                    "local stack commands (`just status`), `.next`",
+                    "canvas/snapping",
+                    "snapping (`snap.ts`), grid",
                     &[
-                        "- Each worktree runs its own stack (#1) <!-- k1-1 -->",
-                        "- just start wipes .next (#2) <!-- k2-1 -->",
+                        "- Shapes snap to the grid (#1) <!-- k1-1 -->",
+                        "- Alt turns snapping off (#2) <!-- k2-1 -->",
                     ],
                 ),
             )
             .unwrap();
         store
             .write_page(
-                "workflow/local-stack-runs",
+                "snap/guides",
                 &page(
-                    "workflow/local-stack-runs",
-                    "runs",
-                    &["- One stack per worktree (#3) <!-- k3-1 -->"],
+                    "snap/guides",
+                    "guides",
+                    &["- Shapes snap to guides (#3) <!-- k3-1 -->"],
                 ),
             )
             .unwrap();
         store
             .write_page(
-                "docs/agent-docs",
+                "shape/handles",
                 &page(
-                    "docs/agent-docs",
-                    "agent docs",
-                    &["- Docs live in agent_docs (#4) <!-- k4-1 -->"],
+                    "shape/handles",
+                    "handles",
+                    &["- Handles stay 8px (#4) <!-- k4-1 -->"],
                 ),
             )
             .unwrap();
         store
             .write_page(
-                "e2e/local-runs",
+                "billing/invoices",
                 &page(
-                    "e2e/local-runs",
-                    "e2e in `e2e/run.sh`",
-                    &["- Probe ws before e2e (#5) <!-- k5-1 -->"],
+                    "billing/invoices",
+                    "invoices in `src/billing.ts`",
+                    &["- Invoices show VAT (#5) <!-- k5-1 -->"],
                 ),
             )
             .unwrap();
@@ -607,7 +587,7 @@ mod tests {
         assert_eq!(
             model.asked.lock().unwrap().len(),
             2,
-            "one call for the area with three topics, one merge; none for testing-and-ci's one"
+            "one call for the area with three topics, one merge; none for access-and-accounts' one"
         );
         assert!(
             model
@@ -628,40 +608,45 @@ mod tests {
         assert_eq!(
             topics,
             vec![
-                ("k1-1".into(), "engineering-tooling/local-stack".into()),
-                ("k2-1".into(), "engineering-tooling/local-stack".into()),
-                ("k3-1".into(), "engineering-tooling/local-stack".into()),
-                ("k4-1".into(), "engineering-tooling/agent-docs".into()),
-                ("k5-1".into(), "testing-and-ci/local-runs".into()),
+                ("k1-1".into(), "editor/snapping".into()),
+                ("k2-1".into(), "editor/snapping".into()),
+                ("k3-1".into(), "editor/snapping".into()),
+                ("k4-1".into(), "editor/handles".into()),
+                ("k5-1".into(), "access-and-accounts/invoices".into()),
             ]
         );
         // The old pages are gone; the new ones are there.
         assert_eq!(
             store.topics(),
             vec![
-                "engineering-tooling/agent-docs",
-                "engineering-tooling/local-stack",
-                "testing-and-ci/local-runs"
+                "access-and-accounts/invoices",
+                "editor/handles",
+                "editor/snapping"
             ]
         );
-        assert!(!store.dir.join("tooling").exists());
+        assert!(!store.dir.join("canvas").exists());
         // The merged page cites every PR and every id, the lost one put back.
-        let merged = store.page("engineering-tooling/local-stack").unwrap();
-        assert!(merged.starts_with("# engineering-tooling/local-stack\nScope: Running the local stack: start, stop, and health\n"), "{merged}");
-        assert!(merged.contains("<!-- k1-1 k3-1 -->"), "{merged}");
+        let merged = store.page("editor/snapping").unwrap();
         assert!(
-            merged.contains("- just start wipes .next (#2) <!-- k2-1 -->\n\n## Constraints"),
+            merged.starts_with(
+                "# editor/snapping\nScope: Snapping shapes: grid, guides, and modifiers\n"
+            ),
             "{merged}"
         );
-        let moved = store.page("testing-and-ci/local-runs").unwrap();
+        assert!(merged.contains("<!-- k1-1 k3-1 -->"), "{merged}");
         assert!(
-            moved.starts_with("# testing-and-ci/local-runs\nScope: e2e in\n"),
+            merged.contains("- Alt turns snapping off (#2) <!-- k2-1 -->\n\n## Constraints"),
+            "{merged}"
+        );
+        let moved = store.page("access-and-accounts/invoices").unwrap();
+        assert!(
+            moved.starts_with("# access-and-accounts/invoices\nScope: invoices in\n"),
             "{moved}"
         );
         // The index is by area, and areas.md is written.
         let index = store.index().unwrap();
         assert!(
-            index.contains("- engineering-tooling: agent-docs, local-stack — 3 rules"),
+            index.contains("- editor: handles, snapping — 3 rules"),
             "{index}"
         );
         assert!(store.dir.join("areas.md").exists());
