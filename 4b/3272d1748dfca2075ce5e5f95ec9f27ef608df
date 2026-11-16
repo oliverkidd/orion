@@ -1,0 +1,22 @@
+crates/orion-tui/src/automations/account.rs
+  s_0ea5bf705342bd::t_f749b58a1f867c 20-25,33,55-56,60,69-103,313,317,321-322,324,327,329,331-340,349-357,361,364,368-460,602,646-648,850-979
+  s_0ea5bf705342bd::t_02c7f4432a33be 980
+docs/sessions.md
+  s_0ea5bf705342bd::t_9c28af4c66df22 755-757
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4b3272d1748dfca2075ce5e5f95ec9f27ef608df",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
