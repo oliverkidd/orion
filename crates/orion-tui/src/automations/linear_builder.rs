@@ -344,7 +344,7 @@ pub struct Entry {
     /// The `ORION-VERDICT:` line its no-change card was posted for.
     #[serde(default)]
     pub verdict: Option<String>,
-    /// When **Build anyway…** steered its plan (ms): the plan still
+    /// When **Build it anyway…** steered its plan (ms): the plan still
     /// waiting until its session moves on is the one answered.
     #[serde(default)]
     pub steered_at: Option<i64>,
@@ -2765,40 +2765,39 @@ mod tests {
             as_,
         };
         let writes = |line: &str| close_writes("i", "t", &parse_verdict(line).unwrap());
+        let comment = |body: &str| Write::Comment {
+            issue: "i".into(),
+            body: format!("Nothing to build: {body} (closed by orion's factory)"),
+        };
         assert_eq!(
-            writes("ORION-VERDICT: already-fixed by abc"),
-            [close(CloseAs::Done)]
+            writes("ORION-VERDICT: already-fixed in #2075"),
+            [comment("already shipped in #2075"), close(CloseAs::Done)]
         );
         assert_eq!(
-            writes("ORION-VERDICT: duplicate of RIPLO-12, the same crash"),
+            writes("ORION-VERDICT: duplicate RIPLO-12, the same crash"),
             [
+                comment("duplicate of RIPLO-12, the same crash"),
                 Write::Duplicate {
                     issue: "i".into(),
                     of: "RIPLO-12".into()
                 },
-                close(CloseAs::Duplicate)
+                close(CloseAs::Done)
             ]
         );
         assert_eq!(
-            writes("ORION-VERDICT: duplicate of the login one"),
-            [close(CloseAs::Duplicate)]
+            writes("ORION-VERDICT: duplicate the login one"),
+            [comment("duplicate of the login one"), close(CloseAs::Done)]
         );
         assert_eq!(
             writes("ORION-VERDICT: not-reproducible works on main"),
             [
-                Write::Comment {
-                    issue: "i".into(),
-                    body: "Can't reproduce: works on main (closed by orion's factory)".into()
-                },
-                close(CloseAs::Canceled)
+                comment("can't reproduce: works on main"),
+                close(CloseAs::Done)
             ]
         );
         assert_eq!(
             writes("ORION-VERDICT: wont-build out of scope")[0],
-            Write::Comment {
-                issue: "i".into(),
-                body: "Won't build: out of scope (closed by orion's factory)".into()
-            }
+            comment("won't build: out of scope")
         );
     }
 
@@ -2928,8 +2927,9 @@ mod tests {
     }
 
     /// A plan whose first line says nothing should be built asks to close
-    /// the ticket; Close writes Linear, archives the session and deletes
-    /// the worktree; Build anyway… steers the plan.
+    /// the ticket, its title the reason in a line; Close comments the
+    /// reason, marks the ticket Done, archives the session and deletes the
+    /// worktree; Build it anyway… steers the plan.
     #[test]
     fn a_plan_that_builds_nothing_asks_to_close_the_ticket() {
         use crate::linear::CloseAs;
@@ -2947,13 +2947,16 @@ mod tests {
         assert_eq!(stage_of(&app), Stage::Approving);
         let key = "issue:uuid-ENG-7:nochange";
         let c = card(&app, key);
-        assert_eq!(c.card.body[0], "*Duplicate of* RIPLO-3 the same crash");
+        assert_eq!(
+            c.card.title,
+            "Nothing to build: duplicate of RIPLO-3 the same crash"
+        );
         let labels: Vec<&str> = c.card.buttons.iter().map(|b| b.label.as_str()).collect();
         assert_eq!(
             labels,
             [
                 "Close ticket",
-                "Build anyway…",
+                "Build it anyway…",
                 "Not for the factory: back to Triage",
                 "Not for the factory: move to Backlog"
             ]
@@ -2972,6 +2975,15 @@ mod tests {
             [
                 (
                     p(),
+                    Write::Comment {
+                        issue: "uuid-ENG-7".into(),
+                        body: "Nothing to build: duplicate of RIPLO-3 the same crash \
+                               (closed by orion's factory)"
+                            .into()
+                    }
+                ),
+                (
+                    p(),
                     Write::Duplicate {
                         issue: "uuid-ENG-7".into(),
                         of: "RIPLO-3".into()
@@ -2982,7 +2994,7 @@ mod tests {
                     Write::Close {
                         issue: "uuid-ENG-7".into(),
                         team: "t1".into(),
-                        as_: CloseAs::Duplicate
+                        as_: CloseAs::Done
                     }
                 ),
             ]
@@ -2995,7 +3007,7 @@ mod tests {
         assert!(app.tree.agents.iter().all(|a| a.archived || a.id.0 != "s7"));
     }
 
-    /// **Build anyway…** steers the plan; the plan it answered asks
+    /// **Build it anyway…** steers the plan; the plan it answered asks
     /// nothing more, but the next one — even with the same verdict, word
     /// for word — gets a new card.
     #[test]
@@ -3149,7 +3161,10 @@ mod tests {
         building(&mut app, Stage::Building);
         let key = no_change(&mut app);
         let flash = app.flash.as_deref().unwrap_or_default().to_string();
-        assert!(flash.starts_with("◆ ENG-7 Crash"), "{flash}");
+        assert!(
+            flash.starts_with("◆ Nothing to build: already shipped in #2075"),
+            "{flash}"
+        );
         let session = Place::Session(AgentId("s7".into()));
         assert_eq!(place_of(&app, key), Some(session.clone()));
         assert_eq!(waiting_at(&app, &session), 1);

@@ -870,13 +870,13 @@ request. They work the same way; each has its own labels and its own preset (**B
   `ORION_AUTOMATION` is set in the session.
 - **Your approval.** Every plan waits for you like any other: in Needs you, and on your phone when
   you're away. A plan whose first line is `ORION-VERDICT: <already-fixed|duplicate|not-reproducible|
-  wont-build> <reason>` builds nothing: a **No change** card says why ("*Already fixed* by …",
-  "*Duplicate of* ENG-n", "*Can't reproduce*: …") with **Close ticket**, **Build anyway…** and
-  **Not for the factory**.
-  Close moves the ticket to Done (already fixed), to Duplicate — the team's Duplicate state, else
-  Canceled — marked a duplicate of the ticket the reason names, or to Canceled with the reason as a
-  comment; then the session is archived and its worktree deleted. It never goes back to Todo. Build
-  anyway… sends what you type to the session as the plan's steer.
+  wont-build> <reason>` builds nothing: a **No change** card says why in its title, in one line
+  ("Nothing to build: already shipped in #2075", "Nothing to build: duplicate of ENG-n", "Nothing to
+  build: can't reproduce: …"), with **Close ticket**, **Build it anyway…** and the two **Not for the
+  factory** choices. **Close ticket** comments the reason on the ticket (and marks it a duplicate of
+  the ticket the reason names, for a duplicate) and marks it Done; then the session is archived and
+  its worktree deleted. It never goes back to Todo. **Build it anyway…** sends what you type to the
+  session as the plan's steer.
 - **Where it stands.** Each ticket moves through planning, approving, building, PR open and merged.
   A ticket moved to the backlog, canceled, done by someone else or no longer assigned to you is
   parked and its session archived; a session or worktree gone for 30 minutes with no pull request is

@@ -7,7 +7,7 @@
 //! | `duplicate` | you | Start anyway (`start`) · Skip (`skip`) |
 //! | `thin`, `thin-again` | the reporter | Open ticket (link) · I've updated it (`updated`) |
 //! | `detail` | you | Open ticket (link) · Start anyway (`start`) |
-//! | `nochange` | you | Close ticket (`close`) · Build anyway… (`build`, typed) · Not for the factory |
+//! | `nochange` | you | Close ticket (`close`) · Build it anyway… (`build`, typed) · Not for the factory |
 //!
 //! **Open ticket** is a link button: Slack (or Needs you) opens the
 //! ticket, and nothing comes back here.
@@ -566,29 +566,40 @@ pub(crate) fn ping(app: &mut App, issue_id: &str) {
     post_thin(app, issue_id, &entry, "there", "thin-again");
 }
 
+/// How long the reason in a no-change card's title may run.
+const REASON_CHARS: usize = 120;
+
+/// The no-change card's title, in one line: "Nothing to build: already
+/// shipped in #2075".
+pub(crate) fn nothing_to_build(nc: &NoChange) -> String {
+    let reason = nc.reason.lines().next().unwrap_or_default().trim();
+    let reason = crate::ui::truncate(reason, REASON_CHARS);
+    let why = match nc.verdict {
+        Verdict::AlreadyFixed => format!("already shipped {reason}"),
+        Verdict::Duplicate => format!("duplicate of {reason}"),
+        Verdict::NotReproducible => format!("can't reproduce: {reason}"),
+        Verdict::WontBuild => format!("won't build: {reason}"),
+    };
+    format!("Nothing to build: {why}")
+}
+
 /// The no-change card, for the plan `nc` says nothing should be built.
 pub(crate) fn post_no_change(app: &mut App, issue_id: &str, nc: &NoChange) {
     let Some(entry) = app.automations.linear_builder.entry(issue_id) else {
         return;
     };
-    let reason = escape(&nc.reason);
-    let line = match nc.verdict {
-        Verdict::AlreadyFixed => format!("*Already fixed* {reason}"),
-        Verdict::Duplicate => format!("*Duplicate of* {reason}"),
-        Verdict::NotReproducible => format!("*Can't reproduce*: {reason}"),
-        Verdict::WontBuild => format!("*Won't build*: {reason}"),
-    };
-    let card = card(
+    let mut card = card(
         app,
         &entry,
         key(issue_id, "nochange"),
         Recipient::Owner,
-        vec![line],
+        Vec::new(),
         and_not_for_the_factory(vec![
             Button::tap("close", "Close ticket"),
-            Button::text("build", "Build anyway…"),
+            Button::text("build", "Build it anyway…"),
         ]),
     );
+    card.title = nothing_to_build(nc);
     cards::post(app, card);
 }
 
@@ -932,43 +943,26 @@ fn reporter_updated(app: &mut App, id: &str) {
     cards::close_if_up(app, &key(id, "thin-again"), thanks);
 }
 
-/// What closing a ticket with nothing to build writes to Linear, as the
-/// verdict says: Done (already fixed); Duplicate, related to the ticket
-/// the reason names when it names one; Canceled with the reason as a
-/// comment (can't reproduce, won't build). Never back to Todo.
+/// What closing a ticket with nothing to build writes to Linear: a
+/// comment citing the reason, the duplicate relation when the reason
+/// names the ticket it duplicates, and Done. Never back to Todo.
 pub(crate) fn close_writes(issue: &str, team: &str, nc: &NoChange) -> Vec<Write> {
-    let close = |as_| Write::Close {
+    let mut writes = vec![Write::Comment {
+        issue: issue.to_string(),
+        body: format!("{} (closed by orion's factory)", nothing_to_build(nc)),
+    }];
+    if nc.verdict == Verdict::Duplicate {
+        writes.extend(stages::named_ticket(&nc.reason).map(|of| Write::Duplicate {
+            issue: issue.to_string(),
+            of,
+        }));
+    }
+    writes.push(Write::Close {
         issue: issue.to_string(),
         team: team.to_string(),
-        as_,
-    };
-    match nc.verdict {
-        Verdict::AlreadyFixed => vec![close(CloseAs::Done)],
-        Verdict::Duplicate => {
-            let mut writes: Vec<Write> = stages::named_ticket(&nc.reason)
-                .map(|of| Write::Duplicate {
-                    issue: issue.to_string(),
-                    of,
-                })
-                .into_iter()
-                .collect();
-            writes.push(close(CloseAs::Duplicate));
-            writes
-        }
-        Verdict::NotReproducible | Verdict::WontBuild => {
-            let what = match nc.verdict {
-                Verdict::NotReproducible => "Can't reproduce",
-                _ => "Won't build",
-            };
-            vec![
-                Write::Comment {
-                    issue: issue.to_string(),
-                    body: format!("{what}: {} (closed by orion's factory)", nc.reason),
-                },
-                close(CloseAs::Canceled),
-            ]
-        }
-    }
+        as_: CloseAs::Done,
+    });
+    writes
 }
 
 /// **Close ticket**: each ticket of the session's group closed as its
@@ -1012,15 +1006,11 @@ fn close_ticket(app: &mut App, id: &str, key: &str) {
         crate::event_loop::delete_worktrees(app, vec![worktree], &mut out);
         app.outbox.extend(out);
     }
-    let note = match nc.verdict {
-        Verdict::AlreadyFixed => "Closed: Done",
-        Verdict::Duplicate => "Closed: Duplicate",
-        _ => "Closed: Canceled",
-    };
+    let note = "Closed: Done";
     cards::close_if_up(app, key, note);
 }
 
-/// **Build anyway…**: your words to the session as its plan's steer.
+/// **Build it anyway…**: your words to the session as its plan's steer.
 fn build_anyway(app: &mut App, id: &str, key: &str, text: Option<String>) {
     let Some(session) = session_of(app, id) else {
         return;

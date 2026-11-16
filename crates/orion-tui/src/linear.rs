@@ -5929,32 +5929,18 @@ pub(crate) fn parse_team_states(json: &serde_json::Value) -> Result<Vec<LinearSt
 pub(crate) enum CloseAs {
     /// Done: a `completed` state.
     Done,
-    /// Canceled: a `canceled` state that isn't the Duplicate one.
-    Canceled,
-    /// Duplicate: a `canceled` state named "Duplicate" when the team has
-    /// one, else Canceled.
-    Duplicate,
 }
 
 /// The state among a team's `states` a ticket closed `as_` goes to: by
 /// type, and by name where a type has several — Done named "Done" before
-/// another completed state, Canceled never the Duplicate state.
+/// another completed state.
 pub(crate) fn state_for(states: &[LinearState], as_: CloseAs) -> Option<&LinearState> {
     let named = |s: &LinearState, name: &str| s.name.trim().eq_ignore_ascii_case(name);
     let of_kind = |kind: &'static str| states.iter().filter(move |s| s.kind == kind);
-    let canceled = || {
-        of_kind("canceled")
-            .find(|s| named(s, "Canceled") || named(s, "Cancelled"))
-            .or_else(|| of_kind("canceled").find(|s| !named(s, "Duplicate")))
-    };
     match as_ {
         CloseAs::Done => of_kind("completed")
             .find(|s| named(s, "Done"))
             .or_else(|| of_kind("completed").next()),
-        CloseAs::Canceled => canceled(),
-        CloseAs::Duplicate => of_kind("canceled")
-            .find(|s| named(s, "Duplicate"))
-            .or_else(canceled),
     }
 }
 
@@ -10724,20 +10710,11 @@ pub(crate) mod tests {
         assert_eq!(states[0].name, "Todo", "in position order");
         let id = |as_| state_for(&states, as_).map(|s| s.id.as_str());
         assert_eq!(id(CloseAs::Done), Some("d1"));
-        assert_eq!(id(CloseAs::Canceled), Some("c1"));
-        assert_eq!(id(CloseAs::Duplicate), Some("c2"));
-        // No Duplicate state: Canceled. No state named Canceled: any
-        // canceled one that isn't the Duplicate.
-        let plain: Vec<LinearState> = states.iter().filter(|s| s.id != "c2").cloned().collect();
+        // No state named Done: the first completed one.
+        let plain: Vec<LinearState> = states.iter().filter(|s| s.id != "d1").cloned().collect();
         assert_eq!(
-            state_for(&plain, CloseAs::Duplicate).map(|s| s.id.as_str()),
-            Some("c1")
-        );
-        let odd: Vec<LinearState> = states.iter().filter(|s| s.id != "c1").cloned().collect();
-        assert_eq!(
-            state_for(&odd, CloseAs::Canceled),
-            None,
-            "never the Duplicate state"
+            state_for(&plain, CloseAs::Done).map(|s| s.id.as_str()),
+            Some("d0")
         );
         assert!(parse_team_states(&serde_json::json!({"errors": [{"message": "nope"}]})).is_err());
     }
