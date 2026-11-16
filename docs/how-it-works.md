@@ -607,15 +607,20 @@ When a pull request merges, orion harvests it, two ways:
   isn't read again: its noted rules are held to your words the same way, then each topic they touch
   is checked against the merged code and merged by one call.
 
-Once a week orion checks the rules again, but only on the topics whose files changed: it remembers
-the base commit each topic was last checked at, diffs the base since, and puts the topics whose
-`applies_to` paths changed to the model, one call an area. A rule that no longer holds moves to
-Replaced. Each step's model and effort is a setting (`knowledge.models`, see
+Once a week each topic's rules are checked again, but only when its files changed, and only by one
+person's orion. When each topic was last checked, and at which base commit, is kept in the repo
+(`checked.jsonl`), not on one machine. Once a day every orion on the project looks, using git alone:
+it reads that file from the base and from everyone's open knowledge branch, and skips any topic
+somebody checked in the last 7 days. For the rest it diffs the base since their last check and puts
+the topics whose `applies_to` paths changed to the model, one call an area. A rule that no longer
+holds moves to Replaced. The new dates go out on that person's knowledge branch straight away, so the
+next orion to look finds nothing due. Two people only repeat a check if their orions look within the
+same few minutes. Each step's model and effort is a setting (`knowledge.models`, see
 [Configuration](configuration.md)): Opus for the harvest and the weekly check, Sonnet at low effort
 for consolidating topics. Where it all lives:
 
 - **In the repo, `.orion/decisions/`.** orion owns only `harvested/`: `index.md` (at most 40 lines),
-  one `<area>/<topic>.md` page a topic and `entries.jsonl`, each file starting with an
+  one `<area>/<topic>.md` page a topic, `entries.jsonl` and `checked.jsonl`, each file starting with an
   `<!-- orion:harvested … -->` marker line. Every other file there is a decision record written by
   hand, in whatever layout the repo keeps them. orion never writes one (its writer refuses any path
   outside `harvested/`), gives them to the harvest's check as read-only context, and drops — or lists
@@ -628,7 +633,8 @@ for consolidating topics. Where it all lives:
   rebuilt from `entries.jsonl` on top of the base. The change is committed (`knowledge: harvest
   #<pr>`), that branch alone pushed with `--force-with-lease`, and its one pull request opened or
   its body updated: the PRs harvested and the new or changed rules, each credited to who decided it.
-  A backfill is one commit a batch of 10, and the weekly check one commit when it changed a page.
+  A backfill is one commit a batch of 10, and a staleness check one commit whenever it asked the
+  model.
 - **Merged after the daily card.** At 18:30 a card lists the rules recorded as yours since the last
   one, each with **Veto k**, plus **All fine** and the pull request's link; a veto takes the rule out
   on the branch and pushes. Two hours later — at once on All fine, or the next time orion runs after

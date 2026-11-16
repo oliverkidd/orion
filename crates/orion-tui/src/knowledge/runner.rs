@@ -52,8 +52,10 @@ const DAILY_MAX: usize = 20;
 pub(crate) const WINDOW_MS: i64 = 2 * 60 * 60 * 1000;
 /// How many times a merge that is refused is tried before a card says so.
 const MERGE_TRIES: u32 = 2;
-/// How often the staleness pass runs.
-const STALE_EVERY_MS: i64 = 7 * orion_core::clock::DAY_MS;
+/// How often orion looks for topics due a staleness check. Cheap: git
+/// alone, unless a topic nobody checked this week had its files change
+/// (`harvest::STALE_AFTER_DAYS`).
+const STALE_LOOK_MS: i64 = orion_core::clock::DAY_MS;
 /// How many times a harvest is tried.
 const ATTEMPTS: u32 = 2;
 /// Where the queue of every project was kept before each had its own.
@@ -132,11 +134,9 @@ pub(crate) struct State {
     pub window: Option<Window>,
     /// Merges refused since the window closed.
     pub merge_failures: u32,
-    /// The commit of the base each topic's rules were last checked at:
-    /// the weekly staleness pass checks a topic again only when its
-    /// files changed since (`harvest::staleness`).
-    pub checked: BTreeMap<String, String>,
-    /// Epoch ms the next weekly staleness pass is due; 0 until first seen.
+    /// Epoch ms the next look for topics due a staleness check is; 0
+    /// until first seen. When each topic was checked is kept in the repo
+    /// (`checked.jsonl`), shared by everyone's orion.
     pub stale_next: i64,
 }
 
@@ -518,17 +518,18 @@ fn note_sessions(app: &App) {
     }
 }
 
-/// Whether the weekly staleness pass is due at `now_ms`, moving the next
-/// one on a week when it is. The first sight of a project starts its week.
+/// Whether the daily look for stale topics is due at `now_ms`, moving the
+/// next one on a day when it is. The first sight of a project starts its
+/// day.
 pub(crate) fn stale_due(state: &mut State, now_ms: i64) -> bool {
     if state.stale_next == 0 {
-        state.stale_next = now_ms + STALE_EVERY_MS;
+        state.stale_next = now_ms + STALE_LOOK_MS;
         return false;
     }
     if now_ms < state.stale_next {
         return false;
     }
-    state.stale_next = now_ms + STALE_EVERY_MS;
+    state.stale_next = now_ms + STALE_LOOK_MS;
     true
 }
 
@@ -560,9 +561,13 @@ fn start_staleness(local: Local, root: PathBuf, project: String) {
     });
 }
 
-/// The weekly staleness pass: the topics whose files changed since their
-/// last check, checked again against the base as origin has it
-/// (`harvest::staleness`), and proposed when any page changed.
+/// The staleness pass: the topics nobody checked this week whose files
+/// changed since their last check, checked again against the base as
+/// origin has it (`harvest::staleness`). Who checked what is read from
+/// the branch (the base's `checked.jsonl` and this person's) and from
+/// everyone else's knowledge branch, so one person's orion makes each
+/// week's check and the rest find nothing due. A check that asked the
+/// model is proposed, its dates with it, whether or not a page changed.
 async fn run_staleness(local: &Local, root: &Path, project: &str) -> Result<Vec<String>, String> {
     let model = ClaudeCli::from_config()?;
     let at = root.to_path_buf();
@@ -584,14 +589,19 @@ async fn run_staleness(local: &Local, root: &Path, project: &str) -> Result<Vec<
             project,
             records: &records,
         };
-        let mut checked = State::load(local).checked;
-        let changed = harvest::staleness(&model, &to, &tree.path, &mut checked).await?;
-        State::update(local, |s| s.checked = checked);
-        if !changed.is_empty() {
+        let mut checked = store.checked();
+        store::merge_checked(
+            &mut checked,
+            share.others_checked(&branch).await.into_values(),
+        );
+        let today = chrono::Local::now().date_naive();
+        let out = harvest::staleness(&model, &to, &tree.path, &mut checked, today).await?;
+        if out.asked {
+            store.save_checked(&checked)?;
             let published = share.publish(&branch, "knowledge: staleness check").await?;
             note_published(local, &published);
         }
-        Ok(changed)
+        Ok(out.changed)
     }
     .await;
     tree.remove().await;
@@ -1265,15 +1275,16 @@ mod tests {
     }
 
     #[test]
-    fn the_staleness_pass_runs_weekly_from_first_sight() {
+    fn the_look_for_stale_topics_is_daily_from_first_sight() {
         let day = orion_core::clock::DAY_MS;
+        let hour = day / 24;
         let mut state = State::default();
-        assert!(!stale_due(&mut state, 1_000), "first sight starts the week");
-        assert_eq!(state.stale_next, 1_000 + 7 * day);
-        assert!(!stale_due(&mut state, 1_000 + 6 * day));
-        assert!(stale_due(&mut state, 1_000 + 7 * day));
-        assert_eq!(state.stale_next, 1_000 + 14 * day);
-        assert!(!stale_due(&mut state, 1_000 + 8 * day), "once a week");
+        assert!(!stale_due(&mut state, 1_000), "first sight starts the day");
+        assert_eq!(state.stale_next, 1_000 + day);
+        assert!(!stale_due(&mut state, 1_000 + 23 * hour));
+        assert!(stale_due(&mut state, 1_000 + day));
+        assert_eq!(state.stale_next, 1_000 + 2 * day);
+        assert!(!stale_due(&mut state, 1_000 + day + hour), "once a day");
     }
 
     #[test]

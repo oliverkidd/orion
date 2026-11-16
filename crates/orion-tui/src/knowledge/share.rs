@@ -22,6 +22,7 @@
 //! programs ([`SystemGit`], [`GhCli`]); a test hands in its own, so no
 //! test reaches a real remote.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -30,7 +31,7 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 use super::local::{Local, Lock};
-use super::store::{self, Entry, Store, ACTIVE, DIR, VETOED};
+use super::store::{self, Entry, Store, TopicCheck, ACTIVE, CHECKED_FILE, DIR, VETOED};
 use crate::pr_actions::MergeMethod;
 use crate::pull_request::{str_at, Checks};
 
@@ -371,6 +372,34 @@ impl Sharer<'_> {
             .collect()
     }
 
+    /// The staleness checks on everyone else's knowledge branch, not
+    /// merged yet: so a topic another person's orion checked this week
+    /// isn't checked again here before their pull request lands. Best
+    /// effort: a fetch that fails leaves only what was fetched before.
+    pub(crate) async fn others_checked(&self, branch: &Branch) -> BTreeMap<String, TopicCheck> {
+        let spec = format!("+refs/heads/{PREFIX}*:refs/remotes/origin/{PREFIX}*");
+        if let Err(why) = self.git(&["fetch", "-q", "--prune", "origin", &spec]).await {
+            tracing::info!("knowledge: couldn't fetch the other knowledge branches: {why}");
+        }
+        let refs = self
+            .git(&[
+                "for-each-ref",
+                "--format=%(refname)",
+                &format!("refs/remotes/origin/{PREFIX}*"),
+            ])
+            .await
+            .unwrap_or_default();
+        let own = format!("refs/remotes/origin/{}", branch.name);
+        let file = format!("{DIR}/{CHECKED_FILE}");
+        let mut all = BTreeMap::new();
+        for r in refs.lines().filter(|r| !r.is_empty() && *r != own) {
+            if let Some(text) = self.show(r, &file).await {
+                store::merge_checked(&mut all, store::read_checked(&text).into_values());
+            }
+        }
+        all
+    }
+
     /// After a rebase that conflicted: the branch made again on
     /// `origin/<base>`, its entries merged with the base's, and each page
     /// it changed taken as it was where the base left the page alone —
@@ -441,6 +470,15 @@ impl Sharer<'_> {
             .await
         {
             store.write(&store.dir.join(super::areas::FILE), &areas)?;
+        }
+        // Each topic's latest check, the base's or the branch's.
+        let checked_file = format!("{DIR}/{CHECKED_FILE}");
+        let mut checked = store.checked();
+        if let Some(mine) = self.show(&tip, &checked_file).await {
+            store::merge_checked(&mut checked, store::read_checked(&mine).into_values());
+        }
+        if !checked.is_empty() {
+            store.save_checked(&checked)?;
         }
         for (path, topic, mine, base_untouched) in pages {
             let text = match (base_untouched, mine) {
@@ -1010,6 +1048,68 @@ pub(crate) mod tests {
             .write_page(&e.topic, &store::render_page(&e.topic, &refs))
             .unwrap();
         store.write_index("app").unwrap();
+    }
+
+    fn checked(topic: &str, on: &str) -> TopicCheck {
+        TopicCheck {
+            topic: topic.into(),
+            commit: "abc".into(),
+            on: on.into(),
+        }
+    }
+
+    /// One person's staleness check, pushed on their branch, is seen by
+    /// everyone else's orion before it merges; their own branch isn't
+    /// read back as someone else's.
+    #[tokio::test]
+    async fn a_check_on_another_persons_branch_is_seen_before_it_merges() {
+        let w = World::new();
+        let git = LocalGit::default();
+        let ann = FakeGh::new("ann");
+        let share = w.sharer(&git, &ann);
+        let branch = share.open().await.unwrap();
+        let store = branch.store();
+        harvest_into(&store, &entry("k12-1", 12, "auth/login", "owner"));
+        let mine: BTreeMap<String, TopicCheck> = [checked("auth/login", "2026-11-16")]
+            .into_iter()
+            .map(|c| (c.topic.clone(), c))
+            .collect();
+        store.save_checked(&mine).unwrap();
+        ann.on("pr list", Ok("[]"));
+        ann.on("pr create", Ok("https://github.com/o/app/pull/77\n"));
+        share
+            .publish(&branch, "knowledge: staleness check")
+            .await
+            .unwrap();
+        assert!(share.others_checked(&branch).await.is_empty(), "ann's own");
+        drop(branch);
+
+        let bob_world = World {
+            tmp: tempfile::tempdir().unwrap(),
+            origin: w.origin.clone(),
+            main: w.main.clone(),
+            local: Local::at("01P", &w.tmp.path().join("data-bob/knowledge/01P")),
+        };
+        let bob = FakeGh::new("bob");
+        let share = bob_world.sharer(&git, &bob);
+        let branch = share.open().await.unwrap();
+        assert_eq!(share.others_checked(&branch).await, mine);
+    }
+
+    /// A rebuild keeps each topic's latest check, the base's or the
+    /// branch's.
+    #[test]
+    fn of_two_checks_of_a_topic_the_later_wins() {
+        let mut all = store::read_checked(
+            "<!-- marker -->\n{\"topic\":\"a/b\",\"commit\":\"abc\",\"on\":\"2026-11-09\"}\n",
+        );
+        store::merge_checked(
+            &mut all,
+            [checked("a/b", "2026-11-16"), checked("c/d", "2026-11-01")],
+        );
+        store::merge_checked(&mut all, [checked("a/b", "2026-11-10")]);
+        assert_eq!(all["a/b"].on, "2026-11-16");
+        assert_eq!(all["c/d"].on, "2026-11-01");
     }
 
     #[test]

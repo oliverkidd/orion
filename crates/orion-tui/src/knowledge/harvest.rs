@@ -37,7 +37,7 @@ use super::condense::Line;
 use super::guards;
 use super::local::Local;
 use super::share::Gh;
-use super::store::{self, Entry, Store, ACTIVE, DROPPED, SECTIONS};
+use super::store::{self, Entry, Store, TopicCheck, ACTIVE, DROPPED, SECTIONS};
 use super::{KnowledgeModels, Step};
 use crate::oneshot::{self, Account};
 
@@ -1139,23 +1139,54 @@ fn named_paths(entries: &[&Entry]) -> Vec<String> {
     paths
 }
 
-/// The staleness pass, weekly: only the topics whose `applies_to` paths
-/// changed since the topic was last checked are checked again, against
-/// the code at `code` (the base as origin has it, [`CheckTree::of_base`]).
-/// `checked` holds the commit each topic was last checked at, and is
-/// moved on to `code`'s for every topic found current; a topic never
-/// checked counts from its newest entry. The changed topics go one call
-/// an area; a rule that no longer holds moves to Replaced. Not committed
-/// (the caller does). The topics whose pages changed.
+/// What a staleness pass did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Staleness {
+    /// The topics whose pages changed.
+    pub changed: Vec<String>,
+    /// Whether the model was asked about any area: a check worth sharing.
+    pub asked: bool,
+}
+
+/// How long a topic's check holds before its changed files are checked
+/// again, whoever's orion made it.
+pub(crate) const STALE_AFTER_DAYS: i64 = 7;
+
+/// The staleness pass: only the topics whose `applies_to` paths changed
+/// since the topic was last checked are checked again, against the code
+/// at `code` (the base as origin has it, [`CheckTree::of_base`]), and a
+/// topic anyone checked in the last [`STALE_AFTER_DAYS`] isn't looked at.
+/// `checked` is the shared record (`checked.jsonl`, merged with the
+/// other knowledge branches'): the commit and date each topic was last
+/// checked, moved on to `code`'s commit and `today` for every topic
+/// found current; a topic never checked counts from its newest entry.
+/// The changed topics go one call an area; a rule that no longer holds
+/// moves to Replaced. Not committed (the caller does).
 pub(crate) async fn staleness(
     model: &dyn Model,
     to: &Target<'_>,
     code: &Path,
-    checked: &mut BTreeMap<String, String>,
-) -> Result<Vec<String>, String> {
+    checked: &mut BTreeMap<String, TopicCheck>,
+    today: chrono::NaiveDate,
+) -> Result<Staleness, String> {
     let store = to.store;
     let git = |args: &[&str]| crate::git_proc::read(code, args).map(|out| out.trim().to_string());
     let head = git(&["rev-parse", "HEAD"])?;
+    let on = today.format("%Y-%m-%d").to_string();
+    let mark = |checked: &mut BTreeMap<String, TopicCheck>, topic: &str| {
+        checked.insert(
+            topic.to_string(),
+            TopicCheck {
+                topic: topic.to_string(),
+                commit: head.clone(),
+                on: on.clone(),
+            },
+        );
+    };
+    let fresh = |c: &TopicCheck| {
+        chrono::NaiveDate::parse_from_str(&c.on, "%Y-%m-%d")
+            .is_ok_and(|then| (today - then).num_days() < STALE_AFTER_DAYS)
+    };
     let topics = store.topics();
     checked.retain(|topic, _| topics.contains(topic));
     let mut entries = store.entries();
@@ -1168,7 +1199,7 @@ pub(crate) async fn staleness(
             .filter(|e| e.topic == topic && e.status == ACTIVE)
             .collect();
         let paths = named_paths(&on);
-        if paths.is_empty() {
+        if paths.is_empty() || checked.get(&topic).is_some_and(fresh) {
             continue;
         }
         let newest = on
@@ -1176,14 +1207,14 @@ pub(crate) async fn staleness(
             .map(|e| e.recorded_at.as_str())
             .max()
             .unwrap_or("");
-        let from = checked.get(&topic).cloned().or_else(|| {
+        let from = checked.get(&topic).map(|c| c.commit.clone()).or_else(|| {
             (!newest.is_empty())
                 .then(|| git(&["rev-list", "-1", &format!("--before={newest}"), "HEAD"]).ok())
                 .flatten()
                 .filter(|rev| !rev.is_empty())
         });
         let Some(from) = from else {
-            checked.insert(topic, head.clone());
+            mark(checked, &topic);
             continue;
         };
         let files = diffs
@@ -1198,7 +1229,7 @@ pub(crate) async fn staleness(
             tracing::info!(
                 "knowledge: staleness can't diff {topic} from {from}; checked from now on"
             );
-            checked.insert(topic, head.clone());
+            mark(checked, &topic);
             continue;
         };
         let touched: Vec<String> = files
@@ -1207,9 +1238,7 @@ pub(crate) async fn staleness(
             .cloned()
             .collect();
         match touched.is_empty() {
-            true => {
-                checked.insert(topic, head.clone());
-            }
+            true => mark(checked, &topic),
             false => {
                 let area = topic.split('/').next().unwrap_or_default().to_string();
                 due.entry(area).or_default().push((topic, page, touched));
@@ -1218,6 +1247,7 @@ pub(crate) async fn staleness(
     }
 
     let mut changed = Vec::new();
+    let asked = !due.is_empty();
     for (area, topics) in &due {
         let mut prompt = format!("{}\n\nArea: {area}\n", records_part(to.records));
         for (topic, page, files) in topics {
@@ -1270,14 +1300,14 @@ pub(crate) async fn staleness(
                 store.write_page(topic, &page)?;
                 changed.push(topic.clone());
             }
-            checked.insert(topic.clone(), head.clone());
+            mark(checked, topic);
         }
     }
     if !changed.is_empty() {
         store.save_entries(&entries)?;
         store.write_index(to.project)?;
     }
-    Ok(changed)
+    Ok(Staleness { changed, asked })
 }
 
 // ---- the checkout a check reads ----
@@ -2359,6 +2389,7 @@ pub(crate) mod tests {
                 entry("k4-1", "charts/axes", &["the axis labels"]),
                 // Never checked, recorded after the change: current.
                 entry("k5-1", "charts/series", &["src/auth.ts"]),
+                entry("k6-1", "editor/fresh", &["src/auth.ts"]),
             ])
             .unwrap();
         let page = |topic: &str, id: &str| {
@@ -2370,14 +2401,26 @@ pub(crate) mod tests {
             ("editor/billing", "k3-1"),
             ("charts/axes", "k4-1"),
             ("charts/series", "k5-1"),
+            ("editor/fresh", "k6-1"),
         ] {
             store.write_page(topic, &page(topic, id)).unwrap();
         }
-        let mut checked: BTreeMap<String, String> =
-            ["editor/login", "editor/redirects", "editor/billing"]
-                .iter()
-                .map(|t| (t.to_string(), first.clone()))
-                .collect();
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
+        let checked_at = |topic: &str, commit: &str, on: &str| TopicCheck {
+            topic: topic.into(),
+            commit: commit.into(),
+            on: on.into(),
+        };
+        let mut checked: BTreeMap<String, TopicCheck> = [
+            checked_at("editor/login", &first, "2026-11-01"),
+            checked_at("editor/redirects", &first, "2026-11-01"),
+            checked_at("editor/billing", &first, "2026-11-01"),
+            // Someone else's orion checked it three days ago.
+            checked_at("editor/fresh", &first, "2026-11-13"),
+        ]
+        .into_iter()
+        .map(|c| (c.topic.clone(), c))
+        .collect();
 
         let reply = json!({"pages": {
             "editor/login": "# editor/login\nScope: editor/login\n\n## Rules in force\n\n## Constraints\n\n## Open questions\n\n## Replaced\n- Rule k1-1 (#1): returnPath is gone <!-- k1-1 -->\n",
@@ -2385,10 +2428,11 @@ pub(crate) mod tests {
         }, "dropped": [{"id": "k1-1", "why": "returnPath is gone"}]})
         .to_string();
         let model = Scripted::new(vec![reply]);
-        let changed = staleness(&model, &into.target(""), dir, &mut checked)
+        let out = staleness(&model, &into.target(""), dir, &mut checked, today)
             .await
             .unwrap();
-        assert_eq!(changed, vec!["editor/login"]);
+        assert_eq!(out.changed, vec!["editor/login"]);
+        assert!(out.asked);
 
         let asked = std::mem::take(&mut *model.asked.lock().unwrap());
         assert_eq!(
@@ -2403,7 +2447,12 @@ pub(crate) mod tests {
             .prompt
             .contains("### editor/login\nFiles changed since its last check: src/auth.ts\n"));
         assert!(ask.prompt.contains("### editor/redirects\n"));
-        for unchanged in ["editor/billing", "charts/axes", "charts/series"] {
+        for unchanged in [
+            "editor/billing",
+            "charts/axes",
+            "charts/series",
+            "editor/fresh",
+        ] {
             assert!(
                 !ask.prompt.contains(unchanged),
                 "{unchanged} wasn't asked about"
@@ -2425,7 +2474,7 @@ pub(crate) mod tests {
         ] {
             assert_eq!(
                 checked.get(topic),
-                Some(&head),
+                Some(&checked_at(topic, &head, "2026-11-16")),
                 "{topic} is checked as of now"
             );
         }
@@ -2434,13 +2483,19 @@ pub(crate) mod tests {
             None,
             "no files named: never checked"
         );
+        assert_eq!(
+            checked.get("editor/fresh"),
+            Some(&checked_at("editor/fresh", &first, "2026-11-13")),
+            "a check made this week holds, whoever made it"
+        );
 
-        // Nothing changed since: no call at all.
+        // Another orion looking the same day, with this record: no call
+        // at all, so nothing to share.
         let model = Scripted::new(Vec::new());
-        let changed = staleness(&model, &into.target(""), dir, &mut checked)
+        let out = staleness(&model, &into.target(""), dir, &mut checked, today)
             .await
             .unwrap();
-        assert!(changed.is_empty());
+        assert_eq!(out, Staleness::default());
         assert!(model.asked.lock().unwrap().is_empty());
     }
 

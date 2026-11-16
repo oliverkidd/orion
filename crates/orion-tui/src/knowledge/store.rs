@@ -10,13 +10,17 @@
 //!   ([`SECTIONS`]), its scope line short and naming no files
 //!   ([`short_scope`]), each rule ending in a hidden `<!-- k… -->` list
 //!   of the entries it stands on, so a veto can take one out;
-//! - `entries.jsonl`: every entry ever extracted, with its status.
+//! - `entries.jsonl`: every entry ever extracted, with its status;
+//! - `checked.jsonl`: the commit and date each topic was last checked
+//!   against the code, so the weekly staleness check one person's orion
+//!   ran spares everyone else's ([`TopicCheck`]).
 //!
 //! Every file orion writes starts with [`MARKER`]. orion owns only
 //! [`DIR`]: everything else under [`DECISIONS`] is a hand-written record,
 //! read-only to orion ([`Store::write`] refuses any path outside). The
 //! condensed dossiers stay on this machine (`super::local`).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -197,6 +201,25 @@ impl Store {
         self.write(&self.entries_path(), &render_entries(all)?)
     }
 
+    pub(crate) fn checked_path(&self) -> PathBuf {
+        self.dir.join(CHECKED_FILE)
+    }
+
+    /// When each topic was last checked against the code, by anyone.
+    pub(crate) fn checked(&self) -> BTreeMap<String, TopicCheck> {
+        read_checked(&std::fs::read_to_string(self.checked_path()).unwrap_or_default())
+    }
+
+    /// Write `all` as the whole of `checked.jsonl`, a topic a line.
+    pub(crate) fn save_checked(&self, all: &BTreeMap<String, TopicCheck>) -> Result<(), String> {
+        let mut text = String::new();
+        for one in all.values() {
+            text.push_str(&serde_json::to_string(one).map_err(|e| e.to_string())?);
+            text.push('\n');
+        }
+        self.write(&self.checked_path(), &text)
+    }
+
     /// Every topic with a page, sorted.
     pub(crate) fn topics(&self) -> Vec<String> {
         let mut topics = Vec::new();
@@ -354,6 +377,46 @@ pub(crate) fn unmarked(text: &str) -> &str {
     match text.strip_prefix(MARKER) {
         Some(rest) => rest.strip_prefix('\n').unwrap_or(rest),
         None => text,
+    }
+}
+
+/// `checked.jsonl`, beside the pages.
+pub(crate) const CHECKED_FILE: &str = "checked.jsonl";
+
+/// When a topic's rules were last checked against the code: the base
+/// commit they were checked at, and the local date (`YYYY-MM-DD`) of the
+/// check. Kept in the repo, not on one machine, so every orion on the
+/// project sees a check any of them made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TopicCheck {
+    pub topic: String,
+    pub commit: String,
+    pub on: String,
+}
+
+/// `checked.jsonl`'s text, by topic: a line that doesn't read is skipped,
+/// and of two lines for one topic the later check wins.
+pub(crate) fn read_checked(text: &str) -> BTreeMap<String, TopicCheck> {
+    let mut all = BTreeMap::new();
+    merge_checked(
+        &mut all,
+        text.lines().filter_map(|l| serde_json::from_str(l).ok()),
+    );
+    all
+}
+
+/// Fold `more` into `into`, keeping each topic's latest check.
+pub(crate) fn merge_checked(
+    into: &mut BTreeMap<String, TopicCheck>,
+    more: impl IntoIterator<Item = TopicCheck>,
+) {
+    for one in more {
+        match into.get(&one.topic) {
+            Some(held) if held.on >= one.on => {}
+            _ => {
+                into.insert(one.topic.clone(), one);
+            }
+        }
     }
 }
 
