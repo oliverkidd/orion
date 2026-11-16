@@ -1,0 +1,24 @@
+crates/orion-tui/src/automations/linear_builder.rs
+  s_0ea5bf705342bd::t_687182196f4b9d 1255-1266,1792-1796,1809-1813,1821-1825,1867-1874,1890-1898,1945-1948,1952-1955,2010-2014
+  s_0ea5bf705342bd::t_101f37da509f1b 544-547,736-738,744,792,794,848-850,885,889-890,892,1159,1162,1168-1172,1176-1177,1182-1185,1228-1237,1239-1240,1242,1245-1247,1252,1267-1323,1325-1326,1334-1335,1347-1354,1360
+  s_0ea5bf705342bd::t_2133d972b91db6 1791,1798,1802,1804-1808,1819,1826-1866,1875-1889,1899-1911,1913-1944,1949-1951,1956-2009,2015-2065,2613,4085,4088,4090-4091,4093
+  s_0ea5bf705342bd::t_b09e7c7c6e964a 1820
+crates/orion-tui/src/automations/linear_builder/intake.rs
+  s_0ea5bf705342bd::t_d5ce3042b9b992 18-27,252-253,261,326-434,436-437,439-442,444-478
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "935dc9572ae2c2b229a3bbad5a00b2238a47b011",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
