@@ -1,0 +1,33 @@
+crates/orion-tui/src/knowledge/runner.rs
+  s_0ea5bf705342bd::t_9f308558419576 55-56,135-140,521-600,636,647-648,657-660
+  s_0ea5bf705342bd::t_1fe9ca9e96bbfc 1268-1278
+  s_0ea5bf705342bd::t_7543a208a8b848 1267
+crates/orion-tui/src/knowledge/read.rs
+  s_0ea5bf705342bd::t_154df8057fe5ca 133
+crates/orion-tui/src/knowledge/backfill.rs
+  s_0ea5bf705342bd::t_a7376b16746501 9-12,319-320
+crates/orion-tui/src/knowledge/harvest.rs
+  s_0ea5bf705342bd::t_8c31289b9e4c4f 1268-1269
+  s_0ea5bf705342bd::t_ee38d717a8ed72 1159-1160,1174-1178,1189-1191,1196,1198-1200,1251-1253,1260-1263,2326-2335,2376-2380,2394-2398,2402-2404,2407-2410,2416-2430,2432-2436
+  s_0ea5bf705342bd::t_154df8057fe5ca 158-164,448-449,457-475,484,493,1127-1149,1154,1157-1158,1162-1173,1179-1188,1192-1195,1197,1201-1236,1238-1239,1241,1245-1250,1254-1259,1264-1266,1270-1273,1276-1279
+  s_0ea5bf705342bd::t_1fe9ca9e96bbfc 2312-2325,2336-2375,2381-2392,2399-2401,2405-2406,2411-2415,2431,2437-2446
+  s_0ea5bf705342bd::t_7da8a0360bd18e 2393
+crates/orion/src/cli.rs
+  s_0ea5bf705342bd::t_df32af576e97b7 492-495,511
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0a0bfa069d875b98fc3cfc22a4f5d9db6ec14ece",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
