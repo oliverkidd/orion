@@ -1,0 +1,51 @@
+docs/configuration.md
+  s_0ea5bf705342bd::t_72d1d4ab1adbbd 144-147,543
+docs/how-it-works.md
+  s_0ea5bf705342bd::t_72d1d4ab1adbbd 342-345
+docs/sessions.md
+  s_0ea5bf705342bd::t_72d1d4ab1adbbd 747-756
+crates/orion-daemon/src/store.rs
+  s_0ea5bf705342bd::t_48ee0838ac7d39 1332-1333,1886
+  s_0ea5bf705342bd::t_46a578e2b9141b 444-454,1292-1293,1295-1300,1306-1331,1334-1350,2280
+  s_0ea5bf705342bd::t_84e38746ca51ad 1352,1850-1885,1887-1891
+  s_0ea5bf705342bd::t_2ba626fc203b04 1351,1353
+crates/orion-daemon/src/away.rs
+  s_0ea5bf705342bd::t_73b1d51340b5b5 3-5
+  s_0ea5bf705342bd::t_c821206b16e671 2,81-83,87-88,118,122-126
+  s_0ea5bf705342bd::t_605f921caf2d71 127-128
+crates/orion-tui/src/factory/cards.rs
+  s_0ea5bf705342bd::t_dbdc3086347220 237-240,256-261
+  s_0ea5bf705342bd::t_ad44406539892a 7-15,57,169-179,202-236,241-255,262-276
+  s_0ea5bf705342bd::t_6ac610ece04b73 277
+crates/orion-daemon/src/factory.rs
+  s_0ea5bf705342bd::t_695e9cb5143b37 614-648
+  s_0ea5bf705342bd::t_2c9868c2b1bef6 37-47,267-286,316,318-332,339-350,353-379
+  s_0ea5bf705342bd::t_2730854effff0c 351-352
+  s_0ea5bf705342bd::t_454188ee4cf5ff 613
+crates/orion-daemon/src/phone.rs
+  s_0ea5bf705342bd::t_c821206b16e671 971-973
+crates/orion-tui/src/ui/launcher_view.rs
+  s_0ea5bf705342bd::t_5c7a4b21e7c1cc 32-37,1828,1833-1839,2348-2356,2367-2368,2376-2377
+crates/orion-tui/src/automations/linear_builder.rs
+  s_0ea5bf705342bd::t_732ee6aba317c6 3012-3074
+crates/orion-tui/src/needs_you/factory.rs
+  s_0ea5bf705342bd::t_ea2882d5cc915c 2-6
+docs/2026-11-14-software-factory/software-factory.md
+  s_0ea5bf705342bd::t_20bbb462654b6c 34
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "51166565349ccaeb3f5c729769565b6194004fc0",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
