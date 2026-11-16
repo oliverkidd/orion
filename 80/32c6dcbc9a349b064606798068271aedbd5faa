@@ -1,0 +1,47 @@
+crates/orion-tui/src/pr_body/rows.rs
+  s_0ea5bf705342bd::t_534586175c7ced 1-26,28-29,31-102,104-107,109-825
+  s_0ea5bf705342bd::t_16da7c4dba50ee 103
+  s_0ea5bf705342bd::t_1a8c5d1e3e10f1 27,30,108
+crates/orion-tui/src/pr_body/render.rs
+  s_0ea5bf705342bd::t_d8205e52524910 5-13,15-19,22,43,50,54-66,128-133,135-142
+  s_0ea5bf705342bd::t_38f1e05382f128 151,163,179-201,209,211-218,220-221,224-225,229-246,249-250,254-257,262,270-272,275,285,290,295-299,304-309
+docs/factory-template/automation.md
+  s_0ea5bf705342bd::t_b24589f97404ec 53,57
+crates/orion-tui/src/pr_body/facts.rs
+  s_0ea5bf705342bd::t_1a8c5d1e3e10f1 217-218
+  s_0ea5bf705342bd::t_ad648f8526b6eb 226-233,235-248,259-264,267-283
+  s_0ea5bf705342bd::t_505529d09bc195 378,385,387,419-476
+  s_0ea5bf705342bd::t_d14b7fcd7507ec 11-17,29-35,48-50,60-69,77,86,88-89,93-97,108-110,116-122,126-157,163,187-192,196-199,205,209-212,219-225,234,249-258,265-266
+  s_0ea5bf705342bd::t_16b8300d1b47f6 284,477
+crates/orion-tui/src/pr_body/pictures.rs
+  s_0ea5bf705342bd::t_a601872fcaba2d 17-22,86-104,109,111-113,142,148-149,153,333-366
+  s_0ea5bf705342bd::t_2a037d6a10f706 367
+crates/orion-tui/src/pr_body/verdict.rs
+  s_0ea5bf705342bd::t_112a4b776b5ee0 7,15-17,92,130-131,136-149,186-187,189-190,192-193,200-207,239,267-276,281-290,294,298,303,306-308,362-365,395,624-641,800-802,813,819-822
+docs/2026-11-14-software-factory/software-factory.md
+  s_0ea5bf705342bd::t_b24589f97404ec 30,177-181,184-185,198-213,354
+crates/orion-tui/src/pr_body/mod.rs
+  s_0ea5bf705342bd::t_114a446713f69a 639-641,743-754,780,786-793,795-833,835-839,930-931,953,1033-1034,1038,1043-1050,1052,1054,1056-1060,1096-1103,1130
+  s_0ea5bf705342bd::t_5079ea19cf9ef7 32,950-952
+  s_0ea5bf705342bd::t_4517626897e534 1444-1458,1472,1481-1486,1544,1660-1790,1803-1810,1812-1819,1825-1832,1834-1841,1843-1850,1856-1863,1883-1890
+  s_0ea5bf705342bd::t_94a7a0f4c001a2 30-31
+  s_0ea5bf705342bd::t_32241a12e5a0ce 25-29,58
+  s_0ea5bf705342bd::t_81f847d92ae072 33-36
+  s_0ea5bf705342bd::t_3b392660fe18bc 184-186
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8032c6dcbc9a349b064606798068271aedbd5faa",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
