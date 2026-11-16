@@ -55,9 +55,63 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context as _, Result};
 
+use crate::oneshot::ModelChoice;
+
 pub(crate) use read::prompt_context;
 pub(crate) use records::Checkout;
 pub(crate) use runner::{merge_landed, on_action, tick};
+
+/// `knowledge` in `config.json`: what each background step asks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct KnowledgeSettings {
+    pub models: KnowledgeModels,
+}
+
+/// `knowledge.models`: the model and effort of each step that asks one
+/// ([`Step`]). An unset part is the step's default ([`Step::default_model`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct KnowledgeModels {
+    /// A merged pull request's harvest, and the check of a factory pull
+    /// request's noted rules.
+    pub harvest: ModelChoice,
+    /// Merging topics down, and their pages into one.
+    pub consolidate: ModelChoice,
+    /// The weekly re-check of the topics whose files changed.
+    pub staleness: ModelChoice,
+}
+
+/// A step of the knowledge work that asks a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Step {
+    Harvest,
+    Consolidate,
+    Staleness,
+}
+
+impl Step {
+    /// What the step asks at out of the box. The harvest stays on Opus:
+    /// cheaper models invent rules, or loosen the owner's.
+    pub(crate) fn default_model(self) -> ModelChoice {
+        match self {
+            Step::Harvest | Step::Staleness => ModelChoice::new("opus", "high"),
+            Step::Consolidate => ModelChoice::new("sonnet", "low"),
+        }
+    }
+}
+
+impl KnowledgeModels {
+    /// The model and effort `step` asks at: as set, else its default.
+    pub(crate) fn of(&self, step: Step) -> ModelChoice {
+        let set = match step {
+            Step::Harvest => &self.harvest,
+            Step::Consolidate => &self.consolidate,
+            Step::Staleness => &self.staleness,
+        };
+        set.or(&step.default_model())
+    }
+}
 
 /// The main checkout of the repo `dir` is in (a worktree's included).
 fn main_checkout(dir: &Path) -> Result<PathBuf> {

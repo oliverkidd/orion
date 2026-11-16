@@ -5,6 +5,7 @@
 //! none of them behaves as Settings › Factory describes.
 
 use super::Automation;
+use crate::oneshot::ModelChoice;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -46,7 +47,16 @@ pub struct AutomationsSettings {
     /// account** ([`super::account`]). None is the default agent's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// The model a ticket's intake asks — one call for a look's new
+    /// tickets, matching them to live sessions, routing and grouping them
+    /// (`super::linear_builder::intake`). Unset parts are
+    /// [`INTAKE_MODEL`]'s.
+    pub intake_model: ModelChoice,
 }
+
+/// What a ticket's intake asks at, out of the box: it sorts tickets, and
+/// needs no more.
+pub const INTAKE_MODEL: (&str, &str) = ("haiku", "low");
 
 /// End-to-end tests on this machine, for every automation agent: never
 /// (CI runs them on the pull request), or only the specs that cover the
@@ -94,6 +104,7 @@ impl Default for AutomationsSettings {
             local_e2e: LocalE2e::default(),
             attention_cap: DEFAULT_ATTENTION_CAP,
             account: None,
+            intake_model: ModelChoice::default(),
         }
     }
 }
@@ -153,6 +164,13 @@ impl Whose {
 }
 
 impl AutomationsSettings {
+    /// The model and effort a ticket's intake asks at: as set, else
+    /// [`INTAKE_MODEL`].
+    pub fn intake_model(&self) -> ModelChoice {
+        self.intake_model
+            .or(&ModelChoice::new(INTAKE_MODEL.0, INTAKE_MODEL.1))
+    }
+
     /// `which`'s settings as they read: its entry, or the defaults.
     pub fn of(&self, which: Automation) -> PerAutomation {
         self.per.get(which.id()).cloned().unwrap_or_default()

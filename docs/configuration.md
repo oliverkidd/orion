@@ -278,6 +278,10 @@ These have no row.
 | `seen_version` | `""` | The release this machine last showed **What's new** for. Kept in `config.local.json`. |
 | `factory.auto_merge` | `false` | A factory pull request (one the bug fixer or the feature builder opened) whose verdict is **Merge** merges on its own, once its checks have settled, instead of waiting for your tap on its card. Marked ready first if it is a draft. |
 | `factory.knowledge_auto_merge` | `true` | orion merges its own knowledge pull request (`orion/knowledge-<login>`, the rules it harvested at merge) once the daily card's veto window has passed: two hours after the card, at once on **All fine**. It merges only a pull request GitHub says is mergeable, with no failing check (a running one is waited for) and the head orion last pushed, by the project's merge method, never forced; a merge refused twice is said on a card. `false` leaves the merge to you. See [Knowledge](how-it-works.md#knowledge). |
+| `knowledge.models.harvest` | `{"model": "opus", "effort": "high"}` | The model and effort of a merged pull request's harvest (one call that extracts the rules, checks them against the code and writes the topic pages) and of the check of a factory pull request's noted rules. Kept on Opus: cheaper models invent rules or loosen the owner's. Either part left out is its default. See [Knowledge](how-it-works.md#knowledge). |
+| `knowledge.models.consolidate` | `{"model": "sonnet", "effort": "low"}` | The model and effort that merge the topics down (`orion knowledge consolidate`, and a harvest that takes them past 60) and write a merged topic's page. |
+| `knowledge.models.staleness` | `{"model": "opus", "effort": "high"}` | The model and effort of the weekly re-check of the topics whose files changed: one call an area. |
+| `automations.intake_model` | `{"model": "haiku", "effort": "low"}` | The model and effort of a ticket's intake: one call for a look's new tickets, which matches them to live sessions, routes them to a project and groups them. |
 
 ## Claude accounts
 

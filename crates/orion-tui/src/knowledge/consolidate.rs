@@ -2,7 +2,8 @@
 //! agent finds the right page. At most about [`TOPIC_CAP`] topics in
 //! all, and about [`AREA_CAP`] an area.
 //!
-//! One Opus call an area ([`ask_area`]) is given the area's topics and
+//! One call an area ([`ask_area`], on Sonnet at low effort unless
+//! `knowledge.models.consolidate` says otherwise) is given the area's topics and
 //! their rules, and maps each old topic to a new one, merging near
 //! duplicates. orion then rewrites the entries' topics, makes each merged
 //! page through the check-and-merge (its rules deduplicated, citing every
@@ -22,6 +23,7 @@ use serde_json::Value;
 use super::areas::Areas;
 use super::harvest::{self, Checked, Model, ModelAsk, Target};
 use super::store::{self, Entry, ACTIVE, SECTIONS};
+use super::Step;
 
 /// The most topics there should be, in all.
 pub(crate) const TOPIC_CAP: usize = 60;
@@ -110,6 +112,7 @@ async fn ask_area(
             prompt,
             cwd: None,
             read_tools: false,
+            step: Step::Consolidate,
         },
         |v| v.get("topics").is_some_and(Value::is_object),
     )
@@ -176,6 +179,7 @@ async fn merge_pages(
         prompt,
         cwd: None,
         read_tools: false,
+        step: Step::Consolidate,
     };
     let Checked { page, .. } = harvest::ask_page(model, ask, topic, scope).await?;
     Ok(keep_every_id(&page, pages))
@@ -604,6 +608,15 @@ mod tests {
             model.asked.lock().unwrap().len(),
             2,
             "one call for the area with three topics, one merge; none for testing-and-ci's one"
+        );
+        assert!(
+            model
+                .asked
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|ask| ask.step == Step::Consolidate),
+            "both on the consolidation's model"
         );
 
         // The entries' topics are rewritten.

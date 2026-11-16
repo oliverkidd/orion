@@ -1362,6 +1362,9 @@ pub struct Config {
     /// `factory.auto_merge` (`crate::pr_body`) and
     /// `factory.knowledge_auto_merge` (`crate::knowledge`).
     pub factory: crate::pr_body::FactorySettings,
+    /// `knowledge.models`: what each knowledge step asks
+    /// (`crate::knowledge::KnowledgeSettings`).
+    pub knowledge: crate::knowledge::KnowledgeSettings,
     /// Keys the files held that this build could not read; they loaded as
     /// defaults. Never written: [`Config::save`] reads it to leave those
     /// stored values alone — most likely a newer orion's — unless the
@@ -1591,6 +1594,7 @@ impl Default for Config {
             inbox: InboxSettings::default(),
             automations: Default::default(),
             factory: Default::default(),
+            knowledge: Default::default(),
             skipped: BTreeSet::new(),
         }
     }

@@ -14,6 +14,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::agent_presets::AgentPreset;
 use crate::config::Config;
@@ -57,6 +58,38 @@ pub struct Ask {
     pub effort: String,
     /// How long the model may take before the ask fails as timed out.
     pub timeout: Duration,
+}
+
+/// The model a background step asks, and how hard it thinks: a setting
+/// (`knowledge.models.*`, `automations.intake_model`) as
+/// `{"model": "opus", "effort": "high"}`. Either left out, or empty, is
+/// the step's own default ([`ModelChoice::or`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelChoice {
+    pub model: String,
+    pub effort: String,
+}
+
+impl ModelChoice {
+    pub fn new(model: &str, effort: &str) -> Self {
+        ModelChoice {
+            model: model.into(),
+            effort: effort.into(),
+        }
+    }
+
+    /// This choice, each part that is unset taken from `default`.
+    pub fn or(&self, default: &ModelChoice) -> ModelChoice {
+        let pick = |own: &str, fallback: &str| match own.trim() {
+            "" => fallback.to_string(),
+            own => own.to_string(),
+        };
+        ModelChoice {
+            model: pick(&self.model, &default.model),
+            effort: pick(&self.effort, &default.effort),
+        }
+    }
 }
 
 /// What [`run`] got back.

@@ -28,11 +28,9 @@ use super::guards;
 use super::local::Local;
 use super::share::Gh;
 use super::store::{self, Entry, Store, ACTIVE, DROPPED, SECTIONS};
+use super::{KnowledgeModels, Step};
 use crate::oneshot::{self, Account};
 
-/// The model a harvest asks, and how hard it thinks.
-pub(crate) const MODEL: &str = "opus";
-pub(crate) const EFFORT: &str = "high";
 /// The tools a check may read code with, and nothing else.
 const READ_TOOLS: &str = "Read,Grep,Glob";
 /// How long one ask may take: a big dossier, or a check reading code.
@@ -131,6 +129,9 @@ pub(crate) struct ModelAsk {
     pub cwd: Option<PathBuf>,
     /// Read, Grep and Glob allowed — and nothing else.
     pub read_tools: bool,
+    /// The step it is: which model and effort answer it
+    /// (`knowledge.models`).
+    pub step: Step,
 }
 
 /// The model a harvest asks: the Claude CLI, or a test's stand-in.
@@ -139,9 +140,11 @@ pub(crate) trait Model: Send + Sync {
     fn ask(&self, ask: ModelAsk) -> BoxFuture<'_, Result<String, String>>;
 }
 
-/// The Claude CLI, in print mode, on one of the accounts orion runs.
+/// The Claude CLI, in print mode, on one of the accounts orion runs, at
+/// each step's model and effort.
 pub(crate) struct ClaudeCli {
     pub account: Account,
+    pub models: KnowledgeModels,
 }
 
 impl ClaudeCli {
@@ -158,7 +161,24 @@ impl ClaudeCli {
         if !crate::config::program_installed(&account.program) {
             return Err(format!("{} is not on your PATH", account.program));
         }
-        Ok(ClaudeCli { account })
+        Ok(ClaudeCli {
+            account,
+            models: cfg.knowledge.models,
+        })
+    }
+
+    /// `ask` as the CLI is asked it: on the account, at its step's model
+    /// and effort.
+    pub(crate) fn one_shot(&self, ask: &ModelAsk) -> oneshot::Ask {
+        let choice = self.models.of(ask.step);
+        oneshot::Ask {
+            prompt: ask.prompt.clone(),
+            system: ask.system.clone(),
+            account: self.account.clone(),
+            model: choice.model,
+            effort: choice.effort,
+            timeout: ASK_TIMEOUT,
+        }
     }
 }
 
@@ -166,14 +186,7 @@ impl Model for ClaudeCli {
     fn ask(&self, ask: ModelAsk) -> BoxFuture<'_, Result<String, String>> {
         Box::pin(async move {
             let tools = ask.read_tools.then_some(READ_TOOLS);
-            let one = oneshot::Ask {
-                prompt: ask.prompt,
-                system: ask.system,
-                account: self.account.clone(),
-                model: MODEL.into(),
-                effort: EFFORT.into(),
-                timeout: ASK_TIMEOUT,
-            };
+            let one = self.one_shot(&ask);
             Ok(oneshot::run_in(one, ask.cwd.as_deref(), tools).await?.text)
         })
     }
@@ -364,6 +377,7 @@ pub(crate) async fn extract(
         prompt,
         cwd: None,
         read_tools: false,
+        step: Step::Harvest,
     };
     let v = ask_json(model, ask, |v| {
         v.get("entries").is_some_and(Value::is_array) || v.get("considered_and_skipped").is_some()
@@ -478,12 +492,17 @@ pub(crate) async fn check_topic(
         records_part(records),
         topic.page.unwrap_or("(no page yet)"),
     );
+    let step = match new.is_empty() {
+        true => Step::Staleness,
+        false => Step::Harvest,
+    };
     let ask = match code {
         Ok(dir) => ModelAsk {
             system: format!("{}\n\n{RECORDS_RULE}\n\n{JSON_ONLY}", check_system()),
             prompt,
             cwd: Some(dir.to_path_buf()),
             read_tools: true,
+            step,
         },
         Err(_) => ModelAsk {
             system: format!(
@@ -493,6 +512,7 @@ pub(crate) async fn check_topic(
             prompt,
             cwd: None,
             read_tools: false,
+            step,
         },
     };
     let hint = match topic.page {
@@ -1042,6 +1062,58 @@ pub(crate) mod tests {
         let system = check_system();
         assert!(system.contains(&format!("at most {PAGE_WORDS} words")));
         assert!(system.contains(r#"{"page": "<the whole page>", "dropped": [{"id""#));
+    }
+
+    #[test]
+    fn each_step_asks_at_the_model_its_setting_names() {
+        let cfg: crate::config::Config = serde_json::from_value(json!({
+            "knowledge": {"models": {
+                "consolidate": {"model": "haiku"},
+                "staleness": {"model": "sonnet", "effort": "medium"}
+            }},
+            "automations": {"intake_model": {"effort": "medium"}}
+        }))
+        .unwrap();
+        let cli = ClaudeCli {
+            account: Account::default(),
+            models: cfg.knowledge.models.clone(),
+        };
+        let at = |step: Step| {
+            let one = cli.one_shot(&ModelAsk {
+                system: String::new(),
+                prompt: String::new(),
+                cwd: None,
+                read_tools: false,
+                step,
+            });
+            (one.model, one.effort)
+        };
+        assert_eq!(
+            at(Step::Harvest),
+            ("opus".into(), "high".into()),
+            "unset: the default"
+        );
+        assert_eq!(
+            at(Step::Consolidate),
+            ("haiku".into(), "low".into()),
+            "the model set, the effort its default"
+        );
+        assert_eq!(at(Step::Staleness), ("sonnet".into(), "medium".into()));
+        let intake = cfg.automations.intake_model();
+        assert_eq!(
+            (intake.model.as_str(), intake.effort.as_str()),
+            ("haiku", "medium")
+        );
+
+        let defaults = crate::config::Config::default();
+        assert_eq!(
+            defaults.knowledge.models.of(Step::Consolidate),
+            oneshot::ModelChoice::new("sonnet", "low")
+        );
+        assert_eq!(
+            defaults.automations.intake_model(),
+            oneshot::ModelChoice::new("haiku", "low")
+        );
     }
 
     /// A model that answers from a script, and remembers what it was asked.
