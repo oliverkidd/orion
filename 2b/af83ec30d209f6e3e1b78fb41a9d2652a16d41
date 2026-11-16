@@ -1,0 +1,42 @@
+docs/sessions.md
+  s_0ea5bf705342bd::t_219e712c0ecf71 772,883-888
+  s_0ea5bf705342bd::t_ab599cd8402bfb 889-892,895
+crates/orion-tui/src/automations/linear_builder.rs
+  s_0ea5bf705342bd::t_012b6d449d5e0a 2899-2902,2907
+  s_0ea5bf705342bd::t_8bd96320410858 2840-2856,2858-2898,2903-2905,2910-2912,2917,2920,2924,3099,3209,3245,3555-3556,3558,3562-3563,3566
+  s_0ea5bf705342bd::t_5b7c0fd7c9ef5c 2857
+  s_0ea5bf705342bd::t_6b8b29637271eb 3150
+  s_0ea5bf705342bd::t_281987ed28b82f 50-53,351-352,355-362,403
+  s_0ea5bf705342bd::t_3b93804e7b27a4 404,613-627,2906,2908-2909,2913-2916,2918-2919,2921-2923,2925,3081-3082,3085,3098,3165,3175,3208,3210,3239,3243-3244,3246,3288,3342,3549,3557,3560-3561,3564,3581
+crates/orion-core/src/automation.rs
+  s_0ea5bf705342bd::t_493362952ed9f6 48-55
+crates/orion-daemon/src/phone.rs
+  s_0ea5bf705342bd::t_43f1e00821afc1 8-9,1003-1007,1020-1028
+  s_0ea5bf705342bd::t_33f81bc8be067e 1029-1030
+crates/orion-tui/src/automations/linear_builder/stages.rs
+  s_0ea5bf705342bd::t_57b498767ffcfb 63
+  s_0ea5bf705342bd::t_7f5e0147dea338 20-33,43-45,58,60-62,64-66,153-154,175,185,216-219,277-308,436-450,527
+  s_0ea5bf705342bd::t_dbca5378d90069 517-519
+crates/orion-tui/src/automations/linear_builder/owner.rs
+  s_0ea5bf705342bd::t_73f7878a1f4afa 612-614,658-659
+crates/orion-tui/src/needs_you/agents.rs
+  s_0ea5bf705342bd::t_9932c45b3da776 9-10,113-119
+docs/2026-11-14-software-factory/software-factory.md
+  s_0ea5bf705342bd::t_6dafc954d67dd0 130-132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2baf83ec30d209f6e3e1b78fb41a9d2652a16d41",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
