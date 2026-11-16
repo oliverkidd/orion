@@ -93,6 +93,33 @@ pub(crate) fn prompt_context(checkout: &Checkout) -> String {
     out.join("\n\n")
 }
 
+/// The areas and topics in `checkout` — its `areas.md` (else the seed)
+/// and each page with its scope — as a builder is given them to note the
+/// rules it learned on (`orion knowledge note`, `super::notes`).
+pub(crate) fn topics_catalog(checkout: &Checkout) -> String {
+    let files = checkout.files(DIR);
+    let areas = files
+        .iter()
+        .find(|(path, _)| *path == format!("{DIR}/areas.md"))
+        .map(|(_, text)| super::areas::parse(store::unmarked(text)))
+        .filter(|a| !a.list.is_empty())
+        .unwrap_or_default();
+    let topics: Vec<(String, String)> = files
+        .iter()
+        .filter_map(|(path, text)| {
+            let rest = path.strip_prefix(&format!("{DIR}/"))?.strip_suffix(".md")?;
+            let (area, name) = rest.split_once('/')?;
+            if name.contains('/') {
+                return None;
+            }
+            let topic = format!("{area}/{name}");
+            let scope = store::short_scope(&store::scope(store::unmarked(text)), &topic);
+            Some((topic, scope))
+        })
+        .collect();
+    super::harvest::catalog(&areas, &topics)
+}
+
 /// The words of a path or topic worth matching on.
 fn words(text: &str) -> BTreeSet<String> {
     text.split(|c: char| !c.is_ascii_alphanumeric())
@@ -297,6 +324,33 @@ mod tests {
         std::fs::remove_dir_all(wt.path().join(DIR)).unwrap();
         let ctx = prompt_context(&checkout);
         assert!(ctx.starts_with("Hand-written decision records:"), "{ctx}");
+    }
+
+    #[test]
+    fn a_builder_is_given_the_areas_and_topics_to_note_rules_on() {
+        let wt = tempfile::tempdir().unwrap();
+        let checkout = Checkout::Dir(wt.path().to_path_buf());
+        let none = topics_catalog(&checkout);
+        assert!(
+            none.starts_with(
+                "The repo's knowledge areas (a topic's area is one of these):\n- editor — "
+            ),
+            "{none}"
+        );
+        assert!(none.ends_with("unless none fits):\n(none yet)"), "{none}");
+        let store = Store::of(wt.path());
+        store
+            .write_page(
+                "editor/tables",
+                "# editor/tables\nScope: tables and their rows\n",
+            )
+            .unwrap();
+        store.write_index("app").unwrap();
+        let some = topics_catalog(&checkout);
+        assert!(
+            some.ends_with("unless none fits):\n- editor/tables — tables and their rows"),
+            "{some}"
+        );
     }
 
     #[test]

@@ -57,6 +57,11 @@ Every other call — `[copy]`, `[ux]` and the rest — takes the Recommended opt
 - Run `orion pr facts init`, fill in the JSON it prints — what users get in one plain sentence, the proof CI's checks don't already show, the gaps, your calls, the flag, the docs touched, whether the plan was followed, and the short labels the PR's table shows — and run `orion pr facts set <file>`.
 - orion writes the top of the PR from those facts, with its verdict. Don't write that part yourself.
 
-## 9. Stop
+## 9. Note what you learned
 
-- Stop once the draft PR is open and the facts are set. orion watches CI and sends the work back to you if a check fails or the owner comments.
+- Record the lasting rules you learned — what a future agent on another ticket would need, as the owner said or approved it — with `orion knowledge note <file>`: `{"entries": [...]}`, each entry with its topic (one of the topics orion listed, unless none fits), rule, applies_to, why, by, confidence, quote (the owner's words, verbatim) and confirm_by. `{"entries": []}` when there are none.
+- orion records them when the pull request merges, checked against the code, instead of reading the whole pull request again.
+
+## 10. Stop
+
+- Stop once the draft PR is open, the facts are set and what you learned is noted. orion watches CI and sends the work back to you if a check fails or the owner comments.

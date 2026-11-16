@@ -33,11 +33,11 @@ use serde::{Deserialize, Serialize};
 use super::consolidate;
 use super::harvest::{self, ClaudeCli, Outcome, Session, Target};
 use super::local::Local;
-use super::records;
 use super::share::{self, GhCli, Merge, Pr, Published, Sharer, SystemGit};
 use super::snapshot::{self, Snapshot};
 use super::store::{self, Entry, Store, ACTIVE};
 use super::{backfill, transcripts};
+use super::{notes, records};
 use crate::app::App;
 use crate::factory::cards::{self, Button, Card, Press, Recipient};
 
@@ -360,6 +360,8 @@ async fn run_job(job: &Job) -> Result<Option<Outcome>, String> {
         project: &job.project,
         records: &records,
     };
+    // The session's notes, once recorded and pushed, are done with.
+    let mut noted_used = false;
     let outcome = match to.harvested(job.number) {
         true => None,
         false => {
@@ -371,8 +373,11 @@ async fn run_job(job: &Job) -> Result<Option<Outcome>, String> {
             if let Some(run) = &job.run {
                 record_corrections(run, harvest::corrections(&sessions));
             }
+            // A factory session that noted its rules: no extraction.
+            let noted = notes::read_for(&notes::dir(), &job.url);
+            let from_notes = noted.is_some();
             let (outcome, unchecked) =
-                harvest::harvest_merge(&model, &to, &job.root, &pr, &comments, &sessions, None)
+                harvest::harvest_merge(&model, &to, &job.root, &pr, &comments, &sessions, noted)
                     .await;
             if let Some(why) = unchecked {
                 tracing::warn!(
@@ -381,6 +386,7 @@ async fn run_job(job: &Job) -> Result<Option<Outcome>, String> {
                     job.project
                 );
             }
+            noted_used = from_notes;
             Some(outcome?)
         }
     };
@@ -400,6 +406,9 @@ async fn run_job(job: &Job) -> Result<Option<Outcome>, String> {
     let published = share.publish(&branch, &message).await?;
     drop(branch);
     note_published(&local, &published);
+    if noted_used {
+        notes::remove_for(&notes::dir(), &job.url);
+    }
     Ok(outcome)
 }
 

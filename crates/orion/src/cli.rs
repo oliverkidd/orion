@@ -441,6 +441,8 @@ pub(crate) enum PrFactsCommand {
 const KNOWLEDGE_EXAMPLES: &str = "\
 Examples:
   orion knowledge for src/auth/login.ts   the pages for a file
+  orion knowledge note /tmp/rules.json    the rules this branch's session
+                                          learned, for its PR
   orion knowledge backfill --project riplo-os --since 2026-06-01
                                           record what merged since June
   orion knowledge consolidate --project riplo-os
@@ -463,6 +465,25 @@ pub(crate) enum KnowledgeCommand {
         /// checkout (default: the checkout the current directory is in).
         #[arg(long, value_name = "NAME")]
         project: Option<String>,
+    },
+    /// Hand orion the rules this session learned, for its pull request.
+    ///
+    /// The file is `{"entries": [...]}`, each entry as a harvest writes
+    /// one: stream, kind, topic (`area/topic`, one of the repo's), rule,
+    /// applies_to, why, by, confidence, quote, confirm_by — and new_topic,
+    /// one line, for a topic that isn't there yet. `{"entries": []}` says
+    /// nothing lasting was learned. Each is checked (its area one of the
+    /// repo's, a rule credited to the owner quoting him) and kept until
+    /// the pull request merges; its harvest then records them, checked
+    /// against the code, in place of reading the whole pull request again.
+    #[command(after_help = KNOWLEDGE_EXAMPLES)]
+    Note {
+        /// The JSON, or `-` to read it from stdin.
+        file: String,
+        /// The pull request, by URL or number (default: the current
+        /// branch's).
+        #[arg(long, value_name = "PR")]
+        pr: Option<String>,
     },
     /// Record the pull requests merged since a date.
     ///

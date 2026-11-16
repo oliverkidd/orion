@@ -55,6 +55,9 @@ fn main() -> Result<()> {
         Some(Command::Knowledge(KnowledgeCommand::For { paths, project })) => {
             orion_tui::knowledge::cli_for(paths, project)
         }
+        Some(Command::Knowledge(KnowledgeCommand::Note { file, pr })) => {
+            orion_tui::knowledge::cli_note(file, pr)
+        }
         Some(Command::Knowledge(KnowledgeCommand::Backfill { project, since })) => {
             orion_tui::knowledge::cli_backfill(project, since)
         }

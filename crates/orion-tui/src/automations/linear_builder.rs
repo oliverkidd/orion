@@ -101,7 +101,11 @@ macro_rules! builder_rules {
 
 ## Workflow
 
-Follow `agent_docs/automation.md`. Every plan goes to the owner for approval. When nothing should be built, make the plan's first line `ORION-VERDICT: <already-fixed|duplicate|not-reproducible|wont-build> <reason>`, the reason naming the fixing commit or the ticket this duplicates, and orion asks the owner whether to close the ticket."
+Follow `agent_docs/automation.md`. Every plan goes to the owner for approval. When nothing should be built, make the plan's first line `ORION-VERDICT: <already-fixed|duplicate|not-reproducible|wont-build> <reason>`, the reason naming the fixing commit or the ticket this duplicates, and orion asks the owner whether to close the ticket.
+
+## Last step
+
+After `orion pr facts set`, record the lasting rules you learned (what a future agent on another ticket would need, as the owner said or approved it) with `orion knowledge note <file>`. The file is `{\"entries\": [...]}`, each entry a harvest's: stream, kind, topic (one listed under Topics to note rules on unless none fits; a new one needs new_topic), rule, applies_to, why, by, confidence, quote (the owner's words, verbatim, when by is owner), confirm_by. Write `{\"entries\": []}` when there are none. orion records them when the pull request merges."
     };
 }
 
@@ -1107,6 +1111,19 @@ pub fn context(app: &App, group: &Group) -> String {
             index.trim()
         ));
     }
+    // The areas and topics its last step notes rules on.
+    if let Some(catalog) = repo.and_then(|p| {
+        let setting = crate::config::base_branch_of(Some(&p.repo_path));
+        let rev = crate::commit_list::resolve_base_cached(&p.repo_path, &setting)?;
+        Some(crate::knowledge::read::topics_catalog(
+            &crate::knowledge::Checkout::Rev {
+                repo: p.repo_path.clone(),
+                rev,
+            },
+        ))
+    }) {
+        out.push_str(&format!("\n\n## Topics to note rules on\n\n{catalog}"));
+    }
     out.push_str(&format!("\n\n{LARGE_WORK}"));
     out
 }
@@ -1938,6 +1955,9 @@ mod tests {
                 "End every comment or reply you post on a pull request with the line `<!-- orion:agent -->`",
                 "Follow `agent_docs/automation.md`",
                 "ORION-VERDICT: <already-fixed|duplicate|not-reproducible|wont-build> <reason>",
+                "## Last step",
+                "After `orion pr facts set`, record the lasting rules you learned",
+                "`orion knowledge note <file>`",
             ] {
                 assert!(text.contains(layer), "{layer}");
             }

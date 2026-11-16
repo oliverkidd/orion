@@ -17,17 +17,21 @@
 //!   `<data_dir>/knowledge/<project id>/`.
 //! - **A harvest** ([`harvest`]) runs at merge, queued and one at a time
 //!   in the background ([`runner`]): the PR's thread and its sessions'
-//!   transcripts, condensed ([`condense`]), read by Opus for entries, held
-//!   to the owner's words by code ([`guards`]), checked against the code
-//!   and the hand-written records, and merged into topic pages — then
-//!   committed and proposed.
+//!   transcripts, condensed ([`condense`]), read by Opus in one call that
+//!   extracts the entries, checks them against the code and the
+//!   hand-written records, and writes the topic pages; held to the owner's
+//!   words by code ([`guards`]) — then committed and proposed.
+//! - **Notes** ([`notes`]): a factory session hands over the rules it
+//!   learned with `orion knowledge note` before it finishes; its pull
+//!   request's harvest records those instead of extracting, each topic
+//!   they touch checked and merged by one call.
 //! - **The daily card** at 18:30 lists the rules recorded as the owner's
 //!   that day, each with a veto, and links the pull request; after its
 //!   veto window orion merges it ([`runner`]).
-//! - **The read path** ([`read`]): every builder prompt carries the index
-//!   and lists the records, read from the session's own checkout
-//!   ([`prompt_context`]); `orion knowledge for <paths…>` prints the pages
-//!   for the files an agent will touch.
+//! - **The read path** ([`read`]): every builder prompt carries the index,
+//!   the areas and topics to note rules on, and lists the records, read
+//!   from the session's own checkout ([`prompt_context`]); `orion knowledge
+//!   for <paths…>` prints the pages for the files an agent will touch.
 //! - **The backfill** ([`backfill`]): `orion knowledge backfill`, the
 //!   pull requests merged before the snapshot existed, joined to their
 //!   transcripts by branch or by the PR links in them.
@@ -43,6 +47,7 @@ pub(crate) mod consolidate;
 pub(crate) mod guards;
 pub(crate) mod harvest;
 pub(crate) mod local;
+pub(crate) mod notes;
 pub(crate) mod read;
 pub(crate) mod records;
 pub(crate) mod runner;
@@ -216,6 +221,46 @@ pub fn cli_for(paths: Vec<String>, project_name: Option<String>) -> Result<()> {
         })
         .collect();
     print!("{}", read::pages_for(&store::Store::of(&top), &relative));
+    Ok(())
+}
+
+/// `orion knowledge note <file>`: the rules the session that built this
+/// branch's pull request (or `pr`) learned, checked against the areas in
+/// the checkout it runs in and kept until the pull request merges
+/// ([`notes`]). `-` reads them from stdin.
+pub fn cli_note(file: String, pr: Option<String>) -> Result<()> {
+    use std::io::Read as _;
+    let text = match file.as_str() {
+        "-" => {
+            let mut text = String::new();
+            std::io::stdin()
+                .read_to_string(&mut text)
+                .context("reading the notes from stdin")?;
+            text
+        }
+        path => std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?,
+    };
+    let cwd = std::env::current_dir().context("no current directory")?;
+    let areas = match crate::git_proc::read(&cwd, &["rev-parse", "--show-toplevel"]) {
+        Ok(top) => areas::Areas::load(&store::Store::of(Path::new(top.trim()))),
+        Err(_) => areas::Areas::default(),
+    };
+    let entries = notes::parse(&text, &areas).map_err(|problems| {
+        anyhow!(
+            "the notes can't be recorded:\n  - {}",
+            problems.join("\n  - ")
+        )
+    })?;
+    let url = crate::pr_body::cli::pr_url(pr.as_deref())?;
+    let noted = entries.len();
+    let total = notes::add(&notes::dir(), &url, entries).context("saving the notes")?;
+    match noted {
+        0 => println!("nothing to record, noted for {url}"),
+        n => println!(
+            "{n} rule{} noted for {url} ({total} in all); orion records them when it merges",
+            if n == 1 { "" } else { "s" }
+        ),
+    }
     Ok(())
 }
 

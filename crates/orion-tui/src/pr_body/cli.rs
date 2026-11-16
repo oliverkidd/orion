@@ -63,7 +63,7 @@ pub fn parse(text: &str) -> Result<Facts> {
 
 /// The PR the facts are for: a URL as given, else `gh pr view [<pr>]`
 /// from here.
-fn pr_url(pr: Option<&str>) -> Result<String> {
+pub(crate) fn pr_url(pr: Option<&str>) -> Result<String> {
     if let Some(url) = pr.filter(|p| p.starts_with("https://")) {
         if super::parse_url(url).is_none() {
             bail!("{url} isn't a GitHub pull request URL");
