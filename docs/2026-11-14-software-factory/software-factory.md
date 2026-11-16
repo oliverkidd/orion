@@ -344,19 +344,19 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
 
 | Card | To | Body | Buttons |
 |---|---|---|---|
-| Plan | owner | existing phone plan message (keep) | Approve · Approve with note… · Suggest changes… · Not for the factory (leave as is / to Backlog) |
-| Question | owner | existing phone question message (keep) | options · Type an answer… · Not for the factory (leave as is / to Backlog) |
-| No change | owner | "*Already fixed* by <sha> …" / "*Duplicate of* RIPLO-n" / "*Can't reproduce*: <reason>" | Close ticket · Build anyway… · Not for the factory (leave as is / to Backlog) |
+| Plan | owner | existing phone plan message (keep) | Approve · Approve with note… · Suggest changes… · Not for the factory (back to Triage / move to Backlog) |
+| Question | owner | existing phone question message (keep) | options · Type an answer… · Not for the factory (back to Triage / move to Backlog) |
+| No change | owner | "*Already fixed* by <sha> …" / "*Duplicate of* RIPLO-n" / "*Can't reproduce*: <reason>" | Close ticket · Build anyway… · Not for the factory (back to Triage / move to Backlog) |
 | Possible duplicate | owner | "Looks like the work in your *<session>* session (<why>)." | Start anyway · Skip |
 | Urgent | owner | "Urgent priority. Start now? <n> things are waiting on you." | Start · Leave |
 | Thin ticket | reporter | "Hi <first name>, an agent is ready to pick this up but needs a bit more first: what you did, what you expected instead, a screenshot. Please add it to the Linear ticket; it's unassigned until then." | Open ticket · I've updated it |
 | Thin ticket (fallback) | owner | "RIPLO-n needs more detail and its reporter can't be asked on Slack." | Open ticket · Start anyway |
-| PR: Merge / Skim / Review | owner | verdict line, the top's rows with their dots, what users get, "look at" lines (Review), grid image (Skim) | per §D.5 · Not for the factory (leave as is / to Backlog) · Verdict right? 👍 👎 |
+| PR: Merge / Skim / Review | owner | verdict line, the top's rows with their dots, what users get, "look at" lines (Review), grid image (Skim) | per §D.5 · Not for the factory (back to Triage / move to Backlog) · Verdict right? 👍 👎 |
 | Can't fix | owner | "CI still red after 3 fixes: <check>. Attempts in the thread." | Open PR · Reply… · Park |
-| Stalled | owner | "Stopped without a PR or a question 10 minutes ago. Last thing it said: …" | Continue · Reply… · Park · Not for the factory (leave as is / to Backlog) |
-| Dead | owner | "Its session or worktree has been gone 30 minutes, with no PR." | Open ticket · Park · Not for the factory (leave as is / to Backlog) |
+| Stalled | owner | "Stopped without a PR or a question 10 minutes ago. Last thing it said: …" | Continue · Reply… · Park · Not for the factory (back to Triage / move to Backlog) |
+| Dead | owner | "Its session or worktree has been gone 30 minutes, with no PR." | Open ticket · Park · Not for the factory (back to Triage / move to Backlog) |
 
-**Not for the factory** is two choices, leave as is and to Backlog. Either parks the ticket as Park does (session archived, cards closed), closes the draft PR it opened with a comment, labels the ticket `factory-skip` (made in the team when missing) and comments "Taken off the factory by <owner>". Leave as is keeps the ticket's status; to Backlog moves it to the team's Backlog state. The intake never picks up a `factory-skip` ticket. It is also in a factory session's menu in orion.
+**Not for the factory** is two choices, back to Triage and move to Backlog. Either parks the ticket as Park does (session archived, cards closed), closes the draft PR it opened with a comment, labels the ticket `factory-skip` (made in the team when missing), comments "Taken off the factory by <owner>" once, sets the team's Triage or Backlog state, and removes the session's worktree when it is clean and every commit on it is on a remote or the base (else keeps it and says why). The intake never picks up a `factory-skip` ticket. It is also in a factory session's menu in orion.
 | Setup missing | owner | "<project> has no factory workflow doc / tools list." | Open template |
 | New rules (daily) | owner | numbered rules with source and quote | Veto k · All fine |
 | Week in review | owner | the Factory summary | Open week in review · Approve fix k |

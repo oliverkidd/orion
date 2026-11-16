@@ -5856,6 +5856,39 @@ pub(crate) fn label_for_team(json: &serde_json::Value, team_id: &str) -> Option<
         .filter(|id| !id.is_empty())
 }
 
+/// An issue's comments' bodies, the latest 100.
+pub(crate) const ISSUE_COMMENTS_QUERY: &str =
+    "query($id: String!) { issue(id: $id) { comments(first: 100) { nodes { body } } } }";
+
+/// Issue `issue_id`'s comments' bodies.
+pub(crate) async fn issue_comments(key: &str, issue_id: &str) -> Result<Vec<String>, String> {
+    let json = graphql(
+        key,
+        ISSUE_COMMENTS_QUERY,
+        serde_json::json!({ "id": issue_id }),
+    )
+    .await?;
+    parse_issue_comments(&json)
+}
+
+/// The bodies in an answer to [`ISSUE_COMMENTS_QUERY`].
+pub(crate) fn parse_issue_comments(json: &serde_json::Value) -> Result<Vec<String>, String> {
+    let nodes = json
+        .pointer("/data/issue/comments/nodes")
+        .and_then(|n| n.as_array())
+        .ok_or_else(|| graphql_error(json).unwrap_or_else(|| "Linear sent no comments".into()))?;
+    Ok(nodes.iter().map(|c| json_text(c, "/body")).collect())
+}
+
+/// A team's state of `kind` (`triage`, `backlog`): the one named like the
+/// kind ("Triage", "Backlog"), else its first.
+pub(crate) fn state_of_kind<'a>(states: &'a [LinearState], kind: &str) -> Option<&'a LinearState> {
+    let of_kind = || states.iter().filter(move |s| s.kind == kind);
+    of_kind()
+        .find(|s| s.name.trim().eq_ignore_ascii_case(kind))
+        .or_else(|| of_kind().next())
+}
+
 /// The name of the account `key` belongs to.
 pub(crate) async fn viewer_name(key: &str) -> Result<String, String> {
     fetch_viewer(key).await.map(|v| v.name)
@@ -5923,14 +5956,6 @@ pub(crate) fn state_for(states: &[LinearState], as_: CloseAs) -> Option<&LinearS
             .find(|s| named(s, "Duplicate"))
             .or_else(canceled),
     }
-}
-
-/// A team's Backlog: its `backlog` state named "Backlog", else its first.
-pub(crate) fn backlog_state(states: &[LinearState]) -> Option<&LinearState> {
-    let backlog = || states.iter().filter(|s| s.kind == "backlog");
-    backlog()
-        .find(|s| s.name.trim().eq_ignore_ascii_case("Backlog"))
-        .or_else(|| backlog().next())
 }
 
 /// A mutation's answer: `Ok` when `data.<field>.success` is true, else

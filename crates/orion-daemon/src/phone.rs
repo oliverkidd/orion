@@ -16,9 +16,10 @@
 //!   - a plan: `Approve` and `Suggest changes…`;
 //!   - a permission prompt: `Yes` and `Type an answer…`;
 //!   - and on any of them from a session the bug fixer or the feature
-//!     builder started, `Not for the factory: leave as is` and `…: to
-//!     Backlog`: the message closes and the TUI takes its ticket off the
-//!     factory (`ServerEvent::FactoryAction` under `session:<agent id>`).
+//!     builder started, `Not for the factory: back to Triage` and `…:
+//!     move to Backlog`: the message closes and the TUI takes its ticket
+//!     off the factory (`ServerEvent::FactoryAction` under
+//!     `session:<agent id>`).
 //! - **Modals**: `Type an answer…`, `Answer…` and `Suggest changes…` open
 //!   a Slack modal (`views.open`, with the press's `trigger_id`) — a text
 //!   box; or, for `Answer…`, radio buttons or checkboxes per question,
@@ -61,7 +62,7 @@ use std::sync::Arc;
 use orion_core::away::PhoneKind;
 use orion_core::factory_card::{
     NOT_FOR_FACTORY, NOT_FOR_FACTORY_BACKLOG, NOT_FOR_FACTORY_BACKLOG_LABEL,
-    NOT_FOR_FACTORY_LEAVE_LABEL, SESSION_PREFIX,
+    NOT_FOR_FACTORY_TRIAGE_LABEL, SESSION_PREFIX,
 };
 use orion_core::slack_caps::{BUTTON, HEADER, MAX_BLOCKS, SECTION};
 use orion_core::{AgentId, AgentStatus, Answer, Asked, Picked, ServerEvent, WaitReason};
@@ -123,8 +124,8 @@ pub const ACTION_ANSWER_MODAL: &str = "orion_answer_modal";
 pub const ACTION_TYPE: &str = "orion_type";
 /// `Suggest changes…`: the plan's steer modal.
 pub const ACTION_STEER: &str = "orion_steer";
-/// `Not for the factory: leave as is` and `…: to Backlog`, on a factory
-/// session's message.
+/// `Not for the factory: back to Triage` and `…: move to Backlog`, on a
+/// factory session's message.
 pub const ACTION_NOT_FOR_FACTORY: &str = "orion_not_for_factory";
 pub const ACTION_NOT_FOR_FACTORY_BACKLOG: &str = "orion_not_for_factory_backlog";
 
@@ -334,7 +335,7 @@ pub fn build(ask: &Ask) -> Built {
         .is_some_and(orion_core::automation::builds_tickets);
     if let (true, Some(buttons)) = (factory, closing.buttons.as_mut()) {
         buttons.push(button(
-            NOT_FOR_FACTORY_LEAVE_LABEL,
+            NOT_FOR_FACTORY_TRIAGE_LABEL,
             ACTION_NOT_FOR_FACTORY,
             NOT_FOR_FACTORY,
         ));
@@ -444,7 +445,7 @@ pub fn answered_with(blocks: &[Value], summary: &str) -> Vec<Value> {
 }
 
 /// `blocks` taken off the factory: its buttons gone, the choice (`✓ Not
-/// for the factory: to Backlog`) at the foot.
+/// for the factory: move to Backlog`) at the foot.
 pub fn not_for_factory(blocks: &[Value], backlog: bool) -> Vec<Value> {
     closed(blocks, format!("✓ {}", not_for_factory_label(backlog)))
 }
@@ -453,7 +454,7 @@ pub fn not_for_factory(blocks: &[Value], backlog: bool) -> Vec<Value> {
 fn not_for_factory_label(backlog: bool) -> &'static str {
     match backlog {
         true => NOT_FOR_FACTORY_BACKLOG_LABEL,
-        false => NOT_FOR_FACTORY_LEAVE_LABEL,
+        false => NOT_FOR_FACTORY_TRIAGE_LABEL,
     }
 }
 
@@ -701,7 +702,7 @@ pub enum Reply {
         trigger: String,
     },
     /// `Not for the factory`: no answer, the session's ticket taken off —
-    /// moved to Backlog, or left as it is.
+    /// moved to Backlog, or back to Triage.
     NotForFactory {
         backlog: bool,
     },
@@ -1465,8 +1466,8 @@ mod tests {
                 assert_eq!(
                     labels(&ask)[labels(&ask).len() - 2..],
                     [
-                        "Not for the factory: leave as is",
-                        "Not for the factory: to Backlog"
+                        "Not for the factory: back to Triage",
+                        "Not for the factory: move to Backlog"
                     ],
                     "{runner} {reason:?}"
                 );
@@ -1494,7 +1495,7 @@ mod tests {
         assert_eq!(closed.len(), 1);
         assert_eq!(
             closed[0]["elements"][0]["text"],
-            "✓ Not for the factory: to Backlog"
+            "✓ Not for the factory: move to Backlog"
         );
     }
 

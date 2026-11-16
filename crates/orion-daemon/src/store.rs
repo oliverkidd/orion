@@ -478,9 +478,17 @@ pub struct Store {
 
 pub type TreeRows = (Vec<Project>, Vec<Worktree>, Vec<Agent>, Vec<TerminalTab>);
 
-/// [`Store::sessions_and_projects`]: session ids, and `(project id,
-/// repository)` pairs.
-pub type SessionsAndProjects = (Vec<String>, Vec<(String, PathBuf)>);
+/// [`Store::skip_lookup`]: the live sessions named as the target, every
+/// live session, every project's repository, every linked worktree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkipLookup {
+    pub named: Vec<String>,
+    pub live: Vec<String>,
+    /// `(project id, repository)`.
+    pub projects: Vec<(String, PathBuf)>,
+    /// `(worktree id, project id, branch, path)`.
+    pub worktrees: Vec<(String, String, String, PathBuf)>,
+}
 
 /// How long a pull request's read mark outlives the last time it was read
 /// ([`Store::prune_pr_seen`]). Long, because losing one is not free: a
@@ -544,17 +552,20 @@ impl Store {
         }))
     }
 
-    /// The ids of the live sessions named `name` (any case), and the
-    /// repository of every project by id, read straight from the database
-    /// at `path` for `orion factory skip`: read-only, never migrated.
-    pub fn sessions_and_projects(path: &Path, name: &str) -> Result<SessionsAndProjects> {
+    /// What `orion factory skip` needs of the database at `path`, read
+    /// straight from it: read-only, never migrated.
+    pub fn skip_lookup(path: &Path, name: &str) -> Result<SkipLookup> {
         use rusqlite::OpenFlags;
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(1))?;
-        let sessions = conn
+        let named = conn
             .prepare("SELECT id FROM agents WHERE archived = 0 AND lower(name) = lower(?1)")?
             .query_map(params![name.trim()], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let live = conn
+            .prepare("SELECT id FROM agents WHERE archived = 0")?
+            .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let projects = conn
             .prepare("SELECT id, repo_path FROM projects")?
@@ -562,7 +573,23 @@ impl Store {
                 Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?)))
             })?
             .collect::<rusqlite::Result<_>>()?;
-        Ok((sessions, projects))
+        let worktrees = conn
+            .prepare("SELECT id, project_id, branch, path FROM worktrees WHERE is_main = 0")?
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    PathBuf::from(r.get::<_, String>(3)?),
+                ))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(SkipLookup {
+            named,
+            live,
+            projects,
+            worktrees,
+        })
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -2090,9 +2117,17 @@ mod tests {
         assert_eq!(Store::agent_account(&path, "gone").unwrap(), None);
         assert!(Store::agent_account(&dir.path().join("none.db"), "a1").is_err());
         // `orion factory skip` finds a session by name, any case.
-        let (named, projects) = Store::sessions_and_projects(&path, "B").unwrap();
-        assert_eq!(named, ["a2"]);
-        assert_eq!(projects, [("p1".to_string(), PathBuf::from("/tmp/p"))]);
+        let found = Store::skip_lookup(&path, "B").unwrap();
+        assert_eq!(found.named, ["a2"]);
+        assert_eq!(found.live, ["a1", "a2"]);
+        assert_eq!(
+            found.projects,
+            [("p1".to_string(), PathBuf::from("/tmp/p"))]
+        );
+        assert!(
+            found.worktrees.is_empty(),
+            "the root is no worktree to remove"
+        );
     }
 
     /// A database already at v21 gains nullable PR launch context without

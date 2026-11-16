@@ -150,18 +150,15 @@ pub fn run_pr_facts(op: PrFactsOp) -> Result<()> {
     pr_body::cli::run(op)
 }
 
+pub use automations::linear_builder::skip::Known as FactoryKnown;
+
 /// `orion factory skip <ticket or session> [--backlog]`: **Not for the
 /// factory** from a shell (see `automations::linear_builder::skip`).
-/// `sessions` are the ids of the live sessions named `target`, `projects`
-/// every project's id and repository: what the daemon's database says.
-pub fn run_factory_skip(
-    target: String,
-    backlog: bool,
-    sessions: Vec<String>,
-    projects: Vec<(String, std::path::PathBuf)>,
-) -> Result<()> {
+/// `known` is what the daemon's database says of sessions, projects and
+/// worktrees.
+pub fn run_factory_skip(target: String, backlog: bool, known: FactoryKnown) -> Result<()> {
     use automations::linear_builder::skip;
-    let mut live = skip::Live { sessions, projects };
+    let mut live = skip::Live(known);
     let path = skip::ledger_path();
     runtime()?
         .block_on(skip::skip(

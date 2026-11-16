@@ -7471,7 +7471,7 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
             .position(|item| matches!(item.action, MenuAction::ArchiveAgent(_)))
         {
             use orion_core::factory_card::{
-                NOT_FOR_FACTORY_BACKLOG_LABEL, NOT_FOR_FACTORY_LEAVE_LABEL,
+                NOT_FOR_FACTORY_BACKLOG_LABEL, NOT_FOR_FACTORY_TRIAGE_LABEL,
             };
             let choice = |label: &str, backlog| {
                 let id = a.id.clone();
@@ -7480,7 +7480,7 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
             items.splice(
                 at + 1..at + 1,
                 [
-                    choice(NOT_FOR_FACTORY_LEAVE_LABEL, false),
+                    choice(NOT_FOR_FACTORY_TRIAGE_LABEL, false),
                     choice(NOT_FOR_FACTORY_BACKLOG_LABEL, true),
                 ],
             );

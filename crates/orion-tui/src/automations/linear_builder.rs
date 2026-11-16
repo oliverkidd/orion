@@ -705,6 +705,12 @@ pub enum Answer {
         released: Vec<String>,
         possible: Vec<intake::Possible>,
     },
+    /// Whether a ticket taken off the factory may have its worktree removed:
+    /// `keep` says why not (`owner::remove_worktree`).
+    Worktree {
+        id: orion_core::WorktreeId,
+        keep: Option<String>,
+    },
     /// The workspace's issue labels, for the labels pick.
     Labels(Result<Vec<String>, String>),
     /// What a stalled ticket's session last said, read off its
@@ -754,6 +760,7 @@ pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
                 launch_queued(app, which, out);
             }
         }
+        Answer::Worktree { id, keep } => owner::worktree_checked(app, id, keep),
         Answer::Labels(names) => {
             if let Some(Overlay::Automations(view)) = &mut app.overlay {
                 if let Some(pick) = &mut view.labels {
@@ -2838,8 +2845,8 @@ mod tests {
             [
                 "Close ticket",
                 "Build anyway…",
-                "Not for the factory: leave as is",
-                "Not for the factory: to Backlog"
+                "Not for the factory: back to Triage",
+                "Not for the factory: move to Backlog"
             ]
         );
         assert!(c.card.buttons[1].asks_text);
@@ -3148,8 +3155,11 @@ mod tests {
             assert_eq!(
                 last,
                 [
-                    (NOT_FOR_FACTORY, "Not for the factory: leave as is"),
-                    (NOT_FOR_FACTORY_BACKLOG, "Not for the factory: to Backlog"),
+                    (NOT_FOR_FACTORY, "Not for the factory: back to Triage"),
+                    (
+                        NOT_FOR_FACTORY_BACKLOG,
+                        "Not for the factory: move to Backlog"
+                    ),
                 ],
                 "{what}"
             );
@@ -3157,8 +3167,8 @@ mod tests {
     }
 
     /// **Not for the factory**: the session parked and archived, its cards
-    /// closed, the ticket labelled `factory-skip` with a comment — and its
-    /// status left alone: no Close write.
+    /// closed, its worktree removed, the ticket labelled `factory-skip`
+    /// with a comment and back in its team's Triage — or its Backlog.
     #[test]
     fn not_for_the_factory_parks_the_session_and_labels_the_ticket() {
         use orion_core::factory_card::NOT_FOR_FACTORY;
@@ -3195,17 +3205,23 @@ mod tests {
                         issue: "uuid-ENG-7".into()
                     }
                 ),
+                (
+                    p(),
+                    Write::ToState {
+                        issue: "uuid-ENG-7".into(),
+                        team: "t1".into(),
+                        to: owner::TeamState::Triage,
+                    }
+                ),
             ]
         );
-        assert!(!app
-            .automations
-            .linear_builder
-            .writes
-            .iter()
-            .any(|(_, w)| matches!(
-                w,
-                Write::Close { .. } | Write::Assign { .. } | Write::ToBacklog { .. }
-            )));
+        // Its worktree, gone from disk here, is removed through orion's
+        // own delete.
+        assert!(
+            app.outbox.iter().any(|r| matches!(r, ClientRequest::DeleteWorktree { id, force: false, .. } if id.0 == "w7")),
+            "{:?}",
+            app.outbox
+        );
         assert_eq!(
             owner::taken_off("Sam Lee"),
             "Taken off the factory by Sam Lee"
@@ -3229,7 +3245,10 @@ mod tests {
             [
                 Write::Label { .. },
                 Write::TakenOff { .. },
-                Write::ToBacklog { .. }
+                Write::ToState {
+                    to: owner::TeamState::Backlog,
+                    ..
+                }
             ]
         ));
         let states = |kinds: &[(&str, &str)]| -> Vec<crate::linear::LinearState> {
@@ -3248,15 +3267,19 @@ mod tests {
             ("Backlog", "backlog"),
             ("Todo", "unstarted"),
         ]);
-        assert_eq!(
-            crate::linear::backlog_state(&team).map(|s| s.name.as_str()),
-            Some("Backlog")
-        );
-        let team = states(&[("Later", "backlog"), ("Todo", "unstarted")]);
-        assert_eq!(
-            crate::linear::backlog_state(&team).map(|s| s.name.as_str()),
-            Some("Later")
-        );
+        let named = |kind| crate::linear::state_of_kind(&team, kind).map(|s| s.name.as_str());
+        assert_eq!(named("backlog"), Some("Backlog"));
+        assert_eq!(named("triage"), None, "no Triage in this team");
+        let team = states(&[("Later", "backlog"), ("Inbox", "triage")]);
+        let named = |kind| crate::linear::state_of_kind(&team, kind).map(|s| s.name.as_str());
+        assert_eq!(named("backlog"), Some("Later"));
+        assert_eq!(named("triage"), Some("Inbox"));
+        // A ticket that says so already isn't commented on again.
+        assert!(owner::said_taken_off(&[
+            "Looks fine".into(),
+            "Taken off the factory by Sam Lee".into()
+        ]));
+        assert!(!owner::said_taken_off(&["Taken off by hand".into()]));
         // Someone else's press on a card counts for nothing.
         let mut app = app_with_project();
         building(&mut app, Stage::Building);

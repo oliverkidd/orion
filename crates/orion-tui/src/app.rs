@@ -410,7 +410,7 @@ pub enum MenuAction {
         id: String,
     },
     /// A factory session's **Not for the factory**: its ticket taken off
-    /// the factory, moved to Backlog or left as it is
+    /// the factory, moved to Backlog or back to Triage
     /// (`linear_builder::owner::not_for_the_factory_session`).
     NotForFactory {
         id: AgentId,

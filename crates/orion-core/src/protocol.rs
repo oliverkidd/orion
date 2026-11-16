@@ -528,15 +528,15 @@ pub mod factory_card {
     /// Between a button value's key and its action (`<key>|<action>`).
     pub const SEP: char = '|';
     /// **Not for the factory**: what every factory card about a ticket
-    /// offers, which takes the ticket off the factory — its status left
-    /// as it is ([`NOT_FOR_FACTORY`]) or moved to the team's Backlog
+    /// offers, which takes the ticket off the factory — moved back to its
+    /// team's Triage ([`NOT_FOR_FACTORY`]) or to its Backlog
     /// ([`NOT_FOR_FACTORY_BACKLOG`]).
     pub const NOT_FOR_FACTORY: &str = "not_for_factory";
     pub const NOT_FOR_FACTORY_BACKLOG: &str = "not_for_factory_backlog";
     /// Its name, and each choice's label.
     pub const NOT_FOR_FACTORY_LABEL: &str = "Not for the factory";
-    pub const NOT_FOR_FACTORY_LEAVE_LABEL: &str = "Not for the factory: leave as is";
-    pub const NOT_FOR_FACTORY_BACKLOG_LABEL: &str = "Not for the factory: to Backlog";
+    pub const NOT_FOR_FACTORY_TRIAGE_LABEL: &str = "Not for the factory: back to Triage";
+    pub const NOT_FOR_FACTORY_BACKLOG_LABEL: &str = "Not for the factory: move to Backlog";
     /// The key a press about a session rather than a card goes by
     /// (`session:<agent id>`): **Not for the factory** on a factory
     /// session's phone message.

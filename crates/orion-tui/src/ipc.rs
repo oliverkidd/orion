@@ -378,6 +378,38 @@ pub async fn archive_agent(id: &AgentId) -> Result<()> {
     await_ack(&mut conn, ONE_SHOT_REQ_ID).await
 }
 
+/// `orion factory skip`: remove worktree `id`, unforced, as the TUI's
+/// delete does — the daemon runs its delete hooks and container cleanup,
+/// and keeps a checkout with changes. Never spawns a daemon.
+pub async fn delete_worktree(id: &orion_core::WorktreeId) -> Result<()> {
+    let Ok(stream) = try_connect(&paths::socket_path()).await else {
+        bail!("no orion daemon is running");
+    };
+    let mut conn = handshake(stream).await?;
+    let delete = ClientRequest::DeleteWorktree {
+        req_id: ONE_SHOT_REQ_ID,
+        id: id.clone(),
+        force: false,
+    };
+    write_frame(&mut conn.stream, &delete).await?;
+    loop {
+        match read_frame::<ServerEvent, _>(&mut conn.stream).await? {
+            Some(ServerEvent::Ack { req_id, .. }) if req_id == ONE_SHOT_REQ_ID => return Ok(()),
+            Some(ServerEvent::Error {
+                req_id: Some(req_id),
+                message,
+            }) if req_id == ONE_SHOT_REQ_ID => bail!("{message}"),
+            Some(ServerEvent::WorktreeHasChanges { req_id, files, .. })
+                if req_id == ONE_SHOT_REQ_ID =>
+            {
+                bail!("kept: {files} uncommitted change(s)")
+            }
+            Some(_) => continue,
+            None => bail!("{CLOSED_BEFORE_REPLY}"),
+        }
+    }
+}
+
 /// CLI: `orion spawn "<task>" [--kind <claude|codex|cursor>]` from inside
 /// an agent session — ask the daemon to start a new agent beside this one,
 /// in the same worktree, opening on `task` as its first prompt. The caller

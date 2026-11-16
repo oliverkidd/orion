@@ -504,7 +504,7 @@ pub(crate) enum KnowledgeCommand {
 
 const FACTORY_EXAMPLES: &str = "\
 Examples:
-  orion factory skip ENG-7              off the factory, its status kept
+  orion factory skip ENG-7              off the factory, back to Triage
   orion factory skip crash-fix --backlog
                                         by its session's name, to Backlog";
 
@@ -514,15 +514,16 @@ pub(crate) enum FactoryCommand {
     ///
     /// Labels the ticket `factory-skip`, which the intake never picks up
     /// until someone removes it, comments "Taken off the factory by
-    /// <you>", closes the draft pull request its session opened, archives
-    /// the session and marks the ticket parked in the builder ledger. Its
-    /// status stays where it is, unless --backlog. Each step prints how it
-    /// went. Works with or without orion running.
+    /// <you>" (once), moves it to its team's Triage (or Backlog), closes
+    /// the draft pull request its session opened, archives the session,
+    /// removes its worktree when nothing in it would be lost, and marks
+    /// the ticket parked in the builder ledger. Each step prints how it
+    /// went, and running it again is safe.
     #[command(after_help = FACTORY_EXAMPLES)]
     Skip {
         /// The ticket (`ENG-7`) or the name of the session working on it.
         target: String,
-        /// Move the ticket to its team's Backlog too.
+        /// Move the ticket to its team's Backlog rather than its Triage.
         #[arg(long)]
         backlog: bool,
     },

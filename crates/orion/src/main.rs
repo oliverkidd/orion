@@ -65,9 +65,14 @@ fn main() -> Result<()> {
             // Read-only, straight from the daemon's database: the sessions
             // named so, and where each project's Linear key lives.
             let db = orion_core::paths::db_path();
-            let (sessions, projects) =
-                orion_daemon::store::Store::sessions_and_projects(&db, &target)?;
-            orion_tui::run_factory_skip(target, backlog, sessions, projects)
+            let found = orion_daemon::store::Store::skip_lookup(&db, &target)?;
+            let known = orion_tui::FactoryKnown {
+                named: found.named,
+                live: found.live,
+                projects: found.projects,
+                worktrees: found.worktrees,
+            };
+            orion_tui::run_factory_skip(target, backlog, known)
         }
         Some(Command::OpenLink { url }) => {
             // The session's account, from the database the daemon keeps:

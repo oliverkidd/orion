@@ -1541,8 +1541,8 @@ mod tests {
         };
         let (merge, card) = labels(Tier::Merge, "nothing risky, CI green");
         let (off, back) = (
-            "Not for the factory: leave as is",
-            "Not for the factory: to Backlog",
+            "Not for the factory: back to Triage",
+            "Not for the factory: move to Backlog",
         );
         assert_eq!(merge, ["Merge", "Open PR", off, back, "👍", "👎"]);
         assert!(card.image.is_none());
@@ -2059,8 +2059,8 @@ mod tests {
             [
                 "Merge",
                 "Open PR",
-                "Not for the factory: leave as is",
-                "Not for the factory: to Backlog",
+                "Not for the factory: back to Triage",
+                "Not for the factory: move to Backlog",
                 "👍",
                 "👎"
             ]

@@ -886,16 +886,19 @@ request. They work the same way; each has its own labels and its own preset (**B
   stage, each question and when you answered go into the run's record
   (`automations/runs/<ticket>.json` in orion's data dir).
 - **Not for the factory.** A ticket the factory shouldn't have taken comes off it for good. It is
-  two choices, **Not for the factory: leave as is** and **Not for the factory: to Backlog**, on the
-  No change, Stalled and dead cards, on the pull request's verdict card, on a factory session's plan
-  and question on your phone, and in the session's menu in orion (right-click its row). Either parks
-  the ticket as **Park** does — its session archived, its cards closed — labels it `factory-skip`
-  (made in its team if the team has no such label), comments "Taken off the factory by <you>" and
-  closes the draft pull request it opened, with a comment saying why. **Leave as is** keeps the
-  ticket's status (Triage, usually), so your own triage decides what happens to it next; **to
-  Backlog** moves it to the team's Backlog. The intake never picks it up again while it carries the
-  label. From a shell, `orion factory skip <ticket or session name> [--backlog]` does the same,
-  printing each step as it goes, and marks the ticket parked in the builder ledger
+  two choices, **Not for the factory: back to Triage** and **Not for the factory: move to Backlog**,
+  on the No change, Stalled and dead cards, on the pull request's verdict card, on a factory
+  session's plan and question on your phone, and in the session's menu in orion (right-click its
+  row). Either parks the ticket as **Park** does — its session archived, its cards closed — labels it
+  `factory-skip` (made in its team if the team has no such label), comments "Taken off the factory by
+  <you>" (once: never again on a ticket that says so already), sets the team's Triage or Backlog
+  state, and closes the draft pull request it opened, with a comment saying why. Then the session's
+  worktree is removed through orion's own delete, its delete hooks and containers with it — only when
+  it has no uncommitted changes and every commit on it is on a remote branch or the base; otherwise it
+  is kept, and the footer says why (`kept: 2 unpushed commits`). The intake never picks the ticket up
+  again while it carries the label. From a shell, `orion factory skip <ticket or session name>
+  [--backlog]` does the same (Triage unless `--backlog`), printing each step as it goes, and marks
+  the ticket parked in the builder ledger
   (`automations/linear-builder.json`), which a running orion takes up on its next tick so it never
   restarts or nudges the session. An orion built before that command keeps its own copy of the
   ledger and may write it back; the label still keeps the ticket off the intake.

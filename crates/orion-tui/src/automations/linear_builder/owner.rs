@@ -15,17 +15,18 @@
 //! ticket, and nothing comes back here.
 //!
 //! **Not for the factory** ([`not_for_the_factory`]) is two choices —
-//! **leave as is** (`not_for_factory`) and **to Backlog**
+//! **back to Triage** (`not_for_factory`) and **move to Backlog**
 //! (`not_for_factory_backlog`) — on these cards, on the PR verdict card
 //! (`pr_body`), on a factory session's plan and question on the phone (a
 //! `session:<id>` press, from the daemon), in a factory session's menu in
 //! orion, and as `orion factory skip` ([`super::skip`]). Each parks the
 //! ticket as **Park** does — its session archived, its cards closed —
 //! labels it `factory-skip` (made in its team when missing), comments
-//! "Taken off the factory by <you>" and closes the draft pull request it
-//! opened with a comment saying why ([`skip_writes`]). Leave as is keeps
-//! the ticket's status; to Backlog moves it to its team's Backlog. The
-//! intake never picks up a `factory-skip` ticket.
+//! "Taken off the factory by <you>" (once), sets its team's Triage or
+//! Backlog state, closes the draft pull request it opened with a comment
+//! saying why ([`skip_writes`]), and removes the session's worktree when
+//! nothing in it would be lost ([`super::skip::why_keep`]). The intake
+//! never picks up a `factory-skip` ticket.
 //!
 //! A thin ticket's reporter is asked on Slack and the ticket unassigned
 //! until they press **I've updated it**, which gives it back to you to be
@@ -37,7 +38,7 @@
 
 use orion_core::factory_card::{
     NOT_FOR_FACTORY, NOT_FOR_FACTORY_BACKLOG, NOT_FOR_FACTORY_BACKLOG_LABEL,
-    NOT_FOR_FACTORY_LEAVE_LABEL,
+    NOT_FOR_FACTORY_TRIAGE_LABEL,
 };
 use orion_core::{AgentId, ClientRequest, FactoryCardFailure, ProjectId};
 
@@ -69,10 +70,15 @@ pub(crate) enum Write {
         team: String,
         name: String,
     },
-    /// Comment "Taken off the factory by <the key's owner>".
+    /// Comment "Taken off the factory by <the key's owner>", unless it
+    /// says so already.
     TakenOff { issue: String },
-    /// Move it to its team's Backlog.
-    ToBacklog { issue: String, team: String },
+    /// Move it to its team's Triage or Backlog, by the state's type.
+    ToState {
+        issue: String,
+        team: String,
+        to: TeamState,
+    },
     /// Close the pull request at `url` with `comment`, if it is an open
     /// draft.
     CloseDraft { url: String, comment: String },
@@ -113,35 +119,73 @@ pub(crate) fn send_writes(app: &mut App) {
     }
 }
 
-/// One write.
-async fn run(key: &str, write: &Write) -> Result<(), String> {
+/// One write; `Some` says more about how it went (`already said`).
+async fn run(key: &str, write: &Write) -> Result<Option<String>, String> {
+    let done = |r: Result<(), String>| r.map(|()| None);
     match write {
-        Write::Assign { issue, user } => crate::linear::assign(key, issue, user.as_deref()).await,
-        Write::Comment { issue, body } => crate::linear::comment(key, issue, body).await,
-        Write::Duplicate { issue, of } => crate::linear::mark_duplicate(key, issue, of).await,
+        Write::Assign { issue, user } => {
+            done(crate::linear::assign(key, issue, user.as_deref()).await)
+        }
+        Write::Comment { issue, body } => done(crate::linear::comment(key, issue, body).await),
+        Write::Duplicate { issue, of } => done(crate::linear::mark_duplicate(key, issue, of).await),
         Write::Label { issue, team, name } => {
-            crate::linear::add_label(key, issue, team, name).await
+            done(crate::linear::add_label(key, issue, team, name).await)
         }
         Write::TakenOff { issue } => {
+            let comments = crate::linear::issue_comments(key, issue).await?;
+            if said_taken_off(&comments) {
+                return Ok(Some("already said".into()));
+            }
             let who = crate::linear::viewer_name(key)
                 .await
                 .ok()
                 .filter(|n| !n.trim().is_empty())
                 .unwrap_or_else(|| "its owner".into());
-            crate::linear::comment(key, issue, &taken_off(&who)).await
+            done(crate::linear::comment(key, issue, &taken_off(&who)).await)
         }
-        Write::ToBacklog { issue, team } => {
+        Write::ToState { issue, team, to } => {
             let states = crate::linear::team_states(key, team).await?;
-            let state = crate::linear::backlog_state(&states)
-                .ok_or_else(|| "the team has no Backlog state".to_string())?;
-            crate::linear::move_to(key, issue, &state.id).await
+            let state = crate::linear::state_of_kind(&states, to.kind())
+                .ok_or_else(|| format!("the team has no {} state", to.name()))?;
+            done(crate::linear::move_to(key, issue, &state.id).await)
         }
         Write::CloseDraft { url, comment } => close_draft(url, comment).await,
         Write::Close { issue, team, as_ } => {
             let states = crate::linear::team_states(key, team).await?;
             let state = crate::linear::state_for(&states, *as_)
                 .ok_or_else(|| format!("the team has no {as_:?} state"))?;
-            crate::linear::move_to(key, issue, &state.id).await
+            done(crate::linear::move_to(key, issue, &state.id).await)
+        }
+    }
+}
+
+/// Whether `comments` already say the ticket was taken off the factory.
+pub(crate) fn said_taken_off(comments: &[String]) -> bool {
+    comments
+        .iter()
+        .any(|c| c.trim_start().starts_with(&taken_off("")))
+}
+
+/// Where **Not for the factory** puts a ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TeamState {
+    Triage,
+    Backlog,
+}
+
+impl TeamState {
+    /// The state's type, as Linear has it.
+    pub(crate) fn kind(self) -> &'static str {
+        match self {
+            TeamState::Triage => "triage",
+            TeamState::Backlog => "backlog",
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            TeamState::Triage => "Triage",
+            TeamState::Backlog => "Backlog",
         }
     }
 }
@@ -156,44 +200,64 @@ pub(crate) fn describe(write: &Write) -> String {
         Write::Duplicate { of, .. } => format!("mark the ticket a duplicate of {of}"),
         Write::Label { name, .. } => format!("label the ticket {name}"),
         Write::TakenOff { .. } => "comment \"Taken off the factory by …\"".into(),
-        Write::ToBacklog { .. } => "move the ticket to Backlog".into(),
+        Write::ToState { to, .. } => format!("move the ticket to {}", to.name()),
         Write::CloseDraft { url, .. } => format!("close the draft {url}"),
     }
 }
 
 /// Run one write under the Linear key `key` — for `orion factory skip`,
 /// which runs them itself, in order.
-pub(crate) async fn run_write(key: &str, write: &Write) -> Result<(), String> {
+pub(crate) async fn run_write(key: &str, write: &Write) -> Result<Option<String>, String> {
     run(key, write).await
 }
 
-/// The writes **Not for the factory** makes, in order: each ticket
-/// labelled [`super::intake::SKIP_LABEL`], commented on and — `backlog` —
-/// moved to its team's Backlog; then the draft pull request at `pr`
-/// closed with a comment naming the tickets. `tickets` are `(id, team,
-/// identifier)`.
-pub(crate) fn skip_writes(
-    tickets: &[(String, String, String)],
-    pr: Option<&str>,
-    backlog: bool,
-) -> Vec<Write> {
-    let mut writes = Vec::new();
-    for (id, team, _) in tickets {
-        writes.push(Write::Label {
-            issue: id.clone(),
-            team: team.clone(),
-            name: super::intake::SKIP_LABEL.into(),
-        });
-        writes.push(Write::TakenOff { issue: id.clone() });
-        if backlog {
-            writes.push(Write::ToBacklog {
-                issue: id.clone(),
-                team: team.clone(),
-            });
+/// A ticket **Not for the factory** takes off: its ledger id, team and
+/// identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SkipTicket {
+    pub id: String,
+    pub team: String,
+    pub identifier: String,
+}
+
+impl SkipTicket {
+    /// Ticket `id` as the ledger has it.
+    pub(crate) fn of(id: &str, e: &Entry) -> Self {
+        Self {
+            id: id.to_string(),
+            team: e.team_id.clone(),
+            identifier: e.identifier.clone(),
         }
     }
+}
+
+/// The writes **Not for the factory** makes, in order: each ticket
+/// labelled [`super::intake::SKIP_LABEL`], commented on (once: not again
+/// on one that says so already) and moved to its team's Triage, or its
+/// Backlog (`backlog`); then the draft pull request at `pr` closed with a
+/// comment naming the tickets. Safe to make twice.
+pub(crate) fn skip_writes(tickets: &[SkipTicket], pr: Option<&str>, backlog: bool) -> Vec<Write> {
+    let mut writes = Vec::new();
+    for t in tickets {
+        writes.push(Write::Label {
+            issue: t.id.clone(),
+            team: t.team.clone(),
+            name: super::intake::SKIP_LABEL.into(),
+        });
+        writes.push(Write::TakenOff {
+            issue: t.id.clone(),
+        });
+        writes.push(Write::ToState {
+            issue: t.id.clone(),
+            team: t.team.clone(),
+            to: match backlog {
+                true => TeamState::Backlog,
+                false => TeamState::Triage,
+            },
+        });
+    }
     if let Some(url) = pr {
-        let names: Vec<&str> = tickets.iter().map(|(_, _, i)| i.as_str()).collect();
+        let names: Vec<&str> = tickets.iter().map(|t| t.identifier.as_str()).collect();
         writes.push(Write::CloseDraft {
             url: url.to_string(),
             comment: format!(
@@ -215,7 +279,7 @@ const GH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Close the pull request at `url` with `comment` — only while it is an
 /// open draft: one marked ready, merged or closed is left as it is.
-async fn close_draft(url: &str, comment: &str) -> Result<(), String> {
+async fn close_draft(url: &str, comment: &str) -> Result<Option<String>, String> {
     use crate::pull_request::run_gh;
     let view = run_gh(
         None,
@@ -225,8 +289,7 @@ async fn close_draft(url: &str, comment: &str) -> Result<(), String> {
     .await?;
     let view: serde_json::Value = serde_json::from_str(&view).map_err(|e| e.to_string())?;
     if !is_open_draft(&view) {
-        tracing::info!("automations: {url} isn't an open draft; left open");
-        return Ok(());
+        return Ok(Some("not an open draft: left as it is".into()));
     }
     run_gh(
         None,
@@ -234,7 +297,7 @@ async fn close_draft(url: &str, comment: &str) -> Result<(), String> {
         GH_TIMEOUT,
     )
     .await
-    .map(drop)
+    .map(|_| None)
 }
 
 /// Whether `gh pr view --json state,isDraft` says an open draft.
@@ -308,7 +371,7 @@ fn card(
 /// the factory took.
 pub(crate) fn not_for_the_factory_buttons() -> [Button; 2] {
     [
-        Button::tap(NOT_FOR_FACTORY, NOT_FOR_FACTORY_LEAVE_LABEL),
+        Button::tap(NOT_FOR_FACTORY, NOT_FOR_FACTORY_TRIAGE_LABEL),
         Button::tap(NOT_FOR_FACTORY_BACKLOG, NOT_FOR_FACTORY_BACKLOG_LABEL),
     ]
 }
@@ -729,8 +792,10 @@ const OFF_THE_FACTORY: &str = "Not for the factory";
 /// [`park`] parks it — its session archived, its cards closed, the
 /// pressed one under `key` too — then [`skip_writes`]: each ticket
 /// labelled `factory-skip` with a comment saying who took it off, moved
-/// to Backlog when `backlog` (else its status left as it is), and its
-/// draft pull request (`pr`, else the ledger's) closed with a comment.
+/// to its team's Backlog when `backlog` (else its Triage), and its draft
+/// pull request (`pr`, else the ledger's) closed with a comment — and its
+/// worktree removed once git says nothing in it would be lost
+/// ([`remove_worktree`]).
 pub(crate) fn not_for_the_factory(
     app: &mut App,
     id: &str,
@@ -745,11 +810,11 @@ pub(crate) fn not_for_the_factory(
         return;
     };
     let group = group_of(&app.automations.linear_builder, id, &entry);
-    let tickets: Vec<(String, String, String)> = group
+    let tickets: Vec<SkipTicket> = group
         .iter()
         .filter_map(|gid| {
             let e = app.automations.linear_builder.ledger.issues.get(gid)?;
-            Some((gid.clone(), e.team_id.clone(), e.identifier.clone()))
+            Some(SkipTicket::of(gid, e))
         })
         .collect();
     let pr = pr.or_else(|| entry.pr_url.clone());
@@ -770,6 +835,68 @@ pub(crate) fn not_for_the_factory(
     }
     for w in skip_writes(&tickets, pr.as_deref(), backlog) {
         write(app, &entry.project, w);
+    }
+    remove_worktree(app, &entry);
+}
+
+/// Remove the worktree `entry`'s session worked in, through orion's own
+/// delete (its hooks and containers with it) — once git, off the loop,
+/// says it is clean and every commit is on a remote or the base
+/// ([`super::skip::why_keep`]). One kept says why in the footer.
+fn remove_worktree(app: &mut App, entry: &Entry) {
+    let Some(w) = app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| !w.is_main && w.project_id == entry.project && w.branch == entry.branch)
+        .cloned()
+    else {
+        return;
+    };
+    let base = app
+        .tree
+        .projects
+        .iter()
+        .find(|p| p.id == w.project_id)
+        .map(|p| {
+            crate::config::Config::load()
+                .project(&p.repo_path)
+                .base_branch
+        })
+        .unwrap_or_default();
+    match app.automations.tx.clone() {
+        Some(tx) => {
+            tokio::task::spawn_blocking(move || {
+                let keep = super::skip::why_keep(&w.path, &base);
+                let answer = super::Answer::Worktree { id: w.id, keep };
+                let _ = tx.send(crate::automations::Answer::LinearBuilder(answer));
+            });
+        }
+        None => {
+            let keep = super::skip::why_keep(&w.path, &base);
+            worktree_checked(app, w.id, keep);
+        }
+    }
+}
+
+/// [`remove_worktree`]'s check landed: removed, or kept with why.
+pub(crate) fn worktree_checked(app: &mut App, id: orion_core::WorktreeId, keep: Option<String>) {
+    match keep {
+        None => {
+            let mut out = Vec::new();
+            crate::event_loop::delete_worktrees(app, vec![id], &mut out);
+            app.outbox.extend(out);
+        }
+        Some(why) => {
+            let branch = app
+                .tree
+                .worktrees
+                .iter()
+                .find(|w| w.id == id)
+                .map_or_else(String::new, |w| format!(" {}", w.branch));
+            app.flash = Some(crate::flash::Flash::note(format!("Worktree{branch} {why}")));
+            app.dirty = true;
+        }
     }
 }
 
