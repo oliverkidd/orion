@@ -130,7 +130,7 @@ fn words(text: &str) -> BTreeSet<String> {
 
 /// Whether `cited` (a path an entry names) and `path` are about the same
 /// files: one is the other, or inside it.
-fn same_files(cited: &str, path: &str) -> bool {
+pub(super) fn same_files(cited: &str, path: &str) -> bool {
     let cited = cited.trim().trim_start_matches("./").trim_end_matches('/');
     let path = path.trim_start_matches("./").trim_end_matches('/');
     if cited.len() < 3 || !cited.contains(['/', '.']) {

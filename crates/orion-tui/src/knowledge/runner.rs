@@ -52,6 +52,8 @@ const DAILY_MAX: usize = 20;
 pub(crate) const WINDOW_MS: i64 = 2 * 60 * 60 * 1000;
 /// How many times a merge that is refused is tried before a card says so.
 const MERGE_TRIES: u32 = 2;
+/// How often the staleness pass runs.
+const STALE_EVERY_MS: i64 = 7 * orion_core::clock::DAY_MS;
 /// How many times a harvest is tried.
 const ATTEMPTS: u32 = 2;
 /// Where the queue of every project was kept before each had its own.
@@ -130,6 +132,12 @@ pub(crate) struct State {
     pub window: Option<Window>,
     /// Merges refused since the window closed.
     pub merge_failures: u32,
+    /// The commit of the base each topic's rules were last checked at:
+    /// the weekly staleness pass checks a topic again only when its
+    /// files changed since (`harvest::staleness`).
+    pub checked: BTreeMap<String, String>,
+    /// Epoch ms the next weekly staleness pass is due; 0 until first seen.
+    pub stale_next: i64,
 }
 
 /// The state files' lock within this process.
@@ -510,6 +518,86 @@ fn note_sessions(app: &App) {
     }
 }
 
+/// Whether the weekly staleness pass is due at `now_ms`, moving the next
+/// one on a week when it is. The first sight of a project starts its week.
+pub(crate) fn stale_due(state: &mut State, now_ms: i64) -> bool {
+    if state.stale_next == 0 {
+        state.stale_next = now_ms + STALE_EVERY_MS;
+        return false;
+    }
+    if now_ms < state.stale_next {
+        return false;
+    }
+    state.stale_next = now_ms + STALE_EVERY_MS;
+    true
+}
+
+/// The projects with a staleness pass on its way.
+static STALING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Run the staleness pass for the project at `root` off the loop: one at
+/// a time a project, and never beside its harvests (the branch's lock).
+fn start_staleness(local: Local, root: PathBuf, project: String) {
+    if !STALING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(local.id.clone())
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        match run_staleness(&local, &root, &project).await {
+            Ok(changed) => tracing::info!(
+                "knowledge: staleness pass of {project} changed {:?}",
+                changed
+            ),
+            Err(why) => tracing::warn!("knowledge: staleness pass of {project} failed: {why}"),
+        }
+        STALING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&local.id);
+    });
+}
+
+/// The weekly staleness pass: the topics whose files changed since their
+/// last check, checked again against the base as origin has it
+/// (`harvest::staleness`), and proposed when any page changed.
+async fn run_staleness(local: &Local, root: &Path, project: &str) -> Result<Vec<String>, String> {
+    let model = ClaudeCli::from_config()?;
+    let at = root.to_path_buf();
+    let ignored = tokio::task::spawn_blocking(move || store::ignored(&at))
+        .await
+        .unwrap_or(true);
+    if ignored {
+        return Ok(Vec::new());
+    }
+    let share = sharer(local, root, project).await?;
+    let tree = harvest::CheckTree::of_base(root).await?;
+    let result = async {
+        let branch = share.open().await?;
+        let store = branch.store();
+        let records = records::for_check_in(&branch.clone);
+        let to = Target {
+            store: &store,
+            local,
+            project,
+            records: &records,
+        };
+        let mut checked = State::load(local).checked;
+        let changed = harvest::staleness(&model, &to, &tree.path, &mut checked).await?;
+        State::update(local, |s| s.checked = checked);
+        if !changed.is_empty() {
+            let published = share.publish(&branch, "knowledge: staleness check").await?;
+            note_published(local, &published);
+        }
+        Ok(changed)
+    }
+    .await;
+    tree.remove().await;
+    result
+}
+
 /// The projects with a merge on its way, so a tick starts no second one.
 static MERGING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
@@ -545,7 +633,7 @@ pub(crate) fn tick(app: &mut App) {
         let local = Local::of(&id);
         // The notices to post, the `.gitignore` card once, the daily card
         // and whether the merge is due: one read and write of the state.
-        let (notices, daily_card, merge) = State::update(&local, |s| {
+        let (notices, daily_card, merge, stale) = State::update(&local, |s| {
             let notices: Vec<Notice> = std::mem::take(&mut s.notices)
                 .into_iter()
                 .filter(|n| match n {
@@ -556,7 +644,8 @@ pub(crate) fn tick(app: &mut App) {
             let card = daily(s, now, &name, &local, auto);
             let merge = merge_due(s, now.timestamp_millis(), auto)
                 .then(|| (s.pr.clone(), s.pushed.clone()));
-            (notices, card, merge)
+            let stale = stale_due(s, now.timestamp_millis());
+            (notices, card, merge, stale)
         });
         for notice in notices {
             post_notice(app, &id, &name, notice);
@@ -565,7 +654,10 @@ pub(crate) fn tick(app: &mut App) {
             cards::post(app, card);
         }
         if let Some((Some(pr), pushed)) = merge {
-            start_merge(local, root, name, pr, pushed);
+            start_merge(local.clone(), root.clone(), name.clone(), pr, pushed);
+        }
+        if stale {
+            start_staleness(local, root, name);
         }
     }
 }
@@ -1170,6 +1262,18 @@ mod tests {
         merge_result(&local, "app", &pr(), Ok(Merge::Merged));
         let s = State::load(&local);
         assert_eq!((s.pr, s.pushed.as_str()), (None, ""));
+    }
+
+    #[test]
+    fn the_staleness_pass_runs_weekly_from_first_sight() {
+        let day = orion_core::clock::DAY_MS;
+        let mut state = State::default();
+        assert!(!stale_due(&mut state, 1_000), "first sight starts the week");
+        assert_eq!(state.stale_next, 1_000 + 7 * day);
+        assert!(!stale_due(&mut state, 1_000 + 6 * day));
+        assert!(stale_due(&mut state, 1_000 + 7 * day));
+        assert_eq!(state.stale_next, 1_000 + 14 * day);
+        assert!(!stale_due(&mut state, 1_000 + 8 * day), "once a week");
     }
 
     #[test]

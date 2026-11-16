@@ -155,8 +155,13 @@ Your reply, after any reading, is one JSON object: {{"entries": [{{"id": "k…",
 /// What every call is told of the hand-written records.
 pub(super) const RECORDS_RULE: &str = "The repo's hand-written decision records (in .orion/decisions/, outside harvested/) are authoritative and read-only. A record always wins: never record a rule that contradicts one; drop it, or list it under Open questions citing the record's path. Never restate a record as a rule.";
 
-/// What the staleness pass adds: no new entries, every rule checked.
-const STALE_TASK: &str = "There are no new entries. Check every rule and constraint on the page against the code as it is now. One that no longer holds moves to Replaced, saying why, its id comment kept; list its ids under dropped. Leave the rest as they are.";
+/// The staleness pass's rules: one area's pages whose files changed,
+/// every rule on them checked against the code as it is now.
+const STALE_SYSTEM: &str = r#"You keep some topic pages of a repository's knowledge store: the rules its owner set for the agents that work in it. You are in a checkout of the repository as it is now. You may read the code (Read, Grep, Glob); change nothing.
+
+You get pages of one area, each with the files it is about that changed since it was last checked. Check every rule and constraint on each page against the code as it is now. One that no longer holds moves to Replaced, saying why, its id comment kept; list its ids under dropped. Leave the rest as they are, word for word.
+
+Return every page you were given, whole, in the shape it has. Your reply, after any reading, is one JSON object: {"pages": {"<area/topic>": "<the whole page>"}, "dropped": [{"id": "k…", "why": "…"}]}"#;
 
 /// What the check is told when there is no checkout to read.
 pub(super) const UNCHECKED: &str = "This time the code can't be read and you have no tools. Don't check the new entries against the code and drop none of them for not holding: merge them into the page as the rules above say, and leave dropped empty.";
@@ -440,9 +445,8 @@ pub(crate) struct Topic<'a> {
 }
 
 /// Check `new` against the code at `code` (a [`CheckTree`]) and merge
-/// them into `topic`'s page — or, with `new` empty, check the page's
-/// rules alone (the staleness pass). With no code to read (`Err`), `new`
-/// is merged unchecked, and nothing is dropped.
+/// them into `topic`'s page. With no code to read (`Err`), `new` is
+/// merged unchecked, and nothing is dropped.
 pub(crate) async fn check_topic(
     model: &dyn Model,
     records: &str,
@@ -450,30 +454,25 @@ pub(crate) async fn check_topic(
     new: &[Entry],
     code: Result<&Path, &str>,
 ) -> Result<Checked, String> {
-    let task = match new.is_empty() {
-        true => STALE_TASK.to_string(),
-        false => {
-            let list: Vec<Value> = new
-                .iter()
-                .map(|e| {
-                    let mut v = json!({"id": e.id, "pr": e.pr, "stream": e.stream, "kind": e.kind,
-                        "rule": e.rule, "applies_to": e.applies_to, "why": e.why, "by": e.by,
-                        "confidence": e.confidence, "quote": e.quote,
-                        "options_rejected": e.options_rejected, "confirm_by": e.confirm_by});
-                    if !e.new_topic.is_empty() {
-                        v["new_topic"] = json!(e.new_topic);
-                    }
-                    v
-                })
-                .collect();
-            format!(
-                "New entries:\n{}",
-                serde_json::to_string_pretty(&list).unwrap_or_default()
-            )
-        }
-    };
-    let others = match (new.is_empty(), topic.others.is_empty()) {
-        (false, false) => format!(
+    let list: Vec<Value> = new
+        .iter()
+        .map(|e| {
+            let mut v = json!({"id": e.id, "pr": e.pr, "stream": e.stream, "kind": e.kind,
+                "rule": e.rule, "applies_to": e.applies_to, "why": e.why, "by": e.by,
+                "confidence": e.confidence, "quote": e.quote,
+                "options_rejected": e.options_rejected, "confirm_by": e.confirm_by});
+            if !e.new_topic.is_empty() {
+                v["new_topic"] = json!(e.new_topic);
+            }
+            v
+        })
+        .collect();
+    let task = format!(
+        "New entries:\n{}",
+        serde_json::to_string_pretty(&list).unwrap_or_default()
+    );
+    let others = match topic.others.is_empty() {
+        false => format!(
             "The area's other topics (move a new entry there only when it belongs there, not here):\n{}\n\n",
             topic
                 .others
@@ -482,7 +481,7 @@ pub(crate) async fn check_topic(
                 .collect::<Vec<_>>()
                 .join("\n")
         ),
-        _ => String::new(),
+        true => String::new(),
     };
     let scope_hint = new.iter().find(|e| !e.new_topic.is_empty());
     let prompt = format!(
@@ -491,10 +490,7 @@ pub(crate) async fn check_topic(
         records_part(records),
         topic.page.unwrap_or("(no page yet)"),
     );
-    let step = match new.is_empty() {
-        true => Step::Staleness,
-        false => Step::Harvest,
-    };
+    let step = Step::Harvest;
     let ask = match code {
         Ok(dir) => ModelAsk {
             system: format!("{}\n\n{RECORDS_RULE}\n\n{JSON_ONLY}", check_system()),
@@ -1128,45 +1124,159 @@ pub(crate) fn mark_agent_calls(page: &str, ids: &[&str]) -> String {
     text
 }
 
-/// The staleness pass: every topic's rules checked against the code at
-/// `code` (the base as origin has it, [`CheckTree::of_base`]), the ones
-/// that no longer hold moved to Replaced. Not committed (the caller
-/// does). The topics changed.
+/// The paths an entry's `applies_to` names: the ones that look like
+/// files or folders.
+fn named_paths(entries: &[&Entry]) -> Vec<String> {
+    let mut paths: Vec<String> = entries
+        .iter()
+        .flat_map(|e| e.applies_to.iter())
+        .flat_map(|a| a.split_whitespace())
+        .map(|p| p.trim_matches(|c: char| "`'\",;()".contains(c)).to_string())
+        .filter(|p| p.len() >= 3 && p.contains(['/', '.']))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The staleness pass, weekly: only the topics whose `applies_to` paths
+/// changed since the topic was last checked are checked again, against
+/// the code at `code` (the base as origin has it, [`CheckTree::of_base`]).
+/// `checked` holds the commit each topic was last checked at, and is
+/// moved on to `code`'s for every topic found current; a topic never
+/// checked counts from its newest entry. The changed topics go one call
+/// an area; a rule that no longer holds moves to Replaced. Not committed
+/// (the caller does). The topics whose pages changed.
 pub(crate) async fn staleness(
     model: &dyn Model,
     to: &Target<'_>,
     code: &Path,
+    checked: &mut BTreeMap<String, String>,
 ) -> Result<Vec<String>, String> {
     let store = to.store;
-    let mut changed = Vec::new();
+    let git = |args: &[&str]| crate::git_proc::read(code, args).map(|out| out.trim().to_string());
+    let head = git(&["rev-parse", "HEAD"])?;
+    let topics = store.topics();
+    checked.retain(|topic, _| topics.contains(topic));
     let mut entries = store.entries();
-    for topic in store.topics() {
-        let page = store.page(&topic);
-        let at = Topic {
-            name: &topic,
-            page: page.as_deref(),
-            others: &[],
+    let mut diffs: BTreeMap<String, Option<Vec<String>>> = BTreeMap::new();
+    // Each area's topics to check, with the files that changed.
+    let mut due: BTreeMap<String, Vec<(String, String, Vec<String>)>> = BTreeMap::new();
+    for (topic, page) in store.pages() {
+        let on: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.topic == topic && e.status == ACTIVE)
+            .collect();
+        let paths = named_paths(&on);
+        if paths.is_empty() {
+            continue;
+        }
+        let newest = on
+            .iter()
+            .map(|e| e.recorded_at.as_str())
+            .max()
+            .unwrap_or("");
+        let from = checked.get(&topic).cloned().or_else(|| {
+            (!newest.is_empty())
+                .then(|| git(&["rev-list", "-1", &format!("--before={newest}"), "HEAD"]).ok())
+                .flatten()
+                .filter(|rev| !rev.is_empty())
+        });
+        let Some(from) = from else {
+            checked.insert(topic, head.clone());
+            continue;
         };
-        let checked = match check_topic(model, to.records, &at, &[], Ok(code)).await {
-            Ok(checked) => checked,
+        let files = diffs
+            .entry(from.clone())
+            .or_insert_with(|| match from == head {
+                true => Some(Vec::new()),
+                false => git(&["diff", "--name-only", &from, "HEAD"])
+                    .ok()
+                    .map(|out| out.lines().map(str::to_string).collect()),
+            });
+        let Some(files) = files else {
+            tracing::info!(
+                "knowledge: staleness can't diff {topic} from {from}; checked from now on"
+            );
+            checked.insert(topic, head.clone());
+            continue;
+        };
+        let touched: Vec<String> = files
+            .iter()
+            .filter(|f| paths.iter().any(|p| super::read::same_files(p, f)))
+            .cloned()
+            .collect();
+        match touched.is_empty() {
+            true => {
+                checked.insert(topic, head.clone());
+            }
+            false => {
+                let area = topic.split('/').next().unwrap_or_default().to_string();
+                due.entry(area).or_default().push((topic, page, touched));
+            }
+        }
+    }
+
+    let mut changed = Vec::new();
+    for (area, topics) in &due {
+        let mut prompt = format!("{}\n\nArea: {area}\n", records_part(to.records));
+        for (topic, page, files) in topics {
+            prompt.push_str(&format!(
+                "\n### {topic}\nFiles changed since its last check: {}\n{}\n",
+                files.join(", "),
+                page.trim()
+            ));
+        }
+        prompt.push_str(&format!("\n{JSON_ONLY}"));
+        let ask = ModelAsk {
+            system: format!("{STALE_SYSTEM}\n\n{RECORDS_RULE}\n\n{JSON_ONLY}"),
+            prompt,
+            cwd: Some(code.to_path_buf()),
+            read_tools: true,
+            step: Step::Staleness,
+        };
+        let v = match ask_json(model, ask, |v| v.get("pages").is_some_and(Value::is_object)).await {
+            Ok(v) => v,
             Err(why) => {
-                tracing::warn!("knowledge: staleness check of {topic} failed: {why}");
+                tracing::warn!("knowledge: staleness check of {area} failed: {why}");
                 continue;
             }
         };
-        for (id, why) in &checked.dropped {
-            if let Some(e) = entries.iter_mut().find(|e| &e.id == id) {
-                e.status = DROPPED.into();
-                e.note = format!("no longer holds: {why}");
+        let dropped = id_pairs(&v, "dropped", "why");
+        for (topic, old, _) in topics {
+            let Some(raw) = v["pages"].get(topic).and_then(Value::as_str) else {
+                continue;
+            };
+            let page = match tidy(topic, raw, None) {
+                Ok(page) => {
+                    super::consolidate::keep_every_id(&page, &[(topic.clone(), old.clone())])
+                }
+                Err(why) => {
+                    tracing::warn!("knowledge: staleness check of {topic}: {why}");
+                    continue;
+                }
+            };
+            for (id, why) in &dropped {
+                if let Some(e) = entries
+                    .iter_mut()
+                    .find(|e| &e.id == id && &e.topic == topic)
+                {
+                    e.status = DROPPED.into();
+                    e.note = format!("no longer holds: {why}");
+                }
             }
-        }
-        if page.as_deref() != Some(checked.page.as_str()) {
-            store.write_page(&topic, &checked.page)?;
-            changed.push(topic);
+            let before = tidy(topic, old, None).unwrap_or_else(|_| old.clone());
+            if before.trim() != page.trim() {
+                store.write_page(topic, &page)?;
+                changed.push(topic.clone());
+            }
+            checked.insert(topic.clone(), head.clone());
         }
     }
-    store.save_entries(&entries)?;
-    store.write_index(to.project)?;
+    if !changed.is_empty() {
+        store.save_entries(&entries)?;
+        store.write_index(to.project)?;
+    }
     Ok(changed)
 }
 
@@ -2197,6 +2307,141 @@ pub(crate) mod tests {
         assert_eq!(out.unwrap().kept, 2);
         assert!(unchecked.is_some_and(|why| why.contains("couldn't fetch")));
         assert!(model.asked.lock().unwrap()[0].cwd.is_none());
+    }
+
+    /// The staleness pass asks only about the topics whose files changed
+    /// since their last check, one call an area.
+    #[tokio::test]
+    async fn staleness_checks_only_the_topics_whose_files_changed() {
+        let code = tempfile::tempdir().unwrap();
+        let dir = code.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        std::fs::create_dir_all(dir.join("src/billing")).unwrap();
+        std::fs::write(dir.join("src/auth.ts"), "one").unwrap();
+        std::fs::write(dir.join("src/billing/invoice.ts"), "one").unwrap();
+        let commit = |message: &str| {
+            git(dir, &["add", "."]);
+            git(
+                dir,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "commit",
+                    "-q",
+                    "-m",
+                    message,
+                ],
+            );
+            git(dir, &["rev-parse", "HEAD"]).trim().to_string()
+        };
+        let first = commit("one");
+        std::fs::write(dir.join("src/auth.ts"), "two").unwrap();
+        let head = commit("two");
+
+        let into = Bench::new();
+        let store = &into.store;
+        let entry = |id: &str, topic: &str, applies: &[&str]| Entry {
+            id: id.into(),
+            topic: topic.into(),
+            rule: format!("Rule {id}"),
+            applies_to: applies.iter().map(|a| a.to_string()).collect(),
+            status: ACTIVE.into(),
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+            ..Entry::default()
+        };
+        store
+            .append(&[
+                entry("k1-1", "editor/login", &["src/auth.ts"]),
+                entry("k2-1", "editor/redirects", &["`src/auth.ts` returnPath"]),
+                entry("k3-1", "editor/billing", &["src/billing"]),
+                entry("k4-1", "charts/axes", &["the axis labels"]),
+                // Never checked, recorded after the change: current.
+                entry("k5-1", "charts/series", &["src/auth.ts"]),
+            ])
+            .unwrap();
+        let page = |topic: &str, id: &str| {
+            format!("# {topic}\nScope: {topic}\n\n## Rules in force\n- Rule {id} (#1) <!-- {id} -->\n\n## Constraints\n\n## Open questions\n\n## Replaced\n")
+        };
+        for (topic, id) in [
+            ("editor/login", "k1-1"),
+            ("editor/redirects", "k2-1"),
+            ("editor/billing", "k3-1"),
+            ("charts/axes", "k4-1"),
+            ("charts/series", "k5-1"),
+        ] {
+            store.write_page(topic, &page(topic, id)).unwrap();
+        }
+        let mut checked: BTreeMap<String, String> =
+            ["editor/login", "editor/redirects", "editor/billing"]
+                .iter()
+                .map(|t| (t.to_string(), first.clone()))
+                .collect();
+
+        let reply = json!({"pages": {
+            "editor/login": "# editor/login\nScope: editor/login\n\n## Rules in force\n\n## Constraints\n\n## Open questions\n\n## Replaced\n- Rule k1-1 (#1): returnPath is gone <!-- k1-1 -->\n",
+            "editor/redirects": page("editor/redirects", "k2-1")
+        }, "dropped": [{"id": "k1-1", "why": "returnPath is gone"}]})
+        .to_string();
+        let model = Scripted::new(vec![reply]);
+        let changed = staleness(&model, &into.target(""), dir, &mut checked)
+            .await
+            .unwrap();
+        assert_eq!(changed, vec!["editor/login"]);
+
+        let asked = std::mem::take(&mut *model.asked.lock().unwrap());
+        assert_eq!(
+            asked.len(),
+            1,
+            "one call for the one area with changed files"
+        );
+        let ask = &asked[0];
+        assert!(ask.read_tools && ask.step == Step::Staleness);
+        assert_eq!(ask.cwd.as_deref(), Some(dir));
+        assert!(ask
+            .prompt
+            .contains("### editor/login\nFiles changed since its last check: src/auth.ts\n"));
+        assert!(ask.prompt.contains("### editor/redirects\n"));
+        for unchanged in ["editor/billing", "charts/axes", "charts/series"] {
+            assert!(
+                !ask.prompt.contains(unchanged),
+                "{unchanged} wasn't asked about"
+            );
+        }
+        let entries = store.entries();
+        assert_eq!(entries[0].status, DROPPED);
+        assert_eq!(entries[0].note, "no longer holds: returnPath is gone");
+        assert_eq!(entries[1].status, ACTIVE);
+        assert!(store
+            .page("editor/login")
+            .unwrap()
+            .contains("## Replaced\n- Rule k1-1"));
+        for topic in [
+            "editor/login",
+            "editor/redirects",
+            "editor/billing",
+            "charts/series",
+        ] {
+            assert_eq!(
+                checked.get(topic),
+                Some(&head),
+                "{topic} is checked as of now"
+            );
+        }
+        assert_eq!(
+            checked.get("charts/axes"),
+            None,
+            "no files named: never checked"
+        );
+
+        // Nothing changed since: no call at all.
+        let model = Scripted::new(Vec::new());
+        let changed = staleness(&model, &into.target(""), dir, &mut checked)
+            .await
+            .unwrap();
+        assert!(changed.is_empty());
+        assert!(model.asked.lock().unwrap().is_empty());
     }
 
     #[test]

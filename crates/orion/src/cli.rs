@@ -489,11 +489,10 @@ pub(crate) enum KnowledgeCommand {
     ///
     /// Lists the merged pull requests, joins each to the Claude and
     /// Cursor transcripts that worked on it (by branch, or by links to
-    /// it), and harvests them oldest first with Opus, as at merge, into
-    /// your knowledge pull request, a commit a batch; then checks every
-    /// topic against the code as it is now. Pull requests recorded before
-    /// are skipped, so it can be run again. Needs gh and a Claude account,
-    /// not the TUI.
+    /// it), and harvests them oldest first, one Opus call each, as at
+    /// merge, into your knowledge pull request, a commit a batch. Pull
+    /// requests recorded before are skipped, so it can be run again.
+    /// Needs gh and a Claude account, not the TUI.
     #[command(
         after_help = KNOWLEDGE_EXAMPLES,
         // Two lines: on one it runs past a 60-column terminal.
@@ -509,7 +508,7 @@ pub(crate) enum KnowledgeCommand {
     },
     /// Merge the recorded topics down to about 60.
     ///
-    /// Each area's topics go to Opus in one call, which merges near
+    /// Each area's topics go to Sonnet in one call, which merges near
     /// duplicates into at most 8 an area; the merged pages are rewritten
     /// with every rule and PR kept, the old ones deleted, and it is all
     /// proposed in your knowledge pull request as one commit. A backfill

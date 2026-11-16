@@ -6,10 +6,10 @@
 //! batch of [`BATCH`], pushed and proposed in the same pull request as
 //! the harvests at merge (`super::share`). A batch that takes the topics
 //! past the cap is consolidated (`super::consolidate`), and so is what
-//! the backfill leaves at the end; then every topic gets a staleness
-//! pass against the code as origin's base has it now (a temporary
-//! checkout, `harvest::CheckTree`; with none, the pass is skipped),
-//! committed the same way. Runs from the CLI, with no TUI.
+//! the backfill leaves at the end. No staleness pass: each pull request
+//! was checked against its own merge, and the weekly pass re-checks the
+//! topics whose files change after (`super::runner`). Runs from the CLI,
+//! with no TUI.
 //!
 //! A usage limit stops it at the first pull request it refuses
 //! ([`harvest_each`]): what was harvested is committed and proposed, and
@@ -57,8 +57,6 @@ pub(crate) struct Summary {
     /// The usage limit the backfill stopped at, and how many pull
     /// requests it left for the next run.
     pub stopped: Option<(String, usize)>,
-    /// Topics the staleness pass changed.
-    pub stale: Vec<String>,
     /// The last consolidation of the topics.
     pub consolidated: Option<Consolidated>,
     /// The knowledge pull request the harvests went to, and the head
@@ -97,9 +95,6 @@ impl Summary {
         }
         if let Some(done) = &self.consolidated {
             lines.push(done.line());
-        }
-        if !self.stale.is_empty() {
-            lines.push(format!("Staleness pass changed: {}", self.stale.join(", ")));
         }
         if let Some(pr) = &self.pr {
             lines.push(format!("Proposed in #{}: {}", pr.number, pr.url));
@@ -321,8 +316,8 @@ pub(crate) async fn run(
             break;
         }
     }
-    // At a limit, consolidating and checking the topics would only meet
-    // it again: the next run does both.
+    // At a limit, consolidating the topics would only meet it again: the
+    // next run does it.
     if let Some((why, left)) = &summary.stopped {
         say(&format!(
             "Stopped at a usage limit, {left} pull requests left for the next run: {why}"
@@ -348,32 +343,6 @@ pub(crate) async fn run(
             say_published(say, &published);
             summary.published(published);
         }
-    }
-    say("Staleness pass over every topic…");
-    match harvest::CheckTree::of_base(root).await {
-        Ok(tree) => {
-            let stale = async {
-                let branch = share.open().await?;
-                let store = branch.store();
-                let records = records::for_check_in(&branch.clone);
-                let to = Target {
-                    store: &store,
-                    local: &share.local,
-                    project: &share.project,
-                    records: &records,
-                };
-                let stale = harvest::staleness(model, &to, &tree.path).await?;
-                let published = share.publish(&branch, "knowledge: staleness check").await?;
-                Ok::<_, String>((stale, published))
-            }
-            .await;
-            tree.remove().await;
-            let (stale, published) = stale?;
-            say_published(say, &published);
-            summary.published(published);
-            summary.stale = stale;
-        }
-        Err(why) => say(&format!("  skipped, no checkout to read: {why}")),
     }
     Ok(summary)
 }
