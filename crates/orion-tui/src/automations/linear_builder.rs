@@ -7,8 +7,10 @@
 //! * **Watch.** Every [`POLL`] ([`interval`]; `ORION_LINEAR_BUILDER_POLL_SECS`
 //!   overrides it, `0` turns it off), for each distinct Linear key across
 //!   the projects, the tickets assigned to the key's owner that carry one
-//!   of the runner's labels and wait in **Triage or Todo** — never the
-//!   backlog: moving a ticket to Todo starts it ([`issues_query`]). A
+//!   of the runner's labels, sit in no Linear project (a project's
+//!   tickets are planned work) and wait in **Todo, Triage or the
+//!   backlog** — picked in that order, then by priority ([`issues_query`],
+//!   [`pick_rank`]); the queue keeps that order too. A
 //!   ticket already in the LEDGER (`<data_dir>/automations/linear-builder.json`,
 //!   issue id → session, stage and history), or being placed or queued
 //!   now, is skipped, by either runner.
@@ -167,33 +169,62 @@ pub fn carries(issue: &LinearIssue, labels: &[String]) -> bool {
     })
 }
 
-/// The states a ticket is picked up in: Triage and Todo (`unstarted`).
-/// Never the backlog — moving a ticket to Todo is what starts it.
-const WAITING_STATES: [&str; 2] = ["triage", "unstarted"];
+/// The states a ticket is picked up in, in the order they are picked:
+/// Todo (`unstarted`) first, then Triage, then the backlog.
+const PICK_ORDER: [&str; 3] = ["unstarted", "triage", "backlog"];
 
-/// The most tickets one look reads.
+/// The most tickets one look reads in each state.
 const ISSUES_LIMIT: usize = 50;
 
-/// The look: tickets assigned to the key's owner, in Triage or Todo, with
-/// one of `labels` — as Linear's `IssueFilter` has it: `assignee.isMe`,
-/// `state.type.in`, and `labels.some.or` of `name.eqIgnoreCase`. Aliased
-/// `mine`, so `linear::parse_issues` reads it as it reads the LINEAR
-/// VIEW's.
+/// The look: tickets assigned to the key's owner, in no Linear project,
+/// with one of `labels` — one list a state of [`PICK_ORDER`], aliased by
+/// the state's type, as Linear's `IssueFilter` has it: `assignee.isMe`,
+/// `state.type.eq`, `project.null` and `labels.some.or` of
+/// `name.eqIgnoreCase`. Asked state by state so a long backlog never
+/// crowds Todo out of a list.
 pub fn issues_query(labels: &[String]) -> (String, serde_json::Value) {
-    let states: Vec<String> = WAITING_STATES.iter().map(|s| format!("\"{s}\"")).collect();
+    let parts: Vec<String> = PICK_ORDER
+        .iter()
+        .map(|state| {
+            format!(
+                "{state}: issues(first: {ISSUES_LIMIT}, filter: {{ \
+                 assignee: {{ isMe: {{ eq: true }} }}, \
+                 state: {{ type: {{ eq: \"{state}\" }} }}, \
+                 project: {{ null: true }}, \
+                 labels: {{ some: {{ or: $labels }} }} }}) {{ nodes {{ {} }} }}",
+                crate::linear::ISSUE_FIELDS
+            )
+        })
+        .collect();
     let query = format!(
-        "query($labels: [IssueLabelFilter!]) {{ mine: issues(first: {ISSUES_LIMIT}, filter: {{ \
-         assignee: {{ isMe: {{ eq: true }} }}, \
-         state: {{ type: {{ in: [{}] }} }}, \
-         labels: {{ some: {{ or: $labels }} }} }}) {{ nodes {{ {} }} }} }}",
-        states.join(", "),
-        crate::linear::ISSUE_FIELDS
+        "query($labels: [IssueLabelFilter!]) {{ {} }}",
+        parts.join(" ")
     );
     let labels: Vec<serde_json::Value> = labels
         .iter()
         .map(|l| serde_json::json!({ "name": { "eqIgnoreCase": l.trim() } }))
         .collect();
     (query, serde_json::json!({ "labels": labels }))
+}
+
+/// Where `issue` comes in the order tickets are picked: by its state in
+/// [`PICK_ORDER`], then by its priority (Urgent first, none last).
+pub(crate) fn pick_rank(issue: &LinearIssue) -> (usize, usize) {
+    let state = PICK_ORDER
+        .iter()
+        .position(|s| *s == issue.status_type)
+        .unwrap_or(PICK_ORDER.len());
+    (state, crate::linear::priority_rank(issue.priority))
+}
+
+/// A group's place in the queue: its most pressing ticket's.
+fn group_rank(group: &Group) -> (usize, usize) {
+    group
+        .issues
+        .iter()
+        .map(pick_rank)
+        .min()
+        .unwrap_or((PICK_ORDER.len(), usize::MAX))
 }
 
 /// The workspace's issue labels: `issueLabels`, groups left out.
@@ -764,7 +795,7 @@ fn look(app: &mut App, which: Automation) {
         tokio::spawn(async move {
             let issues = crate::linear::graphql(&key, &query, variables)
                 .await
-                .and_then(|json| crate::linear::parse_issues(&json));
+                .and_then(|json| crate::linear::parse_my_issues(&json, &PICK_ORDER));
             let _ = tx.send(super::Answer::LinearBuilder(Answer::Fetched {
                 which,
                 projects,
@@ -808,16 +839,21 @@ pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
     }
 }
 
-/// The tickets in `issues` that `which` picks up now: carrying one of its
-/// labels and not `factory-skip`, in Triage or Todo, and not picked up
-/// already.
+/// The tickets in `issues` that `which` picks up now, in the order it
+/// picks them ([`pick_rank`]): carrying one of its labels and not
+/// `factory-skip`, in no Linear project (a project's tickets are planned
+/// work, not the factory's), in Todo, Triage or the backlog, and not
+/// picked up already.
 pub fn fresh(shared: &Shared, labels: &[String], issues: Vec<LinearIssue>) -> Vec<LinearIssue> {
-    issues
+    let mut fresh: Vec<LinearIssue> = issues
         .into_iter()
         .filter(|i| carries(i, labels) && !intake::not_for_the_factory(i))
-        .filter(|i| WAITING_STATES.contains(&i.status_type.as_str()))
+        .filter(|i| i.project.is_none())
+        .filter(|i| PICK_ORDER.contains(&i.status_type.as_str()))
         .filter(|i| !shared.picked_up(&i.id))
-        .collect()
+        .collect();
+    fresh.sort_by_key(pick_rank);
+    fresh
 }
 
 /// A look's tickets: back in your hands ones let go of ([`intake::
@@ -915,6 +951,8 @@ fn placed(
         shared.claimed.remove(&p.issue.id);
     }
     shared.queue.extend(groups);
+    // Todo before Triage before the backlog, whenever each was placed.
+    shared.queue.sort_by_key(group_rank);
     for p in possible {
         owner::hold_duplicate(app, p);
     }
@@ -1706,12 +1744,24 @@ mod tests {
                 status_type: "triage".into(),
                 ..issue("ENG-7", &["Bug"])
             },
+            LinearIssue {
+                project: Some(LinearTag {
+                    name: "Q4 launch".into(),
+                    ..LinearTag::default()
+                }),
+                ..issue("ENG-8", &["Bug"])
+            },
+            LinearIssue {
+                priority: 2,
+                ..issue("ENG-9", &["Bug"])
+            },
         ];
         let ids = |v: Vec<LinearIssue>| v.into_iter().map(|i| i.identifier).collect::<Vec<_>>();
-        // Triage and Todo, never the backlog.
+        // Todo (by priority), then Triage, then the backlog; never one
+        // started, and never one in a Linear project.
         assert_eq!(
             ids(fresh(&shared, &bug, issues.clone())),
-            ["ENG-1", "ENG-7"]
+            ["ENG-9", "ENG-1", "ENG-7", "ENG-6"]
         );
         assert_eq!(ids(fresh(&shared, &feature, issues)), ["ENG-2"]);
 
@@ -1841,18 +1891,6 @@ mod tests {
             intake::route_by_rule(&issue("ENG-1", &["Bug", "Web App"]), &several, &none),
             Some(several[0].project.clone()),
             "a label names it"
-        );
-        let in_project = LinearIssue {
-            project: Some(LinearTag {
-                name: "API".into(),
-                ..LinearTag::default()
-            }),
-            ..issue("ENG-2", &["Bug"])
-        };
-        assert_eq!(
-            intake::route_by_rule(&in_project, &several, &none),
-            Some(several[1].project.clone()),
-            "its Linear project names it"
         );
         assert_eq!(
             intake::route_by_rule(&issue("ENG-3", &["web-app", "api"]), &several, &none),
@@ -2264,13 +2302,15 @@ mod tests {
     #[test]
     fn the_queries_ask_linear_as_its_schema_has_it() {
         let (query, vars) = issues_query(&["Bug".into(), " Regression ".into()]);
-        assert!(query.contains("mine: issues(first: 50"), "{query}");
+        for state in ["unstarted", "triage", "backlog"] {
+            let part = format!(
+                r#"{state}: issues(first: 50, filter: {{ assignee: {{ isMe: {{ eq: true }} }}, state: {{ type: {{ eq: "{state}" }} }}, project: {{ null: true }}, "#
+            );
+            assert!(query.contains(&part), "{query}");
+        }
         assert!(
-            query.contains("assignee: { isMe: { eq: true } }"),
-            "{query}"
-        );
-        assert!(
-            query.contains(r#"state: { type: { in: ["triage", "unstarted"] } }"#),
+            query.find("unstarted:") < query.find("triage:")
+                && query.find("triage:") < query.find("backlog:"),
             "{query}"
         );
         assert!(
@@ -3754,6 +3794,56 @@ mod tests {
         assert_eq!(ids, ["ENG-3"]);
     }
 
+    /// Linear's lists come back state by state, in the order asked, and the
+    /// queue keeps Todo before Triage before the backlog however the
+    /// groups were placed.
+    #[test]
+    fn tickets_are_picked_from_todo_then_triage_then_the_backlog() {
+        let node = |id: &str, state: &str| {
+            serde_json::json!({ "id": id, "identifier": id, "title": id, "url": "u",
+                "state": { "name": state, "type": state } })
+        };
+        let json = serde_json::json!({ "data": {
+            "backlog": { "nodes": [node("ENG-3", "backlog")] },
+            "unstarted": { "nodes": [node("ENG-1", "unstarted")] },
+            "triage": { "nodes": [node("ENG-2", "triage")] },
+        } });
+        let parsed = crate::linear::parse_my_issues(&json, &PICK_ORDER).unwrap();
+        let ids: Vec<&str> = parsed.iter().map(|i| i.identifier.as_str()).collect();
+        assert_eq!(ids, ["ENG-1", "ENG-2", "ENG-3"]);
+        assert!(parsed.iter().all(|i| i.mine));
+
+        let mut app = app_with_project();
+        let in_state = |id: &str, state: &str| LinearIssue {
+            status_type: state.into(),
+            ..issue(id, &["Bug"])
+        };
+        let group = |i: LinearIssue| Group::of(Automation::BugFixer, p(), vec![i]);
+        placed(
+            &mut app,
+            vec![
+                group(in_state("ENG-3", "backlog")),
+                group(in_state("ENG-2", "triage")),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        placed(
+            &mut app,
+            vec![group(in_state("ENG-1", "unstarted"))],
+            Vec::new(),
+            Vec::new(),
+        );
+        let queued: Vec<&str> = app
+            .automations
+            .linear_builder
+            .queue
+            .iter()
+            .map(|g| g.issues[0].identifier.as_str())
+            .collect();
+        assert_eq!(queued, ["ENG-1", "ENG-2", "ENG-3"]);
+    }
+
     /// A parked ticket moved back to Todo starts afresh: its kept worktree
     /// is its own ended run, not someone at work on it, and the new run
     /// gets a branch of its own.
@@ -3786,6 +3876,17 @@ mod tests {
                 };
                 // Before: its own old worktree reads as someone on it.
                 assert!(intake::worked_on(&app, &[p()], &back).is_some());
+
+                // In the backlog, where moving it parked it: left parked.
+                let shelved = LinearIssue {
+                    status_type: "backlog".into(),
+                    ..back.clone()
+                };
+                intake::returned(&mut app, std::slice::from_ref(&shelved));
+                assert!(
+                    picked_up(&app, "uuid-ENG-7"),
+                    "a shelved ticket stays parked"
+                );
 
                 intake::returned(&mut app, std::slice::from_ref(&back));
                 assert!(!picked_up(&app, "uuid-ENG-7"));

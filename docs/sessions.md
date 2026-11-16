@@ -826,9 +826,13 @@ request. They work the same way; each has its own labels and its own preset (**B
   Case doesn't matter. A ticket with none of either's labels is left alone, and so is one labelled
   `factory-skip` (**Not for the factory**, below), until someone takes that label off.
 - **Watching.** Every 2 minutes, for each Linear key your projects use, orion asks for the tickets
-  assigned to you in **Triage or Todo** with one of the labels. The backlog is never picked up:
-  moving a ticket to Todo is what starts it. A ticket is picked up once: orion remembers it in
-  `automations/linear-builder.json` in its data dir, and Needs you stops showing its assignment.
+  assigned to you with one of the labels, in **Todo, Triage or the backlog**, and picks them in that
+  order, then by priority. The queue keeps that order: a Todo ticket starts before a Triage one
+  however long that one has waited. A ticket in a Linear project is never picked up; a project's
+  tickets are planned work, not the factory's. Moving a ticket to the backlog once its session has
+  started still parks it, and it isn't picked up again from there. A ticket is picked up once: orion
+  remembers it in `automations/linear-builder.json` in its data dir, and Needs you stops showing its
+  assignment.
 - **Never twice.** A ticket already linked to an orion worktree, or whose name is in a worktree's
   branch, an open pull request's title, body or branch, or a live session's title or branch, is
   skipped (said once in the log). One the intake's model judges very like a live session's work
@@ -850,7 +854,7 @@ request. They work the same way; each has its own labels and its own preset (**B
   detail and its reporter can't be asked on Slack", **Open ticket** · **Start anyway**), and nothing
   is unassigned. Nothing is written to the ticket's comments.
 - **Which project.** A key only one project uses sends its tickets there. When several projects
-  share a key, a ticket whose labels or Linear project name exactly one of them goes there, and so
+  share a key, a ticket whose labels name exactly one of them goes there, and so
   does one whose team's tickets have only ever gone to one; otherwise the model reads the ticket and
   each project's **What it is** line and picks one.
 - **Together or apart.** When several new tickets land at once, the model joins only the ones in

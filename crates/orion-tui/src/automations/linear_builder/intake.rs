@@ -20,8 +20,8 @@
 //!   in one call, which says which are **very like a live session's
 //!   work** (compared with every live session's title and first prompt; a
 //!   match is held on a card too), which **project** each goes to, and how
-//!   they **group**. A ticket whose labels, Linear project or team name
-//!   one project is routed by code ([`route_by_rule`]), and with nothing
+//!   they **group**. A ticket whose labels or team name one project is
+//!   routed by code ([`route_by_rule`]), and with nothing
 //!   to compare, route or group there is no call. A ticket the model was
 //!   asked about and put nowhere isn't asked about again until it changes
 //!   ([`unseen`]).
@@ -159,10 +159,11 @@ pub(crate) fn worked_on(app: &App, projects: &[ProjectId], ticket: &LinearIssue)
 /// How long after a ticket was let go a look may take it back.
 const SETTLE_MS: i64 = 5 * orion_core::clock::MINUTE_MS;
 
-/// Tickets back in your hands in Triage or Todo, let go of to be checked
-/// again: a thin ticket you gave back to yourself (still thin, it comes
-/// to you, not its reporter), and a started one that was parked, closed
-/// with no change or died and is back in Todo — its branch kept in
+/// Tickets back in your hands, let go of to be checked again: a thin
+/// ticket you gave back to yourself (still thin, it comes to you, not its
+/// reporter), and a started one that was parked, closed with no change or
+/// died and is back in Todo or Triage — never one in the backlog, where
+/// moving it is what parked it — its branch kept in
 /// `Ledger::previous`, so its old worktree doesn't hold it back. One held
 /// on a card, left or skipped stays.
 pub(crate) fn returned(app: &mut App, issues: &[LinearIssue]) {
@@ -179,7 +180,10 @@ pub(crate) fn returned(app: &mut App, issues: &[LinearIssue]) {
             super::Stage::WaitingReporter => now - since >= SETTLE_MS,
             super::Stage::Parked | super::Stage::Dead | super::Stage::NoChange => {
                 let started = entry.history.iter().any(|(s, _)| s.is_active());
-                started && heard > since && now - since >= SETTLE_MS
+                started
+                    && issue.status_type != "backlog"
+                    && heard > since
+                    && now - since >= SETTLE_MS
             }
             _ => false,
         };
@@ -403,7 +407,7 @@ pub(crate) fn prompt(
     Some(out)
 }
 
-/// A name as a label or a project is matched on: its letters and digits,
+/// A name as a label or an orion project is matched on: its letters and digits,
 /// lowercased.
 fn name_key(name: &str) -> String {
     name.chars()
@@ -413,8 +417,8 @@ fn name_key(name: &str) -> String {
 }
 
 /// The project `ticket` goes to by plain code, when one does: the only
-/// candidate; else the one project its labels or its Linear project
-/// name; else the one project its team's tickets have gone to (`teams`).
+/// candidate; else the one project its labels name (a ticket in a
+/// Linear project never gets here: `super::fresh`); else the one project its team's tickets have gone to (`teams`).
 /// None leaves it to the model.
 pub(crate) fn route_by_rule(
     ticket: &LinearIssue,
@@ -428,7 +432,6 @@ pub(crate) fn route_by_rule(
         .labels
         .iter()
         .map(|l| name_key(&l.name))
-        .chain(ticket.project.iter().map(|p| name_key(&p.name)))
         .filter(|k| !k.is_empty())
         .collect();
     let named: BTreeSet<&ProjectId> = candidates

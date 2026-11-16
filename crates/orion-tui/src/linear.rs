@@ -6341,6 +6341,40 @@ fn json_priority(value: &serde_json::Value) -> u8 {
         .min(4) as u8
 }
 
+/// Your issues under each of `lists` (aliases of `issues` in one answer),
+/// list after list, each in the order Linear gave it: for a query asked
+/// in parts whose order matters.
+pub(crate) fn parse_my_issues(
+    json: &serde_json::Value,
+    lists: &[&str],
+) -> Result<Vec<LinearIssue>, String> {
+    if let Some(err) = graphql_error(json) {
+        return Err(err);
+    }
+    let mut issues = Vec::new();
+    let mut any = false;
+    for list in lists {
+        let path = format!("/data/{list}/nodes");
+        let Some(nodes) = json.pointer(&path).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        any = true;
+        issues.extend(
+            nodes
+                .iter()
+                .filter_map(issue_from)
+                .map(|issue| LinearIssue {
+                    mine: true,
+                    ..issue
+                }),
+        );
+    }
+    match any {
+        true => Ok(issues),
+        false => Err("Linear returned no issue list".into()),
+    }
+}
+
 fn issue_from(value: &serde_json::Value) -> Option<LinearIssue> {
     let text = |path: &str| json_text(value, path);
     Some(LinearIssue {
