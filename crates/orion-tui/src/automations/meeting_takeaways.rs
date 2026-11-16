@@ -351,6 +351,7 @@ impl Runner for MeetingTakeaways {
                     state,
                     tone,
                     session: None,
+                    url: None,
                 }
             })
             .collect();
@@ -385,6 +386,10 @@ impl Runner for MeetingTakeaways {
 
     /// Enter on a MEETINGS row: its takeaways, or — when it couldn't be
     /// read — a read again.
+    fn opens_rows(&self) -> bool {
+        true
+    }
+
     fn open_row(&mut self, app: &mut App, index: usize) {
         let Some(id) = listed(app).get(index).map(|m| m.id.clone()) else {
             return;

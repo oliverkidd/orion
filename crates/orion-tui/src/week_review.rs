@@ -2,8 +2,8 @@
 //! pull requests, Linear issues done, todos ticked — written up as a short
 //! review to read aloud with the product on screen: what changed, by
 //! product area, with what to show and what to say. It is an automation
-//! (`crate::automations::week_review`): run on its **When**, by `r` on the
-//! Automations screen, or by "Run week in review now" in `⌘⇧P`, and each
+//! (`crate::automations::week_review`): run on its **When**, by `⌘G` on its
+//! page in Automations, or by "Run week in review now" in `⌘⇧P`, and each
 //! run is one review a project that had changes, read on a page with a
 //! tab a project ([`open`]).
 //!
@@ -2184,7 +2184,7 @@ fn give_up(app: &mut App, failure: Failure) {
     app.week_review.linear.clear();
     tracing::warn!("week in review failed: {}", failure.label());
     app.flash = Some(Flash::failed(format!(
-        "Week in review failed: {} · r to try again",
+        "Week in review failed: {} · ⌘G to try again",
         failure.label()
     )));
     app.week_review.failed = Some(failure);
@@ -4196,7 +4196,7 @@ AL Ada L · GR Grace
             assert!(app.week_review.run.is_none());
             assert_eq!(
                 app.flash.as_deref(),
-                Some("Week in review failed: GitHub unreachable for demo · r to try again")
+                Some("Week in review failed: GitHub unreachable for demo · ⌘G to try again")
             );
             assert_eq!(
                 app.week_review.failed,

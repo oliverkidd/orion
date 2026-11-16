@@ -1,5 +1,5 @@
 //! WEEK IN REVIEW as an automation: on its **When** (Fridays 08:30 out of
-//! the box), by `r` on its panel, or by "Run week in review now" in `⌘⇧P`,
+//! the box), by `⌘G` on its page in `⌘J`, or by "Run week in review now" in `⌘⇧P`,
 //! a run writes up every project that had changes in the week, one review
 //! each ([`crate::week_review`] gathers, writes and keeps them). Its panel
 //! lists the runs kept as REVIEWS, Enter opening one with a tab a project.
@@ -11,7 +11,7 @@
 //!   **When** is written as a line: `Fri 08:30`.
 //! * **A run that could not fetch** wrote nothing, so the week is still
 //!   owed: a run the schedule started is run again [`RERUN`] later, up to
-//!   [`RERUNS`] times, and then it stops and says so ([`Rerun`]). `r`
+//!   [`RERUNS`] times, and then it stops and says so ([`Rerun`]). `⌘G`
 //!   tries again at once.
 //! * The note older releases kept a project (`reviews/p-<id>/note.txt`)
 //!   becomes the extra steer, once ([`migrate_notes`]).
@@ -50,11 +50,11 @@ fn when_of(app: &App) -> Schedule {
         .unwrap_or_else(default_when)
 }
 
-/// `r` on its panel.
-pub const RUN_NOW: Key = Key::new(&["r"], "run now");
+/// `⌘G` on its page in `⌘J`.
+pub const RUN_NOW: Key = Key::new(&["cmd+g", "ctrl+g"], "run now");
 
 /// What the panel's REVIEWS list says with none kept.
-const NO_REVIEWS: &str = "No reviews yet · r writes one now";
+const NO_REVIEWS: &str = "No reviews yet · ⌘G writes one now";
 
 /// The marker [`migrate_notes`] leaves once it has run.
 const NOTES_MOVED: &str = ".notes-moved-to-extra-steer";
@@ -66,7 +66,7 @@ pub struct WeekReview {
     /// Since when it has been watched on: a time before it is never run
     /// late, so turning it on never runs it at once.
     on_since: Option<NaiveDateTime>,
-    /// The slot of the run it started, or `r` did, while that run goes.
+    /// The slot of the run it started, or `⌘G` did, while that run goes.
     watching: Option<NaiveDateTime>,
     /// A slot whose run is over, written or with nothing to write: not
     /// run again.
@@ -200,7 +200,7 @@ impl WeekReview {
                 why.label(),
                 at.format("%H:%M")
             ),
-            None => format!("Week in review failed: {} · r to try again", why.label()),
+            None => format!("Week in review failed: {} · ⌘G to try again", why.label()),
         }));
         self.rerun = Some(Rerun {
             slot,
@@ -331,6 +331,7 @@ impl Runner for WeekReview {
                     state: state.clone(),
                     tone: Tone::Working,
                     session: None,
+                    url: None,
                 });
                 (Dot::Working, state)
             }
@@ -343,10 +344,10 @@ impl Runner for WeekReview {
                         rerun.next.unwrap_or_default().format("%H:%M")
                     ),
                 ),
-                (_, Some(why)) => (Dot::Waiting, format!("{} · r to try again", why.label())),
+                (_, Some(why)) => (Dot::Waiting, format!("{} · ⌘G to try again", why.label())),
                 (Some(rerun), None) => (
                     Dot::Waiting,
-                    format!("{} · r to try again", rerun.why.label()),
+                    format!("{} · ⌘G to try again", rerun.why.label()),
                 ),
                 (None, None) => (Dot::Idle, when_label(&when)),
             },
@@ -365,6 +366,7 @@ impl Runner for WeekReview {
                 state,
                 tone: if meta.read { Tone::Quiet } else { Tone::Done },
                 session: None,
+                url: None,
             });
         }
         Panel {
@@ -408,6 +410,10 @@ impl Runner for WeekReview {
     }
 
     /// Enter on a REVIEWS row: that run on its page, with a tab a project.
+    fn opens_rows(&self) -> bool {
+        true
+    }
+
     fn open_row(&mut self, app: &mut App, index: usize) {
         crate::week_review::open(app, index, true);
     }
@@ -416,7 +422,7 @@ impl Runner for WeekReview {
         Some(RUN_NOW)
     }
 
-    /// `r`: a run, now — one that could not fetch counts as one of the
+    /// `⌘G`: a run, now — one that could not fetch counts as one of the
     /// slot's, so a run given up on says so again.
     fn hotkey_pressed(&mut self, app: &mut App) -> Result<(), String> {
         crate::week_review::run_now(app)?;
@@ -619,7 +625,7 @@ mod tests {
 
     /// A scheduled run that could not fetch wrote nothing, so it is run
     /// again 15 minutes later — the ⌘J row saying when — up to four
-    /// times; then it stops and says so, and `r` tries again at once.
+    /// times; then it stops and says so, and `⌘G` tries again at once.
     #[test]
     fn a_run_that_could_not_fetch_runs_again_every_15_minutes_four_times() {
         let dir = tempfile::tempdir().unwrap();
@@ -656,12 +662,12 @@ mod tests {
             runner.settle(&mut app, now);
             assert_eq!(
                 app.flash.as_deref(),
-                Some("Week in review failed: GitHub unreachable for riplo-os · r to try again")
+                Some("Week in review failed: GitHub unreachable for riplo-os · ⌘G to try again")
             );
             let panel = runner.panel(&app);
             assert_eq!(
                 panel.state,
-                "GitHub unreachable for riplo-os · r to try again"
+                "GitHub unreachable for riplo-os · ⌘G to try again"
             );
             assert_eq!(panel.dot, Dot::Waiting);
             runner.check(&mut app, now + Days::hours(2));

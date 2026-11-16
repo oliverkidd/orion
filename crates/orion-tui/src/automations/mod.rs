@@ -213,9 +213,11 @@ pub struct PanelRow {
     pub tone: Tone,
     /// The session Enter on the row jumps to.
     pub session: Option<AgentId>,
+    /// Where `⌘O` on the row opens: its pull request, else its ticket.
+    pub url: Option<String>,
 }
 
-/// One of a panel's lists — YOUR OPEN PRS, RUNNING, DONE THIS WEEK.
+/// One of a panel's lists — YOUR OPEN PRS, RUNNING, PAST RUNS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PanelList {
     pub title: &'static str,
@@ -225,7 +227,7 @@ pub struct PanelList {
 }
 
 /// What a runner shows: its row's dot and short state, and its lists —
-/// whose live sessions the overview (`⌘J`) lists under it. The name,
+/// the page the overview (`⌘J`) shows beside it. The name,
 /// description and settings come from the registry and the config, not
 /// from here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,12 +272,17 @@ pub trait Runner {
     fn set_text(&mut self, _app: &mut App, row: SettingRow, _text: &str) -> Result<(), String> {
         Err(format!("{} can't be written here", row.label()))
     }
+    /// Whether Enter on one of its list rows with no session is its own
+    /// ([`Self::open_row`]) — else that row's link opens in the browser.
+    fn opens_rows(&self) -> bool {
+        false
+    }
     /// Enter on the `index`th of its list rows with no session, counted
     /// across its lists (meeting takeaways' MEETINGS, week in review's
     /// REVIEWS).
     fn open_row(&mut self, _app: &mut App, _index: usize) {}
-    /// A key of its own on its row in the overview, shown in the keys
-    /// while the cursor is on it (week in review's `r` run now).
+    /// A key of its own on its page in the overview, shown in the keys
+    /// while it is selected (week in review's `⌘G` run now).
     fn hotkey(&self) -> Option<crate::hints::Key> {
         None
     }
@@ -591,31 +598,48 @@ pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
     app.dirty = true;
 }
 
-/// How far back DONE THIS WEEK reaches.
-const WEEK_MS: i64 = 7 * orion_core::clock::DAY_MS;
+/// The most PAST RUNS a page lists.
+pub const PAST_MAX: usize = 50;
 
-/// DONE THIS WEEK: `which`'s sessions that came to rest in the last seven
-/// days — finished, or archived — newest first, each a jump to it.
-pub fn done_this_week(app: &App, which: Automation) -> PanelList {
-    let since = crate::app::now_ms() - WEEK_MS;
+/// A PAST RUNS row's state: how it ended, and how long ago (`merged ·
+/// 2d ago`) when `at_ms` is known.
+pub fn past_state(word: &str, at_ms: i64) -> String {
+    match at_ms {
+        0 => word.to_string(),
+        _ => format!(
+            "{word} · {}",
+            crate::hosts::ago_label(crate::app::now_ms() - at_ms)
+        ),
+    }
+}
+
+/// PAST RUNS: `which`'s sessions that came to rest — finished, or
+/// archived — newest first and however long ago, at most [`PAST_MAX`],
+/// each a jump to its transcript.
+pub fn past_sessions(app: &App, which: Automation) -> PanelList {
     let mut done: Vec<&Agent> = app
         .tree
         .agents
         .iter()
-        .filter(|a| kind_of(a) == Some(which) && a.status_changed_at >= since)
+        .filter(|a| kind_of(a) == Some(which))
         .filter(|a| a.archived || a.status == AgentStatus::Finished)
         .collect();
     done.sort_by_key(|a| std::cmp::Reverse(a.status_changed_at));
     PanelList {
-        title: "DONE THIS WEEK",
-        empty: "Nothing done this week",
+        title: "PAST RUNS",
+        empty: "Nothing finished yet",
         rows: done
             .into_iter()
-            .map(|a| PanelRow {
-                text: a.name.clone(),
-                state: if a.archived { "archived" } else { "done" }.into(),
-                tone: Tone::Done,
-                session: Some(a.id.clone()),
+            .take(PAST_MAX)
+            .map(|a| {
+                let word = if a.archived { "archived" } else { "done" };
+                PanelRow {
+                    text: a.name.clone(),
+                    state: past_state(word, a.status_changed_at),
+                    tone: Tone::Done,
+                    session: Some(a.id.clone()),
+                    url: None,
+                }
             })
             .collect(),
     }

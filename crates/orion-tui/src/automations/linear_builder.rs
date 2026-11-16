@@ -289,6 +289,24 @@ impl Stage {
         )
     }
 
+    /// How it ended, as PAST RUNS says it, and in what colour; None while
+    /// it hasn't.
+    pub fn ended(self) -> Option<(&'static str, Tone)> {
+        match self {
+            Stage::PrOpen => Some(("pull request open", Tone::Working)),
+            Stage::Merged => Some(("merged", Tone::Done)),
+            Stage::NoChange => Some(("no change", Tone::Quiet)),
+            Stage::Parked => Some(("parked", Tone::Quiet)),
+            Stage::Dead => Some(("stopped", Tone::Waiting)),
+            Stage::Starting
+            | Stage::Planning
+            | Stage::Approving
+            | Stage::Building
+            | Stage::Held
+            | Stage::WaitingReporter => None,
+        }
+    }
+
     /// Its name in the run record.
     pub fn name(self) -> &'static str {
         match self {
@@ -1411,7 +1429,7 @@ fn tickets_label(entries: &[&Entry]) -> String {
 
 /// RUNNING: each session at a group of `which`'s tickets, each ticket
 /// held on a card or waiting on its reporter, and each group queued;
-/// DONE THIS WEEK.
+/// PAST RUNS.
 pub fn panel(app: &App, which: Automation) -> Panel {
     use orion_core::AgentStatus;
     let shared = &app.automations.linear_builder;
@@ -1438,6 +1456,7 @@ pub fn panel(app: &App, which: Automation) -> Panel {
                     state: state.into(),
                     tone,
                     session: None,
+                    url: link_of(entry),
                 });
             }
             stage if stage.is_active() => {
@@ -1481,6 +1500,7 @@ pub fn panel(app: &App, which: Automation) -> Panel {
             state: state.into(),
             tone,
             session: agent.map(|a| a.id.clone()),
+            url: link_of(first),
         });
     }
     let running = super::running(app);
@@ -1502,6 +1522,7 @@ pub fn panel(app: &App, which: Automation) -> Panel {
             },
             tone: Tone::Quiet,
             session: None,
+            url: None,
         });
     }
     let verb = match which {
@@ -1533,8 +1554,49 @@ pub fn panel(app: &App, which: Automation) -> Panel {
                 empty: "Nothing running",
                 rows,
             },
-            super::done_this_week(app, which),
+            past_runs(app, which),
         ],
+    }
+}
+
+/// Where `⌘O` on a ticket's row opens: its pull request, else its ticket.
+fn link_of(entry: &Entry) -> Option<String> {
+    entry
+        .pr_url
+        .clone()
+        .or_else(|| (!entry.url.is_empty()).then(|| entry.url.clone()))
+}
+
+/// PAST RUNS: `which`'s tickets that came to an end, newest first by when
+/// they did and however long ago, at most [`super::PAST_MAX`]: each with
+/// how it ended and when, a jump to its session while orion still has it,
+/// and its pull request or ticket for `⌘O`.
+fn past_runs(app: &App, which: Automation) -> PanelList {
+    let mut done: Vec<(&Entry, &'static str, Tone)> = app
+        .automations
+        .linear_builder
+        .ledger
+        .issues
+        .values()
+        .filter(|e| e.automation == which.id())
+        .filter_map(|e| e.stage.ended().map(|(word, tone)| (e, word, tone)))
+        .collect();
+    done.sort_by_key(|(e, _, _)| std::cmp::Reverse(e.since()));
+    let kept = |id: &AgentId| app.tree.agents.iter().any(|a| &a.id == id);
+    PanelList {
+        title: "PAST RUNS",
+        empty: "Nothing finished yet",
+        rows: done
+            .into_iter()
+            .take(super::PAST_MAX)
+            .map(|(e, word, tone)| PanelRow {
+                text: tickets_label(&[e]),
+                state: super::past_state(word, e.since()),
+                tone,
+                session: e.session.clone().filter(|id| kept(id)),
+                url: link_of(e),
+            })
+            .collect(),
     }
 }
 

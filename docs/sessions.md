@@ -704,23 +704,32 @@ The automations are the agents orion starts on its own. Each one is set up in
 **Settings › Factory** (`⌘,`), and `⌘J` shows what they are doing.
 
 ```
-Automations                          2 of at most 3 running · caps in Settings
-● PR fixer           fixing #407 · try 2 of 3
-    #407 Fix the login redirect   fixing checks, try 2 of 3      web          12m
-● Bug fixer          1 plan waiting
-    ENG-412 Crash on save         plan to approve                 api          40m
-○ Feature builder    queued: ENG-399 (at its cap)
-● Week in review     Fri 08:30
-● Meeting takeaways  3 to place
-● Blue sky builder   idle
+Automations                                       2 of at most 3 running · caps in ⌘,
+
+ ● PR fixer                  PR fixer                                    fixing #407
+   fixing #407               type to filter
+ ● Bug fixer
+   1 plan waiting            YOUR OPEN PRS                                         2
+ ○ Feature builder             #407 Fix the login redirect     fixing checks, try 2 of 3
+   off                         #398 Sort shared decks                  gave up, needs you
+ ● Week in review
+   Fri 08:30                 PAST RUNS                                             2
+ ● Meeting takeaways           autofix-405                          archived · 2d ago
+   3 to place                  autofix-401                          archived · 3d ago
+ ● Blue sky builder
+   idle
 ```
 
-- **`⌘J`, the overview.** A row per automation, its dot (yellow working, red waiting on you, grey
-  idle, hollow off) and what it is doing, and under it each live session it runs, with its project
-  and how long it has been at it. `Enter` on a session jumps to it; on an automation it opens
-  Settings › Factory at that automation's section. Week in review's `Enter` opens its latest
-  review (`r` runs it now), and meeting takeaways' unfolds its meetings, `Enter` on one opening its
-  takeaways. `Space` turns the automation on or off, and `,` opens its settings.
+- **`⌘J`, the automations and their runs.** On the left a row per automation, its dot (yellow
+  working, red waiting on you, grey idle, hollow off) and what it is doing; on the right the
+  selected one's page: what it is doing now (YOUR OPEN PRS, RUNNING) and what it did before — PAST
+  RUNS, REVIEWS, MEETINGS, IDEAS — newest first and however long ago, each run with when it ended.
+  `↑`/`↓` move, `Tab`/`⇧Tab` move the keys between the list and the page, and `Enter` on an
+  automation goes to its page. On a page row `Enter` opens it: jumps to its session (a past run's
+  transcript too), opens a review or a meeting's takeaways, else its pull request or ticket in the
+  browser, which `⌘O` does on any row with one. `⌘G` runs week in review now. Typing filters the
+  page, every word matching a row; `Esc` clears the filter, then goes back to the list, then
+  closes. On the list `Space` turns the automation on or off; `⌘,` opens its settings.
 - **Settings › Factory.** The factory's own rows first — **Agents working at once**, **Things
   waiting on you**, **Factory account** and **E2E tests on this machine** — then a section per
   automation, its heading
@@ -922,7 +931,8 @@ request. They work the same way; each has its own labels and its own preset (**B
   ledger and may write it back; the label still keeps the ticket off the intake.
 - **The panel.** **RUNNING** lists each session: `planning`, `plan to approve`, `building`, a ticket
   `waiting on you` or `waiting on its reporter`, or `queued, 5 running` while the cap is full.
-  **DONE THIS WEEK** lists the ones that finished.
+  **PAST RUNS** lists every ticket that came to an end — `pull request open`, `merged`, `no change`,
+  `parked` or `stopped` — with how long ago, newest first, `⌘O` opening its pull request or ticket.
 
 ### Week in review
 
@@ -931,8 +941,8 @@ Linear issues done, the todos ticked — as a review to read aloud with the prod
 product area, each point numbered, with what to **Show** and what to **Say** under the ones worth a
 demo. It writes one review for each project that had changes, so it's ready before the meeting.
 
-It runs three ways: on its **When** while it is on (Fridays 08:30 unless you change it), by `r` on
-its row in Automations (`⌘J`), and by **Run week in review now** in the command palette (`⌘⇧P`),
+It runs three ways: on its **When** while it is on (Fridays 08:30 unless you change it), by `⌘G` on
+its page in Automations (`⌘J`), and by **Run week in review now** in the command palette (`⌘⇧P`),
 which also opens Automations on it to watch it go. Its section in Settings › Factory:
 
 ```
@@ -961,12 +971,12 @@ Week in review                                              Fri 08:30
   is tried again three times, about 10 s, 30 s and 90 s apart, and the footer and `⌘J` row say so
   (`GitHub didn't answer for riplo-os, trying again in 30s`). If it still fails, the run writes
   nothing at all, so the week still counts as owed, and the footer names what failed (`Week in
-  review failed: GitHub unreachable for riplo-os · r to try again`). A run its **When** started is
+  review failed: GitHub unreachable for riplo-os · ⌘G to try again`). A run its **When** started is
   then run again every 15 minutes, up to 4 times, its row in `⌘J` saying when
-  (`GitHub unreachable · next try 09:45`), and after the last it stops and says so. `r` tries again
+  (`GitHub unreachable · next try 09:45`), and after the last it stops and says so. `⌘G` tries again
   at once. A review whose writing fails is sent once more before its tab says why.
 
-`Enter` on week in review's row in `⌘J` opens the latest run on a page of its own, **a tab per project** it wrote up:
+`Enter` on a run in week in review's REVIEWS in `⌘J` opens it on a page of its own, **a tab per project** it wrote up:
 `[`/`]`, `←`/`→` or `⇧←`/`⇧→` move between tabs (a click on one goes there), `↑`/`↓` and
 `PgUp`/`PgDn` scroll, `⌘C` copies the tab's review as Markdown, `⌘O` opens its file, and `Esc` goes
 back to Automations. The run being written opens on the same page, each tab showing its review being
@@ -1188,5 +1198,5 @@ run on another account), told the idea and where to build it.
 - It counts against the automations' cap, and against its own **At most at once** (any unless you
   set one): with that many running, the idea waits (`● starting`) and starts when one finishes.
 - In Settings › Factory it has **On** (on unless you turn it off), **At most at once**,
-  **Preset** and **Extra steer**. In `⌘J` each idea it is building is a row under it; `Enter` on
+  **Preset** and **Extra steer**. In `⌘J` its page lists its IDEAS; `Enter` on
   one opens it in Todos › Blue sky.

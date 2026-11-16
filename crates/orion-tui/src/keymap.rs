@@ -240,8 +240,9 @@ pub enum Action {
     OpenInCursor,
     Quit,
     /// `⌘J`: AUTOMATIONS — what every automation orion runs on its own
-    /// is doing, and its live sessions (`crate::automations::view`); each
-    /// is set up in Settings › Automations.
+    /// is doing, and beside it the selected one's page: its runs now and
+    /// before (`crate::automations::view`); each is set up in Settings ›
+    /// Factory.
     Automations,
 }
 
@@ -512,7 +513,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         hint: "The week in review automation, now: every project that had changes in the last 7 days written up by product area, with what to show and what to say",
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
-        // No key: it runs on its own schedule, and from `r` on ⌘J.
+        // No key: it runs on its own schedule, and from ⌘G on its ⌘J page.
         defaults: &[],
     },
     ActionSpec {
@@ -1049,7 +1050,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::Automations,
         id: "automations",
         label: "Automations",
-        hint: "What orion runs on its own — the PR fixer, the bug fixer, week in review and the rest — and what each is doing now; Enter on one opens its settings",
+        hint: "What orion runs on its own — the PR fixer, the bug fixer, week in review and the rest — what each is doing now, and its past runs on a page beside it",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["cmd+j"],

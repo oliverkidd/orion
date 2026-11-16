@@ -337,6 +337,7 @@ impl Runner for BlueSkyBuilder {
                             state,
                             tone,
                             session: session(app, i).map(|a| a.id.clone()),
+                            url: None,
                         }
                     })
                     .collect()

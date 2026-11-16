@@ -1332,7 +1332,7 @@ impl Runner for PrFixer {
                     empty: "No open PRs of yours",
                     rows: open,
                 },
-                super::done_this_week(app, Automation::PrFixer),
+                super::past_sessions(app, Automation::PrFixer),
             ],
         }
     }
@@ -1408,6 +1408,7 @@ fn open_pr_row(app: &App, project: &ProjectId, pr: &OpenPr) -> PanelRow {
         state,
         tone,
         session,
+        url: Some(pr.url.clone()),
     }
 }
 
