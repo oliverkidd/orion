@@ -6,7 +6,8 @@
 //! ([`crate::palette::session_tier`]) with the PROJECT TABS' rule for a
 //! session whose PTY is gone: it no longer waits, but a crash stays one.
 //! Each card reads `<kind> · <project> · <reason>`, the reason from
-//! [`reason_text`].
+//! [`reason_text`] — or, for a factory session that crashed past its
+//! relaunches, "Stopped after 2 restarts".
 
 use chrono::{DateTime, Utc};
 use orion_core::{Agent, AgentStatus, WaitReason};
@@ -109,7 +110,13 @@ impl CardSource for Agents {
                 let Some(urgency) = urgency(agent) else {
                     continue;
                 };
-                let reason = reason_text(agent, reason_of(app, agent), draft_pr(app, agent));
+                use crate::automations::linear_builder::{
+                    stopped_after_restarts, STOPPED_AFTER_RESTARTS,
+                };
+                let reason = match stopped_after_restarts(app, &agent.id) {
+                    true => STOPPED_AFTER_RESTARTS.to_string(),
+                    false => reason_text(agent, reason_of(app, agent), draft_pr(app, agent)),
+                };
                 cards.push(Card::new(
                     Section::Agents,
                     CardTarget::Session(agent.id.clone()),

@@ -198,14 +198,6 @@ fn read_context(agent: &orion_core::Agent) -> (Option<f64>, Vec<String>) {
     )
 }
 
-/// The last `n` things `agent` said ([`last_said`]), off the tail of its
-/// transcript; none when it has none. Disk work: never on the UI thread.
-pub(crate) fn last_said_of(agent: &orion_core::Agent, n: usize) -> Vec<String> {
-    transcript_tail(agent)
-        .map(|tail| last_said(&tail, n))
-        .unwrap_or_default()
-}
-
 /// The last [`TAIL_BYTES`] of `agent`'s transcript.
 fn transcript_tail(agent: &orion_core::Agent) -> Option<String> {
     super::transcript_of(agent, None).and_then(|path| tail(&path, TAIL_BYTES))

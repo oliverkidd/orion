@@ -8,8 +8,6 @@
 //! | `thin`, `thin-again` | the reporter | Open ticket (link) · I've updated it (`updated`) |
 //! | `detail` | you | Open ticket (link) · Start anyway (`start`) |
 //! | `nochange` | you | Close ticket (`close`) · Build anyway… (`build`, typed) · Not for the factory |
-//! | `stalled` | you | Continue (`continue`) · Reply… (`reply`, typed) · Park (`park`) · Not for the factory |
-//! | `dead` | you | Open ticket (link) · Park (`park`) · Not for the factory |
 //!
 //! **Open ticket** is a link button: Slack (or Needs you) opens the
 //! ticket, and nothing comes back here.
@@ -594,56 +592,6 @@ pub(crate) fn post_no_change(app: &mut App, issue_id: &str, nc: &NoChange) {
     cards::post(app, card);
 }
 
-/// The Stalled card: the session stopped with no pull request and no
-/// question.
-pub(crate) fn post_stalled(app: &mut App, issue_id: &str, said: Option<String>) {
-    let Some(entry) = app.automations.linear_builder.entry(issue_id) else {
-        return;
-    };
-    let mut line = format!(
-        "Stopped without a PR or a question {} minutes ago.",
-        stages::STALL_MS / orion_core::clock::MINUTE_MS
-    );
-    if let Some(said) = said.filter(|s| !s.trim().is_empty()) {
-        line.push_str(&format!(
-            " Last thing it said: {}",
-            escape(&crate::ui::truncate(said.trim(), 600))
-        ));
-    }
-    let card = card(
-        app,
-        &entry,
-        key(issue_id, "stalled"),
-        Recipient::Owner,
-        vec![line],
-        and_not_for_the_factory(vec![
-            Button::tap("continue", "Continue"),
-            Button::text("reply", "Reply…"),
-            Button::tap("park", "Park"),
-        ]),
-    );
-    cards::post(app, card);
-}
-
-/// The Stalled card of a session gone for good.
-pub(crate) fn post_dead(app: &mut App, issue_id: &str) {
-    let Some(entry) = app.automations.linear_builder.entry(issue_id) else {
-        return;
-    };
-    let card = card(
-        app,
-        &entry,
-        key(issue_id, "dead"),
-        Recipient::Owner,
-        vec![format!(
-            "Its session or worktree has been gone {} minutes, with no PR.",
-            stages::DEAD_MS / orion_core::clock::MINUTE_MS
-        )],
-        and_not_for_the_factory(vec![open_ticket(&entry), Button::tap("park", "Park")]),
-    );
-    cards::post(app, card);
-}
-
 // ---- the presses ----
 
 /// A press on an `issue:` card.
@@ -661,21 +609,10 @@ pub(crate) fn on_action(app: &mut App, press: Press) {
         ("thin" | "thin-again", "updated") => reporter_updated(app, &id),
         ("nochange", "close") => close_ticket(app, &id, &key),
         ("nochange", "build") => build_anyway(app, &id, &key, text),
-        ("stalled", "continue") => {
-            let turn = "Continue where you left off: finish the approved work and open the draft pull request, or ask me what you need.".to_string();
-            turn_to(app, &id, &key, turn, "Sent: continue")
-        }
-        ("stalled", "reply") => match text {
-            Some(text) => turn_to(app, &id, &key, text, "Sent"),
-            None => repost(app, &key),
+        ("nochange", action) if press.by_owner => match not_for_the_factory_choice(action) {
+            Some(backlog) => not_for_the_factory(app, &id, Some(&key), None, backlog),
+            None => tracing::warn!("factory: {action} on {key} does nothing"),
         },
-        ("stalled" | "dead", "park") => park(app, &id, &key, "Parked"),
-        ("nochange" | "stalled" | "dead", action) if press.by_owner => {
-            match not_for_the_factory_choice(action) {
-                Some(backlog) => not_for_the_factory(app, &id, Some(&key), None, backlog),
-                None => tracing::warn!("factory: {action} on {key} does nothing"),
-            }
-        }
         _ => tracing::warn!("factory: {} on {key} does nothing", press.action),
     }
 }
@@ -717,21 +654,9 @@ pub(crate) fn on_failed(app: &mut App, key: &str, reason: &FactoryCardFailure) {
     post_detail(app, &id, &entry);
 }
 
-/// Put a card back as it was: the daemon took its buttons off with the
-/// press.
-fn repost(app: &mut App, key: &str) {
-    let card = app
-        .factory_cards
-        .iter()
-        .find(|p| p.card.key == key)
-        .map(|p| p.card.clone());
-    if let Some(card) = card {
-        cards::post(app, card);
-    }
-}
-
 /// Your cards on a ticket that something besides a press can end
-/// (`stages::follow`, [`park`]).
+/// (`stages::follow`, [`park`]) — with `stalled` and `dead`, which an
+/// earlier orion posted and may still be up.
 const ENDED_BY_THE_TICKET: [&str; 5] = ["urgent", "duplicate", "detail", "stalled", "dead"];
 
 /// Close every one of your cards still up on ticket `id` that its
@@ -1116,24 +1041,6 @@ fn build_anyway(app: &mut App, id: &str, key: &str, text: Option<String>) {
     });
     app.outbox.extend(out);
     cards::close_if_up(app, key, "Sent back to plan");
-}
-
-/// A Stalled card's **Continue** or **Reply…**: `text` to the session as
-/// its next turn.
-fn turn_to(app: &mut App, id: &str, key: &str, text: String, note: &str) {
-    let Some(session) = session_of(app, id) else {
-        return;
-    };
-    let mut out = Vec::new();
-    let sent = crate::event_loop::send_turn(app, &session, text, false, &mut out);
-    app.outbox.extend(out);
-    if let Some(e) = app.automations.linear_builder.ledger.issues.get_mut(id) {
-        e.stalled = false;
-    }
-    match sent {
-        true => cards::close_if_up(app, key, note),
-        false => repost(app, key),
-    }
 }
 
 fn session_of(app: &App, id: &str) -> Option<AgentId> {

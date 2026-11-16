@@ -5,7 +5,8 @@
 //!
 //! - **When**: a `StatusChanged` into `needs_feedback` or `terminated`
 //!   while you are away (`away`), outside quiet hours, of a kind
-//!   `away.phone` lists. Never delayed.
+//!   `away.phone` lists. Never delayed. A crash of a session the bug fixer
+//!   or the feature builder started never goes: orion relaunches it.
 //! - **The message** (design 5.4): a context line `● Agent · web · 10:42`,
 //!   the session's name, its whole last response (never summarised, in
 //!   3000-character sections), then what it waits on and its buttons:
@@ -999,9 +1000,11 @@ impl Daemon {
             return;
         };
         let kind = kind_of(status, reason.as_ref());
-        // A plan with nothing to build has the No-change card instead.
-        let sends =
-            kind.is_some_and(|kind| self.phone_sends(kind)) && !factory_verdict(reason.as_ref());
+        // A plan with nothing to build has the No-change card instead, and
+        // a factory session's crash is the TUI's to relaunch.
+        let sends = kind.is_some_and(|kind| self.phone_sends(kind))
+            && !factory_verdict(reason.as_ref())
+            && !(kind == Some(PhoneKind::Crash) && self.builds_tickets(agent));
         let mut already_up = false;
         for message in self.store.open_phone_messages(agent).unwrap_or_default() {
             match closes(&message, status, reason.as_ref(), sends) {
@@ -1012,6 +1015,17 @@ impl Daemon {
         if let (Some(kind), true, false) = (kind, sends, already_up) {
             self.phone_post(&session, agent, kind, reason).await;
         }
+    }
+
+    /// Whether `agent` is a session the bug fixer or the feature builder
+    /// started: one that crashes is relaunched by the TUI, not sent here.
+    fn builds_tickets(&self, agent: &AgentId) -> bool {
+        self.store
+            .get_agent(agent)
+            .ok()
+            .flatten()
+            .and_then(|a| a.automation)
+            .is_some_and(|tag| orion_core::automation::builds_tickets(&tag))
     }
 
     /// Whether a message of `kind` goes to the phone now: you are away,

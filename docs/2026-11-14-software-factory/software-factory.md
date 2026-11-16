@@ -127,8 +127,9 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
      - an open PR on the branch: `PrOpen`;
      - merged: `Merged`;
      - the ticket moved to Backlog, canceled, done by someone else, or unassigned: `Parked`, and the session is stopped;
-     - the session or worktree gone for 30 minutes: `Dead`, with a Stalled card.
-   - A session that finishes in planning or building with no PR and no question for 10 minutes gets a Stalled card [Continue] [Reply…] [Park].
+     - the session or worktree gone for 30 minutes: `Dead`, with no card.
+   - A session that crashes in planning or building is resumed with "You were interrupted; carry on from where you left off", at most twice in 6 hours; a third crash parks it quietly and Needs you lists it as "Stopped after 2 restarts". A usage-limit crash is left to the factory's pause.
+   - A session that finishes in planning or building with no PR and no question for 10 minutes is nudged once to ask with AskUserQuestion or carry on; still idle after that, it is left waiting. No card for either.
 10. **Factory settings.** In `config.rs`, `settings_tab.rs` and `view.rs`:
     - Rename the tab and labels to **Factory**:
       - "Agents working at once (N)": the existing `max_running`; under it: "At most N agents work at the same time.";
@@ -353,8 +354,6 @@ Shared files (`crates/orion-tui/src/event_loop.rs`, `app.rs`) get only small hoo
 | Thin ticket (fallback) | owner | "RIPLO-n needs more detail and its reporter can't be asked on Slack." | Open ticket · Start anyway |
 | PR: Merge / Skim / Review | owner | verdict line, the top's rows with their dots, what users get, "look at" lines (Review), grid image (Skim) | per §D.5 · Not for the factory (back to Triage / move to Backlog) · Verdict right? 👍 👎 |
 | Can't fix | owner | "CI still red after 3 fixes: <check>. Attempts in the thread." | Open PR · Reply… · Park |
-| Stalled | owner | "Stopped without a PR or a question 10 minutes ago. Last thing it said: …" | Continue · Reply… · Park · Not for the factory (back to Triage / move to Backlog) |
-| Dead | owner | "Its session or worktree has been gone 30 minutes, with no PR." | Open ticket · Park · Not for the factory (back to Triage / move to Backlog) |
 
 **Not for the factory** is two choices, back to Triage and move to Backlog. Either parks the ticket as Park does (session archived, cards closed), closes the draft PR it opened with a comment, labels the ticket `factory-skip` (made in the team when missing), comments "Taken off the factory by <owner>" once, sets the team's Triage or Backlog state, and removes the session's worktree when it is clean and every commit on it is on a remote or the base (else keeps it and says why). The intake never picks up a `factory-skip` ticket. It is also in a factory session's menu in orion.
 | Setup missing | owner | "<project> has no factory workflow doc / tools list." | Open template |

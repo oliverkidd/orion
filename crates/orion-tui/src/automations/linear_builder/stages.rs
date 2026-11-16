@@ -17,11 +17,20 @@
 //! - **Parked**: the ticket left your hands — Backlog, canceled, done by
 //!   someone else, or no longer yours — and its session is archived.
 //! - **Dead**: its session or worktree gone [`DEAD_MS`] with no pull
-//!   request, said on a card. Its session back (or a pull request on its
-//!   branch), it takes up where it was.
-//! - **Stalled** (a card, not a stage): its session stopped while
-//!   planning or building with no pull request and no question for
-//!   [`STALL_MS`].
+//!   request — no card: it was archived or deleted by hand. Its session
+//!   back (or a pull request on its branch), it takes up where it was.
+//! - **Crashed** (not a stage): a session that dies while planning or
+//!   building is relaunched — the same session resumed with
+//!   [`RELAUNCH_PROMPT`] — at most [`RELAUNCHES`] times in
+//!   [`RELAUNCH_WINDOW_MS`]. Past that it is parked quietly, its session
+//!   left as it is, and listed in Needs you as "Stopped after 2 restarts"
+//!   (`needs_you::factory`): no card, nothing on Slack. One stopped by a
+//!   usage limit, or while the factory is paused at its account's limit
+//!   (`automations::limit`), is left to that pause.
+//! - **Idle** (not a stage): a session stopped while planning or building
+//!   with no pull request and no question for [`STALL_MS`] is nudged once
+//!   ([`NUDGE_PROMPT`]); still idle after that, it is left in its waiting
+//!   state, with no card.
 //! - **Held** on a card to you: let go when the ticket leaves your hands
 //!   — out of Triage and Todo, canceled, done, unassigned or someone
 //!   else's — to be checked afresh should it come back.
@@ -31,11 +40,9 @@
 //!   ([`drop_leftovers`]). One whose session is there is followed like any
 //!   other.
 //!
-//! Your cards on a ticket close as what they were about ends: Stalled
-//! when its session runs again or a pull request opens, Dead when its
-//! session comes back, and every one when the ticket leaves your hands —
-//! so a card nobody answers needn't hold the factory's intake shut
-//! (`automations::attention`).
+//! Your cards on a ticket close as what they were about ends — every one
+//! when the ticket leaves your hands — so a card nobody answers needn't
+//! hold the factory's intake shut (`automations::attention`).
 //!
 //! Each stage reached, each question asked (the plan, an AskUserQuestion)
 //! and when it was answered go into the run record.
@@ -48,8 +55,15 @@ use super::{Entry, Stage, KEEP_MS, START_LIMIT_MS};
 use crate::app::App;
 use crate::factory::runs::{Question, RunRecord, StageAt};
 
-/// A session stopped this long with nothing to show gets a Stalled card.
+/// A session stopped this long with nothing to show is nudged, once.
 pub(crate) const STALL_MS: i64 = 10 * orion_core::clock::MINUTE_MS;
+/// The nudge.
+pub(crate) const NUDGE_PROMPT: &str = "You've stopped without asking or opening a PR. If you need the owner, ask with AskUserQuestion; otherwise carry on.";
+/// What a crashed session is resumed with.
+pub(crate) const RELAUNCH_PROMPT: &str = "You were interrupted; carry on from where you left off.";
+/// How many relaunches a session gets in [`RELAUNCH_WINDOW_MS`].
+pub(crate) const RELAUNCHES: usize = 2;
+pub(crate) const RELAUNCH_WINDOW_MS: i64 = 6 * 60 * orion_core::clock::MINUTE_MS;
 /// A session or worktree gone this long is dead.
 pub(crate) const DEAD_MS: i64 = 30 * orion_core::clock::MINUTE_MS;
 /// A thin ticket's reporter is reminded once after this long.
@@ -136,8 +150,8 @@ enum Rec {
 enum Do {
     Ping(String),
     NoChange(String, NoChange),
-    Stalled(String, AgentId),
-    Dead(String),
+    /// A turn to a session: the nudge, or a crashed one's relaunch.
+    Turn(AgentId, &'static str),
     Archive(AgentId),
     /// A plan answered in the worktree at this path by this session:
     /// approved, or sent back — its transcript says which.
@@ -158,6 +172,7 @@ pub(crate) fn follow(app: &mut App) {
     let mut records: Vec<(String, Rec)> = Vec::new();
     {
         let tree = &app.tree;
+        let paused = app.automations.account.paused.is_some();
         let reasons = &app.needs_you.reasons;
         let open_prs = &app.open_prs;
         let lists = &app.linear;
@@ -167,6 +182,7 @@ pub(crate) fn follow(app: &mut App) {
             reasons,
             open_prs,
             lists,
+            paused,
         };
         let mut changed = drop_leftovers(&mut shared.ledger, ctx, now);
         shared.ledger.issues.retain(|id, entry| {
@@ -197,15 +213,10 @@ pub(crate) fn follow(app: &mut App) {
                     super::owner::post_no_change(app, &id, &nc);
                 }
             }
-            Do::Stalled(id, session) => {
-                if carded.insert(group_key(app, &id)) {
-                    stalled(app, id, &session);
-                }
-            }
-            Do::Dead(id) => {
-                if carded.insert(group_key(app, &id)) {
-                    super::owner::post_dead(app, &id);
-                }
+            Do::Turn(session, text) => {
+                let mut out = Vec::new();
+                crate::event_loop::send_turn(app, &session, text.to_string(), false, &mut out);
+                app.outbox.extend(out);
             }
             Do::Archive(session) => super::owner::archive(app, session),
             Do::Approved(dir, plan, session) => {
@@ -263,6 +274,38 @@ struct Ctx<'a> {
     reasons: &'a HashMap<AgentId, WaitReason>,
     open_prs: &'a HashMap<orion_core::ProjectId, crate::app::OpenPrs>,
     lists: &'a HashMap<orion_core::ProjectId, crate::linear::LinearList>,
+    /// The factory is paused at its account's limit.
+    paused: bool,
+}
+
+/// What a crashed session gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Crashed {
+    /// Relaunched now.
+    Relaunch,
+    /// Out of relaunches: parked quietly.
+    GiveUp,
+    /// Nothing: relaunched for this crash already, or a usage limit's.
+    Leave,
+}
+
+/// What a session that crashed at `crashed_at` gets, `restarts` the
+/// times it was relaunched: nothing while `limited` (a usage limit, or
+/// the factory paused at one) or when relaunched since the crash; else a
+/// relaunch while fewer than [`RELAUNCHES`] fall in the last
+/// [`RELAUNCH_WINDOW_MS`]; else it is given up on.
+pub(crate) fn crashed(restarts: &[i64], crashed_at: i64, limited: bool, now: i64) -> Crashed {
+    if limited || restarts.last().is_some_and(|at| *at >= crashed_at) {
+        return Crashed::Leave;
+    }
+    let recent = restarts
+        .iter()
+        .filter(|at| now - **at < RELAUNCH_WINDOW_MS)
+        .count();
+    match recent < RELAUNCHES {
+        true => Crashed::Relaunch,
+        false => Crashed::GiveUp,
+    }
 }
 
 /// One ticket brought up to date; false lets it go.
@@ -386,11 +429,25 @@ fn step(
         let since = *entry.gone_since.get_or_insert(now);
         if now - since >= DEAD_MS {
             stage_to(entry, Stage::Dead, rec);
-            todo.push(Do::Dead(id.to_string()));
         }
         return true;
     };
     entry.gone_since = None;
+    if agent.status == AgentStatus::Terminated {
+        let limited = ctx.paused || agent.usage_limit.is_some();
+        match crashed(&entry.restarts, agent.status_changed_at, limited, now) {
+            Crashed::Relaunch => {
+                entry.restarts.push(now);
+                todo.push(Do::Turn(session, RELAUNCH_PROMPT));
+            }
+            Crashed::GiveUp => {
+                entry.stopped = true;
+                stage_to(entry, Stage::Parked, rec);
+            }
+            Crashed::Leave => {}
+        }
+        return true;
+    }
     let waiting = match agent.status {
         AgentStatus::NeedsFeedback => ctx.reasons.get(&session),
         _ => None,
@@ -457,15 +514,9 @@ fn step(
             }
         }
     }
-    if agent.status == AgentStatus::Running {
-        if entry.stalled {
-            entry.stalled = false;
-            close(todo, "Running again");
-        }
-        if entry.asking {
-            entry.asking = false;
-            rec(Rec::Answered(None));
-        }
+    if agent.status == AgentStatus::Running && entry.asking {
+        entry.asking = false;
+        rec(Rec::Answered(None));
     }
     let quiet = agent.status == AgentStatus::Finished
         && now - agent.status_changed_at >= STALL_MS
@@ -473,7 +524,7 @@ fn step(
         && entry.pr_url.is_none();
     if quiet && !entry.stalled {
         entry.stalled = true;
-        todo.push(Do::Stalled(id.to_string(), session));
+        todo.push(Do::Turn(session, NUDGE_PROMPT));
     }
     true
 }
@@ -605,26 +656,4 @@ fn heard_since<'a>(ctx: Ctx<'a>, id: &str, since: i64) -> Option<&'a crate::line
 fn not_yours(issue: &crate::linear::LinearIssue, entry: &Entry) -> bool {
     issue.assignee_id.is_empty()
         || (!entry.owner_id.is_empty() && issue.assignee_id != entry.owner_id)
-}
-
-/// The Stalled card on ticket `id`, with the last thing `session` said
-/// off its transcript — read on the blocking pool, the card posted when
-/// it lands (`linear_builder::Answer::Stalled`). With no loop (the
-/// tests), read here.
-fn stalled(app: &mut App, id: String, session: &AgentId) {
-    use crate::automations::pr_fixer::router::last_said_of;
-    let agent = app.tree.agents.iter().find(|a| &a.id == session).cloned();
-    match (app.automations.tx.clone(), agent) {
-        (Some(tx), Some(agent)) => {
-            tokio::task::spawn_blocking(move || {
-                let said = last_said_of(&agent, 1).pop();
-                let answer = super::Answer::Stalled { issue: id, said };
-                let _ = tx.send(crate::automations::Answer::LinearBuilder(answer));
-            });
-        }
-        (_, agent) => {
-            let said = agent.and_then(|agent| last_said_of(&agent, 1).pop());
-            super::owner::post_stalled(app, &id, said);
-        }
-    }
 }

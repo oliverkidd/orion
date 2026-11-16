@@ -769,7 +769,7 @@ Automations                          2 of at most 3 running · caps in Settings
   automation's name ahead of what it runs on (`PR fixer · opus high`), and Needs you labels it the
   same way. orion keeps the tag with the session, across restarts.
 - **Cards.** <a id="factory-cards"></a>What the factory needs you for — a pull request's verdict, a
-  plan with nothing to build, a stalled session, a ticket held for you — is a card. While you are at
+  plan with nothing to build, a ticket held for you — is a card. While you are at
   the laptop none of them goes to Slack: the card shows in orion, as `◆ card` where the row of the
   session it is about shows its age (on the worktree's rule, `◆` ahead of its pull request, when no
   session of it is live), as a line in the footer when it arrives (`◆ ENG-7 Crash · ⌘K to answer`),
@@ -880,14 +880,19 @@ request. They work the same way; each has its own labels and its own preset (**B
 - **Where it stands.** Each ticket moves through planning, approving, building, PR open and merged.
   A ticket moved to the backlog, canceled, done by someone else or no longer assigned to you is
   parked and its session archived; a session or worktree gone for 30 minutes with no pull request is
-  dead, said on a card. A session that stops while planning or building with no pull request and no
-  question for 10 minutes gets a **Stalled** card: **Continue**, **Reply…**, **Park** or **Not for
-  the factory**; a dead one's card has **Open ticket**, **Park** and **Not for the factory**. Each
-  stage, each question and when you answered go into the run's record
-  (`automations/runs/<ticket>.json` in orion's data dir).
+  dead, with no card. A session that crashes while planning or building is relaunched — the same
+  session resumed with "You were interrupted; carry on from where you left off" — at most twice in 6
+  hours; a third crash parks it quietly, its session left as it is, and Needs you lists it as
+  "Stopped after 2 restarts". A crash on a usage limit, or while the factory is paused at its
+  account's limit, is left to that pause. A session that stops while planning or building with no
+  pull request and no question for 10 minutes is nudged once ("You've stopped without asking or
+  opening a PR. If you need the owner, ask with AskUserQuestion; otherwise carry on."); still idle
+  after that, it is left in its waiting state. None of these is a card or goes to Slack, and a
+  factory session's crash never reaches your phone. Each stage, each question and when you answered
+  go into the run's record (`automations/runs/<ticket>.json` in orion's data dir).
 - **Not for the factory.** A ticket the factory shouldn't have taken comes off it for good. It is
   two choices, **Not for the factory: back to Triage** and **Not for the factory: move to Backlog**,
-  on the No change, Stalled and dead cards, on the pull request's verdict card, on a factory
+  on the No change card, on the pull request's verdict card, on a factory
   session's plan and question on your phone, and in the session's menu in orion (right-click its
   row). Either parks the ticket as **Park** does — its session archived, its cards closed — labels it
   `factory-skip` (made in its team if the team has no such label), comments "Taken off the factory by

@@ -45,4 +45,12 @@ mod tests {
         assert_eq!(super::kind_label(Some("nope")), "agent");
         assert_eq!(super::kind_label(None), "agent");
     }
+
+    #[test]
+    fn only_the_bug_fixer_and_feature_builder_build_tickets() {
+        assert!(super::builds_tickets("bug_fixer"));
+        assert!(super::builds_tickets("feature_builder"));
+        assert!(!super::builds_tickets("pr_fixer"));
+        assert!(!super::builds_tickets("blue_sky"));
+    }
 }

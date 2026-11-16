@@ -47,9 +47,10 @@
 //!   says nothing should be built (`ORION-VERDICT: …`), which asks you to
 //!   close the ticket instead — then building, the pull request open,
 //!   merged; parked when the ticket leaves your hands, dead when its
-//!   session goes, stalled when it stops with nothing to show. Each stage,
-//!   question and the ticket's kind go into its run record
-//!   (`factory::runs`).
+//!   session goes. A session that crashes is relaunched (twice in six
+//!   hours, then parked quietly), and one that stops with nothing to show
+//!   is nudged once — no card for either. Each stage, question and the
+//!   ticket's kind go into its run record (`factory::runs`).
 //! * **Cards** ([`owner`]): every ask above is a factory card under
 //!   `issue:<issue id>:<what>`, its presses handled by [`owner::on_action`].
 //! * **Labels.** Enter on the panel's **Labels** row picks them from the
@@ -347,9 +348,18 @@ pub struct Entry {
     /// waiting until its session moves on is the one answered.
     #[serde(default)]
     pub steered_at: Option<i64>,
-    /// Its Stalled card is up.
+    /// Its session has been nudged for stopping with nothing to show:
+    /// once a run (`stages::NUDGE_PROMPT`).
     #[serde(default)]
     pub stalled: bool,
+    /// When its session was relaunched after a crash (ms), the latest last
+    /// (`stages::crashed`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restarts: Vec<i64>,
+    /// Parked after its session crashed past its relaunches: Needs you
+    /// lists it as "Stopped after 2 restarts".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stopped: bool,
     /// A question to you is open in its run record.
     #[serde(default)]
     pub asking: bool,
@@ -390,6 +400,8 @@ impl Default for Entry {
             asking: false,
             plan: None,
             skipped: false,
+            restarts: Vec::new(),
+            stopped: false,
         }
     }
 }
@@ -598,6 +610,21 @@ impl Shared {
     }
 }
 
+/// What Needs you says of a factory session that crashed past its
+/// relaunches and was parked (`stages::crashed`).
+pub const STOPPED_AFTER_RESTARTS: &str = "Stopped after 2 restarts";
+
+/// Whether session `agent` is a factory ticket's that crashed past its
+/// relaunches and was parked.
+pub fn stopped_after_restarts(app: &App, agent: &orion_core::AgentId) -> bool {
+    app.automations
+        .linear_builder
+        .ledger
+        .issues
+        .values()
+        .any(|e| e.stopped && e.stage == Stage::Parked && e.session.as_ref() == Some(agent))
+}
+
 /// Whether Linear's ticket `issue_id` has been picked up by the bug fixer
 /// or the feature builder: Needs you leaves its assignment off the board.
 pub fn picked_up(app: &App, issue_id: &str) -> bool {
@@ -713,9 +740,6 @@ pub enum Answer {
     },
     /// The workspace's issue labels, for the labels pick.
     Labels(Result<Vec<String>, String>),
-    /// What a stalled ticket's session last said, read off its
-    /// transcript: its Stalled card goes out with it.
-    Stalled { issue: String, said: Option<String> },
 }
 
 /// Ask Linear, under every distinct key, for `which`'s tickets.
@@ -768,7 +792,6 @@ pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
                 }
             }
         }
-        Answer::Stalled { issue, said } => owner::post_stalled(app, &issue, said),
     }
 }
 
@@ -2814,6 +2837,92 @@ mod tests {
         app.tree.agents.push(agent);
     }
 
+    /// The no-change card on ENG-7, already fixed: its key.
+    fn no_change(app: &mut App) -> &'static str {
+        let line = "ORION-VERDICT: already-fixed in #2075";
+        app.automations
+            .linear_builder
+            .ledger
+            .issues
+            .get_mut("uuid-ENG-7")
+            .unwrap()
+            .verdict = Some(line.into());
+        owner::post_no_change(app, "uuid-ENG-7", &stages::parse_verdict(line).unwrap());
+        "issue:uuid-ENG-7:nochange"
+    }
+
+    /// The turns sent to sessions, in order.
+    fn turns(app: &App) -> Vec<&str> {
+        app.outbox
+            .iter()
+            .filter_map(|r| match r {
+                ClientRequest::SendTurn { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A session that crashes is relaunched with a short prompt, twice in
+    /// six hours; the third crash parks it quietly — no card, listed in
+    /// Needs you as stopped. A usage limit's crash, or one while the
+    /// factory is paused, is left alone.
+    #[test]
+    fn a_crashed_session_is_relaunched_twice_then_parked_quietly() {
+        use crate::needs_you::model::CardSource;
+        let mut app = app_with_project();
+        building(&mut app, Stage::Building);
+        let crash = |app: &mut App| {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            app.tree.agents[0].status = AgentStatus::Terminated;
+            app.tree.agents[0].status_changed_at = crate::app::now_ms();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            follow(app);
+        };
+        crash(&mut app);
+        assert_eq!(turns(&app), [stages::RELAUNCH_PROMPT]);
+        follow(&mut app);
+        assert_eq!(turns(&app).len(), 1, "once per crash");
+        crash(&mut app);
+        assert_eq!(turns(&app).len(), 2);
+        crash(&mut app);
+        assert_eq!(turns(&app).len(), 2, "no third relaunch");
+        assert_eq!(stage_of(&app), Stage::Parked);
+        assert!(!app.tree.agents[0].archived, "left as it is");
+        assert!(app.factory_cards.is_empty(), "no card");
+        let s7 = AgentId("s7".into());
+        assert!(stopped_after_restarts(&app, &s7));
+        let board = crate::needs_you::agents::Agents.cards(&app);
+        assert!(board
+            .iter()
+            .any(|c| c.sub.ends_with("Stopped after 2 restarts")));
+
+        // The window: relaunches older than six hours don't count.
+        let now = crate::app::now_ms();
+        let old = now - stages::RELAUNCH_WINDOW_MS - 1;
+        assert_eq!(
+            stages::crashed(&[old, old + 1], now - 5, false, now),
+            stages::Crashed::Relaunch
+        );
+        assert_eq!(
+            stages::crashed(&[now - 20, now - 10], now - 5, false, now),
+            stages::Crashed::GiveUp
+        );
+        // A usage limit, or the factory paused at one: left to the pause.
+        assert_eq!(
+            stages::crashed(&[], now - 5, true, now),
+            stages::Crashed::Leave
+        );
+        let mut app = app_with_project();
+        building(&mut app, Stage::Building);
+        app.tree.agents[0].usage_limit = Some(orion_core::UsageLimit {
+            reason: orion_core::LimitReason::RateLimit,
+            message: None,
+        });
+        crash(&mut app);
+        assert!(turns(&app).is_empty());
+        assert_eq!(stage_of(&app), Stage::Building);
+    }
+
     fn stage_of(app: &App) -> Stage {
         app.automations.linear_builder.ledger.issues["uuid-ENG-7"].stage
     }
@@ -2969,43 +3078,11 @@ mod tests {
     }
 
     /// Your cards on a ticket close as what they were about ends, so none
-    /// holds the intake shut: Stalled when the session runs again or a pull
-    /// request opens, Dead when the session comes back, a held ticket's
-    /// when it leaves your hands.
+    /// holds the intake shut: a held ticket's when it leaves your hands. A
+    /// session gone, or back, has no card at all.
     #[test]
     fn cards_close_as_what_they_were_about_ends() {
-        let stalled = |app: &mut App| {
-            building(app, Stage::Building);
-            app.tree.agents[0].status = AgentStatus::Finished;
-            app.tree.agents[0].status_changed_at = crate::app::now_ms() - stages::STALL_MS - 1;
-            follow(app);
-            assert_eq!(card(app, "issue:uuid-ENG-7:stalled").state, CardState::Open);
-            assert_eq!(super::super::attention(app), 1);
-        };
-        // Stalled, then running again.
-        let mut app = app_with_project();
-        stalled(&mut app);
-        app.tree.agents[0].status = AgentStatus::Running;
-        follow(&mut app);
-        assert_eq!(
-            card(&app, "issue:uuid-ENG-7:stalled").state,
-            CardState::Closed("Running again".into())
-        );
-        assert_eq!(super::super::attention(&app), 0);
-        // Stalled, then a pull request opens.
-        let mut app = app_with_project();
-        stalled(&mut app);
-        app.open_prs.insert(
-            p(),
-            open_prs(vec![pr(9, "ENG-7: fix", "eng-7-crash")], Vec::new()),
-        );
-        follow(&mut app);
-        assert_eq!(
-            card(&app, "issue:uuid-ENG-7:stalled").state,
-            CardState::Closed("PR opened".into())
-        );
-
-        // Dead, then its session back: where it was, the card closed.
+        // Dead, then its session back: where it was, with no card.
         let mut app = app_with_project();
         building(&mut app, Stage::Building);
         let agent = app.tree.agents.remove(0);
@@ -3018,17 +3095,11 @@ mod tests {
             .gone_since = Some(crate::app::now_ms() - stages::DEAD_MS - 1);
         follow(&mut app);
         assert_eq!(stage_of(&app), Stage::Dead);
-        assert_eq!(super::super::attention(&app), 1);
-        follow(&mut app);
-        assert_eq!(stage_of(&app), Stage::Dead, "still gone");
+        assert!(app.factory_cards.is_empty(), "no card");
+        assert_eq!(super::super::attention(&app), 0);
         app.tree.agents.push(agent);
         follow(&mut app);
         assert_eq!(stage_of(&app), Stage::Building);
-        assert_eq!(
-            card(&app, "issue:uuid-ENG-7:dead").state,
-            CardState::Closed("Its session is back".into())
-        );
-        assert_eq!(super::super::attention(&app), 0);
 
         // Held for you, then started in Linear: let go, its card closed.
         let mut app = app_with_project();
@@ -3076,8 +3147,7 @@ mod tests {
         let mut app = app_with_project();
         app.away = false;
         building(&mut app, Stage::Building);
-        owner::post_stalled(&mut app, "uuid-ENG-7", None);
-        let key = "issue:uuid-ENG-7:stalled";
+        let key = no_change(&mut app);
         let flash = app.flash.as_deref().unwrap_or_default().to_string();
         assert!(flash.starts_with("◆ ENG-7 Crash"), "{flash}");
         let session = Place::Session(AgentId("s7".into()));
@@ -3092,7 +3162,7 @@ mod tests {
         app.tree.agents[0].archived = false;
         // Answered in orion: gone everywhere, and closed for the daemon.
         app.outbox.clear();
-        crate::needs_you::factory::press(&mut app, key, "continue", None);
+        crate::needs_you::factory::press(&mut app, key, "build", Some("Do it".into()));
         assert_eq!(waiting_at(&app, &session), 0);
         assert!(crate::needs_you::factory::Factory.cards(&app).is_empty());
         assert!(app
@@ -3102,7 +3172,7 @@ mod tests {
         // Away, a new card says nothing in the footer: it is on Slack.
         app.away = true;
         app.flash = None;
-        owner::post_dead(&mut app, "uuid-ENG-7");
+        no_change(&mut app);
         assert_eq!(app.flash, None);
     }
 
@@ -3135,18 +3205,9 @@ mod tests {
         use orion_core::factory_card::{NOT_FOR_FACTORY, NOT_FOR_FACTORY_BACKLOG};
         let mut app = app_with_project();
         building(&mut app, Stage::Approving);
-        app.automations
-            .linear_builder
-            .ledger
-            .issues
-            .get_mut("uuid-ENG-7")
-            .unwrap()
-            .verdict = Some("ORION-VERDICT: already-fixed abc123".into());
-        let nc = stages::parse_verdict("ORION-VERDICT: already-fixed abc123").unwrap();
-        owner::post_no_change(&mut app, "uuid-ENG-7", &nc);
-        owner::post_stalled(&mut app, "uuid-ENG-7", None);
-        owner::post_dead(&mut app, "uuid-ENG-7");
-        for what in ["nochange", "stalled", "dead"] {
+        no_change(&mut app);
+        {
+            let what = "nochange";
             let c = card(&app, &format!("issue:uuid-ENG-7:{what}"));
             let last: Vec<(&str, &str)> = c.card.buttons[c.card.buttons.len() - 2..]
                 .iter()
@@ -3175,19 +3236,14 @@ mod tests {
         use owner::Write;
         let mut app = app_with_project();
         building(&mut app, Stage::Building);
-        owner::post_stalled(&mut app, "uuid-ENG-7", None);
-        owner::post_dead(&mut app, "uuid-ENG-7");
-        let key = "issue:uuid-ENG-7:stalled";
+        let key = no_change(&mut app);
         crate::factory::cards::on_action(&mut app, key, NOT_FOR_FACTORY, None, true);
         assert_eq!(stage_of(&app), Stage::Parked);
         assert!(app.tree.agents.iter().all(|a| a.archived || a.id.0 != "s7"));
-        for key in [key, "issue:uuid-ENG-7:dead"] {
-            assert_eq!(
-                card(&app, key).state,
-                CardState::Closed("Not for the factory".into()),
-                "{key}"
-            );
-        }
+        assert_eq!(
+            card(&app, key).state,
+            CardState::Closed("Not for the factory".into())
+        );
         assert_eq!(
             app.automations.linear_builder.writes,
             [
@@ -3229,7 +3285,7 @@ mod tests {
         // To Backlog: the same, and the ticket moved to its team's Backlog.
         let mut app = app_with_project();
         building(&mut app, Stage::Building);
-        owner::post_stalled(&mut app, "uuid-ENG-7", None);
+        no_change(&mut app);
         let backlog = orion_core::factory_card::NOT_FOR_FACTORY_BACKLOG;
         crate::factory::cards::on_action(&mut app, key, backlog, None, true);
         assert_eq!(stage_of(&app), Stage::Parked);
@@ -3283,7 +3339,7 @@ mod tests {
         // Someone else's press on a card counts for nothing.
         let mut app = app_with_project();
         building(&mut app, Stage::Building);
-        owner::post_stalled(&mut app, "uuid-ENG-7", None);
+        no_change(&mut app);
         crate::factory::cards::on_action(&mut app, key, NOT_FOR_FACTORY, None, false);
         assert_eq!(stage_of(&app), Stage::Building);
     }
@@ -3490,31 +3546,24 @@ mod tests {
         follow(&mut app);
         assert_eq!(stage_of(&app), Stage::Building);
 
-        // Stopped with nothing to show for ten minutes: a Stalled card.
+        // Stopped with nothing to show for ten minutes: one nudge, no card.
         let mut app = app_with_project();
         building(&mut app, Stage::Building);
         app.tree.agents[0].status = AgentStatus::Finished;
         app.tree.agents[0].status_changed_at = crate::app::now_ms() - stages::STALL_MS - 1;
         follow(&mut app);
-        let c = card(&app, "issue:uuid-ENG-7:stalled");
-        assert!(c.card.body[0].starts_with("Stopped without a PR or a question 10 minutes ago."));
-        let actions: Vec<&str> = c.card.buttons.iter().map(|b| b.action.as_str()).collect();
-        assert_eq!(
-            actions,
-            [
-                "continue",
-                "reply",
-                "park",
-                "not_for_factory",
-                "not_for_factory_backlog"
-            ]
-        );
+        assert_eq!(turns(&app), [stages::NUDGE_PROMPT]);
+        assert!(app.factory_cards.is_empty(), "no card");
+        // Running and idle again: left as it is.
+        app.tree.agents[0].status = AgentStatus::Running;
         follow(&mut app);
-        assert_eq!(app.factory_cards.len(), 1, "once");
-        crate::factory::cards::on_action(&mut app, "issue:uuid-ENG-7:stalled", "park", None, true);
-        assert_eq!(stage_of(&app), Stage::Parked);
+        app.tree.agents[0].status = AgentStatus::Finished;
+        follow(&mut app);
+        assert_eq!(turns(&app), [stages::NUDGE_PROMPT], "once");
+        assert_eq!(stage_of(&app), Stage::Building);
+        assert!(app.factory_cards.is_empty());
 
-        // The session gone half an hour: dead, said on a card.
+        // The session gone half an hour: dead, with no card.
         let mut app = app_with_project();
         building(&mut app, Stage::Building);
         app.tree.agents.clear();
@@ -3529,7 +3578,7 @@ mod tests {
             .gone_since = Some(crate::app::now_ms() - stages::DEAD_MS - 1);
         follow(&mut app);
         assert_eq!(stage_of(&app), Stage::Dead);
-        card(&app, "issue:uuid-ENG-7:dead");
+        assert!(app.factory_cards.is_empty());
         // An old ledger, before any of this, still loads.
         let old = r#"{"issues": {"i": {"automation": "bug_fixer", "identifier": "ENG-1",
             "title": "t", "project": "p", "branch": "b", "stage": "building", "at": 1}}}"#;
