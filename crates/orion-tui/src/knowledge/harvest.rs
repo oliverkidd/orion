@@ -1,19 +1,29 @@
-//! HARVEST: one merged pull request into the harvested pages. Its dossier (the PR's
-//! description and thread, and the condensed sessions that built it) is
-//! read by Opus for entries ([`extract`]); the guards hold those to what
-//! the owner said ([`super::guards`]); each topic they touch is checked
-//! against the code and merged into its page by a second Opus call that
-//! may read a checkout of the merge ([`check_topic`], [`CheckTree`]): a
+//! HARVEST: one merged pull request into the harvested pages. Its dossier
+//! (the PR's description and thread, and the condensed sessions that
+//! built it) is read in a checkout of the merge ([`CheckTree`]: a
 //! temporary detached worktree, since the main checkout may not have the
-//! merge yet. With no such checkout the entries are merged unchecked, at
-//! low confidence, rather than lost. Then the pages, `entries.jsonl` and
-//! `index.md` are written into the knowledge branch's checkout, and the
-//! dossier kept on this machine; the caller commits and proposes them
-//! (`super::share`). The repo's hand-written records are context to both
-//! calls, and always win over a harvested rule.
+//! merge yet), two ways:
+//!
+//! - **A pull request no session noted rules for** — one a person built —
+//!   is one Opus call ([`harvest_whole`]): it extracts the entries, checks
+//!   each against the code, and returns every page they go on, reading the
+//!   knowledge branch's pages laid out in the checkout ([`lay_pages`]).
+//! - **A factory pull request** whose session handed over its rules with
+//!   `orion knowledge note` (`super::notes`) skips the extraction: each
+//!   topic the noted rules touch is checked and merged by one call
+//!   ([`merge_noted`], [`check_topic`]).
+//!
+//! Either way the guards hold the entries to what the owner said, word for
+//! word ([`super::guards`]). With no checkout the entries are merged
+//! unchecked, at low confidence, rather than lost. Then the pages,
+//! `entries.jsonl` and `index.md` are written into the knowledge branch's
+//! checkout, and the dossier kept on this machine; the caller commits and
+//! proposes them (`super::share`). The repo's hand-written records are
+//! context to every call, and always win over a harvested rule.
 //!
 //! The model is a [`Model`]: the real one runs the Claude CLI
-//! ([`ClaudeCli`]); a test hands in its own answers.
+//! ([`ClaudeCli`]) at each [`Step`]'s model (`knowledge.models`); a test
+//! hands in its own answers.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -48,8 +58,9 @@ const PAGE_SLACK: usize = PAGE_WORDS / 4;
 const CORRECTION_CUT: usize = 300;
 const CORRECTIONS_MAX: usize = 20;
 
-/// The extraction prompt: the plan's appendix, word for word.
-pub(crate) const EXTRACT_SYSTEM: &str = r#"You are reading one merged pull request's dossier: its description, review comments and the condensed
+/// What a harvest extracts, and from what: the plan's appendix, word for
+/// word, up to the fields of an entry ([`ENTRY_FIELDS`]).
+pub(crate) const EXTRACT_RULES: &str = r#"You are reading one merged pull request's dossier: its description, review comments and the condensed
 transcripts of the agent sessions that built it. "OWNER" lines are the repo owner. "AGENT ASKED" / "OWNER
 ANSWERED" are questions and answers. "AGENT PLAN" is a plan. Tool output was removed.
 Extract only what a future agent working a different ticket in this repo would need, so it works the way
@@ -74,26 +85,19 @@ human reviewer's comment acted on), agent (the agent decided; confidence low).
 
 Topic: area/topic. Put each entry in one of the repo's listed topics unless none fits; several entries may share
 one. Only then make a new topic: its area one of the listed areas, its name one to three kebab-case words, and
-give new_topic: one line (under 15 words, no file paths) saying what it covers.
-Each entry: stream, kind, topic, new_topic (only for a new topic), rule (≤30 words, true without the ticket),
-applies_to, why (≤60 words or "Not recorded"), by, confidence, quote, options_rejected, confirm_by (a symbol,
-test, command or file to check it still holds; never a line number), source_at.
-Return JSON: {"entries":[...], "considered_and_skipped":["..."]}."#;
+give new_topic: one line (under 15 words, no file paths) saying what it covers."#;
 
-/// The check-and-merge call's rules, [`PAGE_WORDS`] said in them.
-pub(super) fn check_system() -> String {
+/// The fields of an entry: what a harvest returns, and what a factory
+/// session hands over with `orion knowledge note`.
+pub(crate) const ENTRY_FIELDS: &str = r#"stream, kind, topic, new_topic (only for a new topic), rule (≤30 words, true without the ticket),
+applies_to (the files or folders it is about), why (≤60 words or "Not recorded"), by, confidence, quote, options_rejected, confirm_by (a symbol,
+test, command or file to check it still holds; never a line number), source_at"#;
+
+/// How a topic page is written, [`PAGE_WORDS`] said in it: what every
+/// call that writes one is told.
+fn page_shape() -> String {
     format!(
-        r#"You keep one topic page of a repository's knowledge store: the rules its owner set for the agents that work in it. You are in a checkout of the repository as merged. You may read the code (Read, Grep, Glob); change nothing.
-
-You get the topic, its current page (or none yet) and new entries, each with an id. For each new entry:
-- check its confirm_by, and the rule itself, against the code as it is now; drop it when it doesn't hold, saying why;
-- when it repeats a rule already on the page, merge the two into that rule, citing every PR;
-- mark an existing rule superseded (move it to Replaced, saying by what) only when a new entry clearly reverses it;
-- otherwise, when they conflict, list the conflict under Open questions;
-- when an entry or a rule contradicts one of the hand-written records you are given, drop it (its why names the record) or list it under Open questions citing the record's path: a record always wins, and you never change one;
-- when a new entry belongs on one of the area's other topics you are given rather than this one, leave it off this page and list it under moved, with the topic it belongs on.
-
-Write the whole page in Markdown, at most {PAGE_WORDS} words, in exactly this shape:
+        r#"Write the whole page in Markdown, at most {PAGE_WORDS} words, in exactly this shape:
 # <topic>
 Scope: <what it covers, in under 15 words; no file paths>
 ## Rules in force
@@ -101,13 +105,54 @@ Scope: <what it covers, in under 15 words; no file paths>
 ## Open questions
 ## Replaced
 
-Each bullet is one rule of at most 30 words, then the PRs it came from, as (#123, #130), then an HTML comment with the ids of every entry it stands on: <!-- k123-1 k130-2 -->. Keep the id comment of every rule you keep. Name a file path in a rule only when the rule needs it. Rules in force: decisions, conventions, preferences, tooling, gotchas. Constraints: facts about the world that limit behaviour. A rule the agent decided, not the owner, ends with "(agent call)".
-
-Your reply, after any reading, is one JSON object: {{"page": "<the whole page>", "dropped": [{{"id": "k…", "why": "…"}}], "moved": [{{"id": "k…", "to": "<area/topic>"}}]}}"#
+Each bullet is one rule of at most 30 words, then the PRs it came from, as (#123, #130), then an HTML comment with the ids of every entry it stands on: <!-- k123-1 k130-2 -->. Keep the id comment of every rule you keep. Name a file path in a rule only when the rule needs it. Rules in force: decisions, conventions, preferences, tooling, gotchas. Constraints: facts about the world that limit behaviour. A rule the agent decided, not the owner, ends with "(agent call)"."#
     )
 }
 
-/// What both calls are told of the hand-written records.
+/// What a check does with each new entry: hold it against the code and
+/// the page, and the records over both.
+const CHECK_RULES: &str = "- check its confirm_by, and the rule itself, against the code as it is now; drop it when it doesn't hold, saying why;
+- when it repeats a rule already on the page, merge the two into that rule, citing every PR;
+- mark an existing rule superseded (move it to Replaced, saying by what) only when a new entry clearly reverses it;
+- otherwise, when they conflict, list the conflict under Open questions;
+- when an entry or a rule contradicts one of the hand-written records you are given, drop it (its why names the record) or list it under Open questions citing the record's path: a record always wins, and you never change one";
+
+/// The check-and-merge call's rules: one topic's new entries, checked
+/// and merged into its page (a factory pull request's noted rules).
+pub(super) fn check_system() -> String {
+    format!(
+        r#"You keep one topic page of a repository's knowledge store: the rules its owner set for the agents that work in it. You are in a checkout of the repository as merged. You may read the code (Read, Grep, Glob); change nothing.
+
+You get the topic, its current page (or none yet) and new entries, each with an id. For each new entry:
+{CHECK_RULES};
+- when a new entry belongs on one of the area's other topics you are given rather than this one, leave it off this page and list it under moved, with the topic it belongs on.
+
+{}
+
+Your reply, after any reading, is one JSON object: {{"page": "<the whole page>", "dropped": [{{"id": "k…", "why": "…"}}], "moved": [{{"id": "k…", "to": "<area/topic>"}}]}}"#,
+        page_shape()
+    )
+}
+
+/// The one call that harvests a pull request no session noted rules for:
+/// it extracts the entries, checks them against the code and writes the
+/// pages they go on, in one reply.
+pub(crate) fn harvest_system() -> String {
+    format!(
+        r#"{EXTRACT_RULES}
+Each entry: id (k<PR>-<n>, numbered on from the first id you are given), {ENTRY_FIELDS}.
+
+Then keep the repository's knowledge store for the topics your entries go on: one page per topic, the rules its owner set for the agents that work in it. You are in a checkout of the repository as merged. You may read the code (Read, Grep, Glob); change nothing. Each topic's current page is at .orion/decisions/harvested/<area>/<topic>.md in it: read the page of every topic you put an entry on before you write it. For each entry:
+{CHECK_RULES}; a dropped entry goes on no page.
+
+Return the whole page of every topic an entry goes on, and of no other. {}
+
+Your reply, after any reading, is one JSON object: {{"entries": [{{"id": "k…", "stream": "…", "topic": "<area/topic>", "rule": "…", …}}], "considered_and_skipped": ["…"], "pages": {{"<area/topic>": "<the whole page>"}}, "dropped": [{{"id": "k…", "why": "…"}}]}}"#,
+        page_shape()
+    )
+}
+
+/// What every call is told of the hand-written records.
 pub(super) const RECORDS_RULE: &str = "The repo's hand-written decision records (in .orion/decisions/, outside harvested/) are authoritative and read-only. A record always wins: never record a rule that contradicts one; drop it, or list it under Open questions citing the record's path. Never restate a record as a rule.";
 
 /// What the staleness pass adds: no new entries, every rule checked.
@@ -116,7 +161,10 @@ const STALE_TASK: &str = "There are no new entries. Check every rule and constra
 /// What the check is told when there is no checkout to read.
 pub(super) const UNCHECKED: &str = "This time the code can't be read and you have no tools. Don't check the new entries against the code and drop none of them for not holding: merge them into the page as the rules above say, and leave dropped empty.";
 
-/// What both calls are told last, in their rules and at the end of the
+/// What the harvest is told when there is no checkout to read.
+const UNCHECKED_PAGES: &str = "This time the code can't be read and you have no tools: the topics' current pages are given below. Don't check the entries against the code and drop none of them for not holding: write them into the pages as the rules above say, and leave dropped empty.";
+
+/// What every call is told last, in its rules and at the end of the
 /// prompt: the reply is parsed.
 pub(super) const JSON_ONLY: &str = "Reply with the JSON object only: no prose, no code fence.";
 
@@ -324,13 +372,6 @@ pub(crate) fn corrections(sessions: &[Session]) -> Vec<String> {
         .collect()
 }
 
-/// What one extraction found.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Extracted {
-    pub entries: Vec<Entry>,
-    pub skipped: Vec<String>,
-}
-
 /// The records as a prompt gives them.
 pub(super) fn records_part(records: &str) -> String {
     match records.trim() {
@@ -341,8 +382,8 @@ pub(super) fn records_part(records: &str) -> String {
     }
 }
 
-/// The areas and the topics there are, as the extraction picks from
-/// them: each topic `area/topic — scope`.
+/// The areas and the topics there are, as a harvest (or a factory
+/// session noting rules) picks from them: each topic `area/topic — scope`.
 pub(crate) fn catalog(areas: &Areas, topics: &[(String, String)]) -> String {
     let topics = match topics.is_empty() {
         true => "(none yet)".to_string(),
@@ -356,48 +397,6 @@ pub(crate) fn catalog(areas: &Areas, topics: &[(String, String)]) -> String {
         "The repo's knowledge areas (a topic's area is one of these):\n{}\n\nThe repo's topics (put each entry in one of these unless none fits):\n{topics}",
         areas.listing()
     )
-}
-
-/// Ask the model for `dossier`'s entries, with the store's `catalog`
-/// ([`catalog`]) to pick topics from and the hand-written `records` to
-/// defer to.
-pub(crate) async fn extract(
-    model: &dyn Model,
-    dossier: &Dossier,
-    catalog: &str,
-    records: &str,
-) -> Result<Extracted, String> {
-    let prompt = format!(
-        "{catalog}\n\n{}\n\nThe dossier:\n\n{}\n\n{JSON_ONLY}",
-        records_part(records),
-        dossier.text
-    );
-    let ask = ModelAsk {
-        system: format!("{EXTRACT_SYSTEM}\n\n{RECORDS_RULE}\n\n{JSON_ONLY}"),
-        prompt,
-        cwd: None,
-        read_tools: false,
-        step: Step::Harvest,
-    };
-    let v = ask_json(model, ask, |v| {
-        v.get("entries").is_some_and(Value::is_array) || v.get("considered_and_skipped").is_some()
-    })
-    .await?;
-    let entries = v
-        .get("entries")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Entry::from_model)
-        .collect();
-    let skipped = v
-        .get("considered_and_skipped")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|s| s.as_str().map(str::to_string))
-        .collect();
-    Ok(Extracted { entries, skipped })
 }
 
 /// Ask `model`, and read its reply as a JSON object that `fits`
@@ -537,16 +536,26 @@ pub(crate) async fn ask_page(
     scope: Option<&str>,
 ) -> Result<Checked, String> {
     let v = ask_json(model, ask, |v| v.get("page").is_some_and(Value::is_string)).await?;
-    let mut page = v
-        .get("page")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+    let page = tidy(
+        topic,
+        v.get("page").and_then(Value::as_str).unwrap_or_default(),
+        scope,
+    )?;
+    Ok(Checked {
+        page,
+        dropped: id_pairs(&v, "dropped", "why"),
+        moved: id_pairs(&v, "moved", "to"),
+    })
+}
+
+/// `raw`, a page a model wrote for `topic`, made one: every section there
+/// (an empty one included), its title the topic and its scope line short
+/// ([`store::tidy_page`]) — `scope` when given. Not a page at all fails.
+pub(crate) fn tidy(topic: &str, raw: &str, scope: Option<&str>) -> Result<String, String> {
+    let mut page = raw.trim().to_string();
     if !page.contains("## Rules in force") {
         return Err(format!("the check of {topic} returned no page"));
     }
-    // Every page has every section, an empty one included.
     for section in SECTIONS {
         if !page.lines().any(|l| l.trim() == format!("## {section}")) {
             page.push_str(&format!("\n\n## {section}"));
@@ -557,23 +566,22 @@ pub(crate) async fn ask_page(
     if words > PAGE_WORDS + PAGE_SLACK {
         tracing::warn!("knowledge: {topic}'s page runs {words} words");
     }
-    let pairs = |key: &str, field: &str| -> Vec<(String, String)> {
-        v.get(key)
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|d| {
-                let id = d.get("id")?.as_str()?.to_string();
-                let other = d.get(field).and_then(Value::as_str).unwrap_or_default();
-                Some((id, other.to_string()))
-            })
-            .collect()
-    };
-    Ok(Checked {
-        page,
-        dropped: pairs("dropped", "why"),
-        moved: pairs("moved", "to"),
-    })
+    Ok(page)
+}
+
+/// `(id, field)` of each object in `v[key]`: what was dropped and why,
+/// or moved and where.
+pub(super) fn id_pairs(v: &Value, key: &str, field: &str) -> Vec<(String, String)> {
+    v.get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|d| {
+            let id = d.get("id")?.as_str()?.to_string();
+            let other = d.get(field).and_then(Value::as_str).unwrap_or_default();
+            Some((id, other.to_string()))
+        })
+        .collect()
 }
 
 /// What one harvest did.
@@ -608,9 +616,10 @@ impl Target<'_> {
 }
 
 /// Harvest the merged `pr` of the repo at `root` into `to`: its dossier
-/// from `comments` and `sessions`, checked against a checkout of the
-/// merge ([`CheckTree::of_merge`], removed after). The outcome, and why
-/// the entries went unchecked when there was no checkout to read.
+/// from `comments` and `sessions`, and the rules the session that built
+/// it `noted` when it did, checked against a checkout of the merge
+/// ([`CheckTree::of_merge`], removed after). The outcome, and why the
+/// entries went unchecked when there was no checkout to read.
 pub(crate) async fn harvest_merge(
     model: &dyn Model,
     to: &Target<'_>,
@@ -618,10 +627,11 @@ pub(crate) async fn harvest_merge(
     pr: &Pr,
     comments: &[Comment],
     sessions: &[Session],
+    noted: Option<Vec<Entry>>,
 ) -> (Result<Outcome, String>, Option<String>) {
     let dossier = dossier(pr, comments, sessions);
     let tree = CheckTree::of_merge(root, pr).await;
-    let outcome = harvest(model, to, pr, &dossier, code_at(&tree)).await;
+    let outcome = harvest(model, to, pr, &dossier, noted, code_at(&tree)).await;
     match tree {
         Ok(tree) => {
             tree.remove().await;
@@ -663,39 +673,53 @@ fn place(areas: &Areas, topics: &[(String, String)], e: &Entry) -> String {
         .unwrap_or(topic)
 }
 
-/// Harvest `pr` from `dossier` into `to`, the entries checked against
-/// the code at `code` ([`CheckTree::of_merge`]) — or, with none (`Err`,
-/// why), kept unchecked at low confidence with a note saying so. Each
-/// entry goes on a listed topic unless none fits ([`place`]), and the
-/// check may move it to another of its area's. Nothing is written unless
-/// every step worked; nothing is committed (the caller does,
-/// `super::share`).
+/// Harvest `pr` from `dossier` into `to`: the rules its session `noted`
+/// checked topic by topic ([`merge_noted`]), else one call that extracts,
+/// checks and writes the pages ([`harvest_whole`]). Checked against the
+/// code at `code` ([`CheckTree::of_merge`]) — or, with none (`Err`, why),
+/// kept unchecked at low confidence with a note saying so. Nothing is
+/// written unless every step worked; nothing is committed (the caller
+/// does, `super::share`).
 pub(crate) async fn harvest(
     model: &dyn Model,
     to: &Target<'_>,
     pr: &Pr,
     dossier: &Dossier,
+    noted: Option<Vec<Entry>>,
     code: Result<&Path, &str>,
 ) -> Result<Outcome, String> {
-    let store = to.store;
-    let areas = Areas::load(store);
-    let topics = store.topic_scopes();
-    let extracted = extract(model, dossier, &catalog(&areas, &topics), to.records).await?;
-    let guarded = guards::apply(extracted.entries, &dossier.owner_lines);
-    let mut dropped = guarded.dropped.len();
+    match noted {
+        Some(noted) => merge_noted(model, to, pr, dossier, noted, code).await,
+        None => harvest_whole(model, to, pr, dossier, code).await,
+    }
+}
+
+/// The entries `pr` came with, numbered on from those it has, stamped,
+/// and held to the owner's words ([`guards`]): the kept, and how many the
+/// guards dropped. Unchecked (`code` is `Err`), each is at low confidence
+/// with a note saying why.
+fn stamped(
+    store: &Store,
+    pr: &Pr,
+    dossier: &Dossier,
+    entries: Vec<Entry>,
+    code: Result<&Path, &str>,
+) -> (Vec<Entry>, usize) {
+    let guarded = guards::apply(entries, &dossier.owner_lines);
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let first = store.entries().iter().filter(|e| e.pr == pr.number).count() + 1;
-    let mut entries: Vec<Entry> = guarded
+    let kept = guarded
         .kept
         .into_iter()
         .enumerate()
         .map(|(n, mut e)| {
-            e.id = format!("k{}-{}", pr.number, first + n);
+            if e.id.is_empty() {
+                e.id = format!("k{}-{}", pr.number, first + n);
+            }
             e.pr = pr.number;
             e.pr_url = pr.url.clone();
             e.recorded_at = now.clone();
             e.status = ACTIVE.into();
-            e.topic = place(&areas, &topics, &e);
             if let Err(why) = code {
                 e.confidence = "low".into();
                 e.note = format!("not checked against the code: {why}");
@@ -703,7 +727,36 @@ pub(crate) async fn harvest(
             e
         })
         .collect();
+    (kept, guarded.dropped.len())
+}
 
+/// The rules a factory session noted for `pr`, recorded as a harvest
+/// records them, with no extraction: held to the owner's words, each put
+/// on a listed topic unless none fits ([`place`]), then each topic they
+/// touch checked and merged by one call ([`check_topic`]), which may move
+/// an entry to another of its area's topics.
+async fn merge_noted(
+    model: &dyn Model,
+    to: &Target<'_>,
+    pr: &Pr,
+    dossier: &Dossier,
+    noted: Vec<Entry>,
+    code: Result<&Path, &str>,
+) -> Result<Outcome, String> {
+    let store = to.store;
+    let areas = Areas::load(store);
+    let topics = store.topic_scopes();
+    let noted: Vec<Entry> = noted
+        .into_iter()
+        .map(|e| Entry {
+            id: String::new(),
+            ..e
+        })
+        .collect();
+    let (mut entries, mut dropped) = stamped(store, pr, dossier, noted, code);
+    for e in entries.iter_mut() {
+        e.topic = place(&areas, &topics, e);
+    }
     // Where an entry may be moved: a topic with a page, or one this
     // harvest makes.
     let mut targets = topics.clone();
@@ -766,10 +819,231 @@ pub(crate) async fn harvest(
     for (topic, page) in &pages {
         store.write_page(topic, page)?;
     }
+    let source = format!(
+        "{}\n## Noted by the session that built it\n{}",
+        dossier.text,
+        entries
+            .iter()
+            .map(|e| format!("- {}\n", e.rule))
+            .collect::<String>()
+    );
+    store.append(&entries)?;
+    areas.save(store)?;
+    store.write_index(to.project)?;
+    to.local.write_source(pr.number, &source)?;
+    Ok(Outcome {
+        pr: pr.number,
+        kept: entries.iter().filter(|e| e.status == ACTIVE).count(),
+        dropped,
+        topics: pages.into_keys().collect(),
+    })
+}
+
+/// What a whole harvest's reply must have: its entries, or its pages.
+fn whole_fits(v: &Value) -> bool {
+    v.get("entries").is_some_and(Value::is_array) || v.get("pages").is_some_and(Value::is_object)
+}
+
+/// Harvest `pr`, which no session noted rules for, in one call
+/// ([`harvest_system`]): the model reads the dossier for entries, checks
+/// each against the code at `code` (where the knowledge branch's pages
+/// are laid out for it, [`lay_pages`]) and returns every page they go
+/// on. Then code holds the entries to the owner's words ([`guards`]): one
+/// the guards drop comes off the pages, and a rule credited to the owner
+/// whose words weren't found is marked his agent's call. An entry on no
+/// page, or that the check dropped, is recorded as dropped.
+pub(crate) async fn harvest_whole(
+    model: &dyn Model,
+    to: &Target<'_>,
+    pr: &Pr,
+    dossier: &Dossier,
+    code: Result<&Path, &str>,
+) -> Result<Outcome, String> {
+    let store = to.store;
+    let areas = Areas::load(store);
+    let topics = store.topic_scopes();
+    let first = store.entries().iter().filter(|e| e.pr == pr.number).count() + 1;
+    let (system, pages_part) = match code {
+        Ok(dir) => {
+            lay_pages(store, dir)?;
+            (
+                format!("{}\n\n{RECORDS_RULE}\n\n{JSON_ONLY}", harvest_system()),
+                String::new(),
+            )
+        }
+        Err(_) => (
+            format!(
+                "{}\n\n{RECORDS_RULE}\n\n{UNCHECKED_PAGES}\n\n{JSON_ONLY}",
+                harvest_system()
+            ),
+            pages_inline(store),
+        ),
+    };
+    let prompt = format!(
+        "{}\n\n{}\n\nThis is PR #{n}: number its entries from k{n}-{first}.\n\n{pages_part}The dossier:\n\n{}\n\n{JSON_ONLY}",
+        catalog(&areas, &topics),
+        records_part(to.records),
+        dossier.text,
+        n = pr.number,
+    );
+    let ask = ModelAsk {
+        system,
+        prompt,
+        cwd: code.ok().map(Path::to_path_buf),
+        read_tools: code.is_ok(),
+        step: Step::Harvest,
+    };
+    let v = ask_json(model, ask, whole_fits).await?;
+
+    // The entries, each under the id its pages cite it by: one the model
+    // numbered wrong gets a free one, and so stands on no page.
+    let prefix = format!("k{}-", pr.number);
+    let number = |id: &str| id.strip_prefix(&prefix)?.parse::<usize>().ok();
+    let said: Vec<Entry> = v
+        .get("entries")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let mut e = Entry::from_model(item)?;
+            e.id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            Some(e)
+        })
+        .collect();
+    let mut taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut said: Vec<Entry> = said
+        .into_iter()
+        .map(|mut e| {
+            if !number(&e.id).is_some_and(|n| n >= first) || !taken.insert(e.id.clone()) {
+                e.id.clear();
+            }
+            e
+        })
+        .collect();
+    let next = said
+        .iter()
+        .filter_map(|e| number(&e.id))
+        .max()
+        .map_or(first, |n| n + 1);
+    for (n, e) in (next..).zip(said.iter_mut().filter(|e| e.id.is_empty())) {
+        e.id = format!("{prefix}{n}");
+    }
+    let ids: Vec<String> = said.iter().map(|e| e.id.clone()).collect();
+    let (mut entries, mut dropped) = stamped(store, pr, dossier, said, code);
+
+    // Off the pages: what the guards dropped, and what the check did.
+    let checked_out: Vec<(String, String)> = match code {
+        Ok(_) => id_pairs(&v, "dropped", "why")
+            .into_iter()
+            .filter(|(id, _)| ids.contains(id))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let mut strip: Vec<&str> = ids
+        .iter()
+        .filter(|id| !entries.iter().any(|e| &e.id == *id))
+        .map(String::as_str)
+        .collect();
+    strip.extend(checked_out.iter().map(|(id, _)| id.as_str()));
+    let standing: Vec<&Entry> = entries
+        .iter()
+        .filter(|e| !strip.contains(&e.id.as_str()))
+        .collect();
+    let agents_calls: Vec<&str> = standing
+        .iter()
+        .filter(|e| e.downgraded)
+        .map(|e| e.id.as_str())
+        .collect();
+
+    // The pages: each one that an entry still stands on, citing only
+    // entries there are.
+    let known: std::collections::BTreeSet<String> = store
+        .entries()
+        .into_iter()
+        .map(|e| e.id)
+        .chain(standing.iter().map(|e| e.id.clone()))
+        .collect();
+    let mut pages: BTreeMap<String, String> = BTreeMap::new();
+    for (key, raw) in v
+        .get("pages")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let Some(raw) = raw.as_str() else {
+            continue;
+        };
+        let cited: Vec<&str> = raw.lines().flat_map(store::line_ids).collect();
+        let Some(first_on) = standing.iter().find(|e| cited.contains(&e.id.as_str())) else {
+            continue;
+        };
+        let topic = areas.topic(key, &first_on.stream);
+        if pages.contains_key(&topic) {
+            continue;
+        }
+        let old = store.page(&topic);
+        let unknown: Vec<&str> = cited
+            .iter()
+            .copied()
+            .filter(|id| !known.contains(*id))
+            .chain(strip.iter().copied())
+            .collect();
+        let text = mark_agent_calls(&store::without_ids(raw, &unknown), &agents_calls);
+        let hint = match old {
+            None => standing
+                .iter()
+                .find(|e| cited.contains(&e.id.as_str()) && !e.new_topic.is_empty())
+                .map(|e| e.new_topic.as_str()),
+            Some(_) => None,
+        };
+        let text = tidy(&topic, &guards::scrub(&text), hint)?;
+        let text = match old {
+            Some(old) => super::consolidate::keep_every_id(&text, &[(topic.clone(), old)]),
+            None => text,
+        };
+        pages.insert(topic, text);
+    }
+
+    for e in entries.iter_mut() {
+        if let Some((_, why)) = checked_out.iter().find(|(id, _)| *id == e.id) {
+            e.status = DROPPED.into();
+            e.note = why.clone();
+            e.topic = place(&areas, &topics, e);
+            continue;
+        }
+        match pages.iter().find(|(_, page)| {
+            page.lines()
+                .any(|l| store::line_ids(l).contains(&e.id.as_str()))
+        }) {
+            Some((topic, _)) => e.topic = topic.clone(),
+            None => {
+                e.topic = place(&areas, &topics, e);
+                e.status = DROPPED.into();
+                e.note = "the harvest put it on no page".into();
+            }
+        }
+    }
+    dropped += entries.iter().filter(|e| e.status == DROPPED).count();
+
+    for (topic, page) in &pages {
+        store.write_page(topic, page)?;
+    }
     let mut source = dossier.text.clone();
-    if !extracted.skipped.is_empty() {
+    let skipped: Vec<&str> = v
+        .get("considered_and_skipped")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if !skipped.is_empty() {
         source.push_str("\n## Considered and skipped\n");
-        for s in &extracted.skipped {
+        for s in &skipped {
             source.push_str(&format!("- {s}\n"));
         }
     }
@@ -783,6 +1057,75 @@ pub(crate) async fn harvest(
         dropped,
         topics: pages.into_keys().collect(),
     })
+}
+
+/// Lay the knowledge branch's pages out in the checkout at `code`, at
+/// `.orion/decisions/harvested/`, in place of the base's: the harvest
+/// reads the page of each topic it touches there. The checkout is a
+/// temporary one ([`CheckTree`]); the store's own is never touched.
+fn lay_pages(store: &Store, code: &Path) -> Result<(), String> {
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    if same(code, &store.repo) {
+        return Ok(());
+    }
+    let dest = code.join(store::DIR);
+    if dest.exists() {
+        std::fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
+    }
+    for (topic, page) in store.pages() {
+        let path = dest.join(store::page_file(&topic));
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, page).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Every page in `store`, for a harvest with no checkout to read them in.
+fn pages_inline(store: &Store) -> String {
+    let pages = store.pages();
+    if pages.is_empty() {
+        return "The topics' current pages: (none yet)\n\n".into();
+    }
+    let mut out = String::from("The topics' current pages:\n");
+    for (topic, page) in pages {
+        out.push_str(&format!("\n### {topic}\n{}\n", page.trim()));
+    }
+    out.push('\n');
+    out
+}
+
+/// `page` with each rule that stands only on `ids` — entries credited to
+/// the owner whose words weren't found — ending "(agent call)".
+pub(crate) fn mark_agent_calls(page: &str, ids: &[&str]) -> String {
+    if ids.is_empty() {
+        return page.to_string();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for line in page.lines() {
+        let cited = store::line_ids(line);
+        let only_agents = !cited.is_empty() && cited.iter().all(|id| ids.contains(id));
+        match (
+            only_agents && !line.contains("(agent call)"),
+            line.rfind("<!--"),
+        ) {
+            (true, Some(at)) => out.push(format!(
+                "{} (agent call) {}",
+                line[..at].trim_end(),
+                &line[at..]
+            )),
+            _ => out.push(line.to_string()),
+        }
+    }
+    let mut text = out.join("\n");
+    if page.ends_with('\n') {
+        text.push('\n');
+    }
+    text
 }
 
 /// The staleness pass: every topic's rules checked against the code at
@@ -1163,20 +1506,49 @@ pub(crate) mod tests {
         }]
     }
 
-    pub(crate) fn extraction() -> String {
+    /// A whole harvest's reply: four entries, the pages they go on, and
+    /// one the check found doesn't hold.
+    pub(crate) fn whole() -> String {
         json!({"entries": [
-            {"stream": "product", "kind": "decision", "topic": "auth/login",
+            {"id": "k12-1", "stream": "product", "kind": "decision", "topic": "auth/login",
              "rule": "Login returns users to the page they came from, never /home",
              "applies_to": ["src/auth"], "why": "Users lost their place", "by": "owner",
              "confidence": "high", "quote": "Never send users to /home after login, always back where they were.",
              "confirm_by": "src/auth.ts returnPath", "source_at": "session s1"},
-            {"stream": "product", "kind": "decision", "topic": "auth/login",
+            {"id": "k12-2", "stream": "product", "kind": "decision", "topic": "auth/login",
              "rule": "Login keeps the query string", "by": "owner", "confidence": "high",
              "quote": "keep the query string, obviously", "confirm_by": "returnPath"},
-            {"stream": "engineering", "kind": "convention", "topic": "git/hooks",
+            {"id": "k12-3", "stream": "product", "kind": "decision", "topic": "auth/login",
+             "rule": "Login logs the user agent", "by": "agent", "confirm_by": "src/auth.ts"},
+            {"id": "k12-4", "stream": "engineering", "kind": "convention", "topic": "git/hooks",
              "rule": "Use --no-verify when the hook is slow", "by": "owner", "quote": "use --no-verify"}
-        ], "considered_and_skipped": ["the redirect refactor"]})
+        ],
+        "considered_and_skipped": ["the redirect refactor"],
+        "pages": {
+            "auth/login": "# auth/login\nScope: src/auth\n\n## Rules in force\n- Login returns users to the page they came from (#12) <!-- k12-1 -->\n- Login keeps the query string (#12) <!-- k12-2 -->\n\n## Constraints\n\n## Open questions\n\n## Replaced\n",
+            "git/hooks": "# git/hooks\nScope: hooks\n\n## Rules in force\n- Use --no-verify when the hook is slow (#12) <!-- k12-4 -->\n"
+        },
+        "dropped": [{"id": "k12-3", "why": "nothing logs the user agent"}]})
         .to_string()
+    }
+
+    /// What a factory session noted with `orion knowledge note`.
+    pub(crate) fn noted() -> Vec<Entry> {
+        [
+            json!({"stream": "product", "kind": "decision", "topic": "auth/login",
+                   "rule": "Login returns users to the page they came from, never /home",
+                   "applies_to": ["src/auth"], "by": "owner", "confidence": "high",
+                   "quote": "Never send users to /home after login, always back where they were.",
+                   "confirm_by": "src/auth.ts returnPath"}),
+            json!({"stream": "product", "kind": "decision", "topic": "auth/login",
+                   "rule": "Login keeps the query string", "by": "owner",
+                   "quote": "keep the query string, obviously"}),
+            json!({"stream": "engineering", "kind": "convention", "topic": "git/hooks",
+                   "rule": "Use --no-verify when the hook is slow", "by": "owner", "quote": "use --no-verify"}),
+        ]
+        .iter()
+        .filter_map(Entry::from_model)
+        .collect()
     }
 
     pub(crate) fn checked_page() -> String {
@@ -1306,16 +1678,154 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_harvest_guards_checks_and_writes() {
+    async fn a_human_pr_is_harvested_in_one_call() {
         let into = Bench::new();
         let (repo, store) = (&into.repo, &into.store);
-        let model = Scripted::new(vec![extraction(), checked_page()]);
+        let model = Scripted::new(vec![whole()]);
         let d = dossier(&pr(), &[], &sessions());
         let records =
             "### Sessions last 30 days (.orion/decisions/0001-sessions.md)\nDecided with legal.";
-        let out = harvest(&model, &into.target(records), &pr(), &d, Ok(repo.path()))
+        let out = harvest(
+            &model,
+            &into.target(records),
+            &pr(),
+            &d,
+            None,
+            Ok(repo.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out,
+            Outcome {
+                pr: 12,
+                kept: 2,
+                dropped: 2,
+                topics: vec!["access-and-accounts/login".into()]
+            },
+            "the guard dropped the one-off, the check the rule that doesn't hold"
+        );
+
+        let asked = model.asked.lock().unwrap();
+        assert_eq!(asked.len(), 1, "extracted, checked and written in one call");
+        let ask = &asked[0];
+        assert!(ask
+            .system
+            .starts_with("You are reading one merged pull request's dossier"));
+        assert!(ask.system.contains(
+            "Each topic's current page is at .orion/decisions/harvested/<area>/<topic>.md"
+        ));
+        assert!(ask.read_tools && ask.step == Step::Harvest);
+        assert_eq!(ask.cwd.as_deref(), Some(repo.path()));
+        assert!(ask
+            .prompt
+            .contains("This is PR #12: number its entries from k12-1."));
+        assert!(ask
+            .prompt
+            .contains("The repo's knowledge areas (a topic's area is one of these):"));
+        assert!(ask.prompt.contains(records), "{}", ask.prompt);
+        assert!(ask.system.contains(RECORDS_RULE));
+
+        let entries = store.entries();
+        let said: Vec<(&str, &str, &str)> = entries
+            .iter()
+            .map(|e| (e.id.as_str(), e.by.as_str(), e.status.as_str()))
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                ("k12-1", "owner", ACTIVE),
+                ("k12-2", "agent", ACTIVE),
+                ("k12-3", "agent", DROPPED),
+            ],
+            "the one-off is never recorded"
+        );
+        assert!(entries[1].downgraded, "not his words");
+        assert_eq!(entries[2].note, "nothing logs the user agent");
+        assert!(entries
+            .iter()
+            .all(|e| e.topic == "access-and-accounts/login"));
+        let page = store.page("access-and-accounts/login").unwrap();
+        assert!(
+            page.starts_with("# access-and-accounts/login\nScope: login\n"),
+            "the area is a listed one, the scope names no path: {page}"
+        );
+        assert!(page.contains("came from (#12) <!-- k12-1 -->"));
+        assert!(
+            page.contains("- Login keeps the query string (#12) (agent call) <!-- k12-2 -->"),
+            "{page}"
+        );
+        assert_eq!(store.page("git/hooks"), None, "nothing stands on it");
+        assert!(store
+            .index()
+            .unwrap()
+            .contains("- access-and-accounts: login — 2 rules"));
+        let source = std::fs::read_to_string(into.local.source_path(12)).unwrap();
+        assert!(source.contains("## Considered and skipped\n- the redirect refactor"));
+        assert!(
+            !store.dir.join("sources").exists(),
+            "no dossier in the repo"
+        );
+        assert!(into.target("").harvested(12) && !into.target("").harvested(13));
+    }
+
+    #[tokio::test]
+    async fn the_harvest_reads_the_branchs_pages_in_the_checkout_and_keeps_their_rules() {
+        let into = Bench::new();
+        let store = &into.store;
+        let old = "# editor/text-boxes\nScope: text boxes\n\n## Rules in force\n- Text grows the box (#3) <!-- k3-1 -->\n- Text wraps (#3) <!-- k3-2 -->\n";
+        store.write_page("editor/text-boxes", old).unwrap();
+        let code = tempfile::tempdir().unwrap();
+        // The base's own copy, older than the branch's: replaced.
+        let stale = code.path().join(store::DIR).join("editor/gone.md");
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, "old").unwrap();
+        let reply = json!({"entries": [
+            {"id": "k12-1", "stream": "product", "kind": "decision", "topic": "editor/text-boxes",
+             "rule": "Text never shrinks below 8pt", "by": "agent"},
+            // Numbered wrong: given a free id, and so on no page.
+            {"id": "k7-1", "stream": "product", "kind": "decision", "topic": "editor/text-boxes",
+             "rule": "Text is black", "by": "agent"}
+        ], "pages": {"editor/text-boxes":
+            "# editor/text-boxes\nScope: text boxes\n\n## Rules in force\n- Text grows the box (#3) <!-- k3-1 -->\n- Text never shrinks below 8pt (#12) <!-- k12-1 -->\n- Text is black (#12) <!-- k7-1 -->\n"}})
+        .to_string();
+        let model = Scripted::new(vec![reply]);
+        let d = dossier(&pr(), &[], &sessions());
+        let out = harvest(&model, &into.target(""), &pr(), &d, None, Ok(code.path()))
             .await
             .unwrap();
+        assert_eq!((out.kept, out.dropped), (1, 1));
+        let laid = code.path().join(store::DIR).join("editor/text-boxes.md");
+        assert_eq!(std::fs::read_to_string(laid).unwrap(), store::unmarked(old));
+        assert!(!stale.exists(), "only the branch's pages are laid out");
+        let page = store.page("editor/text-boxes").unwrap();
+        assert!(page.contains("<!-- k12-1 -->"));
+        assert!(
+            page.contains("- Text wraps (#3) <!-- k3-2 -->"),
+            "a rule the model lost is put back: {page}"
+        );
+        assert!(!page.contains("k7-1"));
+        let entries = store.entries();
+        assert_eq!(entries[1].id, "k12-2");
+        assert_eq!(entries[1].note, "the harvest put it on no page");
+    }
+
+    #[tokio::test]
+    async fn a_factory_prs_noted_rules_skip_the_extraction() {
+        let into = Bench::new();
+        let store = &into.store;
+        let model = Scripted::new(vec![checked_page()]);
+        let d = dossier(&pr(), &[], &sessions());
+        let out = harvest(
+            &model,
+            &into.target(""),
+            &pr(),
+            &d,
+            Some(noted()),
+            Ok(into.repo.path()),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             out,
             Outcome {
@@ -1325,64 +1835,28 @@ pub(crate) mod tests {
                 topics: vec!["access-and-accounts/login".into()]
             }
         );
-
         let asked = model.asked.lock().unwrap();
         assert_eq!(
             asked.len(),
-            2,
-            "one extraction, one check: git/hooks was dropped by the guard"
+            1,
+            "no extraction: one check for the one topic the guards left"
         );
         assert!(asked[0]
-            .system
-            .starts_with("You are reading one merged pull request's dossier"));
-        assert!(!asked[0].read_tools && asked[0].cwd.is_none());
-        assert!(asked[1].read_tools);
-        assert_eq!(asked[1].cwd.as_deref(), Some(repo.path()));
-        assert!(asked[1].prompt.contains("\"id\": \"k12-1\""));
-
+            .prompt
+            .starts_with("Topic: access-and-accounts/login\n"));
+        assert!(asked[0].system.starts_with("You keep one topic page"));
+        assert!(asked[0].read_tools && asked[0].step == Step::Harvest);
+        assert!(asked[0].prompt.contains("\"id\": \"k12-1\""));
         let entries = store.entries();
         assert_eq!(entries.len(), 2);
-        assert_eq!(
-            (
-                entries[0].id.as_str(),
-                entries[0].by.as_str(),
-                entries[0].status.as_str()
-            ),
-            ("k12-1", "owner", ACTIVE)
-        );
-        // Not his words: downgraded, then dropped by the check.
-        assert_eq!(
-            (entries[1].by.as_str(), entries[1].status.as_str()),
-            ("agent", DROPPED)
-        );
-        assert!(entries[1].downgraded);
-        let page = store.page("access-and-accounts/login").unwrap();
-        assert!(page.contains("<!-- k12-1 -->"));
-        assert!(
-            page.starts_with("# access-and-accounts/login\nScope: login\n"),
-            "the area is a listed one, the scope names no path: {page}"
-        );
-        assert!(store.dir.join("areas.md").exists());
-        assert!(store
-            .index()
-            .unwrap()
-            .contains("- access-and-accounts: login — 1 rule"));
+        assert!(entries[1].downgraded, "held to his words all the same");
+        assert_eq!(entries[1].status, DROPPED);
         let source = std::fs::read_to_string(into.local.source_path(12)).unwrap();
-        assert!(source.contains("## Considered and skipped\n- the redirect refactor"));
-        assert!(
-            !store.dir.join("sources").exists(),
-            "no dossier in the repo"
-        );
-        assert!(into.target("").harvested(12) && !into.target("").harvested(13));
-        // The records are context to both calls, and win.
-        for ask in asked.iter() {
-            assert!(ask.prompt.contains(records), "{}", ask.prompt);
-            assert!(ask.system.contains(RECORDS_RULE));
-        }
+        assert!(source.contains("## Noted by the session that built it\n- Login returns users"));
     }
 
     #[tokio::test]
-    async fn entries_go_on_the_topics_there_are_unless_none_fits() {
+    async fn noted_entries_go_on_the_topics_there_are_unless_none_fits() {
         let into = Bench::new();
         let store = &into.store;
         store
@@ -1397,28 +1871,37 @@ pub(crate) mod tests {
                 "# editor/tables\nScope: tables\n\n## Rules in force\n- Rows keep height (#4) <!-- k4-1 -->\n",
             )
             .unwrap();
-        let extraction = json!({"entries": [
+        let noted: Vec<Entry> = [
             // A new name, with nothing said of it: put on the page it shares a word with.
-            {"stream": "product", "kind": "decision", "topic": "editor/text",
-             "rule": "Text never shrinks below 8pt", "by": "agent"},
+            json!({"stream": "product", "kind": "decision", "topic": "editor/text",
+             "rule": "Text never shrinks below 8pt", "by": "agent"}),
             // A new topic that says what it covers; the check moves it.
-            {"stream": "product", "kind": "decision", "topic": "editor/fonts",
-             "new_topic": "Fonts on text boxes", "rule": "Fonts fall back to Inter", "by": "agent"},
+            json!({"stream": "product", "kind": "decision", "topic": "editor/fonts",
+             "new_topic": "Fonts on text boxes", "rule": "Fonts fall back to Inter", "by": "agent"}),
             // An area that isn't one: moved to the nearest listed.
-            {"stream": "engineering", "kind": "gotcha", "topic": "e2e/local-runs",
-             "new_topic": "Running e2e locally", "rule": "Probe ws before a local e2e run", "by": "agent"}
-        ]})
-        .to_string();
+            json!({"stream": "engineering", "kind": "gotcha", "topic": "e2e/local-runs",
+             "new_topic": "Running e2e locally", "rule": "Probe ws before a local e2e run", "by": "agent"}),
+        ]
+        .iter()
+        .filter_map(Entry::from_model)
+        .collect();
         let fonts = json!({"page": "# editor/fonts\nScope: fonts\n\n## Rules in force\n- Fonts fall back to Inter (#12) <!-- k12-2 -->\n",
             "moved": [{"id": "k12-2", "to": "editor/text-boxes"}]})
         .to_string();
         let text_boxes = json!({"page": "# editor/text-boxes\nScope: text boxes and fonts\n\n## Rules in force\n- Text grows the box (#3) <!-- k3-1 -->\n- Text never shrinks below 8pt (#12) <!-- k12-1 -->\n- Fonts fall back to Inter (#12) <!-- k12-2 -->\n"}).to_string();
         let e2e = json!({"page": "# testing-and-ci/local-runs\nScope: Running e2e locally\n\n## Rules in force\n- Probe ws before a local e2e run (#12) (agent call) <!-- k12-3 -->\n"}).to_string();
-        let model = Scripted::new(vec![extraction, fonts, text_boxes, e2e]);
+        let model = Scripted::new(vec![fonts, text_boxes, e2e]);
         let d = dossier(&pr(), &[], &sessions());
-        let out = harvest(&model, &into.target(""), &pr(), &d, Ok(into.repo.path()))
-            .await
-            .unwrap();
+        let out = harvest(
+            &model,
+            &into.target(""),
+            &pr(),
+            &d,
+            Some(noted),
+            Ok(into.repo.path()),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             out.topics,
             vec!["editor/text-boxes", "testing-and-ci/local-runs"],
@@ -1426,27 +1909,20 @@ pub(crate) mod tests {
         );
 
         let asked = model.asked.lock().unwrap();
-        // The extraction is given the areas and the topics there are.
-        let extract = &asked[0];
-        assert!(extract
-            .system
-            .contains("Put each entry in one of the repo's listed topics unless none fits"));
-        assert!(extract.prompt.contains("The repo's knowledge areas (a topic's area is one of these):\n- editor — The slide editor"));
-        assert!(extract.prompt.contains("The repo's topics (put each entry in one of these unless none fits):\n- editor/tables — tables\n- editor/text-boxes — text boxes, and fonts\n"), "{}", extract.prompt);
         // The check is given the area's other topics, and may move an entry.
-        assert!(asked[1].prompt.starts_with("Topic: editor/fonts\n"));
-        assert!(asked[1].prompt.contains("The area's other topics (move a new entry there only when it belongs there, not here):\n- editor/tables — tables\n- editor/text-boxes — text boxes, and fonts\n"), "{}", asked[1].prompt);
-        assert!(asked[1]
+        assert!(asked[0].prompt.starts_with("Topic: editor/fonts\n"));
+        assert!(asked[0].prompt.contains("The area's other topics (move a new entry there only when it belongs there, not here):\n- editor/tables — tables\n- editor/text-boxes — text boxes, and fonts\n"), "{}", asked[0].prompt);
+        assert!(asked[0]
             .prompt
             .contains("\"new_topic\": \"Fonts on text boxes\""));
         // Moved onto a topic still to be checked: checked there with its own.
-        assert!(asked[2].prompt.starts_with("Topic: editor/text-boxes\n"));
-        assert!(asked[2].prompt.contains("\"id\": \"k12-1\""));
-        assert!(asked[2].prompt.contains("\"id\": \"k12-2\""));
-        assert!(asked[3]
+        assert!(asked[1].prompt.starts_with("Topic: editor/text-boxes\n"));
+        assert!(asked[1].prompt.contains("\"id\": \"k12-1\""));
+        assert!(asked[1].prompt.contains("\"id\": \"k12-2\""));
+        assert!(asked[2]
             .prompt
             .starts_with("Topic: testing-and-ci/local-runs\n"));
-        assert_eq!(asked.len(), 4);
+        assert_eq!(asked.len(), 3, "one call a topic touched");
 
         let topics: Vec<(String, String)> = store
             .entries()
@@ -1462,10 +1938,6 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(store.page("editor/fonts"), None);
-        assert!(store
-            .page("editor/text-boxes")
-            .unwrap()
-            .contains("<!-- k12-2 -->"));
         assert_eq!(
             store.topics(),
             vec![
@@ -1477,15 +1949,30 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_check_writes_nothing() {
+    async fn a_failed_harvest_writes_nothing() {
         let into = Bench::new();
-        let model = Scripted::new(vec![extraction(), r#"{"page": "nonsense"}"#.into()]);
+        let bad = json!({"entries": [{"id": "k12-1", "topic": "auth/login", "rule": "Login keeps the path", "by": "agent"}],
+            "pages": {"auth/login": "nonsense <!-- k12-1 -->"}})
+        .to_string();
+        let model = Scripted::new(vec![bad]);
         let d = dossier(&pr(), &[], &sessions());
+        let target = into.target("");
         assert!(
-            harvest(&model, &into.target(""), &pr(), &d, Ok(into.repo.path()))
+            harvest(&model, &target, &pr(), &d, None, Ok(into.repo.path()))
                 .await
                 .is_err()
         );
+        let model = Scripted::new(vec![r#"{"page": "nonsense"}"#.into()]);
+        assert!(harvest(
+            &model,
+            &target,
+            &pr(),
+            &d,
+            Some(noted()),
+            Ok(into.repo.path())
+        )
+        .await
+        .is_err());
         assert!(into.store.entries().is_empty());
         assert!(!into.target("").harvested(12));
     }
@@ -1495,50 +1982,58 @@ pub(crate) mod tests {
         let into = Bench::new();
         let model = Scripted::new(vec![
             "I read the dossier and found three rules.".into(),
-            extraction(),
             format!(
                 "Checked against the code:\n```json\n{}\n```\nAll done.",
-                checked_page()
+                whole()
             ),
         ]);
         let d = dossier(&pr(), &[], &sessions());
-        let out = harvest(&model, &into.target(""), &pr(), &d, Ok(into.repo.path()))
-            .await
-            .unwrap();
-        assert_eq!((out.kept, out.dropped), (1, 2));
+        let out = harvest(
+            &model,
+            &into.target(""),
+            &pr(),
+            &d,
+            None,
+            Ok(into.repo.path()),
+        )
+        .await
+        .unwrap();
+        assert_eq!((out.kept, out.dropped), (2, 2));
         let asked = model.asked.lock().unwrap();
-        assert_eq!(asked.len(), 3, "the extraction twice, the check once");
+        assert_eq!(asked.len(), 2, "the harvest twice");
         assert!(asked[0].prompt.ends_with(JSON_ONLY));
         assert_eq!(
             asked[1].prompt,
             oneshot::asked_again(&asked[0].prompt, oneshot::NOT_JSON_OBJECT)
         );
         assert_eq!(asked[1].system, asked[0].system);
-        assert!(
-            asked[2].prompt.ends_with(JSON_ONLY),
-            "the check read first time"
-        );
     }
 
     #[tokio::test]
     async fn a_reply_that_isnt_json_twice_fails_the_harvest() {
         let into = Bench::new();
         let model = Scripted::new(vec![
-            extraction(),
             "Sorry, I couldn't read the code.".into(),
             r#"{"dropped": []}"#.into(),
         ]);
         let d = dossier(&pr(), &[], &sessions());
-        let why = harvest(&model, &into.target(""), &pr(), &d, Ok(into.repo.path()))
-            .await
-            .unwrap_err();
+        let why = harvest(
+            &model,
+            &into.target(""),
+            &pr(),
+            &d,
+            None,
+            Ok(into.repo.path()),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             why,
             "the model's JSON was not the shape asked for; it replied: {\"dropped\": []}"
         );
         assert_eq!(
             model.asked.lock().unwrap().len(),
-            3,
+            2,
             "asked again once, no more"
         );
         assert!(into.store.entries().is_empty());
@@ -1549,26 +2044,49 @@ pub(crate) mod tests {
     async fn with_no_checkout_the_entries_are_kept_unchecked_at_low_confidence() {
         let into = Bench::new();
         let store = &into.store;
-        let model = Scripted::new(vec![extraction(), checked_page()]);
+        store
+            .write_page("editor/tables", "# editor/tables\nScope: tables\n\n## Rules in force\n- Rows keep height (#4) <!-- k4-1 -->\n")
+            .unwrap();
+        let model = Scripted::new(vec![whole()]);
         let d = dossier(&pr(), &[], &sessions());
-        let out = harvest(&model, &into.target(""), &pr(), &d, Err("no origin"))
+        let out = harvest(&model, &into.target(""), &pr(), &d, None, Err("no origin"))
             .await
             .unwrap();
         assert_eq!(
             (out.kept, out.dropped),
-            (2, 1),
-            "only the guard dropped one"
+            (2, 2),
+            "nothing dropped as not holding"
         );
         let asked = model.asked.lock().unwrap();
-        assert!(!asked[1].read_tools && asked[1].cwd.is_none());
-        assert!(asked[1]
+        assert!(!asked[0].read_tools && asked[0].cwd.is_none());
+        assert!(asked[0]
             .system
-            .ends_with(&format!("{UNCHECKED}\n\n{JSON_ONLY}")));
+            .ends_with(&format!("{UNCHECKED_PAGES}\n\n{JSON_ONLY}")));
+        assert!(
+            asked[0]
+                .prompt
+                .contains("The topics' current pages:\n\n### editor/tables\n# editor/tables"),
+            "the pages are in the prompt: {}",
+            asked[0].prompt
+        );
         let entries = store.entries();
-        assert!(entries
-            .iter()
-            .all(|e| e.status == ACTIVE && e.confidence == "low"));
-        assert_eq!(entries[0].note, "not checked against the code: no origin");
+        let active: Vec<&Entry> = entries.iter().filter(|e| e.status == ACTIVE).collect();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().all(|e| e.confidence == "low"));
+        assert_eq!(active[0].note, "not checked against the code: no origin");
+        assert_eq!(
+            entries[2].note, "the harvest put it on no page",
+            "the check's drop isn't taken unchecked"
+        );
+    }
+
+    #[test]
+    fn only_a_rule_that_stands_on_agent_calls_alone_is_marked_one() {
+        let page = "## Rules in force\n- A (#1) <!-- k1-1 -->\n- B (#1, #2) <!-- k1-2 k2-1 -->\n- C (#1) (agent call) <!-- k1-3 -->\n- D\n";
+        assert_eq!(
+            mark_agent_calls(page, &["k1-1", "k1-2", "k1-3"]),
+            "## Rules in force\n- A (#1) (agent call) <!-- k1-1 -->\n- B (#1, #2) <!-- k1-2 k2-1 -->\n- C (#1) (agent call) <!-- k1-3 -->\n- D\n"
+        );
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {
@@ -1639,21 +2157,33 @@ pub(crate) mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (clone, merged) = merged_after_clone(tmp.path(), 4343);
         let into = Bench::new();
-        let model = Scripted::new(vec![extraction(), checked_page()]);
-        let (out, unchecked) =
-            harvest_merge(&model, &into.target(""), &clone, &merged, &[], &sessions()).await;
+        let model = Scripted::new(vec![whole()]);
+        let (out, unchecked) = harvest_merge(
+            &model,
+            &into.target(""),
+            &clone,
+            &merged,
+            &[],
+            &sessions(),
+            None,
+        )
+        .await;
         assert_eq!(out.unwrap().pr, 4343);
         assert_eq!(unchecked, None);
         let asked = std::mem::take(&mut *model.asked.lock().unwrap());
+        assert_eq!(asked.len(), 1);
         assert!(asked[0].prompt.contains("Keep the return path on login"));
-        let cwd = asked[1].cwd.clone().expect("the check ran in the checkout");
-        assert!(asked[1].read_tools && cwd.ends_with("4343"));
+        let cwd = asked[0]
+            .cwd
+            .clone()
+            .expect("the harvest ran in the checkout");
+        assert!(asked[0].read_tools && cwd.ends_with("4343"));
         assert!(!cwd.exists(), "the checkout is removed after");
 
         // Nothing to fetch from: harvested all the same, saying why.
         let bare = tempfile::tempdir().unwrap();
         let into = Bench::new();
-        let model = Scripted::new(vec![extraction(), checked_page()]);
+        let model = Scripted::new(vec![whole()]);
         let (out, unchecked) = harvest_merge(
             &model,
             &into.target(""),
@@ -1661,11 +2191,12 @@ pub(crate) mod tests {
             &pr(),
             &[],
             &sessions(),
+            None,
         )
         .await;
         assert_eq!(out.unwrap().kept, 2);
         assert!(unchecked.is_some_and(|why| why.contains("couldn't fetch")));
-        assert!(model.asked.lock().unwrap()[1].cwd.is_none());
+        assert!(model.asked.lock().unwrap()[0].cwd.is_none());
     }
 
     #[test]

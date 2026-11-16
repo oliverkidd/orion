@@ -372,7 +372,8 @@ async fn run_job(job: &Job) -> Result<Option<Outcome>, String> {
                 record_corrections(run, harvest::corrections(&sessions));
             }
             let (outcome, unchecked) =
-                harvest::harvest_merge(&model, &to, &job.root, &pr, &comments, &sessions).await;
+                harvest::harvest_merge(&model, &to, &job.root, &pr, &comments, &sessions, None)
+                    .await;
             if let Some(why) = unchecked {
                 tracing::warn!(
                     "knowledge: #{} of {} is recorded unchecked: {why}",

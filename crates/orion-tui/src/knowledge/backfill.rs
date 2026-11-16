@@ -297,7 +297,7 @@ pub(crate) async fn run(
                 })
                 .await
                 .unwrap_or_default();
-                harvest::harvest_merge(model, to, root, &info, &comments, &sessions).await
+                harvest::harvest_merge(model, to, root, &info, &comments, &sessions, None).await
             },
         )
         .await;
