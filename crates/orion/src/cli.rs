@@ -208,8 +208,9 @@ pub(crate) enum Command {
     /// proposed in one pull request of yours (`orion/knowledge-<login>`).
     /// Once it merges, agents read the pages before they plan, beside the
     /// records written by hand in `.orion/decisions/`, which win. `for`
-    /// prints the pages for the files they will touch, and `backfill`
-    /// records the pull requests merged before orion started.
+    /// prints the pages for the files they will touch, `backfill`
+    /// records the pull requests merged before orion started, and
+    /// `consolidate` merges the topics down to about 60.
     #[command(subcommand, after_help = KNOWLEDGE_EXAMPLES)]
     Knowledge(KnowledgeCommand),
     /// Locate this machine's settings.
@@ -435,7 +436,9 @@ const KNOWLEDGE_EXAMPLES: &str = "\
 Examples:
   orion knowledge for src/auth/login.ts   the pages for a file
   orion knowledge backfill --project riplo-os --since 2026-06-01
-                                          record what merged since June";
+                                          record what merged since June
+  orion knowledge consolidate --project riplo-os
+                                          merge the topics down to ~60";
 
 #[derive(Subcommand)]
 pub(crate) enum KnowledgeCommand {
@@ -476,6 +479,20 @@ pub(crate) enum KnowledgeCommand {
         /// The first merge date to include, as YYYY-MM-DD.
         #[arg(long, value_name = "DATE")]
         since: String,
+    },
+    /// Merge the recorded topics down to about 60.
+    ///
+    /// Each area's topics go to Opus in one call, which merges near
+    /// duplicates into at most 8 an area; the merged pages are rewritten
+    /// with every rule and PR kept, the old ones deleted, and it is all
+    /// proposed in your knowledge pull request as one commit. A backfill
+    /// runs it at the end, and a harvest whenever it takes the topics
+    /// past 60.
+    #[command(after_help = KNOWLEDGE_EXAMPLES)]
+    Consolidate {
+        /// The project, by name or directory.
+        #[arg(long, value_name = "NAME")]
+        project: String,
     },
 }
 

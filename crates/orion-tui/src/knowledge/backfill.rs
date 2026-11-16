@@ -4,16 +4,19 @@
 //! the PR URLs they mention ([`super::transcripts::join`]) and harvested
 //! oldest first, as at merge, into the knowledge branch — one commit a
 //! batch of [`BATCH`], pushed and proposed in the same pull request as
-//! the harvests at merge (`super::share`); then every topic gets a
-//! staleness pass against the code as origin's base has it now (a
-//! temporary checkout, `harvest::CheckTree`; with none, the pass is
-//! skipped), committed the same way. Runs from the CLI, with no TUI.
+//! the harvests at merge (`super::share`). A batch that takes the topics
+//! past the cap is consolidated (`super::consolidate`), and so is what
+//! the backfill leaves at the end; then every topic gets a staleness
+//! pass against the code as origin's base has it now (a temporary
+//! checkout, `harvest::CheckTree`; with none, the pass is skipped),
+//! committed the same way. Runs from the CLI, with no TUI.
 
 use std::path::Path;
 
 use serde_json::Value;
 
 use super::condense;
+use super::consolidate::{self, Consolidated};
 use super::harvest::{self, Model, Outcome, Session, Target};
 use super::records;
 use super::share::{Gh, Published, Sharer};
@@ -47,6 +50,8 @@ pub(crate) struct Summary {
     pub failed: Vec<(u64, String)>,
     /// Topics the staleness pass changed.
     pub stale: Vec<String>,
+    /// The last consolidation of the topics.
+    pub consolidated: Option<Consolidated>,
     /// The knowledge pull request the harvests went to, and the head
     /// pushed to it last.
     pub pr: Option<super::share::Pr>,
@@ -75,6 +80,9 @@ impl Summary {
         )];
         for (pr, why) in &self.failed {
             lines.push(format!("#{pr} failed: {why}"));
+        }
+        if let Some(done) = &self.consolidated {
+            lines.push(done.line());
         }
         if !self.stale.is_empty() {
             lines.push(format!("Staleness pass changed: {}", self.stale.join(", ")));
@@ -246,6 +254,8 @@ pub(crate) async fn run(
     };
     say(&format!("{} to harvest.", todo.len()));
     let mut done = 0;
+    // Harvested since the topics were last consolidated.
+    let mut fresh = false;
     for batch in todo.chunks(BATCH) {
         let branch = share.open().await?;
         let store = branch.store();
@@ -299,8 +309,38 @@ pub(crate) async fn run(
             }
         }
         if !numbers.is_empty() {
-            let message = format!("knowledge: backfill {}", numbers.join(", "));
+            let mut message = format!("knowledge: backfill {}", numbers.join(", "));
+            fresh = true;
+            if consolidate::over_cap(&store) {
+                share.commit(&message).await?;
+                say("  past the topic cap: consolidating…");
+                let done = consolidate::consolidate(model, &to).await?;
+                say(&format!("  {}", done.line()));
+                summary.consolidated = Some(done);
+                message = consolidate::MESSAGE.to_string();
+                fresh = false;
+            }
             let published = share.publish(&branch, &message).await?;
+            say_published(say, &published);
+            summary.published(published);
+        }
+    }
+    {
+        let branch = share.open().await?;
+        let store = branch.store();
+        if fresh || consolidate::over_cap(&store) {
+            say("Consolidating the topics…");
+            let records = records::for_check_in(&branch.clone);
+            let to = Target {
+                store: &store,
+                local: &share.local,
+                project: &share.project,
+                records: &records,
+            };
+            let done = consolidate::consolidate(model, &to).await?;
+            say(&format!("  {}", done.line()));
+            summary.consolidated = Some(done);
+            let published = share.publish(&branch, consolidate::MESSAGE).await?;
             say_published(say, &published);
             summary.published(published);
         }

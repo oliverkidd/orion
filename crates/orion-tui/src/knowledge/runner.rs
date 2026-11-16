@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use orion_core::WorktreeId;
 use serde::{Deserialize, Serialize};
 
+use super::consolidate;
 use super::harvest::{self, ClaudeCli, Outcome, Session, Target};
 use super::local::Local;
 use super::records;
@@ -351,9 +352,20 @@ async fn run_job(job: &Job) -> Result<Option<Outcome>, String> {
             Some(outcome?)
         }
     };
-    let published = share
-        .publish(&branch, &format!("knowledge: harvest #{}", job.number))
-        .await?;
+    let mut message = format!("knowledge: harvest #{}", job.number);
+    // Past the cap: the harvest committed alone, then the topics
+    // consolidated in a commit of their own.
+    if outcome.is_some() && consolidate::over_cap(&store) {
+        share.commit(&message).await?;
+        match consolidate::consolidate(&model, &to).await {
+            Ok(done) => {
+                tracing::info!("knowledge: {} — {}", job.project, done.line());
+                message = consolidate::MESSAGE.to_string();
+            }
+            Err(why) => tracing::warn!("knowledge: consolidating {} failed: {why}", job.project),
+        }
+    }
+    let published = share.publish(&branch, &message).await?;
     drop(branch);
     note_published(&local, &published);
     Ok(outcome)

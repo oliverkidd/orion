@@ -398,7 +398,7 @@ impl Sharer<'_> {
             let Some(topic) = path
                 .strip_prefix(&format!("{DIR}/"))
                 .and_then(|p| p.strip_suffix(".md"))
-                .filter(|t| *t != "index")
+                .filter(|t| *t != "index" && *t != "areas")
             else {
                 continue;
             };
@@ -413,10 +413,35 @@ impl Sharer<'_> {
             let base_page = self.show(&base_ref, &path).await;
             pages.push((path.clone(), topic.to_string(), mine, base_page == at_fork));
         }
+        // Pages the branch deleted (a consolidation) that the base left
+        // alone stay deleted.
+        let mut gone = Vec::new();
+        if let Some(fork) = &fork {
+            let now = self.harvested_files(&tip).await;
+            for path in self.harvested_files(fork).await {
+                if !now.contains(&path)
+                    && self.show(&base_ref, &path).await == self.show(fork, &path).await
+                {
+                    gone.push(path);
+                }
+            }
+        }
         self.git(&["checkout", "-q", "-B", &branch.name, &base_ref])
             .await?;
         let store = branch.store();
         store.save_entries(&merged)?;
+        for path in &gone {
+            let path = store.repo.join(path);
+            if store.may_write(&path) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        if let Some(areas) = self
+            .show(&tip, &format!("{DIR}/{}", super::areas::FILE))
+            .await
+        {
+            store.write(&store.dir.join(super::areas::FILE), &areas)?;
+        }
         for (path, topic, mine, base_untouched) in pages {
             let text = match (base_untouched, mine) {
                 (true, Some(mine)) => store::unmarked(&mine).to_string(),

@@ -31,9 +31,15 @@
 //! - **The backfill** ([`backfill`]): `orion knowledge backfill`, the
 //!   pull requests merged before the snapshot existed, joined to their
 //!   transcripts by branch or by the PR links in them.
+//! - **Areas and consolidation** ([`areas`], [`consolidate`]): every
+//!   topic sits in one of a fixed set of areas, and the topics are merged
+//!   down to about 60 by `orion knowledge consolidate`, at the end of a
+//!   backfill, and whenever a harvest takes them past that.
 
+pub(crate) mod areas;
 pub(crate) mod backfill;
 pub(crate) mod condense;
+pub(crate) mod consolidate;
 pub(crate) mod guards;
 pub(crate) mod harvest;
 pub(crate) mod local;
@@ -159,14 +165,10 @@ pub fn cli_for(paths: Vec<String>, project_name: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// `orion knowledge backfill --project <name> --since <date>`: harvest
-/// the pull requests merged since `since` into the knowledge pull
-/// request, then check every topic against the code. Needs no TUI; a
-/// running one posts the summary card.
-pub fn cli_backfill(project_name: String, since: String) -> Result<()> {
-    chrono::NaiveDate::parse_from_str(&since, "%Y-%m-%d")
-        .map_err(|_| anyhow!("--since takes a date as YYYY-MM-DD, not {since}"))?;
-    let Known { root, name, id } = project(Some(&project_name))?;
+/// The project `project_name` names, as orion writes its knowledge:
+/// known to orion, its `.orion/decisions/` not ignored.
+fn sharer_for(project_name: &str) -> Result<(share::Sharer<'static>, local::Local)> {
+    let Known { root, name, id } = project(Some(project_name))?;
     let Some(id) = id else {
         bail!(
             "orion hasn't opened {name} ({}) yet — add it as a project in orion first",
@@ -176,25 +178,82 @@ pub fn cli_backfill(project_name: String, since: String) -> Result<()> {
     if store::ignored(&root) {
         bail!("{name} ignores .orion/decisions/, so harvested rules can't be shared — take it out of its .gitignore first");
     }
-    let model = harvest::ClaudeCli::from_config().map_err(|why| anyhow!(why))?;
     let local = local::Local::of(&id);
     let share = share::Sharer {
         git: &share::SystemGit,
         gh: &share::GhCli,
         main: root.clone(),
         local: local.clone(),
-        project: name.clone(),
+        project: name,
         base: share::base_of(&root),
     };
-    eprintln!(
-        "Backfilling {name} ({}) from {since}, into a pull request to {}…",
-        root.display(),
-        share.base
-    );
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    Ok((share, local))
+}
+
+/// A runtime for a knowledge command.
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
-        .build()?;
+        .build()?)
+}
+
+/// `orion knowledge consolidate --project <name>`: merge the project's
+/// harvested topics down to about [`consolidate::TOPIC_CAP`], and propose
+/// that in the knowledge pull request as one commit.
+pub fn cli_consolidate(project_name: String) -> Result<()> {
+    let (share, local) = sharer_for(&project_name)?;
+    let model = harvest::ClaudeCli::from_config().map_err(|why| anyhow!(why))?;
+    eprintln!(
+        "Consolidating {}'s topics ({}), into a pull request to {}…",
+        share.project,
+        share.main.display(),
+        share.base
+    );
+    let (done, published, index_lines) = runtime()?
+        .block_on(async {
+            let branch = share.open().await?;
+            let store = branch.store();
+            let records = records::for_check_in(&branch.clone);
+            let to = harvest::Target {
+                store: &store,
+                local: &share.local,
+                project: &share.project,
+                records: &records,
+            };
+            let done = consolidate::consolidate(&model, &to).await?;
+            let lines = store
+                .index()
+                .map_or(0, |i| store::marked(&i).lines().count());
+            let published = share.publish(&branch, consolidate::MESSAGE).await?;
+            Ok::<_, String>((done, published, lines))
+        })
+        .map_err(|why| anyhow!(why))?;
+    println!("{}", done.line());
+    println!("index.md: {index_lines} lines.");
+    if let Some(pr) = &published.pr {
+        println!("Proposed in #{}: {}", pr.number, pr.url);
+    }
+    runner::note_published(&local, &published);
+    Ok(())
+}
+
+/// `orion knowledge backfill --project <name> --since <date>`: harvest
+/// the pull requests merged since `since` into the knowledge pull
+/// request, then check every topic against the code. Needs no TUI; a
+/// running one posts the summary card.
+pub fn cli_backfill(project_name: String, since: String) -> Result<()> {
+    chrono::NaiveDate::parse_from_str(&since, "%Y-%m-%d")
+        .map_err(|_| anyhow!("--since takes a date as YYYY-MM-DD, not {since}"))?;
+    let (share, local) = sharer_for(&project_name)?;
+    let model = harvest::ClaudeCli::from_config().map_err(|why| anyhow!(why))?;
+    eprintln!(
+        "Backfilling {} ({}) from {since}, into a pull request to {}…",
+        share.project,
+        share.main.display(),
+        share.base
+    );
+    let runtime = runtime()?;
     let mut say = |line: &str| eprintln!("{line}");
     let summary = runtime
         .block_on(backfill::run(&model, &share, &since, &mut say))

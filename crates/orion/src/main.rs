@@ -57,6 +57,9 @@ fn main() -> Result<()> {
         Some(Command::Knowledge(KnowledgeCommand::Backfill { project, since })) => {
             orion_tui::knowledge::cli_backfill(project, since)
         }
+        Some(Command::Knowledge(KnowledgeCommand::Consolidate { project })) => {
+            orion_tui::knowledge::cli_consolidate(project)
+        }
         Some(Command::OpenLink { url }) => {
             // The session's account, from the database the daemon keeps:
             // read-only, and no round trip. A miss opens the default way.

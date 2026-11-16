@@ -2,11 +2,14 @@
 //! the repo, committed like any other file and changed only through
 //! orion's knowledge pull request (`super::share`).
 //!
-//! - `index.md`: at most [`INDEX_LINES`] lines, one per topic with its
-//!   scope and rule count — what every builder prompt carries;
+//! - `index.md`: at most [`INDEX_LINES`] lines, one per area with its
+//!   topics' short names and its rule count — what every builder prompt
+//!   carries;
+//! - `areas.md`: the areas a topic may sit in (`super::areas`);
 //! - `<area>/<topic>.md`: a topic page in the fixed sections
-//!   ([`SECTIONS`]), each rule ending in a hidden `<!-- k… -->` list of
-//!   the entries it stands on, so a veto can take one out;
+//!   ([`SECTIONS`]), its scope line short and naming no files
+//!   ([`short_scope`]), each rule ending in a hidden `<!-- k… -->` list
+//!   of the entries it stands on, so a veto can take one out;
 //! - `entries.jsonl`: every entry ever extracted, with its status.
 //!
 //! Every file orion writes starts with [`MARKER`]. orion owns only
@@ -26,7 +29,7 @@ pub(crate) const DIR: &str = ".orion/decisions/harvested";
 /// The first line of every file orion writes.
 pub(crate) const MARKER: &str =
     "<!-- orion:harvested — written by orion; edit through a PR, it is regenerated -->";
-/// The most lines `index.md` may have.
+/// The most lines `index.md` may have, its marker line among them.
 pub(crate) const INDEX_LINES: usize = 40;
 /// A topic page's sections, in order.
 pub(crate) const SECTIONS: [&str; 4] = [
@@ -73,6 +76,10 @@ pub(crate) struct Entry {
     pub downgraded: bool,
     /// Why it was dropped, when it was.
     pub note: String,
+    /// What a new topic the extraction made covers, in one line; never
+    /// kept in `entries.jsonl`.
+    #[serde(skip)]
+    pub new_topic: String,
 }
 
 impl Entry {
@@ -111,6 +118,7 @@ impl Entry {
             options_rejected: list("options_rejected"),
             confirm_by: text("confirm_by"),
             source_at: text("source_at"),
+            new_topic: text("new_topic"),
             status: ACTIVE.into(),
             ..Entry::default()
         };
@@ -239,14 +247,51 @@ impl Store {
             .filter(|i| !i.trim().is_empty())
     }
 
-    /// `index.md` written afresh from the pages.
+    /// `index.md` written afresh from the pages, by area.
     pub(crate) fn write_index(&self, project: &str) -> Result<(), String> {
-        let pages: Vec<(String, String)> = self
-            .topics()
+        let areas = super::areas::Areas::load(self);
+        let order: Vec<String> = areas.names().into_iter().map(str::to_string).collect();
+        self.write(
+            &self.index_path(),
+            &render_index(project, &order, &self.pages()),
+        )
+    }
+
+    /// Every page, with its topic, sorted.
+    pub(crate) fn pages(&self) -> Vec<(String, String)> {
+        self.topics()
             .into_iter()
             .filter_map(|t| Some((t.clone(), self.page(&t)?)))
-            .collect();
-        self.write(&self.index_path(), &render_index(project, &pages))
+            .collect()
+    }
+
+    /// Every topic with a page, and its scope line.
+    pub(crate) fn topic_scopes(&self) -> Vec<(String, String)> {
+        self.pages()
+            .into_iter()
+            .map(|(topic, page)| {
+                let scope = short_scope(&scope(&page), &topic);
+                (topic, scope)
+            })
+            .collect()
+    }
+
+    /// Delete `topic`'s page, and its area's folder once empty.
+    pub(crate) fn remove_page(&self, topic: &str) -> Result<(), String> {
+        let path = self.page_path(topic);
+        if !self.may_write(&path) {
+            return Err(format!("orion removes only under {DIR}/"));
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("couldn't remove {}: {e}", path.display())),
+        }
+        if let Some(folder) = path.parent() {
+            // Only when empty: remove_dir refuses otherwise.
+            let _ = std::fs::remove_dir(folder);
+        }
+        Ok(())
     }
 
     /// Mark `id` vetoed, and take it out of its page and the index. The
@@ -333,16 +378,10 @@ pub(crate) fn render_entries(all: &[Entry]) -> Result<String, String> {
 /// A page made from its entries alone, with no model: what a rebuild
 /// writes for a topic both sides changed (`super::share`). Rules,
 /// constraints and questions in force; vetoed and dropped entries left
-/// out.
+/// out. Its scope is the topic's name: no paths.
 pub(crate) fn render_page(topic: &str, entries: &[&Entry]) -> String {
     let mut sections: [Vec<String>; 3] = Default::default();
-    let mut scope: Vec<&str> = Vec::new();
     for e in entries.iter().filter(|e| e.status == ACTIVE) {
-        for path in &e.applies_to {
-            if !scope.contains(&path.as_str()) {
-                scope.push(path);
-            }
-        }
         let call = if e.by == "agent" { " (agent call)" } else { "" };
         let at = match e.kind.as_str() {
             "constraint" => 1,
@@ -351,7 +390,7 @@ pub(crate) fn render_page(topic: &str, entries: &[&Entry]) -> String {
         };
         sections[at].push(format!("- {} (#{}){call} <!-- {} -->", e.rule, e.pr, e.id));
     }
-    let mut out = format!("# {topic}\nScope: {}\n", scope.join(", "));
+    let mut out = format!("# {topic}\nScope: {}\n", short_scope("", topic));
     for (i, name) in SECTIONS.iter().enumerate() {
         out.push_str(&format!("\n## {name}\n"));
         for line in sections.get(i).into_iter().flatten() {
@@ -360,6 +399,110 @@ pub(crate) fn render_page(topic: &str, entries: &[&Entry]) -> String {
         }
     }
     out
+}
+
+/// The most words a page's scope line holds.
+pub(crate) const SCOPE_WORDS: usize = 14;
+
+/// Whether `word` names a file or folder: a path, a dotfile, or a name
+/// with an extension.
+fn is_path(word: &str) -> bool {
+    let w =
+        word.trim_matches(|c: char| matches!(c, ',' | ';' | ':' | '(' | ')' | '"' | '\'' | '`'));
+    if w.contains('/') || w.contains('\\') || (w.starts_with('.') && w.len() > 1) {
+        return true;
+    }
+    match w.rsplit_once('.') {
+        Some((stem, ext)) => {
+            !stem.is_empty()
+                && (1..=5).contains(&ext.len())
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && ext.chars().any(|c| c.is_ascii_alphabetic())
+        }
+        None => false,
+    }
+}
+
+/// `text` as a page's scope line: no code, no parentheses, no file
+/// paths, at most [`SCOPE_WORDS`] words — cut back to a whole item of a
+/// list where it can be. With nothing left, the topic's name in words.
+pub(crate) fn short_scope(text: &str, topic: &str) -> String {
+    let mut plain = String::new();
+    let (mut code, mut depth) = (false, 0usize);
+    for c in text.chars() {
+        match c {
+            '`' => code = !code,
+            '(' if !code => depth += 1,
+            ')' if !code => depth = depth.saturating_sub(1),
+            _ if code || depth > 0 => {}
+            c => plain.push(c),
+        }
+    }
+    // A list's comma left on its own, the code before it gone, goes back
+    // on the word before.
+    let mut words: Vec<String> = Vec::new();
+    for w in plain.split_whitespace().filter(|w| !is_path(w)) {
+        if w.chars().any(|c| c.is_alphanumeric()) {
+            words.push(w.to_string());
+        } else if let Some(last) = words.last_mut() {
+            if w.contains([',', ';']) && !last.ends_with([',', ';']) {
+                last.push(',');
+            }
+        }
+    }
+    let mut kept: Vec<String> = words.iter().take(SCOPE_WORDS).cloned().collect();
+    if words.len() > SCOPE_WORDS {
+        if let Some(cut) = kept
+            .iter()
+            .rposition(|w| w.ends_with(',') || w.ends_with(';'))
+        {
+            if cut >= 3 {
+                kept.truncate(cut + 1);
+            }
+        }
+    }
+    let line = kept
+        .join(" ")
+        .trim_end_matches([',', ';', ':', '—', '-', ' '])
+        .to_string();
+    match line.is_empty() {
+        true => {
+            let name = topic.rsplit('/').next().unwrap_or(topic);
+            name.replace('-', " ")
+        }
+        false => line,
+    }
+}
+
+/// `page` as `topic`'s: its title the topic, and its scope line `scope`
+/// (else its own) made short ([`short_scope`]).
+pub(crate) fn tidy_page(topic: &str, page: &str, scope_hint: Option<&str>) -> String {
+    let own = scope(page);
+    let wanted = match scope_hint.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(hint) => hint.to_string(),
+        None => own,
+    };
+    let scope_line = format!("Scope: {}", short_scope(&wanted, topic));
+    let mut out: Vec<String> = Vec::new();
+    let (mut titled, mut scoped) = (false, false);
+    for line in page.lines() {
+        if !titled && line.starts_with("# ") {
+            out.push(format!("# {topic}"));
+            titled = true;
+        } else if !scoped && line.trim().starts_with("Scope:") {
+            out.push(scope_line.clone());
+            scoped = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !titled {
+        out.insert(0, format!("# {topic}"));
+    }
+    if !scoped {
+        out.insert(1, scope_line);
+    }
+    out.join("\n") + "\n"
 }
 
 /// The ids a page line cites, in its `<!-- … -->`.
@@ -420,39 +563,64 @@ pub(crate) fn scope(page: &str) -> String {
         .unwrap_or_default()
 }
 
-/// `index.md` for `pages` (topic, text): one line per topic, the most
-/// rules first, at most [`INDEX_LINES`] lines in all.
-pub(crate) fn render_index(project: &str, pages: &[(String, String)]) -> String {
-    let mut rows: Vec<(&str, usize, String)> = pages
-        .iter()
-        .map(|(topic, page)| (topic.as_str(), rule_count(page), scope(page)))
-        .collect();
-    rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+/// What the index's last line says.
+pub(crate) const POINTER: &str = "Topic pages: .orion/decisions/harvested/<area>/<topic>.md";
+/// The most topic names an area's line lists.
+const LINE_TOPICS: usize = 16;
+
+/// `index.md` for `pages` (topic, text): one line per area — `order`'s
+/// first, then any other a page sits in — naming its topics, short, and
+/// counting its rules; then where the pages are. At most [`INDEX_LINES`]
+/// lines, however many topics there are.
+pub(crate) fn render_index(project: &str, order: &[String], pages: &[(String, String)]) -> String {
+    let mut areas: Vec<(String, Vec<String>, usize)> =
+        order.iter().map(|a| (a.clone(), Vec::new(), 0)).collect();
+    for (topic, page) in pages {
+        let (area, name) = topic.split_once('/').unwrap_or(("general", topic));
+        let at = match areas.iter().position(|(a, _, _)| a == area) {
+            Some(at) => at,
+            None => {
+                areas.push((area.to_string(), Vec::new(), 0));
+                areas.len() - 1
+            }
+        };
+        areas[at].1.push(name.to_string());
+        areas[at].2 += rule_count(page);
+    }
+    areas.retain(|(_, topics, _)| !topics.is_empty());
     let mut lines = vec![
         format!("# Knowledge: {project}"),
         format!(
-            "{} topics, recorded from merged pull requests. One line per topic: scope, rules.",
-            rows.len()
+            "{} topics in {} areas, recorded from merged pull requests. One line per area: its topics, then its rules.",
+            pages.len(),
+            areas.len()
         ),
         String::new(),
     ];
-    let room = INDEX_LINES - lines.len();
-    let shown = if rows.len() > room {
-        room - 1
-    } else {
-        rows.len()
+    // Room for the areas: the file's marker comes first, a blank line
+    // and the pointer last.
+    let room = INDEX_LINES - 1 - lines.len() - 2;
+    let shown = match areas.len() > room {
+        true => room - 1,
+        false => areas.len(),
     };
-    for (topic, rules, scope) in &rows[..shown] {
-        let scope = match scope.as_str() {
-            "" => String::new(),
-            scope => format!(" — {}", crate::ui::truncate(scope, 90)),
-        };
+    for (area, topics, rules) in &areas[..shown] {
+        let mut names = topics.clone();
+        names.sort();
+        let more = names.len().saturating_sub(LINE_TOPICS);
+        names.truncate(LINE_TOPICS);
+        let mut list = names.join(", ");
+        if more > 0 {
+            list.push_str(&format!(" and {more} more"));
+        }
         let noun = if *rules == 1 { "rule" } else { "rules" };
-        lines.push(format!("- `{topic}`{scope} — {rules} {noun}"));
+        lines.push(format!("- {area}: {list} — {rules} {noun}"));
     }
-    if shown < rows.len() {
-        lines.push(format!("- … and {} more topics", rows.len() - shown));
+    if shown < areas.len() {
+        lines.push(format!("- … and {} more areas", areas.len() - shown));
     }
+    lines.push(String::new());
+    lines.push(POINTER.to_string());
     lines.join("\n") + "\n"
 }
 
@@ -482,28 +650,112 @@ mod tests {
     }
 
     #[test]
-    fn the_index_is_one_line_a_topic_with_scope_and_rules() {
+    fn the_index_is_one_line_an_area_with_its_topics_and_rules() {
         let pages = vec![
-            ("auth/login".to_string(), PAGE.to_string()),
+            ("access-and-accounts/login".to_string(), PAGE.to_string()),
             (
-                "ui/forms".to_string(),
-                "# ui/forms\n## Rules in force\n- one <!-- k1-1 -->\n".to_string(),
+                "editor/forms".to_string(),
+                "# editor/forms\nScope: forms in src/ui/forms.tsx\n## Rules in force\n- one <!-- k1-1 -->\n".to_string(),
+            ),
+            (
+                "editor/tables".to_string(),
+                "# editor/tables\n## Rules in force\n- two <!-- k2-1 -->\n".to_string(),
+            ),
+            (
+                "legacy/old".to_string(),
+                "# legacy/old\n## Rules in force\n".to_string(),
             ),
         ];
+        let order: Vec<String> = ["editor", "charts", "access-and-accounts"]
+            .map(String::from)
+            .to_vec();
         assert_eq!(
-            render_index("riplo-os", &pages),
-            "# Knowledge: riplo-os\n2 topics, recorded from merged pull requests. One line per topic: scope, rules.\n\n- `auth/login` — src/auth, login flow — 3 rules\n- `ui/forms` — 1 rule\n"
+            render_index("riplo-os", &order, &pages),
+            "# Knowledge: riplo-os\n4 topics in 3 areas, recorded from merged pull requests. One line per area: its topics, then its rules.\n\n- editor: forms, tables — 2 rules\n- access-and-accounts: login — 3 rules\n- legacy: old — 0 rules\n\nTopic pages: .orion/decisions/harvested/<area>/<topic>.md\n"
         );
     }
 
     #[test]
     fn the_index_never_runs_past_its_lines() {
-        let pages: Vec<(String, String)> = (0..60)
-            .map(|i| (format!("a/t{i:02}"), String::new()))
+        let order: Vec<String> = crate::knowledge::areas::SEED
+            .iter()
+            .map(|(name, _, _)| name.to_string())
             .collect();
-        let index = render_index("p", &pages);
-        assert_eq!(index.lines().count(), INDEX_LINES);
-        assert!(index.ends_with("- … and 24 more topics\n"), "{index}");
+        // 300 topics: in five listed areas, and in 40 areas of their own.
+        let pages: Vec<(String, String)> = (0..300)
+            .map(|i| {
+                let area = match i % 2 {
+                    0 => order[i % order.len()].clone(),
+                    _ => format!("stray-{}", i % 80),
+                };
+                let page = format!(
+                    "# t\nScope: src/a/b{i}.ts and more\n## Rules in force\n- r <!-- k{i}-1 -->\n"
+                );
+                (format!("{area}/topic-number-{i:03}"), page)
+            })
+            .collect();
+        let index = render_index("p", &order, &pages);
+        assert_eq!(
+            index.lines().count(),
+            INDEX_LINES - 1,
+            "the marker makes 40: {index}"
+        );
+        assert!(
+            index.starts_with("# Knowledge: p\n300 topics in 45 areas"),
+            "{index}"
+        );
+        assert!(
+            index.ends_with(&format!("- … and 12 more areas\n\n{POINTER}\n")),
+            "{index}"
+        );
+        assert!(!index.contains("src/"), "no paths: {index}");
+        assert!(!index.contains("Scope"), "no scope text: {index}");
+        assert!(index.contains(" and 14 more — 30 rules"), "{index}");
+
+        // A store's own index stays inside its lines too.
+        let repo = tempfile::tempdir().unwrap();
+        let store = Store::of(repo.path());
+        for (topic, page) in &pages {
+            store.write_page(topic, page).unwrap();
+        }
+        store.write_index("p").unwrap();
+        let file = std::fs::read_to_string(store.index_path()).unwrap();
+        assert_eq!(file.lines().count(), INDEX_LINES, "{file}");
+    }
+
+    #[test]
+    fn scope_lines_are_short_and_name_no_files() {
+        let long = "local stack commands (`just status`, `just start`/`stop`), `.next`/`.next-e2e`, stack health, offline auth, local seeding for visual checks, stack needs of local e2e and the pre-commit hook";
+        let short = short_scope(long, "engineering-tooling/local-stack");
+        assert_eq!(
+            short,
+            "local stack commands, stack health, offline auth, local seeding for visual checks"
+        );
+        for scope in [
+            long,
+            "src/lib/presentations/deck-logo.ts, apps/os/SaveNoticeToast.tsx and the toolbar",
+            "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen",
+        ] {
+            let short = short_scope(scope, "a/b");
+            assert!(short.split_whitespace().count() < 15, "{short}");
+            assert!(!short.split_whitespace().any(is_path), "{short}");
+        }
+        assert_eq!(short_scope("`src/x.ts`", "editor/text-boxes"), "text boxes");
+
+        let page = tidy_page("editor/text", PAGE, None);
+        assert!(
+            page.starts_with("# editor/text\nScope: login flow\n\n## Rules in force\n"),
+            "{page}"
+        );
+        let page = tidy_page(
+            "editor/text",
+            "## Rules in force\n- a <!-- k1-1 -->\n",
+            Some("Text boxes and fonts"),
+        );
+        assert_eq!(
+            page,
+            "# editor/text\nScope: Text boxes and fonts\n## Rules in force\n- a <!-- k1-1 -->\n"
+        );
     }
 
     #[test]
@@ -605,7 +857,7 @@ mod tests {
         let page = render_page("auth/login", &refs);
         assert_eq!(
             page,
-            "# auth/login\nScope: src/auth\n\n## Rules in force\n- rule k12-1 (#12) <!-- k12-1 -->\n- rule k12-3 (#12) (agent call) <!-- k12-3 -->\n\n## Constraints\n- rule k12-2 (#12) <!-- k12-2 -->\n\n## Open questions\n\n## Replaced\n"
+            "# auth/login\nScope: login\n\n## Rules in force\n- rule k12-1 (#12) <!-- k12-1 -->\n- rule k12-3 (#12) (agent call) <!-- k12-3 -->\n\n## Constraints\n- rule k12-2 (#12) <!-- k12-2 -->\n\n## Open questions\n\n## Replaced\n"
         );
         assert_eq!(rule_count(&page), 3);
     }
