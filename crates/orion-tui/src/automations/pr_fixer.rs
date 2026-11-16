@@ -452,7 +452,12 @@ impl State {
 /// attempts are left as they are. A draft is dropped — a factory draft
 /// aside, watched for its failing checks alone ([`fixer_view`]).
 pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
-    for pr in list.iter().filter(|pr| pr.mine) {
+    // orion's own knowledge pull request is orion's to rebuild and merge
+    // (`knowledge::share`); a fixer pushing to its branch would race it.
+    for pr in list
+        .iter()
+        .filter(|pr| pr.mine && !pr.head.starts_with(crate::knowledge::share::PREFIX))
+    {
         let factory = is_factory(app, project, &pr.head);
         if factory {
             poll_comments(app, project, pr);
@@ -3169,6 +3174,19 @@ mod tests {
         assert!(app.autofix.watching.contains_key(&pr().url), "ready now");
         let out = landed(&mut app, &detail(true, Vec::new()));
         assert!(sent_prompt(&out).is_some(), "{out:?}");
+    }
+
+    /// orion's own knowledge pull request is never sent a fixer, however
+    /// broken it is: orion rebuilds and merges it itself.
+    #[test]
+    fn the_knowledge_pull_request_is_never_fixed() {
+        let knowledge = OpenPr {
+            head: format!("{}someone", crate::knowledge::share::PREFIX),
+            ..broken(true, true)
+        };
+        let mut app = app_with(vec![knowledge], true);
+        listed(&mut app);
+        assert!(app.autofix.watching.is_empty());
     }
 
     /// A ready PR turned back to draft drops its watch — from the list,
