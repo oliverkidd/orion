@@ -1,0 +1,70 @@
+crates/orion-tui/src/knowledge/store.rs
+  s_0ea5bf705342bd::t_f2c6103aad6900 352,355
+  s_0ea5bf705342bd::t_60e5e1a2aead58 401,825-846,851-873,875-884,889-898,903-907
+  s_0ea5bf705342bd::t_fd43c62ca20d5f 909
+  s_0ea5bf705342bd::t_7dd3523c5f77ee 18-21,57-60,140-146,335-343,345,347-350,354,356-357,361,363-400
+  s_0ea5bf705342bd::t_34294291f26dfb 346,351,353,358-360,362
+  s_0ea5bf705342bd::t_eff119c1aa6bff 344
+  s_0ea5bf705342bd::t_24562dea5ad018 847-850,885-888,899-902
+  s_0ea5bf705342bd::t_ed3872e473cf6b 402,908
+crates/orion-tui/src/automations/linear_builder.rs
+  s_0ea5bf705342bd::t_d42870f5be59c6 2279
+  s_0ea5bf705342bd::t_8c57ae11f642b1 110
+docs/how-it-works.md
+  s_0ea5bf705342bd::t_24562dea5ad018 597-602,605,639-643
+  s_0ea5bf705342bd::t_4fe621ce96b375 603-604
+crates/orion-tui/src/knowledge/consolidate.rs
+  s_0ea5bf705342bd::t_3b2fbbed6dd3d5 485,506-508,510,520-522,530-534,539,541-542,544-545,552,554-556,562,564-566,572,574-576,590,611-615,622-624,627,629,638,641,643,649
+  s_0ea5bf705342bd::t_f7f659998575d5 445
+  s_0ea5bf705342bd::t_29c59a2e6b0db1 343,441
+  s_0ea5bf705342bd::t_6000bf0f05e2d8 503,516,630-635
+  s_0ea5bf705342bd::t_373ab0f36c5c2b 342
+crates/orion-tui/src/knowledge/harvest.rs
+  s_0ea5bf705342bd::t_62cf9d1970be8f 655,786,987
+  s_0ea5bf705342bd::t_0b9a069a79d165 61-63,70-74,76-80,108,695
+  s_0ea5bf705342bd::t_8fb7363fdc4d77 984,986
+  s_0ea5bf705342bd::t_eff119c1aa6bff 705-708,731
+  s_0ea5bf705342bd::t_9830449b2b8e73 2029-2031,2042-2043,2057,2074-2080,2092,2101
+  s_0ea5bf705342bd::t_f7f659998575d5 704,832,1053
+  s_0ea5bf705342bd::t_54e079b2cb811c 1361-1363,1365
+crates/orion-tui/src/knowledge/areas.rs
+  s_0ea5bf705342bd::t_54bdf5d22baef1 228-238,305,384-385,392-397,539-543,545,549,551,553-567
+  s_0ea5bf705342bd::t_59cd9daa55b35a 315-319
+  s_0ea5bf705342bd::t_3b1ccb0531c246 550,552
+  s_0ea5bf705342bd::t_eff119c1aa6bff 239-245
+crates/orion-tui/src/knowledge/runner.rs
+  s_0ea5bf705342bd::t_215e01a69819f0 325-326
+  s_0ea5bf705342bd::t_54e079b2cb811c 328,578
+crates/orion-tui/src/knowledge/notes.rs
+  s_0ea5bf705342bd::t_8c57ae11f642b1 75-80
+  s_0ea5bf705342bd::t_aba76e59f69e77 154-155,159-161,166-167,172-175
+  s_0ea5bf705342bd::t_eff119c1aa6bff 19-20,81-87,162-165,168-171
+crates/orion-tui/src/knowledge/mod.rs
+  s_0ea5bf705342bd::t_54e079b2cb811c 287
+crates/orion-tui/src/knowledge/share.rs
+  s_0ea5bf705342bd::t_53cf4975397ed5 437-438,440-444,450-455,1332-1357,1362-1363,1366
+  s_0ea5bf705342bd::t_215e01a69819f0 460,1364,1367-1410
+  s_0ea5bf705342bd::t_54e079b2cb811c 143-163,165-174,222-234,699,708-713,715-716,718-724
+  s_0ea5bf705342bd::t_59cd9daa55b35a 164,175-185,188,192-202,214-221
+  s_0ea5bf705342bd::t_f7f659998575d5 596
+  s_0ea5bf705342bd::t_eff119c1aa6bff 186-187,189-191,203-213,456-459,1358-1361
+  s_0ea5bf705342bd::t_d4d9496bc32200 461,1365,1411
+crates/orion-tui/src/knowledge/backfill.rs
+  s_0ea5bf705342bd::t_bd84a7baecaa2c 14-19,42-43,272-282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "904c3d77e44527351da22581716ab93822abd203",
+  "prompts": {},
+  "sessions": {
+    "s_0ea5bf705342bd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "cddeb30e-0d64-4224-bbf0-ca43924b6134",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
