@@ -2073,7 +2073,12 @@ pub(crate) async fn run_piped(
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
-        Err(first_line(&String::from_utf8_lossy(&out.stderr)).unwrap_or(not_run))
+        // A program that reports its failure on stdout (`claude -p
+        // --output-format json` says "weekly limit" there) is read for it
+        // when stderr is empty.
+        Err(first_line(&String::from_utf8_lossy(&out.stderr))
+            .or_else(|| first_line(&String::from_utf8_lossy(&out.stdout)))
+            .unwrap_or(not_run))
     }
 }
 

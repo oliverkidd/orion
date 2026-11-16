@@ -144,7 +144,14 @@ pub(crate) async fn run_in(
         "--output-format",
         "json",
     ]);
-    let out = crate::pull_request::run_piped(cmd, &ask.prompt, ask.timeout).await?;
+    // A refused ask (a usage limit, a sign-out) exits non-zero with its
+    // reason in the JSON on stdout: that reason is the failure.
+    let out = crate::pull_request::run_piped(cmd, &ask.prompt, ask.timeout)
+        .await
+        .map_err(|why| match why.trim_start().starts_with('{') {
+            true => parse_reply(&why).err().unwrap_or(why),
+            false => why,
+        })?;
     parse_reply(&out)
 }
 
