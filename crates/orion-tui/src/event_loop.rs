@@ -7463,6 +7463,20 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         items.splice(at..at, links);
         return items;
     }
+    // A factory session: **Not for the factory**, after Archive, which it
+    // does too — and more.
+    if crate::automations::linear_builder::owner::ticket_of_session(app, &a.id).is_some() {
+        if let Some(at) = items
+            .iter()
+            .position(|item| matches!(item.action, MenuAction::ArchiveAgent(_)))
+        {
+            let item = MenuItem::destructive(
+                orion_core::factory_card::NOT_FOR_FACTORY_LABEL,
+                MenuAction::NotForFactory(a.id.clone()),
+            );
+            items.insert(at + 1, item);
+        }
+    }
     let Some(w) = app
         .tree
         .worktrees
@@ -9874,6 +9888,9 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
         }
         MenuAction::RenameAgent(id) => open_prompt(app, PromptKind::RenameAgent { id }),
         MenuAction::ArchiveAgent(id) => archive_agent(app, id),
+        MenuAction::NotForFactory(id) => {
+            crate::automations::linear_builder::owner::not_for_the_factory_session(app, &id)
+        }
         MenuAction::UnarchiveAgent(id) => activate::unarchive(app, id, out),
         MenuAction::DeleteAgent(id) => {
             if let Some(a) = app.tree.agents.iter().find(|a| a.id == id).cloned() {

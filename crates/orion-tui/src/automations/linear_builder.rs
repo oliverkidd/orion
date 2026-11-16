@@ -19,7 +19,9 @@
 //!   20 words, nothing attached) asks its reporter on Slack for more and
 //!   is unassigned until they say they've updated it — or, when they
 //!   can't be asked, asks you. One the model judges very like a live
-//!   session's work asks you too (Start anyway · Skip).
+//!   session's work asks you too (Start anyway · Skip). A ticket labelled
+//!   `factory-skip` (**Not for the factory**, [`owner`]) is never picked
+//!   up ([`fresh`]).
 //! * **Route.** A key one project uses goes to that project. A key several
 //!   share asks the model once, through [`crate::oneshot::run_json`], with
 //!   each ticket and each project's **What it is**
@@ -726,11 +728,12 @@ pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
 }
 
 /// The tickets in `issues` that `which` picks up now: carrying one of its
-/// labels, in Triage or Todo, and not picked up already.
+/// labels and not `factory-skip`, in Triage or Todo, and not picked up
+/// already.
 pub fn fresh(shared: &Shared, labels: &[String], issues: Vec<LinearIssue>) -> Vec<LinearIssue> {
     issues
         .into_iter()
-        .filter(|i| carries(i, labels))
+        .filter(|i| carries(i, labels) && !intake::not_for_the_factory(i))
         .filter(|i| WAITING_STATES.contains(&i.status_type.as_str()))
         .filter(|i| !shared.picked_up(&i.id))
         .collect()
@@ -2792,7 +2795,10 @@ mod tests {
         let c = card(&app, key);
         assert_eq!(c.card.body[0], "*Duplicate of* RIPLO-3 the same crash");
         let labels: Vec<&str> = c.card.buttons.iter().map(|b| b.label.as_str()).collect();
-        assert_eq!(labels, ["Close ticket", "Build anyway…"]);
+        assert_eq!(
+            labels,
+            ["Close ticket", "Build anyway…", "Not for the factory"]
+        );
         assert!(c.card.buttons[1].asks_text);
         // Once per verdict.
         follow(&mut app);
@@ -3072,6 +3078,165 @@ mod tests {
         assert_eq!(place_of(&app, "week:2026-11-14"), None);
     }
 
+    /// Every card about a ticket the factory took offers **Not for the
+    /// factory**.
+    #[test]
+    fn every_card_about_a_ticket_offers_not_for_the_factory() {
+        use orion_core::factory_card::NOT_FOR_FACTORY;
+        let mut app = app_with_project();
+        building(&mut app, Stage::Approving);
+        app.automations
+            .linear_builder
+            .ledger
+            .issues
+            .get_mut("uuid-ENG-7")
+            .unwrap()
+            .verdict = Some("ORION-VERDICT: already-fixed abc123".into());
+        let nc = stages::parse_verdict("ORION-VERDICT: already-fixed abc123").unwrap();
+        owner::post_no_change(&mut app, "uuid-ENG-7", &nc);
+        owner::post_stalled(&mut app, "uuid-ENG-7", None);
+        owner::post_dead(&mut app, "uuid-ENG-7");
+        for what in ["nochange", "stalled", "dead"] {
+            let c = card(&app, &format!("issue:uuid-ENG-7:{what}"));
+            let last = c.card.buttons.last().unwrap();
+            assert_eq!(
+                (last.action.as_str(), last.label.as_str()),
+                (NOT_FOR_FACTORY, "Not for the factory"),
+                "{what}"
+            );
+        }
+    }
+
+    /// **Not for the factory**: the session parked and archived, its cards
+    /// closed, the ticket labelled `factory-skip` with a comment — and its
+    /// status left alone: no Close write.
+    #[test]
+    fn not_for_the_factory_parks_the_session_and_labels_the_ticket() {
+        use orion_core::factory_card::NOT_FOR_FACTORY;
+        use owner::Write;
+        let mut app = app_with_project();
+        building(&mut app, Stage::Building);
+        owner::post_stalled(&mut app, "uuid-ENG-7", None);
+        owner::post_dead(&mut app, "uuid-ENG-7");
+        let key = "issue:uuid-ENG-7:stalled";
+        crate::factory::cards::on_action(&mut app, key, NOT_FOR_FACTORY, None, true);
+        assert_eq!(stage_of(&app), Stage::Parked);
+        assert!(app.tree.agents.iter().all(|a| a.archived || a.id.0 != "s7"));
+        for key in [key, "issue:uuid-ENG-7:dead"] {
+            assert_eq!(
+                card(&app, key).state,
+                CardState::Closed("Not for the factory".into()),
+                "{key}"
+            );
+        }
+        assert_eq!(
+            app.automations.linear_builder.writes,
+            [
+                (
+                    p(),
+                    Write::Label {
+                        issue: "uuid-ENG-7".into(),
+                        team: "t1".into(),
+                        name: "factory-skip".into(),
+                    }
+                ),
+                (
+                    p(),
+                    Write::TakenOff {
+                        issue: "uuid-ENG-7".into()
+                    }
+                ),
+            ]
+        );
+        assert!(!app
+            .automations
+            .linear_builder
+            .writes
+            .iter()
+            .any(|(_, w)| matches!(w, Write::Close { .. } | Write::Assign { .. })));
+        assert_eq!(
+            owner::taken_off("Sam Lee"),
+            "Taken off the factory by Sam Lee"
+        );
+        // Someone else's press on a card counts for nothing.
+        let mut app = app_with_project();
+        building(&mut app, Stage::Building);
+        owner::post_stalled(&mut app, "uuid-ENG-7", None);
+        crate::factory::cards::on_action(&mut app, key, NOT_FOR_FACTORY, None, false);
+        assert_eq!(stage_of(&app), Stage::Building);
+    }
+
+    /// From a pull request's verdict card, the factory session's menu or
+    /// its phone message: the draft pull request closed as well.
+    #[test]
+    fn not_for_the_factory_closes_the_draft_from_every_place() {
+        use orion_core::factory_card::NOT_FOR_FACTORY;
+        use owner::Write;
+        let url = "https://github.com/o/r/pull/9";
+        let with_pr = || {
+            let mut app = app_with_project();
+            building(&mut app, Stage::PrOpen);
+            app.automations
+                .linear_builder
+                .ledger
+                .issues
+                .get_mut("uuid-ENG-7")
+                .unwrap()
+                .pr_url = Some(url.into());
+            app
+        };
+        let closes_draft = |app: &App| {
+            app.automations
+                .linear_builder
+                .writes
+                .iter()
+                .any(|(_, w)| matches!(w, Write::CloseDraft { url: u, comment } if u == url && comment.contains("ENG-7")))
+        };
+        // The verdict card.
+        let mut app = with_pr();
+        owner::not_for_the_factory_pr(&mut app, url, "", &format!("pr:{url}:verdict"));
+        assert_eq!(stage_of(&app), Stage::Parked);
+        assert!(closes_draft(&app));
+        // The session's menu offers it, and it does the same.
+        let mut app = with_pr();
+        let s7 = AgentId("s7".into());
+        assert_eq!(
+            owner::ticket_of_session(&app, &s7).as_deref(),
+            Some("uuid-ENG-7")
+        );
+        owner::not_for_the_factory_session(&mut app, &s7);
+        assert_eq!(stage_of(&app), Stage::Parked);
+        assert!(closes_draft(&app));
+        assert_eq!(owner::ticket_of_session(&app, &s7), None, "parked");
+        // The phone: a press about the session.
+        let mut app = with_pr();
+        crate::factory::cards::on_action(&mut app, "session:s7", NOT_FOR_FACTORY, None, true);
+        assert_eq!(stage_of(&app), Stage::Parked);
+        // Only an open draft is closed.
+        let view = |state: &str, draft: bool| serde_json::json!({"state": state, "isDraft": draft});
+        assert!(owner::is_open_draft(&view("OPEN", true)));
+        assert!(!owner::is_open_draft(&view("OPEN", false)));
+        assert!(!owner::is_open_draft(&view("MERGED", true)));
+    }
+
+    /// A ticket labelled `factory-skip` is never picked up, in any case of
+    /// the label; without it, it is.
+    #[test]
+    fn the_intake_skips_a_ticket_labelled_factory_skip() {
+        let shared = Shared::default();
+        let labels = vec!["Bug".to_string()];
+        let issues = vec![
+            issue("ENG-1", &["Bug", "factory-skip"]),
+            issue("ENG-2", &["Bug", "Factory-Skip"]),
+            issue("ENG-3", &["Bug"]),
+        ];
+        let ids: Vec<String> = fresh(&shared, &labels, issues)
+            .into_iter()
+            .map(|i| i.identifier)
+            .collect();
+        assert_eq!(ids, ["ENG-3"]);
+    }
+
     /// A parked ticket moved back to Todo starts afresh: its kept worktree
     /// is its own ended run, not someone at work on it, and the new run
     /// gets a branch of its own.
@@ -3186,7 +3351,7 @@ mod tests {
         let c = card(&app, "issue:uuid-ENG-7:stalled");
         assert!(c.card.body[0].starts_with("Stopped without a PR or a question 10 minutes ago."));
         let actions: Vec<&str> = c.card.buttons.iter().map(|b| b.action.as_str()).collect();
-        assert_eq!(actions, ["continue", "reply", "park"]);
+        assert_eq!(actions, ["continue", "reply", "park", "not_for_factory"]);
         follow(&mut app);
         assert_eq!(app.factory_cards.len(), 1, "once");
         crate::factory::cards::on_action(&mut app, "issue:uuid-ENG-7:stalled", "park", None, true);

@@ -799,7 +799,8 @@ request. They work the same way; each has its own labels and its own preset (**B
 - **Labels.** The bug fixer's are `Bug · Regression · Customer bug`, the feature builder's
   `Feature · Improvement`, until you pick others: `Enter` on **Labels** lists your Linear
   workspace's labels, `Space` ticks one, `Enter` keeps the ticks and `Esc` leaves them as they were.
-  Case doesn't matter. A ticket with none of either's labels is left alone.
+  Case doesn't matter. A ticket with none of either's labels is left alone, and so is one labelled
+  `factory-skip` (**Not for the factory**, below), until someone takes that label off.
 - **Watching.** Every 2 minutes, for each Linear key your projects use, orion asks for the tickets
   assigned to you in **Triage or Todo** with one of the labels. The backlog is never picked up:
   moving a ticket to Todo is what starts it. A ticket is picked up once: orion remembers it in
@@ -846,7 +847,8 @@ request. They work the same way; each has its own labels and its own preset (**B
 - **Your approval.** Every plan waits for you like any other: in Needs you, and on your phone when
   you're away. A plan whose first line is `ORION-VERDICT: <already-fixed|duplicate|not-reproducible|
   wont-build> <reason>` builds nothing: a **No change** card says why ("*Already fixed* by …",
-  "*Duplicate of* RIPLO-n", "*Can't reproduce*: …") with **Close ticket** and **Build anyway…**.
+  "*Duplicate of* ENG-n", "*Can't reproduce*: …") with **Close ticket**, **Build anyway…** and
+  **Not for the factory**.
   Close moves the ticket to Done (already fixed), to Duplicate — the team's Duplicate state, else
   Canceled — marked a duplicate of the ticket the reason names, or to Canceled with the reason as a
   comment; then the session is archived and its worktree deleted. It never goes back to Todo. Build
@@ -855,9 +857,18 @@ request. They work the same way; each has its own labels and its own preset (**B
   A ticket moved to the backlog, canceled, done by someone else or no longer assigned to you is
   parked and its session archived; a session or worktree gone for 30 minutes with no pull request is
   dead, said on a card. A session that stops while planning or building with no pull request and no
-  question for 10 minutes gets a **Stalled** card: **Continue**, **Reply…** or **Park**. Each stage,
-  each question and when you answered go into the run's record (`automations/runs/<ticket>.json` in
-  orion's data dir).
+  question for 10 minutes gets a **Stalled** card: **Continue**, **Reply…**, **Park** or **Not for
+  the factory**; a dead one's card has **Open ticket**, **Park** and **Not for the factory**. Each
+  stage, each question and when you answered go into the run's record
+  (`automations/runs/<ticket>.json` in orion's data dir).
+- **Not for the factory.** A ticket the factory shouldn't have taken comes off it for good: the
+  button is on the No change, Stalled and dead cards, on the pull request's verdict card, on a
+  factory session's plan and question on your phone, and in the session's menu in orion (right-click
+  its row). It parks the ticket as **Park** does — its session archived, its cards closed — closes
+  the draft pull request it opened, with a comment saying why, labels the ticket `factory-skip`
+  (made in its team if the team has no such label) and comments "Taken off the factory by <you>".
+  The ticket's status stays where it is, so your own triage decides what happens to it next; the
+  intake never picks it up again while it carries the label.
 - **The panel.** **RUNNING** lists each session: `planning`, `plan to approve`, `building`, a ticket
   `waiting on you` or `waiting on its reporter`, or `queued, 5 running` while the cap is full.
   **DONE THIS WEEK** lists the ones that finished.

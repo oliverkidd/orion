@@ -527,6 +527,15 @@ pub mod factory_card {
     pub const ACTION_LINK: &str = "orion_factory_link";
     /// Between a button value's key and its action (`<key>|<action>`).
     pub const SEP: char = '|';
+    /// **Not for the factory**: the action every factory card about a
+    /// ticket offers, which takes the ticket off the factory.
+    pub const NOT_FOR_FACTORY: &str = "not_for_factory";
+    /// Its label.
+    pub const NOT_FOR_FACTORY_LABEL: &str = "Not for the factory";
+    /// The key a press about a session rather than a card goes by
+    /// (`session:<agent id>`): **Not for the factory** on a factory
+    /// session's phone message.
+    pub const SESSION_PREFIX: &str = "session:";
 }
 
 /// Slack's caps on what a message may hold, in characters (or blocks):

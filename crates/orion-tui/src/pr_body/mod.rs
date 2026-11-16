@@ -1107,6 +1107,7 @@ fn verdict_card(
         Tier::Skim => vec![merge, open, send],
         _ => vec![open, merge, send],
     };
+    buttons.push(crate::automations::linear_builder::owner::not_for_the_factory_button());
     buttons.extend([Button::tap("right", "👍"), Button::tap("wrong", "👎")]);
     Card {
         key: card_key(url),
@@ -1193,6 +1194,15 @@ fn on_press(app: &mut App, press: Press) {
             if !text.trim().is_empty() {
                 send_back(app, &url, &text);
             }
+        }
+        orion_core::factory_card::NOT_FOR_FACTORY if press.by_owner => {
+            let identifier = app.pr_body.remembered(&url).identifier.clone();
+            crate::automations::linear_builder::owner::not_for_the_factory_pr(
+                app,
+                &url,
+                &identifier,
+                press.key,
+            );
         }
         "right" | "wrong" if press.by_owner => {
             let right = press.action == "right";
@@ -1525,14 +1535,15 @@ mod tests {
             )
         };
         let (merge, card) = labels(Tier::Merge, "nothing risky, CI green");
-        assert_eq!(merge, ["Merge", "Open PR", "👍", "👎"]);
+        let off = "Not for the factory";
+        assert_eq!(merge, ["Merge", "Open PR", off, "👍", "👎"]);
         assert!(card.image.is_none());
         let (skim, card) = labels(Tier::Skim, "visible change, pictures below");
-        assert_eq!(skim, ["Merge", "Open PR", "Send back…", "👍", "👎"]);
+        assert_eq!(skim, ["Merge", "Open PR", "Send back…", off, "👍", "👎"]);
         assert_eq!(card.image.as_deref(), Some(Path::new("/g.png")));
         assert!(card.buttons[2].asks_text);
         let (review, card) = labels(Tier::Review, "risky: src/auth.rs");
-        assert_eq!(review, ["Open PR", "Merge", "Send back…", "👍", "👎"]);
+        assert_eq!(review, ["Open PR", "Merge", "Send back…", off, "👍", "👎"]);
         assert!(card
             .body
             .iter()
@@ -1993,6 +2004,22 @@ mod tests {
         assert!(app.pr_body.remembered(URL).card.as_ref().unwrap().closed);
     }
 
+    /// The verdict card offers **Not for the factory**, ahead of the vote.
+    #[test]
+    fn the_verdict_card_offers_not_for_the_factory() {
+        let app = app_with_card();
+        let actions: Vec<&str> = posted_card(&app)
+            .card
+            .buttons
+            .iter()
+            .map(|b| b.action.as_str())
+            .collect();
+        assert_eq!(
+            actions[actions.len() - 3..],
+            [orion_core::factory_card::NOT_FOR_FACTORY, "right", "wrong"]
+        );
+    }
+
     #[test]
     fn a_vote_is_noted_and_the_card_keeps_its_buttons() {
         use orion_core::ClientRequest;
@@ -2007,7 +2034,10 @@ mod tests {
             .iter()
             .map(|b| b.label.as_str())
             .collect();
-        assert_eq!(labels, ["Merge", "Open PR", "👍", "👎"]);
+        assert_eq!(
+            labels,
+            ["Merge", "Open PR", "Not for the factory", "👍", "👎"]
+        );
         let Some(ClientRequest::PostFactoryCard { card }) = app.outbox.last() else {
             panic!("{:?}", app.outbox);
         };

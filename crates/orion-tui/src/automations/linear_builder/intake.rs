@@ -1,6 +1,10 @@
 //! INTAKE: what a fresh ticket is checked for before it is claimed, and
 //! what a claimed one is given.
 //!
+//! - **Not for the factory** ([`not_for_the_factory`]): a ticket labelled
+//!   [`SKIP_LABEL`] is never picked up, until someone takes the label off.
+//!   **Not for the factory** on a card or a session puts it there
+//!   (`owner`).
 //! - **Worked on already** ([`worked_on`]), in this order: linked to an
 //!   orion worktree, or a worktree's branch names it; an open pull
 //!   request's title, body or branch names it; a live session's title or
@@ -33,6 +37,17 @@ use crate::linear::{names_issue, LinearIssue};
 /// A description shorter than this many words, with nothing attached, is
 /// thin.
 pub(crate) const THIN_WORDS: usize = 20;
+
+/// The Linear label that keeps a ticket off the factory.
+pub(crate) const SKIP_LABEL: &str = "factory-skip";
+
+/// Whether `ticket` carries [`SKIP_LABEL`], in any case.
+pub(crate) fn not_for_the_factory(ticket: &LinearIssue) -> bool {
+    ticket
+        .labels
+        .iter()
+        .any(|l| l.name.trim().eq_ignore_ascii_case(SKIP_LABEL))
+}
 
 /// What the check says about a fresh ticket.
 #[derive(Debug, Clone, PartialEq, Eq)]

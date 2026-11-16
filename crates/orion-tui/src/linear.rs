@@ -5810,6 +5810,57 @@ pub(crate) async fn mark_duplicate(key: &str, issue_id: &str, of: &str) -> Resul
     )
 }
 
+/// Issue labels by name, any case: the workspace's and every team's.
+pub(crate) const LABELS_BY_NAME: &str = "query($name: String!) { issueLabels(first: 50, filter: { name: { eqIgnoreCase: $name } }) { nodes { id team { id } } } }";
+/// `issueLabelCreate` — a label the team is missing.
+pub(crate) const LABEL_CREATE: &str = "mutation($input: IssueLabelCreateInput!) { issueLabelCreate(input: $input) { success issueLabel { id } } }";
+/// `issueAddLabel` — one label onto a ticket, its others kept.
+pub(crate) const ISSUE_ADD_LABEL: &str = "mutation($id: String!, $labelId: String!) { issueAddLabel(id: $id, labelId: $labelId) { success } }";
+
+/// Put the label `name` on `issue_id`: team `team_id`'s own label of that
+/// name, else the workspace's, else one made in the team now.
+pub(crate) async fn add_label(
+    key: &str,
+    issue_id: &str,
+    team_id: &str,
+    name: &str,
+) -> Result<(), String> {
+    let found = graphql(key, LABELS_BY_NAME, serde_json::json!({ "name": name })).await?;
+    let label = match label_for_team(&found, team_id) {
+        Some(id) => id,
+        None => {
+            let input = serde_json::json!({ "input": { "name": name, "teamId": team_id } });
+            let made = graphql(key, LABEL_CREATE, input).await?;
+            mutation_result(&made, "issueLabelCreate", "Linear did not make the label")?;
+            json_text(&made, "/data/issueLabelCreate/issueLabel/id")
+        }
+    };
+    if label.is_empty() {
+        return Err("Linear did not say which label it made".into());
+    }
+    let variables = serde_json::json!({ "id": issue_id, "labelId": label });
+    let json = graphql(key, ISSUE_ADD_LABEL, variables).await?;
+    mutation_result(&json, "issueAddLabel", "Linear did not add the label")
+}
+
+/// The label in a [`LABELS_BY_NAME`] answer a ticket of team `team_id`
+/// can carry: the team's own first, else a workspace label (no team).
+pub(crate) fn label_for_team(json: &serde_json::Value, team_id: &str) -> Option<String> {
+    let nodes = json.pointer("/data/issueLabels/nodes")?.as_array()?;
+    let team_of = |n: &serde_json::Value| json_text(n, "/team/id");
+    nodes
+        .iter()
+        .find(|n| team_of(n) == team_id)
+        .or_else(|| nodes.iter().find(|n| team_of(n).is_empty()))
+        .map(|n| json_text(n, "/id"))
+        .filter(|id| !id.is_empty())
+}
+
+/// The name of the account `key` belongs to.
+pub(crate) async fn viewer_name(key: &str) -> Result<String, String> {
+    fetch_viewer(key).await.map(|v| v.name)
+}
+
 /// Team `team_id`'s workflow states, in Linear's `position` order.
 pub(crate) async fn team_states(key: &str, team_id: &str) -> Result<Vec<LinearState>, String> {
     let json = graphql(key, TEAM_STATES_QUERY, serde_json::json!({ "id": team_id })).await?;
@@ -7267,6 +7318,52 @@ pub(crate) mod tests {
         assert!(
             app.linear_links.pending(&project, "feature-x").is_empty(),
             "taken"
+        );
+    }
+
+    /// `factory-skip` goes on a ticket as its team's own label, else the
+    /// workspace's; with neither, one is made in the team first.
+    #[test]
+    fn a_label_is_found_for_the_team_or_made_there() {
+        let found = |nodes: serde_json::Value| serde_json::json!({"data": {"issueLabels": {"nodes": nodes}}});
+        let both = found(serde_json::json!([
+            {"id": "L-other", "team": {"id": "t2"}},
+            {"id": "L-all", "team": null},
+            {"id": "L-mine", "team": {"id": "t1"}},
+        ]));
+        assert_eq!(label_for_team(&both, "t1").as_deref(), Some("L-mine"));
+        assert_eq!(label_for_team(&both, "t3").as_deref(), Some("L-all"));
+        let theirs = found(serde_json::json!([{"id": "L-other", "team": {"id": "t2"}}]));
+        assert_eq!(label_for_team(&theirs, "t1"), None);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let sent = with_graphql_stub(
+            |_, query| {
+                Ok(if query == LABELS_BY_NAME {
+                    serde_json::json!({"data": {"issueLabels": {"nodes": []}}})
+                } else if query == LABEL_CREATE {
+                    serde_json::json!({"data": {"issueLabelCreate":
+                        {"success": true, "issueLabel": {"id": "L-new"}}}})
+                } else {
+                    serde_json::json!({"data": {"issueAddLabel": {"success": true}}})
+                })
+            },
+            || {
+                rt.block_on(add_label("k", "uuid-ENG-7", "t1", "factory-skip"))
+                    .unwrap();
+                graphql_sent()
+            },
+        );
+        assert_eq!(
+            sent,
+            [
+                serde_json::json!({"name": "factory-skip"}),
+                serde_json::json!({"input": {"name": "factory-skip", "teamId": "t1"}}),
+                serde_json::json!({"id": "uuid-ENG-7", "labelId": "L-new"}),
+            ]
         );
     }
 

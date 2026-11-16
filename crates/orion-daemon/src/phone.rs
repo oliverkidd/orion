@@ -14,7 +14,11 @@
 //!   - a multi-select question, or several in one ask: every question in
 //!     bold with its options listed dim under it, and one `Answer…`;
 //!   - a plan: `Approve` and `Suggest changes…`;
-//!   - a permission prompt: `Yes` and `Type an answer…`.
+//!   - a permission prompt: `Yes` and `Type an answer…`;
+//!   - and on any of them from a session the bug fixer or the feature
+//!     builder started, `Not for the factory`: the message closes and the
+//!     TUI takes its ticket off the factory (`ServerEvent::FactoryAction`
+//!     under `session:<agent id>`).
 //! - **Modals**: `Type an answer…`, `Answer…` and `Suggest changes…` open
 //!   a Slack modal (`views.open`, with the press's `trigger_id`) — a text
 //!   box; or, for `Answer…`, radio buttons or checkboxes per question,
@@ -55,6 +59,7 @@
 use std::sync::Arc;
 
 use orion_core::away::PhoneKind;
+use orion_core::factory_card::{NOT_FOR_FACTORY, NOT_FOR_FACTORY_LABEL, SESSION_PREFIX};
 use orion_core::slack_caps::{BUTTON, HEADER, MAX_BLOCKS, SECTION};
 use orion_core::{AgentId, AgentStatus, Answer, Asked, Picked, ServerEvent, WaitReason};
 use serde_json::{json, Value};
@@ -115,6 +120,8 @@ pub const ACTION_ANSWER_MODAL: &str = "orion_answer_modal";
 pub const ACTION_TYPE: &str = "orion_type";
 /// `Suggest changes…`: the plan's steer modal.
 pub const ACTION_STEER: &str = "orion_steer";
+/// `Not for the factory`, on a factory session's message.
+pub const ACTION_NOT_FOR_FACTORY: &str = "orion_not_for_factory";
 
 /// The `block_id`s: the `or reply in this thread` line, and in a modal each
 /// question's picks (`orion_q_<n>`) and words (`orion_t_<n>`), and the
@@ -316,6 +323,17 @@ pub fn build(ask: &Ask) -> Built {
             text: format!("{} is waiting for you", ask.session),
         },
     };
+    let mut closing = closing;
+    let factory = ask
+        .automation
+        .is_some_and(orion_core::automation::builds_tickets);
+    if let (true, Some(buttons)) = (factory, closing.buttons.as_mut()) {
+        buttons.push(button(
+            NOT_FOR_FACTORY_LABEL,
+            ACTION_NOT_FOR_FACTORY,
+            NOT_FOR_FACTORY,
+        ));
+    }
     let tail = closing.blocks.len()
         + usize::from(closing.buttons.is_some())
         + usize::from(closing.reply_here);
@@ -413,6 +431,12 @@ impl Close {
 /// what went in at the foot.
 pub fn answered_with(blocks: &[Value], summary: &str) -> Vec<Value> {
     closed(blocks, escape(&sent_line(summary)))
+}
+
+/// `blocks` taken off the factory: its buttons gone, `✓ Not for the
+/// factory` at the foot.
+pub fn not_for_factory(blocks: &[Value]) -> Vec<Value> {
+    closed(blocks, format!("✓ {NOT_FOR_FACTORY_LABEL}"))
 }
 
 /// The line an answered message ends on.
@@ -658,6 +682,8 @@ pub enum Reply {
         action: String,
         trigger: String,
     },
+    /// `Not for the factory`: no answer, the session's ticket taken off.
+    NotForFactory,
 }
 
 /// One reply, routed.
@@ -691,6 +717,7 @@ fn route_action_for(payload: &Value, me: &str, dm: &str) -> Option<Route> {
     let id = action["action_id"].as_str()?;
     let reply = match id {
         ACTION_APPROVE => Reply::Approve,
+        ACTION_NOT_FOR_FACTORY => Reply::NotForFactory,
         ACTION_ANSWER_MODAL | ACTION_TYPE | ACTION_STEER => Reply::Modal {
             action: id.to_string(),
             trigger: payload["trigger_id"].as_str()?.to_string(),
@@ -843,7 +870,7 @@ fn answer_for(kind: PhoneKind, reply: Reply) -> Option<Answer> {
         Reply::Words(text) if kind == PhoneKind::Plan => Some(Answer::Steer(text)),
         Reply::Words(text) => Some(Answer::Text(text)),
         Reply::Answers(picks) => Some(Answer::Answers(picks)),
-        Reply::Modal { .. } => None,
+        Reply::Modal { .. } | Reply::NotForFactory => None,
     }
 }
 
@@ -1194,6 +1221,32 @@ impl Daemon {
         None
     }
 
+    /// `Not for the factory` on `message`: closed so, and every TUI told
+    /// to take its session's ticket off the factory — which archives the
+    /// session, so nothing answers it.
+    async fn phone_not_for_factory(&self, session: &Arc<Session>, message: PhoneMessage) {
+        let _ = self
+            .store
+            .set_phone_answered(&message.channel, &message.ts, Some("phone"));
+        tracing::info!(agent = %message.agent, "not for the factory, from the phone");
+        let blocks: Vec<Value> = serde_json::from_str(&message.blocks).unwrap_or_default();
+        let blocks = not_for_factory(&blocks);
+        let (api, sent) = (session.api.clone(), message.clone());
+        slack("chat.update", move || {
+            api.update(&sent.channel, &sent.ts, NOT_FOR_FACTORY_LABEL, &blocks)
+        })
+        .await;
+        self.broadcast(ServerEvent::FactoryAction {
+            key: format!("{SESSION_PREFIX}{}", message.agent),
+            action: NOT_FOR_FACTORY.to_string(),
+            text: None,
+            by: orion_core::SlackUser {
+                id: session.me.clone(),
+                is_owner: true,
+            },
+        });
+    }
+
     /// A reply on the phone: a plain DM posts what waits again; anything
     /// on a message opens the modal a button asks for, or answers the
     /// session it is to and updates its message to say what went in.
@@ -1230,6 +1283,10 @@ impl Daemon {
         let thread = Some(message.ts.clone());
         if !open {
             say(format!("{ALREADY_ANSWERED}."), thread).await;
+            return;
+        }
+        if route.reply == Reply::NotForFactory {
+            self.phone_not_for_factory(session, message).await;
             return;
         }
         let Some(answer) = answer_for(message.kind, route.reply) else {
@@ -1349,6 +1406,53 @@ mod tests {
             texts(&build(&tagged).blocks)[0],
             "● Bug fixer · web · 10:42"
         );
+    }
+
+    /// A factory session's plan and question offer **Not for the factory**;
+    /// a session you started doesn't, and a crash has no buttons at all.
+    #[test]
+    fn a_factory_sessions_message_offers_not_for_the_factory() {
+        let labels = |ask: &Ask| -> Vec<String> {
+            build(ask)
+                .blocks
+                .iter()
+                .filter(|b| b["type"] == "actions")
+                .flat_map(|b| b["elements"].as_array().cloned().unwrap_or_default())
+                .map(|e| e["text"]["text"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+        let plan = WaitReason::Plan {
+            plan: "1. Fix it".into(),
+        };
+        for reason in [question(), several(), plan] {
+            for runner in ["bug_fixer", "feature_builder"] {
+                let ask = Ask {
+                    automation: Some(runner),
+                    ..ask(None, Some(&reason))
+                };
+                assert_eq!(
+                    labels(&ask).last().map(String::as_str),
+                    Some("Not for the factory"),
+                    "{runner} {reason:?}"
+                );
+            }
+            let theirs = ask(None, Some(&reason));
+            assert!(!labels(&theirs).contains(&"Not for the factory".to_string()));
+            let fixer = Ask {
+                automation: Some("pr_fixer"),
+                ..ask(None, Some(&reason))
+            };
+            assert!(!labels(&fixer).contains(&"Not for the factory".to_string()));
+        }
+        let pressed = press("U1", ACTION_NOT_FOR_FACTORY);
+        assert_eq!(
+            route_action_for(&pressed, "U1", "D1").map(|r| r.reply),
+            Some(Reply::NotForFactory)
+        );
+        assert_eq!(answer_for(PhoneKind::Plan, Reply::NotForFactory), None);
+        let closed = not_for_factory(&[json!({"type": "actions"})]);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0]["elements"][0]["text"], "✓ Not for the factory");
     }
 
     #[test]

@@ -409,6 +409,9 @@ pub enum MenuAction {
         project: ProjectId,
         id: String,
     },
+    /// A factory session's **Not for the factory**: its ticket taken off
+    /// the factory (`linear_builder::owner::not_for_the_factory_session`).
+    NotForFactory(AgentId),
     /// A button of a software factory card on the NEEDS YOU BOARD:
     /// pressed as its Slack twin is, or — one that asks for words — a box
     /// for them first (`needs_you::factory`).

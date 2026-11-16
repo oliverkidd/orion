@@ -338,6 +338,8 @@ pub(crate) fn on_action(
         // Intake and Linear: a held ticket, a thin ticket's question, a
         // plan with nothing to build, a stalled session.
         Some("issue") => crate::automations::linear_builder::owner::on_action(app, press),
+        // A factory session's phone message: **Not for the factory**.
+        Some("session") => crate::automations::linear_builder::owner::on_session_action(app, press),
         // A verdict card's buttons.
         Some("pr") => crate::pr_body::on_action(app, press),
         // Knowledge: the daily card's vetoes, the `.gitignore` ask and a
