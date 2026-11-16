@@ -166,10 +166,11 @@ pub(crate) fn post(app: &mut App, card: Card) {
     if unchanged {
         return;
     }
+    // New, or back after it was closed: not a pressed card put back up.
     let fresh = !app
         .factory_cards
         .iter()
-        .any(|p| p.card.key == card.key && p.state == CardState::Open);
+        .any(|p| p.card.key == card.key && p.state.is_up());
     if fresh && card.to == Recipient::Owner && !app.away {
         let key = crate::hints::key_or(&app.keymap, crate::keymap::Action::Palette, "⌘K");
         app.flash = Some(crate::flash::Flash::note(format!(

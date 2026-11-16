@@ -3417,7 +3417,12 @@ mod tests {
         let page = detail(false, vec![check("unit", "CI", CheckState::Failed)]);
         let out = landed(&mut app, &page);
         assert!(out.is_empty(), "{out:?}");
-        assert_eq!(app.flash, None, "a card, not a flash");
+        // At the desk the card's arrival is the footer's only line.
+        assert!(
+            app.flash.as_ref().is_none_or(|f| f.text.starts_with("◆ ")),
+            "a card, not a flash: {:?}",
+            app.flash
+        );
         let key = cant_fix_key(&pr().url);
         let card = &app.factory_cards.last().expect("a card").card;
         assert_eq!(card.key, key);
