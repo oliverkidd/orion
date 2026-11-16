@@ -42,6 +42,10 @@ pub struct AutomationsSettings {
     /// New tickets wait while this many factory items need you
     /// ([`super::attention`]): **Things waiting on you**.
     pub attention_cap: u8,
+    /// The Claude account the factory runs on, by registry id: **Factory
+    /// account** ([`super::account`]). None is the default agent's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 /// End-to-end tests on this machine, for every automation agent: never
@@ -89,6 +93,7 @@ impl Default for AutomationsSettings {
             per: BTreeMap::new(),
             local_e2e: LocalE2e::default(),
             attention_cap: DEFAULT_ATTENTION_CAP,
+            account: None,
         }
     }
 }

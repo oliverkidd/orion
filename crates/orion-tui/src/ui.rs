@@ -682,6 +682,9 @@ pub(crate) fn confirm_hints(action: &crate::app::PendingAction) -> Vec<crate::hi
             TRASH.hint(),
             CANCEL.show(2).hint(),
         ],
+        PendingAction::MoveFactory { .. } => {
+            vec![YES.hint_as("move it"), CANCEL.show(2).hint_as("not now")]
+        }
         _ => vec![YES.hint(), CANCEL.show(2).hint()],
     }
 }

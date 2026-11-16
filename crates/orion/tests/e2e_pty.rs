@@ -5791,3 +5791,285 @@ async fn a_lost_answer_and_a_newer_question_reach_the_phone() {
     write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
     wait_for_exit(&mut daemon);
 }
+
+/// The live agent rows, off a Snapshot on a connection of their own.
+async fn agents_now(sock: &Path) -> Vec<orion_core::Agent> {
+    let mut c = connect(sock).await;
+    handshake(&mut c).await;
+    write_frame(&mut c, &ClientRequest::Subscribe)
+        .await
+        .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| {
+        evs.iter()
+            .any(|e| matches!(e, ServerEvent::Snapshot { .. }))
+    })
+    .await;
+    events
+        .into_iter()
+        .find_map(|e| match e {
+            ServerEvent::Snapshot { agents, .. } => Some(agents),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// **Factory account** changed: the factory's sessions move to the new
+/// account through the planner the app runs on every tick
+/// (`automations::account::plan`). A session at rest goes at once — its
+/// transcript copied to the same place under the new account's config dir,
+/// the row on the new account, and `claude --resume` of the same session
+/// relaunched with that dir as its `CLAUDE_CONFIG_DIR` — while one
+/// mid-turn waits, nothing of it copied and its turn left running, and
+/// goes the same way once its turn is over. A scripted `claude`, no real
+/// one.
+#[tokio::test]
+async fn the_factory_moves_its_sessions_to_the_new_account_each_as_its_turn_ends() {
+    use orion_core::AgentStatus;
+    use orion_tui::automations::account::plan;
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let dir = env.tmp.path().to_path_buf();
+    let account_a = dir.join("claude-a");
+    let account_b = dir.join("claude-b");
+    env.write_config(
+        &serde_json::json!({
+            "claude_accounts": [{"id": "claude-b", "config_dir": account_b.to_str().unwrap()}]
+        })
+        .to_string(),
+    );
+    // The rc file's `claude`: each run records its config dir and argv,
+    // and the env its hooks would post with, then waits like a CLI.
+    let rc = dir.join("rc.sh");
+    std::fs::write(
+        &rc,
+        format!(
+            concat!(
+                "claude() {{\n",
+                "  args=$(printf '%s ' \"$@\" | tr '\\n' ' ')\n",
+                "  echo \"CFG=$CLAUDE_CONFIG_DIR ARGS=$args\" >> '{d}/runs-'\"$ORION_AGENT_ID\"\n",
+                "  env > '{d}/env-'\"$ORION_AGENT_ID\"\n",
+                "  exec sleep 600\n",
+                "}}\n",
+            ),
+            d = dir.display()
+        ),
+    )
+    .unwrap();
+    let shell = dir.join("factory-shell.sh");
+    std::fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/bash -c \". '{}'; $4\"\n",
+            rc.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&shell);
+    let daemon_env = [(env::CLAUDE_CONFIG_DIR, account_a.to_str().unwrap())];
+    let mut daemon = env.spawn_daemon_in(&shell, None, &daemon_env);
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    let mut ids = Vec::new();
+    for (req_id, name) in [(2, "busy"), (3, "idle")] {
+        write_frame(
+            &mut c,
+            &ClientRequest::CreateAgent {
+                mode: Default::default(),
+                req_id,
+                worktree: worktree.id.clone(),
+                name: name.into(),
+                kind: AgentKind::Claude,
+                custom_harness: None,
+                model: None,
+                effort: None,
+                auto_title: false,
+                starting_prompt: None,
+                automation: Some("bug_fixer".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let events =
+            read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, req_id).is_some()).await;
+        let Some(ServerEvent::Ack {
+            created: Some(EntityId::Agent(id)),
+            ..
+        }) = find_ack(&events, req_id)
+        else {
+            panic!("CreateAgent failed: {events:#?}");
+        };
+        ids.push(id.clone());
+    }
+    let (busy, idle) = (ids[0].clone(), ids[1].clone());
+    let runs = |id: &orion_core::AgentId| -> Vec<String> {
+        std::fs::read_to_string(dir.join(format!("runs-{}", id.as_str())))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    let wait_runs = |id: orion_core::AgentId, n: usize| {
+        let path = dir.join(format!("runs-{}", id.as_str()));
+        async move {
+            let deadline = tokio::time::Instant::now() + SPAWN_CHAIN_TIMEOUT;
+            while std::fs::read_to_string(&path)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+                < n
+            {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{path:?} never had {n} runs"
+                );
+                tokio::time::sleep(POLL_STEP).await;
+            }
+        }
+    };
+    wait_runs(busy.clone(), 1).await;
+    wait_runs(idle.clone(), 1).await;
+
+    // A turn on each, its transcript under the first account; the idle
+    // one's turn ends.
+    let hooks = read_env_file(&dir.join(format!("env-{}", busy.as_str()))).await;
+    let port: u16 = hooks[env::API_URL]
+        .rsplit(':')
+        .next()
+        .unwrap()
+        .trim_end_matches('/')
+        .parse()
+        .unwrap();
+    let token = hooks[env::API_TOKEN].clone();
+    let hook = |id: &orion_core::AgentId, event: &str, body: String| {
+        let path = format!(
+            "/api/hooks/claude?agentId={}&hookEvent={event}",
+            id.as_str()
+        );
+        let token = token.clone();
+        async move {
+            let (status, _) = hook_post_json(port, &path, &token, &body).await;
+            assert_eq!(status, 200);
+        }
+    };
+    let slug = account_a.join("projects").join("-repo");
+    std::fs::create_dir_all(slug.join("sid-idle").join("subagents")).unwrap();
+    for (id, sid) in [(&busy, "sid-busy"), (&idle, "sid-idle")] {
+        std::fs::write(slug.join(format!("{sid}.jsonl")), "{\"type\":\"user\"}\n").unwrap();
+        hook(
+            id,
+            "UserPromptSubmit",
+            format!(r#"{{"session_id":"{sid}","prompt":"go"}}"#),
+        )
+        .await;
+    }
+    std::fs::write(
+        slug.join("sid-idle/subagents/agent-1.jsonl"),
+        "{\"type\":\"assistant\"}\n",
+    )
+    .unwrap();
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        status_change_at(evs, &busy, AgentStatus::Running).is_some()
+            && status_change_at(evs, &idle, AgentStatus::Running).is_some()
+    })
+    .await;
+    hook(&idle, "Stop", r#"{"session_id":"sid-idle"}"#.into()).await;
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        status_change_at(evs, &idle, AgentStatus::Finished).is_some()
+    })
+    .await;
+
+    // The first look: the idle session goes, the busy one waits.
+    let waiting = vec![busy.clone(), idle.clone()];
+    let (send, waiting) = plan(&agents_now(&env.sock()).await, &waiting, "claude-b");
+    assert_eq!(send, std::slice::from_ref(&idle));
+    assert_eq!(waiting, std::slice::from_ref(&busy));
+    let moved_slug = account_b.join("projects").join("-repo");
+    let mut req_id = 10;
+    let mut carry = |id: orion_core::AgentId| {
+        req_id += 1;
+        (
+            req_id,
+            ClientRequest::ContinueAgentOn {
+                req_id,
+                id,
+                harness: "claude-b".into(),
+            },
+        )
+    };
+    let (req, frame) = carry(idle.clone());
+    write_frame(&mut c, &frame).await.unwrap();
+    let events = read_events_until(&mut c, SPAWN_CHAIN_TIMEOUT, |evs| {
+        matches!(find_ack(evs, req), Some(ServerEvent::Error { .. }))
+            || (find_ack(evs, req).is_some()
+                && upserted_agent(evs, &idle)
+                    .is_some_and(|a| a.custom_harness.as_deref() == Some("claude-b")))
+    })
+    .await;
+    assert!(
+        matches!(find_ack(&events, req), Some(ServerEvent::Ack { .. })),
+        "{events:#?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(moved_slug.join("sid-idle.jsonl")).unwrap(),
+        "{\"type\":\"user\"}\n"
+    );
+    assert!(moved_slug
+        .join("sid-idle/subagents/agent-1.jsonl")
+        .is_file());
+    assert!(
+        !moved_slug.join("sid-busy.jsonl").exists(),
+        "the session mid-turn is not touched"
+    );
+    wait_runs(idle.clone(), 2).await;
+    let again = &runs(&idle)[1];
+    assert!(
+        again.starts_with(&format!("CFG={} ", account_b.display()))
+            && again.contains("--resume sid-idle"),
+        "{again}"
+    );
+    assert_eq!(runs(&busy).len(), 1, "its turn runs on");
+
+    // Still mid-turn: the next look waits again. Its turn over, it goes.
+    let (send, still) = plan(&agents_now(&env.sock()).await, &waiting, "claude-b");
+    assert!(send.is_empty());
+    assert_eq!(still, std::slice::from_ref(&busy));
+    hook(&busy, "Stop", r#"{"session_id":"sid-busy"}"#.into()).await;
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        status_change_at(evs, &busy, AgentStatus::Finished).is_some()
+    })
+    .await;
+    let (send, still) = plan(&agents_now(&env.sock()).await, &waiting, "claude-b");
+    assert_eq!(send, std::slice::from_ref(&busy));
+    assert!(still.is_empty());
+    let (req, frame) = carry(busy.clone());
+    write_frame(&mut c, &frame).await.unwrap();
+    let events = read_events_until(&mut c, SPAWN_CHAIN_TIMEOUT, |evs| {
+        matches!(find_ack(evs, req), Some(ServerEvent::Error { .. }))
+            || (find_ack(evs, req).is_some()
+                && upserted_agent(evs, &busy)
+                    .is_some_and(|a| a.custom_harness.as_deref() == Some("claude-b")))
+    })
+    .await;
+    assert!(
+        matches!(find_ack(&events, req), Some(ServerEvent::Ack { .. })),
+        "{events:#?}"
+    );
+    wait_runs(busy.clone(), 2).await;
+    let again = &runs(&busy)[1];
+    assert!(
+        again.starts_with(&format!("CFG={} ", account_b.display()))
+            && again.contains("--resume sid-busy"),
+        "{again}"
+    );
+    let rows = agents_now(&env.sock()).await;
+    for id in [&busy, &idle] {
+        let row = rows.iter().find(|a| &a.id == id).unwrap();
+        assert_eq!(row.custom_harness.as_deref(), Some("claude-b"));
+        assert!(row.session_id.is_some());
+    }
+    let (send, still) = plan(&rows, &[busy.clone(), idle.clone()], "claude-b");
+    assert!(send.is_empty() && still.is_empty(), "both there: done");
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}

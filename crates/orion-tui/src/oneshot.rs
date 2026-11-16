@@ -74,17 +74,38 @@ pub(crate) fn offline() -> bool {
     cfg!(test) || orion_core::env::non_empty(orion_core::env::AGENT_CMD).is_some()
 }
 
-/// The account `cfg` answers `preset`'s asks through: the Claude account
-/// the preset pins (`Config::review_account`), or the default agent's when
-/// it follows the box. None with no Claude account switched on.
+impl Account {
+    /// The account a Claude harness row is: its CLI, its environment and
+    /// its label.
+    pub fn of(entry: &orion_core::harness::HarnessDescriptor) -> Self {
+        Account {
+            program: entry.program.trim().to_string(),
+            env: entry.launch_env(),
+            label: entry.display_label().to_string(),
+        }
+    }
+}
+
+/// The account `cfg` answers an automation `preset`'s asks through: the
+/// Claude account the preset pins (`Config::review_account`), or the
+/// factory account when it follows the box ([`factory_account`]). None
+/// with no Claude account switched on.
 pub fn account_for(cfg: &Config, preset: &AgentPreset) -> Option<Account> {
-    // A preset that follows the box names no account: the default
-    // agent's, as `review_account` reads an empty one.
-    let pinned = match preset.follows_box() {
-        true => "",
-        false => orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref()),
-    };
-    through(cfg, pinned)
+    match preset.follows_box() {
+        true => factory_account(cfg),
+        false => through(
+            cfg,
+            orion_core::harness::registry_id(preset.kind, preset.custom_harness.as_deref()),
+        ),
+    }
+}
+
+/// The factory's own account — what the harvest, the backfill and a
+/// ticket's intake ask through: **Factory account** in Settings ›
+/// Factory, else the default agent's (`automations::account::ask_entry`).
+/// None with no Claude account switched on.
+pub fn factory_account(cfg: &Config) -> Option<Account> {
+    crate::automations::account::ask_entry(cfg).map(|entry| Account::of(&entry))
 }
 
 /// The default agent's Claude account — what an ask with no preset of its
@@ -96,12 +117,7 @@ pub fn default_account(cfg: &Config) -> Option<Account> {
 
 /// The Claude account `pinned` names, else the default agent's.
 fn through(cfg: &Config, pinned: &str) -> Option<Account> {
-    let entry = cfg.review_account(pinned)?;
-    Some(Account {
-        program: entry.program.trim().to_string(),
-        env: entry.launch_env(),
-        label: entry.display_label().to_string(),
-    })
+    cfg.review_account(pinned).map(|entry| Account::of(&entry))
 }
 
 /// Send `ask.prompt` to `ask.model` at `ask.effort` through the account's
@@ -113,12 +129,28 @@ pub async fn run(ask: Ask) -> Result<Reply, String> {
 }
 
 /// [`run`], in `cwd` when given, with `tools` (`Read,Grep,Glob`) allowed
-/// and nothing else; None allows none.
+/// and nothing else; None allows none. While the factory is paused on the
+/// ask's account the ask is refused at once with the pause's line; an ask
+/// on the factory's account refused for a usage limit pauses it
+/// (`automations::limit`).
 pub(crate) async fn run_in(
     ask: Ask,
     cwd: Option<&Path>,
     tools: Option<&str>,
 ) -> Result<Reply, String> {
+    if let Some(why) = crate::automations::limit::refusal(&ask.account) {
+        return Err(why);
+    }
+    let account = ask.account.clone();
+    let reply = run_cli(ask, cwd, tools).await;
+    if let Err(why) = &reply {
+        crate::automations::limit::note_refusal(&account, why);
+    }
+    reply
+}
+
+/// The account's CLI, asked once.
+async fn run_cli(ask: Ask, cwd: Option<&Path>, tools: Option<&str>) -> Result<Reply, String> {
     let mut cmd = tokio::process::Command::new(&ask.account.program);
     cmd.envs(ask.account.env.iter().map(|(name, value)| (name, value)));
     if let Some(cwd) = cwd {

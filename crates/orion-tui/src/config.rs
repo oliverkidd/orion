@@ -2593,8 +2593,9 @@ impl Config {
 
     /// What the AUTOFIX agent launches on when it does not run on the pull
     /// request's own agent: the harness the **PR autofix** SYSTEM PRESET
-    /// pins, while that is on, else the default agent
-    /// ([`Config::quick_prompt_harness`]) — at the preset's model and
+    /// pins, while that is on, else the factory account — the default
+    /// agent's unless Settings › Factory names one
+    /// (`automations::account::harness`) — at the preset's model and
     /// effort, each falling back to that harness's own default when unset
     /// or not offered there (the harness changed since it was picked), and
     /// the effort fitted to the model, as every launch surface does.
@@ -2605,7 +2606,7 @@ impl Config {
     ) -> (AgentKind, Option<String>, Option<String>, Option<String>) {
         let (kind, custom) = match self.autofix_pins(preset) {
             true => (preset.kind, preset.custom_harness.clone()),
-            false => self.quick_prompt_harness(),
+            false => crate::automations::account::harness(self),
         };
         let descriptor = self.effective_harness(kind, custom.as_deref());
         let model = picked(

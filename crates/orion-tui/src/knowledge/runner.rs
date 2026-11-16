@@ -244,9 +244,22 @@ fn enqueue(job: Job) {
 }
 
 /// Run one job, and take it off the queue — or put it back for one more
-/// try when it failed.
+/// try when it failed. One refused at a usage limit stays queued as it
+/// was, its tries untouched, and goes again once the factory's pause
+/// lifts (`automations::limit`).
 async fn work(job: Job) {
     let result = run_job(&job).await;
+    if let Err(why) = &result {
+        if crate::automations::limit::is_limit(why) {
+            tracing::warn!(
+                "knowledge: harvest of #{} of {} waits for the limit to reset: {why}",
+                job.number,
+                job.project
+            );
+            hold_for_reset(job);
+            return;
+        }
+    }
     let retry = match &result {
         Ok(Some(o)) => {
             tracing::info!(
@@ -281,6 +294,24 @@ async fn work(job: Job) {
     if let (Some(again), Some(tx)) = (retry, worker()) {
         let _ = tx.send(again);
     }
+}
+
+/// Hand `job` — still on its queue — back to the worker once the factory's
+/// pause lifts, or after [`crate::automations::limit::UNREAD_RESET`] when
+/// none is kept.
+fn hold_for_reset(job: Job) {
+    let now = chrono::Local::now();
+    let until = crate::automations::limit::current_at(now)
+        .map(|p| p.until_ms)
+        .unwrap_or_else(|| (now + crate::automations::limit::UNREAD_RESET).timestamp_millis());
+    let wait = u64::try_from(until - now.timestamp_millis()).unwrap_or(0);
+    let Some(tx) = worker() else {
+        return;
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        let _ = tx.send(job);
+    });
 }
 
 /// The project at `root` (`local`'s), as orion writes its knowledge: its

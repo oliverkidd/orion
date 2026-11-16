@@ -715,6 +715,12 @@ pub enum PendingAction {
     Upgrade {
         restarts_daemon: bool,
     },
+    /// The notice of the factory at its account's limit: move the factory
+    /// to the Claude account `to` (registry id) — **Factory account** set
+    /// to it, which carries its sessions over (`automations::account`).
+    MoveFactory {
+        to: String,
+    },
 }
 
 impl PendingAction {
@@ -730,6 +736,7 @@ impl PendingAction {
                 | PendingAction::Upgrade {
                     restarts_daemon: false
                 }
+                | PendingAction::MoveFactory { .. }
         )
     }
 

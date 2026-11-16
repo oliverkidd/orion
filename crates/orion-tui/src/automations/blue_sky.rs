@@ -25,7 +25,7 @@ use orion_core::{Agent, AgentId, AgentMode, AgentStatus, ClientRequest, ProjectI
 use super::{Automation, Dot, Panel, PanelList, PanelRow, Runner, Tone};
 use crate::app::App;
 use crate::flash::Flash;
-use crate::quick_prompt::{QuickLaunch, QuickTarget};
+use crate::quick_prompt::QuickTarget;
 use crate::todos::{store, Item, TodoFile, TodoRef};
 
 /// What the **Blue sky builder** preset says while it holds none of the
@@ -479,7 +479,7 @@ fn send(
         cfg.automations.local_e2e.rule(),
         &cfg.automations.of(Automation::BlueSky).extra_steer,
     );
-    let mut launch = QuickLaunch::of_preset(target, preset, None, &cfg)
+    let mut launch = super::account::of_preset(target, preset, &cfg)
         .with_mode(AgentMode::Plan, &cfg)
         .with_todo(Some(TodoRef {
             repo_path: store::blue_sky_key(),

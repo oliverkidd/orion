@@ -722,7 +722,8 @@ Automations                          2 of at most 3 running · caps in Settings
   review (`r` runs it now), and meeting takeaways' unfolds its meetings, `Enter` on one opening its
   takeaways. `Space` turns the automation on or off, and `,` opens its settings.
 - **Settings › Factory.** The factory's own rows first — **Agents working at once**, **Things
-  waiting on you** and **E2E tests on this machine** — then a section per automation, its heading
+  waiting on you**, **Factory account** and **E2E tests on this machine** — then a section per
+  automation, its heading
   saying what it is doing and how many of its sessions run against its own cap. Each has **On**, its
   **Preset** and an **Extra steer**; the PR fixer, the bug fixer, the feature builder and the blue
   sky builder an **At most at once**; the bug fixer and the feature builder their **Labels**; week
@@ -741,6 +742,26 @@ Automations                          2 of at most 3 running · caps in Settings
   request's verdict, a ticket held for you, a fix given up on. Work that comes meanwhile waits for a
   place — a breakage the PR fixer sees stays watched, a ticket at the bug fixer's cap reads
   `queued (at its cap)`, and one held by the attention cap `queued: waiting on you (5)`.
+- **The factory account.** <a id="factory-account"></a>**Factory account** picks the Claude account
+  everything the factory runs goes through: its sessions, the knowledge harvest and backfill, and
+  its model asks (a ticket's intake, the week in review, the meeting takeaways). `←` / `→` step
+  through **Default agent** — the account new agents start on, as before there was a choice — and
+  every Claude account that is on. An automation whose preset pins an account or a harness keeps
+  it; the factory account is what the others run on. Changing it moves every live factory session
+  (one an automation started, not archived) onto the new account, so they all stay on one: each is
+  carried over as **Continue on** does — its conversation copied into the new account's config dir
+  and resumed there under the same session — once its turn is over. A session mid-turn waits, and
+  its turn is never cut short; the row reads `moving, N waiting for their turn to end` meanwhile.
+- **At the limit.** When the factory account hits a usage limit — a model ask refused with
+  `You've hit your weekly limit · resets …`, or a factory session stopped on it — the factory
+  pauses until the limit resets: no automation starts a session or looks for work, asks on that
+  account are refused at once, the backfill stops at the first pull request it can't harvest (the
+  rest wait for the next run) and a harvest waits on its queue. orion says so once, in orion and
+  never on Slack: "Factory account Work is at its limit until Thu 9:00am. Move the factory to
+  Personal?", where `Enter` (or `y`) sets **Factory account** to that account, which moves the
+  factory there, and `Esc` leaves it paused. orion never switches accounts on its own. Past the
+  reset the factory carries on by itself; a limit that names no reset time is tried again after an
+  hour.
 - **Tagged sessions.** Every session an automation starts is an ordinary row on the grid, its
   automation's name ahead of what it runs on (`PR fixer · opus high`), and Needs you labels it the
   same way. orion keeps the tag with the session, across restarts.

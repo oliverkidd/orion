@@ -1,7 +1,9 @@
 //! SETTINGS › FACTORY: where every automation is set up. The factory's
 //! own rows first — **Agents working at once** (the overall cap, all
 //! automations together), **Things waiting on you** (new tickets wait
-//! while this many factory items need you) and the local e2e rule — then
+//! while this many factory items need you), **Factory account** (the
+//! Claude account it all runs on, [`super::account`]) and the local e2e
+//! rule — then
 //! a section per automation, in [`Automation::ALL`] order, holding its
 //! runner's rows ([`Automation::settings`]): on or
 //! off, its own cap, its labels or its schedule, its preset and its extra
@@ -47,6 +49,10 @@ pub const ALL_AUTOMATIONS: &str = "Factory";
 pub const SESSIONS_AT_ONCE: &str = "Agents working at once";
 /// The attention cap's row ([`super::config::AutomationsSettings::attention_cap`]).
 pub const WAITING_ON_YOU: &str = "Things waiting on you";
+/// The factory account's row ([`super::account`]).
+pub const FACTORY_ACCOUNT: &str = "Factory account";
+/// What the line under it says.
+const ACCOUNT_EXPLAINED: &str = "The Claude account the factory's sessions, harvests and asks run on; a preset that pins one keeps it. Changing it moves every live factory session there, each once its turn ends";
 /// The local e2e row ([`super::config::LocalE2e`]).
 pub const LOCAL_E2E: &str = "E2E tests on this machine";
 /// What the line under the rows says on it.
@@ -61,6 +67,8 @@ pub enum Entry {
     Cap,
     /// **Things waiting on you**.
     Attention,
+    /// **Factory account**.
+    Account,
     /// **E2E tests on this machine**.
     E2e,
     /// A row of `which`'s section.
@@ -70,7 +78,7 @@ pub enum Entry {
 impl Entry {
     pub fn automation(self) -> Option<Automation> {
         match self {
-            Entry::Cap | Entry::Attention | Entry::E2e => None,
+            Entry::Cap | Entry::Attention | Entry::Account | Entry::E2e => None,
             Entry::Row(which, _) => Some(which),
         }
     }
@@ -79,7 +87,7 @@ impl Entry {
 /// Every selectable row, top to bottom: the overall cap, then each
 /// automation's rows in its [`Automation::settings`] order.
 pub fn entries() -> Vec<Entry> {
-    [Entry::Cap, Entry::Attention, Entry::E2e]
+    [Entry::Cap, Entry::Attention, Entry::Account, Entry::E2e]
         .into_iter()
         .chain(Automation::ALL.into_iter().flat_map(|which| {
             which
@@ -118,8 +126,9 @@ pub fn settings_rows() -> Vec<SettingsRow> {
         SettingsRow::Setting(0),
         SettingsRow::Setting(1),
         SettingsRow::Setting(2),
+        SettingsRow::Setting(3),
     ];
-    let mut at = 3;
+    let mut at = 4;
     for which in Automation::ALL {
         out.push(SettingsRow::Blank);
         out.push(SettingsRow::Header(which.name().into()));
@@ -137,6 +146,13 @@ pub fn value(app: &App, entry: Entry) -> String {
     let (which, row) = match entry {
         Entry::Cap => return settings.cap().to_string(),
         Entry::Attention => return settings.attention_cap().to_string(),
+        Entry::Account => {
+            let label = super::account::label(&crate::config::Config::load());
+            return match super::account::waiting(app) {
+                0 => label,
+                n => format!("{label} · moving, {n} waiting for their turn to end"),
+            };
+        }
         Entry::E2e => return settings.local_e2e.label().into(),
         Entry::Row(which, row) => (which, row),
     };
@@ -220,6 +236,7 @@ pub fn line(
             let label = match entry {
                 Entry::Cap => SESSIONS_AT_ONCE,
                 Entry::Attention => WAITING_ON_YOU,
+                Entry::Account => FACTORY_ACCOUNT,
                 Entry::E2e => LOCAL_E2E,
                 Entry::Row(_, row) => row.label(),
             };
@@ -267,6 +284,7 @@ pub fn explain(at: usize) -> String {
     let (which, row) = match entry(at) {
         Some(Entry::Row(which, row)) => (which, row),
         Some(Entry::E2e) => return E2E_EXPLAINED.into(),
+        Some(Entry::Account) => return ACCOUNT_EXPLAINED.into(),
         Some(Entry::Attention) => {
             let n = crate::config::Config::load().automations.attention_cap();
             return attention_explained(n);
@@ -357,9 +375,12 @@ pub fn run(app: &mut App, cmd: Cmd) {
         (Cmd::Open(_) | Cmd::Step(..), Entry::E2e) => {
             change_settings(app, |s| s.local_e2e = s.local_e2e.next())
         }
-        (Cmd::Toggle(_) | Cmd::PickPreset(_), Entry::Cap | Entry::Attention | Entry::E2e) => {
-            note(app, "That's for an automation: on one of its rows")
-        }
+        (Cmd::Open(_), Entry::Account) => step_account(app, 1),
+        (Cmd::Step(_, step), Entry::Account) => step_account(app, step),
+        (
+            Cmd::Toggle(_) | Cmd::PickPreset(_),
+            Entry::Cap | Entry::Attention | Entry::Account | Entry::E2e,
+        ) => note(app, "That's for an automation: on one of its rows"),
         (Cmd::Toggle(_), Entry::Row(which, _)) => toggle(app, which),
         (Cmd::PickPreset(_), Entry::Row(which, _)) => {
             crate::preset_overlays::open_for_automation(app, which)
@@ -406,6 +427,19 @@ pub(crate) fn toggle(app: &mut App, which: Automation) {
     if on {
         super::linear_builder::setup::on_enable(app, which);
     }
+}
+
+/// `←`/`→` or Enter on **Factory account**: the next account, the factory
+/// moving there ([`super::account::set`]).
+fn step_account(app: &mut App, step: i8) {
+    let cfg = crate::config::Config::load();
+    if super::account::choices(&cfg).len() < 2 {
+        return note(
+            app,
+            "No Claude account to choose: add one in Settings › Accounts › Claude accounts",
+        );
+    }
+    super::account::set(app, super::account::stepped(&cfg, step));
 }
 
 fn step_own(app: &mut App, which: Automation, step: i8) {
@@ -652,6 +686,27 @@ mod tests {
             assert_eq!(WAITING_ON_YOU, "Things waiting on you");
             let tab = crate::config::automations_tab();
             assert_eq!(crate::config::SETTINGS_TABS[tab].title, "Factory");
+        });
+    }
+
+    /// **Factory account**: the default agent out of the box, stepped
+    /// through the Claude accounts by the arrows and saved.
+    #[test]
+    fn the_factory_account_row_steps_through_the_accounts() {
+        in_config(|| {
+            let mut app = App::new();
+            open_at(&mut app, None);
+            assert_eq!(entry(2), Some(Entry::Account));
+            assert_eq!(
+                value(&app, Entry::Account),
+                super::super::account::DEFAULT_AGENT
+            );
+            assert!(explain(2).starts_with("The Claude account the factory"));
+            run(&mut app, Cmd::Step(2, 1));
+            let saved = crate::config::Config::load().automations.account;
+            assert!(saved.is_some(), "an account chosen");
+            run(&mut app, Cmd::Step(2, -1));
+            assert_eq!(crate::config::Config::load().automations.account, None);
         });
     }
 

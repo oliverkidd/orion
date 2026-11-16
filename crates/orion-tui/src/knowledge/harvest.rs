@@ -145,15 +145,15 @@ pub(crate) struct ClaudeCli {
 }
 
 impl ClaudeCli {
-    /// The default agent's Claude account, when one is on and its CLI is
-    /// installed — and never while `ORION_AGENT_CMD` stands in for the
-    /// agents (orion's own tests).
+    /// The factory's Claude account (`oneshot::factory_account`), when one
+    /// is on and its CLI is installed — and never while `ORION_AGENT_CMD`
+    /// stands in for the agents (orion's own tests).
     pub(crate) fn from_config() -> Result<Self, String> {
         if orion_core::env::non_empty(orion_core::env::AGENT_CMD).is_some() {
             return Err("off while ORION_AGENT_CMD stands in for the agents".into());
         }
         let cfg = crate::config::Config::load();
-        let account = oneshot::default_account(&cfg)
+        let account = oneshot::factory_account(&cfg)
             .ok_or("no Claude account is switched on — Settings → Accounts")?;
         if !crate::config::program_installed(&account.program) {
             return Err(format!("{} is not on your PATH", account.program));

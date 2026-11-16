@@ -2043,8 +2043,10 @@ fn launch_fresh(
 
 /// What a fresh fixer on `pr` runs on, by the PR autofix `preset`'s Runs on row:
 /// following — the default — the harness, account, model and effort of
-/// the session that did the work on the branch ([`source_agent`]), and the
-/// preset's own with none; a harness the preset pins, while it is on, at
+/// the session that did the work on the branch ([`source_agent`]) — on the
+/// factory account in place of its Claude account while one is chosen
+/// ([`super::account::onto`]) — and the preset's own with none; a harness
+/// the preset pins, while it is on, at
 /// the preset's model and effort ([`crate::config::Config::autofix_launch`]).
 /// `(kind, custom, model, effort)`.
 fn launch_of(
@@ -2055,11 +2057,14 @@ fn launch_of(
     cfg: &crate::config::Config,
 ) -> (AgentKind, Option<String>, Option<String>, Option<String>) {
     match source_agent(app, project, pr).filter(|_| !cfg.autofix_pins(preset)) {
-        Some(a) => (
-            a.kind,
-            a.custom_harness.clone(),
-            a.model.clone(),
-            a.effort.clone(),
+        Some(a) => super::account::onto(
+            cfg,
+            (
+                a.kind,
+                a.custom_harness.clone(),
+                a.model.clone(),
+                a.effort.clone(),
+            ),
         ),
         None => cfg.autofix_launch(preset),
     }

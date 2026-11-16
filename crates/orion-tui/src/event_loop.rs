@@ -9756,6 +9756,7 @@ fn run_pending_action(app: &mut App, action: PendingAction, out: &mut Vec<Client
             app.upgrade = true;
             app.should_quit = true;
         }
+        PendingAction::MoveFactory { to } => crate::automations::account::set(app, Some(to)),
     }
 }
 

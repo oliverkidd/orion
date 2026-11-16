@@ -22,8 +22,10 @@
 //! Settings are global, never per project: `automations` in `config.json`
 //! ([`config`]).
 
+pub mod account;
 pub mod blue_sky;
 pub mod config;
+pub mod limit;
 pub mod linear_builder;
 pub mod meeting_takeaways;
 pub mod pr_fixer;
@@ -304,6 +306,8 @@ pub struct Engine {
     pub linear_builder: linear_builder::Shared,
     /// Meeting takeaways' meetings, and its looks and reads under way.
     pub meetings: meeting_takeaways::Shared,
+    /// The factory account's move under way, and the pause at its limit.
+    pub account: account::State,
 }
 
 impl Default for Engine {
@@ -330,6 +334,7 @@ impl Default for Engine {
             tx: None,
             linear_builder: linear_builder::Shared::default(),
             meetings: meeting_takeaways::Shared::default(),
+            account: account::State::default(),
         }
     }
 }
@@ -382,19 +387,23 @@ pub fn with_runner<T>(
     Some(out)
 }
 
-/// The git tick: every runner of an automation that is on looks for work.
-/// The bug fixer and the feature builder share one ledger: it is brought
-/// up to date once before they look, and the Linear writes they made are
+/// The git tick: the factory account's turn first ([`account::tick`]),
+/// then every runner of an automation that is on looks for work — none
+/// while the factory is paused at its account's limit ([`limit`]). The
+/// bug fixer and the feature builder share one ledger: it is brought up
+/// to date once before they look, and the Linear writes they made are
 /// sent once after.
 pub fn tick(app: &mut App, out: &mut Vec<ClientRequest>) {
+    account::tick(app, out);
     let builders = [Automation::BugFixer, Automation::FeatureBuilder]
         .into_iter()
         .any(|which| app.automations.is_on(which));
     if builders {
         linear_builder::stages::follow(app);
     }
+    let paused = app.automations.account.paused.is_some();
     for which in Automation::ALL {
-        if app.automations.is_on(which) {
+        if app.automations.is_on(which) && !paused {
             with_runner(app, which, |runner, app| runner.tick(app, out));
         }
     }
@@ -443,14 +452,15 @@ fn occupies(agent: &Agent) -> bool {
     }
 }
 
-/// Whether one more of `which`'s sessions may start: under the overall
-/// cap, and under its own — and, for a new ticket (the bug fixer's, the
-/// feature builder's), while fewer than `attention_cap` factory items
-/// wait on you.
+/// Whether one more of `which`'s sessions may start: the factory not
+/// paused at its account's limit ([`limit`]), under the overall cap, and
+/// under its own — and, for a new ticket (the bug fixer's, the feature
+/// builder's), while fewer than `attention_cap` factory items wait on you.
 pub fn may_start(app: &App, which: Automation) -> bool {
     let settings = &app.automations.settings;
     let takes_tickets = matches!(which, Automation::BugFixer | Automation::FeatureBuilder);
-    running(app) < settings.cap()
+    app.automations.account.paused.is_none()
+        && running(app) < settings.cap()
         && settings
             .cap_of(which)
             .is_none_or(|own| running_of(app, which) < own)

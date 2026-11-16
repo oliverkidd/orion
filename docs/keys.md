@@ -736,7 +736,7 @@ yours, after a confirmation — it can't be deleted or renamed, so its row has n
 **Yours** `Enter` edits, `^N` makes a new one and `^D` deletes it (with a confirmation); `Enter` on
 **+ New preset** makes one ([Sessions](sessions.md#agent-presets)). On the Factory tab — the
 overall caps, then a section per automation — `←`/`→` change **Agents working at once**, **Things
-waiting on you** and an
+waiting on you**, the **Factory account** (moving the factory's sessions there) and an
 automation's **At most at once** (1 to 10, then any), `Enter` edits the row — **Extra steer** and
 week in review's **When** in a prompt, **Labels** in a pick of your Linear workspace's labels
 (`Space` ticks, `Enter` keeps them), **Whose** switches, **Preset** opens it on the Presets tab —

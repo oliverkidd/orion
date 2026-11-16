@@ -75,7 +75,7 @@ use super::{
 };
 use crate::app::{App, Overlay};
 use crate::linear::LinearIssue;
-use crate::quick_prompt::{QuickLaunch, QuickTarget};
+use crate::quick_prompt::QuickTarget;
 
 /// The repo's factory workflow doc, which every builder prompt points at:
 /// without it, orion starts nothing in that project.
@@ -801,7 +801,7 @@ fn fetched(app: &mut App, which: Automation, projects: Vec<ProjectId>, issues: V
     };
     let shared = &mut app.automations.linear_builder;
     shared.claimed.extend(tickets.iter().map(|t| t.id.clone()));
-    let account = crate::oneshot::default_account(&crate::config::Config::load());
+    let account = crate::oneshot::factory_account(&crate::config::Config::load());
     tokio::spawn(async move {
         let answer = place(which, tickets, candidates, account, extras).await;
         let _ = tx.send(super::Answer::LinearBuilder(answer));
@@ -907,7 +907,7 @@ fn launch(app: &mut App, group: Group, out: &mut Vec<ClientRequest>) -> Result<(
     };
     // The preset's harness, account, model and effort; its text is the
     // batch's task already.
-    let mut launch = QuickLaunch::of_preset(target, preset, None, &cfg);
+    let mut launch = super::account::of_preset(target, preset, &cfg);
     launch.preset = None;
     let launch = launch
         .with_linear(Some(batch))

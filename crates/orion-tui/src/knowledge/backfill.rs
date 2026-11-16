@@ -10,6 +10,12 @@
 //! pass against the code as origin's base has it now (a temporary
 //! checkout, `harvest::CheckTree`; with none, the pass is skipped),
 //! committed the same way. Runs from the CLI, with no TUI.
+//!
+//! A usage limit stops it at the first pull request it refuses
+//! ([`harvest_each`]): what was harvested is committed and proposed, and
+//! the rest wait for a run after the reset — none of them is tried
+//! against a limit that would refuse it too. The factory pauses on that
+//! account (`crate::automations::limit`).
 
 use std::path::Path;
 
@@ -48,6 +54,9 @@ pub(crate) struct Summary {
     /// `(pr, why)`: harvested before, or nothing to read.
     pub skipped: Vec<(u64, String)>,
     pub failed: Vec<(u64, String)>,
+    /// The usage limit the backfill stopped at, and how many pull
+    /// requests it left for the next run.
+    pub stopped: Option<(String, usize)>,
     /// Topics the staleness pass changed.
     pub stale: Vec<String>,
     /// The last consolidation of the topics.
@@ -80,6 +89,11 @@ impl Summary {
         )];
         for (pr, why) in &self.failed {
             lines.push(format!("#{pr} failed: {why}"));
+        }
+        if let Some((why, left)) = &self.stopped {
+            lines.push(format!(
+                "Stopped at a usage limit ({why}); {left} more wait: run the backfill again after the reset to carry on."
+            ));
         }
         if let Some(done) = &self.consolidated {
             lines.push(done.line());
@@ -266,55 +280,34 @@ pub(crate) async fn run(
             project: &share.project,
             records: &records,
         };
-        let mut numbers = Vec::new();
-        for (pr, found) in batch {
-            done += 1;
-            say(&format!(
-                "[{done}/{}] #{} ({} transcripts)…",
-                todo.len(),
-                pr.number,
-                found.len()
-            ));
-            let (info, comments) = match harvest::gather_pr(gh, root, pr.number).await {
-                Ok(g) => g,
-                Err(why) => {
-                    summary.failed.push((pr.number, why));
-                    continue;
-                }
-            };
-            let found = found.clone();
-            let sessions = tokio::task::spawn_blocking(move || {
-                found.iter().filter_map(session_of).collect::<Vec<_>>()
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-            let (outcome, unchecked) =
-                harvest::harvest_merge(model, &to, root, &info, &comments, &sessions).await;
-            if let Some(why) = unchecked {
-                say(&format!("  not checked against the code: {why}"));
-            }
-            match outcome {
-                Ok(outcome) => {
-                    say(&format!(
-                        "  {} rules kept, {} dropped",
-                        outcome.kept, outcome.dropped
-                    ));
-                    numbers.push(format!("#{}", outcome.pr));
-                    summary.harvested.push(outcome);
-                }
-                Err(why) => {
-                    say(&format!("  failed: {why}"));
-                    summary.failed.push((pr.number, why));
-                }
-            }
-        }
+        let (to, model) = (&to, model);
+        let numbers = harvest_each(
+            batch,
+            (&mut done, todo.len()),
+            &mut summary,
+            say,
+            move |(pr, found): &Todo| async move {
+                let (info, comments) = match harvest::gather_pr(gh, root, pr.number).await {
+                    Ok(g) => g,
+                    Err(why) => return (Err(why), None),
+                };
+                let found = found.clone();
+                let sessions = tokio::task::spawn_blocking(move || {
+                    found.iter().filter_map(session_of).collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default();
+                harvest::harvest_merge(model, to, root, &info, &comments, &sessions).await
+            },
+        )
+        .await;
         if !numbers.is_empty() {
             let mut message = format!("knowledge: backfill {}", numbers.join(", "));
             fresh = true;
             if consolidate::over_cap(&store) {
                 share.commit(&message).await?;
                 say("  past the topic cap: consolidating…");
-                let done = consolidate::consolidate(model, &to).await?;
+                let done = consolidate::consolidate(model, to).await?;
                 say(&format!("  {}", done.line()));
                 summary.consolidated = Some(done);
                 message = consolidate::MESSAGE.to_string();
@@ -324,6 +317,17 @@ pub(crate) async fn run(
             say_published(say, &published);
             summary.published(published);
         }
+        if summary.stopped.is_some() {
+            break;
+        }
+    }
+    // At a limit, consolidating and checking the topics would only meet
+    // it again: the next run does both.
+    if let Some((why, left)) = &summary.stopped {
+        say(&format!(
+            "Stopped at a usage limit, {left} pull requests left for the next run: {why}"
+        ));
+        return Ok(summary);
     }
     {
         let branch = share.open().await?;
@@ -374,6 +378,66 @@ pub(crate) async fn run(
     Ok(summary)
 }
 
+/// One pull request harvested: its outcome, and why it went unchecked
+/// against the code when it did (`harvest::harvest_merge`).
+pub(crate) type HarvestOne = (Result<Outcome, String>, Option<String>);
+
+/// Harvest `batch`'s pull requests one after another with `one`, counting
+/// on from `count`'s done of its total and saying how each goes; each
+/// outcome or failure lands in `summary`. The first usage limit stops it
+/// there — the pull request it refused, and every one after it in the
+/// backfill, left for the next run (`Summary::stopped`). The numbers
+/// harvested, `#12`, for the batch's commit.
+pub(crate) async fn harvest_each<'t, Fut>(
+    batch: &'t [Todo],
+    count: (&mut usize, usize),
+    summary: &mut Summary,
+    say: &mut (dyn FnMut(&str) + Send),
+    mut one: impl FnMut(&'t Todo) -> Fut,
+) -> Vec<String>
+where
+    Fut: std::future::Future<Output = HarvestOne>,
+{
+    let (done, total) = count;
+    let mut numbers = Vec::new();
+    for todo in batch {
+        let (pr, found) = todo;
+        *done += 1;
+        say(&format!(
+            "[{done}/{total}] #{} ({} transcripts)…",
+            pr.number,
+            found.len()
+        ));
+        let (outcome, unchecked) = one(todo).await;
+        if let Some(why) = unchecked {
+            say(&format!("  not checked against the code: {why}"));
+        }
+        match outcome {
+            Ok(outcome) => {
+                say(&format!(
+                    "  {} rules kept, {} dropped",
+                    outcome.kept, outcome.dropped
+                ));
+                numbers.push(format!("#{}", outcome.pr));
+                summary.harvested.push(outcome);
+            }
+            Err(why) => {
+                say(&format!("  failed: {why}"));
+                let limit = crate::automations::limit::is_limit(&why);
+                summary.failed.push((pr.number, why.clone()));
+                if limit {
+                    // This one and every one after it, here and in the
+                    // batches still to come.
+                    summary.stopped = Some((why, total - *done + 1));
+                    summary.failed.pop();
+                    break;
+                }
+            }
+        }
+    }
+    numbers
+}
+
 /// Where a batch went.
 fn say_published(say: &mut (dyn FnMut(&str) + Send), published: &Published) {
     if let Some(pr) = &published.pr {
@@ -400,6 +464,103 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             mentions: mentions.iter().copied().collect::<BTreeMap<_, _>>(),
         }
+    }
+
+    fn todo(number: u64) -> Todo {
+        let listed = Listed {
+            number,
+            branch: format!("b{number}"),
+            merged_at: number.to_string(),
+        };
+        (listed, Vec::new())
+    }
+
+    /// The first usage limit stops the backfill there: the pull requests
+    /// before it harvested, the one it refused and every one after it
+    /// left for the next run, untried.
+    #[tokio::test]
+    async fn the_backfill_stops_at_the_first_limit() {
+        let todo: Vec<Todo> = (1..=5).map(todo).collect();
+        let mut summary = Summary::default();
+        let mut said = Vec::new();
+        let mut say = |line: &str| said.push(line.to_string());
+        let mut asked = Vec::new();
+        let mut done = 0;
+        let numbers = harvest_each(
+            &todo[..4],
+            (&mut done, todo.len()),
+            &mut summary,
+            &mut say,
+            |(pr, _): &Todo| {
+                asked.push(pr.number);
+                let number = pr.number;
+                async move {
+                    match number {
+                        2 => (Err("gh couldn't read #2".to_string()), None),
+                        3 => (
+                            Err("You've hit your weekly limit · resets Nov 20, 9am".into()),
+                            None,
+                        ),
+                        n => (
+                            Ok(Outcome {
+                                pr: n,
+                                kept: 1,
+                                dropped: 0,
+                                topics: Vec::new(),
+                            }),
+                            None,
+                        ),
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(asked, [1, 2, 3], "nothing is tried past the limit");
+        assert_eq!(numbers, ["#1"]);
+        assert_eq!(summary.failed, [(2, "gh couldn't read #2".to_string())]);
+        let (why, left) = summary.stopped.clone().expect("stopped");
+        assert!(why.starts_with("You've hit your weekly limit"));
+        assert_eq!(left, 3, "#3 and the two after it");
+        let lines = summary.lines();
+        assert!(lines[0].contains("1 pull requests harvested"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("Stopped at a usage limit") && l.contains("3 more wait")),
+            "{lines:?}"
+        );
+        assert!(said.iter().any(|l| l.contains("failed: You've hit")));
+
+        // Any other failure carries on to the next.
+        let mut summary = Summary::default();
+        let mut done = 0;
+        let mut quiet = |_: &str| {};
+        let numbers = harvest_each(
+            &todo[..2],
+            (&mut done, 2),
+            &mut summary,
+            &mut quiet,
+            |(pr, _): &Todo| {
+                let number = pr.number;
+                async move {
+                    match number {
+                        1 => (Err("the model's JSON did not read".to_string()), None),
+                        n => (
+                            Ok(Outcome {
+                                pr: n,
+                                kept: 0,
+                                dropped: 0,
+                                topics: Vec::new(),
+                            }),
+                            None,
+                        ),
+                    }
+                }
+            },
+        )
+        .await;
+        assert_eq!(numbers, ["#2"]);
+        assert_eq!(summary.stopped, None);
     }
 
     #[test]
