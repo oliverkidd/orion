@@ -4536,10 +4536,7 @@ fn dispatch_action(
         Action::OpenInCursor => open_checkout_outside(app),
         Action::OpenOutside => menus::open_outside_menu(app),
         Action::CommandPalette => menus::open_command_palette(app),
-        // The selected worktree's OPEN COMMAND (the palette, ⌘O's menu):
-        // the cursor's worktree is the context wherever the cursor stands,
-        // so it is never quietly dropped on Sessions.
-        Action::OpenWorktree => open_selected_worktree(app),
+        // ⌘O's **Open app**: the cursor's checkout's run's first port.
         Action::OpenApp => crate::stacks::open_app(app),
         // AddProject adds a project from ANY panel — unlike New it never
         // changes meaning with focus, matching the "open a repo" instinct.
@@ -4878,12 +4875,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
             let hint = match kind {
                 crate::config::SettingKind::BaseBranch => {
                     "branch this project's new worktrees start from (empty = auto: origin's default branch)"
-                }
-                crate::config::SettingKind::SetupCommand => {
-                    "shell line run once in each new worktree, e.g. just setup-worktree (empty = none)"
-                }
-                crate::config::SettingKind::OpenCommand => {
-                    "shell line ⌘O → Open command runs to open a worktree of this project (empty = none)"
                 }
                 _ => "value (empty = default)",
             };
@@ -5611,87 +5602,6 @@ fn start_run_with(
             command: Some(command),
         }
     });
-}
-
-/// **Open checkout in editor** (the palette, ⌘O's menu): fire the
-/// selected checkout's OPEN COMMAND.
-fn open_selected_worktree(app: &mut App) {
-    // A pull request row has no checkout to open.
-    if app.selected_worktree_pr().is_some() {
-        return;
-    }
-    let Some(w) = app.selected_worktree().cloned() else {
-        return;
-    };
-    open_worktree(app, &w);
-}
-
-/// Why `Shift+Enter` has nothing to run, naming where to set one — the
-/// twin of the DAEMON's line for `r`.
-const NO_OPEN_COMMAND: &str =
-    "no open command for this project — set one in Settings → Projects (Open command)";
-
-/// Run `worktree`'s OPEN COMMAND once — saying why when there is none or
-/// it won't start: the project's **Open command** setting (Settings →
-/// Projects). The TUI runs it, not the DAEMON: it opens a browser or an
-/// editor on the machine the user is sitting at.
-fn open_worktree(app: &mut App, worktree: &orion_core::Worktree) {
-    let main = app
-        .tree
-        .projects
-        .iter()
-        .find(|p| p.id == worktree.project_id)
-        .map_or_else(|| worktree.path.clone(), |p| p.repo_path.clone());
-    let Some(command) = open_command_for(&main) else {
-        app.flash = Some(crate::flash::Flash::failed(NO_OPEN_COMMAND));
-        return;
-    };
-    if let Err(e) = spawn_open_command(&command, &worktree.path) {
-        app.flash = Some(crate::flash::Flash::failed(format!(
-            "couldn't run {command}: {e}"
-        )));
-    }
-}
-
-/// The OPEN COMMAND for the project whose main checkout is `main`,
-/// resolved the way the DAEMON resolves `r`'s: its `open_command` setting,
-/// read fresh so an edit applies on the next press. None when it is unset.
-fn open_command_for(main: &std::path::Path) -> Option<String> {
-    let setting = crate::config::Config::load().project(main).open_command;
-    let setting = setting.trim();
-    (!setting.is_empty()).then(|| setting.to_string())
-}
-
-/// Start an OPEN COMMAND through `$SHELL -c` in `cwd`, kept off the TUI's
-/// screen: no stdin, output discarded (a stray byte on the TUI's terminal
-/// tears the frame), a process group of its own, reaped on a thread. A
-/// failure to start is the caller's to show; a non-zero exit only logs,
-/// since by then `open` has handed the URL over or said why not.
-fn spawn_open_command(command: &str, cwd: &std::path::Path) -> std::io::Result<()> {
-    if cfg!(test) {
-        return Ok(());
-    }
-    use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
-    let shell = orion_core::shell::user_shell();
-    let mut child = Command::new(shell)
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()?;
-    let command = command.to_string();
-    std::thread::spawn(move || match child.wait() {
-        Ok(status) if !status.success() => {
-            tracing::warn!(%command, %status, "open command failed");
-        }
-        Err(err) => tracing::warn!(%command, %err, "open command not reaped"),
-        Ok(_) => {}
-    });
-    Ok(())
 }
 
 /// The selected worktree's checkout — path and branch — for the modals that
@@ -7564,10 +7474,7 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         crate::stacks::menu_label(app, &w.id),
         MenuAction::ToggleRun(w.id.clone()),
     ));
-    items.push(MenuItem::new(
-        "Open",
-        MenuAction::OpenWorktree(w.id.clone()),
-    ));
+    items.push(crate::stacks::open_app_item());
     items.push(MenuItem::new(
         "Pull",
         MenuAction::PullWorktree(w.id.clone()),
@@ -7793,7 +7700,7 @@ fn worktree_menu_items(app: &App, w: &orion_core::Worktree) -> Vec<MenuItem> {
         MenuItem::new("New agent", MenuAction::NewAgent(w.id.clone())),
         MenuItem::new("New terminal", MenuAction::NewTerminal(w.id.clone())),
         MenuItem::new(run, MenuAction::ToggleRun(w.id.clone())),
-        MenuItem::new("Open", MenuAction::OpenWorktree(w.id.clone())),
+        crate::stacks::open_app_item(),
         MenuItem::new("Pull", MenuAction::PullWorktree(w.id.clone())),
         MenuItem::new("Push", MenuAction::PushWorktree(w.id.clone())),
     ];
@@ -10105,11 +10012,6 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             start_run_with(app, &worktree, command, out)
         }
         MenuAction::RestartRun(id) => crate::stacks::restart(app, &id, out),
-        MenuAction::OpenWorktree(id) => {
-            if let Some(w) = app.tree.worktrees.iter().find(|w| w.id == id).cloned() {
-                open_worktree(app, &w);
-            }
-        }
         MenuAction::DeleteWorktree(id) => activate::delete_worktree(app, &id),
         MenuAction::PullWorktree(id) => {
             crate::git_sync::request(app, id, crate::git_sync::Op::Pull)
@@ -21165,58 +21067,6 @@ mod tests {
             assert_eq!(app.launcher_pane_hidden, pane_hidden);
             assert_eq!(app.select_when_seen, None, "nothing waits to follow it");
         }
-    }
-
-    /// **Open command** (⌘O's menu) on a worktree fires its OPEN COMMAND —
-    /// the project's **Open command** setting — and without one says where
-    /// to set it, without Enter's
-    /// drill-in. It answers from the Sessions panel too, where the
-    /// cursor's worktree is just as much the context. ⇧Enter and ⌥Enter
-    /// stay Enter's.
-    #[test]
-    fn the_open_command_fires_on_a_worktree() {
-        use crate::config::SettingKind::OpenCommand;
-        let dir = tempfile::tempdir().unwrap();
-        let config_path = dir.path().join("config.json");
-        crate::config::with_config_path(config_path.clone(), || {
-            let mut app = App::new();
-            seed_repo_tree(&mut app, dir.path());
-            app.focus = Focus::Worktrees;
-            let mut out = Vec::new();
-            out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            let flash = app.flash.as_deref().unwrap_or_default().to_string();
-            assert!(
-                flash.contains("no open command") && flash.contains("Settings → Projects"),
-                "names where to set one: {flash}"
-            );
-            assert_eq!(app.focus, Focus::Worktrees, "not Enter's drill-in");
-
-            let fires = || open_command_for(dir.path());
-            assert_eq!(fires(), None);
-
-            // Set, it fires — read fresh per press.
-            let mut cfg = crate::config::Config::load();
-            assert!(cfg.set_project_text(dir.path(), OpenCommand, "open http://localhost:5173"));
-            cfg.save_to(&config_path).unwrap();
-            assert_eq!(fires().as_deref(), Some("open http://localhost:5173"));
-            app.flash = None;
-            out.extend(run_action(&mut app, crate::keymap::Action::OpenWorktree));
-            assert_eq!(app.flash, None, "what it opens is the answer");
-
-            // Sessions panel: the same worktree is under the
-            // cursor, so the same command fires, and focus stays put.
-            app.focus = Focus::Sessions;
-            out.extend(crate::event_loop::run_action(
-                &mut app,
-                crate::keymap::Action::OpenWorktree,
-            ));
-            assert_eq!(app.flash, None);
-            assert_eq!(app.focus, Focus::Sessions);
-            assert!(
-                out.is_empty(),
-                "opening is the TUI's own doing, never a request"
-            );
-        });
     }
 
     #[test]
@@ -34260,18 +34110,18 @@ mod tests {
             .collect()
     }
 
-    /// **Setup command** on the PROJECT TAB, which lists every project
+    /// **Base branch** on the PROJECT TAB, which lists every project
     /// whichever is selected: Enter opens a prompt titled with the row's
-    /// project, pre-filled with its stored command; Enter there writes
-    /// `setup_command` into that project's entry (and nothing else), the
-    /// row reads it back, the next project's row still reads `not set`;
+    /// project, pre-filled with its stored branch; Enter there writes
+    /// `base_branch` into that project's entry (and nothing else), the
+    /// row reads it back, the next project's row still reads `auto`;
     /// ←/→ only explain themselves; Esc keeps the old value; an empty
     /// Enter unsets it and drops the key. With
     /// no project in the tree the tab says so, and Enter opens nothing
     /// and says why.
     #[test]
-    fn the_project_tab_setup_command_is_typed_into_each_projects_entry() {
-        use crate::config::SettingKind::SetupCommand;
+    fn the_project_tab_base_branch_is_typed_into_each_projects_entry() {
+        use crate::config::SettingKind::BaseBranch;
         use orion_core::{Entity, Project, ProjectId};
         let draw_to_string = |app: &mut App, w: u16, h: u16| {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -34300,7 +34150,7 @@ mod tests {
             );
             app.set_sel_project(0);
             let tab = crate::config::project_tab();
-            let (_, row) = crate::config::locate(SetupCommand).unwrap();
+            let (_, row) = crate::config::locate(BaseBranch).unwrap();
             let open_at = |app: &mut App, out: &mut Vec<ClientRequest>, row: usize| {
                 press(app, KeyCode::Char('s'), KeyModifiers::NONE, out);
                 let digit = char::from_digit(tab as u32 + 1, 10).unwrap();
@@ -34321,12 +34171,12 @@ mod tests {
 
             open_on_row(&mut app, &mut out);
             let screen = draw_to_string(&mut app, 100, 40);
-            assert!(screen.contains("Setup command"), "{screen}");
+            assert!(screen.contains("Base branch"), "{screen}");
             assert!(
                 screen.contains("demo") && screen.contains("/tmp/other"),
                 "every project has its block: {screen}"
             );
-            assert!(screen.contains("[not set]"), "unset: {screen}");
+            assert!(screen.contains("[auto]"), "unset: {screen}");
 
             // ←/→: nothing to cycle, the overlay stays and explains.
             press(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, &mut out);
@@ -34341,47 +34191,47 @@ mod tests {
             // Enter: a prompt in the overlay's place, named for the project.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("expected the setup command prompt, got {:?}", app.overlay);
+                panic!("expected the base branch prompt, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.title, "Setup command · demo");
+            assert_eq!(prompt.title, "Base branch · demo");
             assert_eq!(prompt.input.as_str(), "");
             assert!(matches!(
                 &prompt.kind,
-                PromptKind::SettingText { kind: SetupCommand, project: Some(p) }
+                PromptKind::SettingText { kind: BaseBranch, project: Some(p) }
                     if p == std::path::Path::new("/tmp/demo")
             ));
-            type_text(&mut app, "npm run dev", &mut out);
+            type_text(&mut app, "release", &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert!(out.is_empty(), "a setting is a file write, not a request");
             assert_eq!(
                 saved(&path)["projects"],
                 serde_json::json!({
-                    "/tmp/demo": { "setup_command": "npm run dev" }
+                    "/tmp/demo": { "base_branch": "release" }
                 })
             );
             let view = settings_view(&app);
             assert_eq!((view.tab, view.selected, view.on_tabs), (tab, row, false));
             assert!(
-                matches!(&view.notice, Some((t, _)) if t.contains("npm run dev")),
+                matches!(&view.notice, Some((t, _)) if t.contains("release")),
                 "the notice shows the saved value: {:?}",
                 view.notice
             );
             let screen = draw_to_string(&mut app, 100, 40);
-            assert!(screen.contains("[npm run dev]"), "{screen}");
+            assert!(screen.contains("[release]"), "{screen}");
 
             // Reopened, the prompt carries the stored value; Esc keeps it.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("expected the setup command prompt, got {:?}", app.overlay);
+                panic!("expected the base branch prompt, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.input.as_str(), "npm run dev");
+            assert_eq!(prompt.input.as_str(), "release");
             type_text(&mut app, " --typo", &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             assert_eq!(
                 crate::config::Config::load()
                     .project(std::path::Path::new("/tmp/demo"))
-                    .setup_command,
-                "npm run dev"
+                    .base_branch,
+                "release"
             );
             let view = settings_view(&app);
             assert_eq!((view.tab, view.selected), (tab, row));
@@ -34392,26 +34242,26 @@ mod tests {
             let other = row + crate::config::tab_settings(tab).len();
             open_at(&mut app, &mut out, other);
             let screen = draw_to_string(&mut app, 100, 40);
-            assert!(screen.contains("[not set]"), "{screen}");
+            assert!(screen.contains("[auto]"), "{screen}");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("expected the setup command prompt, got {:?}", app.overlay);
+                panic!("expected the base branch prompt, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.title, "Setup command · other");
+            assert_eq!(prompt.title, "Base branch · other");
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 
             // An empty Enter unsets it — the entry goes.
             open_on_row(&mut app, &mut out);
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            for _ in 0.."npm run dev".len() {
+            for _ in 0.."release".len() {
                 press(&mut app, KeyCode::Backspace, KeyModifiers::NONE, &mut out);
             }
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             assert_eq!(saved(&path)["projects"], serde_json::json!({}));
             let view = settings_view(&app);
             assert!(
-                matches!(&view.notice, Some((t, _)) if t.contains("not set")),
+                matches!(&view.notice, Some((t, _)) if t.contains("auto")),
                 "unset: {:?}",
                 view.notice
             );

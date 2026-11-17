@@ -878,7 +878,7 @@ fn project_menu(app: &mut App, at: (u16, u16)) {
             crate::stacks::menu_label(app, &w),
             MenuAction::ToggleRun(w.clone()),
         ));
-        items.push(MenuItem::new("Open", MenuAction::OpenWorktree(w.clone())));
+        items.push(crate::stacks::open_app_item());
         if !app.tree.worktrees.iter().any(|x| x.id == w && x.is_main) {
             items.push(MenuItem::destructive(
                 "Delete worktree",

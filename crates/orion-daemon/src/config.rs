@@ -54,9 +54,8 @@ pub struct Config {
     pub away: orion_core::away::AwaySettings,
 }
 
-/// One project's entry under `projects` — the rows of the TUI's Projects
-/// tab, of which the daemon reads four. The rest (`open_command`) are the
-/// TUI's and pass through unread.
+/// One project's entry under `projects`, of which the daemon reads four
+/// keys. The rest are the TUI's, or retired, and pass through unread.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct ProjectConfig {
@@ -70,8 +69,8 @@ pub struct ProjectConfig {
     /// log. Read through [`Config::base_branch`].
     pub base_branch: String,
     /// The SETUP COMMAND run once in each worktree orion creates for this
-    /// project, in a setup row in its band, typed into Settings →
-    /// Projects. Empty means there is none.
+    /// project, in a setup row in its band — set by hand in `config.json`,
+    /// as no row sets it any more. Empty means there is none.
     pub setup_command: String,
     /// The RUN COMMAND from a config written before `⌘⇧S` found the
     /// checkout's apps itself (`ClientRequest::StartRun`'s `command`): a
@@ -184,9 +183,9 @@ impl Config {
             })
     }
 
-    /// The RUN COMMAND set for the project checked out at `repo_path` in
-    /// Settings → Projects, trimmed; None when the project has no entry or
-    /// the row is empty.
+    /// The RUN COMMAND for the project checked out at `repo_path` — a
+    /// start's picked app, or an older config's — trimmed; None when the
+    /// project has no entry or it is empty.
     pub fn run_command(&self, repo_path: &Path) -> Option<&str> {
         self.command_line(repo_path, |p| &p.run_command)
     }

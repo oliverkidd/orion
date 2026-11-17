@@ -106,11 +106,6 @@ pub enum Action {
     /// `⇧P`: PUSH the selected checkout's branch — fast-forward its
     /// upstream, or publish a branch that tracks nothing; never a force.
     PushWorktree,
-    /// Fire the selected worktree's OPEN COMMAND — the project's **Open
-    /// command** setting (`open http://localhost:3000`, say) — from the
-    /// COMMAND PALETTE or ⌘O's OPEN MENU; no key by default. Its RUN
-    /// COMMAND is what ⌘⇧S starts ([`Action::ToggleStack`]).
-    OpenWorktree,
     /// ⌘O's **Open app**: the first localhost port the cursor's
     /// checkout's run printed, in the browser (`crate::stacks::open_app`).
     OpenApp,
@@ -538,15 +533,6 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         defaults: &["shift+p"],
-    },
-    ActionSpec {
-        action: Action::OpenWorktree,
-        id: "open_worktree",
-        label: "Open checkout in editor",
-        hint: "Open the selected checkout outside orion, usually in your editor: its project's Open command (Settings → Projects) — e.g. open http://localhost:3000",
-        group: "PROJECTS & WORKTREES",
-        scope: Scope::Global,
-        defaults: &[],
     },
     ActionSpec {
         action: Action::OpenApp,
@@ -996,7 +982,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::RunSetup,
         id: "run_setup",
         label: "Run setup",
-        hint: "Open Orion setup again: Claude and its accounts (i installs its CLI), your first project's base branch and setup command, and the keys that matter",
+        hint: "Open Orion setup again: Claude and its accounts (i installs its CLI), your first project and the branch its worktrees start from, and the keys that matter",
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &[],

@@ -370,8 +370,7 @@ pub(crate) fn take_opened_as() -> Vec<(String, Option<String>)> {
 /// `open` spends 50 to 150 ms talking to LaunchServices before it exits,
 /// and the key that asked for a browser tab used to spend them with it —
 /// the loop frozen, the flash unpainted. Whether it then succeeds is not
-/// something the keypress can wait to learn; a failure is logged (the
-/// `spawn_open_command` rule), and the reaper thread is what keeps the
+/// something the keypress can wait to learn; a failure is logged, and the reaper thread is what keeps the
 /// child from lingering as a zombie.
 fn spawn_and_reap(mut command: std::process::Command, what: &'static str) -> bool {
     use std::process::Stdio;

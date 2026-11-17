@@ -65,10 +65,6 @@ pub const AUTO_CHOICE: &str = "auto";
 /// The Projects tab with no project to list.
 pub const NO_PROJECTS: &str = "no projects yet — each one you add gets its rows here";
 
-/// What the Projects tab's **Setup command** and **Open
-/// command** rows show while they are empty: there is nothing to run then.
-pub const NO_COMMAND: &str = "not set";
-
 // The static model/effort lists live in the core registry table now
 // ([`orion_core::harness::builtin`]); what the pickers show is built
 // below from the effective descriptor, so a `harnesses` override renames
@@ -395,9 +391,6 @@ pub enum SettingKind {
     QuickPromptKind,
     /// A project's base branch: what its new worktrees start from.
     BaseBranch,
-    /// A project's SETUP COMMAND: what runs once in each new worktree.
-    SetupCommand,
-    OpenCommand,
     /// A project's ON WORKTREE DELETE: what deleting one of its worktrees
     /// does to the docker compose projects started in it.
     WorktreeContainers,
@@ -521,8 +514,6 @@ impl SettingKind {
         matches!(
             self,
             SettingKind::BaseBranch
-                | SettingKind::SetupCommand
-                | SettingKind::OpenCommand
                 | SettingKind::About
                 | SettingKind::Away(AwayField::Quiet)
                 | SettingKind::Slack(SlackField::Channels | SlackField::Keywords)
@@ -546,8 +537,6 @@ impl SettingKind {
         matches!(
             self,
             SettingKind::BaseBranch
-                | SettingKind::SetupCommand
-                | SettingKind::OpenCommand
                 | SettingKind::WorktreeContainers
                 | SettingKind::LinearKey
                 | SettingKind::TakeawaysLink
@@ -677,18 +666,6 @@ pub const PROJECT_SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::BaseBranch,
         label: "Base branch",
         hint: "Branch this project's new worktrees start from; Enter types one (empty = origin's default branch)",
-        group: "",
-    },
-    SettingSpec {
-        kind: SettingKind::SetupCommand,
-        label: "Setup command",
-        hint: "Shell line run once in each new worktree of this project, on a setup line in its band, e.g. just setup-worktree; {toggle_stack} (Start stack) waits for it",
-        group: "",
-    },
-    SettingSpec {
-        kind: SettingKind::OpenCommand,
-        label: "Open command",
-        hint: "Shell line {open_outside} → Open command runs to open a worktree of this project, e.g. open http://localhost:3000",
         group: "",
     },
     SettingSpec {
@@ -1380,21 +1357,6 @@ pub struct ProjectSettings {
     /// DAEMON reads it (`orion-daemon/src/config.rs`); the TUI edits it.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub base_branch: String,
-    /// The SETUP COMMAND the DAEMON runs once in each worktree it creates
-    /// for this project, on a setup line in its band — `just
-    /// setup-worktree`, say. Empty (shown as `not set`) is none. The
-    /// DAEMON reads it; the TUI only edits it. Left out of the file while
-    /// empty, like `open_command`.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub setup_command: String,
-    /// The OPEN COMMAND ⌘O's OPEN MENU (or the palette's **Open checkout
-    /// in editor**) fires on this project's worktrees, typed on the
-    /// Projects tab — `open http://localhost:3000`, say. Empty (shown as `not set`) is none. The TUI both edits and runs it
-    /// (`event_loop::open_worktree`): what it opens belongs on the machine
-    /// the user sits at, never the DAEMON's. Left out of the file while
-    /// empty, like `setup_command`.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub open_command: String,
     /// ON WORKTREE DELETE: what deleting one of this project's worktrees
     /// does to the docker compose projects started in it — `stop`,
     /// `remove` or `remove+volumes`; empty (shown as `off`) leaves them
@@ -1428,8 +1390,6 @@ impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             base_branch: String::new(),
-            setup_command: String::new(),
-            open_command: String::new(),
             worktree_containers: String::new(),
             merge_method: String::new(),
             takeaways: true,
@@ -1450,8 +1410,6 @@ impl ProjectSettings {
     pub fn value_label(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::BaseBranch => blank_as(&self.base_branch, AUTO_CHOICE),
-            SettingKind::SetupCommand => blank_as(&self.setup_command, NO_COMMAND),
-            SettingKind::OpenCommand => blank_as(&self.open_command, NO_COMMAND),
             SettingKind::WorktreeContainers => self.containers().as_str().into(),
             SettingKind::TakeawaysLink => on_off(self.takeaways).into(),
             SettingKind::About => blank_as(&self.about, crate::projects::NOT_WRITTEN),
@@ -1471,8 +1429,6 @@ impl ProjectSettings {
     pub fn text_value(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::BaseBranch => self.base_branch.clone(),
-            SettingKind::SetupCommand => self.setup_command.clone(),
-            SettingKind::OpenCommand => self.open_command.clone(),
             SettingKind::About => self.about.clone(),
             _ => String::new(),
         }
@@ -1484,8 +1440,6 @@ impl ProjectSettings {
     pub fn set_text(&mut self, kind: SettingKind, value: &str) -> bool {
         let field = match kind {
             SettingKind::BaseBranch => &mut self.base_branch,
-            SettingKind::SetupCommand => &mut self.setup_command,
-            SettingKind::OpenCommand => &mut self.open_command,
             SettingKind::About => &mut self.about,
             _ => return false,
         };
@@ -2842,8 +2796,6 @@ impl Config {
             // an entry would show. The Linear key is the app's to tell
             // (`linear::key_status`), not the file's.
             SettingKind::BaseBranch
-            | SettingKind::SetupCommand
-            | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
             | SettingKind::LinearKey
             | SettingKind::TakeawaysLink
@@ -3006,8 +2958,6 @@ impl Config {
             // One project's, not the file's: see `set_project_text` and
             // `cycle_project`.
             SettingKind::BaseBranch
-            | SettingKind::SetupCommand
-            | SettingKind::OpenCommand
             | SettingKind::WorktreeContainers
             | SettingKind::LinearKey
             | SettingKind::TakeawaysLink
@@ -4381,133 +4331,30 @@ mod tests {
         assert!(cfg.follow_new_session, "a missing key reads as on");
     }
 
-    /// The retired **Run command** (`⌘⇧S` finds the checkout's apps now):
-    /// no row for it, and an entry still holding one keeps it through a
-    /// save, for an older orion.
+    /// The retired **Run command**, **Setup command** and **Open command**
+    /// (`⌘⇧S` finds the checkout's apps now, and its start does the
+    /// setting up): no row for any, and an entry still holding them keeps
+    /// them through a save, for an older orion.
     #[test]
-    fn the_retired_run_command_has_no_row_and_survives_a_save() {
-        assert!(PROJECT_SETTINGS.iter().all(|s| s.label != "Run command"));
+    fn the_retired_commands_have_no_row_and_survive_a_save() {
+        for gone in ["Run command", "Setup command", "Open command"] {
+            assert!(PROJECT_SETTINGS.iter().all(|s| s.label != gone), "{gone}");
+        }
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
+        let entry = serde_json::json!({
+            "run_command": "just start",
+            "setup_command": "just setup-worktree",
+            "open_command": "open http://localhost:3000",
+        });
         std::fs::write(
             &path,
-            r#"{"projects": {"/tmp/demo": {"run_command": "just start"}}}"#,
+            serde_json::json!({"projects": {"/tmp/demo": entry.clone()}}).to_string(),
         )
         .unwrap();
         let cfg = load_from(&path);
         cfg.save_to(&path).unwrap();
-        assert_eq!(
-            read_json_file(&path)["projects"]["/tmp/demo"]["run_command"],
-            "just start"
-        );
-    }
-
-    /// **Setup command** on the Projects tab: a typed per-project row,
-    /// under the base branch, kept as
-    /// `setup_command` — what the DAEMON runs in each new worktree. Its
-    /// own key, left out of the file while empty.
-    #[test]
-    fn setup_command_is_a_typed_project_row() {
-        let demo = Path::new("/tmp/demo");
-        let mut cfg = Config::default();
-        assert!(SettingKind::SetupCommand.is_text());
-        assert!(SettingKind::SetupCommand.is_project());
-        let (tab, row) = locate(SettingKind::SetupCommand).unwrap();
-        assert_eq!(tab, project_tab());
-        assert_eq!(row, 1, "under the base branch");
-        assert_eq!(
-            cfg.project(demo).value_label(SettingKind::SetupCommand),
-            NO_COMMAND
-        );
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.projects.is_empty(), "a typed row cycles nothing");
-
-        assert!(cfg.set_project_text(demo, SettingKind::SetupCommand, " just setup-worktree "));
-        assert_eq!(cfg.project(demo).setup_command, "just setup-worktree");
-        assert_eq!(
-            cfg.project_text_value(demo, SettingKind::SetupCommand),
-            "just setup-worktree"
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(
-            read_json_file(&path)["projects"],
-            serde_json::json!({ "/tmp/demo": { "setup_command": "just setup-worktree" } })
-        );
-        assert_eq!(
-            load_from(&path).project(demo).setup_command,
-            "just setup-worktree"
-        );
-        assert!(cfg.set_project_text(demo, SettingKind::SetupCommand, ""));
-        assert!(cfg.projects.is_empty(), "empty unsets it");
-    }
-
-    /// **Open command** on the Projects tab: the same typed per-project row
-    /// as Setup command, right under it, kept as `open_command` — what
-    /// **Open checkout in editor** runs. Its own key, so setting it leaves
-    /// the setup command alone; empty drops it from the entry.
-    #[test]
-    fn open_command_is_a_typed_project_row_under_setup_command() {
-        let demo = Path::new("/tmp/demo");
-        let mut cfg = Config::default();
-        assert!(SettingKind::OpenCommand.is_text());
-        assert!(SettingKind::OpenCommand.is_project());
-        let (tab, row) = locate(SettingKind::OpenCommand).unwrap();
-        assert_eq!(tab, project_tab());
-        assert_eq!(
-            row,
-            locate(SettingKind::SetupCommand).unwrap().1 + 1,
-            "right under Setup command"
-        );
-        assert_eq!(cfg.project(demo).open_command, "");
-        assert_eq!(
-            cfg.project(demo).value_label(SettingKind::OpenCommand),
-            NO_COMMAND
-        );
-        assert_eq!(cfg.value_label(SettingKind::OpenCommand), "not set");
-
-        // A typed row: cycling its tab row changes nothing.
-        cfg.cycle(tab, row, 0);
-        assert!(cfg.projects.is_empty());
-
-        assert!(cfg.set_project_text(
-            demo,
-            SettingKind::OpenCommand,
-            "  open http://localhost:3000 "
-        ));
-        assert_eq!(
-            cfg.project(demo).open_command,
-            "open http://localhost:3000",
-            "trimmed"
-        );
-        assert_eq!(
-            cfg.project(demo).setup_command,
-            "",
-            "setup's key is untouched"
-        );
-        assert_eq!(
-            cfg.project_text_value(demo, SettingKind::OpenCommand),
-            "open http://localhost:3000"
-        );
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(
-            read_json_file(&path)["projects"],
-            serde_json::json!({
-                "/tmp/demo": { "open_command": "open http://localhost:3000" },
-            })
-        );
-        assert_eq!(
-            load_from(&path).project(demo).open_command,
-            "open http://localhost:3000"
-        );
-
-        // Empty unsets it — and drops the entry.
-        assert!(cfg.set_project_text(demo, SettingKind::OpenCommand, " "));
-        assert!(cfg.projects.is_empty());
+        assert_eq!(read_json_file(&path)["projects"]["/tmp/demo"], entry);
     }
 
     /// The Projects tab: every project in turn, a line naming it then its
@@ -4531,16 +4378,13 @@ mod tests {
             PROJECT_SETTINGS.iter().map(|s| s.kind).collect::<Vec<_>>(),
             [
                 SettingKind::BaseBranch,
-                SettingKind::SetupCommand,
-                SettingKind::OpenCommand,
                 SettingKind::WorktreeContainers,
                 SettingKind::LinearKey,
                 SettingKind::TakeawaysLink,
                 SettingKind::About,
             ]
         );
-        assert_eq!(kind(n + 1), Some(SettingKind::SetupCommand));
-        assert_eq!(kind(n + 2), Some(SettingKind::OpenCommand));
+        assert_eq!(kind(n + 1), Some(SettingKind::WorktreeContainers));
         assert_eq!(project_at(tab, n - 1), Some(0));
         assert_eq!(project_at(tab, n), Some(1));
         assert_eq!(project_at(0, 2), None);
@@ -5465,8 +5309,6 @@ mod tests {
             project,
             [
                 "Base branch",
-                "Setup command",
-                "Open command",
                 "On worktree delete",
                 "Linear key",
                 "Link to meeting takeaways",

@@ -374,8 +374,6 @@ pub enum MenuAction {
     /// A run line's **Restart stack**: stop the worktree's run, then start
     /// it again once it has gone.
     RestartRun(WorktreeId),
-    /// Fire the worktree's OPEN COMMAND (`Shift+Enter`).
-    OpenWorktree(WorktreeId),
     AddProject,
     RemoveProject(ProjectId),
     /// A PROJECT TAB's right-click **Close…**: the CLOSE PROJECT DIALOG

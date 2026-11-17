@@ -81,7 +81,6 @@ const OPEN_ROWS: &[(Action, &str)] = &[
     (Action::OpenPullRequest, "Pull request on GitHub"),
     (Action::OpenInCursor, "Checkout in"),
     (Action::OpenOutsideTerminal, "Terminal in the checkout"),
-    (Action::OpenWorktree, "Open command"),
     (Action::OpenApp, "Open app"),
 ];
 

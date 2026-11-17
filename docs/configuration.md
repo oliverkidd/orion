@@ -96,16 +96,14 @@ One block per project in the tree, each row reading and writing that project's e
 
 ```json
 { "projects": { "/Users/me/src/app": {
-    "base_branch": "dev", "setup_command": "just setup-worktree",
-    "open_command": "open http://localhost:3000",
+    "base_branch": "dev",
     "worktree_containers": "remove" } } }
 ```
 
 | Key | Default | Row | What it does |
 |---|---|---|---|
 | `base_branch` | `""` (`auto`) | **Base branch** | Where the project's new worktrees start. Empty is `origin/HEAD`, freshly fetched; a name (`dev`) is origin's copy of that branch, else a local branch of that name, else `origin/HEAD` with a line in `daemon.log`. A leading `origin/` is dropped. The grid's ahead/behind counts, the commit list and the background base fetch measure against it, and a merge never deletes it. `orion worktree --base` wins over it. |
-| `setup_command` | `""` | **Setup command** | Run once in each worktree orion creates for the project. See [Setup command](#setup-command). |
-| `open_command` | `""` | **Open command** | What `⌘O` → **Open command** runs. |
+| `setup_command` | `""` | — | Hand-edited only: run once in each worktree orion creates for the project. See [Setup command](#setup-command). |
 | `worktree_containers` | `""` (`off`) | **On worktree delete** | What deleting a worktree does to the docker compose projects started in it. See [Worktree containers](#worktree-containers). |
 | `merge_method` | `""` (squash) | — | The method the project's last merge took; its next merge form opens on it. |
 | — | — | **Linear key** | Not a setting: where the project's `LINEAR_API_KEY` was found. See [Linear](#linear). |
@@ -375,8 +373,9 @@ automation is told by in place of its system preset.
 
 ## Setup command
 
-A project's **Setup command** (`setup_command`, also on setup's **First project** page) runs once
-in each worktree orion creates for it: `orion worktree`, **+ new worktree**, `⌘⇧N`, a branch picked
+No row sets it any more — an app's start does its own setting up, and `⌘⇧S` finds the start
+(below). A `setup_command` written into a project's entry by hand still runs once in each worktree
+orion creates for it: `orion worktree`, **+ new worktree**, `⌘⇧N`, a branch picked
 in the worktree picker, a pull request's checkout, a spare worktree.
 
 - It runs on a **setup** row in the worktree's band, through your login shell (`$SHELL -l -i -c`),
@@ -389,7 +388,7 @@ in the worktree picker, a pull request's checkout, a spare worktree.
 
 Worktrees made outside orion run nothing.
 
-## Run and open commands
+## Starting the app
 
 - **What `⌘⇧S` starts**: `⌘⇧S` finds what there is to start in the checkout itself, so there is nothing to set: a
   Justfile's `start` recipe (else `dev`) as `just start`, and each of its modules' as `just os
@@ -406,10 +405,9 @@ Worktrees made outside orion run nothing.
   minutes, kills it. A stop you asked for removes the line; an exit nobody asked for leaves `done`
   or a red `exited 1`. **Restart stack** stops it and starts the same app again. One run per
   worktree. A `run_command` left in `config.json` from before is kept through a save, unused.
-- **Open command**: `⌘O` → **Open command** runs it from the TUI with `$SHELL -c`, output
-  discarded, since what it opens belongs on the machine you sit at.
-
-The apps are looked for, and the open command read, fresh at every press.
+The apps are looked for fresh at every press. There is no open command: `⌘O` → **Open app**
+opens the first localhost address the run printed. An `open_command` left in `config.json` is kept
+through a save, unused.
 
 ## Worktree containers
 
@@ -432,7 +430,7 @@ faint stopped. The DAEMON asks `docker ps` every 5 s, and only while a client is
 ## Spare worktrees
 
 For each project used in the last 24 hours, the DAEMON keeps one SPARE WORKTREE: cut from the
-project's **Base branch**, its `.env` links made and its **Setup command** run, with a `claude`
+project's **Base branch**, its `.env` links made and its setup command (when one was set by hand) run, with a `claude`
 booted on the `⌘N` account at its default model and effort, waiting at its prompt. Its branch and
 directory are `orion-spare-<id>`; the grid, worktree sync and the worktree picker leave it out.
 

@@ -20,6 +20,15 @@ pub(crate) fn listed(app: &mut App, stacks: Option<Vec<Stack>>) {
     app.dirty = true;
 }
 
+/// A checkout's menu item for ⌘O's **Open app**: the first localhost
+/// address its run printed, in the browser ([`open_app`]).
+pub(crate) fn open_app_item() -> crate::app::MenuItem {
+    crate::app::MenuItem::new(
+        "Open app",
+        crate::app::MenuAction::RunAction(crate::keymap::Action::OpenApp),
+    )
+}
+
 /// A checkout's menu item for `⌘⇧S`: **Stop stack** while its run is up,
 /// **Cancel start** while a start waits on its setup, else **Start stack**.
 pub(crate) fn menu_label(app: &App, worktree: &WorktreeId) -> &'static str {
