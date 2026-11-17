@@ -1,0 +1,48 @@
+crates/orion-tui/src/onboard.rs
+  s_68eca67879aee8::t_0e3e68d4128a47 3,46
+  s_68eca67879aee8::t_4fbc114bc4d56e 85
+  s_68eca67879aee8::t_2ca2ef0f4359e6 1543,1546-1547,1549-1552,1554
+  s_68eca67879aee8::t_04d990a5d0763f 94-95,817-818
+docs/keys.md
+  s_68eca67879aee8::t_6ed66e20d0611f 138
+docs/sessions.md
+  s_68eca67879aee8::t_bffae44ce68b77 509-510
+crates/orion-tui/src/event_loop/launcher.rs
+  s_68eca67879aee8::t_92fd3f14207a67 881
+docs/how-it-works.md
+  s_68eca67879aee8::t_6ed66e20d0611f 210
+  s_68eca67879aee8::t_bffae44ce68b77 205
+crates/orion-tui/src/stacks.rs
+  s_68eca67879aee8::t_92fd3f14207a67 23-31
+crates/orion-tui/src/event_loop.rs
+  s_68eca67879aee8::t_de31ffc765b2a8 34113,34115-34117,34123-34124,34153,34174,34179,34194,34196,34200,34203,34209,34215,34220,34225,34227,34233-34234,34245,34248,34250,34257,34264
+  s_68eca67879aee8::t_3c0e1f770ab935 4539
+  s_68eca67879aee8::t_92fd3f14207a67 7477,7703
+crates/orion-tui/src/open_url.rs
+  s_68eca67879aee8::t_3c0e1f770ab935 373
+crates/orion-daemon/src/config.rs
+  s_68eca67879aee8::t_92fd3f14207a67 57-58,72-73,186-188
+crates/orion-tui/src/config.rs
+  s_68eca67879aee8::t_a0dd76b673f43b 4387
+  s_68eca67879aee8::t_64cfce1daa4f20 4334-4337,4339-4342,4345-4349,4352,4357
+docs/configuration.md
+  s_68eca67879aee8::t_bffae44ce68b77 99,106,376-378,391,408-410,433
+crates/orion-tui/src/keymap.rs
+  s_68eca67879aee8::t_0e3e68d4128a47 985
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "fbc8771cc1dd9f493f777a929554e8c00b94d2cf",
+  "prompts": {},
+  "sessions": {
+    "s_68eca67879aee8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2166cbce-4594-47ad-aacd-4388f0200ec4",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
