@@ -638,6 +638,16 @@ pub(crate) fn tick(app: &mut App) {
         .collect();
     for (id, name, root) in projects {
         let local = Local::of(&id);
+        // A daily card Slack never took (the network was down) has given
+        // you no chance to veto: its window starts again, and nothing
+        // merges, until it is up (`factory::cards::reconcile` posts it
+        // again).
+        let daily_prefix = format!("kb:daily:{id}:");
+        let now_ms = now.timestamp_millis();
+        let undelivered = app
+            .factory_cards
+            .iter()
+            .any(|p| p.card.key.starts_with(&daily_prefix) && cards::awaiting_retry(p, now_ms));
         // The notices to post, the `.gitignore` card once, the daily card
         // and whether the merge is due: one read and write of the state.
         let (notices, daily_card, merge, stale) = State::update(&local, |s| {
@@ -649,6 +659,17 @@ pub(crate) fn tick(app: &mut App) {
                 })
                 .collect();
             let card = daily(s, now, &name, &local, auto);
+            if undelivered {
+                // Pushed on in steps, so the state isn't written each tick.
+                let full = now.timestamp_millis() + WINDOW_MS;
+                if let Some(window) = s
+                    .window
+                    .as_mut()
+                    .filter(|w| w.ends_at < full - HOLD_STEP_MS)
+                {
+                    window.ends_at = full;
+                }
+            }
             let merge = merge_due(s, now.timestamp_millis(), auto)
                 .then(|| (s.pr.clone(), s.pushed.clone()));
             let stale = stale_due(s, now.timestamp_millis());
@@ -905,9 +926,18 @@ pub(crate) fn daily(
     Some(daily_card(&key, project, &refs, &[], state, auto))
 }
 
+/// How far the veto window of a daily card not yet up may fall behind
+/// a full window before it is pushed on again.
+const HOLD_STEP_MS: i64 = 10 * orion_core::clock::MINUTE_MS;
+
+/// The most rules the daily card gives a Veto button each; past that it
+/// has one **Veto…**, which asks for their numbers.
+const VETO_BUTTONS: usize = 5;
+
 /// The daily card under `key`: each rule numbered, with its source and
-/// quote; a Veto button for each one not vetoed, All fine, and the
-/// knowledge pull request's link.
+/// quote; a Veto button for each one not vetoed — or, with more than
+/// [`VETO_BUTTONS`] of them, one **Veto…** that takes their numbers —
+/// All fine, and the knowledge pull request's link.
 pub(crate) fn daily_card(
     key: &str,
     project: &str,
@@ -920,6 +950,7 @@ pub(crate) fn daily_card(
     let noun = if n == 1 { "rule" } else { "rules" };
     let mut body = Vec::new();
     let mut buttons = Vec::new();
+    let open = (1..=n).filter(|k| !vetoed.contains(k)).count();
     for (i, e) in rules.iter().enumerate() {
         let k = i + 1;
         let quote = match e.quote.trim() {
@@ -930,10 +961,15 @@ pub(crate) fn daily_card(
             body.push(format!("~{k}. {}~ (vetoed)", e.rule));
         } else {
             body.push(format!("{k}. {} — _#{}, {}{quote}_", e.rule, e.pr, e.by));
-            buttons.push(Button::tap(format!("veto:{k}"), format!("Veto {k}")));
+            if open <= VETO_BUTTONS {
+                buttons.push(Button::tap(format!("veto:{k}"), format!("Veto {k}")));
+            }
         }
     }
-    buttons.push(Button::tap("fine", "All fine"));
+    buttons.insert(0, Button::tap("fine", "All fine"));
+    if open > VETO_BUTTONS {
+        buttons.insert(1, Button::text(VETO_SOME, "Veto…"));
+    }
     if let Some(pr) = &state.pr {
         let hours = WINDOW_MS / (60 * 60 * 1000);
         body.push(match auto {
@@ -956,13 +992,29 @@ pub(crate) fn daily_card(
     }
 }
 
+/// The daily card's **Veto…**: the numbers typed, any way — `3 7`,
+/// `3, 7`.
+const VETO_SOME: &str = "veto_some";
+
 /// A press on a `kb:` card.
 pub(crate) fn on_action(app: &mut App, press: Press) {
     let key = press.key.to_string();
     if key.starts_with("kb:daily:") {
-        return daily_action(app, &key, press.action);
+        return daily_action(app, &key, press.action, press.text.as_deref());
     }
     cards::close(app, &key, "OK");
+}
+
+/// The rule numbers in the words typed after **Veto…**.
+fn numbers(text: &str) -> Vec<usize> {
+    let mut out: Vec<usize> = text
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|n| n.parse().ok())
+        .filter(|&n| n > 0)
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The project a `kb:<kind>:<id>:…` key is about: its folder, name and
@@ -977,7 +1029,7 @@ fn project_of(app: &App, key: &str) -> Option<(Local, String, PathBuf)> {
     ))
 }
 
-fn daily_action(app: &mut App, key: &str, action: &str) {
+fn daily_action(app: &mut App, key: &str, action: &str, text: Option<&str>) {
     let Some((local, project, root)) = project_of(app, key) else {
         return cards::close(app, key, "That project is gone");
     };
@@ -990,26 +1042,38 @@ fn daily_action(app: &mut App, key: &str, action: &str) {
         });
         return cards::close(app, key, "All fine");
     }
-    let Some(k) = action
-        .strip_prefix("veto:")
-        .and_then(|k| k.parse::<usize>().ok())
-    else {
-        return;
+    let ks: Vec<usize> = match action {
+        VETO_SOME => numbers(text.unwrap_or_default()),
+        _ => action
+            .strip_prefix("veto:")
+            .and_then(|k| k.parse::<usize>().ok())
+            .into_iter()
+            .collect(),
     };
-    let rule = State::update(&local, |s| {
+    let picked = State::update(&local, |s| {
         let listed = s.daily.get_mut(key)?;
-        let rule = listed.get_mut(k.checked_sub(1)?)?;
-        rule.vetoed = true;
-        Some((rule.clone(), listed.clone(), s.clone()))
+        let mut rules = Vec::new();
+        for k in &ks {
+            if let Some(rule) = k.checked_sub(1).and_then(|i| listed.get_mut(i)) {
+                if !rule.vetoed {
+                    rule.vetoed = true;
+                    rules.push(rule.clone());
+                }
+            }
+        }
+        Some((rules, listed.clone(), s.clone()))
     });
-    let Some((rule, listed, state)) = rule else {
+    let Some((rules, listed, state)) = picked else {
         return;
     };
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+    // One after another, on the one knowledge branch.
+    if let (false, Ok(handle)) = (rules.is_empty(), tokio::runtime::Handle::try_current()) {
         let (local, project, root) = (local.clone(), project.clone(), root.clone());
         handle.spawn(async move {
-            if let Err(why) = veto(&local, &root, &project, &rule.id).await {
-                tracing::warn!("knowledge: veto of {} failed: {why}", rule.id);
+            for rule in rules {
+                if let Err(why) = veto(&local, &root, &project, &rule.id).await {
+                    tracing::warn!("knowledge: veto of {} failed: {why}", rule.id);
+                }
             }
         });
     }
@@ -1158,7 +1222,7 @@ mod tests {
             "_orion merges #77 in 2 hours unless you veto; All fine merges it now._"
         );
         let actions: Vec<&str> = card.buttons.iter().map(|b| b.action.as_str()).collect();
-        assert_eq!(actions, vec!["veto:1", "veto:2", "fine", "open"]);
+        assert_eq!(actions, vec!["fine", "veto:1", "veto:2", "open"]);
         assert_eq!(card.buttons[3].url.as_deref(), Some(pr().url.as_str()));
         assert_eq!(state.daily["kb:daily:01P:2026-11-14"][1].id, "k12-3");
         assert!(
@@ -1298,7 +1362,23 @@ mod tests {
         );
         assert_eq!(card.body[0], "~1. rule k12-1~ (vetoed)");
         let actions: Vec<&str> = card.buttons.iter().map(|b| b.action.as_str()).collect();
-        assert_eq!(actions, vec!["veto:2", "fine"]);
+        assert_eq!(actions, vec!["fine", "veto:2"]);
+    }
+
+    /// Past five rules the card has one **Veto…**, which takes their
+    /// numbers however they are typed, instead of a button each.
+    #[test]
+    fn many_rules_share_one_veto_that_takes_numbers() {
+        let entries: Vec<Entry> = (1..=20)
+            .map(|n| entry(&format!("k{n}"), n, "owner", at(9, 0)))
+            .collect();
+        let refs: Vec<&Entry> = entries.iter().collect();
+        let card = daily_card("kb:daily:x", "app", &refs, &[], &State::default(), true);
+        let actions: Vec<&str> = card.buttons.iter().map(|b| b.action.as_str()).collect();
+        assert_eq!(actions, vec!["fine", VETO_SOME]);
+        assert!(card.buttons[1].asks_text);
+        assert_eq!(numbers("3, 7 and 3; 0 x12"), vec![3, 7, 12]);
+        assert!(numbers("none").is_empty());
     }
 
     #[test]

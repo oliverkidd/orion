@@ -598,6 +598,8 @@ pub(super) fn handle_action(
         // the card itself has no room to grow one, and the pane stays
         // exactly as it is.
         Action::FollowUp => follow_up(app),
+        // `c` on a row with a factory card up about it: its buttons.
+        Action::FactoryCard => crate::factory::cards::open_at_cursor(app),
         // The pull request the cursor's band names on its rule, in the
         // browser (no key by default).
         Action::OpenPullRequest => open_pull_request(app, out),

@@ -38,6 +38,15 @@ impl Cubic {
         self.open.iter().filter(|f| f.severity == Some(p)).count()
     }
 
+    /// The dismissed P1s that say why they weren't fixed: what the
+    /// verdict lets stand without a Review.
+    pub fn dismissed_p1_with_reason(&self) -> usize {
+        self.dismissed
+            .iter()
+            .filter(|item| about_p1(item) && has_reason(item))
+            .count()
+    }
+
     /// The declared items about a P1: every one that doesn't name a lower
     /// severity (one that names none is taken as a P1, the case it is
     /// there for).
@@ -46,7 +55,7 @@ impl Cubic {
             .iter()
             .chain(&self.unresolved)
             .map(String::as_str)
-            .filter(|item| matches!(severity(item), None | Some(0) | Some(1)))
+            .filter(|item| about_p1(item))
             .collect()
     }
 
@@ -109,6 +118,23 @@ pub fn findings(threads: &[ReviewThread]) -> Vec<Finding> {
             })
         })
         .collect()
+}
+
+/// Whether a dismissal gives its reason: words after a `: `, ` — ` or
+/// ` - ` (`P1 in a.rs: false positive, the lock is held`). A path's
+/// `a.rs:12` is no reason.
+pub fn has_reason(item: &str) -> bool {
+    [": ", " — ", " - "].iter().any(|sep| {
+        item.split_once(sep)
+            .is_some_and(|(_, why)| why.split_whitespace().count() >= 2)
+    })
+}
+
+/// Whether a declared item is about a P1: any that doesn't name a lower
+/// severity (one that names none is taken as a P1, the case it is there
+/// for).
+fn about_p1(item: &str) -> bool {
+    matches!(severity(item), None | Some(0) | Some(1))
 }
 
 /// The `Cubic dismissals:` and `Cubic unresolved:` items in `texts` (the

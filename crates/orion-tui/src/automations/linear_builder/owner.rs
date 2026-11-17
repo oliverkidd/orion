@@ -7,12 +7,12 @@
 //! | `duplicate` | you | Start anyway (`start`) · Skip (`skip`) |
 //! | `thin`, `thin-again` | the reporter | Open ticket (link) · I've updated it (`updated`) |
 //! | `detail` | you | Open ticket (link) · Start anyway (`start`) |
-//! | `nochange` | you | Close ticket (`close`) · Build it anyway… (`build`, typed) · Not for the factory |
+//! | `nochange` | you | Close ticket (`close`) · Build it anyway… (`build`, typed) · Not for orion |
 //!
 //! **Open ticket** is a link button: Slack (or Needs you) opens the
 //! ticket, and nothing comes back here.
 //!
-//! **Not for the factory** ([`not_for_the_factory`]) is two choices —
+//! **Not for orion** ([`not_for_the_factory`]) is two choices —
 //! **back to Triage** (`not_for_factory`) and **move to Backlog**
 //! (`not_for_factory_backlog`) — on these cards, on the PR verdict card
 //! (`pr_body`), on a factory session's plan and question on the phone (a
@@ -20,7 +20,7 @@
 //! orion, and as `orion factory skip` ([`super::skip`]). Each parks the
 //! ticket as **Park** does — its session archived, its cards closed —
 //! labels it `factory-skip` (made in its team when missing), comments
-//! "Taken off the factory by <you>" (once), sets its team's Triage or
+//! "Taken off orion by <you>" (once), sets its team's Triage or
 //! Backlog state, closes the draft pull request it opened with a comment
 //! saying why ([`skip_writes`]), and removes the session's worktree when
 //! nothing in it would be lost ([`super::skip::why_keep`]). The intake
@@ -35,7 +35,7 @@
 //! not to be built.
 
 use orion_core::factory_card::{
-    NOT_FOR_FACTORY, NOT_FOR_FACTORY_BACKLOG, NOT_FOR_FACTORY_BACKLOG_LABEL,
+    NOT_FOR_FACTORY, NOT_FOR_FACTORY_BACKLOG, NOT_FOR_FACTORY_BACKLOG_LABEL, NOT_FOR_FACTORY_MENU,
     NOT_FOR_FACTORY_TRIAGE_LABEL,
 };
 use orion_core::{AgentId, ClientRequest, FactoryCardFailure, ProjectId};
@@ -68,7 +68,7 @@ pub(crate) enum Write {
         team: String,
         name: String,
     },
-    /// Comment "Taken off the factory by <the key's owner>", unless it
+    /// Comment "Taken off orion by <the key's owner>", unless it
     /// says so already.
     TakenOff { issue: String },
     /// Move it to its team's Triage or Backlog, by the state's type.
@@ -164,7 +164,7 @@ pub(crate) fn said_taken_off(comments: &[String]) -> bool {
         .any(|c| c.trim_start().starts_with(&taken_off("")))
 }
 
-/// Where **Not for the factory** puts a ticket.
+/// Where **Not for orion** puts a ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TeamState {
     Triage,
@@ -197,7 +197,7 @@ pub(crate) fn describe(write: &Write) -> String {
         Write::Comment { .. } => "comment on the ticket".into(),
         Write::Duplicate { of, .. } => format!("mark the ticket a duplicate of {of}"),
         Write::Label { name, .. } => format!("label the ticket {name}"),
-        Write::TakenOff { .. } => "comment \"Taken off the factory by …\"".into(),
+        Write::TakenOff { .. } => "comment \"Taken off orion by …\"".into(),
         Write::ToState { to, .. } => format!("move the ticket to {}", to.name()),
         Write::CloseDraft { url, .. } => format!("close the draft {url}"),
     }
@@ -209,7 +209,7 @@ pub(crate) async fn run_write(key: &str, write: &Write) -> Result<Option<String>
     run(key, write).await
 }
 
-/// A ticket **Not for the factory** takes off: its ledger id, team and
+/// A ticket **Not for orion** takes off: its ledger id, team and
 /// identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SkipTicket {
@@ -229,7 +229,7 @@ impl SkipTicket {
     }
 }
 
-/// The writes **Not for the factory** makes, in order: each ticket
+/// The writes **Not for orion** makes, in order: each ticket
 /// labelled [`super::intake::SKIP_LABEL`], commented on (once: not again
 /// on one that says so already) and moved to its team's Triage, or its
 /// Backlog (`backlog`); then the draft pull request at `pr` closed with a
@@ -259,7 +259,7 @@ pub(crate) fn skip_writes(tickets: &[SkipTicket], pr: Option<&str>, backlog: boo
         writes.push(Write::CloseDraft {
             url: url.to_string(),
             comment: format!(
-                "Closed: {} was taken off orion's software factory (Not for the factory).",
+                "Closed: {} was taken off orion (Not for orion).",
                 names.join(", ")
             ),
         });
@@ -269,7 +269,7 @@ pub(crate) fn skip_writes(tickets: &[SkipTicket], pr: Option<&str>, backlog: boo
 
 /// The comment on a ticket taken off the factory.
 pub(crate) fn taken_off(who: &str) -> String {
-    format!("Taken off the factory by {who}")
+    format!("Taken off orion by {who}")
 }
 
 /// How long one `gh` call on the draft may take.
@@ -365,22 +365,23 @@ fn card(
     }
 }
 
-/// **Not for the factory**'s two choices, on every card about a ticket
-/// the factory took.
+/// **Not for orion**'s two choices, on every card about a ticket the
+/// factory took: one **Not for orion…** menu on Slack.
 pub(crate) fn not_for_the_factory_buttons() -> [Button; 2] {
+    let menu = NOT_FOR_FACTORY_MENU;
     [
-        Button::tap(NOT_FOR_FACTORY, NOT_FOR_FACTORY_TRIAGE_LABEL),
-        Button::tap(NOT_FOR_FACTORY_BACKLOG, NOT_FOR_FACTORY_BACKLOG_LABEL),
+        Button::choice(NOT_FOR_FACTORY, NOT_FOR_FACTORY_TRIAGE_LABEL, menu),
+        Button::choice(NOT_FOR_FACTORY_BACKLOG, NOT_FOR_FACTORY_BACKLOG_LABEL, menu),
     ]
 }
 
-/// `buttons`, then **Not for the factory**'s two.
+/// `buttons`, then **Not for orion**'s two.
 fn and_not_for_the_factory(mut buttons: Vec<Button>) -> Vec<Button> {
     buttons.extend(not_for_the_factory_buttons());
     buttons
 }
 
-/// Whether `action` is one of **Not for the factory**'s choices, and
+/// Whether `action` is one of **Not for orion**'s choices, and
 /// which: `Some(true)` to Backlog.
 pub(crate) fn not_for_the_factory_choice(action: &str) -> Option<bool> {
     match action {
@@ -445,7 +446,10 @@ pub(crate) fn hold_urgent(
         key(&ticket.id, "urgent"),
         Recipient::Owner,
         vec![format!("Urgent priority. Start now? {waiting}.")],
-        vec![Button::tap("start", "Start"), Button::tap("leave", "Leave")],
+        and_not_for_the_factory(vec![
+            Button::tap("start", "Start"),
+            Button::tap("leave", "Leave"),
+        ]),
     );
     cards::post(app, card);
 }
@@ -466,10 +470,10 @@ pub(crate) fn hold_duplicate(app: &mut App, p: Possible) {
             "Looks like the work in your *{}* session{why}.",
             escape(&p.session)
         )],
-        vec![
+        and_not_for_the_factory(vec![
             Button::tap("start", "Start anyway"),
             Button::tap("skip", "Skip"),
-        ],
+        ]),
     );
     cards::post(app, card);
 }
@@ -552,7 +556,10 @@ fn post_detail(app: &mut App, issue_id: &str, entry: &Entry) {
             "{} needs more detail and its reporter can't be asked on Slack.",
             entry.identifier
         )],
-        vec![open_ticket(entry), Button::tap("start", "Start anyway")],
+        and_not_for_the_factory(vec![
+            open_ticket(entry),
+            Button::tap("start", "Start anyway"),
+        ]),
     );
     cards::post(app, card);
 }
@@ -620,10 +627,13 @@ pub(crate) fn on_action(app: &mut App, press: Press) {
         ("thin" | "thin-again", "updated") => reporter_updated(app, &id),
         ("nochange", "close") => close_ticket(app, &id, &key),
         ("nochange", "build") => build_anyway(app, &id, &key, text),
-        ("nochange", action) if press.by_owner => match not_for_the_factory_choice(action) {
-            Some(backlog) => not_for_the_factory(app, &id, Some(&key), None, backlog),
-            None => tracing::warn!("factory: {action} on {key} does nothing"),
-        },
+        // **Not for orion** on any of your cards about the ticket.
+        ("urgent" | "duplicate" | "detail" | "nochange", action)
+            if press.by_owner && not_for_the_factory_choice(action).is_some() =>
+        {
+            let backlog = not_for_the_factory_choice(action) == Some(true);
+            not_for_the_factory(app, &id, Some(&key), None, backlog)
+        }
         _ => tracing::warn!("factory: {} on {key} does nothing", press.action),
     }
 }
@@ -722,9 +732,9 @@ fn park(app: &mut App, id: &str, key: &str, note: &str) {
 }
 
 /// What a card taken off the factory closes on.
-const OFF_THE_FACTORY: &str = "Not for the factory";
+const OFF_THE_FACTORY: &str = "Not for orion";
 
-/// **Not for the factory** on the ticket `id` (and its group): parked as
+/// **Not for orion** on the ticket `id` (and its group): parked as
 /// [`park`] parks it — its session archived, its cards closed, the
 /// pressed one under `key` too — then [`skip_writes`]: each ticket
 /// labelled `factory-skip` with a comment saying who took it off, moved
@@ -871,7 +881,7 @@ pub(crate) fn worktree_checked(app: &mut App, id: orion_core::WorktreeId, keep: 
     }
 }
 
-/// **Not for the factory** on the factory ticket whose pull request is at
+/// **Not for orion** on the factory ticket whose pull request is at
 /// `url` (the verdict card's), found by the ledger's pull request or by
 /// its `identifier`.
 pub(crate) fn not_for_the_factory_pr(
@@ -910,7 +920,7 @@ pub(crate) fn ticket_of_session(app: &App, agent: &AgentId) -> Option<String> {
         .map(|(id, _)| id.clone())
 }
 
-/// **Not for the factory** on session `agent` — from its menu in orion,
+/// **Not for orion** on session `agent` — from its menu in orion,
 /// or its plan or question on the phone (`session:<id>`).
 pub(crate) fn not_for_the_factory_session(app: &mut App, agent: &AgentId, backlog: bool) {
     match ticket_of_session(app, agent) {

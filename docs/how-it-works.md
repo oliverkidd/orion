@@ -586,7 +586,8 @@ name ahead of what the row runs on, Needs you uses it as the card's kind, and a 
 it on its context line.
 
 The TUI runs the automations: each one's runner looks for work on the git tick, and none starts a
-session while `automations.max_running` tagged sessions are at work or waiting on you — creates
+session while `automations.max_running` tagged sessions are at work — one waiting on you holds no
+place — and creates
 still on their way to the DAEMON count too, so one tick can't overshoot. The PR fixer reads the same
 open-PR lists and pull request bodies as the grid, so it asks `gh` for nothing of its own beyond a
 watched pull request's body. Every runner's prompt is its preset's text with the task at `{task}`,

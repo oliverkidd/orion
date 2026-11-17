@@ -139,7 +139,12 @@ pub fn route_action(payload: &Value) -> Option<Press> {
     if !id.starts_with(&format!("{ACTION}_")) {
         return None;
     }
-    let (key, act) = action["value"].as_str()?.rsplit_once(SEP)?;
+    // A menu's choice carries what a button would: its value and label.
+    let chosen = &action["selected_option"];
+    let value = action["value"]
+        .as_str()
+        .or_else(|| chosen["value"].as_str())?;
+    let (key, act) = value.rsplit_once(SEP)?;
     let container = &payload["container"];
     let step = match id.starts_with(&format!("{ACTION_TYPE}_")) {
         true => Step::Modal {
@@ -159,7 +164,11 @@ pub fn route_action(payload: &Value) -> Option<Press> {
         user: payload["user"]["id"].as_str()?.to_string(),
         key: key.to_string(),
         action: act.to_string(),
-        label: action["text"]["text"].as_str().unwrap_or(act).to_string(),
+        label: action["text"]["text"]
+            .as_str()
+            .or_else(|| chosen["text"]["text"].as_str())
+            .unwrap_or(act)
+            .to_string(),
         step,
     })
 }
@@ -605,6 +614,26 @@ mod tests {
                 trigger: "T1".into()
             }
         );
+        // A menu's choice routes as a button does, under its own label.
+        let choice = json!({"type": "block_actions", "user": {"id": "U1"},
+            "container": {"type": "message", "message_ts": "100.1", "channel_id": "D2"},
+            "actions": [{"action_id": "orion_factory_select_2", "type": "static_select",
+                "selected_option": {"value": "pr:k|not_for_factory_backlog",
+                    "text": {"type": "plain_text", "text": "Not for orion: move to Backlog"}}}]});
+        let chose = route_action(&choice).unwrap();
+        assert_eq!(
+            (
+                chose.key.as_str(),
+                chose.action.as_str(),
+                chose.label.as_str()
+            ),
+            (
+                "pr:k",
+                "not_for_factory_backlog",
+                "Not for orion: move to Backlog"
+            )
+        );
+        assert_eq!(chose.step, Step::Act { text: None });
         // The phone's own buttons, and a value with no action, are not ours.
         assert_eq!(route_action(&press("U1", "orion_option_0", "0")), None);
         assert_eq!(route_action(&press("U1", "orion_factory_0", "nokey")), None);

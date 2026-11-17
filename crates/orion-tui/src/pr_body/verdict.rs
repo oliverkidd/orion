@@ -4,7 +4,10 @@
 //! | Tier | When |
 //! |---|---|
 //! | Blocked | CI red; a check still cancelled at head; a conflict on a ready PR; an open Cubic P0, or an open P1 the agent hasn't declared |
-//! | Review | a visible change with no pictures at its head, or with pictures that show no difference; a risky path from the contract; a Cubic P1 dismissed or unresolved; a `Hook: … skipped` trailer; a `security`, `dep` or `arch` call; over the size limit; a contract that doesn't parse |
+//! | Review | a visible change with no pictures at its head, or with pictures that show no difference; a risky path from the contract; a Cubic P1 dismissed without a reason, or unresolved; a `Hook: … skipped` trailer; a `security` or `dep` call; over the size limit; a contract that doesn't parse |
+//!
+//! A P1 dismissed with its reason, and an `arch` call, are the table's
+//! amber Cubic and Your calls rows: there to read, not a Review.
 //! | Skim | a visible change with pictures |
 //! | Merge | everything else |
 //!
@@ -376,8 +379,12 @@ pub fn verdict(
         .filter(|d| declared.contains(&d.as_str()))
         .count();
     let unresolved_p1 = declared.len() - dismissed_p1;
-    if dismissed_p1 > 0 {
-        say(Tier::Review, format!("{dismissed_p1} Cubic P1 dismissed"));
+    let unexplained = dismissed_p1.saturating_sub(cubic.dismissed_p1_with_reason());
+    if unexplained > 0 {
+        say(
+            Tier::Review,
+            format!("{unexplained} Cubic P1 dismissed without a reason"),
+        );
     }
     if unresolved_p1 > 0 {
         say(Tier::Review, format!("{unresolved_p1} Cubic P1 unresolved"));
@@ -386,7 +393,7 @@ pub fn verdict(
         say(Tier::Review, format!("hook: {}", hook.text));
     }
     for call in &facts.your_calls {
-        if matches!(call.tag.as_str(), "security" | "dep" | "arch") {
+        if matches!(call.tag.as_str(), "security" | "dep") {
             say(Tier::Review, format!("[{}] call: {}", call.tag, call.call));
         }
     }
@@ -650,11 +657,15 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_cubic_p1_is_review() {
+    fn a_declared_cubic_p1_is_review_unless_dismissed_with_its_reason() {
         let mut i = In::new();
         i.cubic.open = vec![finding(1)];
-        i.cubic.dismissed = vec!["P1 a: false positive".into()];
-        assert_tier(&i, Tier::Review, "1 Cubic P1 dismissed");
+        i.cubic.dismissed = vec!["P1 a.rs:12 retry loop".into()];
+        assert_tier(&i, Tier::Review, "1 Cubic P1 dismissed without a reason");
+        let mut i = In::new();
+        i.cubic.open = vec![finding(1)];
+        i.cubic.dismissed = vec!["P1 a.rs:12 — false positive: the lock is held".into()];
+        assert_eq!(i.run().tier, Tier::Merge, "dismissed with its reason");
         let mut i = In::new();
         i.cubic.open = vec![finding(1)];
         i.cubic.unresolved = vec!["P1 retry loop".into()];
@@ -681,8 +692,8 @@ mod tests {
     }
 
     #[test]
-    fn a_security_dep_or_arch_call_is_review() {
-        for tag in ["security", "dep", "arch"] {
+    fn a_security_or_dep_call_is_review_but_an_arch_call_is_not() {
+        for tag in ["security", "dep"] {
             let mut i = In::new();
             i.facts.your_calls = vec![Call {
                 call: "token storage".into(),
@@ -691,12 +702,14 @@ mod tests {
             }];
             assert_tier(&i, Tier::Review, &format!("[{tag}] call: token storage"));
         }
-        let mut i = In::new();
-        i.facts.your_calls = vec![Call {
-            tag: "copy".into(),
-            ..Default::default()
-        }];
-        assert_eq!(i.run().tier, Tier::Merge);
+        for tag in ["copy", "arch"] {
+            let mut i = In::new();
+            i.facts.your_calls = vec![Call {
+                tag: tag.into(),
+                ..Default::default()
+            }];
+            assert_eq!(i.run().tier, Tier::Merge, "{tag}");
+        }
     }
 
     #[test]

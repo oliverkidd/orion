@@ -4508,6 +4508,7 @@ fn dispatch_action(
                 activate::follow_up(app);
             }
         }
+        Action::FactoryCard => crate::factory::cards::open_at_cursor(app),
         // On an open-PR row (either list) `g` reads that pull request's
         // diff instead of the checkout's — same modal, the pull request's
         // commits.
@@ -7463,7 +7464,7 @@ fn menu_items_for_session_in(app: &App, a: &orion_core::Agent) -> Vec<MenuItem> 
         items.splice(at..at, links);
         return items;
     }
-    // A factory session: **Not for the factory**'s two choices, after
+    // A factory session: **Not for orion**'s two choices, after
     // Archive, which each does too — and more.
     if crate::automations::linear_builder::owner::ticket_of_session(app, &a.id).is_some() {
         if let Some(at) = items
@@ -11709,6 +11710,7 @@ fn update_pointer(app: &mut App, mouse: &MouseEvent) {
                 | HitTarget::LauncherTabClose(_)
                 | HitTarget::LauncherPaneClose
                 | HitTarget::LauncherPaneZoom
+                | HitTarget::LauncherPaneCard
                 | HitTarget::LauncherTabAdd
                 | HitTarget::LauncherTabMore
                 | HitTarget::LauncherCrumb
@@ -12561,6 +12563,9 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 Some(HitTarget::LauncherPaneZoom) => {
                     launcher::toggle_full_screen(app, out);
                 }
+                // The FACTORY CARD LINE on the pane's rule: the card's
+                // buttons, as `c` opens them.
+                Some(HitTarget::LauncherPaneCard) => crate::factory::cards::open_at_cursor(app),
                 // Never in the hit map: the PULL REQUESTS MODAL and the
                 // LINEAR VIEW route the click on their button themselves,
                 // before this is reached.

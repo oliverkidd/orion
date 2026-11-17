@@ -2717,11 +2717,52 @@ pub(super) fn pane_frame(
         }
     }
     draw_rule(f, area, 2, if focused { th.accent } else { th.edge });
+    draw_card_line(f, app, area);
     Rect {
         y: area.y + 3,
         height: area.height.saturating_sub(3),
         ..area
     }
+}
+
+/// The FACTORY CARD LINE: while a software factory card is up about the
+/// row the pane reads (`factory::cards::at_cursor`), what it asks sits on
+/// the pane's rule — `─ ◆ Review: no pictures · c answer ─` — in the
+/// accent the row's `◆ card` wears; a click on it is `c`. It takes no
+/// row from the session, so the agent's screen never changes size as a
+/// card comes and goes.
+fn draw_card_line(f: &mut Frame, app: &mut App, area: Rect) {
+    let Some(summary) =
+        crate::factory::cards::at_cursor(app).map(|p| crate::factory::cards::summary(&p.card))
+    else {
+        return;
+    };
+    let Some(r) = row_rect(area, 2) else {
+        return;
+    };
+    let r = pad_x(r);
+    let th = app.theme;
+    let key = crate::hints::key_or(&app.keymap, crate::keymap::Action::FactoryCard, "c");
+    let tail = format!(" · {key} answer ");
+    let room = usize::from(r.width).saturating_sub(tail.chars().count() + 4);
+    if room < 8 {
+        return;
+    }
+    let spans = vec![
+        Span::styled(" ◆ ", Style::default().fg(th.accent)),
+        Span::styled(
+            truncate(&summary, room),
+            Style::default().fg(th.text).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(tail, Style::default().fg(th.dim)),
+    ];
+    let width = spans.iter().map(|s| s.width()).sum::<usize>();
+    let line = Rect {
+        width: u16::try_from(width).unwrap_or(r.width).min(r.width),
+        ..r
+    };
+    f.render_widget(Paragraph::new(Line::from(spans)), line);
+    app.hits.push((line, HitTarget::LauncherPaneCard));
 }
 
 /// The pane's title, laid out left to right in `room` columns: the card

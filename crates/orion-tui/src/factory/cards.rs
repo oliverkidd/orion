@@ -6,13 +6,21 @@
 //!
 //! - **At the desk, in orion**: a card to you reaches Slack only while
 //!   you are away — the daemon holds it otherwise, and sends what is
-//!   still open, once each, as you go (`orion_daemon::factory`). Every
-//!   card to you shows in orion either way: a `◆` on the row of the
-//!   session it is about, or of its worktree when no session is live
-//!   ([`place_of`]); a line in the footer as a new one arrives while you
-//!   are here; and the Needs you board (`needs_you::factory`), whose
-//!   Enter opens its buttons. A press in either place closes it in the
+//!   still open, once each, as you go (`orion_daemon::factory`). In
+//!   orion a card lives where its work is ([`place_of`]): on the row of
+//!   the session it is about (`◆ card`, and the pane's rule says what it
+//!   asks), or of its worktree when no session is live; `c` on that row
+//!   opens its buttons ([`open_at_cursor`]). The session's
+//!   own Needs you card stands for it — it waits on you while the card is
+//!   up — so the board lists only the cards that are about no session
+//!   (`needs_you::factory`). A press in either place closes it in the
 //!   other.
+//! - **Never stale** ([`reconcile`], on every git tick): a card whose
+//!   work moved on closes itself, on Slack too — its session at work
+//!   again after it was idle (you wrote to it, here or on the phone, or
+//!   the fixer did): "Picked up in orion"; the plan it was about answered
+//!   in orion; its worktree removed; a kind of card orion no longer makes;
+//!   a note that only says something finished, after a day.
 //! - **The message** is in the phone's style: a context line
 //!   `● Bug fixer · riplo-os · 10:42`, the card's title as the header,
 //!   one section per body line (Slack mrkdwn, `*bold*`), then its
@@ -35,9 +43,10 @@
 //!   to [`on_action`], which passes it to the owning module. The daemon
 //!   has already marked the message `✓ <label>`, its buttons gone; the
 //!   module may rewrite it with [`close`], or put it back up with [`post`]
-//!   when the press wasn't the card's answer (a verdict's 👍 / 👎).
+//!   when the press wasn't the card's answer (a Merge the card no longer
+//!   stands behind).
 //! - **Every card posted** is also kept in `App::factory_cards`, with
-//!   whether it is still open, so Needs you can mirror the open ones —
+//!   whether it is still open, so orion can show the open ones —
 //!   and on disk, in `<data_dir>/automations/factory-cards.json`, so a
 //!   restarted orion can still close, edit or re-post the cards it sent
 //!   (`load`, written after every change). A card acted on, closed or
@@ -46,7 +55,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use orion_core::factory_card::{ACTION, ACTION_LINK, ACTION_TYPE, SEP};
+use orion_core::factory_card::{ACTION, ACTION_LINK, ACTION_SELECT, ACTION_TYPE, SEP};
 use orion_core::slack_caps::{BUTTON, HEADER, MAX_BLOCKS, SECTION};
 use orion_core::{CardRecipient, ClientRequest, FactoryCard, FactoryCardFailure};
 use serde::{Deserialize, Serialize};
@@ -54,7 +63,7 @@ use serde_json::{json, Value};
 
 use crate::app::App;
 use crate::ui::truncate;
-use orion_core::{AgentId, WorktreeId};
+use orion_core::{AgentId, AgentStatus, WorktreeId};
 
 /// How long a closed (or never posted) card is kept after it was posted.
 pub(crate) const FORGET_AFTER_MS: i64 = 7 * orion_core::clock::DAY_MS;
@@ -77,6 +86,12 @@ pub(crate) struct Button {
     pub label: String,
     pub asks_text: bool,
     pub url: Option<String>,
+    /// The menu it is a choice in, by its name (`Not for orion…`): on
+    /// Slack the buttons that share one are one labelled menu
+    /// (`static_select`) rather than a button each. In orion each is a
+    /// row of the card's menu as any button is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub menu: Option<String>,
 }
 
 impl Button {
@@ -87,6 +102,19 @@ impl Button {
             label: label.into(),
             asks_text: false,
             url: None,
+            menu: None,
+        }
+    }
+
+    /// A choice in the menu named `menu`, taken in one pick.
+    pub(crate) fn choice(
+        action: impl Into<String>,
+        label: impl Into<String>,
+        menu: impl Into<String>,
+    ) -> Self {
+        Self {
+            menu: Some(menu.into()),
+            ..Self::tap(action, label)
         }
     }
 
@@ -97,6 +125,7 @@ impl Button {
             label: label.into(),
             asks_text: true,
             url: None,
+            menu: None,
         }
     }
 
@@ -108,6 +137,7 @@ impl Button {
             label: label.into(),
             asks_text: false,
             url: Some(url.into()),
+            menu: None,
         }
     }
 }
@@ -153,12 +183,34 @@ pub(crate) struct Posted {
     pub state: CardState,
     /// When it was last posted (epoch ms).
     pub at_ms: i64,
+    /// What [`reconcile`] has seen of its work since it was posted. Not
+    /// kept: a restarted orion looks again before it closes anything.
+    #[serde(skip)]
+    pub watch: Watch,
+}
+
+/// What [`reconcile`] has seen of a card's work since it was posted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Watch {
+    /// Its session was seen at rest — its turn over, or waiting on you —
+    /// so a turn after this is a pickup.
+    pub idle_seen: bool,
+    /// The worktree it was last seen about ([`place_of`]): once that is
+    /// gone from the tree, so is the card's work.
+    pub worktree: Option<WorktreeId>,
+    /// When a post the network stopped was last sent again (epoch ms).
+    pub retried_at_ms: i64,
 }
 
 /// Post `card` (or edit it in place, when its key was posted before),
 /// and keep it in `app.factory_cards`. The very card still open under its
 /// key is left as it is.
 pub(crate) fn post(app: &mut App, card: Card) {
+    send(app, card, true);
+}
+
+/// [`post`], saying so in the footer as a new card arrives when `flash`.
+fn send(app: &mut App, card: Card, flash: bool) {
     let unchanged = app
         .factory_cards
         .iter()
@@ -171,12 +223,20 @@ pub(crate) fn post(app: &mut App, card: Card) {
         .factory_cards
         .iter()
         .any(|p| p.card.key == card.key && p.state.is_up());
-    if fresh && card.to == Recipient::Owner && !app.away {
-        let key = crate::hints::key_or(&app.keymap, crate::keymap::Action::Palette, "⌘K");
-        app.flash = Some(crate::flash::Flash::note(format!(
-            "◆ {} · {key} to answer",
-            card.title
-        )));
+    if flash && fresh && card.to == Recipient::Owner && !app.away {
+        // Where to answer it: on its row, when it has one; else Needs you.
+        let line = match place_of(app, &card.key) {
+            Some(_) => {
+                let key =
+                    crate::hints::key_or(&app.keymap, crate::keymap::Action::FactoryCard, "c");
+                format!("◆ {} · {key} on its row to answer", card.title)
+            }
+            None => {
+                let key = crate::hints::key_or(&app.keymap, crate::keymap::Action::Palette, "⌘K");
+                format!("◆ {} · {key} to answer", card.title)
+            }
+        };
+        app.flash = Some(crate::flash::Flash::note(line));
     }
     let time = chrono::Local::now().format("%H:%M").to_string();
     let request = ClientRequest::PostFactoryCard {
@@ -187,6 +247,7 @@ pub(crate) fn post(app: &mut App, card: Card) {
         card,
         state: CardState::Open,
         at_ms: orion_core::clock::now_ms(),
+        watch: Watch::default(),
     };
     match app
         .factory_cards
@@ -269,11 +330,262 @@ fn pr_worktree(app: &App, url: &str) -> Option<WorktreeId> {
 
 /// How many open cards to you show at `place`.
 pub(crate) fn waiting_at(app: &App, place: &Place) -> usize {
+    shown_at(app, place.clone()).count()
+}
+
+/// The open cards to you: what shows in orion and on Slack.
+pub(crate) fn open_to_you(app: &App) -> impl Iterator<Item = &Posted> {
     app.factory_cards
         .iter()
         .filter(|p| p.state == CardState::Open && p.card.to == Recipient::Owner)
-        .filter(|p| place_of(app, &p.card.key).as_ref() == Some(place))
-        .count()
+}
+
+/// The open cards to you shown at `place`.
+fn shown_at(app: &App, place: Place) -> impl Iterator<Item = &Posted> {
+    open_to_you(app).filter(move |p| place_of(app, &p.card.key).as_ref() == Some(&place))
+}
+
+/// The open card to you shown at `place`, the newest first.
+pub(crate) fn open_at<'a>(app: &'a App, place: &Place) -> Option<&'a Posted> {
+    shown_at(app, place.clone()).max_by_key(|p| p.at_ms)
+}
+
+/// The open card to you on each live session, the newest each: one walk
+/// of the cards, for a list of every session (`needs_you::agents`).
+pub(crate) fn by_session(app: &App) -> std::collections::HashMap<AgentId, &Posted> {
+    let mut out: std::collections::HashMap<AgentId, &Posted> = std::collections::HashMap::new();
+    for p in open_to_you(app) {
+        if let Some(Place::Session(id)) = place_of(app, &p.card.key) {
+            let newer = out.get(&id).is_none_or(|q| p.at_ms > q.at_ms);
+            if newer {
+                out.insert(id, p);
+            }
+        }
+    }
+    out
+}
+
+/// Where the grid's cursor is in `bands`, as a card's place: the session
+/// under it, else its band's worktree.
+fn cursor_place(app: &App, bands: &[crate::launcher::Band]) -> Option<Place> {
+    let band = &bands[crate::launcher::band_cursor(app, bands)?];
+    let card = crate::launcher::card_cursor(app, band).and_then(|c| band.cards.get(c));
+    Some(match card {
+        Some(crate::launcher::Card::Session(row)) => Place::Session(row.agent.id.clone()),
+        _ => Place::Worktree(band.worktree.clone()),
+    })
+}
+
+/// The open card to you about what the grid's cursor is on: the
+/// session's own, else its worktree's. The grid is laid out only when
+/// some card is open, so a frame with none costs nothing.
+pub(crate) fn at_cursor(app: &App) -> Option<&Posted> {
+    open_to_you(app).next()?;
+    at_cursor_in(app, &crate::launcher::bands(app))
+}
+
+/// [`at_cursor`] on the bands the caller has laid out already.
+pub(crate) fn at_cursor_in<'a>(
+    app: &'a App,
+    bands: &[crate::launcher::Band],
+) -> Option<&'a Posted> {
+    open_to_you(app).next()?;
+    let place = cursor_place(app, bands)?;
+    open_at(app, &place).or_else(|| match place {
+        Place::Session(id) => {
+            let agent = app.tree.agents.iter().find(|a| a.id == id)?;
+            open_at(app, &Place::Worktree(agent.worktree_id.clone()))
+        }
+        Place::Worktree(_) => None,
+    })
+}
+
+/// `c` on the grid: the buttons of the card about the row under the
+/// cursor, its words above them (`needs_you::factory::open_menu`) — or a
+/// word that there is none.
+pub(crate) fn open_at_cursor(app: &mut App) {
+    match at_cursor(app).map(|p| p.card.key.clone()) {
+        Some(key) => crate::needs_you::factory::open_menu(app, &key),
+        None => {
+            app.flash = Some(crate::flash::Flash::note(
+                "No factory card waits on this row",
+            ));
+            app.dirty = true;
+        }
+    }
+}
+
+/// What a card asks, in a line: a verdict's first body line as plain
+/// text (`Review: no pictures`) — its title is the pull request's — and
+/// any other card's title (`Nothing to build: already shipped in #2075`).
+pub(crate) fn summary(card: &Card) -> String {
+    if !card.key.starts_with(PR_PREFIX) {
+        return card.title.clone();
+    }
+    card.body
+        .iter()
+        .map(|line| plain(line))
+        .map(|line| line.lines().next().unwrap_or("").trim().to_string())
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| card.title.clone())
+}
+
+/// Slack mrkdwn as plain text: bold and italic marks gone, `<url|label>`
+/// as its label, the escapes undone (`needs_you::slack::plain`).
+pub(crate) fn plain(line: &str) -> String {
+    crate::needs_you::slack::plain(line, &Default::default()).replace(['*', '_'], "")
+}
+
+/// A pull request's verdict card's key prefix (`pr_body`).
+const PR_PREFIX: &str = "pr:";
+/// The knowledge backfill's summary card's key prefix
+/// (`knowledge::runner`).
+const BACKFILL_PREFIX: &str = "kb:backfill:";
+/// The week in review card's key prefix (`factory::week`).
+const WEEK_PREFIX: &str = "week:";
+
+/// Kinds of card this orion no longer makes, closed on sight: a session
+/// that dies or stalls is relaunched or nudged now.
+const RETIRED: [&str; 2] = [":dead", ":stalled"];
+/// A card that only says something finished — the knowledge backfill —
+/// closes after this.
+const NOTE_KEEP_MS: i64 = orion_core::clock::DAY_MS;
+/// The week's card closes before the next week's comes.
+const WEEK_KEEP_MS: i64 = 6 * orion_core::clock::DAY_MS;
+/// What a card whose session went back to work says as it closes.
+pub(crate) const PICKED_UP: &str = "Picked up in orion";
+/// …and while you are away, when it was the fixer or the phone.
+pub(crate) const WORKING_AGAIN: &str = "The agent is working again";
+/// How often a post the network stopped is sent again…
+const RETRY_MS: i64 = 5 * orion_core::clock::MINUTE_MS;
+/// …for as long as this after it was first posted.
+const RETRY_FOR_MS: i64 = orion_core::clock::DAY_MS;
+
+/// Whether `p` is a post the network stopped that is still being sent
+/// again ([`reconcile`]): not up yet, but on its way.
+pub(crate) fn awaiting_retry(p: &Posted, now_ms: i64) -> bool {
+    matches!(&p.state, CardState::Failed(why) if network_failure(why))
+        && now_ms.saturating_sub(p.at_ms) < RETRY_FOR_MS
+}
+
+/// Whether a failed post is the network's doing — no DNS, no connection,
+/// a timeout — and worth sending again.
+fn network_failure(reason: &FactoryCardFailure) -> bool {
+    let FactoryCardFailure::Other(why) = reason else {
+        return false;
+    };
+    [
+        "Could not resolve host",
+        "curl: (6)",
+        "curl: (7)",
+        "curl: (28)",
+    ]
+    .iter()
+    .any(|sign| why.contains(sign))
+}
+
+/// What a card on a plan answered in orion says as it closes.
+pub(crate) const ANSWERED: &str = "Answered in orion";
+/// What a card whose worktree was removed says as it closes.
+pub(crate) const WORKTREE_GONE: &str = "Worktree removed";
+/// What a kind of card orion no longer makes says as it closes.
+const RETIRED_NOTE: &str = "No longer needed";
+/// What a card that only said something finished says as it closes.
+const EXPIRED: &str = "Expired";
+
+/// Close every open card to you whose work has moved on, here and on
+/// Slack — see the module's doc. Run on every git tick, once the tree
+/// is in.
+pub(crate) fn reconcile(app: &mut App) {
+    if app.tree.worktrees.is_empty() {
+        return;
+    }
+    let now = orion_core::clock::now_ms();
+    // A post the network stopped — the day's rules while the Wi-Fi was
+    // down — goes again every few minutes until Slack takes it, for a
+    // day: it keeps the time it was first posted.
+    let retry: Vec<(Card, i64)> = app
+        .factory_cards
+        .iter()
+        .filter(|p| awaiting_retry(p, now))
+        .filter(|p| now.saturating_sub(p.watch.retried_at_ms) >= RETRY_MS)
+        .map(|p| (p.card.clone(), p.at_ms))
+        .collect();
+    for (card, first_at_ms) in retry {
+        tracing::info!(
+            "factory: posting {} again after a network failure",
+            card.key
+        );
+        let key = card.key.clone();
+        send(app, card, false);
+        if let Some(p) = app.factory_cards.iter_mut().find(|p| p.card.key == key) {
+            p.at_ms = first_at_ms;
+            p.watch.retried_at_ms = now;
+        }
+    }
+    let mut closing: Vec<(String, &'static str)> = Vec::new();
+    let mut seen: Vec<(String, Watch)> = Vec::new();
+    for p in open_to_you(app) {
+        let key = p.card.key.as_str();
+        let age = now.saturating_sub(p.at_ms);
+        if RETIRED.iter().any(|end| key.ends_with(end)) {
+            closing.push((key.to_string(), RETIRED_NOTE));
+            continue;
+        }
+        if (key.starts_with(BACKFILL_PREFIX) && age > NOTE_KEEP_MS)
+            || (key.starts_with(WEEK_PREFIX) && age > WEEK_KEEP_MS)
+        {
+            closing.push((key.to_string(), EXPIRED));
+            continue;
+        }
+        let mut watch = p.watch.clone();
+        match place_of(app, key) {
+            Some(Place::Session(id)) => {
+                let agent = app.tree.agents.iter().find(|a| a.id == id);
+                watch.worktree = agent.map(|a| a.worktree_id.clone());
+                let status = agent.map(|a| a.status);
+                if status == Some(AgentStatus::Running) && watch.idle_seen {
+                    let note = match (key.ends_with(":nochange"), app.away) {
+                        (true, _) => ANSWERED,
+                        (false, false) => PICKED_UP,
+                        (false, true) => WORKING_AGAIN,
+                    };
+                    closing.push((key.to_string(), note));
+                    continue;
+                }
+                // At rest: its turn over, or waiting on you — not booting.
+                watch.idle_seen |= matches!(
+                    status,
+                    Some(AgentStatus::Finished | AgentStatus::NeedsFeedback)
+                );
+            }
+            Some(Place::Worktree(id)) => watch.worktree = Some(id),
+            None => {
+                // Nowhere to show it — closed only once the worktree it
+                // was last seen about has really gone from the tree.
+                let gone = watch
+                    .worktree
+                    .as_ref()
+                    .is_some_and(|w| !app.tree.worktrees.iter().any(|t| &t.id == w));
+                if gone {
+                    closing.push((key.to_string(), WORKTREE_GONE));
+                    continue;
+                }
+            }
+        }
+        if watch != p.watch {
+            seen.push((key.to_string(), watch));
+        }
+    }
+    for (key, watch) in seen {
+        if let Some(p) = app.factory_cards.iter_mut().find(|p| p.card.key == key) {
+            p.watch = watch;
+        }
+    }
+    for (key, note) in closing {
+        tracing::info!("factory: card {key} closed: {note}");
+        close(app, &key, note);
+    }
 }
 
 /// Where the card under `key` stands, if it was posted.
@@ -338,7 +650,7 @@ pub(crate) fn on_action(
         // Intake and Linear: a held ticket, a thin ticket's question, a
         // plan with nothing to build, a stalled session.
         Some("issue") => crate::automations::linear_builder::owner::on_action(app, press),
-        // A factory session's phone message: **Not for the factory**.
+        // A factory session's phone message: **Not for orion**.
         Some("session") => crate::automations::linear_builder::owner::on_session_action(app, press),
         // A verdict card's buttons.
         Some("pr") => crate::pr_body::on_action(app, press),
@@ -371,7 +683,11 @@ pub(crate) fn on_failed(app: &mut App, key: &str, reason: FactoryCardFailure) {
         }
     }
     if let Some(posted) = app.factory_cards.iter_mut().find(|p| p.card.key == key) {
-        posted.state = CardState::Failed(reason.clone());
+        // A close Slack didn't take is still closed here: only a post
+        // that never went up is a failed card.
+        if !matches!(posted.state, CardState::Closed(_)) {
+            posted.state = CardState::Failed(reason.clone());
+        }
     }
     save(app);
     if key.starts_with("issue:") {
@@ -483,15 +799,38 @@ pub(crate) fn blocks(card: &Card, time: &str) -> Vec<Value> {
             }),
     );
     if !card.buttons.is_empty() {
-        let elements: Vec<Value> = card
-            .buttons
-            .iter()
-            .enumerate()
-            .map(|(n, b)| button(&card.key, n, b))
-            .collect();
+        let mut elements: Vec<Value> = Vec::new();
+        let mut menus: Vec<&str> = Vec::new();
+        for (n, b) in card.buttons.iter().enumerate() {
+            match b.menu.as_deref() {
+                None => elements.push(button(&card.key, n, b)),
+                // The first choice of a menu stands for all of its.
+                Some(name) if !menus.contains(&name) => {
+                    menus.push(name);
+                    elements.push(menu(&card.key, n, name, &card.buttons));
+                }
+                Some(_) => {}
+            }
+        }
         blocks.push(json!({"type": "actions", "block_id": "orion_factory", "elements": elements}));
     }
     blocks
+}
+
+/// The menu named `name`: every button of the card that is a choice in
+/// it, as a labelled `static_select`.
+fn menu(key: &str, n: usize, name: &str, buttons: &[Button]) -> Value {
+    let options: Vec<Value> = buttons
+        .iter()
+        .filter(|b| b.menu.as_deref() == Some(name))
+        .map(|b| {
+            json!({"text": {"type": "plain_text", "emoji": true, "text": truncate(&b.label, BUTTON)},
+                "value": format!("{key}{SEP}{}", b.action)})
+        })
+        .collect();
+    json!({"type": "static_select", "action_id": format!("{ACTION_SELECT}_{n}"),
+        "placeholder": {"type": "plain_text", "emoji": true, "text": truncate(name, BUTTON)},
+        "options": options})
 }
 
 fn button(key: &str, n: usize, b: &Button) -> Value {
@@ -538,6 +877,49 @@ pub(crate) fn escape(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A post the network stopped is sent again every few minutes, for a
+    /// day from when it was first posted, without a footer line each
+    /// time; a close that failed is never posted again.
+    #[test]
+    fn a_post_the_network_stopped_goes_again_for_a_day() {
+        let mut app = App::new();
+        app.tree.worktrees.push(orion_core::Worktree {
+            id: WorktreeId("w".into()),
+            project_id: orion_core::ProjectId("p".into()),
+            path: PathBuf::from("/nonexistent/w"),
+            branch: "main".into(),
+            is_main: true,
+            sort_order: 0,
+        });
+        let offline =
+            || FactoryCardFailure::Other("curl: (6) Could not resolve host: slack.com".into());
+        post(&mut app, card());
+        let first_at = app.factory_cards[0].at_ms;
+        on_failed(&mut app, &card().key, offline());
+        app.outbox.clear();
+        app.flash = None;
+        reconcile(&mut app);
+        assert!(matches!(
+            app.outbox.last(),
+            Some(ClientRequest::PostFactoryCard { .. })
+        ));
+        assert_eq!(app.flash, None, "no footer line for a retry");
+        assert_eq!(app.factory_cards[0].at_ms, first_at, "keeps its first time");
+        // Failed again at once: not sent again for five minutes.
+        on_failed(&mut app, &card().key, offline());
+        app.outbox.clear();
+        reconcile(&mut app);
+        assert!(app.outbox.is_empty());
+        assert!(awaiting_retry(&app.factory_cards[0], first_at + 1));
+        assert!(!awaiting_retry(
+            &app.factory_cards[0],
+            first_at + RETRY_FOR_MS
+        ));
+        // Slack refusing it is no network failure.
+        app.factory_cards[0].state = CardState::Failed(FactoryCardFailure::NotOnSlack);
+        assert!(!awaiting_retry(&app.factory_cards[0], first_at + 1));
+    }
 
     fn card() -> Card {
         Card {
@@ -630,6 +1012,14 @@ mod tests {
         let blocks = sent.blocks.as_array().unwrap();
         assert!(blocks.iter().all(|b| b["type"] != "actions"));
         assert_eq!(blocks.last().unwrap()["elements"][0]["text"], "✓ Merged");
+        // A close Slack didn't take is still closed here…
+        on_failed(&mut app, &card().key, FactoryCardFailure::NotOnSlack);
+        assert_eq!(
+            app.factory_cards[0].state,
+            CardState::Closed("Merged".into())
+        );
+        // …while a post that never went up is a failed card.
+        post(&mut app, card());
         on_failed(&mut app, &card().key, FactoryCardFailure::NotOnSlack);
         assert_eq!(
             app.factory_cards[0].state,
@@ -670,6 +1060,7 @@ mod tests {
             },
             state,
             at_ms,
+            watch: Watch::default(),
         };
         let old = now - FORGET_AFTER_MS - 1;
         let kept = vec![
@@ -702,6 +1093,7 @@ mod tests {
             card: card(),
             state: CardState::Open,
             at_ms: orion_core::clock::now_ms(),
+            watch: Watch::default(),
         }];
         close(&mut app, &card().key, "Merged");
         assert!(matches!(

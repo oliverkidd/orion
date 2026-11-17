@@ -123,6 +123,7 @@ cursor. `↑`/`↓` walk the lines, every band listing all of its entries.
 | `Enter`, a double-click | into the pane on the row under the cursor, its input locked. On a band with nothing on it but its pull request, into the pane to read it. On a terminal too short to draw the pane the session takes the whole screen instead |
 | `Esc` | in the ARCHIVED VIEW, back to the live sessions; else let the row under the cursor go — the pane collapses. What was under the cursor is only let go of: the next arrow takes the aim back |
 | `Space` | the FOLLOW-UP MODAL: a small box over the grid for the selected session's next turn. `Enter` sends it down the PTY, `⇧Enter` / `⌥Enter` / `^J` break a line, `Esc` closes without sending. Nothing about the pane moves. Only a live local agent takes one; a session whose CLI is not up is booted first and the box kept |
+| `c` | **answer the factory card** about the row under the cursor — a pull request's verdict, a plan with nothing to build — while one is up: the row wears `◆ card` and the pane's rule says what it asks (`◆ Review: no pictures · c answer`, a click there is `c`). Its words over its buttons, as on Slack: `1`–`9` presses one, a button that asks for words (`Send back…`) opens a box for them, a link (`Open PR`) opens in the browser. See [Sessions](sessions.md#factory-cards) |
 | `t` | a new shell terminal inside orion, in the cursor's checkout — a row in its band, with the pane on it and the keys in it. `⌘O` → **Terminal in the checkout** opens one outside orion, in a Ghostty tab |
 | `` ` `` | the next TERMINAL row of the cursor's checkout, round to the first |
 | `r` | rename the session under the cursor |
@@ -287,7 +288,11 @@ connected). Three columns:
 1. **AGENTS** — every session that wants you, of every kind, in one list: crashed first, then
    waiting on you (the longest waiting first), then finished and unread. A card reads its name and
    how long ago, then `agent · project · reason` — `asks a question`, `plan to approve`,
-   `needs permission for Bash`, `crashed, exit 1`, `draft PR #12 ready`, `done`.
+   `needs permission for Bash`, `crashed, exit 1`, `draft PR #12 ready`, `done`. A session with a
+   software factory card up about it waits on you while the card is up, the reason saying what the
+   card asks (`◆ Review: no pictures`): `Enter` lands on it, and `c` there answers the card. A
+   factory card about no live session — a ticket held for you, the day's new rules — is a card of
+   its own here, marked `◆`, whose `Enter` lists its buttons.
 2. **LINEAR** — one card per live ticket of yours: those assigned to you in triage, todo or a
    started state (never the backlog, done or cancelled), and those your unread notifications are
    about (mentions, new comments on issues you're in, issues given to you). A card reads
@@ -735,9 +740,8 @@ orion's presets (**Used by orion**) `Enter` edits it and `^R` puts back orion's 
 yours, after a confirmation — it can't be deleted or renamed, so its row has neither; on one of
 **Yours** `Enter` edits, `^N` makes a new one and `^D` deletes it (with a confirmation); `Enter` on
 **+ New preset** makes one ([Sessions](sessions.md#agent-presets)). On the Factory tab — the
-overall caps, then a section per automation — `←`/`→` change **Agents working at once**, **Things
-waiting on you**, the **Factory account** (moving the factory's sessions there) and an
-automation's **At most at once** (1 to 10, then any), `Enter` edits the row — **Extra steer** and
+factory's own rows, then a section per automation — `←`/`→` change **Agents working at once** (the
+one cap) and the **Factory account** (moving the factory's sessions there), `Enter` edits the row — **Extra steer** and
 week in review's **When** in a prompt, **Labels** in a pick of your Linear workspace's labels
 (`Space` ticks, `Enter` keeps them), **Whose** switches, **Preset** opens it on the Presets tab —
 `Space` turns the section's automation on or off, and `⌘U` (`^X`) picks another preset for it, `Esc`

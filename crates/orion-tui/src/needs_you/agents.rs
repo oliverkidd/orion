@@ -7,7 +7,12 @@
 //! session whose PTY is gone: it no longer waits, but a crash stays one.
 //! Each card reads `<kind> · <project> · <reason>`, the reason from
 //! [`reason_text`] — or, for a factory session that crashed past its
-//! relaunches, "Stopped after 2 restarts".
+//! relaunches, "Stopped after 2 restarts". A session with a software
+//! factory card up about it (a pull request's verdict, a plan with
+//! nothing to build) waits on you for as long as the card is up, the
+//! reason saying what the card asks — `◆ Review: no pictures` — so the
+//! board lists the session once, in its latest state, and Enter lands on
+//! it, where `c` answers the card.
 
 use chrono::{DateTime, Utc};
 use orion_core::{Agent, AgentStatus, WaitReason};
@@ -104,18 +109,36 @@ pub struct Agents;
 
 impl CardSource for Agents {
     fn cards(&self, app: &App) -> Vec<Card> {
+        use crate::automations::linear_builder::{stopped_after_restarts, STOPPED_AFTER_RESTARTS};
+        // The factory card up on each session, found in one walk.
+        let factory = crate::factory::cards::by_session(app);
         let mut cards = Vec::new();
         for project in &app.tree.projects {
             for agent in crate::launcher::project_agents(app, &project.id) {
-                let Some(urgency) = urgency(agent) else {
-                    continue;
+                let card = factory.get(&agent.id);
+                // A card up about it: it waits on you, as the card does.
+                let urgency = match (urgency(agent), card.is_some()) {
+                    (Some(u), true) => u.max(WAITING),
+                    (None, true) => WAITING,
+                    (Some(u), false) => u,
+                    (None, false) => continue,
                 };
-                use crate::automations::linear_builder::{
-                    stopped_after_restarts, STOPPED_AFTER_RESTARTS,
-                };
-                let reason = match stopped_after_restarts(app, &agent.id) {
-                    true => STOPPED_AFTER_RESTARTS.to_string(),
-                    false => reason_text(agent, reason_of(app, agent), draft_pr(app, agent)),
+                let wait = reason_of(app, agent);
+                // A question or a permission prompt says more than the
+                // card; a plan with nothing to build is the card's.
+                let asks_itself = agent.status == AgentStatus::NeedsFeedback
+                    && matches!(
+                        wait,
+                        Some(WaitReason::Question { .. } | WaitReason::Permission { .. })
+                    );
+                let reason = match card {
+                    _ if stopped_after_restarts(app, &agent.id) => {
+                        STOPPED_AFTER_RESTARTS.to_string()
+                    }
+                    Some(p) if !asks_itself => {
+                        format!("◆ {}", crate::factory::cards::summary(&p.card))
+                    }
+                    _ => reason_text(agent, wait, draft_pr(app, agent)),
                 };
                 cards.push(Card::new(
                     Section::Agents,

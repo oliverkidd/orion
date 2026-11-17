@@ -24,7 +24,7 @@ pub fn name(id: &str) -> Option<&'static str> {
 
 /// The automations that build Linear tickets — the software factory's
 /// intake. A session one of them started can be taken off the factory
-/// (**Not for the factory**).
+/// (**Not for orion**).
 pub const TICKET_RUNNERS: [&str; 2] = ["bug_fixer", "feature_builder"];
 
 /// Whether the automation tagged `id` builds Linear tickets.

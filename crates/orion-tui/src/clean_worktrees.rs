@@ -495,7 +495,7 @@ pub(crate) fn delete_branch_later(app: &App, repo: PathBuf, branch: String, coun
 }
 
 /// `branch` of `repo` to go once the daemon has removed worktree `id`
-/// ([`removed`]), said by name — how **Not for the factory** takes a
+/// ([`removed`]), said by name — how **Not for orion** takes a
 /// ticket's branch with its checkout.
 pub(crate) fn branch_goes_with(app: &mut App, id: WorktreeId, repo: PathBuf, branch: String) {
     app.clean_worktrees

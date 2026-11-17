@@ -216,7 +216,7 @@ pub(crate) enum Command {
     /// Take a ticket off the software factory.
     ///
     /// The bug fixer and the feature builder build Linear tickets on their
-    /// own; `skip` is their cards' **Not for the factory**, from a shell.
+    /// own; `skip` is their cards' **Not for orion**, from a shell.
     #[command(subcommand, after_help = FACTORY_EXAMPLES)]
     Factory(FactoryCommand),
     /// Locate this machine's settings.
@@ -533,7 +533,7 @@ pub(crate) enum FactoryCommand {
     /// Take a ticket off the factory for good.
     ///
     /// Labels the ticket `factory-skip`, which the intake never picks up
-    /// until someone removes it, comments "Taken off the factory by
+    /// until someone removes it, comments "Taken off orion by
     /// <you>" (once), moves it to its team's Triage (or Backlog), closes
     /// the draft pull request its session opened, archives the session,
     /// removes its worktree when nothing in it would be lost, and marks

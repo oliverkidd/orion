@@ -201,7 +201,7 @@ pub fn start(app: &mut App, ids: &[u64], out: &mut Vec<ClientRequest>) {
         .map(|file| {
             ids.iter()
                 .filter_map(|id| file.item(*id))
-                .filter(|i| i.done.is_none() && session(app, i).is_none_or(|a| !super::occupies(a)))
+                .filter(|i| i.done.is_none() && session(app, i).is_none_or(|a| !super::on_task(a)))
                 .map(|i| i.id)
                 .collect()
         })
@@ -225,7 +225,7 @@ pub fn start(app: &mut App, ids: &[u64], out: &mut Vec<ClientRequest>) {
     if !ideas(app).is_some_and(|f| f.items.iter().any(|i| i.queued)) {
         return;
     }
-    app.flash = Some(if super::may_start(app, Automation::BlueSky) {
+    app.flash = Some(if super::may_start(app) {
         Flash::working(format!(
             "making {} a project, then the Blue sky builder starts",
             folder().map_or_else(|| BLUE_SKY.to_string(), |f| f.display().to_string())
@@ -295,7 +295,7 @@ impl Runner for BlueSkyBuilder {
             .map(|f| f.items.iter().filter(|i| i.queued).cloned().collect())
             .unwrap_or_default();
         for item in queued {
-            if !super::may_start(app, Automation::BlueSky) {
+            if !super::may_start(app) {
                 return;
             }
             if item.target.is_some() {

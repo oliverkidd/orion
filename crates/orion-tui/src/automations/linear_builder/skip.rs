@@ -1,5 +1,5 @@
-//! `orion factory skip <ticket or session> [--backlog]`: **Not for the
-//! factory** from a shell, with or without orion running — the same
+//! `orion factory skip <ticket or session> [--backlog]`: **Not for orion**
+//! from a shell, with or without orion running — the same
 //! pipeline as the button ([`super::owner::not_for_the_factory`]), each
 //! step printed as it goes:
 //!
@@ -456,7 +456,7 @@ mod tests {
             outside.calls,
             [
                 "lin_key: label the ticket factory-skip",
-                "lin_key: comment \"Taken off the factory by …\"",
+                "lin_key: comment \"Taken off orion by …\"",
                 "lin_key: move the ticket to Backlog",
                 &format!("lin_key: close the draft {url}"),
                 "archive s7",
@@ -469,7 +469,7 @@ mod tests {
             [
                 "ENG-7: taking ENG-7 off the factory, to Backlog",
                 "✓ label the ticket factory-skip",
-                "✓ comment \"Taken off the factory by …\"",
+                "✓ comment \"Taken off orion by …\"",
                 "✓ move the ticket to Backlog",
                 &format!("✓ close the draft {url}"),
                 "✓ archive the session s7",
@@ -501,7 +501,7 @@ mod tests {
             [
                 "ENG-7: taking ENG-7 off the factory, to Triage",
                 "✗ label the ticket factory-skip: refused",
-                "✓ comment \"Taken off the factory by …\"",
+                "✓ comment \"Taken off orion by …\"",
                 "✓ move the ticket to Triage",
                 "· no draft pull request to close",
                 "✓ archive the session s7",

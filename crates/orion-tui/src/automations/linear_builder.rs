@@ -22,7 +22,7 @@
 //!   is unassigned until they say they've updated it — or, when they
 //!   can't be asked, asks you. One the model judges very like a live
 //!   session's work asks you too (Start anyway · Skip). A ticket labelled
-//!   `factory-skip` (**Not for the factory**, [`owner`]) is never picked
+//!   `factory-skip` (**Not for orion**, [`owner`]) is never picked
 //!   up ([`fresh`]).
 //! * **Route.** A key one project uses goes to that project. A key several
 //!   share asks the model once, through [`crate::oneshot::run_json`], with
@@ -42,9 +42,8 @@
 //!   tickets and work and the repo's knowledge at `{task}` ([`context`]).
 //!   A project without the factory workflow doc ([`WORKFLOW_DOC`]) starts
 //!   nothing and says so once ([`setup`]). A group waits — "queued, N
-//!   running" — while `automations.max_running` automation sessions run,
-//!   and while `automations.attention_cap` factory items wait on you
-//!   ([`super::attention`]).
+//!   running" — while `automations.max_running` automation sessions are
+//!   at work. However much waits on you, it holds nothing back.
 //! * **Follow** ([`stages`]): the plan up for approval — or a plan that
 //!   says nothing should be built (`ORION-VERDICT: …`), which asks you to
 //!   close the ticket instead — then building, the pull request open,
@@ -420,7 +419,7 @@ pub struct Entry {
     /// approves (`approved_paths`). Taken when it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    /// Taken off the factory (**Not for the factory**, from orion or
+    /// Taken off the factory (**Not for orion**, from orion or
     /// `orion factory skip`): parked for good. A running orion adopts one
     /// the CLI wrote ([`Shared::adopt_skips`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -980,7 +979,7 @@ fn placed(
 /// project that has its workflow doc; one that hasn't stays queued, and
 /// says so once.
 fn launch_queued(app: &mut App, which: Automation, out: &mut Vec<ClientRequest>) {
-    while super::may_start(app, which) {
+    while super::may_start(app) {
         let waiting: Vec<(usize, ProjectId)> = app
             .automations
             .linear_builder
@@ -1479,7 +1478,7 @@ pub fn panel(app: &App, which: Automation) -> Panel {
         let (state, tone) = match agent {
             None if first.session.is_none() => ("starting", Tone::Working),
             None => continue,
-            Some(a) if a.archived || !super::occupies(a) => continue,
+            Some(a) if a.archived || !super::on_task(a) => continue,
             Some(a) if a.status == AgentStatus::NeedsFeedback => {
                 if first.stage == Stage::Approving {
                     plans += 1;
@@ -1504,22 +1503,13 @@ pub fn panel(app: &App, which: Automation) -> Panel {
         });
     }
     let running = super::running(app);
-    // Waiting on its own cap, not the overall one: Settings › Factory is
-    // where that changes.
-    let at_cap = super::at_own_cap(app, which);
-    let attention = super::attention(app);
-    let on_you = attention >= app.automations.settings.attention_cap();
     let queued: Vec<&Group> = shared.queue.iter().filter(|g| g.which == which).collect();
     for group in &queued {
         let ids: Vec<&str> = group.issues.iter().map(|i| i.identifier.as_str()).collect();
         let title = group.issues.first().map_or("", |i| i.title.as_str());
         rows.push(PanelRow {
             text: format!("{} {title}", ids.join(", ")),
-            state: match (on_you, at_cap) {
-                (true, _) => format!("queued: waiting on you ({attention})"),
-                (false, true) => "queued (at its cap)".to_string(),
-                (false, false) => format!("queued, {running} running"),
-            },
+            state: format!("queued, {running} running"),
             tone: Tone::Quiet,
             session: None,
             url: None,
@@ -1534,14 +1524,6 @@ pub fn panel(app: &App, which: Automation) -> Panel {
         (n, _, _) if n > 1 => (Dot::Waiting, format!("{n} plans waiting")),
         (_, n, _) if n > 0 => (Dot::Waiting, format!("{n} waiting on you")),
         (_, _, Some(id)) => (Dot::Working, format!("{verb} {id}")),
-        _ if on_you && !queued.is_empty() => {
-            (Dot::Idle, format!("queued: waiting on you ({attention})"))
-        }
-        _ if at_cap && !queued.is_empty() => {
-            let first = queued.first().and_then(|g| g.issues.first());
-            let id = first.map_or("", |i| i.identifier.as_str());
-            (Dot::Idle, format!("queued: {id} (at its cap)"))
-        }
         _ if !queued.is_empty() => (Dot::Idle, format!("{} queued", queued.len())),
         _ => (Dot::Idle, "watching Linear".to_string()),
     };
@@ -2761,7 +2743,15 @@ mod tests {
             "Looks like the work in your *login loop* session (the same redirect)."
         );
         let actions: Vec<&str> = c.card.buttons.iter().map(|b| b.action.as_str()).collect();
-        assert_eq!(actions, ["start", "skip"]);
+        assert_eq!(
+            actions,
+            [
+                "start",
+                "skip",
+                "not_for_factory",
+                "not_for_factory_backlog"
+            ]
+        );
         crate::factory::cards::on_action(
             &mut app,
             "issue:uuid-ENG-1:duplicate",
@@ -3357,8 +3347,8 @@ mod tests {
             [
                 "Close ticket",
                 "Build it anyway…",
-                "Not for the factory: back to Triage",
-                "Not for the factory: move to Backlog"
+                "Not for orion: back to Triage",
+                "Not for orion: move to Backlog"
             ]
         );
         assert!(c.card.buttons[1].asks_text);
@@ -3548,10 +3538,12 @@ mod tests {
         assert_eq!(super::super::attention(&app), 0);
     }
 
-    /// At the desk a card shows in orion: a footer line as it arrives, a
-    /// badge on its session's row — or, the session gone, its worktree's —
-    /// and the Needs you board; acted on in orion, it goes from all three
-    /// and its close goes to the daemon (which drops it or edits Slack).
+    /// At the desk a card shows in orion where its work is: a footer line
+    /// as it arrives, a badge on its session's row — or, the session gone,
+    /// its worktree's — and, on Needs you, the session's own card saying
+    /// what it asks (the board lists the card itself only once no session
+    /// stands for it); acted on in orion, it goes from all of them and its
+    /// close goes to the daemon (which drops it or edits Slack).
     #[test]
     fn a_card_at_the_desk_shows_on_its_session_and_in_needs_you() {
         use crate::factory::cards::{place_of, waiting_at, Place};
@@ -3566,14 +3558,29 @@ mod tests {
             "{flash}"
         );
         let session = Place::Session(AgentId("s7".into()));
+        assert!(flash.ends_with("c on its row to answer"), "{flash}");
         assert_eq!(place_of(&app, key), Some(session.clone()));
         assert_eq!(waiting_at(&app, &session), 1);
-        assert_eq!(crate::needs_you::factory::Factory.cards(&app).len(), 1);
-        // Its session archived: the worktree wears it instead.
+        assert!(
+            crate::needs_you::factory::Factory.cards(&app).is_empty(),
+            "its session stands for it"
+        );
+        let agents = crate::needs_you::agents::Agents.cards(&app);
+        assert_eq!(agents.len(), 1, "the session waits on you");
+        assert!(
+            agents[0]
+                .sub
+                .contains("◆ Nothing to build: already shipped in #2075"),
+            "{}",
+            agents[0].sub
+        );
+        // Its session archived: the worktree wears it instead, and the
+        // board lists the card itself.
         app.tree.agents[0].archived = true;
         let worktree = Place::Worktree(WorktreeId("w7".into()));
         assert_eq!(place_of(&app, key), Some(worktree.clone()));
         assert_eq!(waiting_at(&app, &worktree), 1);
+        assert_eq!(crate::needs_you::factory::Factory.cards(&app).len(), 1);
         app.tree.agents[0].archived = false;
         // Answered in orion: gone everywhere, and closed for the daemon.
         app.outbox.clear();
@@ -3589,6 +3596,107 @@ mod tests {
         app.flash = None;
         no_change(&mut app);
         assert_eq!(app.flash, None);
+    }
+
+    /// A card is never stale: its session at work again after it was
+    /// seen idle closes it ("Picked up in orion"), on Slack too; one whose
+    /// session was still at work when it went up waits for it to stop
+    /// first. Its worktree removed closes it; so does a kind orion no
+    /// longer makes.
+    #[test]
+    fn a_card_closes_itself_once_its_work_moves_on() {
+        use crate::factory::cards::{reconcile, ANSWERED, PICKED_UP, WORKTREE_GONE};
+        let mut app = app_with_project();
+        app.away = false;
+        building(&mut app, Stage::PrOpen);
+        let url = "https://github.com/o/r/pull/9";
+        app.automations
+            .linear_builder
+            .ledger
+            .issues
+            .get_mut("uuid-ENG-7")
+            .unwrap()
+            .pr_url = Some(url.into());
+        let key = format!("pr:{url}:verdict");
+        let verdict = |app: &mut App| {
+            crate::factory::cards::post(
+                app,
+                crate::factory::cards::Card {
+                    key: format!("pr:{url}:verdict"),
+                    to: Recipient::Owner,
+                    context: "Bug fixer · web".into(),
+                    title: "#9 Fix the crash".into(),
+                    body: vec!["*Review*: no pictures".into()],
+                    buttons: vec![crate::factory::cards::Button::tap("merge", "Merge")],
+                    image: None,
+                },
+            )
+        };
+        // Posted while its session is still finishing its turn: left up.
+        verdict(&mut app);
+        reconcile(&mut app);
+        assert_eq!(card(&app, &key).state, CardState::Open);
+        // The turn ends; then you write to it: picked up.
+        app.tree.agents[0].status = AgentStatus::Finished;
+        reconcile(&mut app);
+        assert_eq!(card(&app, &key).state, CardState::Open);
+        app.tree.agents[0].status = AgentStatus::Running;
+        app.outbox.clear();
+        reconcile(&mut app);
+        assert_eq!(card(&app, &key).state, CardState::Closed(PICKED_UP.into()));
+        assert!(app
+            .outbox
+            .iter()
+            .any(|r| matches!(r, ClientRequest::UpdateFactoryCard { key: k, .. } if *k == key)));
+
+        // Its worktree removed (and its session with it): closed.
+        app.tree.agents[0].status = AgentStatus::Finished;
+        verdict(&mut app);
+        reconcile(&mut app);
+        app.tree.agents.clear();
+        app.tree.worktrees.retain(|w| w.id.as_str() != "w7");
+        app.tree.worktrees.push(Worktree {
+            id: WorktreeId("other".into()),
+            project_id: p(),
+            path: PathBuf::from("/nonexistent/other"),
+            branch: "other".into(),
+            is_main: false,
+            sort_order: 2,
+        });
+        reconcile(&mut app);
+        assert_eq!(
+            card(&app, &key).state,
+            CardState::Closed(WORKTREE_GONE.into())
+        );
+
+        // A plan with nothing to build, approved in orion: answered.
+        let mut app = app_with_project();
+        building(&mut app, Stage::Approving);
+        app.tree.agents[0].status = AgentStatus::NeedsFeedback;
+        let key = no_change(&mut app);
+        reconcile(&mut app);
+        app.tree.agents[0].status = AgentStatus::Running;
+        reconcile(&mut app);
+        assert_eq!(card(&app, key).state, CardState::Closed(ANSWERED.into()));
+
+        // A Died card an earlier orion left up: closed.
+        crate::factory::cards::post(
+            &mut app,
+            crate::factory::cards::Card {
+                key: "issue:uuid-ENG-9:dead".into(),
+                to: Recipient::Owner,
+                context: String::new(),
+                title: "ENG-9".into(),
+                body: Vec::new(),
+                buttons: Vec::new(),
+                image: None,
+            },
+        );
+        reconcile(&mut app);
+        assert!(matches!(
+            card(&app, "issue:uuid-ENG-9:dead").state,
+            CardState::Closed(_)
+        ));
     }
 
     /// A verdict card shows on the session of the ticket whose pull
@@ -3613,8 +3721,7 @@ mod tests {
         assert_eq!(place_of(&app, "week:2026-11-14"), None);
     }
 
-    /// Every card about a ticket the factory took offers **Not for the
-    /// factory**.
+    /// Every card about a ticket the factory took offers **Not for orion**.
     #[test]
     fn every_card_about_a_ticket_offers_not_for_the_factory() {
         use orion_core::factory_card::{NOT_FOR_FACTORY, NOT_FOR_FACTORY_BACKLOG};
@@ -3631,18 +3738,15 @@ mod tests {
             assert_eq!(
                 last,
                 [
-                    (NOT_FOR_FACTORY, "Not for the factory: back to Triage"),
-                    (
-                        NOT_FOR_FACTORY_BACKLOG,
-                        "Not for the factory: move to Backlog"
-                    ),
+                    (NOT_FOR_FACTORY, "Not for orion: back to Triage"),
+                    (NOT_FOR_FACTORY_BACKLOG, "Not for orion: move to Backlog"),
                 ],
                 "{what}"
             );
         }
     }
 
-    /// **Not for the factory**: the session parked and archived, its cards
+    /// **Not for orion**: the session parked and archived, its cards
     /// closed, its worktree removed, the ticket labelled `factory-skip`
     /// with a comment and back in its team's Triage — or its Backlog.
     #[test]
@@ -3657,7 +3761,7 @@ mod tests {
         assert!(app.tree.agents.iter().all(|a| a.archived || a.id.0 != "s7"));
         assert_eq!(
             card(&app, key).state,
-            CardState::Closed("Not for the factory".into())
+            CardState::Closed("Not for orion".into())
         );
         assert_eq!(
             app.automations.linear_builder.writes,
@@ -3701,10 +3805,7 @@ mod tests {
             "its branch goes once the worktree has: {:?}",
             app.clean_worktrees.branch_after
         );
-        assert_eq!(
-            owner::taken_off("Sam Lee"),
-            "Taken off the factory by Sam Lee"
-        );
+        assert_eq!(owner::taken_off("Sam Lee"), "Taken off orion by Sam Lee");
         // To Backlog: the same, and the ticket moved to its team's Backlog.
         let mut app = app_with_project();
         building(&mut app, Stage::Building);
@@ -3756,7 +3857,7 @@ mod tests {
         // A ticket that says so already isn't commented on again.
         assert!(owner::said_taken_off(&[
             "Looks fine".into(),
-            "Taken off the factory by Sam Lee".into()
+            "Taken off orion by Sam Lee".into()
         ]));
         assert!(!owner::said_taken_off(&["Taken off by hand".into()]));
         // Someone else's press on a card counts for nothing.
@@ -4071,10 +4172,10 @@ mod tests {
         assert!(ledger.issues["i"].history.is_empty() && ledger.cleared.is_empty());
     }
 
-    /// New tickets wait while the attention cap's worth of factory items
-    /// wait on you; the PR fixer doesn't.
+    /// However many factory cards wait on you, a new ticket still starts:
+    /// a card left on Slack to pick up at the desk holds nothing back.
     #[test]
-    fn new_tickets_wait_while_things_wait_on_you() {
+    fn new_tickets_start_however_much_waits_on_you() {
         use crate::factory::cards::{Button, Card};
         let dir = tempfile::tempdir().unwrap();
         crate::agent_presets::with_presets_path(dir.path().join("presets.json"), || {
@@ -4082,7 +4183,7 @@ mod tests {
                 let mut app = app_with_project();
                 with_workflow_doc(&mut app, dir.path());
                 app.automations.settings.max_running = 10;
-                for n in 0..5 {
+                for n in 0..12 {
                     crate::factory::cards::post(
                         &mut app,
                         Card {
@@ -4096,29 +4197,14 @@ mod tests {
                         },
                     );
                 }
-                assert_eq!(super::super::attention(&app), 5);
-                assert!(!super::super::may_start(&app, Automation::BugFixer));
-                assert!(super::super::may_start(&app, Automation::PrFixer));
+                assert_eq!(super::super::attention(&app), 12);
+                assert!(super::super::may_start(&app));
                 app.automations.linear_builder.queue.push(Group::of(
                     Automation::BugFixer,
                     p(),
                     vec![issue("ENG-7", &["Bug"])],
                 ));
                 let mut out = Vec::new();
-                launch_queued(&mut app, Automation::BugFixer, &mut out);
-                assert!(out.is_empty());
-                let panel = panel(&app, Automation::BugFixer);
-                assert_eq!(panel.state, "queued: waiting on you (5)");
-                assert_eq!(panel.lists[0].rows[0].state, "queued: waiting on you (5)");
-                // Acting on one frees a place.
-                crate::factory::cards::on_action(
-                    &mut app,
-                    "pr:https://github.com/o/r/pull/0:verdict",
-                    "merge",
-                    None,
-                    true,
-                );
-                assert_eq!(super::super::attention(&app), 4);
                 launch_queued(&mut app, Automation::BugFixer, &mut out);
                 assert!(!out.is_empty());
             })

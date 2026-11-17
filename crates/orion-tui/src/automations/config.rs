@@ -1,6 +1,7 @@
-//! `automations` in `config.json`: how many automation sessions may run
-//! at once, all of them together and each on its own, and each
-//! automation's own settings, keyed by its id ([`super::Automation::id`]).
+//! `automations` in `config.json`: how many automation sessions may be at
+//! work at once, all of them together, and each automation's own
+//! settings, keyed by its id ([`super::Automation::id`]). The retired
+//! caps — one per runner, and `attention_cap` — are read and dropped.
 //! Global, never per project. Every key has a default, so a config with
 //! none of them behaves as Settings › Factory describes.
 
@@ -15,17 +16,6 @@ use std::ops::RangeInclusive;
 pub const DEFAULT_MAX_RUNNING: u8 = 3;
 /// The overall cap `←`/`→` step through in Settings › Factory.
 pub const MAX_RUNNING_RANGE: RangeInclusive<u8> = 1..=20;
-/// How many factory items may wait on you before new tickets wait too,
-/// out of the box.
-pub const DEFAULT_ATTENTION_CAP: u8 = 5;
-/// The range **Things waiting on you** steps through.
-pub const ATTENTION_RANGE: RangeInclusive<u8> = 1..=20;
-/// One automation's own cap: `←`/`→` step through these, and a step up
-/// from the top is "any".
-pub const OWN_CAP_RANGE: RangeInclusive<u8> = 1..=10;
-/// A saved [`PerAutomation::max_running`] of this is "any": only the
-/// overall cap applies.
-pub const ANY: u8 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
@@ -40,9 +30,6 @@ pub struct AutomationsSettings {
     /// Whether automation agents run end-to-end tests on this machine
     /// ([`LocalE2e::rule`], added to every automation agent's prompt).
     pub local_e2e: LocalE2e,
-    /// New tickets wait while this many factory items need you
-    /// ([`super::attention`]): **Things waiting on you**.
-    pub attention_cap: u8,
     /// The Claude account the factory runs on, by registry id: **Factory
     /// account** ([`super::account`]). None is the default agent's.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -102,7 +89,6 @@ impl Default for AutomationsSettings {
             max_running: DEFAULT_MAX_RUNNING,
             per: BTreeMap::new(),
             local_e2e: LocalE2e::default(),
-            attention_cap: DEFAULT_ATTENTION_CAP,
             account: None,
             intake_model: ModelChoice::default(),
         }
@@ -131,11 +117,6 @@ pub struct PerAutomation {
     /// system preset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
-    /// The most of this automation's sessions running at once, [`ANY`]
-    /// for no cap of its own. None is its own default
-    /// ([`Automation::default_cap`]).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_running: Option<u8>,
 }
 
 /// A weekly time: `{"day": "fri", "at": "08:30"}`.
@@ -195,63 +176,16 @@ impl AutomationsSettings {
         usize::from(self.max_running.max(*MAX_RUNNING_RANGE.start()))
     }
 
-    /// `which`'s own cap: its saved one, else its default. None is "any",
-    /// only the overall cap applying.
-    pub fn cap_of(&self, which: Automation) -> Option<usize> {
-        match self.per.get(which.id()).and_then(|p| p.max_running) {
-            Some(ANY) => None,
-            Some(n) => Some(usize::from(n)),
-            None => which.default_cap().map(usize::from),
-        }
-    }
-
     /// `←`/`→` on **Agents working at once**: the overall cap a step down
     /// or up, kept in [`MAX_RUNNING_RANGE`].
     pub fn step_cap(&mut self, step: i8) {
         self.max_running = stepped(self.max_running, step, &MAX_RUNNING_RANGE);
     }
-
-    /// The attention cap, kept in [`ATTENTION_RANGE`]: a hand-edited 0
-    /// would stop every new ticket without saying so.
-    pub fn attention_cap(&self) -> usize {
-        usize::from(
-            self.attention_cap
-                .clamp(*ATTENTION_RANGE.start(), *ATTENTION_RANGE.end()),
-        )
-    }
-
-    /// `←`/`→` on **Things waiting on you**: a step down or up, kept in
-    /// [`ATTENTION_RANGE`].
-    pub fn step_attention(&mut self, step: i8) {
-        self.attention_cap = stepped(self.attention_cap, step, &ATTENTION_RANGE);
-    }
-
-    /// `←`/`→` on `which`'s **At most at once**: its own cap a step down
-    /// or up through [`OWN_CAP_RANGE`], "any" above the top.
-    pub fn step_cap_of(&mut self, which: Automation, step: i8) {
-        let top = *OWN_CAP_RANGE.end();
-        let now = self
-            .cap_of(which)
-            .map_or(ANY, |n| u8::try_from(n).unwrap_or(top).min(top));
-        let next = match (now, step.signum()) {
-            (ANY, -1) => top,
-            (ANY, _) => ANY,
-            (n, 1) if n == top => ANY,
-            (n, _) => stepped(n, step, &OWN_CAP_RANGE),
-        };
-        self.of_mut(which).max_running = Some(next);
-    }
 }
 
-/// `value` a `step` down or up, kept in `range`: the one stepper both caps
-/// go through.
+/// `value` a `step` down or up, kept in `range`.
 pub fn stepped(value: u8, step: i8, range: &RangeInclusive<u8>) -> u8 {
     value
         .saturating_add_signed(step)
         .clamp(*range.start(), *range.end())
-}
-
-/// A cap as its row reads: the number, or "any".
-pub fn cap_label(cap: Option<usize>) -> String {
-    cap.map_or_else(|| "any".into(), |n| n.to_string())
 }

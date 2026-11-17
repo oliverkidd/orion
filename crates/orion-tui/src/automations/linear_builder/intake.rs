@@ -1,9 +1,9 @@
 //! INTAKE: what a fresh ticket is checked for before it is claimed, and
 //! what a claimed one is given.
 //!
-//! - **Not for the factory** ([`not_for_the_factory`]): a ticket labelled
+//! - **Not for orion** ([`not_for_the_factory`]): a ticket labelled
 //!   [`SKIP_LABEL`] is never picked up, until someone takes the label off.
-//!   **Not for the factory** on a card or a session puts it there
+//!   **Not for orion** on a card or a session puts it there
 //!   (`owner`).
 //! - **Worked on already** ([`worked_on`]), in this order: linked to an
 //!   orion worktree, or a worktree's branch names it; an open pull

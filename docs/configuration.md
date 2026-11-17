@@ -236,22 +236,18 @@ they are doing. Global, never per project.
 ```json
 { "automations": {
     "max_running": 3,
-    "attention_cap": 5,
     "account": "claude-work",
     "local_e2e": "never",
     "per": {
-      "pr_fixer": { "on": true, "max_running": 1, "extra_steer": "" },
-      "blue_sky": { "max_running": 0 },
+      "pr_fixer": { "on": true, "extra_steer": "" },
       "bug_fixer": { "on": false, "labels": ["Bug"], "preset": "Careful" },
       "week_review": { "when": { "day": "fri", "at": "08:30" }, "whose": "just_me" } } } }
 ```
 
 | Key | Default | What it does |
 |---|---|---|
-| `automations.max_running` | `3` | No automation starts a session while this many automation sessions are running, all automations together (at work or waiting on you). **Agents working at once** in Settings › Factory, `←` / `→` 1 to 20. A value saved before the default came down from 5 is kept as it is. |
-| `automations.attention_cap` | `5` | New Linear tickets wait — the bug fixer and the feature builder start none — while this many factory items wait on you: factory sessions waiting on a plan or a question, and the factory cards you haven't acted on. **Things waiting on you** in Settings › Factory, `←` / `→` 1 to 20. |
+| `automations.max_running` | `3` | No automation starts a session while this many automation sessions are at work (mid-turn or booting), all automations together. It is the one cap: a session waiting on you (a plan, a question) holds no place, and nothing caps how much may wait on you. **Agents working at once** in Settings › Factory, `←` / `→` 1 to 20. A value saved before the default came down from 5 is kept as it is. The retired `automations.attention_cap` and `automations.per.<id>.max_running` are read and dropped. |
 | `automations.account` | none (the default agent) | The Claude account the factory runs on, by its id in `claude_accounts` (or `claude` for the default account): every automation session whose preset follows (a preset that pins an account or a harness keeps it), the knowledge harvest and `orion knowledge backfill`, and the factory's model asks (a ticket's intake, the week in review, the meeting takeaways). Unset, or naming an account that is off or gone, is the default agent's account. **Factory account** in Settings › Factory, `←` / `→` or `Enter`; changing it there moves every live factory session onto the new account (see [Automations](sessions.md#factory-account)). |
-| `automations.per.<id>.max_running` | `1` for `pr_fixer`, `bug_fixer` and `feature_builder`; any for `blue_sky` | No more than this many of the automation's own sessions run at once, under the overall cap too — `0` is any, only the overall cap applying. **At most at once** in its section, `←` / `→` 1 to 10, then any. Week in review and meeting takeaways have none: they never run more than one. |
 | `automations.local_e2e` | `never` | Whether automation agents that write code (PR fixer, bug fixer, feature builder, Blue sky builder) run end-to-end tests on this machine: `never` leaves them to CI on the pull request and runs only the unit tests for what changed; `covering` runs only the e2e specs that cover the change, never the full suite. The rule is added to every such agent's prompt, before its Extra steer. **E2E tests on this machine** in Settings › Factory, `←` / `→` or Enter. |
 | `automations.per.<id>.on` | `true` for `pr_fixer`, `meeting_takeaways` and `blue_sky`, else `false` | The automation on or off. Ids: `pr_fixer`, `bug_fixer`, `feature_builder`, `week_review`, `meeting_takeaways`, `blue_sky`. |
 | `automations.per.<id>.extra_steer` | `""` | Added to every prompt the automation sends, after a blank line, as `Extra steer: …`. |

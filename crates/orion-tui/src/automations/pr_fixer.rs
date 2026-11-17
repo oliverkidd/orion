@@ -899,8 +899,7 @@ pub fn land_detail(
     let record = app.autofix.ledger.get(url).cloned().unwrap_or_default();
     // At the cap: the breakage waits, still watched, for a place.
     let on = app.automations.is_on(Automation::PrFixer);
-    if fresh && on && record.attempts < AUTO_ATTEMPTS && !super::may_start(app, Automation::PrFixer)
-    {
+    if fresh && on && record.attempts < AUTO_ATTEMPTS && !super::may_start(app) {
         app.autofix.recheck_later(url);
         return;
     }
@@ -1010,6 +1009,22 @@ fn cant_fix_card(app: &App, form: &AutofixForm, attempts: u8) -> crate::factory:
         .iter()
         .find(|p| p.id == form.project)
         .map_or_else(String::new, |p| format!(" · {}", p.name));
+    let mut buttons = vec![
+        Button::link("Open PR", form.pr.url.clone()),
+        Button::text("reply", "Reply…"),
+        Button::tap("park", "Park"),
+    ];
+    // A factory ticket's pull request can be taken off orion from here too.
+    let factory = app
+        .automations
+        .linear_builder
+        .ledger
+        .issues
+        .values()
+        .any(|e| e.pr_url.as_deref() == Some(form.pr.url.as_str()));
+    if factory {
+        buttons.extend(super::linear_builder::owner::not_for_the_factory_buttons());
+    }
     Card {
         key: cant_fix_key(&form.pr.url),
         to: Recipient::Owner,
@@ -1019,11 +1034,7 @@ fn cant_fix_card(app: &App, form: &AutofixForm, attempts: u8) -> crate::factory:
             format!("CI still red after {attempts} fixes: {what}."),
             format!("<{}|Open #{} on GitHub>", form.pr.url, form.pr.number),
         ],
-        buttons: vec![
-            Button::link("Open PR", form.pr.url.clone()),
-            Button::text("reply", "Reply…"),
-            Button::tap("park", "Park"),
-        ],
+        buttons,
         image: None,
     }
 }
@@ -1031,7 +1042,8 @@ fn cant_fix_card(app: &App, form: &AutofixForm, attempts: u8) -> crate::factory:
 /// A press on a PR fixer card (`fix:` keys, from `factory::cards`): on
 /// *Can't fix* (whose Open PR is a link, never handed back), Reply… sends the owner's words to
 /// the branch's agent and starts the tries over; Park leaves the pull
-/// request alone until it goes green or is sent by `⌘G`.
+/// request alone until it goes green or is sent by `⌘G`; **Not for
+/// orion** (a factory ticket's) takes its ticket off and closes the draft.
 pub(crate) fn on_card(app: &mut App, key: &str, action: &str, text: Option<String>) {
     let Some(url) = key
         .strip_prefix(CARD_PREFIX)
@@ -1041,6 +1053,13 @@ pub(crate) fn on_card(app: &mut App, key: &str, action: &str, text: Option<Strin
         tracing::warn!("pr fixer: a press on {key}, which it doesn't know");
         return;
     };
+    if let Some(backlog) = super::linear_builder::owner::not_for_the_factory_choice(action) {
+        app.autofix.record(&url).parked = true;
+        app.autofix.forget(&url);
+        super::linear_builder::owner::not_for_the_factory_pr(app, &url, "", key, backlog);
+        crate::factory::cards::close_if_up(app, key, "Not for orion");
+        return;
+    }
     let target = open_anywhere(app, &url);
     match action {
         "park" => {

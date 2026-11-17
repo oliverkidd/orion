@@ -525,20 +525,26 @@ pub mod factory_card {
     /// The `action_id` prefix of a button that opens its `url`: Slack
     /// opens it, and the daemon acks its press and does nothing else.
     pub const ACTION_LINK: &str = "orion_factory_link";
+    /// The `action_id` prefix of a menu (`static_select`) of choices —
+    /// **Not for orion…**'s two: each choice's `value` is `<key>|<action>`,
+    /// as a button's is.
+    pub const ACTION_SELECT: &str = "orion_factory_select";
     /// Between a button value's key and its action (`<key>|<action>`).
     pub const SEP: char = '|';
-    /// **Not for the factory**: what every factory card about a ticket
+    /// **Not for orion**: what every factory card about a ticket
     /// offers, which takes the ticket off the factory — moved back to its
     /// team's Triage ([`NOT_FOR_FACTORY`]) or to its Backlog
     /// ([`NOT_FOR_FACTORY_BACKLOG`]).
     pub const NOT_FOR_FACTORY: &str = "not_for_factory";
     pub const NOT_FOR_FACTORY_BACKLOG: &str = "not_for_factory_backlog";
     /// Its name, and each choice's label.
-    pub const NOT_FOR_FACTORY_LABEL: &str = "Not for the factory";
-    pub const NOT_FOR_FACTORY_TRIAGE_LABEL: &str = "Not for the factory: back to Triage";
-    pub const NOT_FOR_FACTORY_BACKLOG_LABEL: &str = "Not for the factory: move to Backlog";
+    pub const NOT_FOR_FACTORY_LABEL: &str = "Not for orion";
+    /// The one menu holding both choices on Slack.
+    pub const NOT_FOR_FACTORY_MENU: &str = "Not for orion…";
+    pub const NOT_FOR_FACTORY_TRIAGE_LABEL: &str = "Not for orion: back to Triage";
+    pub const NOT_FOR_FACTORY_BACKLOG_LABEL: &str = "Not for orion: move to Backlog";
     /// The key a press about a session rather than a card goes by
-    /// (`session:<agent id>`): **Not for the factory** on a factory
+    /// (`session:<agent id>`): **Not for orion** on a factory
     /// session's phone message.
     pub const SESSION_PREFIX: &str = "session:";
 }

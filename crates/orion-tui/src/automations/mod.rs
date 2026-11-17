@@ -10,11 +10,11 @@
 //!   id in `Agent::automation` ([`launch`], or a draft's own
 //!   `AgentLaunchDraft::automation`), which the DAEMON keeps with the row:
 //!   the grid's badge and Needs you's kind label read it ([`kind_of`]).
-//! * **Three caps.** No automation starts a session while
-//!   `automations.max_running` of them are running, nor while its own
-//!   `automations.per.<id>.max_running` of its own are; and no new ticket
-//!   starts while `automations.attention_cap` factory items wait on you
-//!   ([`may_start`], [`attention`]).
+//! * **One cap.** No automation starts a session while
+//!   `automations.max_running` of them are at work — mid-turn or booting
+//!   ([`may_start`]). A session waiting on you holds no place, and
+//!   nothing caps how much may wait on you: a plan or a pull request left
+//!   on Slack to pick up at the desk never holds the next ticket back.
 //! * **One way to say it.** A runner's first prompt is its preset's text
 //!   with its context at `{task}`, and the user's extra steer after it
 //!   ([`compose`]).
@@ -115,29 +115,16 @@ impl Automation {
         )
     }
 
-    /// Its own cap in a config that says nothing about it: one PR fixer,
-    /// bug fixer and feature builder session at a time; the blue sky
-    /// builder only under the overall cap. None for the two with no
-    /// **At most at once** row, which never start more than one.
-    pub const fn default_cap(self) -> Option<u8> {
-        match self {
-            Automation::PrFixer | Automation::BugFixer | Automation::FeatureBuilder => Some(1),
-            Automation::BlueSky | Automation::WeekReview | Automation::MeetingTakeaways => None,
-        }
-    }
-
-    /// Its rows in Settings › Automations, in order. **At most at once**
-    /// only where it starts sessions of its own: week in review runs one
-    /// session, and meeting takeaways only asks the model.
+    /// Its rows in Settings › Factory, in order. None has a cap of its
+    /// own: **Agents working at once** is the one cap, for all of them.
     pub const fn settings(self) -> &'static [SettingRow] {
         use SettingRow::*;
         match self {
-            Automation::BugFixer | Automation::FeatureBuilder => {
-                &[On, Cap, Labels, Preset, ExtraSteer]
-            }
+            Automation::BugFixer | Automation::FeatureBuilder => &[On, Labels, Preset, ExtraSteer],
             Automation::WeekReview => &[On, When, Whose, Preset, ExtraSteer],
-            Automation::PrFixer | Automation::BlueSky => &[On, Cap, Preset, ExtraSteer],
-            Automation::MeetingTakeaways => &[On, Preset, ExtraSteer],
+            Automation::PrFixer | Automation::BlueSky | Automation::MeetingTakeaways => {
+                &[On, Preset, ExtraSteer]
+            }
         }
     }
 }
@@ -152,9 +139,6 @@ pub fn kind_of(agent: &Agent) -> Option<Automation> {
 pub enum SettingRow {
     /// Space or Enter: on or off.
     On,
-    /// `←`/`→`: the most of its sessions at once, or any
-    /// ([`config::AutomationsSettings::cap_of`]).
-    Cap,
     /// The Linear labels a ticket needs (the bug fixer's, the feature
     /// builder's): Enter is the runner's ([`Runner::edit`]).
     Labels,
@@ -173,7 +157,6 @@ impl SettingRow {
     pub const fn label(self) -> &'static str {
         match self {
             SettingRow::On => "On",
-            SettingRow::Cap => "At most at once",
             SettingRow::Labels => "Labels",
             SettingRow::When => "When",
             SettingRow::Whose => "Whose",
@@ -301,7 +284,7 @@ pub struct Engine {
     pub settings: config::AutomationsSettings,
     /// Creates sent for an automation whose Ack has not come, and the
     /// automation each is for: counted as running, so one tick can't
-    /// start past either cap.
+    /// start past the cap.
     pub launching: HashMap<u64, Automation>,
     /// The automation the overview (`⌘J`) was last left on, by
     /// [`Automation::ALL`] index, for its next open.
@@ -408,6 +391,8 @@ pub fn tick(app: &mut App, out: &mut Vec<ClientRequest>) {
     if builders {
         linear_builder::stages::follow(app);
     }
+    // Cards whose work moved on close themselves, here and on Slack.
+    crate::factory::cards::reconcile(app);
     let paused = app.automations.account.paused.is_some();
     for which in Automation::ALL {
         if app.automations.is_on(which) && !paused {
@@ -425,7 +410,7 @@ pub(crate) fn state_dir() -> std::path::PathBuf {
 }
 
 /// How many automation sessions are running: tagged, not archived, at
-/// work or waiting on you — plus the creates still on their way.
+/// work — plus the creates still on their way.
 pub fn running(app: &App) -> usize {
     let live = app
         .tree
@@ -449,29 +434,27 @@ pub fn running_of(app: &App, which: Automation) -> usize {
     live + coming.filter(|w| **w == which).count()
 }
 
-/// Whether a session holds one of the cap's places: mid-turn, waiting on
-/// you, or booting.
+/// Whether a session holds one of the cap's places: mid-turn, or
+/// booting. One waiting on you — a plan, a question — holds none: the
+/// cap is on agents at work, and what waits on you is never capped.
 fn occupies(agent: &Agent) -> bool {
     match agent.status {
-        AgentStatus::Running | AgentStatus::NeedsFeedback => true,
+        AgentStatus::Running => true,
         AgentStatus::Fresh => agent.alive,
         _ => false,
     }
 }
 
+/// Whether a session is still on its task: at work ([`occupies`]), or
+/// waiting on you. Neither is started over.
+pub(crate) fn on_task(agent: &Agent) -> bool {
+    occupies(agent) || agent.status == AgentStatus::NeedsFeedback
+}
+
 /// Whether one more of `which`'s sessions may start: the factory not
-/// paused at its account's limit ([`limit`]), under the overall cap, and
-/// under its own — and, for a new ticket (the bug fixer's, the feature
-/// builder's), while fewer than `attention_cap` factory items wait on you.
-pub fn may_start(app: &App, which: Automation) -> bool {
-    let settings = &app.automations.settings;
-    let takes_tickets = matches!(which, Automation::BugFixer | Automation::FeatureBuilder);
-    app.automations.account.paused.is_none()
-        && running(app) < settings.cap()
-        && settings
-            .cap_of(which)
-            .is_none_or(|own| running_of(app, which) < own)
-        && (!takes_tickets || attention(app) < settings.attention_cap())
+/// paused at its account's limit ([`limit`]), and under the cap.
+pub fn may_start(app: &App) -> bool {
+    app.automations.account.paused.is_none() && running(app) < app.automations.settings.cap()
 }
 
 /// The automations whose work is the software factory's.
@@ -482,17 +465,16 @@ const FACTORY: [Automation; 3] = [
 ];
 
 /// A factory card open longer than this no longer counts toward
-/// [`attention`]: one whose end nothing noticed mustn't hold the intake
-/// shut for good.
+/// [`attention`].
 const CARD_COUNTS_MS: i64 = 7 * orion_core::clock::DAY_MS;
 
-/// How many factory items wait on you: factory sessions waiting on you
-/// (a plan, a question), and the factory cards you haven't acted on —
-/// a pull request's verdict, a ticket held for you, a fix given up on —
-/// in the last [`CARD_COUNTS_MS`]; an older one is said once in the log.
-/// A no-change card is its session's plan, counted once.
+/// How many factory items wait on you, as the Urgent card says it:
+/// factory sessions waiting on you (a plan, a question), and the factory
+/// cards you haven't acted on — a pull request's verdict, a ticket held
+/// for you, a fix given up on — in the last [`CARD_COUNTS_MS`]. A
+/// no-change card is its session's plan, counted once. It holds nothing
+/// back.
 pub fn attention(app: &App) -> usize {
-    use crate::factory::cards::{CardState, Recipient};
     let sessions = app
         .tree
         .agents
@@ -504,50 +486,22 @@ pub fn attention(app: &App) -> usize {
         ["issue:", "pr:", "fix:"].iter().any(|p| key.starts_with(p)) && !key.ends_with(":nochange")
     };
     let now = crate::app::now_ms();
-    let cards = app
-        .factory_cards
-        .iter()
-        .filter(|p| p.state == CardState::Open && p.card.to == Recipient::Owner)
+    let cards = crate::factory::cards::open_to_you(app)
         .filter(|p| counts(&p.card.key))
-        .filter(|p| {
-            let old = now - p.at_ms > CARD_COUNTS_MS;
-            if old {
-                said_old(&p.card.key);
-            }
-            !old
-        })
+        .filter(|p| now - p.at_ms <= CARD_COUNTS_MS)
         .count();
     sessions + cards
 }
 
-/// Say once in the log that the card under `key` is too old to count.
-fn said_old(key: &str) {
-    static SAID: std::sync::Mutex<std::collections::BTreeSet<String>> =
-        std::sync::Mutex::new(std::collections::BTreeSet::new());
-    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
-    if said.insert(key.to_string()) {
-        tracing::info!(
-            "automations: the factory card {key} has been open over {} days; it no longer holds new tickets back",
-            CARD_COUNTS_MS / orion_core::clock::DAY_MS
-        );
-    }
-}
-
-/// Whether `which` waits at its own cap while the overall cap still has
-/// room: what "(at its cap)" says.
-pub fn at_own_cap(app: &App, which: Automation) -> bool {
-    running(app) < app.automations.settings.cap() && !may_start(app, which)
-}
-
 /// Start `which`'s session: tagged with it, and refused — false — at
-/// either cap, for the runner to try again on a later tick.
+/// the cap, for the runner to try again on a later tick.
 pub fn launch(
     app: &mut App,
     which: Automation,
     draft: AgentLaunchDraft,
     out: &mut Vec<ClientRequest>,
 ) -> bool {
-    if !may_start(app, which) {
+    if !may_start(app) {
         return false;
     }
     let draft = AgentLaunchDraft {
@@ -561,8 +515,8 @@ pub fn launch(
 /// Start `which`'s session in a fresh worktree — or in the checkout
 /// `launch` names — as the QUICK PROMPT's Enter does with `launch` and
 /// `text` typed, tagged with it, moving nothing on screen; refused, false,
-/// at either cap, for the runner to try again on a later tick. The
-/// checkout being cut holds its place under both.
+/// at the cap, for the runner to try again on a later tick. The checkout
+/// being cut holds its place under it.
 pub fn launch_in_new_worktree(
     app: &mut App,
     which: Automation,
@@ -570,7 +524,7 @@ pub fn launch_in_new_worktree(
     text: String,
     out: &mut Vec<ClientRequest>,
 ) -> bool {
-    if !may_start(app, which) {
+    if !may_start(app) {
         return false;
     }
     let launch = crate::quick_prompt::QuickLaunch {
@@ -803,16 +757,14 @@ mod tests {
         app.automations.settings.max_running = 3;
         assert_eq!(
             running(&app),
-            2,
-            "finished, untagged and archived don't count"
+            1,
+            "waiting on you, finished, untagged and archived don't count"
         );
-        assert!(may_start(&app, Automation::BlueSky));
+        assert!(may_start(&app));
+        app.automations.launching.insert(8, Automation::BugFixer);
         app.automations.launching.insert(9, Automation::BlueSky);
         assert_eq!(running(&app), 3);
-        assert!(
-            !may_start(&app, Automation::BlueSky),
-            "a create on its way takes a place"
-        );
+        assert!(!may_start(&app), "a create on its way takes a place");
 
         // A refused launch sends nothing.
         let mut out = Vec::new();
@@ -824,92 +776,37 @@ mod tests {
         app.automations.launching.clear();
         app.tree.agents.clear();
         app.automations.settings.max_running = 0;
-        assert!(may_start(&app, Automation::BugFixer));
+        assert!(may_start(&app));
     }
 
-    /// The bug fixer at its own cap of one waits while the overall cap has
-    /// room; the overall cap stops a launch its own cap would allow.
+    /// The one cap is on agents at work, all automations together: no
+    /// runner has a cap of its own, and sessions waiting on you — however
+    /// many — hold no place.
     #[test]
-    fn each_cap_stops_a_launch_the_other_would_allow() {
+    fn only_agents_at_work_count_against_the_one_cap() {
         let mut app = App::new();
-        app.automations.settings.max_running = 3;
-        app.tree.agents = vec![tagged("a", AgentStatus::Running, Some("bug_fixer"))];
-        assert_eq!(running_of(&app, Automation::BugFixer), 1);
-        assert_eq!(
-            app.automations.settings.cap_of(Automation::BugFixer),
-            Some(1)
-        );
-        assert!(!may_start(&app, Automation::BugFixer), "at its own cap");
-        assert!(at_own_cap(&app, Automation::BugFixer));
-        assert!(
-            may_start(&app, Automation::FeatureBuilder),
-            "its own is free"
-        );
-        // A create on its way counts against its own automation only.
-        app.automations
-            .launching
-            .insert(7, Automation::FeatureBuilder);
-        assert_eq!(running_of(&app, Automation::FeatureBuilder), 1);
-        assert!(!may_start(&app, Automation::FeatureBuilder));
-        assert!(may_start(&app, Automation::BlueSky));
-
-        // Raised to two, the bug fixer may start again…
-        app.automations
-            .settings
-            .of_mut(Automation::BugFixer)
-            .max_running = Some(2);
-        assert!(may_start(&app, Automation::BugFixer));
-        // …until the overall cap is full, its own cap still with room.
         app.automations.settings.max_running = 2;
-        assert_eq!(running(&app), 2);
-        assert!(!may_start(&app, Automation::BugFixer));
-        assert!(!at_own_cap(&app, Automation::BugFixer));
-        // "Any" is only the overall cap.
-        app.automations.settings.max_running = 5;
-        app.automations
-            .settings
-            .of_mut(Automation::BugFixer)
-            .max_running = Some(config::ANY);
-        assert_eq!(app.automations.settings.cap_of(Automation::BugFixer), None);
+        app.tree.agents = (0..6)
+            .map(|n| {
+                tagged(
+                    &format!("w{n}"),
+                    AgentStatus::NeedsFeedback,
+                    Some("bug_fixer"),
+                )
+            })
+            .collect();
+        assert!(may_start(&app), "six waiting on you");
         app.tree
             .agents
-            .push(tagged("b", AgentStatus::Running, Some("bug_fixer")));
-        assert!(may_start(&app, Automation::BugFixer));
-    }
-
-    #[test]
-    fn own_caps_default_to_one_but_blue_sky_and_step_through_any() {
-        let mut s = config::AutomationsSettings::default();
-        let caps: Vec<Option<usize>> = Automation::ALL.iter().map(|a| s.cap_of(*a)).collect();
-        assert_eq!(caps, [Some(1), Some(1), Some(1), None, None, None]);
+            .push(tagged("a", AgentStatus::Running, Some("bug_fixer")));
+        assert!(may_start(&app), "no cap of its own");
+        app.tree
+            .agents
+            .push(tagged("b", AgentStatus::Running, Some("pr_fixer")));
+        assert!(!may_start(&app), "two at work");
         for which in Automation::ALL {
-            assert_eq!(
-                which.settings().contains(&SettingRow::Cap),
-                matches!(
-                    which,
-                    Automation::PrFixer
-                        | Automation::BugFixer
-                        | Automation::FeatureBuilder
-                        | Automation::BlueSky
-                ),
-                "{}",
-                which.name()
-            );
+            assert!(!which.settings().is_empty(), "{}", which.name());
         }
-        // 1 → 2; ← from 1 stays; 10 → any; any ← 10; any → any.
-        s.step_cap_of(Automation::PrFixer, 1);
-        assert_eq!(s.cap_of(Automation::PrFixer), Some(2));
-        s.step_cap_of(Automation::PrFixer, -1);
-        s.step_cap_of(Automation::PrFixer, -1);
-        assert_eq!(s.cap_of(Automation::PrFixer), Some(1));
-        s.of_mut(Automation::PrFixer).max_running = Some(10);
-        s.step_cap_of(Automation::PrFixer, 1);
-        assert_eq!(s.cap_of(Automation::PrFixer), None);
-        assert_eq!(s.of(Automation::PrFixer).max_running, Some(config::ANY));
-        s.step_cap_of(Automation::PrFixer, 1);
-        assert_eq!(s.cap_of(Automation::PrFixer), None);
-        s.step_cap_of(Automation::BlueSky, -1);
-        assert_eq!(s.cap_of(Automation::BlueSky), Some(10));
     }
 
     /// A saved cap of 8 (stepped up before the default came down) is kept
@@ -936,33 +833,23 @@ mod tests {
             let cfg = crate::config::Config::load();
             assert_eq!(cfg.automations.max_running, 3);
             assert_eq!(cfg.automations.cap(), 3);
-            assert_eq!(cfg.automations.of(Automation::BugFixer).max_running, None);
         });
     }
 
-    /// **Things waiting on you**: 5 out of the box, kept through a save,
-    /// stepped within 1 to 20, a hand-edited 0 read as 1.
+    /// A config from before the one cap — a cap per runner, **Things
+    /// waiting on you** — still loads, and a save drops what is gone.
     #[test]
-    fn the_attention_cap_round_trips_and_steps_within_its_range() {
-        let s = config::AutomationsSettings::default();
-        assert_eq!(s.attention_cap(), 5);
-        let none: config::AutomationsSettings = serde_json::from_str("{}").unwrap();
-        assert_eq!(none.attention_cap, 5);
-        let saved: config::AutomationsSettings =
-            serde_json::from_str(r#"{"attention_cap": 7}"#).unwrap();
-        assert_eq!(saved.attention_cap(), 7);
-        let back: config::AutomationsSettings =
-            serde_json::from_value(serde_json::to_value(&saved).unwrap()).unwrap();
-        assert_eq!(back, saved);
-        let mut s = saved;
-        s.attention_cap = 20;
-        s.step_attention(1);
-        assert_eq!(s.attention_cap, 20);
-        s.attention_cap = 1;
-        s.step_attention(-1);
-        assert_eq!(s.attention_cap, 1);
-        s.attention_cap = 0;
-        assert_eq!(s.attention_cap(), 1);
+    fn an_old_config_with_the_retired_caps_still_loads() {
+        let old: config::AutomationsSettings = serde_json::from_str(
+            r#"{"max_running": 8, "attention_cap": 4,
+                "per": {"bug_fixer": {"on": true, "max_running": 4}}}"#,
+        )
+        .unwrap();
+        assert_eq!(old.cap(), 8);
+        assert!(old.is_on(Automation::BugFixer));
+        let saved = serde_json::to_value(&old).unwrap();
+        assert!(saved.get("attention_cap").is_none());
+        assert!(saved["per"]["bug_fixer"].get("max_running").is_none());
     }
 
     /// Factory sessions waiting on you and the factory cards you haven't
@@ -997,12 +884,9 @@ mod tests {
         );
         post(&mut app, card("kb:daily", Recipient::Owner));
         assert_eq!(attention(&app), 4);
+        // It holds nothing back.
         app.automations.settings.max_running = 20;
-        app.automations.settings.attention_cap = 4;
-        assert!(!may_start(&app, Automation::FeatureBuilder));
-        assert!(may_start(&app, Automation::BlueSky), "not a new ticket");
-        app.automations.settings.attention_cap = 5;
-        assert!(may_start(&app, Automation::FeatureBuilder));
+        assert!(may_start(&app));
         // A card open over a week no longer counts.
         app.factory_cards
             .iter_mut()

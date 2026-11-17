@@ -195,10 +195,14 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
         list.extend(tail);
         return list;
     }
+    // A factory card up about the row: answering it is why you're here.
+    let answer_card = crate::factory::cards::at_cursor_in(app, &bands)
+        .map(|_| act(km, Action::FactoryCard, "answer card").map(Hint::kept));
     match card {
         Some(crate::launcher::Card::Session(row)) => {
             list.push(act(km, Action::Activate, "open"));
             list.push(into_pane(app, &bands));
+            list.extend(answer_card.clone());
             // A session stopped on a usage limit: the way on is the first
             // thing worth naming after opening it.
             if row.agent.limit_reached().is_some() {
@@ -226,6 +230,7 @@ fn grid_hints(app: &App) -> Vec<Option<Hint>> {
         }
         None => {
             // An EMPTY BAND: a checkout with nothing running in it.
+            list.extend(answer_card);
             list.extend([
                 into_pane(app, &bands),
                 act(km, Action::QuickPrompt, "new agent"),

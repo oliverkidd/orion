@@ -41,12 +41,12 @@
 //!   that has left its project's open list ([`gone_fetches`]).
 //! - **The card's buttons** come back through [`on_action`]: Merge (ready
 //!   first if a draft, then `pr_actions`' merge), Send back… (to the
-//!   branch's agent, [`send_back`]) and the verdict's 👍 / 👎. Open PR is
-//!   a link button, opened by Slack and never handed back. Merge acts
-//!   only while the card still stands ([`merge_stands`]): else the card
-//!   says CI changed and is put back. A vote is noted on the card, which
-//!   goes back up with its buttons — the daemon takes them off with any
-//!   press.
+//!   branch's agent, [`send_back`]). Open PR is a link button, opened by
+//!   Slack and never handed back. **Not for orion…** — one menu on
+//!   Slack, its two choices — takes the ticket off and closes the draft;
+//!   there is no vote on the verdict. Merge
+//!   acts only while the card still stands ([`merge_stands`]): else the
+//!   card says CI changed and is put back.
 
 pub mod cli;
 pub mod contract;
@@ -1098,7 +1098,8 @@ fn verdict_card(
             .collect();
         body.push(look.join("\n"));
     }
-    body.push("_Verdict right?_".into());
+    // The card asks whether it merges; **Not for orion…** (a menu on
+    // Slack) is the way out, and there is no vote on the verdict.
     let merge = Button::tap("merge", "Merge");
     let open = Button::link("Open PR", url);
     let send = Button::text("send_back", "Send back…");
@@ -1108,7 +1109,6 @@ fn verdict_card(
         _ => vec![open, merge, send],
     };
     buttons.extend(crate::automations::linear_builder::owner::not_for_the_factory_buttons());
-    buttons.extend([Button::tap("right", "👍"), Button::tap("wrong", "👎")]);
     Card {
         key: card_key(url),
         to: Recipient::Owner,
@@ -1209,17 +1209,6 @@ fn on_press(app: &mut App, press: Press) {
                 backlog,
             );
         }
-        "right" | "wrong" if press.by_owner => {
-            let right = press.action == "right";
-            let identifier = app.pr_body.remembered(&url).identifier.clone();
-            if !identifier.is_empty() {
-                crate::factory::runs::update(&identifier, |r| r.verdict_right = Some(right));
-            }
-            // A vote isn't the card's answer: it goes back up, Merge and
-            // all, the vote noted.
-            let thumb = if right { "👍" } else { "👎" };
-            put_back(app, &url, &format!("{NOTED}: {thumb}_"));
-        }
         other => tracing::info!("pr_body: {other} on {url} (owner: {})", press.by_owner),
     }
 }
@@ -1228,8 +1217,6 @@ fn on_press(app: &mut App, press: Press) {
 const MERGEABLE: [Tier; 3] = [Tier::Merge, Tier::Skim, Tier::Review];
 /// What a Merge the card no longer stands behind says.
 const STALE: &str = "CI changed since this card: open the PR";
-/// The line a vote leaves on the card (closed with `_` by its writer).
-const NOTED: &str = "_✓ noted";
 
 /// Whether a Merge on the card for `url` still stands: the PR's verdict
 /// now is Merge, Skim or Review, its card is still up, and that card was
@@ -1287,10 +1274,10 @@ fn refuse_merge(app: &mut App, url: &str) {
     }
 }
 
-/// Post the PR's card again as it was — buttons and all — with `note`:
-/// a warning at its top, a vote's note at its foot, either replacing the
-/// one there before. Not for a card that was closed.
-fn put_back(app: &mut App, url: &str, note: &str) {
+/// Post the PR's card again as it was — buttons and all — with
+/// `warning` at its top, replacing the one there before. Not for a card
+/// that was closed.
+fn put_back(app: &mut App, url: &str, warning: &str) {
     let open = app
         .pr_body
         .memory()
@@ -1308,12 +1295,8 @@ fn put_back(app: &mut App, url: &str, note: &str) {
     else {
         return;
     };
-    card.body
-        .retain(|line| !line.starts_with(NOTED) && !line.starts_with('⚠'));
-    match note.starts_with('⚠') {
-        true => card.body.insert(0, note.to_string()),
-        false => card.body.push(note.to_string()),
-    }
+    card.body.retain(|line| !line.starts_with('⚠'));
+    card.body.insert(0, warning.to_string());
     cards::post(app, card);
 }
 
@@ -1385,17 +1368,6 @@ fn merged(app: &mut App, url: &str, result: Result<String, String>) {
             app.flash = Some(crate::flash::Flash::failed(format!("Merge failed: {why}")));
         }
     }
-}
-
-/// As though the verdict card for `url` went out for `head` and is up.
-#[cfg(test)]
-pub(crate) fn remember_card_sent(app: &mut App, url: &str, head: &str) {
-    app.pr_body.remembered(url).card = Some(CardSent {
-        tier: Tier::Merge.id().into(),
-        head_sha: head.into(),
-        closed: false,
-        closed_at_ms: None,
-    });
 }
 
 /// Send the owner's words back to the agent on the PR's branch, through
@@ -1523,7 +1495,7 @@ mod tests {
             );
             assert_eq!(card.key, "pr:https://github.com/o/r/pull/7:verdict");
             assert_eq!(card.context, "Bug fixer · riplo-os");
-            assert_eq!(card.body.last().unwrap(), "_Verdict right?_");
+            assert!(!card.body.iter().any(|l| l.contains("Verdict right")));
             assert!(card.body.contains(&"No more &lt;loop&gt;.".to_string()));
             // The dots lead, right under the verdict.
             assert_eq!(
@@ -1539,25 +1511,32 @@ mod tests {
                 card,
             )
         };
-        let (merge, card) = labels(Tier::Merge, "nothing risky, CI green");
         let (off, back) = (
-            "Not for the factory: back to Triage",
-            "Not for the factory: move to Backlog",
+            "Not for orion: back to Triage",
+            "Not for orion: move to Backlog",
         );
-        assert_eq!(merge, ["Merge", "Open PR", off, back, "👍", "👎"]);
+        let (merge, card) = labels(Tier::Merge, "nothing risky, CI green");
+        assert_eq!(merge, ["Merge", "Open PR", off, back]);
+        // The two choices are one menu on Slack.
+        let blocks = cards::blocks(&card, "10:42");
+        let actions = blocks.last().unwrap()["elements"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[2]["type"], "static_select");
+        assert_eq!(actions[2]["placeholder"]["text"], "Not for orion…");
+        assert_eq!(
+            actions[2]["options"][1]["value"],
+            "pr:https://github.com/o/r/pull/7:verdict|not_for_factory_backlog"
+        );
         assert!(card.image.is_none());
         let (skim, card) = labels(Tier::Skim, "visible change, pictures below");
-        assert_eq!(
-            skim,
-            ["Merge", "Open PR", "Send back…", off, back, "👍", "👎"]
-        );
+        assert_eq!(skim, ["Merge", "Open PR", "Send back…", off, back]);
         assert_eq!(card.image.as_deref(), Some(Path::new("/g.png")));
         assert!(card.buttons[2].asks_text);
         let (review, card) = labels(Tier::Review, "risky: src/auth.rs");
-        assert_eq!(
-            review,
-            ["Open PR", "Merge", "Send back…", off, back, "👍", "👎"]
-        );
+        assert_eq!(review, ["Open PR", "Merge", "Send back…", off, back]);
         assert!(card
             .body
             .iter()
@@ -2018,10 +1997,10 @@ mod tests {
         assert!(app.pr_body.remembered(URL).card.as_ref().unwrap().closed);
     }
 
-    /// The verdict card offers **Not for the factory**'s two choices, ahead
-    /// of the vote.
+    /// A PR's card asks whether it merges, with **Not for orion…** as
+    /// the way out, and no vote.
     #[test]
-    fn the_verdict_card_offers_not_for_the_factory() {
+    fn the_verdict_card_asks_about_the_merge_with_a_way_out() {
         let app = app_with_card();
         let actions: Vec<&str> = posted_card(&app)
             .card
@@ -2030,55 +2009,14 @@ mod tests {
             .map(|b| b.action.as_str())
             .collect();
         assert_eq!(
-            actions[actions.len() - 4..],
+            actions,
             [
-                orion_core::factory_card::NOT_FOR_FACTORY,
-                orion_core::factory_card::NOT_FOR_FACTORY_BACKLOG,
-                "right",
-                "wrong"
+                "merge",
+                "open",
+                "not_for_factory",
+                "not_for_factory_backlog"
             ]
         );
-    }
-
-    #[test]
-    fn a_vote_is_noted_and_the_card_keeps_its_buttons() {
-        use orion_core::ClientRequest;
-        let mut app = app_with_card();
-        cards::on_action(&mut app, &card_key(URL), "right", None, true);
-        let posted = posted_card(&app);
-        assert_eq!(posted.state, CardState::Open, "still up");
-        assert_eq!(posted.card.body.last().unwrap(), "_✓ noted: 👍_");
-        let labels: Vec<&str> = posted
-            .card
-            .buttons
-            .iter()
-            .map(|b| b.label.as_str())
-            .collect();
-        assert_eq!(
-            labels,
-            [
-                "Merge",
-                "Open PR",
-                "Not for the factory: back to Triage",
-                "Not for the factory: move to Backlog",
-                "👍",
-                "👎"
-            ]
-        );
-        let Some(ClientRequest::PostFactoryCard { card }) = app.outbox.last() else {
-            panic!("{:?}", app.outbox);
-        };
-        assert!(card
-            .blocks
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|b| b["type"] == "actions"));
-        // A second vote replaces the first's note.
-        cards::on_action(&mut app, &card_key(URL), "wrong", None, true);
-        let body = &posted_card(&app).card.body;
-        assert_eq!(body.last().unwrap(), "_✓ noted: 👎_");
-        assert_eq!(body.iter().filter(|l| l.starts_with(NOTED)).count(), 1);
     }
 
     #[test]

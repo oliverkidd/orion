@@ -146,6 +146,11 @@ pub enum Action {
     /// `Space`: the FOLLOW-UP MODAL for the selected session card — its
     /// next turn, typed in a box over the grid and sent on Enter.
     FollowUp,
+    /// `c`: the software factory card up about the session (or worktree)
+    /// under the cursor — a pull request's verdict, a plan with nothing
+    /// to build — its words and its buttons, in context
+    /// (`factory::cards::open_at_cursor`).
+    FactoryCard,
     /// `Shift+P`: the QUICK PROMPT on the card under the cursor's settings
     /// — the same harness, model, effort and worktree — so the task is all
     /// there is to type. `p` opens the box on the Accounts tab defaults; the
@@ -762,6 +767,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "SESSIONS",
         scope: Scope::Global,
         defaults: &["space"],
+    },
+    ActionSpec {
+        action: Action::FactoryCard,
+        id: "factory_card",
+        label: "Answer factory card",
+        hint: "The software factory card about the session or worktree under the cursor — a pull request's verdict, a plan with nothing to build — with its buttons: Merge, Send back… and the rest, as on Slack. The row wears ◆ card while one is up",
+        group: "SESSIONS",
+        scope: Scope::Global,
+        defaults: &["c"],
     },
     ActionSpec {
         action: Action::DuplicateSession,

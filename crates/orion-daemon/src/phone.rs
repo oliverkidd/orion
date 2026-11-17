@@ -17,7 +17,7 @@
 //!   - a plan: `Approve` and `Suggest changes…`;
 //!   - a permission prompt: `Yes` and `Type an answer…`;
 //!   - and on any of them from a session the bug fixer or the feature
-//!     builder started, `Not for the factory: back to Triage` and `…:
+//!     builder started, `Not for orion: back to Triage` and `…:
 //!     move to Backlog`: the message closes and the TUI takes its ticket
 //!     off the factory (`ServerEvent::FactoryAction` under
 //!     `session:<agent id>`).
@@ -62,7 +62,7 @@ use std::sync::Arc;
 
 use orion_core::away::PhoneKind;
 use orion_core::factory_card::{
-    NOT_FOR_FACTORY, NOT_FOR_FACTORY_BACKLOG, NOT_FOR_FACTORY_BACKLOG_LABEL,
+    NOT_FOR_FACTORY, NOT_FOR_FACTORY_BACKLOG, NOT_FOR_FACTORY_BACKLOG_LABEL, NOT_FOR_FACTORY_MENU,
     NOT_FOR_FACTORY_TRIAGE_LABEL, SESSION_PREFIX,
 };
 use orion_core::slack_caps::{BUTTON, HEADER, MAX_BLOCKS, SECTION};
@@ -125,8 +125,13 @@ pub const ACTION_ANSWER_MODAL: &str = "orion_answer_modal";
 pub const ACTION_TYPE: &str = "orion_type";
 /// `Suggest changes…`: the plan's steer modal.
 pub const ACTION_STEER: &str = "orion_steer";
-/// `Not for the factory: back to Triage` and `…: move to Backlog`, on a
-/// factory session's message.
+/// **Not for orion…** on a factory session's message: one menu
+/// (`static_select`) whose two choices are `Not for orion: back to
+/// Triage` and `…: move to Backlog`, the choice's value
+/// `NOT_FOR_FACTORY` or `NOT_FOR_FACTORY_BACKLOG`.
+pub const ACTION_NOT_FOR_ORION: &str = "orion_not_for_orion";
+/// The two buttons an earlier orion put there instead: a press on one of
+/// its messages still counts.
 pub const ACTION_NOT_FOR_FACTORY: &str = "orion_not_for_factory";
 pub const ACTION_NOT_FOR_FACTORY_BACKLOG: &str = "orion_not_for_factory_backlog";
 
@@ -335,16 +340,7 @@ pub fn build(ask: &Ask) -> Built {
         .automation
         .is_some_and(orion_core::automation::builds_tickets);
     if let (true, Some(buttons)) = (factory, closing.buttons.as_mut()) {
-        buttons.push(button(
-            NOT_FOR_FACTORY_TRIAGE_LABEL,
-            ACTION_NOT_FOR_FACTORY,
-            NOT_FOR_FACTORY,
-        ));
-        buttons.push(button(
-            NOT_FOR_FACTORY_BACKLOG_LABEL,
-            ACTION_NOT_FOR_FACTORY_BACKLOG,
-            NOT_FOR_FACTORY_BACKLOG,
-        ));
+        buttons.push(not_for_orion_menu());
     }
     let tail = closing.blocks.len()
         + usize::from(closing.buttons.is_some())
@@ -445,8 +441,20 @@ pub fn answered_with(blocks: &[Value], summary: &str) -> Vec<Value> {
     closed(blocks, escape(&sent_line(summary)))
 }
 
+/// **Not for orion…**: one menu, labelled, with its two choices — less
+/// to read than two buttons, and still named on the message.
+pub fn not_for_orion_menu() -> Value {
+    let option = |label: &str, value: &str| json!({"text": plain(label), "value": value});
+    json!({"type": "static_select", "action_id": ACTION_NOT_FOR_ORION,
+    "placeholder": plain(NOT_FOR_FACTORY_MENU),
+    "options": [
+        option(NOT_FOR_FACTORY_TRIAGE_LABEL, NOT_FOR_FACTORY),
+        option(NOT_FOR_FACTORY_BACKLOG_LABEL, NOT_FOR_FACTORY_BACKLOG),
+    ]})
+}
+
 /// `blocks` taken off the factory: its buttons gone, the choice (`✓ Not
-/// for the factory: move to Backlog`) at the foot.
+/// for orion: move to Backlog`) at the foot.
 pub fn not_for_factory(blocks: &[Value], backlog: bool) -> Vec<Value> {
     closed(blocks, format!("✓ {}", not_for_factory_label(backlog)))
 }
@@ -702,7 +710,7 @@ pub enum Reply {
         action: String,
         trigger: String,
     },
-    /// `Not for the factory`: no answer, the session's ticket taken off —
+    /// `Not for orion`: no answer, the session's ticket taken off —
     /// moved to Backlog, or back to Triage.
     NotForFactory {
         backlog: bool,
@@ -740,6 +748,11 @@ fn route_action_for(payload: &Value, me: &str, dm: &str) -> Option<Route> {
     let id = action["action_id"].as_str()?;
     let reply = match id {
         ACTION_APPROVE => Reply::Approve,
+        ACTION_NOT_FOR_ORION => match action["selected_option"]["value"].as_str()? {
+            NOT_FOR_FACTORY => Reply::NotForFactory { backlog: false },
+            NOT_FOR_FACTORY_BACKLOG => Reply::NotForFactory { backlog: true },
+            _ => return None,
+        },
         ACTION_NOT_FOR_FACTORY => Reply::NotForFactory { backlog: false },
         ACTION_NOT_FOR_FACTORY_BACKLOG => Reply::NotForFactory { backlog: true },
         ACTION_ANSWER_MODAL | ACTION_TYPE | ACTION_STEER => Reply::Modal {
@@ -1258,7 +1271,7 @@ impl Daemon {
         None
     }
 
-    /// `Not for the factory` on `message`: closed so, and every TUI told
+    /// `Not for orion` on `message`: closed so, and every TUI told
     /// to take its session's ticket off the factory — which archives the
     /// session, so nothing answers it.
     async fn phone_not_for_factory(
@@ -1270,7 +1283,7 @@ impl Daemon {
         let _ = self
             .store
             .set_phone_answered(&message.channel, &message.ts, Some("phone"));
-        tracing::info!(agent = %message.agent, "not for the factory, from the phone");
+        tracing::info!(agent = %message.agent, "not for orion, from the phone");
         let blocks: Vec<Value> = serde_json::from_str(&message.blocks).unwrap_or_default();
         let blocks = not_for_factory(&blocks, backlog);
         let (api, sent) = (session.api.clone(), message.clone());
@@ -1432,7 +1445,12 @@ mod tests {
                         .as_array()
                         .unwrap()
                         .iter()
-                        .map(|e| e["text"]["text"].as_str().unwrap())
+                        .map(|e| {
+                            e["text"]["text"]
+                                .as_str()
+                                .or_else(|| e["placeholder"]["text"].as_str())
+                                .unwrap()
+                        })
                         .collect::<Vec<_>>()
                         .join("|")
                 ),
@@ -1455,17 +1473,30 @@ mod tests {
         );
     }
 
-    /// A factory session's plan and question offer **Not for the factory**;
-    /// a session you started doesn't, and a crash has no buttons at all.
+    /// A factory session's plan and question offer **Not for orion…**,
+    /// one menu of its two choices; a session you started doesn't, and a
+    /// crash has no buttons at all.
     #[test]
-    fn a_factory_sessions_message_offers_not_for_the_factory() {
+    fn a_factory_sessions_message_offers_not_for_orion() {
+        // Each element's label — a button's text, a menu's placeholder
+        // then its choices.
         let labels = |ask: &Ask| -> Vec<String> {
             build(ask)
                 .blocks
                 .iter()
                 .filter(|b| b["type"] == "actions")
                 .flat_map(|b| b["elements"].as_array().cloned().unwrap_or_default())
-                .map(|e| e["text"]["text"].as_str().unwrap_or_default().to_string())
+                .flat_map(|e| {
+                    let mut out = vec![e["text"]["text"]
+                        .as_str()
+                        .or_else(|| e["placeholder"]["text"].as_str())
+                        .unwrap_or_default()
+                        .to_string()];
+                    for o in e["options"].as_array().cloned().unwrap_or_default() {
+                        out.push(o["text"]["text"].as_str().unwrap_or_default().to_string());
+                    }
+                    out
+                })
                 .collect()
         };
         let plan = WaitReason::Plan {
@@ -1478,10 +1509,11 @@ mod tests {
                     ..ask(None, Some(&reason))
                 };
                 assert_eq!(
-                    labels(&ask)[labels(&ask).len() - 2..],
+                    labels(&ask)[labels(&ask).len() - 3..],
                     [
-                        "Not for the factory: back to Triage",
-                        "Not for the factory: move to Backlog"
+                        "Not for orion…",
+                        "Not for orion: back to Triage",
+                        "Not for orion: move to Backlog"
                     ],
                     "{runner} {reason:?}"
                 );
@@ -1494,6 +1526,7 @@ mod tests {
             };
             assert!(!off(labels(&fixer)));
         }
+        // An earlier orion's two buttons still count…
         for (action, backlog) in [
             (ACTION_NOT_FOR_FACTORY, false),
             (ACTION_NOT_FOR_FACTORY_BACKLOG, true),
@@ -1503,13 +1536,22 @@ mod tests {
                 Some(Reply::NotForFactory { backlog })
             );
         }
+        // …and so does a choice in the menu.
+        for (value, backlog) in [(NOT_FOR_FACTORY, false), (NOT_FOR_FACTORY_BACKLOG, true)] {
+            let mut chose = press("U1", ACTION_NOT_FOR_ORION);
+            chose["actions"][0]["selected_option"] = json!({"value": value});
+            assert_eq!(
+                route_action_for(&chose, "U1", "D1").map(|r| r.reply),
+                Some(Reply::NotForFactory { backlog })
+            );
+        }
         let reply = Reply::NotForFactory { backlog: false };
         assert_eq!(answer_for(PhoneKind::Plan, reply), None);
         let closed = not_for_factory(&[json!({"type": "actions"})], true);
         assert_eq!(closed.len(), 1);
         assert_eq!(
             closed[0]["elements"][0]["text"],
-            "✓ Not for the factory: move to Backlog"
+            "✓ Not for orion: move to Backlog"
         );
     }
 

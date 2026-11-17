@@ -152,8 +152,8 @@ pub fn run_pr_facts(op: PrFactsOp) -> Result<()> {
 
 pub use automations::linear_builder::skip::Known as FactoryKnown;
 
-/// `orion factory skip <ticket or session> [--backlog]`: **Not for the
-/// factory** from a shell (see `automations::linear_builder::skip`).
+/// `orion factory skip <ticket or session> [--backlog]`: **Not for orion**
+/// from a shell (see `automations::linear_builder::skip`).
 /// `known` is what the daemon's database says of sessions, projects and
 /// worktrees.
 pub fn run_factory_skip(target: String, backlog: bool, known: FactoryKnown) -> Result<()> {

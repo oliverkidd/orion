@@ -730,27 +730,21 @@ Automations                                       2 of at most 3 running · caps
   browser, which `⌘O` does on any row with one. `⌘G` runs week in review now. Typing filters the
   page, every word matching a row; `Esc` clears the filter, then goes back to the list, then
   closes. On the list `Space` turns the automation on or off; `⌘,` opens its settings.
-- **Settings › Factory.** The factory's own rows first — **Agents working at once**, **Things
-  waiting on you**, **Factory account** and **E2E tests on this machine** — then a section per
-  automation, its heading
-  saying what it is doing and how many of its sessions run against its own cap. Each has **On**, its
-  **Preset** and an **Extra steer**; the PR fixer, the bug fixer, the feature builder and the blue
-  sky builder an **At most at once**; the bug fixer and the feature builder their **Labels**; week
+- **Settings › Factory.** The factory's own rows first — **Agents working at once**, **Factory
+  account** and **E2E tests on this machine** — then a section per automation, its heading saying
+  what it is doing and how many of its sessions are at work. Each has **On**, its **Preset** and an
+  **Extra steer**; the bug fixer and the feature builder their **Labels**; week
   in review its **When** and **Whose**. The preset says what the agent is told and what it runs on:
   `Enter` on the row opens it in Settings › Presets, and `⌘U` picks another of your presets in its
   place. The extra steer is one line added after the preset's text, as `Extra steer: …`, on every
   prompt that automation sends.
-- **Three caps.** No automation starts a session while `automations.max_running` of them — 3
-  unless you change **Agents working at once** ("At most N agents work at the same time.") — are at
-  work or waiting on you, nor while its own **At most at once** of its own are: one PR fixer, bug
-  fixer and feature builder session at a time out of the box, and any number of blue sky builds
-  under the overall cap. A session waiting on you holds its place, so approving or closing it frees
-  one. And no new ticket starts while **Things waiting on you** (5 unless you change it, 1 to 20:
-  "New tickets wait while N or more factory items need you.") factory items wait on you: factory
-  sessions waiting on a plan or a question, and the factory cards you haven't acted on — a pull
-  request's verdict, a ticket held for you, a fix given up on. Work that comes meanwhile waits for a
-  place — a breakage the PR fixer sees stays watched, a ticket at the bug fixer's cap reads
-  `queued (at its cap)`, and one held by the attention cap `queued: waiting on you (5)`.
+- **One cap.** No automation starts a session while `automations.max_running` of them — 3 unless
+  you change **Agents working at once** — are at work (mid-turn or booting), all automations
+  together; no runner has a cap of its own. A session waiting on you — a plan, a question, a pull
+  request to merge — holds no place, and nothing caps how much may wait on you: leave a card on
+  Slack to pick up at the desk and the factory carries on meanwhile. Work that comes while the cap
+  is full waits for a place — a breakage the PR fixer sees stays watched, and a ticket reads
+  `queued, N running`.
 - **The factory account.** <a id="factory-account"></a>**Factory account** picks the Claude account
   everything the factory runs goes through: its sessions, the knowledge harvest and backfill, and
   its model asks (a ticket's intake, the week in review, the meeting takeaways). `←` / `→` step
@@ -779,14 +773,38 @@ Automations                                       2 of at most 3 running · caps
   same way. orion keeps the tag with the session, across restarts.
 - **Cards.** <a id="factory-cards"></a>What the factory needs you for — a pull request's verdict, a
   plan with nothing to build, a ticket held for you — is a card. While you are at
-  the laptop none of them goes to Slack: the card shows in orion, as `◆ card` where the row of the
-  session it is about shows its age (on the worktree's rule, `◆` ahead of its pull request, when no
-  session of it is live), as a line in the footer when it arrives (`◆ ENG-7 Crash · ⌘K to answer`),
-  and on the Needs you board (`⌘K`), where `Enter` lists its buttons and `1`–`9` presses one. Once you
-  count as away (the screen locked, idle, or `⌘⇧A`; see
-  [How it works](how-it-works.md#phone-bridge)) and it isn't quiet hours, the cards still open go to
-  Slack, once each, and new ones go straight there. A press in either place closes the card in the
-  other. A thin ticket's question to its reporter goes to them on Slack whoever is at the desk.
+  the laptop none of them goes to Slack: the card shows in orion where its work is — `◆ card` where
+  the row of the session it is about shows its age (on the worktree's rule, `◆` ahead of its pull
+  request, when no session of it is live), what it asks on the pane's rule when the cursor is on
+  that row (`◆ Review: no pictures · c answer`), and a line in the footer when it arrives (`◆ #42 Fix
+  the login loop · c on its row to answer`). `c` on the row (or a click on the pane's line) opens its
+  words and buttons; `1`–`9` presses one. On the Needs you board (`⌘K`) the session's own card
+  stands for it: it waits on you for as long as the card is up, saying what the card asks
+  (`◆ Review: no pictures`), and `Enter` lands on it. Only a card about no live session — a ticket
+  held for you, the day's new rules — is listed on the board itself. Once you count as away (the
+  screen locked, idle, or `⌘⇧A`; see [How it works](how-it-works.md#phone-bridge)) and it isn't
+  quiet hours, the cards still open go to Slack, once each, and new ones go straight there. A press
+  in either place closes the card in the other. A thin ticket's question to its reporter goes to
+  them on Slack whoever is at the desk.
+- **Never stale.** A card closes itself, on Slack too, as soon as its work moves on: its session
+  back at work after it was idle — you wrote to it here or on the phone, or the PR fixer did
+  (`✓ Picked up in orion`) — a plan with nothing to build answered in orion, its worktree removed,
+  its pull request merged or closed anywhere. A new commit brings a fresh verdict card once the
+  checks settle. A card about something that only finished (the knowledge backfill) closes after a
+  day, and the week's card before the next one. A card Slack never took because the network was
+  down is sent again every five minutes; while the day's rules haven't reached you, their veto
+  window doesn't start and nothing merges.
+- **What a card asks.** Each card's buttons fit where its ticket is. Before work: **Start** ·
+  **Leave** on an Urgent ticket, **Start anyway** · **Skip** on a possible duplicate, **Open ticket** ·
+  **Start anyway** on a thin ticket whose reporter can't be asked. Planning: the phone's **Approve**
+  · **Suggest changes…**, a question's options · **Type an answer…**, and **Close ticket** ·
+  **Build it anyway…** on a plan with nothing to build. A pull request's card asks whether it
+  merges — **Merge**, **Open PR** and, unless it is a plain Merge, **Send back…** (your words to its
+  agent) — with no vote on the verdict; the fixer giving up has **Open PR** · **Reply…** · **Park**.
+  Every one of those about a ticket orion took also has **Not for orion…**: on Slack one labelled
+  menu holding its two choices, in orion two rows of the card's menu. The day's new rules have
+  **All fine** and a **Veto** per rule — or, past five rules, one **Veto…** that takes their numbers
+  (`3 7`).
 - Settings are global, never per project. See [Configuration](configuration.md#automations).
 
 ### The PR fixer
@@ -833,7 +851,7 @@ request. They work the same way; each has its own labels and its own preset (**B
   `Feature · Improvement`, until you pick others: `Enter` on **Labels** lists your Linear
   workspace's labels, `Space` ticks one, `Enter` keeps the ticks and `Esc` leaves them as they were.
   Case doesn't matter. A ticket with none of either's labels is left alone, and so is one labelled
-  `factory-skip` (**Not for the factory**, below), until someone takes that label off.
+  `factory-skip` (**Not for orion**, below), until someone takes that label off.
 - **Watching.** Every 2 minutes, for each Linear key your projects use, orion asks for the tickets
   assigned to you with one of the labels, in **Todo, Triage or the backlog**, and picks them in that
   order, then by priority. The queue keeps that order: a Todo ticket starts before a Triage one
@@ -894,8 +912,8 @@ request. They work the same way; each has its own labels and its own preset (**B
   you're away. A plan whose first line is `ORION-VERDICT: <already-fixed|duplicate|not-reproducible|
   wont-build> <reason>` builds nothing: a **No change** card says why in its title, in one line
   ("Nothing to build: already shipped in #2075", "Nothing to build: duplicate of ENG-n", "Nothing to
-  build: can't reproduce: …"), with **Close ticket**, **Build it anyway…** and the two **Not for the
-  factory** choices. **Close ticket** comments the reason on the ticket (and marks it a duplicate of
+  build: can't reproduce: …"), with **Close ticket**, **Build it anyway…** and the **Not for
+  orion…** menu choices. **Close ticket** comments the reason on the ticket (and marks it a duplicate of
   the ticket the reason names, for a duplicate) and marks it Done; then the session is archived and
   its worktree deleted. It never goes back to Todo. **Build it anyway…** sends what you type to the
   session as the plan's steer.
@@ -912,12 +930,12 @@ request. They work the same way; each has its own labels and its own preset (**B
   after that, it is left in its waiting state. None of these is a card or goes to Slack, and a
   factory session's crash never reaches your phone. Each stage, each question and when you answered
   go into the run's record (`automations/runs/<ticket>.json` in orion's data dir).
-- **Not for the factory.** A ticket the factory shouldn't have taken comes off it for good. It is
-  two choices, **Not for the factory: back to Triage** and **Not for the factory: move to Backlog**,
-  on the No change card, on the pull request's verdict card, on a factory
-  session's plan and question on your phone, and in the session's menu in orion (right-click its
-  row). Either parks the ticket as **Park** does — its session archived, its cards closed — labels it
-  `factory-skip` (made in its team if the team has no such label), comments "Taken off the factory by
+- **Not for orion.** A ticket the factory shouldn't have taken comes off it for good. It is
+  two choices, **Not for orion: back to Triage** and **Not for orion: move to Backlog** — on
+  Slack one **Not for orion…** menu — on every card about the ticket (held, no change, the pull
+  request's verdict, the fixer's Can't fix), on a factory session's plan, question and permission
+  prompt on your phone, and in the session's menu in orion (right-click its row). Either parks the ticket as **Park** does — its session archived, its cards closed — labels it
+  `factory-skip` (made in its team if the team has no such label), comments "Taken off orion by
   <you>" (once: never again on a ticket that says so already), sets the team's Triage or Backlog
   state, and closes the draft pull request it opened, with a comment saying why. Then the session's
   worktree is removed through orion's own delete, its delete hooks and containers with it — only when
@@ -1198,8 +1216,7 @@ run on another account), told the idea and where to build it.
   as `brief to approve`, and to your phone while you're away, as any plan does.
 - **Then the prototype.** Approved, it builds a working prototype — a web tool may also be published
   as a claude.ai artifact, its link noted — and finishes with how to try it.
-- It counts against the automations' cap, and against its own **At most at once** (any unless you
-  set one): with that many running, the idea waits (`● starting`) and starts when one finishes.
-- In Settings › Factory it has **On** (on unless you turn it off), **At most at once**,
-  **Preset** and **Extra steer**. In `⌘J` its page lists its IDEAS; `Enter` on
+- It counts against the automations' cap: with that many at work, the idea waits (`● starting`)
+  and starts when one finishes.
+- In Settings › Factory it has **On** (on unless you turn it off), **Preset** and **Extra steer**. In `⌘J` its page lists its IDEAS; `Enter` on
   one opens it in Todos › Blue sky.

@@ -1034,7 +1034,7 @@ mod tests {
             tick(&mut app, &mut out);
             let pause = app.automations.account.paused.clone().expect("paused");
             assert_eq!(pause.account, "claude-work");
-            assert!(!super::super::may_start(&app, Automation::BlueSky));
+            assert!(!super::super::may_start(&app));
             let Some(Overlay::Confirm(dialog)) = &app.overlay else {
                 panic!("the notice: {:?}", app.overlay)
             };
@@ -1073,7 +1073,7 @@ mod tests {
                 app.automations.account.paused, None,
                 "the new account isn't paused"
             );
-            assert!(super::super::may_start(&app, Automation::BlueSky));
+            assert!(super::super::may_start(&app));
             assert_eq!(
                 app.automations
                     .account

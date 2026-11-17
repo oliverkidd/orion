@@ -166,6 +166,11 @@ pub enum HitTarget {
     /// click toggles between the two, the same
     /// `event_loop::launcher::toggle_full_screen` `^F` runs.
     LauncherPaneZoom,
+    /// The FACTORY CARD LINE on the pane's rule — `◆ Review: no pictures
+    /// · c answer` — while a software factory card is up about the row
+    /// the pane reads: a click opens the card's buttons, as `c` does
+    /// (`factory::cards::open_at_cursor`).
+    LauncherPaneCard,
     /// The PR COUNT on the right of the LAUNCHER VIEW's header (`2 prs`):
     /// a click opens the open pull requests of the project in front of
     /// you — the modal `v` opens.
@@ -409,7 +414,7 @@ pub enum MenuAction {
         project: ProjectId,
         id: String,
     },
-    /// A factory session's **Not for the factory**: its ticket taken off
+    /// A factory session's **Not for orion**: its ticket taken off
     /// the factory, moved to Backlog or back to Triage
     /// (`linear_builder::owner::not_for_the_factory_session`).
     NotForFactory {

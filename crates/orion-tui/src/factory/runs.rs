@@ -2,7 +2,8 @@
 //! `<data_dir>/automations/runs/<identifier>.json` (`RIPLO-123.json`) —
 //! the ticket and its sessions, every question asked and how long it
 //! waited, the owner's corrections, the stages with their times, the
-//! pull request with its verdict and the owner's 👍/👎 on it, the fixes
+//! pull request with its verdict (and, in older records, the owner's
+//! 👍/👎 on it), the fixes
 //! sent, the merge, and the bugs that followed it. Week in review and the
 //! weekly retro read them; nothing else does — there are no metrics.
 //!
@@ -98,7 +99,8 @@ pub(crate) struct RunRecord {
     /// `merge`, `skim`, `review` or `blocked`, with its reasons.
     pub verdict: Option<String>,
     pub verdict_reasons: Vec<String>,
-    /// The owner's "Verdict right?": 👍 true, 👎 false.
+    /// The owner's "Verdict right?" (👍 true, 👎 false), from the vote
+    /// the verdict card had until it was dropped: kept for older records.
     pub verdict_right: Option<bool>,
     pub cubic_dismissals: Vec<String>,
     pub fixer_sends: Vec<FixerSend>,

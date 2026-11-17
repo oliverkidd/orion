@@ -1,9 +1,11 @@
-//! The board's FACTORY cards: every software factory card posted to you
-//! and still open (`App::factory_cards`, `factory::cards`) — a plan, a
-//! question, a verdict, the day's new rules, the week's fixes — in the
-//! AGENTS column, marked `◆`, with the Slack card's own buttons. While
-//! you are at the desk this is where a card is answered: it reaches
-//! Slack only once you go away.
+//! The board's FACTORY cards: the software factory cards posted to you,
+//! still open (`App::factory_cards`, `factory::cards`) and about no live
+//! session — a ticket held for you, the day's new rules, the week's
+//! fixes, a pull request whose session is gone — in the AGENTS column,
+//! marked `◆`, with the Slack card's own buttons. A card about a live
+//! session isn't listed: that session's own card is, waiting on you with
+//! what the card asks (`needs_you::agents`), and `c` on its row answers
+//! it, in context. A card reaches Slack only once you go away.
 //!
 //! - **Enter** on one opens its buttons as a menu, the card's words above
 //!   them; there **1–9** presses the button of that number at once. On
@@ -15,7 +17,8 @@
 //!   that owns the card (`factory::cards::on_action`), exactly as a tap
 //!   on Slack does, and the Slack card is then closed with the button's
 //!   label (`factory::cards::close`) — unless that module already closed
-//!   it, or posted it again to keep it open (a verdict's 👍 / 👎).
+//!   it, or posted it again to keep it open (a Merge the card no longer
+//!   stands behind).
 //! - **A press on Slack** marks the card acted, and it leaves the board.
 //!
 //! Only the cards that went to you are mirrored: a thin ticket's question
@@ -25,7 +28,7 @@ use chrono::{DateTime, Utc};
 
 use super::model::{Card, CardSource, CardTarget, Section};
 use crate::app::{App, ContextMenu, MenuAction, MenuItem, Overlay, PromptKind};
-use crate::factory::cards::{self, CardState, Posted, Recipient};
+use crate::factory::cards::{self, CardState, Posted};
 
 /// Where a factory card sorts among the sessions: with the ones waiting
 /// on you.
@@ -35,11 +38,9 @@ const MENU_TEXT_W: usize = 72;
 /// The most lines of a card's words its menu shows.
 const MENU_TEXT_LINES: usize = 10;
 
-/// The open cards posted to you.
+/// The open cards posted to you, wherever they show.
 fn open(app: &App) -> impl Iterator<Item = &Posted> {
-    app.factory_cards
-        .iter()
-        .filter(|p| p.state == CardState::Open && p.card.to == Recipient::Owner)
+    cards::open_to_you(app)
 }
 
 /// The open card under `key`.
@@ -53,6 +54,12 @@ pub struct Factory;
 impl CardSource for Factory {
     fn cards(&self, app: &App) -> Vec<Card> {
         open(app)
+            .filter(|p| {
+                !matches!(
+                    cards::place_of(app, &p.card.key),
+                    Some(cards::Place::Session(_))
+                )
+            })
             .map(|p| {
                 let labels: Vec<&str> = p.card.buttons.iter().map(|b| b.label.as_str()).collect();
                 let mut sub = p.card.context.clone();
@@ -124,7 +131,7 @@ pub(crate) fn open_menu(app: &mut App, key: &str) {
 fn words(body: &[String]) -> String {
     let mut lines: Vec<String> = body
         .iter()
-        .map(|line| plain(line))
+        .map(|line| cards::plain(line))
         .filter(|line| !line.trim().is_empty())
         .flat_map(|line| crate::pr_preview::wrap(&line, MENU_TEXT_W))
         .collect();
@@ -133,29 +140,6 @@ fn words(body: &[String]) -> String {
         lines.push("…".into());
     }
     lines.join("\n")
-}
-
-/// Slack mrkdwn as plain text: bold and italic marks gone, `<url|label>`
-/// as its label, the escapes undone.
-fn plain(line: &str) -> String {
-    let mut out = String::new();
-    let mut rest = line;
-    while let Some(open) = rest.find('<') {
-        out.push_str(&rest[..open]);
-        let Some(close) = rest[open..].find('>') else {
-            out.push_str(&rest[open..]);
-            rest = "";
-            break;
-        };
-        let link = &rest[open + 1..open + close];
-        out.push_str(link.split_once('|').map_or(link, |(_, label)| label));
-        rest = &rest[open + close + 1..];
-    }
-    out.push_str(rest);
-    out.replace(['*', '_'], "")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
 }
 
 /// The row digit `c` presses in `menu`, when it is a card's menu
@@ -214,6 +198,7 @@ pub(crate) fn press(app: &mut App, key: &str, action: &str, text: Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::factory::cards::Recipient;
     use crate::factory::cards::{Button, Card as SlackCard};
     use orion_core::ClientRequest;
 
@@ -358,31 +343,6 @@ mod tests {
         let mut other = menu.clone();
         other.items = vec![MenuItem::new("Open PRs", MenuAction::ToggleOpenPrs)];
         assert_eq!(numbered_row(&other, '1'), None, "not a card's menu");
-    }
-
-    #[test]
-    fn a_verdict_vote_here_leaves_the_card_up_with_its_buttons() {
-        let mut app = App::new();
-        let key = "pr:https://x.y/7:verdict";
-        let mut card = slack_card(key);
-        card.buttons = vec![
-            Button::tap("merge", "Merge"),
-            Button::tap("right", "👍"),
-            Button::tap("wrong", "👎"),
-        ];
-        cards::post(&mut app, card);
-        // pr_body puts a voted card back up as it was, the vote noted.
-        crate::pr_body::remember_card_sent(&mut app, "https://x.y/7", "abc");
-        press(&mut app, key, "right", None);
-        assert!(
-            !matches!(
-                app.outbox.last(),
-                Some(ClientRequest::UpdateFactoryCard { .. })
-            ),
-            "not closed: {:?}",
-            app.outbox.last()
-        );
-        assert_eq!(Factory.cards(&app).len(), 1, "still on the board");
     }
 
     #[test]
