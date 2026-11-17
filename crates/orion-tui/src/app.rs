@@ -362,8 +362,15 @@ pub enum MenuAction {
     PullWorktree(WorktreeId),
     /// A band's **Push**: send its branch's new commits up (`⇧P`).
     PushWorktree(WorktreeId),
-    /// Start the worktree's RUN COMMAND, or stop it while it runs (`r`).
+    /// Start an app found in the worktree (a pick when there are several),
+    /// or stop its run while it runs (`⌘⇧S`).
     ToggleRun(WorktreeId),
+    /// `⌘⇧S`'s pick: start `command`, one of the apps found in the
+    /// checkout (`run_targets`), in the worktree's run terminal.
+    StartRunWith {
+        worktree: WorktreeId,
+        command: String,
+    },
     /// A run line's **Restart stack**: stop the worktree's run, then start
     /// it again once it has gone.
     RestartRun(WorktreeId),
@@ -4525,6 +4532,9 @@ pub struct App {
     /// DAEMON last saw it — `None` while docker is out of reach (or before
     /// the first answer).
     pub stacks: Option<Vec<orion_core::compose::Stack>>,
+    /// The app `⌘⇧S` last started in each project, by its command: first
+    /// in the next pick (`run_targets`).
+    pub run_picks: HashMap<orion_core::ProjectId, String>,
     /// What `gh pr view` last said about each worktree's branch: `Some(pr)`
     /// when one exists, `None` when the lookup came back empty (no PR, no
     /// `gh`, no remote). A missing key means "not looked up yet" — briefly,
@@ -4976,6 +4986,7 @@ impl App {
             worktree_lines: HashMap::new(),
             worktree_ahead: HashMap::new(),
             stacks: None,
+            run_picks: HashMap::new(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
             attention_walk: None,

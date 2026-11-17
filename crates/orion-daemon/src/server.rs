@@ -675,8 +675,13 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 ClientRequest::CloseTerminal { req_id, id } => {
                     reply_done(&out_tx, req_id, daemon.close_terminal(&id)).await;
                 }
-                ClientRequest::StartRun { req_id, worktree } => {
-                    reply(&out_tx, req_id, daemon.start_run(&worktree).map(Some)).await;
+                ClientRequest::StartRun {
+                    req_id,
+                    worktree,
+                    command,
+                } => {
+                    let started = daemon.start_run(&worktree, command.as_deref());
+                    reply(&out_tx, req_id, started.map(Some)).await;
                 }
                 ClientRequest::StopRun { req_id, worktree } => {
                     reply_done(&out_tx, req_id, daemon.stop_run(&worktree)).await;

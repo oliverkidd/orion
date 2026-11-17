@@ -188,10 +188,13 @@
   spare the last DAEMON left fully set up is kept and anything else of one is removed; removing a
   project removes its spare. The footer's memory readout counts the spares. See
   [Configuration](configuration.md#spare-worktrees).
-- **A worktree runs its own project — the RUN COMMAND.** The Projects tab of the SETTINGS OVERLAY
-  holds a `run` and an `open` command per project, in `config.json`. `⌘⇧S`, or **Start stack** in a row's, a band's or the
-  project tab's right-click menu, has the DAEMON start `run` — once the worktree's setup, if any, has
-  finished — in a RUN TERMINAL — a terminal row
+- **A worktree runs its own project — the RUN COMMAND.** The TUI finds what there is to start in
+  the checkout itself (`run_targets`: a Justfile's `start` recipes, its modules' among them, then
+  `package.json` workspaces' `dev` scripts, a Makefile, a compose file — small text files, no
+  process) and, with several, asks which; the Projects tab holds only an `open` command per
+  project. `⌘⇧S`, or **Start stack** in a row's, a band's or the project tab's right-click menu,
+  sends the pick as `StartRun`'s `command`, and the DAEMON starts it — once the worktree's setup,
+  if any, has finished — in a RUN TERMINAL — a terminal row
   that carries its command and spawns `$SHELL -l -i -c '<run>'` instead of an interactive shell — so the
   PTY's life is the worktree's RUNNING state, broadcast as that terminal's `alive` and drawn as its
   row's `▶`; **Stop stack** writes a `^C` into that PTY so the run's own trap winds down, broadcasts

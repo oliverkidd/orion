@@ -92,9 +92,8 @@ pub(crate) fn open_menu(app: &mut App, key: &str) {
         .card
         .buttons
         .iter()
-        .enumerate()
-        .map(|(n, b)| {
-            let mut item = MenuItem::new(
+        .map(|b| {
+            MenuItem::new(
                 b.label.clone(),
                 MenuAction::FactoryPress {
                     key: key.to_string(),
@@ -102,17 +101,33 @@ pub(crate) fn open_menu(app: &mut App, key: &str) {
                     label: b.label.clone(),
                     asks_text: b.asks_text,
                 },
-            );
-            if n < 9 {
-                item.hint = Some((n + 1).to_string());
-            }
-            item
+            )
         })
         .collect();
     if items.is_empty() {
         return;
     }
     let (title, words) = (p.card.title.clone(), words(&p.card.body));
+    open_numbered(app, title, items, (!words.is_empty()).then_some(words));
+}
+
+/// A NUMBERED PICK over the grid — a card's buttons, `⌘⇧S`'s apps — its
+/// first nine rows wearing the digit that presses them
+/// ([`numbered_row`]), `message` above them.
+pub(crate) fn open_numbered(
+    app: &mut App,
+    title: String,
+    items: Vec<MenuItem>,
+    message: Option<String>,
+) {
+    let items = items
+        .into_iter()
+        .enumerate()
+        .map(|(n, item)| match n < 9 {
+            true => item.with_hint((n + 1).to_string()),
+            false => item,
+        })
+        .collect();
     app.overlay = Some(Overlay::Menu(ContextMenu {
         title: Some(title),
         items,
@@ -121,7 +136,7 @@ pub(crate) fn open_menu(app: &mut App, key: &str) {
         area: ratatui::layout::Rect::default(),
         parent: None,
         filter: None,
-        message: (!words.is_empty()).then_some(words),
+        message,
     }));
     app.dirty = true;
 }
@@ -142,13 +157,19 @@ fn words(body: &[String]) -> String {
     lines.join("\n")
 }
 
-/// The row digit `c` presses in `menu`, when it is a card's menu
-/// ([`open_menu`]) with a button of that number.
+/// The row digit `c` presses in `menu`, when it is a numbered pick — a
+/// card's buttons ([`open_menu`]), or `⌘⇧S`'s apps — with a row of that
+/// number.
 pub(crate) fn numbered_row(menu: &ContextMenu, c: char) -> Option<usize> {
     let n = (c.to_digit(10)? as usize).checked_sub(1)?;
     menu.items
         .get(n)
-        .filter(|item| matches!(item.action, MenuAction::FactoryPress { .. }))
+        .filter(|item| {
+            matches!(
+                item.action,
+                MenuAction::FactoryPress { .. } | MenuAction::StartRunWith { .. }
+            )
+        })
         .map(|_| n)
 }
 

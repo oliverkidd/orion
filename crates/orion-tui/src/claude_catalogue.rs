@@ -185,7 +185,8 @@ pub fn available_models_in(doc: &serde_json::Value) -> Option<Vec<String>> {
     )
 }
 
-fn read_json(path: &Path) -> Option<serde_json::Value> {
+/// A JSON file, or None when it can't be read or parsed.
+pub(crate) fn read_json(path: &Path) -> Option<serde_json::Value> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
 }

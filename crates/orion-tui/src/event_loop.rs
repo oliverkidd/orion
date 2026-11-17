@@ -4882,9 +4882,6 @@ pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
                 crate::config::SettingKind::SetupCommand => {
                     "shell line run once in each new worktree, e.g. just setup-worktree (empty = none)"
                 }
-                crate::config::SettingKind::RunCommand => {
-                    "shell line Start stack runs in a worktree's run terminal, e.g. just start (empty = none)"
-                }
                 crate::config::SettingKind::OpenCommand => {
                     "shell line ⌘O → Open command runs to open a worktree of this project (empty = none)"
                 }
@@ -5541,10 +5538,77 @@ pub(crate) fn toggle_stack_in(
         });
         return;
     }
+    start_run_picking(app, &id, out);
+}
+
+/// `⌘⇧S` on a checkout with nothing running: the apps found in it
+/// (`run_targets::detect`) — one starts at once, several are a pick, the
+/// one started last in the project first, and none says what was looked
+/// for.
+fn start_run_picking(
+    app: &mut App,
+    worktree: &orion_core::WorktreeId,
+    out: &mut Vec<ClientRequest>,
+) {
+    let Some(w) = app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| &w.id == worktree)
+        .cloned()
+    else {
+        return;
+    };
+    let name = crate::launcher::project_name(app, &w.project_id).unwrap_or_else(|| "app".into());
+    let mut targets = crate::run_targets::found(&w.path, &name);
+    if let Some(last) = app.run_picks.get(&w.project_id) {
+        if let Some(at) = targets.iter().position(|t| &t.command == last) {
+            let picked = targets.remove(at);
+            targets.insert(0, picked);
+        }
+    }
+    match targets.as_slice() {
+        [] => {
+            app.flash = Some(crate::flash::Flash::note(crate::run_targets::NOTHING));
+            app.dirty = true;
+        }
+        [one] => start_run_with(app, worktree, one.command.clone(), out),
+        _ => {
+            let items = targets
+                .iter()
+                .map(|t| {
+                    MenuItem::new(
+                        format!("{} · {}", t.name, t.command),
+                        MenuAction::StartRunWith {
+                            worktree: worktree.clone(),
+                            command: t.command.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let title = format!("Start which app? · {}", w.branch);
+            crate::needs_you::factory::open_numbered(app, title, items, None);
+        }
+    }
+}
+
+/// Start `command` in `worktree`'s run terminal, and remember it as the
+/// project's last pick.
+fn start_run_with(
+    app: &mut App,
+    worktree: &orion_core::WorktreeId,
+    command: String,
+    out: &mut Vec<ClientRequest>,
+) {
+    if let Some(w) = app.tree.worktrees.iter().find(|w| &w.id == worktree) {
+        app.run_picks.insert(w.project_id.clone(), command.clone());
+    }
+    let id = worktree.clone();
     send_with(app, out, PendingIntent::RunStarted, |req_id| {
         ClientRequest::StartRun {
             req_id,
             worktree: id,
+            command: Some(command),
         }
     });
 }
@@ -10037,6 +10101,9 @@ fn run_menu_action(app: &mut App, action: MenuAction, out: &mut Vec<ClientReques
             }
         }
         MenuAction::ToggleRun(id) => toggle_stack_in(app, &id, out),
+        MenuAction::StartRunWith { worktree, command } => {
+            start_run_with(app, &worktree, command, out)
+        }
         MenuAction::RestartRun(id) => crate::stacks::restart(app, &id, out),
         MenuAction::OpenWorktree(id) => {
             if let Some(w) = app.tree.worktrees.iter().find(|w| w.id == id).cloned() {
@@ -20943,7 +21010,9 @@ mod tests {
         let req_id = out
             .iter()
             .find_map(|r| match r {
-                ClientRequest::StartRun { req_id, worktree } if worktree.0 == "w1" => Some(*req_id),
+                ClientRequest::StartRun {
+                    req_id, worktree, ..
+                } if worktree.0 == "w1" => Some(*req_id),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("r sends StartRun: {out:?}"));
@@ -29267,6 +29336,62 @@ mod tests {
     /// stopping the footer holds that a second press kills it. A stack
     /// orion didn't start is only its `⬡`: the key starts the run as it
     /// would on a checkout with none.
+    /// `⌘⇧S` with several apps in the checkout: a pick, numbered, whose
+    /// digit starts that app with its command; the next pick in the
+    /// project leads with it. One app starts at once; none says what was
+    /// looked for.
+    #[test]
+    fn cmd_shift_s_picks_among_the_checkouts_apps() {
+        use crate::run_targets::{stub, Target};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        stub(Some(vec![
+            Target::new("os", "just os start"),
+            Target::new("slides", "just slides start"),
+        ]));
+        let started = |out: &[ClientRequest]| -> Vec<String> {
+            out.iter()
+                .filter_map(|r| match r {
+                    ClientRequest::StartRun { command, .. } => command.clone(),
+                    _ => None,
+                })
+                .collect()
+        };
+        let out = run_action(&mut app, crate::keymap::Action::ToggleStack);
+        assert!(started(&out).is_empty(), "nothing yet: {out:?}");
+        let labels = |app: &App| match &app.overlay {
+            Some(Overlay::Menu(menu)) => menu.items.iter().map(|i| i.label.clone()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(
+            labels(&app),
+            ["os · just os start", "slides · just slides start"]
+        );
+        let mut out = Vec::new();
+        press(&mut app, KeyCode::Char('2'), KeyModifiers::NONE, &mut out);
+        assert_eq!(started(&out), ["just slides start"]);
+        assert!(app.overlay.is_none());
+
+        // The last pick leads the next one.
+        run_action(&mut app, crate::keymap::Action::ToggleStack);
+        assert_eq!(
+            labels(&app),
+            ["slides · just slides start", "os · just os start"]
+        );
+        app.overlay = None;
+
+        stub(Some(vec![Target::new("app", "npm run dev")]));
+        let out = run_action(&mut app, crate::keymap::Action::ToggleStack);
+        assert_eq!(started(&out), ["npm run dev"], "one app starts at once");
+
+        stub(Some(Vec::new()));
+        app.flash = None;
+        let out = run_action(&mut app, crate::keymap::Action::ToggleStack);
+        assert!(started(&out).is_empty());
+        assert_eq!(app.flash.as_deref(), Some(crate::run_targets::NOTHING));
+        stub(None);
+    }
+
     #[test]
     fn cmd_shift_s_starts_and_stops_the_checkouts_stack() {
         use orion_core::{Entity, TerminalId, TerminalTab};
@@ -34135,18 +34260,18 @@ mod tests {
             .collect()
     }
 
-    /// **Run command** on the PROJECT TAB, which lists every project
+    /// **Setup command** on the PROJECT TAB, which lists every project
     /// whichever is selected: Enter opens a prompt titled with the row's
     /// project, pre-filled with its stored command; Enter there writes
-    /// `run_command` into that project's entry (and nothing else), the
+    /// `setup_command` into that project's entry (and nothing else), the
     /// row reads it back, the next project's row still reads `not set`;
     /// ←/→ only explain themselves; Esc keeps the old value; an empty
     /// Enter unsets it and drops the key. With
     /// no project in the tree the tab says so, and Enter opens nothing
     /// and says why.
     #[test]
-    fn the_project_tab_run_command_is_typed_into_each_projects_entry() {
-        use crate::config::SettingKind::RunCommand;
+    fn the_project_tab_setup_command_is_typed_into_each_projects_entry() {
+        use crate::config::SettingKind::SetupCommand;
         use orion_core::{Entity, Project, ProjectId};
         let draw_to_string = |app: &mut App, w: u16, h: u16| {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -34175,7 +34300,7 @@ mod tests {
             );
             app.set_sel_project(0);
             let tab = crate::config::project_tab();
-            let (_, row) = crate::config::locate(RunCommand).unwrap();
+            let (_, row) = crate::config::locate(SetupCommand).unwrap();
             let open_at = |app: &mut App, out: &mut Vec<ClientRequest>, row: usize| {
                 press(app, KeyCode::Char('s'), KeyModifiers::NONE, out);
                 let digit = char::from_digit(tab as u32 + 1, 10).unwrap();
@@ -34196,7 +34321,7 @@ mod tests {
 
             open_on_row(&mut app, &mut out);
             let screen = draw_to_string(&mut app, 100, 40);
-            assert!(screen.contains("Run command"), "{screen}");
+            assert!(screen.contains("Setup command"), "{screen}");
             assert!(
                 screen.contains("demo") && screen.contains("/tmp/other"),
                 "every project has its block: {screen}"
@@ -34216,13 +34341,13 @@ mod tests {
             // Enter: a prompt in the overlay's place, named for the project.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("expected the run command prompt, got {:?}", app.overlay);
+                panic!("expected the setup command prompt, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.title, "Run command · demo");
+            assert_eq!(prompt.title, "Setup command · demo");
             assert_eq!(prompt.input.as_str(), "");
             assert!(matches!(
                 &prompt.kind,
-                PromptKind::SettingText { kind: RunCommand, project: Some(p) }
+                PromptKind::SettingText { kind: SetupCommand, project: Some(p) }
                     if p == std::path::Path::new("/tmp/demo")
             ));
             type_text(&mut app, "npm run dev", &mut out);
@@ -34231,7 +34356,7 @@ mod tests {
             assert_eq!(
                 saved(&path)["projects"],
                 serde_json::json!({
-                    "/tmp/demo": { "run_command": "npm run dev" }
+                    "/tmp/demo": { "setup_command": "npm run dev" }
                 })
             );
             let view = settings_view(&app);
@@ -34247,7 +34372,7 @@ mod tests {
             // Reopened, the prompt carries the stored value; Esc keeps it.
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("expected the run command prompt, got {:?}", app.overlay);
+                panic!("expected the setup command prompt, got {:?}", app.overlay);
             };
             assert_eq!(prompt.input.as_str(), "npm run dev");
             type_text(&mut app, " --typo", &mut out);
@@ -34255,7 +34380,7 @@ mod tests {
             assert_eq!(
                 crate::config::Config::load()
                     .project(std::path::Path::new("/tmp/demo"))
-                    .run_command,
+                    .setup_command,
                 "npm run dev"
             );
             let view = settings_view(&app);
@@ -34270,9 +34395,9 @@ mod tests {
             assert!(screen.contains("[not set]"), "{screen}");
             press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
             let Some(Overlay::Prompt(prompt)) = &app.overlay else {
-                panic!("expected the run command prompt, got {:?}", app.overlay);
+                panic!("expected the setup command prompt, got {:?}", app.overlay);
             };
-            assert_eq!(prompt.title, "Run command · other");
+            assert_eq!(prompt.title, "Setup command · other");
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
 

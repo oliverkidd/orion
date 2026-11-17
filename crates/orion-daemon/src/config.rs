@@ -73,9 +73,9 @@ pub struct ProjectConfig {
     /// project, in a setup row in its band, typed into Settings →
     /// Projects. Empty means there is none.
     pub setup_command: String,
-    /// The RUN COMMAND a menu's **Run** starts in this project's
-    /// worktrees, typed into Settings → Projects. Empty means there is
-    /// none.
+    /// The RUN COMMAND from a config written before `⌘⇧S` found the
+    /// checkout's apps itself (`ClientRequest::StartRun`'s `command`): a
+    /// start that names none falls back on it. Empty means there is none.
     pub run_command: String,
     /// ON WORKTREE DELETE: what a deleted worktree's docker compose
     /// projects get — empty or `off` (the default), `stop`, `remove`, or
@@ -189,6 +189,16 @@ impl Config {
     /// the row is empty.
     pub fn run_command(&self, repo_path: &Path) -> Option<&str> {
         self.command_line(repo_path, |p| &p.run_command)
+    }
+
+    /// This config with `command` as the RUN COMMAND of the project at
+    /// `repo_path`: the app picked for one start, over the setting.
+    pub fn with_run_command(mut self, repo_path: &Path, command: &str) -> Self {
+        self.projects
+            .entry(repo_path.to_path_buf())
+            .or_default()
+            .run_command = command.to_string();
+        self
     }
 
     /// The SETUP COMMAND set for the project checked out at `repo_path`,
@@ -413,7 +423,17 @@ mod tests {
         );
     }
 
-    /// The Projects tab's `run_command`, under the project's repo path:
+    /// The app `⌘⇧S` picked runs as its project's run command, for that
+    /// start, and no other project's.
+    #[test]
+    fn a_picked_app_is_the_run_command_of_its_project_alone() {
+        let app = Path::new("/tmp/app");
+        let cfg = Config::default().with_run_command(app, "just os start");
+        assert_eq!(cfg.run_command(app), Some("just os start"));
+        assert_eq!(cfg.run_command(Path::new("/tmp/other")), None);
+    }
+
+    /// An older config's `run_command`, under the project's repo path:
     /// trimmed, blank is unset, and the entry's other rows — the TUI's —
     /// don't stop the daemon reading it.
     #[test]

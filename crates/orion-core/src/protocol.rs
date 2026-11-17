@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 57;
+pub const PROTOCOL_VERSION: u32 = 58;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -377,16 +377,18 @@ pub enum ClientRequest {
         req_id: u64,
         id: TerminalId,
     },
-    /// `r` on a worktree: start the project's RUN COMMAND — its **Run
-    /// command** setting, read fresh — in the worktree's RUN TERMINAL, a login shell running that
-    /// line and nothing else. An exited run's row is reused; a run still
-    /// going is left alone and named in the reply, so a second client's
-    /// press never starts a second one. Answered with
-    /// `Ack { created: Some(EntityId::Terminal(..)) }`; no command is an
-    /// Error saying where to set one.
+    /// `⌘⇧S` on a worktree: start `command` — the app the TUI found in the
+    /// checkout and you picked (`run_targets`), else the project's
+    /// `run_command` from an older config — in the worktree's RUN
+    /// TERMINAL, a login shell running that line and nothing else. An
+    /// exited run's row is reused; a run still going is left alone and
+    /// named in the reply, so a second client's press never starts a
+    /// second one. Answered with `Ack { created: Some(EntityId::Terminal(..)) }`;
+    /// no command at all is an Error.
     StartRun {
         req_id: u64,
         worktree: WorktreeId,
+        command: Option<String>,
     },
     /// `r` again: a `^C` into the worktree's RUN TERMINAL, the row sent
     /// as stopping (`RunState::stopping_until`) and dropped once the run
@@ -397,9 +399,9 @@ pub enum ClientRequest {
         worktree: WorktreeId,
     },
     /// **Restart stack**: `StopRun`, then `StartRun` in the same row once
-    /// the run has gone (`RunState::restarting` meanwhile). A run that
-    /// isn't up just starts; with no run command it is an Error, and
-    /// nothing is stopped.
+    /// the run has gone (`RunState::restarting` meanwhile), with the
+    /// command the row last ran. A run that isn't up just starts; with no
+    /// command to run it is an Error, and nothing is stopped.
     RestartRun {
         req_id: u64,
         worktree: WorktreeId,

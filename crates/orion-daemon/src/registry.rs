@@ -58,8 +58,7 @@ type FinishedRun = (Arc<PtySession>, Option<i32>);
 const RUN_TERMINAL_NAME: &str = "run";
 /// `⌘⇧S` on a worktree with nothing to run: the footer line naming where
 /// a RUN COMMAND is set.
-const NO_RUN_COMMAND: &str =
-    "no run command for this project — set one in Settings → Projects (Run command)";
+const NO_RUN_COMMAND: &str = "nothing to start in this worktree: no app was found in it to run";
 /// Why a RUN TERMINAL with nothing left to replay will not attach — its
 /// run ended before a DAEMON restart, typically.
 const RUN_NOT_RUNNING: &str = "this run has stopped — ⌘⇧S on its worktree starts it again";
@@ -2303,15 +2302,43 @@ impl Daemon {
 
     // ---- run terminals ----
 
-    /// `⌘⇧S` on a worktree: start its RUN COMMAND — the project's
-    /// `run_command` setting (Settings → Projects), read fresh — in the
-    /// worktree's RUN TERMINAL; with none, the refusal says so. A run that already
-    /// exited lends its row; one still going is the answer as it stands,
-    /// so a second client's press never starts a second server. A worktree
-    /// still running its setup starts nothing yet: the start waits for the
-    /// setup ([`Daemon::queue_run_behind_setup`]), and the answer is its row.
-    pub fn start_run(self: &Arc<Self>, worktree_id: &WorktreeId) -> Result<EntityId> {
-        self.start_run_with(worktree_id, &crate::config::Config::load())
+    /// `⌘⇧S` on a worktree: start `command` — the app the TUI found and
+    /// you picked — else the project's `run_command` from an older config,
+    /// in the worktree's RUN TERMINAL; with neither, the refusal says so.
+    /// A run that already exited lends its row; one still going is the
+    /// answer as it stands, so a second client's press never starts a
+    /// second server. A worktree still running its setup starts nothing
+    /// yet: the start waits for the setup
+    /// ([`Daemon::queue_run_behind_setup`]), and the answer is its row.
+    pub fn start_run(
+        self: &Arc<Self>,
+        worktree_id: &WorktreeId,
+        command: Option<&str>,
+    ) -> Result<EntityId> {
+        let config = self.config_running(worktree_id, command)?;
+        self.start_run_with(worktree_id, &config)
+    }
+
+    /// The config a start on `worktree_id` runs under: the settings file,
+    /// with `command`, when given, as its project's run command.
+    fn config_running(
+        &self,
+        worktree_id: &WorktreeId,
+        command: Option<&str>,
+    ) -> Result<crate::config::Config> {
+        let config = crate::config::Config::load();
+        let Some(command) = command.map(str::trim).filter(|c| !c.is_empty()) else {
+            return Ok(config);
+        };
+        let worktree = self
+            .store
+            .get_worktree(worktree_id)?
+            .context("worktree not found")?;
+        let main = self
+            .store
+            .get_project(&worktree.project_id)?
+            .map_or_else(|| worktree.path.clone(), |p| p.repo_path);
+        Ok(config.with_run_command(&main, command))
     }
 
     /// [`Daemon::start_run`] against a given config, for the tests that
@@ -2368,7 +2395,7 @@ impl Daemon {
     }
 
     /// `worktree`'s RUN COMMAND under `config`: its project's setting, or
-    /// the refusal that says where to set one.
+    /// the refusal that there is nothing to start.
     fn run_command_in(
         &self,
         worktree: &Worktree,
@@ -2385,11 +2412,18 @@ impl Daemon {
     }
 
     /// `RestartRun`: the worktree's run stopped as [`Daemon::stop_run`]
-    /// stops it, then started again in its row once it has gone — the
-    /// command read fresh now. A run that isn't up just starts; a second
+    /// stops it, then started again in its row once it has gone, with
+    /// the command that row last ran. A run that isn't up just starts; a second
     /// restart, like a second stop, kills it at once and starts it.
     pub fn restart_run(self: &Arc<Self>, worktree_id: &WorktreeId) -> Result<()> {
-        self.restart_run_with(worktree_id, &crate::config::Config::load())
+        // The command the row last ran: the app that was picked for it.
+        let last = self
+            .store
+            .run_terminals_in(worktree_id)?
+            .into_iter()
+            .find_map(|t| t.run_command);
+        let config = self.config_running(worktree_id, last.as_deref())?;
+        self.restart_run_with(worktree_id, &config)
     }
 
     /// [`Daemon::restart_run`] against a given config, for the tests.
@@ -5547,8 +5581,8 @@ pub(crate) mod tests {
             .start_run_with(&worktree.id, &crate::config::Config::default())
             .unwrap_err();
         assert!(
-            missing.to_string().contains("Settings → Projects"),
-            "names where to set one: {missing}"
+            missing.to_string().contains("nothing to start"),
+            "says there is nothing to start: {missing}"
         );
         assert!(daemon
             .store
@@ -5794,7 +5828,7 @@ pub(crate) mod tests {
         let err = daemon
             .restart_run_with(&worktree.id, &crate::config::Config::default())
             .unwrap_err();
-        assert!(err.to_string().contains("Settings → Projects"), "{err}");
+        assert!(err.to_string().contains("nothing to start"), "{err}");
         assert!(daemon.is_alive(&sref), "still running");
         assert_eq!(
             daemon
@@ -5892,7 +5926,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The project's `run_command` setting (Settings → Projects) is what
+    /// An older config's `run_command` is what
     /// `r` runs; blank, or another project's, is no run command at all.
     #[tokio::test]
     async fn the_project_setting_is_the_run_command() {
@@ -5915,7 +5949,7 @@ pub(crate) mod tests {
             run_config(Path::new("/tmp/other"), "sleep 31"),
         ] {
             let err = daemon.start_run_with(&worktree.id, &cfg).unwrap_err();
-            assert!(err.to_string().contains("Settings → Projects"), "{err}");
+            assert!(err.to_string().contains("nothing to start"), "{err}");
         }
     }
 

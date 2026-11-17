@@ -29,8 +29,8 @@ back to its default, after a confirm, and removes `config.local.json`. **Presets
 edits nothing (rebinding is [`keybindings`](#hand-edited)).
 
 The DAEMON reads `session_idle_timeout`, `harnesses`, `claude_accounts`, `quick_prompt_kind`,
-`claude_enabled` and four keys of each `projects` entry (`base_branch`, `setup_command`,
-`run_command`, `worktree_containers`). The TUI reads the rest.
+`claude_enabled` and three keys of each `projects` entry (`base_branch`, `setup_command`,
+`worktree_containers`). The TUI reads the rest.
 
 ### General
 
@@ -97,7 +97,7 @@ One block per project in the tree, each row reading and writing that project's e
 ```json
 { "projects": { "/Users/me/src/app": {
     "base_branch": "dev", "setup_command": "just setup-worktree",
-    "run_command": "just start", "open_command": "open http://localhost:3000",
+    "open_command": "open http://localhost:3000",
     "worktree_containers": "remove" } } }
 ```
 
@@ -105,7 +105,6 @@ One block per project in the tree, each row reading and writing that project's e
 |---|---|---|---|
 | `base_branch` | `""` (`auto`) | **Base branch** | Where the project's new worktrees start. Empty is `origin/HEAD`, freshly fetched; a name (`dev`) is origin's copy of that branch, else a local branch of that name, else `origin/HEAD` with a line in `daemon.log`. A leading `origin/` is dropped. The grid's ahead/behind counts, the commit list and the background base fetch measure against it, and a merge never deletes it. `orion worktree --base` wins over it. |
 | `setup_command` | `""` | **Setup command** | Run once in each worktree orion creates for the project. See [Setup command](#setup-command). |
-| `run_command` | `""` | **Run command** | What `⌘⇧S` (**Start stack**) runs. See [Run and open commands](#run-and-open-commands). |
 | `open_command` | `""` | **Open command** | What `⌘O` → **Open command** runs. |
 | `worktree_containers` | `""` (`off`) | **On worktree delete** | What deleting a worktree does to the docker compose projects started in it. See [Worktree containers](#worktree-containers). |
 | `merge_method` | `""` (squash) | — | The method the project's last merge took; its next merge form opens on it. |
@@ -392,16 +391,25 @@ Worktrees made outside orion run nothing.
 
 ## Run and open commands
 
-- **Run command**: `⌘⇧S`, or **Start stack** in a row's or a project tab's menu, starts it in the
+- **What `⌘⇧S` starts**: `⌘⇧S` finds what there is to start in the checkout itself, so there is nothing to set: a
+  Justfile's `start` recipe (else `dev`) as `just start`, and each of its modules' as `just os
+  start` (a monorepo's apps); else each `package.json` workspace's `dev` script (else `start`), run
+  the way the lockfile's package manager runs a workspace's (`npm run dev -w web`, `pnpm --filter
+  web dev`, `yarn workspace web dev`, `bun --filter web dev`), or the root's own; else a Makefile's
+  `dev`, `start`, `run` or `up`; else `docker compose up` for a compose file. One app starts at
+  once; several are a pick — `↑`/`↓` and `Enter`, or its digit — the one started last in the
+  project first. With nothing found the footer says what was looked for.
+  `⌘⇧S`, or **Start stack** in a row's or a project tab's menu, starts it in the
   background, in a RUN TERMINAL through your login shell. Its run line shows in the band with the
   localhost ports it prints (`:3000 :5173`, each a link; `⌘O` → **Open app** opens the first).
   `⌘⇧S` again sends it `^C`; the line counts down `stopping… 1:52` and a further press, or two
   minutes, kills it. A stop you asked for removes the line; an exit nobody asked for leaves `done`
-  or a red `exited 1`. **Restart stack** stops it and starts it again. One run per worktree.
+  or a red `exited 1`. **Restart stack** stops it and starts the same app again. One run per
+  worktree. A `run_command` left in `config.json` from before is kept through a save, unused.
 - **Open command**: `⌘O` → **Open command** runs it from the TUI with `$SHELL -c`, output
   discarded, since what it opens belongs on the machine you sit at.
 
-Both are read fresh at every press. With none set, the footer says so and names Settings → Projects.
+The apps are looked for, and the open command read, fresh at every press.
 
 ## Worktree containers
 

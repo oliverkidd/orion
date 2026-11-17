@@ -1,8 +1,9 @@
 //! STACK STATUS in the TUI: the DAEMON's listing of every docker compose
 //! stack on the machine (`ServerEvent::StacksChanged`), which the band's
 //! `⬡` reads through [`App::stack_of`]. Starting and stopping a checkout's
-//! stack is `⌘⇧S`'s (`event_loop::toggle_stack_in`): its RUN COMMAND, in
-//! the background, on a run line in its band. The ports that run prints
+//! stack is `⌘⇧S`'s (`event_loop::toggle_stack_in`): an app found in the
+//! checkout (`crate::run_targets`), in the background, on a run line in
+//! its band. The ports that run prints
 //! are its app: a click on one, or ⌘O's **Open app**, opens it.
 
 use crate::app::{App, PendingIntent};
@@ -41,14 +42,25 @@ pub(crate) fn run_queued(app: &App, worktree: &WorktreeId) -> bool {
 }
 
 /// **Restart stack**: `worktree`'s run stopped — a `^C`, so it winds down
-/// — then started again in its run line once it has gone, in the
-/// background as a start is (`ClientRequest::RestartRun`). On a run
+/// — then the same app started again in its run line once it has gone,
+/// in the background as a start is (`ClientRequest::RestartRun`); with
+/// no run line yet, a start. On a run
 /// already winding down the DAEMON kills it and starts it at once.
 pub(crate) fn restart(app: &mut App, worktree: &WorktreeId, out: &mut Vec<ClientRequest>) {
     if app.is_placeholder_worktree(worktree)
         || !app.tree.worktrees.iter().any(|w| &w.id == worktree)
     {
         return;
+    }
+    // No run line yet: nothing to restart, so a start — the pick of the
+    // checkout's apps, as `⌘⇧S`.
+    let has_run = app
+        .tree
+        .terminals
+        .iter()
+        .any(|t| &t.worktree_id == worktree && t.run_command.is_some() && !t.setup);
+    if !has_run {
+        return crate::event_loop::toggle_stack_in(app, worktree, out);
     }
     app.flash = app
         .run_stopping(worktree)

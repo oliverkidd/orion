@@ -1,6 +1,6 @@
 //! First-run SETUP: four pages over the empty grid — Welcome; Claude, its
 //! CLI and the accounts to sign in; the first project, with the branch
-//! its worktrees start from, its setup command and its run command; and
+//! its worktrees start from and its setup command; and
 //! Ready, the keys that matter. Opened once from `main_loop` while
 //! `config.onboarded` is still false, and again from the palette's **Run
 //! setup** and `orion setup`; Esc / a click outside skips and stamps the
@@ -43,7 +43,7 @@ enum Page {
     Welcome,
     /// CLAUDE: the CLI, then every account — sign each in, add one.
     Claude,
-    /// FIRST PROJECT: the repo, its base branch, setup and run commands.
+    /// FIRST PROJECT: the repo, its base branch and its setup command.
     Project,
     Ready,
 }
@@ -82,11 +82,7 @@ fn claude_rows(cfg: &Config) -> Vec<ClaudeRow> {
 
 /// The First project page's rows under the project: its rows of
 /// Settings → Projects, by kind.
-const PROJECT_ROWS: &[SettingKind] = &[
-    SettingKind::BaseBranch,
-    SettingKind::SetupCommand,
-    SettingKind::RunCommand,
-];
+const PROJECT_ROWS: &[SettingKind] = &[SettingKind::BaseBranch, SettingKind::SetupCommand];
 
 /// The first-run wizard's live state. `area` is written back on draw so a
 /// click outside can dismiss it the same way Esc does.
@@ -96,7 +92,7 @@ pub struct OnboardView {
     pub row: usize,
     pub area: Rect,
     /// A typed row being edited in place — the project's base branch,
-    /// setup command or run command — and its text so far.
+    /// or its setup command — and its text so far.
     pub field: Option<(SettingKind, TextInput)>,
     /// What the Claude page is asking, when it is asking.
     pub account: AccountStep,
@@ -818,9 +814,8 @@ fn claude(body: &mut Body, cfg: &Config, view: &OnboardView, th: Theme, width: u
 }
 
 /// The First project page: the project the grid is on — or the repo
-/// orion was started in, to open — then its **Base branch**, **Setup
-/// command** and **Run command**, the rows Settings → Projects has for it,
-/// typed in place.
+/// orion was started in, to open — then its **Base branch** and **Setup
+/// command**, the rows Settings → Projects has for it, typed in place.
 fn project(body: &mut Body, app: &App, cfg: &Config, view: &OnboardView, th: Theme, width: u16) {
     let dim = Style::default().fg(th.dim);
     body.prose(
@@ -1549,14 +1544,14 @@ mod tests {
                     "Project demo · /tmp/demo",
                     "› Base branch auto",
                     "Setup command not set",
-                    "Run command not set",
                 ] {
                     assert!(inner.contains(needle), "{needle}:\n{inner}");
                 }
-                for (i, value) in ["dev", "just setup-worktree", "just start"]
-                    .into_iter()
-                    .enumerate()
-                {
+                assert!(!inner.contains("Run command"), "{inner}");
+                for needle in [] as [&str; 0] {
+                    assert!(inner.contains(needle), "{needle}:\n{inner}");
+                }
+                for (i, value) in ["dev", "just setup-worktree"].into_iter().enumerate() {
                     if i > 0 {
                         press(app, KeyCode::Down);
                     }
@@ -1570,7 +1565,6 @@ mod tests {
                 let project = Config::load().project(std::path::Path::new("/tmp/demo"));
                 assert_eq!(project.base_branch, "dev");
                 assert_eq!(project.setup_command, "just setup-worktree");
-                assert_eq!(project.run_command, "just start");
                 let inner = words(&draw_text(app));
                 assert!(inner.contains("Base branch dev"), "{inner}");
             });
