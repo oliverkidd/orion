@@ -184,6 +184,20 @@ pub(crate) enum Command {
         #[arg(required = true, num_args = 1.., value_name = "FILE[:LINE]")]
         files: Vec<String>,
     },
+    /// Start this checkout's app in orion's run line.
+    ///
+    /// Run from inside a orion agent session: the command runs in the
+    /// checkout's run terminal, as ⌘⇧S starts it — a run line with the
+    /// ports it prints, stopped by ⌘⇧S — rather than in the agent's shell.
+    /// Returns at once. `--stop` stops it.
+    Run {
+        /// The command to run; multiple words need no quotes.
+        #[arg(num_args = 1.., required_unless_present = "stop", conflicts_with = "stop", trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+        /// Stop the run instead.
+        #[arg(long)]
+        stop: bool,
+    },
     /// What an autofix session runs on itself.
     ///
     /// Run from inside an `autofix-<n>` session that orion started on a

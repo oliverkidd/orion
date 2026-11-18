@@ -556,6 +556,13 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 } => {
                     reply_done(&out_tx, req_id, daemon.open_files(&id, paths, lines)).await;
                 }
+                ClientRequest::AgentRun {
+                    req_id,
+                    id,
+                    command,
+                } => {
+                    reply_done(&out_tx, req_id, daemon.agent_run(&id, command.as_deref())).await;
+                }
                 ClientRequest::EnterWorktree {
                     req_id,
                     id,

@@ -193,6 +193,7 @@ const CLAUDE_ALLOW_RULES: &[&str] = &[
     "Bash(orion worktree:*)",
     "Bash(orion spawn:*)",
     "Bash(orion open:*)",
+    "Bash(orion run:*)",
 ];
 
 /// Cursor variant: the payload arrives on stdin like Claude's, but cursor

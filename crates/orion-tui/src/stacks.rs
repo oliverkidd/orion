@@ -32,7 +32,7 @@ pub(crate) fn open_app_item() -> crate::app::MenuItem {
 /// A checkout's menu item for `⌘⇧S`: **Stop stack** while its run is up,
 /// **Cancel start** while a start waits on its setup, else **Start stack**.
 pub(crate) fn menu_label(app: &App, worktree: &WorktreeId) -> &'static str {
-    if app.worktree_running(worktree) {
+    if app.worktree_running(worktree) || app.stack_running(worktree) {
         "Stop stack"
     } else if run_queued(app, worktree) {
         "Cancel start"

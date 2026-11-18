@@ -543,6 +543,39 @@ pub async fn open_files_for_current_agent(files: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// CLI: `orion run <command>` / `orion run --stop` from inside an agent
+/// session — the daemon starts the command in the session's checkout's
+/// run line, or stops that run. Never spawns a daemon.
+pub async fn agent_run_for_current_agent(command: Option<String>) -> Result<()> {
+    let agent_id = current_agent_id("run")?;
+    let sock = paths::socket_path();
+    let Ok(stream) = try_connect(&sock).await else {
+        bail!("no orion daemon is running — nothing started");
+    };
+    let mut conn = handshake(stream).await?;
+    let req_id = ONE_SHOT_REQ_ID;
+    let stopping = command.is_none();
+    write_frame(
+        &mut conn.stream,
+        &ClientRequest::AgentRun {
+            req_id,
+            id: AgentId(agent_id),
+            command,
+        },
+    )
+    .await?;
+    await_ack(&mut conn, req_id).await?;
+    if stopping {
+        println!("stopping the run in orion's run line — it winds down in the background.");
+    } else {
+        println!(
+            "started in orion's run line — the user sees it with its ports and stops it with ⌘⇧S. \
+             It runs in the background; carry on."
+        );
+    }
+    Ok(())
+}
+
 /// CLI: `orion worktree [name] [--base <ref>]` from inside an agent
 /// session — take (or create) the named worktree of this session's project
 /// and have the daemon move the session into it. A blank name is invented

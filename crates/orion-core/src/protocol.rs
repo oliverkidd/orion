@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 58;
+pub const PROTOCOL_VERSION: u32 = 59;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -285,6 +285,15 @@ pub enum ClientRequest {
         paths: Vec<PathBuf>,
         /// One per path: the line a `file:42` asked for, None for the top.
         lines: Vec<Option<u64>>,
+    },
+    /// `orion run <command>` / `orion run --stop`, run by the agent from
+    /// inside its own session: start `command` in its worktree's RUN
+    /// TERMINAL — the run line, its ports and ⌘⇧S, as a start from the TUI
+    /// — or, with None, stop that run (`StopRun`). Answered with `Ack`.
+    AgentRun {
+        req_id: u64,
+        id: AgentId,
+        command: Option<String>,
     },
     /// Kills the PTY, sets archived=1.
     ArchiveAgent {

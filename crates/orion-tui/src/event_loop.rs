@@ -5529,6 +5529,16 @@ pub(crate) fn toggle_stack_in(
         });
         return;
     }
+    if app.stack_running(&id) {
+        // Up, but not from a run line of orion's — an agent started it in
+        // its own shell: the DAEMON stops its compose projects.
+        app.flash = Some(crate::flash::Flash::note("stopping the stack"));
+        send(app, out, |req_id| ClientRequest::StopRun {
+            req_id,
+            worktree: id,
+        });
+        return;
+    }
     start_run_picking(app, &id, out);
 }
 
@@ -29317,7 +29327,9 @@ mod tests {
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(app.flash.as_deref().unwrap_or_default().contains("killing"));
 
-        // The run gone, a stack still up that orion didn't start: the run.
+        // The run gone, a stack still up that orion didn't start — an
+        // agent ran it in its own shell: a stop, which the DAEMON takes to
+        // the stack's compose projects.
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
@@ -29328,8 +29340,17 @@ mod tests {
         list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 3)]);
         assert_eq!(
             crate::stacks::menu_label(&app, &orion_core::WorktreeId("w1".into())),
-            "Start stack"
+            "Stop stack"
         );
+        out.clear();
+        out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
+        assert!(
+            matches!(out.as_slice(), [ClientRequest::StopRun { .. }]),
+            "{out:?}"
+        );
+
+        // Once it is down, a start again.
+        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 0, 3)]);
         out.clear();
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(

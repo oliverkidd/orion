@@ -1554,10 +1554,15 @@ fn draw_list_row(
         let text_at = runs_at + mark_col + runs_w + LIST_GAP;
         let text_mark_w = e.text_mark.chars().count();
         if !e.text.is_empty() && room >= text_at + text_mark_w + 6 {
-            // The ports keep their room — `  :3000 :5173`, two cells
-            // before the first and one between — and the command gives way.
-            let labels: Vec<String> = e.ports.iter().map(|p| format!(":{p}")).collect();
-            let ports_w: usize = labels.iter().map(|l| l.chars().count() + 1).sum::<usize>() + 1;
+            // The first [`RUN_PORTS_SHOWN`] ports keep their room —
+            // `  :3000 :5173`, two cells before the first and one between,
+            // then `+N` for the rest — and the command gives way.
+            let shown_n = e.ports.len().min(RUN_PORTS_SHOWN);
+            let labels: Vec<String> = e.ports[..shown_n].iter().map(|p| format!(":{p}")).collect();
+            let more = (e.ports.len() > shown_n).then(|| format!("+{}", e.ports.len() - shown_n));
+            let ports_w: usize = labels.iter().map(|l| l.chars().count() + 1).sum::<usize>()
+                + 1
+                + more.as_ref().map_or(0, |m| m.chars().count() + 1);
             let ports_fit = !labels.is_empty() && room >= text_at + text_mark_w + 6 + ports_w;
             let text_room = room - text_at - text_mark_w - if ports_fit { ports_w } else { 0 };
             // The todo the session came from keeps up to half the prompt's
@@ -1590,7 +1595,7 @@ fn draw_list_row(
                 }
                 _ => None,
             };
-            let shown: &[u16] = if ports_fit { e.ports } else { &[] };
+            let shown: &[u16] = if ports_fit { &e.ports[..shown_n] } else { &[] };
             for (i, (&port, label)) in shown.iter().zip(labels).enumerate() {
                 let gap = if i == 0 { 2 } else { 1 };
                 spans.push(Span::raw(" ".repeat(gap)));
@@ -1602,14 +1607,23 @@ fn draw_list_row(
                         HitTarget::RunPort(t.id.clone(), port),
                     ));
                 }
-                let fg = if hovered == Some(port) {
-                    th.accent
+                // In the command's own color, so they read as part of the
+                // line; the one under the pointer lit.
+                let style = if hovered == Some(port) {
+                    Style::default().fg(th.accent)
                 } else {
-                    th.text
+                    e.text_style
                 };
-                let style = Style::default().fg(fg).add_modifier(Modifier::UNDERLINED);
-                spans.push(Span::styled(label, style));
+                spans.push(Span::styled(
+                    label,
+                    style.add_modifier(Modifier::UNDERLINED),
+                ));
                 used += w;
+            }
+            if let Some(more) = more.filter(|_| ports_fit) {
+                spans.push(Span::raw(" "));
+                used += 1 + more.chars().count();
+                spans.push(Span::styled(more, Style::default().fg(th.dim)));
             }
         }
     }
@@ -2128,6 +2142,10 @@ fn terminal_runs(t: &orion_core::TerminalTab) -> &'static str {
         "shell"
     }
 }
+
+/// How many of a RUN LINE's ports it names after its command; the rest
+/// are a dim `+N` (⌘O's **Open app** still opens the first).
+const RUN_PORTS_SHOWN: usize = 2;
 
 /// What opens a RUN LINE's command, where a session's prompt opens on `›`.
 const RUN_MARK: &str = "$ ";
@@ -4207,6 +4225,22 @@ mod tests {
         let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
         assert!(line.contains("…  :3000 :5173"), "{line:?}");
         assert!(line.trim_end().ends_with("running"), "{line:?}");
+    }
+
+    /// A stack that prints many ports names the first two and counts the
+    /// rest, rather than running the line out with them.
+    #[test]
+    fn a_run_with_many_ports_names_two_and_counts_the_rest() {
+        let mut app = a_tree();
+        select(&mut app, "api");
+        let mut run = a_run(true);
+        run.run_command = Some("just os start".into());
+        run.run.ports = vec![30045, 30055, 30056, 30057, 30049];
+        app.tree.terminals.push(run);
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 120, 30));
+        let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
+        assert!(line.contains("just os start  :30045 :30055 +3"), "{line:?}");
+        assert!(!line.contains(":30056"), "{line:?}");
     }
 
     /// A run that ended with nobody stopping it says how at the right

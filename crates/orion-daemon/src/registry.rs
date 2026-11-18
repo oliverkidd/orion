@@ -2453,13 +2453,60 @@ impl Daemon {
     /// at once. A run that already ended is dropped, row and all. Nothing
     /// to stop is not an error — two clients may both have pressed it. A
     /// start still waiting on the worktree's setup is called off instead.
+    /// With no run of orion's alive, the compose stacks started from the
+    /// checkout are stopped instead ([`Daemon::stop_stacks_in`]).
     ///
     /// [`RunState::stopping_until`]: orion_core::RunState::stopping_until
     pub fn stop_run(self: &Arc<Self>, worktree_id: &WorktreeId) -> Result<()> {
         if self.cancel_queued_run(worktree_id)? {
             return Ok(());
         }
+        let live_run = self
+            .store
+            .run_terminals_in(worktree_id)?
+            .iter()
+            .any(|t| self.session(&SessionRef::Terminal(t.id.clone())).is_some());
+        if !live_run {
+            // Nothing of orion's runs here, yet the stop was asked for: the
+            // band's `⬡` said a stack is up, started some other way — by an
+            // agent in its own shell, say. Its compose projects stop.
+            let worktree = self
+                .store
+                .get_worktree(worktree_id)?
+                .context("worktree not found")?;
+            self.stop_stacks_in(worktree.path);
+        }
         self.stop_run_then(worktree_id, None)
+    }
+
+    /// `docker compose stop` on every running compose project started
+    /// only from `dir`, in the background; what fails is a warning in
+    /// every client, and the stack listing is polled afresh either way.
+    fn stop_stacks_in(self: &Arc<Self>, dir: std::path::PathBuf) {
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let Some(docker) = crate::containers::find_docker() else {
+            return;
+        };
+        let daemon = Arc::clone(self);
+        rt.spawn(async move {
+            let Some(running) = crate::containers::running_in(&docker, &dir).await else {
+                return;
+            };
+            for project in &running.owned {
+                match crate::containers::stop_project(&docker, project).await {
+                    Ok(()) => tracing::info!(project, worktree = %dir.display(), "stopped compose project"),
+                    Err(e) => daemon.warn_clients(format!("couldn't stop compose {project}: {e}")),
+                }
+            }
+            for project in &running.shared {
+                daemon.warn_clients(format!(
+                    "left compose {project} running: it also runs from another folder"
+                ));
+            }
+            daemon.stacks.poke();
+        });
     }
 
     /// [`Daemon::stop_run`], with what follows the run's end: its row
@@ -3898,6 +3945,7 @@ fn agent_spawn_command_with(
             first.push(CLAUDE_WORKTREE_GUIDANCE.to_string());
             first.push(crate::sibling::CLAUDE_SPAWN_GUIDANCE.to_string());
             first.push(crate::open_files::CLAUDE_OPEN_GUIDANCE.to_string());
+            first.push(crate::agent_run::CLAUDE_RUN_GUIDANCE.to_string());
         }
         if let Some(prompt) = additional_system_prompt {
             first.push(prompt.to_string());
@@ -3971,6 +4019,7 @@ fn push_system_prompt(
         system_prompt.push(CLAUDE_WORKTREE_GUIDANCE);
         system_prompt.push(crate::sibling::CLAUDE_SPAWN_GUIDANCE);
         system_prompt.push(crate::open_files::CLAUDE_OPEN_GUIDANCE);
+        system_prompt.push(crate::agent_run::CLAUDE_RUN_GUIDANCE);
     }
     if let Some(prompt) = additional {
         system_prompt.push(prompt);
@@ -4289,6 +4338,7 @@ pub(crate) mod tests {
                     CLAUDE_WORKTREE_GUIDANCE,
                     crate::sibling::CLAUDE_SPAWN_GUIDANCE,
                     crate::open_files::CLAUDE_OPEN_GUIDANCE,
+                    crate::agent_run::CLAUDE_RUN_GUIDANCE,
                 ]
                 .join("\n\n"),
             ])
