@@ -782,7 +782,7 @@ Automations                                       2 of at most 3 running · caps
   words and buttons; `1`–`9` presses one. On the Needs you board (`⌘K`) the session's own card
   stands for it: it waits on you for as long as the card is up, saying what the card asks
   (`◆ Review: no pictures`), and `Enter` lands on it. Only a card about no live session — a ticket
-  held for you, the day's new rules — is listed on the board itself. Once you count as away (the
+  held for you — is listed on the board itself. Once you count as away (the
   screen locked, idle, or `⌘⇧A`; see [How it works](how-it-works.md#phone-bridge)) and it isn't
   quiet hours, the cards still open go to Slack, once each, and new ones go straight there. A press
   in either place closes the card in the other. A thin ticket's question to its reporter goes to
@@ -793,8 +793,8 @@ Automations                                       2 of at most 3 running · caps
   its pull request merged or closed anywhere. A new commit brings a fresh verdict card once the
   checks settle. A card about something that only finished (the knowledge backfill) closes after a
   day, and the week's card before the next one. A card Slack never took because the network was
-  down is sent again every five minutes; while the day's rules haven't reached you, their veto
-  window doesn't start and nothing merges.
+  down is sent again every five minutes. A daily rules card an older orion posted closes as no
+  longer needed: the rules are signed off in the [rule review](#rule-review) now.
 - **What a card asks.** Each card's buttons fit where its ticket is. Before work: **Start** ·
   **Leave** on an Urgent ticket, **Start anyway** · **Skip** on a possible duplicate, **Open ticket** ·
   **Start anyway** on a thin ticket whose reporter can't be asked. Planning: the phone's **Approve**
@@ -803,9 +803,24 @@ Automations                                       2 of at most 3 running · caps
   merges — **Merge**, **Open PR** and, unless it is a plain Merge, **Send back…** (your words to its
   agent) — with no vote on the verdict; the fixer giving up has **Open PR** · **Reply…** · **Park**.
   Every one of those about a ticket orion took also has **Not for orion…**: on Slack one labelled
-  menu holding its two choices, in orion two rows of the card's menu. The day's new rules have
-  **All fine** and a **Veto** per rule — or, past five rules, one **Veto…** that takes their numbers
-  (`3 7`).
+  menu holding its two choices, in orion two rows of the card's menu.
+- **Rule review.** <a id="rule-review"></a>The rules orion harvested from your merged pull requests
+  (see [How it works](how-it-works.md#knowledge)) are never sent to Slack or the phone. At 09:00 —
+  or the first launch after — when a rule recorded before then is waiting, the RULE REVIEW opens over
+  the grid with every rule waiting, under each project's name: YOURS (your words, your picks and
+  plans you approved), then INFERRED BY THE AGENT, then MOVE INTO THE AGENT DOCS (rules the weekly
+  scan found hold repo-wide). Each row is a box, the rule, its pull request and your words under it.
+  Everything starts ticked. `space` unticks a rule (it is dropped) or a promotion (never offered
+  again); `n` writes a note on the rule under the cursor — on a kept rule it says what is wrong, and
+  orion rewrites the rule to fit; on a dropped one, why it goes — and every drop and note is a lesson
+  later harvests read. `enter` shows the tally (`Sign off 23 rules · 21 keep · 1 drop · 1 fix?`) and
+  `enter` again signs off: the drops come out, the rewrites go in, the branch is pushed and its pull
+  request opened, and orion merges it once checks pass. `esc` puts it off with your picks kept (a
+  restart keeps them too). Until you sign off a BANNER holds the top row of the screen, on the
+  needs-you tint: `◆ 23 rules wait for your sign-off · riplo-os's knowledge won't merge until you do ·
+  waiting 2h`, full crimson after four hours, and leading with `Yesterday's rules too` once a day's
+  review was skipped. A click on it, or **Review rules** in the COMMAND PALETTE, opens the review;
+  every launch while rules wait opens it too.
 - Settings are global, never per project. See [Configuration](configuration.md#automations).
 
 ### The PR fixer

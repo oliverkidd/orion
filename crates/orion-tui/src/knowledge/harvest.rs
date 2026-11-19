@@ -43,6 +43,8 @@ use crate::oneshot::{self, Account};
 
 /// The tools a check may read code with, and nothing else.
 const READ_TOOLS: &str = "Read,Grep,Glob";
+/// The tools the one call that edits files may use.
+const EDIT_TOOLS: &str = "Read,Grep,Glob,Edit";
 /// How long one ask may take: a big dossier, or a check reading code.
 const ASK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// How much dossier one extraction reads, in chars.
@@ -59,29 +61,58 @@ const CORRECTION_CUT: usize = 300;
 const CORRECTIONS_MAX: usize = 20;
 
 /// What a harvest extracts, and from what: the plan's appendix, up to the
-/// fields of an entry ([`ENTRY_FIELDS`]) — product knowledge only, since
-/// the engineering stream was dropped (`Store::keep_product`).
+/// fields of an entry ([`ENTRY_FIELDS`]) — the lessons that change what an
+/// agent does on another ticket, never one component's spec. Architecture
+/// rules go in the product stream too: the engineering stream (how agents
+/// work) was dropped (`Store::keep_product`).
 pub(crate) const EXTRACT_RULES: &str = r#"You are reading one merged pull request's dossier: its description, review comments and the condensed
 transcripts of the agent sessions that built it. "OWNER" lines are the repo owner. "AGENT ASKED" / "OWNER
 ANSWERED" are questions and answers. "AGENT PLAN" is a plan. Tool output was removed.
-Extract only what a future agent working a different ticket in this repo would need, so it works the way
-the owner wants without asking him again.
 
-Only product knowledge: what the product does and why. stream is always "product", kind one of: decision (a
-choice between behaviours the owner made, picked or approved), constraint (a fact about the world that limits
-behaviour, with evidence), question (the owner hedged or left it open; never turn a hedge into a decision).
-Write an entry only if a user or client AI would notice it, a future agent reading only the code could undo
-it, and the owner owned it (or an agent made a call he should be able to overturn).
+The knowledge store is read by autonomous agents building pull requests on other tickets, with no one to ask.
+It exists to stop them breaking things, repeating a mistake the owner already corrected, missing the other
+paths and surfaces a change must keep consistent, and building badly: a parallel path instead of the shared
+one, a hardcoded list instead of the registry, a second source of truth. Every entry costs every future agent
+context, so record only what would change what an agent does on a different ticket. Most pull requests yield
+none, one or two entries; never more than five.
 
-Never extract: how agents work in the repo — tooling, scripts, the local stack, environments, git, hooks,
-tests, CI, reviews, docs or how the owner wants agents to work with him (the repo's own agent docs hold those,
-not you); progress, handovers; anything only true for this ticket; one-off authorisations ("use --no-verify",
-"push it", "run the e2e", "just one PR here"): these are never precedent; mechanisms readable from code;
-refactors with no behaviour choice; anything lint, types or tests enforce; client names, emails or secrets.
+Record an entry only when it is one of these:
+- a hazard or invariant: data integrity, security, permissions, boundaries between spaces or tenants, spend,
+  destructive operations, concurrency traps;
+- an architecture or reuse rule the owner set or corrected: one source of truth, go through or extend the
+  registry, fix the shared component instead of forking a copy, store intent (theme references) not literals,
+  call the existing function instead of re-implementing it;
+- every path or every surface: behaviour that must match across entry points (keyboard, menu, right-click,
+  MCP, paste, import) or surfaces (canvas, thumbnail, present, PDF, PPTX);
+- a product principle that spans features, or the words the product uses for a concept;
+- a deliberate behaviour guarding against an annoying regression: the obvious implementation would be the
+  annoying one, users would notice, and a refactor could plausibly bring it back;
+- a limit of the outside world (a third-party service, a browser) that would waste an agent's effort or break
+  what it ships.
+
+Write the lesson, not the ticket's spec. When the owner corrects one feature, record the rule behind the
+correction, as wide as his words and the why support and no wider: "the save toast reads the toolbar's sync
+selector" is "UI that shows state the app already tracks reads the existing store; it never tracks it again".
+Never invent a principle the dossier doesn't back.
+
+Never record: how one component looks or behaves (sizes, colours, layout, order, labels, which control sits
+where) unless it is one of the kinds above; bug facts, routes, or what the code currently does; shapes that
+types, tests or lint enforce; mechanisms readable from code; anything only true for this ticket; one-off
+authorisations ("use --no-verify", "push it", "run the e2e", "just one PR here"): these are never precedent;
+limits on scope ("only these five", "don't add more without asking"); open questions, unless an agent touching
+the area must not decide it alone; how agents work in the repo — tooling, scripts, the local stack,
+environments, git, hooks, tests, CI, reviews, releases, changelog wording, docs or how the owner wants agents to
+work with him (the repo's own agent docs hold those, not you); anything the repo's agent docs or hand-written
+records already say; progress, handovers; client names, emails or secrets.
+
+stream is always "product", architecture rules included. kind one of: decision (a choice the owner made, picked
+or approved), constraint (a fact about the world that limits behaviour, with evidence), question (the owner
+hedged or left it open; never turn a hedge into a decision).
 
 by: owner (he said it; quote ≤2 lines verbatim from an OWNER line, required), owner-pick (he picked an
 agent's option; quote the question and the picked label), plan (in a plan he approved; ≤ medium), review (a
-human reviewer's comment acted on), agent (the agent decided; confidence low).
+human reviewer's comment acted on), agent (a hazard or outside-world limit the agent found, with evidence;
+confidence low; never a choice of the agent's own).
 
 Topic: area/topic. Put each entry in one of the repo's listed topics unless none fits; several entries may share
 one. Only then make a new topic: its area one of the listed areas, its name one to three kebab-case words, and
@@ -191,6 +222,12 @@ pub(crate) struct ModelAsk {
 pub(crate) trait Model: Send + Sync {
     /// The model's reply text.
     fn ask(&self, ask: ModelAsk) -> BoxFuture<'_, Result<String, String>>;
+    /// The reply to `ask` with Edit allowed beside Read, Grep and Glob in
+    /// its `cwd`: the one call that changes files (a promotion into the
+    /// agent docs, `super::review`). A stand-in answers as [`Model::ask`].
+    fn ask_editing(&self, ask: ModelAsk) -> BoxFuture<'_, Result<String, String>> {
+        self.ask(ask)
+    }
 }
 
 /// The Claude CLI, in print mode, on one of the accounts orion runs, at
@@ -241,6 +278,15 @@ impl Model for ClaudeCli {
             let tools = ask.read_tools.then_some(READ_TOOLS);
             let one = self.one_shot(&ask);
             Ok(oneshot::run_in(one, ask.cwd.as_deref(), tools).await?.text)
+        })
+    }
+
+    fn ask_editing(&self, ask: ModelAsk) -> BoxFuture<'_, Result<String, String>> {
+        Box::pin(async move {
+            let one = self.one_shot(&ask);
+            Ok(oneshot::run_in(one, ask.cwd.as_deref(), Some(EDIT_TOOLS))
+                .await?
+                .text)
         })
     }
 }
@@ -377,13 +423,33 @@ pub(crate) fn corrections(sessions: &[Session]) -> Vec<String> {
         .collect()
 }
 
-/// The records as a prompt gives them.
+/// The records as a prompt gives them — and, when [`with_lessons`] put
+/// them on, the owner's corrections of past harvests after them.
 pub(super) fn records_part(records: &str) -> String {
-    match records.trim() {
-        "" => "The repo's hand-written decision records: (none)".into(),
+    let (records, lessons) = match records.find(store::LESSONS_HEAD) {
+        Some(at) => (&records[..at], records[at..].trim()),
+        None => (records, ""),
+    };
+    let mut out = match records.trim() {
+        "" => "The repo's hand-written decision records: (none)".to_string(),
         records => {
             format!("The repo's hand-written decision records (read-only; they win):\n{records}")
         }
+    };
+    if !lessons.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(lessons);
+    }
+    out
+}
+
+/// `records` (as [`super::records::for_check_in`] reads them) with the
+/// owner's latest corrections from `store`'s `lessons.jsonl` after them,
+/// so every call that reads the records reads those too.
+pub(crate) fn with_lessons(records: String, store: &Store) -> String {
+    match store::lessons_part(&store.lessons()) {
+        lessons if lessons.is_empty() => records,
+        lessons => format!("{records}\n\n{lessons}"),
     }
 }
 
@@ -2539,6 +2605,42 @@ pub(crate) mod tests {
                 (Commenter::Cubic, "P1 bug", "a.rs:4"),
                 (Commenter::Owner, "rename this", "b.rs"),
             ]
+        );
+    }
+
+    #[test]
+    fn the_lessons_follow_the_records_under_their_own_heading() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::of(dir.path());
+        assert_eq!(with_lessons("- A record".into(), &store), "- A record");
+        store
+            .append_lessons(&[store::Lesson {
+                id: "k1-1".into(),
+                rule: "Star exports as star5".into(),
+                verdict: store::LESSON_DROPPED.into(),
+                note: "one shape's spec".into(),
+                ..store::Lesson::default()
+            }])
+            .unwrap();
+        let records = with_lessons("- A record".into(), &store);
+        let part = records_part(&records);
+        assert!(
+            part.starts_with(
+                "The repo's hand-written decision records (read-only; they win):\n- A record"
+            ),
+            "{part}"
+        );
+        assert!(
+            part.ends_with(&format!(
+                "{}\n- dropped: \"Star exports as star5\" — one shape's spec",
+                store::LESSONS_HEAD
+            )),
+            "{part}"
+        );
+        let none = records_part(&with_lessons(String::new(), &store));
+        assert!(
+            none.starts_with("The repo's hand-written decision records: (none)\n\n"),
+            "{none}"
         );
     }
 }

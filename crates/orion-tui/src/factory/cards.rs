@@ -447,6 +447,9 @@ const WEEK_PREFIX: &str = "week:";
 /// Kinds of card this orion no longer makes, closed on sight: a session
 /// that dies or stalls is relaunched or nudged now.
 const RETIRED: [&str; 2] = [":dead", ":stalled"];
+/// The knowledge daily card's key prefix: gone too, its rules reviewed in
+/// orion's RULE REVIEW now (`crate::rule_review`).
+const RETIRED_DAILY: &str = "kb:daily:";
 /// A card that only says something finished — the knowledge backfill —
 /// closes after this.
 const NOTE_KEEP_MS: i64 = orion_core::clock::DAY_MS;
@@ -528,7 +531,7 @@ pub(crate) fn reconcile(app: &mut App) {
     for p in open_to_you(app) {
         let key = p.card.key.as_str();
         let age = now.saturating_sub(p.at_ms);
-        if RETIRED.iter().any(|end| key.ends_with(end)) {
+        if RETIRED.iter().any(|end| key.ends_with(end)) || key.starts_with(RETIRED_DAILY) {
             closing.push((key.to_string(), RETIRED_NOTE));
             continue;
         }

@@ -240,10 +240,25 @@ fn draw_screen(f: &mut Frame, app: &mut App) {
     app.host_cursor = None;
     app.welcome_on_screen = false;
 
+    // The RULE REVIEW's BANNER takes the top row while rules wait on a
+    // sign-off; everything else draws under it.
+    let mut screen = f.area();
+    if crate::rule_review::banner_up(app) && screen.height > FOOTER_ROWS + 4 {
+        let row = Rect {
+            height: 1,
+            ..screen
+        };
+        screen = Rect {
+            y: screen.y + 1,
+            height: screen.height - 1,
+            ..screen
+        };
+        crate::rule_review::draw_banner(f, app, row);
+    }
     // The bar gets a blank row above it so it breathes off the panel
     // borders, matching the terminal's own padding below the last row.
     let [body, footer] =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(FOOTER_ROWS)]).areas(f.area());
+        Layout::vertical([Constraint::Min(3), Constraint::Length(FOOTER_ROWS)]).areas(screen);
 
     if app.collapsed {
         draw_terminal(f, app, body);
@@ -2459,6 +2474,7 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
         Overlay::WeekReview(view) => crate::week_review::draw(f, app, &view, th),
         Overlay::Conflicts(view) => crate::conflicts::draw(f, app, &view, th),
         Overlay::Takeaways(view) => crate::takeaways_view::draw(f, app, &view, th),
+        Overlay::RuleReview(view) => crate::rule_review::draw(f, app, &view, th),
         Overlay::Usage(view) => crate::usage::draw(f, app, &view, th),
         Overlay::CleanWorktrees(view) => crate::clean_worktrees::draw(f, app, &view, th),
         Overlay::OpenRepo(view) => crate::open_repo::draw(f, app, &view, th),

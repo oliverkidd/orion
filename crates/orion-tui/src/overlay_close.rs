@@ -52,6 +52,7 @@ pub(crate) fn overlay_area(overlay: &Overlay) -> Rect {
         Overlay::WeekReview(v) => v.area,
         Overlay::Conflicts(v) => v.area,
         Overlay::Takeaways(v) => v.area,
+        Overlay::RuleReview(v) => v.area,
     }
 }
 
@@ -92,6 +93,7 @@ pub(crate) fn click_outside(app: &mut App, out: &mut Vec<ClientRequest>) {
         Some(Overlay::Onboard(view)) if view.asking() => crate::onboard::back_out(app),
         Some(Overlay::Onboard(_)) => crate::onboard::dismiss(app),
         Some(Overlay::WhatsNew(_)) => crate::whats_new::dismiss(app),
+        Some(Overlay::RuleReview(_)) => crate::rule_review::dismiss(app),
         // A DIFF VIEWER opened from the PULL REQUESTS MODAL is a level
         // inside it: the modal comes back on the row and tab it was on.
         Some(Overlay::Diff(view)) if view.back.is_some() => {
@@ -170,6 +172,7 @@ pub(crate) fn force_close(app: &mut App) -> bool {
         Overlay::Settings(_) => crate::event_loop::close_settings(app),
         Overlay::Onboard(_) => crate::onboard::dismiss(app),
         Overlay::WhatsNew(_) => crate::whats_new::dismiss(app),
+        Overlay::RuleReview(_) => crate::rule_review::dismiss(app),
         _ => app.overlay = None,
     }
     if let Some(draft) = parked {

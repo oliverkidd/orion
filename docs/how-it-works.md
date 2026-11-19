@@ -597,10 +597,17 @@ then `Extra steer: …` when the automation has one.
 
 ## Knowledge
 
-When a pull request merges, orion harvests it for product knowledge only: what the product does and
-why — the decisions you made, the constraints it lives under, the questions you left open. How agents
-work in the repo (its tooling, scripts, local stack, tests, CI and workflow) is never harvested: that
-belongs in the repo's own hand-written agent docs. An entry of that kind is dropped, whether a harvest
+When a pull request merges, orion harvests the rules that would change what an agent does on a
+different ticket: a hazard or invariant (data, security, permissions, the boundary between spaces,
+spend), an architecture or reuse rule you set or corrected (go through the registry, one source of
+truth, fix the shared component rather than fork a copy), behaviour that must match on every path or
+surface, a product principle or word that spans features, a deliberate behaviour that guards against
+an annoying regression, and a limit of the outside world. It writes the lesson behind your
+correction, not the ticket's spec, and at most five a pull request — usually none to two. One
+component's look, bug facts, shapes the types enforce, one-off calls, scope limits ("only these
+five") and anything the agent docs already say are never recorded. How agents work in the repo (its
+tooling, scripts, local stack, tests, CI and workflow) is never harvested either: that belongs in the
+repo's own hand-written agent docs. An entry of that kind is dropped, whether a harvest
 or a factory session's note offers it (`orion knowledge note` refuses it), and an older harvest's —
 the engineering stream, and the `engineering-tooling` and `testing-and-ci` areas — comes out the next
 time orion writes the pages, or at once with `orion knowledge backfill` (its first commit, even with
@@ -631,7 +638,9 @@ same few minutes. Each step's model and effort is a setting (`knowledge.models`,
 for consolidating topics. Where it all lives:
 
 - **In the repo, `.orion/decisions/`.** orion owns only `harvested/`: `index.md` (at most 40 lines),
-  one `<area>/<topic>.md` page a topic, `entries.jsonl` and `checked.jsonl`, each file starting with an
+  one `<area>/<topic>.md` page a topic, `entries.jsonl`, `checked.jsonl` and `lessons.jsonl` (what
+  your rule reviews dropped or corrected, and why — the latest 40 go into every harvest's prompt, so
+  it stops making the same mistake), each file starting with an
   `<!-- orion:harvested … -->` marker line. Every other file there is a decision record written by
   hand, in whatever layout the repo keeps them. orion never writes one (its writer refuses any path
   outside `harvested/`), gives them to the harvest's check as read-only context, and drops — or lists
@@ -644,28 +653,44 @@ for consolidating topics. Where it all lives:
   merged pull requests went into — so everyone's knowledge lands where the work does (`dev`, say, in
   a repo whose default is a release `main`) whether or not they set it — else origin's default. A
   knowledge pull request found open on another branch is moved to it. A rebase that conflicts is given up and the pages
-  rebuilt from `entries.jsonl` on top of the base. The change is committed (`knowledge: harvest
-  #<pr>`), that branch alone pushed with `--force-with-lease`, and its one pull request opened or
-  its body updated: the PRs harvested and the new or changed rules, each credited to who decided it.
-  A backfill is one commit a batch of 10, and a staleness check one commit whenever it asked the
-  model.
-- **Merged after the daily card.** At 18:30 a card lists the rules recorded as yours since the last
-  one, each with **Veto k**, plus **All fine** and the pull request's link; a veto takes the rule out
-  on the branch and pushes. Two hours later — at once on All fine, or the next time orion runs after
-  that — orion merges the pull request itself (`factory.knowledge_auto_merge`), by the repo's merge
-  method: only while GitHub says it is mergeable, no check is failing (one still running waits for
-  a later tick) and its head is the commit orion last pushed. It never forces or admin-merges. A
-  conflict is rebuilt and pushed; a refusal is tried once more, then a card says why. After the
-  merge the branch starts again from the new base, so a later veto lands in the next day's pull
-  request.
+  rebuilt from `entries.jsonl` on top of the base. The change is committed on this machine
+  (`knowledge: harvest #<pr>`) and **pushed only when you sign off a rule review** — that branch
+  alone, with `--force-with-lease` — so CI runs once a sign-off, never once a harvest. The sign-off
+  opens its one pull request, or updates its body (the PRs harvested and the new or changed rules,
+  each credited to who decided it), and marks it ready if an older orion left it a draft. A
+  staleness check is one commit whenever it asked the model; with no rule waiting, what was
+  committed since the last sign-off goes up on its own at 09:00. A backfill (`orion knowledge
+  backfill`) still pushes as it goes, a commit a batch of 10, and its rules skip the review: you
+  ran it.
+- **Merged after your rule review.** At 09:00 — or the first time orion launches after — when a rule
+  recorded before then is waiting, the RULE REVIEW opens over orion with every rule waiting (see
+  [Sessions](sessions.md#rule-review)). Each starts kept; you untick the wrong ones, or note what's
+  wrong: a kept rule with a note is rewritten to fit it (one model call a topic), a dropped one keeps
+  the note as its reason, and every drop and note becomes a lesson. Esc puts it off, leaving a banner
+  on the top row until you sign off; it opens again on every launch while rules wait. The sign-off
+  vetoes the drops, applies the rewrites, pushes and opens the pull request; then orion merges it
+  itself (`factory.knowledge_auto_merge`), by the repo's merge method: only while every rule on the
+  branch is signed off, GitHub says it is mergeable, no check is failing (one still running waits
+  for a later tick) and its head is the commit the sign-off pushed. It never forces or admin-merges.
+  A conflict is rebuilt and pushed when nothing unsigned rode in, else it waits for the next review;
+  a refusal is tried once more, then a card says why. After the merge the branch is put back on the
+  new base with anything harvested since the sign-off rebased on top.
+- **Promoted into the agent docs.** Once a week one Opus call reads the pages and the repo's
+  `AGENTS.md` (else `CLAUDE.md`) and picks at most five rules that hold repo-wide — the kind every
+  agent should always know — that the docs don't already say. The next rule review offers them
+  under MOVE INTO THE AGENT DOCS. One you keep is added to the docs where it fits, by a call that may
+  edit only Markdown outside `.orion/`, in a pull request of its own on `orion/agent-docs-<gh login>`,
+  merged the same way; once it lands, the harvested copies are retired citing the doc, so each rule
+  lives in one place. One you untick is never offered again.
 - **Read from the session's checkout.** A builder's prompt carries the harvested index, the areas
   and topics it notes rules on, and lists the records' titles and paths, repo-relative, ending
   "Accepted records in .orion/decisions/ win over the harvested pages." — read from the commit its
   worktree is cut from, since the worktree doesn't exist yet when the prompt is written. `orion knowledge for <paths…>` reads the checkout it runs
   in. A harvest reaches agents once its pull request merges, not before.
 - **Kept on this machine, `<data_dir>/knowledge/<project id>/`:** the condensed dossiers
-  (`sources/<pr>.md`), the harvest queue, the cards' state, the commit each topic was last checked
-  at, and the session snapshot; a factory session's notes wait in `<data_dir>/knowledge-notes/`
+  (`sources/<pr>.md`), the harvest queue, the review's state (what you signed off, the promotions
+  waiting, the agent docs pull request) and your unfinished picks (`review-draft.json`), the cards'
+  state, the commit each topic was last checked at, and the session snapshot; a factory session's notes wait in `<data_dir>/knowledge-notes/`
   until its pull request is harvested. None of it is committed. If the repo's `.gitignore` covers `.orion/decisions/`, nothing is harvested, and a card
   says so once.
 

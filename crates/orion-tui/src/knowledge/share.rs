@@ -10,13 +10,23 @@
 //!   ([`Sharer::open`]); a rebase that conflicts is given up, and the
 //!   harvested pages rebuilt from `entries.jsonl` on top of the base
 //!   instead ([`Sharer::rebuild`]).
-//! - **A write** changes only `.orion/decisions/harvested/`, is committed
-//!   (`knowledge: harvest #<pr>`), and pushed — that branch alone, with
-//!   `--force-with-lease` ([`Sharer::publish`]).
-//! - **One pull request** for the branch, kept open: made if missing,
-//!   else its body brought up to date ([`Sharer::ensure_pr`]). Merging it
-//!   is how the rules become shared; orion may merge it itself after the
-//!   daily card's veto window ([`Sharer::merge`]), never forced.
+//! - **A write** changes only `.orion/decisions/harvested/` and is
+//!   committed (`knowledge: harvest #<pr>`) — on this machine only
+//!   ([`Sharer::save`]). The branch is pushed, that branch alone with
+//!   `--force-with-lease`, only when the owner signs off a rule review
+//!   ([`Sharer::publish`], `super::review`), so CI runs once per sign-off,
+//!   not once per harvest.
+//! - **One pull request** for the branch, opened at the first sign-off and
+//!   kept open: made if missing, else its body brought up to date
+//!   ([`Sharer::ensure_pr`]). Merging it is how the rules become shared;
+//!   orion may merge it itself once the review signed off everything on
+//!   it ([`Sharer::merge`]), never forced. After a merge the commits made
+//!   since the sign-off are kept, rebased on the new base.
+//! - **The agent docs branch** (`orion/agent-docs-<login>`, [`docs_branch_for`])
+//!   carries a promotion: a rule the review moved into the repo's
+//!   always-loaded agent docs, proposed in a pull request of its own so
+//!   the knowledge branch never changes anything outside the harvested
+//!   pages ([`Sharer::open_docs_branch`], [`Sharer::propose_docs`]).
 //!
 //! `git` and `gh` are a [`Git`] and a [`Gh`]: the real ones run the
 //! programs ([`SystemGit`], [`GhCli`]); a test hands in its own, so no
@@ -31,7 +41,9 @@ use futures::future::BoxFuture;
 use serde_json::Value;
 
 use super::local::{Local, Lock};
-use super::store::{self, Entry, Store, TopicCheck, ACTIVE, CHECKED_FILE, DIR, VETOED};
+use super::store::{
+    self, Entry, Store, TopicCheck, ACTIVE, CHECKED_FILE, DIR, ENTRIES_FILE, LESSONS_FILE, VETOED,
+};
 use crate::pr_actions::MergeMethod;
 use crate::pull_request::{str_at, Checks};
 
@@ -39,6 +51,12 @@ use crate::pull_request::{str_at, Checks};
 pub(crate) const TITLE: &str = "Knowledge: rules harvested from merged PRs";
 /// What every knowledge branch's name starts with.
 pub(crate) const PREFIX: &str = "orion/knowledge-";
+/// What every agent docs branch's name starts with.
+pub(crate) const DOCS_PREFIX: &str = "orion/agent-docs-";
+/// Where a rebuild keeps the branch's old tip while it works.
+const PRE_REBUILD: &str = "refs/orion/pre-rebuild";
+/// The agent docs pull request's title.
+pub(crate) const DOCS_TITLE: &str = "Agent docs: rules promoted from the knowledge base";
 /// The most rules a pull request's body lists.
 const BODY_RULES: usize = 60;
 const GH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -138,6 +156,24 @@ pub(crate) fn branch_for(login: &str) -> String {
         })
         .collect();
     format!("{PREFIX}{}", safe.trim_matches('-'))
+}
+
+/// `login`'s agent docs branch: `orion/agent-docs-<login>`, named as
+/// [`branch_for`] names the knowledge branch.
+pub(crate) fn docs_branch_for(login: &str) -> String {
+    let knowledge = branch_for(login);
+    format!("{DOCS_PREFIX}{}", &knowledge[PREFIX.len()..])
+}
+
+/// Whether a promotion may change `path`: a Markdown file outside
+/// `.orion/` — the agent docs, never the decision records or the
+/// harvested pages, and never code.
+pub(crate) fn docs_path_ok(path: &str) -> bool {
+    let path = path.trim();
+    !path.is_empty()
+        && path.ends_with(".md")
+        && !path.starts_with(".orion/")
+        && !path.split('/').any(|part| part == ".." || part.is_empty())
 }
 
 /// The branch the knowledge pull request goes to: the project's **Base
@@ -515,7 +551,7 @@ impl Sharer<'_> {
             .await
             .ok()
             .map(|s| s.trim().to_string());
-        let entries_file = format!("{DIR}/entries.jsonl");
+        let entries_file = format!("{DIR}/{ENTRIES_FILE}");
         let read = |text: Option<String>| store::read_entries(&text.unwrap_or_default());
         let ours = read(self.show(&tip, &entries_file).await);
         let theirs = read(self.show(&base_ref, &entries_file).await);
@@ -557,18 +593,46 @@ impl Sharer<'_> {
                 }
             }
         }
+        // Harvests wait unpushed until a sign-off, so the old tip may be
+        // the only copy: a rebuild that fails part way puts it back.
+        self.git(&["update-ref", PRE_REBUILD, &tip]).await?;
         self.git(&["checkout", "-q", "-B", &branch.name, &base_ref])
             .await?;
+        let rebuilt = self
+            .write_rebuild(branch, &tip, &merged, &gone, pages)
+            .await;
+        if let Err(why) = &rebuilt {
+            let _ = self.git(&["reset", "-q", "--hard"]).await;
+            let _ = self
+                .git(&["checkout", "-q", "-B", &branch.name, &tip])
+                .await;
+            tracing::warn!(
+                "knowledge: rebuild on {} failed, the branch kept: {why}",
+                self.base
+            );
+        }
+        rebuilt
+    }
+
+    /// The rebuild's writes on the branch, now on the base, and its commit.
+    async fn write_rebuild(
+        &self,
+        branch: &Branch,
+        tip: &str,
+        merged: &[Entry],
+        gone: &[String],
+        pages: Vec<(String, String, Option<String>, bool)>,
+    ) -> Result<(), String> {
         let store = branch.store();
-        store.save_entries(&merged)?;
-        for path in &gone {
+        store.save_entries(merged)?;
+        for path in gone {
             let path = store.repo.join(path);
             if store.may_write(&path) {
                 let _ = std::fs::remove_file(path);
             }
         }
         if let Some(areas) = self
-            .show(&tip, &format!("{DIR}/{}", super::areas::FILE))
+            .show(tip, &format!("{DIR}/{}", super::areas::FILE))
             .await
         {
             store.write(&store.dir.join(super::areas::FILE), &areas)?;
@@ -576,11 +640,17 @@ impl Sharer<'_> {
         // Each topic's latest check, the base's or the branch's.
         let checked_file = format!("{DIR}/{CHECKED_FILE}");
         let mut checked = store.checked();
-        if let Some(mine) = self.show(&tip, &checked_file).await {
+        if let Some(mine) = self.show(tip, &checked_file).await {
             store::merge_checked(&mut checked, store::read_checked(&mine).into_values());
         }
         if !checked.is_empty() {
             store.save_checked(&checked)?;
+        }
+        // Every lesson, the base's and the branch's.
+        let lessons_file = format!("{DIR}/{LESSONS_FILE}");
+        if let Some(mine) = self.show(tip, &lessons_file).await {
+            let all = store::merge_lessons(&store.lessons(), &store::read_lessons(&mine));
+            store.save_lessons(&all)?;
         }
         for (path, topic, mine, base_untouched) in pages {
             let text = match (base_untouched, mine) {
@@ -621,6 +691,41 @@ impl Sharer<'_> {
         }
         self.git(&["commit", "-q", "-m", message]).await?;
         Ok(true)
+    }
+
+    /// Commit the branch's changes as `message` on this machine, pushing
+    /// nothing: a harvest, a staleness check or a consolidation waits for
+    /// the owner's sign-off to be pushed ([`Sharer::publish`]).
+    pub(crate) async fn save(&self, _branch: &Branch, message: &str) -> Result<bool, String> {
+        self.commit(message).await
+    }
+
+    /// The entries the clone's `origin/<base>` has, as last fetched.
+    pub(crate) async fn base_entries(&self) -> Vec<Entry> {
+        let file = format!("{DIR}/{ENTRIES_FILE}");
+        store::read_entries(&self.show(&self.base_ref(), &file).await.unwrap_or_default())
+    }
+
+    /// Whether the knowledge branch has commits origin's copy of it hasn't
+    /// (or origin has none): what a sign-off would push. Read without
+    /// fetching — the last fetch's word.
+    pub(crate) async fn unpushed(&self, branch: &Branch) -> bool {
+        let base_ref = self.base_ref();
+        let ahead_of = |rev: String| async move {
+            self.git(&["rev-list", "--count", &format!("{rev}..HEAD")])
+                .await
+                .ok()
+                .and_then(|n| n.trim().parse::<usize>().ok())
+                .unwrap_or(0)
+        };
+        if ahead_of(base_ref).await == 0 {
+            return false;
+        }
+        let tracking = format!("refs/remotes/origin/{}", branch.name);
+        match self.rev(&tracking).await {
+            Some(_) => ahead_of(tracking).await > 0,
+            None => true,
+        }
     }
 
     /// Commit the branch's changes as `message`, push it — that branch
@@ -666,7 +771,7 @@ impl Sharer<'_> {
         }
         let theirs = store::read_entries(
             &self
-                .show(&base_ref, &format!("{DIR}/entries.jsonl"))
+                .show(&base_ref, &format!("{DIR}/{ENTRIES_FILE}"))
                 .await
                 .unwrap_or_default(),
         );
@@ -682,8 +787,20 @@ impl Sharer<'_> {
     /// The branch's one open pull request: its body brought up to date,
     /// or — with none open — made.
     pub(crate) async fn ensure_pr(&self, branch: &Branch, body: &str) -> Result<Pr, String> {
-        let dir = &branch.clone;
-        let name = branch.name.as_str();
+        self.ensure_pr_for(&branch.clone, &branch.name, TITLE, body)
+            .await
+    }
+
+    /// Branch `name`'s one open pull request, titled `title`: its body
+    /// brought up to date and — a draft an older orion opened — marked
+    /// ready; or, with none open, made.
+    async fn ensure_pr_for(
+        &self,
+        dir: &Path,
+        name: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<Pr, String> {
         let list = self
             .gh
             .run(
@@ -696,7 +813,7 @@ impl Sharer<'_> {
                     "--state",
                     "open",
                     "--json",
-                    "number,url,baseRefName",
+                    "number,url,baseRefName,isDraft",
                     "--limit",
                     "10",
                 ],
@@ -710,10 +827,11 @@ impl Sharer<'_> {
                     number: crate::pull_request::u64_at(&v, "number"),
                     url: str_at(&v, "url"),
                 };
-                (pr, str_at(&v, "baseRefName"))
+                let draft = v.get("isDraft").and_then(Value::as_bool) == Some(true);
+                (pr, str_at(&v, "baseRefName"), draft)
             })
-            .filter(|(pr, _)| pr.number > 0);
-        if let Some((pr, on)) = open {
+            .filter(|(pr, _, _)| pr.number > 0);
+        if let Some((pr, on, draft)) = open {
             let n = pr.number.to_string();
             // One opened on another branch (an older orion went to
             // origin's default) moves to the base.
@@ -722,6 +840,9 @@ impl Sharer<'_> {
                 edit.extend(["--base", self.base.as_str()]);
             }
             self.gh.run(dir, &edit).await?;
+            if draft {
+                self.gh.run(dir, &["pr", "ready", n.as_str()]).await?;
+            }
             return Ok(pr);
         }
         let out = self
@@ -729,7 +850,7 @@ impl Sharer<'_> {
             .run(
                 dir,
                 &[
-                    "pr", "create", "--base", &self.base, "--head", name, "--title", TITLE,
+                    "pr", "create", "--base", &self.base, "--head", name, "--title", title,
                     "--body", body,
                 ],
             )
@@ -748,22 +869,30 @@ impl Sharer<'_> {
         Ok(Pr { number, url })
     }
 
-    /// Merge `pr` when it stands ([`readiness`]) — its head the commit
-    /// orion last pushed (`pushed`) — by `wanted` when the repo allows
-    /// it, else the first method it does; then reset the branch to the
-    /// new base. Never forced. `Err` is why it can't merge.
+    /// Merge the knowledge pull request `pr` ([`Sharer::merge_pr`]); once
+    /// merged, the branch put back on the new base with whatever was
+    /// committed after `pushed` kept ([`Sharer::reset_to_base`]).
     pub(crate) async fn merge(
         &self,
         pr: &Pr,
         pushed: &str,
         wanted: MergeMethod,
     ) -> Result<Merge, String> {
-        let dir = self.local.clone_dir();
+        let merged = self.merge_pr(pr, pushed, wanted).await?;
+        if merged == Merge::Merged {
+            self.reset_to_base(pushed).await?;
+        }
+        Ok(merged)
+    }
+
+    /// How `pr` stands for a merge of `pushed` ([`readiness`]), asked of
+    /// GitHub.
+    pub(crate) async fn readiness_of(&self, pr: &Pr, pushed: &str) -> Result<Ready, String> {
         let n = pr.number.to_string();
         let view = self
             .gh
             .run(
-                &dir,
+                &self.local.clone_dir(),
                 &[
                     "pr",
                     "view",
@@ -774,12 +903,24 @@ impl Sharer<'_> {
             )
             .await?;
         let view: Value = serde_json::from_str(&view).map_err(|e| e.to_string())?;
-        match readiness(&view, pushed) {
+        Ok(readiness(&view, pushed))
+    }
+
+    /// Merge `pr` when it stands ([`readiness`]) — its head the commit
+    /// orion last pushed (`pushed`) — by `wanted` when the repo allows
+    /// it, else the first method it does. Never forced. `Err` is why it
+    /// can't merge.
+    pub(crate) async fn merge_pr(
+        &self,
+        pr: &Pr,
+        pushed: &str,
+        wanted: MergeMethod,
+    ) -> Result<Merge, String> {
+        let dir = self.local.clone_dir();
+        let n = pr.number.to_string();
+        match self.readiness_of(pr, pushed).await? {
             Ready::Go => {}
-            Ready::Merged => {
-                self.reset_to_base().await?;
-                return Ok(Merge::Merged);
-            }
+            Ready::Merged => return Ok(Merge::Merged),
             Ready::Closed => return Ok(Merge::Closed),
             Ready::Wait(why) => return Ok(Merge::Waiting(why)),
             Ready::Conflicting => return Ok(Merge::Conflicting),
@@ -820,13 +961,16 @@ impl Sharer<'_> {
                 ],
             )
             .await?;
-        self.reset_to_base().await?;
         Ok(Merge::Merged)
     }
 
-    /// After a merge: the branch put back on the new `origin/<base>`,
-    /// ready for the next day's harvests.
-    pub(crate) async fn reset_to_base(&self) -> Result<(), String> {
+    /// After a merge of `merged` (the head the sign-off pushed): the
+    /// branch put back on the new `origin/<base>`. What was committed on
+    /// it since — harvests waiting for the next review — is rebased on
+    /// top, never thrown away; a rebase that conflicts is given up and the
+    /// branch left as it is, for the next [`Sharer::open`] to rebase (or
+    /// rebuild).
+    pub(crate) async fn reset_to_base(&self, merged: &str) -> Result<(), String> {
         let _lock = self.local.lock().await?;
         let login = self.gh.login().await.ok_or("gh isn't signed in")?;
         let name = branch_for(&login);
@@ -839,10 +983,129 @@ impl Sharer<'_> {
             &format!("+refs/heads/{base}:{base_ref}"),
         ])
         .await?;
+        let _ = self.git(&["rebase", "--abort"]).await;
         let _ = self.git(&["reset", "-q", "--hard"]).await;
+        let head = self.rev(&format!("refs/heads/{name}")).await;
+        let merged = merged.trim();
+        let later = match &head {
+            Some(head) if !merged.is_empty() && head != merged => self
+                .git(&["merge-base", "--is-ancestor", merged, head])
+                .await
+                .is_ok(),
+            _ => false,
+        };
+        if !later {
+            // Nothing past what merged (or nothing to tell): the base alone.
+            if head
+                .as_deref()
+                .is_none_or(|h| h == merged || merged.is_empty())
+            {
+                self.git(&["checkout", "-q", "-B", &name, &base_ref])
+                    .await?;
+            }
+            return Ok(());
+        }
+        if self
+            .git(&["rebase", "-q", "--onto", &base_ref, merged, &name])
+            .await
+            .is_err()
+        {
+            let _ = self.git(&["rebase", "--abort"]).await;
+        }
+        Ok(())
+    }
+
+    /// The agent docs branch, made afresh on `origin/<base>` in the
+    /// working clone and checked out, the clone held until the returned
+    /// lock drops: where a promotion edits the docs. The next
+    /// [`Sharer::open`] checks the knowledge branch out again.
+    pub(crate) async fn open_docs_branch(&self) -> Result<(Lock, String), String> {
+        let lock = self.local.lock().await?;
+        let login = self
+            .gh
+            .login()
+            .await
+            .ok_or("gh isn't signed in (gh auth login)")?;
+        let name = docs_branch_for(&login);
+        self.ensure_clone().await?;
+        let _ = self.git(&["rebase", "--abort"]).await;
+        let _ = self.git(&["reset", "-q", "--hard"]).await;
+        self.git(&["clean", "-qfd"]).await?;
+        let base = &self.base;
+        let base_ref = self.base_ref();
+        self.git(&[
+            "fetch",
+            "-q",
+            "origin",
+            &format!("+refs/heads/{base}:{base_ref}"),
+        ])
+        .await
+        .map_err(|why| format!("couldn't fetch origin/{base}: {why}"))?;
         self.git(&["checkout", "-q", "-B", &name, &base_ref])
             .await?;
-        Ok(())
+        Ok((lock, name))
+    }
+
+    /// Commit what a promotion changed on the agent docs branch `name` as
+    /// `message`, push it with a lease on what origin had, and keep its
+    /// one pull request open with `body`: the pull request and the head
+    /// pushed. A change outside the agent docs ([`docs_path_ok`]) is
+    /// thrown away and refused; nothing changed is `Ok(None)`.
+    pub(crate) async fn propose_docs(
+        &self,
+        name: &str,
+        message: &str,
+        body: &str,
+    ) -> Result<Option<(Pr, String)>, String> {
+        let status = self
+            .git(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+            .await?;
+        let paths: Vec<String> = crate::git_diff::parse_status_z(status.as_bytes())
+            .into_iter()
+            .flat_map(|f| std::iter::once(f.path).chain(f.orig_path))
+            .collect();
+        if paths.is_empty() {
+            return Ok(None);
+        }
+        if let Some(bad) = paths.iter().find(|p| !docs_path_ok(p)) {
+            let _ = self.git(&["reset", "-q", "--hard"]).await;
+            let _ = self.git(&["clean", "-qfd"]).await;
+            return Err(format!(
+                "the promotion changed {bad}, outside the agent docs; nothing was proposed"
+            ));
+        }
+        let mut add = vec!["add", "-A", "--"];
+        add.extend(paths.iter().map(String::as_str));
+        self.git(&add).await?;
+        self.git(&["commit", "-q", "-m", message]).await?;
+        let head = self.rev("HEAD").await.ok_or("the branch has no commit")?;
+        let tracking = format!("refs/remotes/origin/{name}");
+        match self
+            .git(&[
+                "fetch",
+                "-q",
+                "origin",
+                &format!("+refs/heads/{name}:{tracking}"),
+            ])
+            .await
+        {
+            Ok(_) => {}
+            Err(why) if why.contains("couldn't find remote ref") => {
+                let _ = self.git(&["update-ref", "-d", &tracking]).await;
+            }
+            Err(why) => return Err(format!("couldn't fetch {name}: {why}")),
+        }
+        let remote = self.rev(&tracking).await.unwrap_or_default();
+        let lease = format!("--force-with-lease=refs/heads/{name}:{remote}");
+        let refspec = format!("refs/heads/{name}:refs/heads/{name}");
+        self.git(&["push", "-q", &lease, "origin", &refspec])
+            .await
+            .map_err(|why| format!("couldn't push {name}: {why}"))?;
+        let _ = self.git(&["update-ref", &tracking, &head]).await;
+        let pr = self
+            .ensure_pr_for(&self.local.clone_dir(), name, DOCS_TITLE, body)
+            .await?;
+        Ok(Some((pr, head)))
     }
 }
 
@@ -1657,5 +1920,138 @@ pub(crate) mod tests {
             .await
             .is_err());
         assert_eq!(gh.verbs().iter().filter(|v| *v == "pr merge").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_save_commits_here_and_pushes_nothing() {
+        let w = World::new();
+        let (git, gh) = (LocalGit::default(), FakeGh::new("ann"));
+        let share = w.sharer(&git, &gh);
+        let branch = share.open().await.unwrap();
+        harvest_into(&branch.store(), &entry("k12-1", 12, "auth/login", "owner"));
+        assert!(share.save(&branch, "knowledge: harvest #12").await.unwrap());
+        assert!(share.unpushed(&branch).await, "the sign-off has it to push");
+        drop(branch);
+        assert!(git.pushes().is_empty(), "nothing pushed");
+        assert!(
+            !gh.verbs().iter().any(|v| v.starts_with("pr ")),
+            "nothing proposed"
+        );
+        assert_eq!(w.origin_rev("refs/heads/orion/knowledge-ann"), None);
+    }
+
+    #[tokio::test]
+    async fn a_merge_keeps_what_was_committed_after_the_sign_off() {
+        let w = World::new();
+        let (git, gh) = (LocalGit::default(), FakeGh::new("ann"));
+        let share = w.sharer(&git, &gh);
+        let branch = share.open().await.unwrap();
+        harvest_into(&branch.store(), &entry("k12-1", 12, "auth/login", "owner"));
+        gh.on("pr list", Ok("[]"));
+        gh.on("pr create", Ok("https://github.com/o/app/pull/77"));
+        let out = share
+            .publish(&branch, "knowledge: signed off")
+            .await
+            .unwrap();
+        // A harvest after the sign-off, waiting for the next review.
+        harvest_into(&branch.store(), &entry("k13-1", 13, "auth/login", "owner"));
+        share.save(&branch, "knowledge: harvest #13").await.unwrap();
+        drop(branch);
+        // GitHub squashes the signed-off head onto dev.
+        w.land_on_dev("app.txt", "moved on");
+        let other = w.tmp.path().join("other");
+        crate::knowledge::share::tests::git(&other, &["fetch", "-q", "origin", &out.head]);
+        crate::knowledge::share::tests::git(&other, &["merge", "-q", "--squash", "FETCH_HEAD"]);
+        crate::knowledge::share::tests::git(&other, &["commit", "-q", "-m", "Knowledge (#77)"]);
+        crate::knowledge::share::tests::git(&other, &["push", "-q", "origin", "dev"]);
+        let ok = view(
+            "OPEN",
+            "MERGEABLE",
+            &out.head,
+            serde_json::json!([run("SUCCESS")]),
+        );
+        gh.on("pr view", Ok(&ok.to_string()));
+        gh.on("repo view", Ok(r#"{"squashMergeAllowed": true}"#));
+        let pr = out.pr.unwrap();
+        assert_eq!(
+            share.merge(&pr, &out.head, MergeMethod::Squash).await,
+            Ok(Merge::Merged)
+        );
+        let clone = w.local.clone_dir();
+        let parent =
+            crate::git_proc::read(&clone, &["rev-parse", "orion/knowledge-ann~1"]).unwrap();
+        assert_eq!(
+            Some(parent.trim().to_string()),
+            w.origin_rev("refs/heads/dev"),
+            "on the new base"
+        );
+        let subject =
+            crate::git_proc::read(&clone, &["log", "-1", "--format=%s", "orion/knowledge-ann"])
+                .unwrap();
+        assert_eq!(
+            subject.trim(),
+            "knowledge: harvest #13",
+            "the later harvest kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_promotion_is_proposed_on_its_own_branch_and_only_in_the_agent_docs() {
+        let w = World::new();
+        let (git, gh) = (LocalGit::default(), FakeGh::new("ann"));
+        let share = w.sharer(&git, &gh);
+        let (lock, name) = share.open_docs_branch().await.unwrap();
+        assert_eq!(name, "orion/agent-docs-ann");
+        let clone = w.local.clone_dir();
+        std::fs::write(
+            clone.join("AGENTS.md"),
+            "# Agents\n- Go through the registry.\n",
+        )
+        .unwrap();
+        gh.on("pr list", Ok("[]"));
+        gh.on("pr create", Ok("https://github.com/o/app/pull/90"));
+        let (pr, head) = share
+            .propose_docs(&name, "agent docs: promote 1 rule", "body")
+            .await
+            .unwrap()
+            .unwrap();
+        drop(lock);
+        assert_eq!(pr.number, 90);
+        assert_eq!(w.origin_rev("refs/heads/orion/agent-docs-ann"), Some(head));
+        let create = gh.call("pr create").unwrap();
+        assert!(create.iter().any(|a| a == DOCS_TITLE));
+
+        // A change outside the agent docs is refused, and thrown away.
+        let (lock, name) = share.open_docs_branch().await.unwrap();
+        std::fs::write(clone.join("app.txt"), "changed").unwrap();
+        let refused = share.propose_docs(&name, "agent docs", "body").await;
+        drop(lock);
+        assert!(refused.unwrap_err().contains("app.txt"));
+        assert_eq!(
+            std::fs::read_to_string(clone.join("app.txt")).unwrap(),
+            "app"
+        );
+        assert!(docs_path_ok("agent_docs/ui.md") && docs_path_ok("AGENTS.md"));
+        assert!(!docs_path_ok(".orion/decisions/x.md") && !docs_path_ok("src/a.ts"));
+        assert!(!docs_path_ok("../AGENTS.md"));
+    }
+
+    #[tokio::test]
+    async fn a_draft_pull_request_is_marked_ready() {
+        let w = World::new();
+        let (git, gh) = (LocalGit::default(), FakeGh::new("ann"));
+        let share = w.sharer(&git, &gh);
+        let branch = share.open().await.unwrap();
+        harvest_into(&branch.store(), &entry("k12-1", 12, "auth/login", "owner"));
+        gh.on(
+            "pr list",
+            Ok(r#"[{"number": 77, "url": "https://github.com/o/app/pull/77", "baseRefName": "dev", "isDraft": true}]"#),
+        );
+        share
+            .publish(&branch, "knowledge: signed off")
+            .await
+            .unwrap();
+        drop(branch);
+        assert_eq!(gh.call("pr ready").unwrap(), ["pr", "ready", "77"]);
     }
 }

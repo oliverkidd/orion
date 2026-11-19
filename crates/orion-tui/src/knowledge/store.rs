@@ -195,7 +195,7 @@ impl Store {
     }
 
     pub(crate) fn entries_path(&self) -> PathBuf {
-        self.dir.join("entries.jsonl")
+        self.dir.join(ENTRIES_FILE)
     }
 
     /// Every entry recorded, oldest first. A line that doesn't read (the
@@ -400,14 +400,24 @@ impl Store {
         Ok(true)
     }
 
-    /// Mark `id` vetoed, and take it out of its page and the index. The
-    /// caller commits and pushes (`super::share`).
-    pub(crate) fn veto(&self, id: &str, project: &str) -> Result<(), String> {
+    /// Give `id` `status` (vetoed, dropped) and — when there is one —
+    /// `note` saying why, and take it off its page and out of the index.
+    /// The caller commits (`super::share`).
+    pub(crate) fn retire(
+        &self,
+        id: &str,
+        project: &str,
+        status: &str,
+        note: &str,
+    ) -> Result<(), String> {
         let mut all = self.entries();
         let Some(entry) = all.iter_mut().find(|e| e.id == id) else {
             return Err(format!("no entry {id}"));
         };
-        entry.status = VETOED.into();
+        entry.status = status.into();
+        if !note.trim().is_empty() {
+            entry.note = note.trim().to_string();
+        }
         let topic = entry.topic.clone();
         self.save_entries(&all)?;
         if let Some(page) = self.page(&topic) {
@@ -415,6 +425,60 @@ impl Store {
         }
         self.write_index(project)?;
         Ok(())
+    }
+
+    /// Put `rule` in place of entry `id`'s rule: in `entries.jsonl`, and
+    /// on every page line that cites it, the line's PRs, agent-call mark
+    /// and ids kept ([`with_rule_text`]). The caller commits.
+    pub(crate) fn rewrite(&self, id: &str, rule: &str) -> Result<(), String> {
+        let mut all = self.entries();
+        let Some(entry) = all.iter_mut().find(|e| e.id == id) else {
+            return Err(format!("no entry {id}"));
+        };
+        entry.rule = rule.trim().to_string();
+        let topic = entry.topic.clone();
+        self.save_entries(&all)?;
+        if let Some(page) = self.page(&topic) {
+            let mut lines: Vec<String> = Vec::new();
+            for line in page.lines() {
+                match line_ids(line).contains(&id) {
+                    true => lines.push(with_rule_text(line, rule)),
+                    false => lines.push(line.to_string()),
+                }
+            }
+            let mut text = lines.join("\n");
+            if page.ends_with('\n') {
+                text.push('\n');
+            }
+            self.write_page(&topic, &text)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn lessons_path(&self) -> PathBuf {
+        self.dir.join(LESSONS_FILE)
+    }
+
+    /// Every lesson the owner's reviews left, oldest first.
+    pub(crate) fn lessons(&self) -> Vec<Lesson> {
+        read_lessons(&std::fs::read_to_string(self.lessons_path()).unwrap_or_default())
+    }
+
+    /// Write `all` as the whole of `lessons.jsonl`, a lesson a line.
+    pub(crate) fn save_lessons(&self, all: &[Lesson]) -> Result<(), String> {
+        let mut text = String::new();
+        for one in all {
+            text.push_str(&serde_json::to_string(one).map_err(|e| e.to_string())?);
+            text.push('\n');
+        }
+        self.write(&self.lessons_path(), &text)
+    }
+
+    /// Add `new` to the end of `lessons.jsonl`.
+    pub(crate) fn append_lessons(&self, new: &[Lesson]) -> Result<(), String> {
+        let mut all = self.lessons();
+        all.extend(new.iter().cloned());
+        self.save_lessons(&all)
     }
 
     /// Whether orion may write `path`: a file inside [`DIR`], with no `..`
@@ -462,6 +526,123 @@ pub(crate) fn unmarked(text: &str) -> &str {
         None => text,
     }
 }
+
+/// `lessons.jsonl`, beside the pages: what the owner's rule reviews
+/// dropped or rewrote, and why — read by every later harvest.
+pub(crate) const LESSONS_FILE: &str = "lessons.jsonl";
+/// How many of the latest lessons a prompt carries.
+pub(crate) const LESSONS_IN_PROMPT: usize = 40;
+/// The heading the lessons go under in a prompt, after the records.
+pub(crate) const LESSONS_HEAD: &str =
+    "The owner's corrections of past harvests. Don't make these mistakes again:";
+
+/// One correction from a rule review: a rule the owner dropped, or
+/// rewrote with a note.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Lesson {
+    /// The entry it was about.
+    pub id: String,
+    pub pr: u64,
+    pub topic: String,
+    /// The rule as the harvest wrote it.
+    pub rule: String,
+    /// [`LESSON_DROPPED`] or [`LESSON_REWRITTEN`].
+    pub verdict: String,
+    /// The owner's note; empty for a drop with no reason.
+    pub note: String,
+    /// Who reviewed it (their GitHub login).
+    pub by: String,
+    /// RFC 3339.
+    pub at: String,
+}
+
+pub(crate) const LESSON_DROPPED: &str = "dropped";
+pub(crate) const LESSON_REWRITTEN: &str = "rewritten";
+
+/// `lessons.jsonl`'s text: a line that doesn't read is skipped.
+pub(crate) fn read_lessons(text: &str) -> Vec<Lesson> {
+    text.lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// `theirs` and `ours` as one list, each lesson once (by entry and time),
+/// in the order they were made.
+pub(crate) fn merge_lessons(theirs: &[Lesson], ours: &[Lesson]) -> Vec<Lesson> {
+    let mut all: Vec<Lesson> = theirs.to_vec();
+    for one in ours {
+        if !all.iter().any(|l| l.id == one.id && l.at == one.at) {
+            all.push(one.clone());
+        }
+    }
+    all.sort_by(|a, b| a.at.cmp(&b.at));
+    all
+}
+
+/// The latest [`LESSONS_IN_PROMPT`] lessons as a prompt gives them, under
+/// [`LESSONS_HEAD`] — newest first; empty with none.
+pub(crate) fn lessons_part(all: &[Lesson]) -> String {
+    if all.is_empty() {
+        return String::new();
+    }
+    let mut out = vec![LESSONS_HEAD.to_string()];
+    for l in all.iter().rev().take(LESSONS_IN_PROMPT) {
+        let note = match l.note.trim() {
+            "" => "no reason given".to_string(),
+            n => n.to_string(),
+        };
+        out.push(match l.verdict.as_str() {
+            LESSON_REWRITTEN => format!("- rewritten: \"{}\" → {note}", l.rule),
+            _ => format!("- dropped: \"{}\" — {note}", l.rule),
+        });
+    }
+    out.join("\n")
+}
+
+/// A page line with its rule text swapped for `rule`: the trailing PRs
+/// (`(#12, #30)`), `(agent call)` and the id comment kept as they were.
+pub(crate) fn with_rule_text(line: &str, rule: &str) -> String {
+    let (body, comment) = match line.rfind("<!--") {
+        Some(at) => (line[..at].trim_end(), &line[at..]),
+        None => (line.trim_end(), ""),
+    };
+    let mut rest = body.strip_prefix("- ").unwrap_or(body).to_string();
+    let mut tail: Vec<String> = Vec::new();
+    loop {
+        let trimmed = rest.trim_end().to_string();
+        let Some(open) = trimmed.rfind(" (") else {
+            break;
+        };
+        let group = &trimmed[open + 1..];
+        let inner = group.trim_start_matches('(').trim_end_matches(')');
+        let is_prs = !inner.is_empty()
+            && inner
+                .split([',', ' '])
+                .filter(|w| !w.is_empty())
+                .all(|w| w.starts_with('#') && w[1..].chars().all(|c| c.is_ascii_digit()));
+        if group.ends_with(')') && (is_prs || inner == "agent call") {
+            tail.insert(0, group.to_string());
+            rest = trimmed[..open].to_string();
+        } else {
+            break;
+        }
+    }
+    let text = rule.trim().trim_end_matches('.');
+    let mut out = format!("- {text}.");
+    for t in tail {
+        out.push(' ');
+        out.push_str(&t);
+    }
+    if !comment.is_empty() {
+        out.push(' ');
+        out.push_str(comment);
+    }
+    out
+}
+
+/// `entries.jsonl`, beside the pages: every entry ever recorded.
+pub(crate) const ENTRIES_FILE: &str = "entries.jsonl";
 
 /// `checked.jsonl`, beside the pages.
 pub(crate) const CHECKED_FILE: &str = "checked.jsonl";
@@ -1030,7 +1211,7 @@ mod tests {
         store.write_page("auth/login", &marked(PAGE)).unwrap();
         assert_eq!(store.page("auth/login").unwrap(), PAGE);
 
-        store.veto("k12-1", "demo").unwrap();
+        store.retire("k12-1", "demo", VETOED, "").unwrap();
         assert_eq!(store.entries()[0].status, VETOED);
         assert!(store.page("auth/login").unwrap().contains("<!-- k30-2 -->"));
     }
@@ -1115,5 +1296,72 @@ mod tests {
         assert_eq!((e.by.as_str(), e.confidence.as_str()), ("owner", "high"));
         assert_eq!(e.status, ACTIVE);
         assert!(Entry::from_model(&serde_json::json!({"rule": ""})).is_none());
+    }
+
+    #[test]
+    fn a_rewrite_keeps_the_lines_prs_mark_and_ids() {
+        assert_eq!(
+            with_rule_text(
+                "- Selection overrides hover on tables. (#1056, #1060) (agent call) <!-- k1056-6 k1060-2 -->",
+                "Selection state always beats hover affordances"
+            ),
+            "- Selection state always beats hover affordances. (#1056, #1060) (agent call) <!-- k1056-6 k1060-2 -->"
+        );
+        assert_eq!(
+            with_rule_text("- Old (said in parens) here. (#3) <!-- k3-1 -->", "New."),
+            "- New. (#3) <!-- k3-1 -->",
+            "a parenthesis that isn't PRs is text"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::of(dir.path());
+        let mut e = Entry {
+            id: "k3-1".into(),
+            topic: "editor/tables".into(),
+            rule: "Old.".into(),
+            status: ACTIVE.into(),
+            ..Entry::default()
+        };
+        store.append(std::slice::from_ref(&e)).unwrap();
+        store
+            .write_page("editor/tables", "# editor/tables\nScope: tables\n\n## Rules in force\n- Old. (#3) <!-- k3-1 -->\n- Other. (#4) <!-- k4-1 -->\n")
+            .unwrap();
+        store.rewrite("k3-1", "New rule").unwrap();
+        e.rule = "New rule".into();
+        assert_eq!(store.entries(), vec![e]);
+        let page = store.page("editor/tables").unwrap();
+        assert!(
+            page.contains("- New rule. (#3) <!-- k3-1 -->\n- Other. (#4) <!-- k4-1 -->"),
+            "{page}"
+        );
+    }
+
+    #[test]
+    fn lessons_merge_once_each_and_the_newest_lead_the_prompt() {
+        let lesson = |id: &str, verdict: &str, note: &str, at: &str| Lesson {
+            id: id.into(),
+            rule: format!("rule {id}"),
+            verdict: verdict.into(),
+            note: note.into(),
+            at: at.into(),
+            ..Lesson::default()
+        };
+        let a = lesson("k1-1", LESSON_DROPPED, "", "2026-11-18T09:00:00Z");
+        let b = lesson(
+            "k2-1",
+            LESSON_REWRITTEN,
+            "it's every element",
+            "2026-11-19T09:00:00Z",
+        );
+        let all = merge_lessons(std::slice::from_ref(&a), &[a.clone(), b.clone()]);
+        assert_eq!(all, vec![a, b]);
+        assert_eq!(
+            lessons_part(&all),
+            format!("{LESSONS_HEAD}\n- rewritten: \"rule k2-1\" → it's every element\n- dropped: \"rule k1-1\" — no reason given")
+        );
+        assert_eq!(lessons_part(&[]), "");
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::of(dir.path());
+        store.append_lessons(&all).unwrap();
+        assert_eq!(store.lessons(), all);
     }
 }

@@ -94,6 +94,9 @@ pub enum Focus {
 /// What a screen cell maps to; rebuilt on every draw for hit-testing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HitTarget {
+    /// The RULE REVIEW's BANNER across the top row: a click opens the
+    /// review (`crate::rule_review`).
+    RuleReviewBanner,
     /// The GRID's background (registered after the cards, so they win).
     PanelBg(Focus),
     TerminalPane,
@@ -2492,6 +2495,9 @@ pub enum Overlay {
     /// A meeting's TAKEAWAYS SCREEN, from its Needs you card or its row
     /// on the Automations screen (`crate::takeaways_view`).
     Takeaways(Box<crate::takeaways_view::TakeawaysView>),
+    /// The RULE REVIEW: the morning's sign-off of the rules orion
+    /// harvested (`crate::rule_review`).
+    RuleReview(Box<crate::rule_review::RuleReviewView>),
 }
 
 /// Rows optimistically removed for an in-flight DeleteWorktree, kept so an
@@ -4113,6 +4119,9 @@ pub struct App {
     /// for Needs you to mirror the open ones — kept on disk, so it
     /// outlives a restart.
     pub(crate) factory_cards: Vec<crate::factory::cards::Posted>,
+    /// The RULE REVIEW's pending rules and whether it should open
+    /// (`crate::rule_review`).
+    pub(crate) rule_review: crate::rule_review::ReviewState,
     /// Where the Spotify polls and commands answer — the loop's channel,
     /// held here so a click on one of the readout's buttons can reach it.
     pub spotify_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::spotify::Answer>>,
@@ -4894,6 +4903,7 @@ impl App {
             slack_status: Default::default(),
             outbox: Vec::new(),
             factory_cards: crate::factory::cards::load(),
+            rule_review: crate::rule_review::ReviewState::default(),
             spotify_tx: None,
             edge_tap: None,
             release_watch: None,

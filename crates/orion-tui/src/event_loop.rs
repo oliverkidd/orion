@@ -4307,6 +4307,7 @@ fn dispatch_action(
         Action::CopyLinearIssues => crate::linear::copy_worktree_issues(app),
         Action::Todos => crate::todos::open(app),
         Action::WeekReview => crate::automations::week_review::run_now(app),
+        Action::ReviewRules => crate::rule_review::open(app),
         Action::Automations => crate::automations::view::open(app),
         Action::PullWorktree => {
             if let Some(id) = crate::git_sync::target(app) {
@@ -7979,6 +7980,7 @@ pub(crate) fn handle_overlay_key(app: &mut App, key: KeyEvent, out: &mut Vec<Cli
         Overlay::WeekReview(_) => crate::week_review::handle_key(app, key),
         Overlay::Conflicts(_) => crate::conflicts::handle_key(app, key),
         Overlay::Takeaways(_) => crate::takeaways_view::handle_key(app, key),
+        Overlay::RuleReview(_) => crate::rule_review::handle_key(app, key),
         Overlay::Usage(_) => crate::usage::handle_key(app, key),
         Overlay::CleanWorktrees(_) => crate::clean_worktrees::handle_key(app, key, out),
         Overlay::OpenRepo(_) => crate::open_repo::handle_key(app, key, out),
@@ -12488,6 +12490,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) 
                 }
                 // A port on a run line: its app, in the browser.
                 Some(HitTarget::RunPort(_, port)) => crate::stacks::open_port(app, port),
+                // The RULE REVIEW's banner: the review.
+                Some(HitTarget::RuleReviewBanner) => crate::rule_review::open(app),
                 // An ACCOUNT CHIP: ACCOUNT USAGE, on that account.
                 Some(HitTarget::AccountTag(id)) => crate::usage::open_on(app, &id),
                 // `‹ sessions` in a full-screen session's header: back
@@ -38385,6 +38389,7 @@ mod tests {
             Overlay::Todos(_) => "Todos",
             Overlay::Automations(_) => "Automations",
             Overlay::Takeaways(_) => "Takeaways",
+            Overlay::RuleReview(_) => "RuleReview",
         }
     }
 

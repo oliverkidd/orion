@@ -149,6 +149,7 @@ The actions with no key of their own — **New agent — choose harness** (the N
 **Duplicate session**, **Comment on pull request**, **Delete all sessions**, **SSH hosts** (the hosts
 `orion ssh` has reached; picking one restarts orion there), **Restart stack**, **Stop all stacks**,
 **Clean unused worktrees**, **Copy linked Linear issues**, **Run setup**, **Run week in review now**,
+**Review rules** (the RULE REVIEW, while rules wait on your sign-off),
 **Keyboard shortcuts**, **Open a folder as a project**, **Claude accounts**, **Connections**
 (Settings on its Connections tab),
 **Open skills folder** (your Claude Code skills, `~/.claude/skills`, in the TREE BROWSER) — are
@@ -767,6 +768,12 @@ a page asks something, backs out of the question.
 
 WHAT'S NEW is a sheet of its own, up once on the first launch after an upgrade: every release since
 the one this machine last ran, newest first. `↑`/`↓` walk the releases; `Enter` or `Esc` closes it.
+
+The RULE REVIEW is a sheet of its own too, up at 09:00 and on any launch while harvested rules wait
+on your sign-off ([Sessions](sessions.md#rule-review)). `↑`/`↓` (`k`/`j`) move between rules,
+`Space` keeps or drops the one under the cursor, `n` writes a note on it (`Enter` saves it, `Esc`
+leaves it), `Enter` shows the tally and `Enter` again signs off; `Esc` puts it off, picks kept, and
+the banner on the top row stays until you sign off — a click on it opens the review again.
 
 ## Typed fields
 

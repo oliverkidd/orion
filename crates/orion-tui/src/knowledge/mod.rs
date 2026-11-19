@@ -10,8 +10,9 @@
 //!   authoritative and read-only to orion.
 //! - **Sharing** ([`share`]): orion writes through a pull request — its
 //!   own working clone, one `orion/knowledge-<login>` branch a person,
-//!   rebased on the base before each write, pushed with a lease, one pull
-//!   request kept open. Never a push to the base.
+//!   rebased on the base before each write, committed on this machine and
+//!   pushed with a lease only when the owner signs off a rule review, one
+//!   pull request kept open. Never a push to the base.
 //! - **Local material** ([`local`]): the condensed dossiers, the queue,
 //!   the cards' state and the session snapshot ([`snapshot`]) stay in
 //!   `<data_dir>/knowledge/<project id>/`.
@@ -25,9 +26,13 @@
 //!   learned with `orion knowledge note` before it finishes; its pull
 //!   request's harvest records those instead of extracting, each topic
 //!   they touch checked and merged by one call.
-//! - **The daily card** at 18:30 lists the rules recorded as the owner's
-//!   that day, each with a veto, and links the pull request; after its
-//!   veto window orion merges it ([`runner`]).
+//! - **The rule review** ([`review`], drawn by `crate::rule_review`): at
+//!   09:00, or the first launch after, every rule waiting opens over orion
+//!   — kept, dropped, or noted to be rewritten — and a banner stays until
+//!   it is signed off. The sign-off pushes the branch, keeps each drop and
+//!   note as a lesson later harvests read, and lets orion merge the pull
+//!   request ([`runner`]). Rules that hold repo-wide are offered weekly to
+//!   move into the agent docs, through a pull request of their own.
 //! - **The read path** ([`read`]): every builder prompt carries the index,
 //!   the areas and topics to note rules on, and lists the records, read
 //!   from the session's own checkout ([`prompt_context`]); `orion knowledge
@@ -50,6 +55,7 @@ pub(crate) mod local;
 pub(crate) mod notes;
 pub(crate) mod read;
 pub(crate) mod records;
+pub(crate) mod review;
 pub(crate) mod runner;
 pub(crate) mod share;
 pub(crate) mod snapshot;
@@ -309,7 +315,7 @@ pub fn cli_consolidate(project_name: String) -> Result<()> {
         share.main.display(),
         share.base
     );
-    let (done, published, index_lines) = runtime()?
+    let (done, published, index_lines, branch_name) = runtime()?
         .block_on(async {
             let branch = share.open().await?;
             let store = branch.store();
@@ -325,7 +331,9 @@ pub fn cli_consolidate(project_name: String) -> Result<()> {
                 .index()
                 .map_or(0, |i| store::marked(&i).lines().count());
             let published = share.publish(&branch, consolidate::MESSAGE).await?;
-            Ok::<_, String>((done, published, lines))
+            let name = branch.name.clone();
+            drop(branch);
+            Ok::<_, String>((done, published, lines, name))
         })
         .map_err(|why| anyhow!(why))?;
     println!("{}", done.line());
@@ -334,6 +342,7 @@ pub fn cli_consolidate(project_name: String) -> Result<()> {
         println!("Proposed in #{}: {}", pr.number, pr.url);
     }
     runner::note_published(&local, &published);
+    review::after_cli_push(&local, &share.base, &branch_name, &[], &published.head);
     Ok(())
 }
 
@@ -370,6 +379,12 @@ pub fn cli_backfill(project_name: String, since: String) -> Result<()> {
                 pushed: true,
             },
         );
+        // A backfill's rules skip the review: you ran it.
+        let prs: Vec<u64> = summary.harvested.iter().map(|o| o.pr).collect();
+        if let Some(login) = runtime.block_on(runner::gh_login()) {
+            let branch = share::branch_for(&login);
+            review::after_cli_push(&local, &share.base, &branch, &prs, &summary.head);
+        }
     }
     runner::notify(&local, runner::Notice::Backfilled { lines });
     Ok(())

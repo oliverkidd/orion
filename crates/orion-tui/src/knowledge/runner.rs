@@ -1,26 +1,27 @@
 //! The TUI's side of knowledge: the session snapshot kept as the tree
 //! changes, harvests queued at merge and run one at a time in the
-//! background, the knowledge pull request merged after its veto window,
-//! and the cards — the daily "new rules" card with its vetoes, the
-//! one-time "ignores `.orion/decisions/`" card, a merge that failed twice,
-//! and a backfill's summary.
+//! background, the knowledge pull request merged once the owner's rule
+//! review signed off everything on it, and the cards — the one-time
+//! "ignores `.orion/decisions/`" card, a merge that failed twice, and a
+//! backfill's summary.
 //!
-//! Nothing here blocks the loop: a harvest, a veto and a merge each run on
-//! a task of their own, their git and file work on blocking threads. Each
-//! project's queue and state are kept in its folder under the data dir
-//! (`super::local`), so a harvest cut off by a quit runs on the next
+//! Nothing here blocks the loop: a harvest, a sign-off and a merge each run
+//! on a task of their own, their git and file work on blocking threads.
+//! Each project's queue and state are kept in its folder under the data
+//! dir (`super::local`), so a harvest cut off by a quit runs on the next
 //! start. What the background wants posted is left in the state's
 //! `notices`, which [`tick`] posts.
 //!
-//! **The veto window.** At 18:30 the daily card lists the rules recorded
-//! as the owner's since the last one, each with a veto, and a link to the
-//! knowledge pull request. With `factory.knowledge_auto_merge` on (the
-//! default), the window closes [`WINDOW_MS`] later — at once on All fine
-//! — and orion then merges the pull request itself ([`merge_due`],
-//! `Sharer::merge`): only when it is mergeable, no check fails, and its
-//! head is what orion last pushed. A check still running waits for a
-//! later tick; a conflict is rebuilt and pushed; a refusal is tried once
-//! more, then said on a card. Never forced.
+//! **The review gate.** A harvest commits on this machine and pushes
+//! nothing. At 09:00 (or the first launch after) the RULE REVIEW opens
+//! over orion with every rule waiting (`super::review`, `crate::rule_review`);
+//! its sign-off pushes the branch and opens or updates the pull request.
+//! With `factory.knowledge_auto_merge` on (the default), orion then merges
+//! it itself ([`merge_due`], `Sharer::merge`): only when the review signed
+//! off everything on it, it is mergeable, no check fails, and its head is
+//! what the sign-off pushed. A check still running waits for a later tick;
+//! a conflict is rebuilt and pushed (when nothing unsigned rode in); a
+//! refusal is tried once more, then said on a card. Never forced.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -33,9 +34,10 @@ use serde::{Deserialize, Serialize};
 use super::consolidate;
 use super::harvest::{self, ClaudeCli, Outcome, Session, Target};
 use super::local::Local;
+use super::review::{self, Candidate, DocsPr};
 use super::share::{self, GhCli, Merge, Pr, Published, Sharer, SystemGit};
 use super::snapshot::{self, Snapshot};
-use super::store::{self, Entry, Store, ACTIVE};
+use super::store;
 use super::{backfill, transcripts};
 use super::{notes, records};
 use crate::app::App;
@@ -43,13 +45,6 @@ use crate::factory::cards::{self, Button, Card, Press, Recipient};
 
 /// How often [`tick`] does its work.
 const EVERY: Duration = Duration::from_secs(30);
-/// When the daily card goes, local time.
-const DAILY_AT: (u32, u32) = (18, 30);
-/// The most rules one daily card lists.
-const DAILY_MAX: usize = 20;
-/// How long after the daily card the knowledge pull request merges, unless
-/// a veto or All fine came first.
-pub(crate) const WINDOW_MS: i64 = 2 * 60 * 60 * 1000;
 /// How many times a merge that is refused is tried before a card says so.
 const MERGE_TRIES: u32 = 2;
 /// How often orion looks for topics due a staleness check. Cheap: git
@@ -84,15 +79,6 @@ pub(crate) struct Job {
     pub run: Option<String>,
 }
 
-/// One rule a daily card lists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Listed {
-    pub id: String,
-    pub rule: String,
-    #[serde(default)]
-    pub vetoed: bool,
-}
-
 /// Something the background (or the CLI) wants a card for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -105,24 +91,27 @@ pub(crate) enum Notice {
     CantMerge { pr: Pr, why: String },
 }
 
-/// The veto window on the knowledge pull request.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Window {
-    /// Epoch ms it closes, and the merge may go.
-    pub ends_at: i64,
-}
-
 /// What a project's cards and pull request remember between runs:
 /// `<data_dir>/knowledge/<project id>/state.json`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct State {
-    /// The local date the daily card was last considered.
-    pub last_daily: String,
-    /// RFC 3339: entries recorded after this are new to the next card.
-    pub since: String,
-    /// Each daily card's key → the rules it lists, in order.
-    pub daily: BTreeMap<String, Vec<Listed>>,
+    /// The entries a rule review signed off (or a backfill recorded),
+    /// pruned to the ones still only on the branch.
+    pub signed: BTreeSet<String>,
+    /// The head the last sign-off pushed: the merge goes only while
+    /// `pushed` is this one.
+    pub signed_head: String,
+    /// The local date (`YYYY-MM-DD`) the review last opened on its own.
+    pub review_opened_on: String,
+    /// The promotions into the agent docs the next review offers.
+    pub promote: Vec<Candidate>,
+    /// Epoch ms of the next promotion scan; 0 until first seen.
+    pub promote_next: i64,
+    /// Promotions the owner turned down, by their first entry.
+    pub promote_declined: BTreeSet<String>,
+    /// The agent docs pull request a sign-off opened, until it merges.
+    pub docs_pr: Option<DocsPr>,
     /// Whether the "ignores `.orion/decisions/`" card went.
     pub asked_gitignore: bool,
     pub notices: Vec<Notice>,
@@ -130,9 +119,7 @@ pub(crate) struct State {
     pub pr: Option<Pr>,
     /// The commit orion last pushed to its knowledge branch.
     pub pushed: String,
-    /// The veto window, while one is open.
-    pub window: Option<Window>,
-    /// Merges refused since the window closed.
+    /// Merges refused since the last sign-off.
     pub merge_failures: u32,
     /// Epoch ms the next look for topics due a staleness check is; 0
     /// until first seen. When each topic was checked is kept in the repo
@@ -194,7 +181,7 @@ pub(crate) fn note_published(local: &Local, published: &Published) {
         None => {
             s.pr = None;
             s.pushed.clear();
-            s.window = None;
+            s.signed_head.clear();
         }
     });
 }
@@ -322,9 +309,24 @@ fn hold_for_reset(job: Job) {
     });
 }
 
+/// The `gh` every knowledge step runs.
+pub(super) fn gh() -> &'static GhCli {
+    &GH
+}
+
+/// The signed-in GitHub login.
+pub(super) async fn gh_login() -> Option<String> {
+    use share::Gh as _;
+    GH.login().await
+}
+
 /// The project at `root` (`local`'s), as orion writes its knowledge, on
 /// the base [`share::base_of`] finds.
-async fn sharer(local: &Local, root: &Path, project: &str) -> Result<Sharer<'static>, String> {
+pub(super) async fn sharer(
+    local: &Local,
+    root: &Path,
+    project: &str,
+) -> Result<Sharer<'static>, String> {
     let base = share::base_of(root, &GH).await;
     Ok(Sharer {
         git: &GIT,
@@ -336,9 +338,9 @@ async fn sharer(local: &Local, root: &Path, project: &str) -> Result<Sharer<'sta
     })
 }
 
-/// Harvest `job`'s pull request into the knowledge branch, and push and
-/// propose it. None when it was harvested before (anything left unpushed
-/// is pushed all the same) or the repo ignores `.orion/decisions/`.
+/// Harvest `job`'s pull request into the knowledge branch, committed on
+/// this machine for the next rule review. None when it was harvested before
+/// or the repo ignores `.orion/decisions/`.
 async fn run_job(job: &Job) -> Result<Option<Outcome>, String> {
     let model = ClaudeCli::from_config()?;
     let local = Local::of(&job.id);
@@ -358,7 +360,7 @@ async fn run_job(job: &Job) -> Result<Option<Outcome>, String> {
     let share = sharer(&local, &job.root, &job.project).await?;
     let branch = share.open().await?;
     let store = branch.store();
-    let records = records::for_check_in(&branch.clone);
+    let records = harvest::with_lessons(records::for_check_in(&branch.clone), &store);
     let to = Target {
         store: &store,
         local: &local,
@@ -408,9 +410,9 @@ async fn run_job(job: &Job) -> Result<Option<Outcome>, String> {
             Err(why) => tracing::warn!("knowledge: consolidating {} failed: {why}", job.project),
         }
     }
-    let published = share.publish(&branch, &message).await?;
+    // Committed here only: the owner's next sign-off pushes it.
+    share.save(&branch, &message).await?;
     drop(branch);
-    note_published(&local, &published);
     if noted_used {
         notes::remove_for(&notes::dir(), &job.url);
     }
@@ -519,31 +521,90 @@ fn note_sessions(app: &App) {
 /// next one on a day when it is. The first sight of a project starts its
 /// day.
 pub(crate) fn stale_due(state: &mut State, now_ms: i64) -> bool {
-    if state.stale_next == 0 {
-        state.stale_next = now_ms + STALE_LOOK_MS;
+    cadence_due(&mut state.stale_next, now_ms, STALE_LOOK_MS)
+}
+
+/// Whether a step that runs every `every_ms` is due at `now_ms`, moving
+/// `next` on when it is. The first sight (`next` still 0) starts the
+/// period and runs nothing.
+pub(super) fn cadence_due(next: &mut i64, now_ms: i64, every_ms: i64) -> bool {
+    if *next == 0 {
+        *next = now_ms + every_ms;
         return false;
     }
-    if now_ms < state.stale_next {
+    if now_ms < *next {
         return false;
     }
-    state.stale_next = now_ms + STALE_LOOK_MS;
+    *next = now_ms + every_ms;
     true
 }
 
+/// The keys of the background steps on their way — a project's merge,
+/// staleness pass, sign-off … — so a tick starts no second one.
+pub(super) struct InFlight(Mutex<BTreeSet<String>>);
+
+/// A key held in an [`InFlight`] set; dropping it — the task done, or
+/// panicked — lets the next one start.
+pub(super) struct Held {
+    set: &'static InFlight,
+    key: String,
+}
+
+impl InFlight {
+    pub(super) const fn new() -> Self {
+        InFlight(Mutex::new(BTreeSet::new()))
+    }
+
+    /// Hold `key`: None while it is held already.
+    pub(super) fn take(&'static self, key: &str) -> Option<Held> {
+        let fresh = self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key.to_string());
+        fresh.then(|| Held {
+            set: self,
+            key: key.to_string(),
+        })
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.set
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.key);
+    }
+}
+
+/// Spawn `work` on the runtime unless `key` is already in `set`, the key
+/// held until it finishes.
+pub(super) fn spawn_once<F>(set: &'static InFlight, key: &str, work: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let Some(held) = set.take(key) else {
+        return;
+    };
+    handle.spawn(async move {
+        work.await;
+        drop(held);
+    });
+}
+
 /// The projects with a staleness pass on its way.
-static STALING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static STALING: InFlight = InFlight::new();
 
 /// Run the staleness pass for the project at `root` off the loop: one at
 /// a time a project, and never beside its harvests (the branch's lock).
 fn start_staleness(local: Local, root: PathBuf, project: String) {
-    if !STALING
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(local.id.clone())
-    {
-        return;
-    }
-    tokio::spawn(async move {
+    let key = local.id.clone();
+    spawn_once(&STALING, &key, async move {
         match run_staleness(&local, &root, &project).await {
             Ok(changed) => tracing::info!(
                 "knowledge: staleness pass of {project} changed {:?}",
@@ -551,10 +612,6 @@ fn start_staleness(local: Local, root: PathBuf, project: String) {
             ),
             Err(why) => tracing::warn!("knowledge: staleness pass of {project} failed: {why}"),
         }
-        STALING
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&local.id);
     });
 }
 
@@ -564,7 +621,8 @@ fn start_staleness(local: Local, root: PathBuf, project: String) {
 /// the branch (the base's `checked.jsonl` and this person's) and from
 /// everyone else's knowledge branch, so one person's orion makes each
 /// week's check and the rest find nothing due. A check that asked the
-/// model is proposed, its dates with it, whether or not a page changed.
+/// model is committed, its dates with it, whether or not a page changed,
+/// and goes up with the next push.
 async fn run_staleness(local: &Local, root: &Path, project: &str) -> Result<Vec<String>, String> {
     let model = ClaudeCli::from_config()?;
     let at = root.to_path_buf();
@@ -579,7 +637,7 @@ async fn run_staleness(local: &Local, root: &Path, project: &str) -> Result<Vec<
     let result = async {
         let branch = share.open().await?;
         let store = branch.store();
-        let records = records::for_check_in(&branch.clone);
+        let records = harvest::with_lessons(records::for_check_in(&branch.clone), &store);
         let to = Target {
             store: &store,
             local,
@@ -595,8 +653,7 @@ async fn run_staleness(local: &Local, root: &Path, project: &str) -> Result<Vec<
         let out = harvest::staleness(&model, &to, &tree.path, &mut checked, today).await?;
         if out.asked {
             store.save_checked(&checked)?;
-            let published = share.publish(&branch, "knowledge: staleness check").await?;
-            note_published(local, &published);
+            share.save(&branch, "knowledge: staleness check").await?;
         }
         Ok(out.changed)
     }
@@ -605,17 +662,26 @@ async fn run_staleness(local: &Local, root: &Path, project: &str) -> Result<Vec<
     result
 }
 
-/// The projects with a merge on its way, so a tick starts no second one.
-static MERGING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// The merges on their way — a project's knowledge pull request, or its
+/// agent docs one — so a tick starts no second one.
+pub(super) static MERGING: InFlight = InFlight::new();
 
-/// The loop's beat: the snapshot, the queue left from a last run, and
-/// for each project the cards the background asked for, the daily card
-/// when it is due, and the merge once its window has closed.
+/// The loop's beat: the snapshot, the queue left from a last run, the
+/// rule review's pending list, and for each project the cards the
+/// background asked for, the morning's review, the merge once the review
+/// signed it off, the staleness pass and the promotion scan.
 pub(crate) fn tick(app: &mut App) {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     if crate::oneshot::offline() {
         return;
     }
+    // What the last refresh found and what the background said land at
+    // once, not on the next beat.
+    if let Some(found) = review::take_refreshed() {
+        crate::rule_review::refreshed(app, found);
+    }
+    review::post_said(app);
+    crate::rule_review::maybe_open(app);
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
         if last.is_some_and(|at| at.elapsed() < EVERY) {
@@ -629,6 +695,8 @@ pub(crate) fn tick(app: &mut App) {
     }
     note_sessions(app);
     let now = chrono::Local::now();
+    let now_ms = now.timestamp_millis();
+    let today = now.format("%Y-%m-%d").to_string();
     let auto = app.pr_body.settings.knowledge_auto_merge;
     let projects: Vec<(String, String, PathBuf)> = app
         .tree
@@ -636,21 +704,18 @@ pub(crate) fn tick(app: &mut App) {
         .iter()
         .map(|p| (p.id.to_string(), p.name.clone(), p.repo_path.clone()))
         .collect();
+    review::refresh(projects.clone());
+    let cutoff = review::cutoff(now);
+    let morning = review::past_review_time(now) && app.rule_review.loaded;
+    let opened_today = app.rule_review.opened_on == today;
     for (id, name, root) in projects {
         let local = Local::of(&id);
-        // A daily card Slack never took (the network was down) has given
-        // you no chance to veto: its window starts again, and nothing
-        // merges, until it is up (`factory::cards::reconcile` posts it
-        // again).
-        let daily_prefix = format!("kb:daily:{id}:");
-        let now_ms = now.timestamp_millis();
-        let undelivered = app
-            .factory_cards
-            .iter()
-            .any(|p| p.card.key.starts_with(&daily_prefix) && cards::awaiting_retry(p, now_ms));
-        // The notices to post, the `.gitignore` card once, the daily card
-        // and whether the merge is due: one read and write of the state.
-        let (notices, daily_card, merge, stale) = State::update(&local, |s| {
+        let held = app.rule_review.pending.iter().find(|p| p.id == id);
+        let pending_any = held.is_some_and(|p| !p.rules.is_empty());
+        let due = held.is_some_and(|p| p.due(cutoff));
+        // The notices to post, the `.gitignore` card once, the morning's
+        // review, and what is due: one read and write of the state.
+        let (notices, nine, merge, stale, promote, docs) = State::update(&local, |s| {
             let notices: Vec<Notice> = std::mem::take(&mut s.notices)
                 .into_iter()
                 .filter(|n| match n {
@@ -658,74 +723,80 @@ pub(crate) fn tick(app: &mut App) {
                     _ => true,
                 })
                 .collect();
-            let card = daily(s, now, &name, &local, auto);
-            if undelivered {
-                // Pushed on in steps, so the state isn't written each tick.
-                let full = now.timestamp_millis() + WINDOW_MS;
-                if let Some(window) = s
-                    .window
-                    .as_mut()
-                    .filter(|w| w.ends_at < full - HOLD_STEP_MS)
-                {
-                    window.ends_at = full;
-                }
+            let nine = morning && s.review_opened_on != today;
+            if nine {
+                s.review_opened_on = today.clone();
             }
-            let merge = merge_due(s, now.timestamp_millis(), auto)
-                .then(|| (s.pr.clone(), s.pushed.clone()));
-            let stale = stale_due(s, now.timestamp_millis());
-            (notices, card, merge, stale)
+            let merge = merge_due(s, auto).then(|| (s.pr.clone(), s.pushed.clone()));
+            let stale = stale_due(s, now_ms);
+            let promote = review::promote_due(s, now_ms);
+            let docs = s.docs_pr.clone();
+            (notices, nine, merge, stale, promote, docs)
         });
         for notice in notices {
             post_notice(app, &id, &name, notice);
         }
-        if let Some(card) = daily_card {
-            cards::post(app, card);
+        if nine {
+            match (due, pending_any) {
+                // Once a day: a launch that opened it already counts.
+                (true, _) if opened_today => {}
+                (true, _) => {
+                    app.rule_review.want_open = true;
+                    app.rule_review.opened_on = today.clone();
+                }
+                // Nothing to review: what was committed since the last
+                // sign-off goes up on its own (checked again, held).
+                (false, false) => {
+                    review::push_if_waiting(local.clone(), root.clone(), name.clone())
+                }
+                (false, true) => {}
+            }
         }
         if let Some((Some(pr), pushed)) = merge {
             start_merge(local.clone(), root.clone(), name.clone(), pr, pushed);
         }
         if stale {
-            start_staleness(local, root, name);
+            start_staleness(local.clone(), root.clone(), name.clone());
+        }
+        if promote {
+            review::start_promote_scan(local.clone(), root.clone(), name.clone());
+        }
+        if let Some(docs) = docs {
+            review::start_docs_merge(local, root, name, docs, auto);
         }
     }
+    crate::rule_review::maybe_open(app);
 }
 
 /// Whether the knowledge pull request should be merged now: the switch
-/// on, a pull request orion pushed to, and its veto window closed.
-pub(crate) fn merge_due(state: &State, now_ms: i64, auto: bool) -> bool {
-    auto && state.pr.is_some()
-        && !state.pushed.is_empty()
-        && state.window.as_ref().is_some_and(|w| now_ms >= w.ends_at)
+/// on, a pull request orion pushed to, and its head the one the last
+/// sign-off pushed — which held only signed-off rules. Harvests committed
+/// since wait here, unpushed, and don't hold it back.
+pub(crate) fn merge_due(state: &State, auto: bool) -> bool {
+    auto && state.pr.is_some() && !state.pushed.is_empty() && state.pushed == state.signed_head
 }
 
 /// Merge the knowledge pull request, off the loop: once at a time a
 /// project.
 fn start_merge(local: Local, root: PathBuf, project: String, pr: Pr, pushed: String) {
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        return;
-    };
-    if !MERGING
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(local.id.clone())
-    {
-        return;
-    }
-    handle.spawn(async move {
+    let key = local.id.clone();
+    spawn_once(&MERGING, &key, async move {
         let wanted = crate::config::Config::load().merge_method(&root);
         let result = match sharer(&local, &root, &project).await {
             Ok(share) => {
                 let merged = share.merge(&pr, &pushed, wanted).await;
                 if let Ok(Merge::Conflicting) = &merged {
                     // The base moved under it: rebased — rebuilt, when
-                    // that conflicts — and pushed for the next tick.
+                    // that conflicts — and pushed for the next tick, when
+                    // everything on it is still signed off; else it waits
+                    // for the next review.
                     let rebuilt = async {
                         let branch = share.open().await?;
-                        let published = share
-                            .publish(&branch, &format!("knowledge: rebuilt on {}", share.base))
-                            .await?;
-                        drop(branch);
-                        note_published(&local, &published);
+                        let message = format!("knowledge: rebuilt on {}", share.base);
+                        if !review::publish_if_all_signed(&local, &share, &branch, &message).await?
+                        {
+                            State::update(&local, |s| s.signed_head.clear());
+                        }
                         Ok::<_, String>(())
                     }
                     .await;
@@ -738,16 +809,12 @@ fn start_merge(local: Local, root: PathBuf, project: String, pr: Pr, pushed: Str
             Err(why) => Err(why),
         };
         merge_result(&local, &project, &pr, result);
-        MERGING
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&local.id);
     });
 }
 
 /// What a merge attempt leaves in the state: a merged or closed pull
 /// request forgotten; a refusal counted, and on the second a card, the
-/// window closed until the next day's.
+/// merge held until the next sign-off.
 pub(crate) fn merge_result(local: &Local, project: &str, pr: &Pr, result: Result<Merge, String>) {
     match result {
         Ok(Merge::Merged) | Ok(Merge::Closed) => {
@@ -758,7 +825,7 @@ pub(crate) fn merge_result(local: &Local, project: &str, pr: &Pr, result: Result
             State::update(local, |s| {
                 s.pr = None;
                 s.pushed.clear();
-                s.window = None;
+                s.signed_head.clear();
                 s.merge_failures = 0;
             });
         }
@@ -771,7 +838,7 @@ pub(crate) fn merge_result(local: &Local, project: &str, pr: &Pr, result: Result
             State::update(local, |s| {
                 s.merge_failures += 1;
                 if s.merge_failures >= MERGE_TRIES {
-                    s.window = None;
+                    s.signed_head.clear();
                     s.merge_failures = 0;
                     s.notices.push(Notice::CantMerge {
                         pr: pr.clone(),
@@ -853,271 +920,18 @@ fn cant_merge_card(id: &str, project: &str, pr: &Pr, why: &str) -> Card {
         context: format!("Knowledge · {project}"),
         title: format!("Knowledge PR #{} can't merge: {why}", pr.number),
         body: vec![
-            "orion tried twice and stopped until tomorrow's card. Merge it yourself once it's fixed, or leave it for then.".into(),
+            "orion tried twice and stopped until your next rule review signs off. Merge it yourself once it's fixed, or leave it for then.".into(),
         ],
         buttons: vec![Button::link("Open PR", &pr.url), Button::tap("ok", "OK")],
         image: None,
     }
 }
 
-/// The daily card for project `project` (`local`'s), when it is due and
-/// there is something on it: the owner's rules this machine recorded
-/// since the last one. When it is due, the veto window on the knowledge
-/// pull request opens, card or not (`auto` on).
-pub(crate) fn daily(
-    state: &mut State,
-    now: chrono::DateTime<chrono::Local>,
-    project: &str,
-    local: &Local,
-    auto: bool,
-) -> Option<Card> {
-    let today = now.format("%Y-%m-%d").to_string();
-    let at = chrono::NaiveTime::from_hms_opt(DAILY_AT.0, DAILY_AT.1, 0)?;
-    if now.time() < at || state.last_daily == today {
-        return None;
-    }
-    let since = match state.since.as_str() {
-        "" => (now - chrono::Duration::days(1)).to_rfc3339(),
-        since => since.to_string(),
-    };
-    let since = chrono::DateTime::parse_from_rfc3339(&since).ok()?;
-    let store = Store::of(&local.clone_dir());
-    let mut rules: Vec<Entry> = store
-        .entries()
-        .into_iter()
-        .filter(|e| {
-            let new =
-                chrono::DateTime::parse_from_rfc3339(&e.recorded_at).is_ok_and(|at| at > since);
-            new && e.status == ACTIVE && e.is_owners() && local.has_source(e.pr)
-        })
-        .collect();
-    state.last_daily = today.clone();
-    state.since = now.to_rfc3339();
-    if auto && state.pr.is_some() {
-        state.window = Some(Window {
-            ends_at: now.timestamp_millis() + WINDOW_MS,
-        });
-        state.merge_failures = 0;
-    }
-    if rules.is_empty() {
-        return None;
-    }
-    rules.truncate(DAILY_MAX);
-    let key = format!("kb:daily:{}:{today}", local.id);
-    let listed = rules
-        .iter()
-        .map(|e| Listed {
-            id: e.id.clone(),
-            rule: e.rule.clone(),
-            vetoed: false,
-        })
-        .collect();
-    state.daily.insert(key.clone(), listed);
-    // Only cards not yet forgotten can still be pressed.
-    let oldest = (now - chrono::Duration::milliseconds(cards::FORGET_AFTER_MS))
-        .format("%Y-%m-%d")
-        .to_string();
-    state.daily.retain(|k, _| {
-        k.rsplit(':')
-            .next()
-            .is_some_and(|day| day >= oldest.as_str())
-    });
-    let refs: Vec<&Entry> = rules.iter().collect();
-    Some(daily_card(&key, project, &refs, &[], state, auto))
-}
-
-/// How far the veto window of a daily card not yet up may fall behind
-/// a full window before it is pushed on again.
-const HOLD_STEP_MS: i64 = 10 * orion_core::clock::MINUTE_MS;
-
-/// The most rules the daily card gives a Veto button each; past that it
-/// has one **Veto…**, which asks for their numbers.
-const VETO_BUTTONS: usize = 5;
-
-/// The daily card under `key`: each rule numbered, with its source and
-/// quote; a Veto button for each one not vetoed — or, with more than
-/// [`VETO_BUTTONS`] of them, one **Veto…** that takes their numbers —
-/// All fine, and the knowledge pull request's link.
-pub(crate) fn daily_card(
-    key: &str,
-    project: &str,
-    rules: &[&Entry],
-    vetoed: &[usize],
-    state: &State,
-    auto: bool,
-) -> Card {
-    let n = rules.len();
-    let noun = if n == 1 { "rule" } else { "rules" };
-    let mut body = Vec::new();
-    let mut buttons = Vec::new();
-    let open = (1..=n).filter(|k| !vetoed.contains(k)).count();
-    for (i, e) in rules.iter().enumerate() {
-        let k = i + 1;
-        let quote = match e.quote.trim() {
-            "" => String::new(),
-            q => format!(": “{}”", crate::ui::truncate(q, 200)),
-        };
-        if vetoed.contains(&k) {
-            body.push(format!("~{k}. {}~ (vetoed)", e.rule));
-        } else {
-            body.push(format!("{k}. {} — _#{}, {}{quote}_", e.rule, e.pr, e.by));
-            if open <= VETO_BUTTONS {
-                buttons.push(Button::tap(format!("veto:{k}"), format!("Veto {k}")));
-            }
-        }
-    }
-    buttons.insert(0, Button::tap("fine", "All fine"));
-    if open > VETO_BUTTONS {
-        buttons.insert(1, Button::text(VETO_SOME, "Veto…"));
-    }
-    if let Some(pr) = &state.pr {
-        let hours = WINDOW_MS / (60 * 60 * 1000);
-        body.push(match auto {
-            true => format!(
-                "_orion merges #{} in {hours} hours unless you veto; All fine merges it now._",
-                pr.number
-            ),
-            false => format!("_They're shared once #{} merges._", pr.number),
-        });
-        buttons.push(Button::link("Open PR", &pr.url));
-    }
-    Card {
-        key: key.to_string(),
-        to: Recipient::Owner,
-        context: format!("Knowledge · {project}"),
-        title: format!("{n} new {noun} recorded as yours today"),
-        body,
-        buttons,
-        image: None,
-    }
-}
-
-/// The daily card's **Veto…**: the numbers typed, any way — `3 7`,
-/// `3, 7`.
-const VETO_SOME: &str = "veto_some";
-
-/// A press on a `kb:` card.
+/// A press on a `kb:` card: every one is an OK. A daily card an older
+/// orion posted closes as no longer needed (`factory::cards::reconcile`).
 pub(crate) fn on_action(app: &mut App, press: Press) {
     let key = press.key.to_string();
-    if key.starts_with("kb:daily:") {
-        return daily_action(app, &key, press.action, press.text.as_deref());
-    }
     cards::close(app, &key, "OK");
-}
-
-/// The rule numbers in the words typed after **Veto…**.
-fn numbers(text: &str) -> Vec<usize> {
-    let mut out: Vec<usize> = text
-        .split(|c: char| !c.is_ascii_digit())
-        .filter_map(|n| n.parse().ok())
-        .filter(|&n| n > 0)
-        .collect();
-    out.sort_unstable();
-    out.dedup();
-    out
-}
-
-/// The project a `kb:<kind>:<id>:…` key is about: its folder, name and
-/// main checkout.
-fn project_of(app: &App, key: &str) -> Option<(Local, String, PathBuf)> {
-    let id = key.split(':').nth(2)?;
-    let project = app.tree.projects.iter().find(|p| p.id.as_str() == id)?;
-    Some((
-        Local::of(id),
-        project.name.clone(),
-        project.repo_path.clone(),
-    ))
-}
-
-fn daily_action(app: &mut App, key: &str, action: &str, text: Option<&str>) {
-    let Some((local, project, root)) = project_of(app, key) else {
-        return cards::close(app, key, "That project is gone");
-    };
-    if action == "fine" {
-        let now = orion_core::clock::now_ms();
-        State::update(&local, |s| {
-            if let Some(window) = &mut s.window {
-                window.ends_at = window.ends_at.min(now);
-            }
-        });
-        return cards::close(app, key, "All fine");
-    }
-    let ks: Vec<usize> = match action {
-        VETO_SOME => numbers(text.unwrap_or_default()),
-        _ => action
-            .strip_prefix("veto:")
-            .and_then(|k| k.parse::<usize>().ok())
-            .into_iter()
-            .collect(),
-    };
-    let picked = State::update(&local, |s| {
-        let listed = s.daily.get_mut(key)?;
-        let mut rules = Vec::new();
-        for k in &ks {
-            if let Some(rule) = k.checked_sub(1).and_then(|i| listed.get_mut(i)) {
-                if !rule.vetoed {
-                    rule.vetoed = true;
-                    rules.push(rule.clone());
-                }
-            }
-        }
-        Some((rules, listed.clone(), s.clone()))
-    });
-    let Some((rules, listed, state)) = picked else {
-        return;
-    };
-    // One after another, on the one knowledge branch.
-    if let (false, Ok(handle)) = (rules.is_empty(), tokio::runtime::Handle::try_current()) {
-        let (local, project, root) = (local.clone(), project.clone(), root.clone());
-        handle.spawn(async move {
-            for rule in rules {
-                if let Err(why) = veto(&local, &root, &project, &rule.id).await {
-                    tracing::warn!("knowledge: veto of {} failed: {why}", rule.id);
-                }
-            }
-        });
-    }
-    if listed.iter().all(|l| l.vetoed) {
-        return cards::close(app, key, "Vetoed");
-    }
-    // The press took the buttons away: the card again, without that one.
-    let entries: Vec<Entry> = {
-        let all = Store::of(&local.clone_dir()).entries();
-        listed
-            .iter()
-            .map(|l| {
-                all.iter()
-                    .find(|e| e.id == l.id)
-                    .cloned()
-                    .unwrap_or_else(|| Entry {
-                        rule: l.rule.clone(),
-                        ..Entry::default()
-                    })
-            })
-            .collect()
-    };
-    let refs: Vec<&Entry> = entries.iter().collect();
-    let vetoed: Vec<usize> = listed
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.vetoed)
-        .map(|(i, _)| i + 1)
-        .collect();
-    let auto = app.pr_body.settings.knowledge_auto_merge;
-    cards::post(app, daily_card(key, &project, &refs, &vetoed, &state, auto));
-}
-
-/// Take entry `id` out on the knowledge branch, and push and propose it.
-async fn veto(local: &Local, root: &Path, project: &str, id: &str) -> Result<(), String> {
-    let share = sharer(local, root, project).await?;
-    let branch = share.open().await?;
-    branch.store().veto(id, project)?;
-    let published = share
-        .publish(&branch, &format!("knowledge: veto {id}"))
-        .await?;
-    drop(branch);
-    note_published(local, &published);
-    Ok(())
 }
 
 /// `root`'s git common dir, asked of git once a checkout.
@@ -1141,41 +955,6 @@ pub(super) fn common_dir(root: &Path) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
-
-    fn at(h: u32, m: u32) -> chrono::DateTime<chrono::Local> {
-        chrono::Local
-            .with_ymd_and_hms(2026, 11, 14, h, m, 0)
-            .unwrap()
-    }
-
-    /// A project's folder whose working clone holds `entries`, each
-    /// harvested on this machine but the ones in `elsewhere`.
-    fn local_with(entries: Vec<Entry>, elsewhere: &[u64]) -> (tempfile::TempDir, Local) {
-        let dir = tempfile::tempdir().unwrap();
-        let local = Local::at("01P", dir.path());
-        let store = Store::of(&local.clone_dir());
-        store.append(&entries).unwrap();
-        for e in &entries {
-            if !elsewhere.contains(&e.pr) {
-                local.write_source(e.pr, "dossier").unwrap();
-            }
-        }
-        (dir, local)
-    }
-
-    fn entry(id: &str, pr: u64, by: &str, at: chrono::DateTime<chrono::Local>) -> Entry {
-        Entry {
-            id: id.into(),
-            pr,
-            by: by.into(),
-            rule: format!("rule {id}"),
-            quote: "always back where they were".into(),
-            recorded_at: at.to_rfc3339(),
-            status: ACTIVE.into(),
-            ..Entry::default()
-        }
-    }
 
     fn pr() -> Pr {
         Pr {
@@ -1185,114 +964,27 @@ mod tests {
     }
 
     #[test]
-    fn the_daily_card_lists_todays_owner_rules_once_after_half_past_six() {
-        let (_dir, local) = local_with(
-            vec![
-                entry("k12-1", 12, "owner", at(9, 0)),
-                entry("k12-2", 12, "agent", at(9, 0)),
-                entry("k12-3", 12, "plan", at(10, 0)),
-                entry("k11-1", 11, "owner", at(9, 0) - chrono::Duration::days(3)),
-                entry("k20-1", 20, "owner", at(9, 0)),
-            ],
-            &[20],
-        );
-        let mut state = State {
-            since: (at(9, 0) - chrono::Duration::days(1)).to_rfc3339(),
-            pr: Some(pr()),
-            pushed: "abc".into(),
-            ..State::default()
-        };
-        assert!(
-            daily(&mut state, at(18, 29), "app", &local, true).is_none(),
-            "not yet"
-        );
-        let card = daily(&mut state, at(18, 31), "app", &local, true).unwrap();
-        assert_eq!(card.key, "kb:daily:01P:2026-11-14");
-        assert_eq!(card.context, "Knowledge · app");
-        assert_eq!(
-            card.title, "2 new rules recorded as yours today",
-            "not another person's #20"
-        );
-        assert_eq!(
-            card.body[0],
-            "1. rule k12-1 — _#12, owner: “always back where they were”_"
-        );
-        assert_eq!(
-            card.body[2],
-            "_orion merges #77 in 2 hours unless you veto; All fine merges it now._"
-        );
-        let actions: Vec<&str> = card.buttons.iter().map(|b| b.action.as_str()).collect();
-        assert_eq!(actions, vec!["fine", "veto:1", "veto:2", "open"]);
-        assert_eq!(card.buttons[3].url.as_deref(), Some(pr().url.as_str()));
-        assert_eq!(state.daily["kb:daily:01P:2026-11-14"][1].id, "k12-3");
-        assert!(
-            daily(&mut state, at(19, 0), "app", &local, true).is_none(),
-            "once a day"
-        );
-    }
-
-    #[test]
-    fn a_day_with_nothing_new_posts_nothing_but_still_opens_the_window() {
-        let (_dir, local) = local_with(vec![entry("k12-2", 12, "agent", at(9, 0))], &[]);
+    fn the_merge_waits_for_a_sign_off_and_the_switch() {
         let mut state = State {
             pr: Some(pr()),
             pushed: "abc".into(),
             ..State::default()
         };
-        assert!(daily(&mut state, at(18, 30), "app", &local, true).is_none());
-        assert_eq!(state.last_daily, "2026-11-14");
-        assert_eq!(
-            state.window,
-            Some(Window {
-                ends_at: at(18, 30).timestamp_millis() + WINDOW_MS
-            })
-        );
-    }
-
-    #[test]
-    fn the_merge_waits_for_the_window_and_the_switch() {
-        let (_dir, local) = local_with(vec![entry("k12-1", 12, "owner", at(9, 0))], &[]);
-        let mut state = State {
-            pr: Some(pr()),
-            pushed: "abc".into(),
-            ..State::default()
-        };
-        assert!(
-            !merge_due(&state, at(9, 0).timestamp_millis(), true),
-            "no window yet"
-        );
-        daily(&mut state, at(18, 30), "app", &local, true).unwrap();
-        let card_at = at(18, 30).timestamp_millis();
-        assert!(
-            !merge_due(&state, card_at + WINDOW_MS - 1, true),
-            "inside the window"
-        );
-        assert!(merge_due(&state, card_at + WINDOW_MS, true), "it closed");
-        assert!(
-            merge_due(&state, card_at + 5 * WINDOW_MS, true),
-            "or the next run after"
-        );
-        assert!(
-            !merge_due(&state, card_at + WINDOW_MS, false),
-            "switched off"
-        );
-        let unpushed = State {
-            pushed: String::new(),
+        assert!(!merge_due(&state, true), "nothing signed off yet");
+        state.signed_head = "abc".into();
+        assert!(merge_due(&state, true), "the sign-off pushed this head");
+        assert!(!merge_due(&state, false), "switched off");
+        let later = State {
+            pushed: "def".into(),
             ..state.clone()
         };
-        assert!(!merge_due(&unpushed, card_at + WINDOW_MS, true));
-
-        // Switched off, no window opens, and the card says the PR waits.
-        let mut off = State {
-            pr: Some(pr()),
-            pushed: "abc".into(),
-            ..State::default()
+        assert!(!merge_due(&later, true), "pushed since without a sign-off");
+        let unpushed = State {
+            pushed: String::new(),
+            signed_head: String::new(),
+            ..state.clone()
         };
-        let card = daily(&mut off, at(18, 30), "app", &local, false).unwrap();
-        assert_eq!(off.window, None);
-        assert!(card
-            .body
-            .contains(&"_They're shared once #77 merges._".to_string()));
+        assert!(!merge_due(&unpushed, true));
     }
 
     #[test]
@@ -1302,20 +994,20 @@ mod tests {
         State::update(&local, |s| {
             s.pr = Some(pr());
             s.pushed = "abc".into();
-            s.window = Some(Window { ends_at: 1 });
+            s.signed_head = "abc".into();
         });
         merge_result(&local, "app", &pr(), Ok(Merge::Waiting("checks".into())));
         merge_result(&local, "app", &pr(), Err("a check is failing".into()));
         let s = State::load(&local);
         assert_eq!(
-            (s.merge_failures, s.window.is_some()),
-            (1, true),
+            (s.merge_failures, s.signed_head.as_str()),
+            (1, "abc"),
             "tried again next tick"
         );
         assert!(s.notices.is_empty());
         merge_result(&local, "app", &pr(), Err("a check is failing".into()));
         let s = State::load(&local);
-        assert_eq!(s.window, None, "no more tries until tomorrow");
+        assert_eq!(s.signed_head, "", "no more tries until the next sign-off");
         assert_eq!(
             s.notices,
             vec![Notice::CantMerge {
@@ -1328,11 +1020,21 @@ mod tests {
             card.title,
             "Knowledge PR #77 can't merge: a check is failing"
         );
+        assert!(card.body[0].contains("next rule review"));
         assert_eq!(card.buttons[0].url.as_deref(), Some(pr().url.as_str()));
 
         merge_result(&local, "app", &pr(), Ok(Merge::Merged));
         let s = State::load(&local);
         assert_eq!((s.pr, s.pushed.as_str()), (None, ""));
+    }
+
+    #[test]
+    fn an_older_state_file_reads_with_its_daily_card_fields_ignored() {
+        let old = r#"{"last_daily":"2026-11-18","since":"2026-11-18T18:30:00+00:00","daily":{"kb:daily:01P:2026-11-18":[{"id":"k1-1","rule":"r","vetoed":false}]},"pr":{"number":77,"url":"u"},"pushed":"abc","window":{"ends_at":1},"merge_failures":0}"#;
+        let s: State = serde_json::from_str(old).unwrap();
+        assert_eq!(s.pushed, "abc");
+        assert_eq!(s.signed_head, "", "an older orion's push is no sign-off");
+        assert!(!merge_due(&s, true));
     }
 
     #[test]
@@ -1346,39 +1048,6 @@ mod tests {
         assert!(stale_due(&mut state, 1_000 + day));
         assert_eq!(state.stale_next, 1_000 + 2 * day);
         assert!(!stale_due(&mut state, 1_000 + day + hour), "once a day");
-    }
-
-    #[test]
-    fn a_vetoed_rule_loses_its_button() {
-        let e1 = entry("k12-1", 12, "owner", at(9, 0));
-        let e2 = entry("k12-3", 12, "plan", at(9, 0));
-        let card = daily_card(
-            "kb:daily:x",
-            "app",
-            &[&e1, &e2],
-            &[1],
-            &State::default(),
-            true,
-        );
-        assert_eq!(card.body[0], "~1. rule k12-1~ (vetoed)");
-        let actions: Vec<&str> = card.buttons.iter().map(|b| b.action.as_str()).collect();
-        assert_eq!(actions, vec!["fine", "veto:2"]);
-    }
-
-    /// Past five rules the card has one **Veto…**, which takes their
-    /// numbers however they are typed, instead of a button each.
-    #[test]
-    fn many_rules_share_one_veto_that_takes_numbers() {
-        let entries: Vec<Entry> = (1..=20)
-            .map(|n| entry(&format!("k{n}"), n, "owner", at(9, 0)))
-            .collect();
-        let refs: Vec<&Entry> = entries.iter().collect();
-        let card = daily_card("kb:daily:x", "app", &refs, &[], &State::default(), true);
-        let actions: Vec<&str> = card.buttons.iter().map(|b| b.action.as_str()).collect();
-        assert_eq!(actions, vec!["fine", VETO_SOME]);
-        assert!(card.buttons[1].asks_text);
-        assert_eq!(numbers("3, 7 and 3; 0 x12"), vec![3, 7, 12]);
-        assert!(numbers("none").is_empty());
     }
 
     #[test]

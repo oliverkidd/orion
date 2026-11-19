@@ -882,7 +882,7 @@ mod tests {
             &mut app,
             card("issue:j:thin", Recipient::Email("a@x.co".into())),
         );
-        post(&mut app, card("kb:daily", Recipient::Owner));
+        post(&mut app, card("kb:backfill", Recipient::Owner));
         assert_eq!(attention(&app), 4);
         // It holds nothing back.
         app.automations.settings.max_running = 20;

@@ -134,7 +134,8 @@ pub(super) fn land_click_focus(app: &mut App, column: u16, row: u16, out: &mut V
             | HitTarget::Upgrade
             | HitTarget::FooterSpotify(_)
             | HitTarget::NeedsYouCount
-            | HitTarget::ModalBrowser,
+            | HitTarget::ModalBrowser
+            | HitTarget::RuleReviewBanner,
         )
         | None => {}
     }

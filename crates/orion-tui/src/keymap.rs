@@ -100,6 +100,10 @@ pub enum Action {
     /// "Run week in review now": the WEEK IN REVIEW automation, run at
     /// once. Unbound: the COMMAND PALETTE runs it.
     WeekReview,
+    /// "Review rules": the RULE REVIEW, the rules orion harvested waiting
+    /// on your sign-off (`crate::rule_review`). Unbound: it opens on its
+    /// own at 09:00, and from the banner.
+    ReviewRules,
     /// `p`: PULL the selected checkout — fetch, then fast-forward onto its
     /// upstream, never a merge or a rebase (`crate::git_sync`).
     PullWorktree,
@@ -514,6 +518,16 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "PROJECTS & WORKTREES",
         scope: Scope::Global,
         // No key: it runs on its own schedule, and from ⌘G on its ⌘J page.
+        defaults: &[],
+    },
+    ActionSpec {
+        action: Action::ReviewRules,
+        id: "review_rules",
+        label: "Review rules",
+        hint: "The rules orion harvested from your merged pull requests, waiting on your sign-off: keep, drop or note each; nothing merges until you sign off",
+        group: "PROJECTS & WORKTREES",
+        scope: Scope::Global,
+        // No key: it opens on its own at 09:00, and from its banner.
         defaults: &[],
     },
     ActionSpec {

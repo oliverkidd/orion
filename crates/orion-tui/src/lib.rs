@@ -86,6 +86,7 @@ pub mod quick_prompt;
 pub mod recent_files;
 pub mod remote;
 pub mod review;
+pub mod rule_review;
 pub mod run_targets;
 pub mod saved_draft;
 pub mod splash;

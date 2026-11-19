@@ -106,7 +106,7 @@ Follow `agent_docs/automation.md`. Every plan goes to the owner for approval. Wh
 
 ## Last step
 
-After `orion pr facts set`, record the lasting product rules you learned (what the product does and why, that a future agent on another ticket would need, as the owner said or approved it — never how agents work: tooling, tests, CI or workflow belong in the repo's agent docs) with `orion knowledge note <file>`. The file is `{\"entries\": [...]}`, each entry a harvest's: stream (always product), kind (decision, constraint or question), topic (one listed under Topics to note rules on unless none fits; a new one needs new_topic), rule, applies_to, why, by, confidence, quote (the owner's words, verbatim, when by is owner), confirm_by. Write `{\"entries\": []}` when there are none. orion records them when the pull request merges."
+After `orion pr facts set`, record the lasting rules you learned that would change what a future agent does on another ticket, as the owner said or approved them: a hazard, an architecture or reuse rule he set or corrected, behaviour that must match across paths or surfaces, a product principle spanning features, a deliberate guard against an annoying regression, or an outside-world limit. Write the lesson, not this ticket's spec; at most five, usually none to two; never one component's look, scope limits, or how agents work (tooling, tests, CI or workflow belong in the repo's agent docs). Record them with `orion knowledge note <file>`. The file is `{\"entries\": [...]}`, each entry a harvest's: stream (always product), kind (decision, constraint or question), topic (one listed under Topics to note rules on unless none fits; a new one needs new_topic), rule, applies_to, why, by, confidence, quote (the owner's words, verbatim, when by is owner), confirm_by. Write `{\"entries\": []}` when there are none. orion records them when the pull request merges."
     };
 }
 
@@ -2320,7 +2320,7 @@ mod tests {
                 "Follow `agent_docs/automation.md`",
                 "ORION-VERDICT: <already-fixed|duplicate|not-reproducible|wont-build> <reason>",
                 "## Last step",
-                "After `orion pr facts set`, record the lasting product rules you learned",
+                "After `orion pr facts set`, record the lasting rules you learned",
                 "`orion knowledge note <file>`",
             ] {
                 assert!(text.contains(layer), "{layer}");
