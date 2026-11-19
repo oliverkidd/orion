@@ -685,6 +685,7 @@ const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!, $
     nodes { number url title isDraft headRefName isCrossRepository \
     headRepositoryOwner { login } mergeable viewerDidAuthor headRefOid \
     createdAt reviewDecision author { login } comments { totalCount } \
+    reviewThreads { totalCount } \
     labels(first: 10) { nodes { name color } } \
     reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } \
     commits(last: 1) { nodes { commit { statusCheckRollup { state \
@@ -774,6 +775,10 @@ pub struct PrMeta {
     pub review_requested: bool,
     pub review: Review,
     pub comments: u32,
+    /// Its review threads (`reviewThreads.totalCount`), asked of an open
+    /// row: a reviewer — Cubic above all — opening one moves it, which no
+    /// other field of the row does.
+    pub threads: u32,
     pub labels: Vec<PrLabel>,
     /// None where the head commit has no checks, or nobody asked.
     pub checks: Option<CheckTally>,
@@ -1347,6 +1352,10 @@ fn meta(v: &serde_json::Value, viewer: &str) -> PrMeta {
         review: Review::of(&str_at(v, "reviewDecision")),
         comments: v
             .pointer("/comments/totalCount")
+            .and_then(|n| n.as_u64())
+            .unwrap_or(0) as u32,
+        threads: v
+            .pointer("/reviewThreads/totalCount")
             .and_then(|n| n.as_u64())
             .unwrap_or(0) as u32,
         labels: nodes("/labels/nodes")
@@ -2831,7 +2840,8 @@ mod tests {
         let answer = r#"{"data":{"viewer":{"login":"Me"},"repository":{"pullRequests":{"nodes":[
           {"number":1,"url":"https://github.com/o/r/pull/1","title":"Mine","viewerDidAuthor":true,
            "createdAt":"2026-10-06T09:10:27Z","reviewDecision":"APPROVED","author":{"login":"me"},
-           "comments":{"totalCount":5},"labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},
+           "comments":{"totalCount":5},"reviewThreads":{"totalCount":3},
+           "labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},
            "reviewRequests":{"nodes":[]},
            "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING","contexts":{
              "checkRunCountsByState":[{"state":"SUCCESS","count":27},{"state":"SKIPPED","count":11},
@@ -2850,6 +2860,7 @@ mod tests {
         assert_eq!(m.created_at, "2026-10-06T09:10:27Z");
         assert_eq!(m.review, Review::Approved);
         assert_eq!(m.comments, 5);
+        assert_eq!(m.threads, 3);
         assert_eq!(
             m.labels,
             vec![PrLabel {

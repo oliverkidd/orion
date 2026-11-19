@@ -108,16 +108,28 @@ pub fn severity(text: &str) -> Option<u8> {
 pub fn findings(threads: &[ReviewThread]) -> Vec<Finding> {
     threads
         .iter()
-        .filter(|t| !t.resolved)
-        .filter_map(|t| {
-            let first = t.comments.first()?;
-            is_cubic(&first.author).then(|| Finding {
-                severity: severity(&first.body),
-                path: t.path.clone(),
-                place: t.place(),
-            })
+        .filter(|t| is_open_finding(t))
+        .map(|t| Finding {
+            severity: severity(&t.comments[0].body),
+            path: t.path.clone(),
+            place: t.place(),
         })
         .collect()
+}
+
+/// An unresolved thread Cubic started.
+fn is_open_finding(t: &ReviewThread) -> bool {
+    !t.resolved && t.comments.first().is_some_and(|c| is_cubic(&c.author))
+}
+
+/// The open findings nobody has answered: Cubic's unresolved threads
+/// with no reply but its own. A reply — the agent's reason for leaving
+/// it, the owner's word — means it was looked at, so the PR fixer does
+/// not send it again ([`crate::automations::pr_fixer`]).
+pub fn unanswered(threads: &[ReviewThread]) -> impl Iterator<Item = &ReviewThread> {
+    threads
+        .iter()
+        .filter(|t| is_open_finding(t) && t.comments.iter().all(|c| is_cubic(&c.author)))
 }
 
 /// Whether a dismissal gives its reason: words after a `: `, ` — ` or
@@ -254,6 +266,29 @@ mod tests {
         assert_eq!(open[0].severity, Some(1));
         assert_eq!(open[0].place, "line 3");
         assert_eq!(open[1].severity, None);
+    }
+
+    #[test]
+    fn a_reply_answers_a_finding() {
+        let mut replied = thread("cubic-dev-ai[bot]", "**P1** leak", false);
+        replied.comments.push(ThreadComment {
+            author: "oliver".into(),
+            body: "Intended: the cache owns it".into(),
+            ..replied.comments[0].clone()
+        });
+        let mut followed_up = thread("cubic-dev-ai[bot]", "**P2** name", false);
+        followed_up.comments.push(followed_up.comments[0].clone());
+        let threads = [
+            thread("cubic-dev-ai[bot]", "**P1** open", false),
+            thread("cubic-dev-ai[bot]", "**P0** done", true),
+            thread("oliver", "my note", false),
+            replied,
+            followed_up,
+        ];
+        let open: Vec<&str> = unanswered(&threads)
+            .map(|t| t.comments[0].body.as_str())
+            .collect();
+        assert_eq!(open, ["**P1** open", "**P2** name"]);
     }
 
     #[test]

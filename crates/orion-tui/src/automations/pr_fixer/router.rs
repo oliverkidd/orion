@@ -1,6 +1,7 @@
 //! The FIX ROUTER: one branch, one agent. Everything the PR fixer sends
 //! about a pull request — a breakage ([`Work::Fix`]), the owner's review
-//! comments or a reply from a card ([`Work::Words`]) — goes where
+//! comments, Cubic's findings ([`cubic_turn`]) or a reply from a card
+//! ([`Work::Words`]) — goes where
 //! [`route`] says:
 //!
 //! 1. an `autofix-<n>` already live on the branch: a breakage waits for
@@ -31,6 +32,7 @@ use serde_json::Value;
 use super::{AutofixForm, Issue};
 use crate::app::App;
 use crate::flash::Flash;
+use crate::pr_review::github::ReviewThread;
 use crate::pull_request::{OpenPr, PrDetail};
 use crate::ui::truncate;
 
@@ -775,6 +777,59 @@ pub fn comments_turn(pr: &OpenPr, comments: &[OwnerComment]) -> String {
         url = pr.url,
         head = pr.head,
         body = comments_text(comments),
+    )
+}
+
+/// The most of each Cubic finding put in a turn.
+const FINDING_CHARS: usize = 3_000;
+
+/// Cubic's new `findings` on `pr`, as the branch's agent reads them —
+/// round `round` of `rounds`: judge each against what it knows of the
+/// change, fix what is right as a new commit on top (so Cubic reviews
+/// the fix), and say why on the thread of each one it leaves.
+pub fn cubic_turn(pr: &OpenPr, findings: &[&ReviewThread], round: u8, rounds: u8) -> String {
+    let list = findings
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let body = t.comments.first().map_or("", |c| c.body.trim());
+            let severity = crate::pr_body::cubic::severity(body)
+                .map_or_else(|| "No severity".to_string(), |p| format!("P{p}"));
+            let outdated = match t.outdated {
+                true => " (outdated: the code under it has changed since)",
+                false => "",
+            };
+            format!(
+                "{}. {severity} on `{}` {}{outdated} — thread `{}`:\n{}",
+                i + 1,
+                t.path,
+                t.place(),
+                t.id,
+                quote(&truncate(body, FINDING_CHARS)),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let last = match round >= rounds {
+        true => {
+            " This is the last round orion sends: whatever Cubic finds after it goes to the owner."
+        }
+        false => "",
+    };
+    format!(
+        "Cubic, the review bot, left {count} on your pull request #{n} ({url}): round {round} of {rounds}.{last} You know why this change is the way it is, so judge each finding against that before touching anything:\n\n\
+         - Fix a finding that is right. A P0 or P1 is fixed unless it is wrong; a P2 or P3 when it is right and in scope.\n\
+         - Leave a finding that is wrong, or that asks for something you or the owner left out on purpose (look back over this conversation and the pull request's comments for that): never redo what was decided against. Reply on its thread saying why, and list it in a comment on the pull request as `Cubic dismissals: P<n> in <file>: <why>`.\n\n\
+         Make the fixes in this pull request on `{head}` as a new commit on top (no amend, no force-push) with the repo's commit skill, and push: Cubic reviews the new commit, and orion sends you whatever it finds next. Then resolve the thread of each finding you fixed. When nothing needed fixing, push nothing. Then stop.\n\n\
+         Reply on a thread:\n\
+         gh api graphql -f query='mutation($id: ID!, $body: String!) {{ addPullRequestReviewThreadReply(input: {{pullRequestReviewThreadId: $id, body: $body}}) {{ comment {{ id }} }} }}' -f id=<thread> -f body=<why>\n\
+         Resolve one:\n\
+         gh api graphql -f query='mutation($id: ID!) {{ resolveReviewThread(input: {{threadId: $id}}) {{ thread {{ isResolved }} }} }}' -f id=<thread>\n\n\
+         {list}",
+        count = crate::flash::plural(findings.len(), "finding"),
+        n = pr.number,
+        url = pr.url,
+        head = pr.head,
     )
 }
 

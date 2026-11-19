@@ -832,6 +832,16 @@ agent and another 3 tries, Park to leave it alone until it goes green), and what
 GitHub — review comments with their file and line, and conversation comments — goes to the branch's
 agent the same way, verbatim, to be done in that pull request.
 
+Once one of your pull requests is green, the PR fixer also sends Cubic's findings on it, the same way
+and to the same agent: the session that built the branch, which knows what was left out on purpose.
+Each unresolved Cubic thread nobody has replied to goes once. The agent fixes the findings it
+agrees with in a new commit on top, so Cubic reviews the fix, and resolves their threads. For each
+one it leaves, it replies on the thread with why and lists it under `Cubic dismissals:` in a PR
+comment. A finding someone has already answered on its thread is never sent. Red pull requests get
+their checks fixed first, and their findings go once they are green. A new review thread on the
+pull request has it read at once. After 3 rounds, what Cubic finds is yours, and orion says so. It
+doesn't send a turn into a session you are using.
+
 A cancelled check is not a failing one: a job cancelled by hand, or by its workflow starting again
 on the same commit, broke nothing in the code. It is drawn dim with `⊘`, counts as neither passed
 nor failed, and never brings the PR fixer or `⌘G`'s *failing checks*. A run started again on the

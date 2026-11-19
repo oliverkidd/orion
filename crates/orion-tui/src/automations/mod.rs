@@ -82,7 +82,7 @@ impl Automation {
     /// keys `{token}`s the keymap spells (`hints::expand`).
     pub const fn description(self) -> &'static str {
         match self {
-            Automation::PrFixer => "When one of your PRs hits conflicts or failing checks, fixes it and watches until it's green. Stops after 3 tries in a row that don't work.",
+            Automation::PrFixer => "When one of your PRs hits conflicts or failing checks, fixes it and watches until it's green. Stops after 3 tries in a row that don't work. Once it's green, has its agent work through Cubic's findings.",
             Automation::BugFixer => "Picks up Linear tickets assigned to you that carry one of its labels, plans each one, waits for your approval, then builds to a draft PR.",
             Automation::FeatureBuilder => "Picks up Linear tickets assigned to you that carry one of its labels, plans each one, waits for your approval, then builds to a draft PR.",
             Automation::WeekReview => "Writes up the week from everything merged, done and ticked, so it's ready before the meeting. Also in {command_palette} as \"Run week in review now\".",

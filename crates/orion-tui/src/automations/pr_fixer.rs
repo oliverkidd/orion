@@ -49,6 +49,16 @@
 //!   writes on GitHub — review comments with their file and line, and
 //!   conversation comments — goes to the branch's agent through the same
 //!   router, verbatim, once each ([`relay_comments`]).
+//! * **Cubic's findings.** Each of your pull requests that is green is
+//!   read again when its row's review-thread count moves (`PrMeta::
+//!   threads`) or it turns green, and every [`CUBIC_POLL`] besides
+//!   ([`poll`]). The Cubic threads on it that nobody has answered and that
+//!   were never sent go to the branch's agent through the same router —
+//!   the session that built it, which knows what was left out on purpose
+//!   — to fix what is right as a new commit on top (so Cubic reviews the
+//!   fix) and say why on the thread of each one it leaves
+//!   ([`relay_cubic`]). Each thread goes once; after [`CUBIC_ROUNDS`]
+//!   rounds what Cubic finds is the owner's.
 //! * **Giving up, on a factory PR**, is a *Can't fix* card in Slack
 //!   ([`give_up`]): Open PR (a link), Reply… (words for the branch's agent, and
 //!   the tries start over), Park (left alone until it goes green).
@@ -120,6 +130,13 @@ pub const AUTO_ATTEMPTS: u8 = 3;
 /// comments while nothing else asks for it — sooner when its row's comment
 /// count moves.
 pub const COMMENT_POLL: Duration = Duration::from_secs(120);
+/// How often a green pull request is read for Cubic's findings while
+/// nothing on its row moves: a fallback, since a new review thread moves
+/// the row's thread count and has it read at once.
+pub const CUBIC_POLL: Duration = Duration::from_secs(30 * 60);
+/// How many rounds of Cubic's findings go to a pull request's agent;
+/// after them, what Cubic finds is the owner's.
+pub const CUBIC_ROUNDS: u8 = 3;
 
 /// One kind of thing the agent can be sent to fix — a row of the form, in
 /// [`Issue::ALL`] order (which is also its index in [`Picks`]).
@@ -304,6 +321,13 @@ pub struct Record {
     /// ([`rerun_cancelled`]): not again on that commit.
     #[serde(default)]
     pub rerun: Option<String>,
+    /// The Cubic review threads already sent to an agent, or passed over
+    /// once the rounds ran out ([`relay_cubic`]): never sent again.
+    #[serde(default)]
+    pub cubic_sent: Vec<String>,
+    /// Rounds of Cubic's findings sent ([`CUBIC_ROUNDS`] at most).
+    #[serde(default)]
+    pub cubic_rounds: u8,
 }
 
 /// A watched pull request: in trouble, its body asked for.
@@ -374,9 +398,13 @@ pub struct State {
     pub measuring: HashMap<orion_core::AgentId, Instant>,
     /// By PR URL: fresh fixers launched and not in the tree yet.
     pub launches: HashMap<String, router::Launch>,
+    /// By PR URL: Cubic findings held back — at the cap, or the owner in
+    /// the session — and when to try again ([`retry_cubic`]).
+    pub cubic_retry: HashMap<String, Instant>,
 }
 
-/// A factory pull request read for the owner's comments.
+/// A pull request whose body is read on a beat of its own: a factory one
+/// for the owner's comments, a green one of yours for Cubic's findings.
 #[derive(Debug, Clone)]
 pub struct Poll {
     pub project: ProjectId,
@@ -386,6 +414,14 @@ pub struct Poll {
     pub due: Instant,
     /// Its row's comment count, the last list: a move reads it at once.
     pub count: u32,
+    /// Its row's review-thread count, the last list: a move — Cubic
+    /// opening a thread — reads it at once.
+    pub threads: u32,
+    /// A factory pull request: the owner's comments are relayed.
+    pub factory: bool,
+    /// Green, with the PR fixer on: Cubic's findings are sent
+    /// ([`cubic_wanted`]). Turning so reads it at once.
+    pub cubic: bool,
 }
 
 /// What a pull request's head was asked to merge with its base — the
@@ -459,10 +495,14 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
         .filter(|pr| pr.mine && !pr.head.starts_with(crate::knowledge::share::PREFIX))
     {
         let factory = is_factory(app, project, &pr.head);
-        if factory {
-            poll_comments(app, project, pr);
-        }
         let status = fixer_view(app.prs.status_or_open(&pr.url), factory);
+        let cubic = cubic_wanted(app, &status, factory);
+        match factory || cubic {
+            true => poll(app, project, pr, factory, cubic),
+            false => {
+                app.autofix.polls.remove(&pr.url);
+            }
+        }
         if status.is_green() {
             close_cant_fix(app, &pr.url, "Green now");
             let record = app.autofix.ledger.get(&pr.url);
@@ -659,15 +699,23 @@ fn fixer_trouble(status: &PrStatus) -> Option<crate::pull_request::Trouble> {
     }
 }
 
-/// Read factory pull request `pr`'s body for the owner's comments: at
-/// once the first time and whenever its comment count moves, else every
-/// [`COMMENT_POLL`].
-fn poll_comments(app: &mut App, project: &ProjectId, pr: &OpenPr) {
-    let count = pr.meta.comments;
+/// Read `pr`'s body on its own beat — a factory pull request's for the
+/// owner's comments, a green one's for Cubic's findings (`cubic`): at once
+/// the first time, whenever its comment or review-thread count moves, and
+/// as it turns green; else every [`COMMENT_POLL`] for a factory one,
+/// [`CUBIC_POLL`] for the rest.
+fn poll(app: &mut App, project: &ProjectId, pr: &OpenPr, factory: bool, cubic: bool) {
+    let (count, threads) = (pr.meta.comments, pr.meta.threads);
     match app.autofix.polls.get_mut(&pr.url) {
         Some(poll) => {
-            if poll.count != count {
-                poll.count = count;
+            let moved = (factory && poll.count != count)
+                || poll.threads != threads
+                || (cubic && !poll.cubic);
+            poll.count = count;
+            poll.threads = threads;
+            poll.factory = factory;
+            poll.cubic = cubic;
+            if moved {
                 poll.due = Instant::now();
             }
         }
@@ -683,17 +731,37 @@ fn poll_comments(app: &mut App, project: &ProjectId, pr: &OpenPr) {
                     dir,
                     due: Instant::now(),
                     count,
+                    threads,
+                    factory,
+                    cubic,
                 },
             );
         }
     }
 }
 
+/// Whether one of your pull requests, standing at `status` (seen through
+/// [`fixer_view`]), has Cubic's findings sent: the PR fixer on, open and
+/// green — a breakage is fixed first, and Cubic's findings then go in one
+/// round — and not a plain draft. (Going green unparks it.)
+fn cubic_wanted(app: &App, status: &PrStatus, factory: bool) -> bool {
+    app.automations.is_on(Automation::PrFixer)
+        && status.is_open()
+        && status.is_green()
+        && (factory || !status.is_draft())
+}
+
 /// A factory pull request's body landed: the owner's comments on it that
 /// are new since the last look go to the branch's agent through the
 /// router, verbatim, once each. The first look only takes note.
 fn relay_comments(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<ClientRequest>) {
-    let Some(project) = app.autofix.polls.get(url).map(|p| p.project.clone()) else {
+    let Some(project) = app
+        .autofix
+        .polls
+        .get(url)
+        .filter(|p| p.factory)
+        .map(|p| p.project.clone())
+    else {
         return;
     };
     let Some(pr) = open_pr(app, &project, url).cloned() else {
@@ -720,6 +788,107 @@ fn relay_comments(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<Cli
         pr: Box::new(pr),
     };
     router::deliver(app, work, out);
+}
+
+/// One of your green pull requests' bodies landed: Cubic's threads on it
+/// that nobody has answered ([`crate::pr_body::cubic::unanswered`]) and
+/// that were never sent go to the branch's agent through the router, in
+/// one turn ([`router::cubic_turn`]) — its own agent first, since it
+/// knows what was left out on purpose. Each thread goes once. A fresh
+/// fixer waits for a place under the cap, a turn while the owner is using
+/// the session ([`in_use`]); once [`CUBIC_ROUNDS`] rounds have gone, the
+/// owner is told instead.
+fn relay_cubic(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<ClientRequest>) {
+    // The list said green; the body may have landed after a push since.
+    let Some((project, factory)) = app
+        .autofix
+        .polls
+        .get(url)
+        .filter(|p| p.cubic)
+        .map(|p| (p.project.clone(), p.factory))
+    else {
+        return;
+    };
+    let status = fixer_view(app.prs.status_or_open(url), factory);
+    if !cubic_wanted(app, &status, factory) {
+        return;
+    }
+    let (new, rounds) = {
+        let record = app.autofix.ledger.get(url);
+        let sent = record.map_or(&[][..], |r| r.cubic_sent.as_slice());
+        let new: Vec<&crate::pr_review::github::ReviewThread> =
+            crate::pr_body::cubic::unanswered(&detail.threads)
+                .filter(|t| !sent.contains(&t.id))
+                .collect();
+        (new, record.map_or(0, |r| r.cubic_rounds))
+    };
+    if new.is_empty() {
+        return;
+    }
+    let Some(pr) = open_pr(app, &project, url).cloned() else {
+        return;
+    };
+    let ids = new.iter().map(|t| t.id.clone());
+    if rounds >= CUBIC_ROUNDS {
+        app.autofix.record(url).cubic_sent.extend(ids);
+        over_to_you(
+            app,
+            format!(
+                "Cubic raised {} more on {} after {CUBIC_ROUNDS} PR fixer rounds: over to you",
+                crate::flash::plural(new.len(), "finding"),
+                pr.label()
+            ),
+        );
+        app.dirty = true;
+        return;
+    }
+    // A fresh fixer is a new session: at the cap, it waits for a place.
+    // The owner's own conversation with the branch's agent isn't cut into
+    // either: it waits while they are using that session — tried again
+    // from the body in hand ([`retry_cubic`]).
+    let wait = match router::route(app, &project, &pr.head, pr.number, url) {
+        router::Route::Fresh { .. } => !super::may_start(app),
+        router::Route::Turn(id) => in_use(app, &id),
+        _ => false,
+    };
+    if wait {
+        app.autofix
+            .cubic_retry
+            .insert(url.to_string(), Instant::now() + RECHECK);
+        return;
+    }
+    app.autofix.cubic_retry.remove(url);
+    let round = rounds + 1;
+    let work = Work::Words {
+        text: router::cubic_turn(&pr, &new, round, CUBIC_ROUNDS),
+        plan: router::plan_comment(detail),
+        reason: crate::flash::plural(new.len(), "Cubic finding"),
+        project,
+        pr: Box::new(pr),
+    };
+    let record = app.autofix.record(url);
+    record.cubic_sent.extend(ids);
+    record.cubic_rounds = round;
+    router::deliver(app, work, out);
+}
+
+/// The beat: each pull request whose Cubic findings [`relay_cubic`] held
+/// back, its time come, tried again from the body already in hand.
+fn retry_cubic(app: &mut App, out: &mut Vec<ClientRequest>) {
+    let now = Instant::now();
+    let due: Vec<String> = app
+        .autofix
+        .cubic_retry
+        .iter()
+        .filter(|(_, at)| **at <= now)
+        .map(|(url, _)| url.clone())
+        .collect();
+    for url in due {
+        app.autofix.cubic_retry.remove(&url);
+        if let Some(detail) = app.pr_detail.get(&url).cloned() {
+            relay_cubic(app, &url, &detail, out);
+        }
+    }
 }
 
 /// Watch `pr`, its body asked for at `next_fetch`.
@@ -767,11 +936,16 @@ pub fn due_fetches(app: &mut App) -> Vec<(String, u64, PathBuf)> {
             }
         }
     }
-    // A factory pull request's comments, read on their own beat — unless
-    // its body is on its way already.
+    // A factory pull request's comments and a green one's Cubic findings,
+    // read on their own beat — unless its body is on its way already.
     for (url, poll) in app.autofix.polls.iter_mut() {
         if poll.due <= now {
-            poll.due = now + COMMENT_POLL;
+            poll.due = now
+                + if poll.factory {
+                    COMMENT_POLL
+                } else {
+                    CUBIC_POLL
+                };
             if !app.pr_detail_inflight.in_flight(url) && !due.iter().any(|(u, _, _)| u == url) {
                 due.push((url.clone(), poll.number, poll.dir.clone()));
             }
@@ -797,6 +971,7 @@ pub fn land_detail(
     }
     if let Some(detail) = detail {
         relay_comments(app, url, detail, out);
+        relay_cubic(app, url, detail, out);
     }
     let Some(watch) = app.autofix.watching.get(url).cloned() else {
         return;
@@ -936,6 +1111,12 @@ fn give_up(app: &mut App, form: &AutofixForm, attempts: u8) {
         "{} is still failing after {attempts} PR fixer tries: over to you",
         form.pr.label()
     );
+    over_to_you(app, text);
+}
+
+/// Hand a pull request back to the owner, saying `text`: a flash, and
+/// the desktop while the window is away.
+fn over_to_you(app: &mut App, text: String) {
     if app.may_notify_desktop() {
         crate::event_loop::alerts::notify_text("PR fixer", &text);
     }
@@ -1317,6 +1498,7 @@ impl Runner for PrFixer {
 
     fn tick(&mut self, app: &mut App, out: &mut Vec<ClientRequest>) {
         send_waiting(app, out);
+        retry_cubic(app, out);
         router::deliver_queued(app, out);
         archive_green(app, out);
         note_stand_downs(app);
@@ -1566,7 +1748,7 @@ Rules:
   - Unit tests: reproduce each failing test locally with this repo's test command, and fix it. Change a test only when this pull request meant to change the behaviour it checks.
   - E2E tests: work from the failing specs' CI logs. No local e2e unless the logs aren't enough; then run only the failing specs, at most twice, as the testing rule below says.
   - Any other check (lint, typecheck, build): reproduce it locally and fix it.
-- Cubic (the review bot): fix every open P0 and P1 it raised, and push until none is open. Dismiss a P1 only with a reason posted on the pull request. If the same P1 comes back a third time, stop and say so in your summary.
+- Cubic (the review bot): judge each open finding against what this pull request means to do. Fix a P0 or P1 unless it is wrong; never redo something that was left out on purpose. Dismiss a finding only with a reason posted on the pull request: a reply on its thread, and a `Cubic dismissals: <finding>: <why>` line in a comment. If the same P1 comes back a third time, stop and say so in your summary.
 - A review comment from the owner is done in this pull request, never in a new one.
 - End every comment or reply you post on the pull request with the line `<!-- orion:agent -->`, so orion can tell your words from the owner's.
 
@@ -2029,7 +2211,7 @@ fn launch_fresh(
             super::compose_with(
                 &preset,
                 &format!(
-                    "Pull request: {} (#{} \"{}\")\nThis worktree is checked out on `{}`.\n\nFix:\n- What the owner asks below, in this pull request.\n\n{text}",
+                    "Pull request: {} (#{} \"{}\")\nThis worktree is checked out on `{}`.\n\nFix:\n- What is asked below, in this pull request.\n\n{text}",
                     pr.url, pr.number, pr.title, pr.head
                 ),
                 rule,
@@ -2532,7 +2714,8 @@ mod tests {
             "No local e2e unless the logs aren't enough",
             "reproduce each failing test locally",
             "Any other check (lint, typecheck, build): reproduce it locally and fix it",
-            "Dismiss a P1 only with a reason posted on the pull request",
+            "Dismiss a finding only with a reason posted on the pull request",
+            "never redo something that was left out on purpose",
             "If the same P1 comes back a third time, stop",
             "A review comment from the owner is done in this pull request",
             "Never use `--no-verify`",
@@ -3565,7 +3748,10 @@ mod tests {
             10_000,
         );
         listed(&mut app);
-        assert!(app.autofix.polls.is_empty(), "not a factory PR");
+        assert!(
+            app.autofix.polls.get(&pr().url).is_some_and(|p| !p.factory),
+            "read for Cubic alone: not a factory PR"
+        );
         make_factory(&mut app);
         listed(&mut app);
         assert_eq!(due_fetches(&mut app).len(), 1, "read at once");
@@ -3623,6 +3809,163 @@ mod tests {
         );
         assert!(!text.contains("old note"), "{text}");
         assert!(land(&mut app, &page).is_empty(), "once");
+    }
+
+    /// A review thread Cubic opened on line `line`, answered by nobody.
+    fn cubic_thread(id: &str, line: u32, body: &str) -> crate::pr_review::github::ReviewThread {
+        use crate::pr_review::github::{ReviewThread, Side, ThreadComment};
+        ReviewThread {
+            id: id.into(),
+            path: "src/a.rs".into(),
+            line: Some(line),
+            start_line: None,
+            original_line: Some(line),
+            side: Side::Right,
+            resolved: false,
+            outdated: false,
+            comments: vec![ThreadComment {
+                id: format!("{id}-c"),
+                author: "cubic-dev-ai[bot]".into(),
+                body: body.into(),
+                at: "2026-11-14T10:00:00Z".into(),
+                mine: false,
+                pending: false,
+            }],
+        }
+    }
+
+    /// Cubic's findings on a green pull request — not only a factory one —
+    /// go to the branch's own agent as a turn, once each: one answered on
+    /// its thread, or resolved, is left be. The turn asks for a judgement
+    /// against what the agent knows, a new commit on top, and a reason on
+    /// the thread of each one left; a later finding is the next round.
+    #[test]
+    fn cubics_findings_on_a_green_pr_go_to_the_branchs_agent_once() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = app_with(vec![broken(false, false)], true);
+        let (id, places) = claude_on_branch(
+            &mut app,
+            &home,
+            "builder",
+            AgentStatus::Finished,
+            &["Built it."],
+            10_000,
+        );
+        listed(&mut app);
+        assert_eq!(due_fetches(&mut app).len(), 1, "a green PR is read");
+
+        let mut answered = cubic_thread("PRRT_answered", 9, "**P1** stale cache");
+        answered
+            .comments
+            .push(crate::pr_review::github::ThreadComment {
+                author: "o".into(),
+                body: "Intended: the cache is rebuilt on boot".into(),
+                mine: true,
+                ..answered.comments[0].clone()
+            });
+        let mut resolved = cubic_thread("PRRT_resolved", 11, "**P0** gone");
+        resolved.resolved = true;
+        let mut page = PrDetail {
+            threads: vec![
+                cubic_thread("PRRT_leak", 3, "**P1** the handle leaks on error"),
+                answered,
+                resolved,
+            ],
+            ..detail(false, Vec::new())
+        };
+        let land = |app: &mut App, page: &PrDetail| {
+            crate::paths_util::with_places(places.clone(), || landed(app, page))
+        };
+        let out = land(&mut app, &page);
+        let (to, text) = sent_turn(&out).expect("sent");
+        assert_eq!(to, id, "the agent that built it");
+        for needle in [
+            "Cubic, the review bot, left 1 finding on your pull request #7",
+            "round 1 of 3",
+            "1. P1 on `src/a.rs` line 3 — thread `PRRT_leak`:\n> **P1** the handle leaks on error",
+            "left out on purpose",
+            "as a new commit on top (no amend, no force-push)",
+            "addPullRequestReviewThreadReply",
+            "resolveReviewThread",
+            "Cubic dismissals:",
+            router::AGENT_MARKER,
+        ] {
+            assert!(text.contains(needle), "{needle}:\n{text}");
+        }
+        assert!(!text.contains("stale cache"), "answered: {text}");
+        assert!(!text.contains("gone"), "resolved: {text}");
+        assert!(land(&mut app, &page).is_empty(), "once");
+        assert_eq!(app.autofix.ledger[&pr().url].cubic_rounds, 1);
+
+        page.threads
+            .push(cubic_thread("PRRT_next", 5, "**P2** name it"));
+        app.tree
+            .agents
+            .iter_mut()
+            .filter(|a| a.id == id)
+            .for_each(|a| a.status = AgentStatus::Finished);
+        let out = land(&mut app, &page);
+        let text = match sent_turn(&out) {
+            Some((_, text)) => text,
+            None => match &app.autofix.queued[..] {
+                [q] => router::turn_text(&q.work),
+                other => panic!("neither sent nor held: {other:?}"),
+            },
+        };
+        assert!(text.contains("round 2 of 3"), "{text}");
+        assert!(
+            text.contains("PRRT_next") && !text.contains("PRRT_leak"),
+            "{text}"
+        );
+    }
+
+    /// Cubic waits while the pull request is not green — the breakage is
+    /// fixed first — and is not sent with the PR fixer off. Once the
+    /// rounds have run out, the owner is told and nothing goes.
+    #[test]
+    fn cubic_waits_for_green_and_stops_after_its_rounds() {
+        let page = PrDetail {
+            threads: vec![cubic_thread("PRRT_a", 3, "**P1** leak")],
+            ..detail(false, vec![check("unit", "", CheckState::Failed)])
+        };
+        let mut app = app_with(vec![broken(false, true)], true);
+        session_on_branch(&mut app, "builder", AgentStatus::Finished);
+        listed(&mut app);
+        landed(&mut app, &page);
+        assert!(
+            app.autofix
+                .ledger
+                .get(&pr().url)
+                .is_none_or(|r| r.cubic_sent.is_empty()),
+            "red: the checks first"
+        );
+
+        let green = PrDetail {
+            threads: page.threads.clone(),
+            ..detail(false, Vec::new())
+        };
+        let mut app = app_with(vec![broken(false, false)], false);
+        listed(&mut app);
+        assert!(app.autofix.polls.is_empty(), "the PR fixer is off");
+        assert!(landed(&mut app, &green).is_empty());
+
+        let mut app = app_with(vec![broken(false, false)], true);
+        app.autofix.ledger.insert(
+            pr().url,
+            Record {
+                cubic_rounds: CUBIC_ROUNDS,
+                ..Record::default()
+            },
+        );
+        listed(&mut app);
+        assert!(landed(&mut app, &green).is_empty(), "no more rounds");
+        assert_eq!(app.autofix.ledger[&pr().url].cubic_sent, ["PRRT_a"]);
+        let flash = app
+            .flash
+            .as_ref()
+            .map(|f| f.text.clone())
+            .unwrap_or_default();
+        assert!(flash.contains("over to you"), "{flash}");
     }
 
     /// The agent runs as the session that did the work on the branch —
