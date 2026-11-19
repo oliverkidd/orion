@@ -3251,15 +3251,17 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
 }
 
 /// The idle reaper kills sessions in worktrees no client is looking at once
-/// they age past `session_idle_timeout` — but spares terminals with a
+/// they age past the idle timeout — but spares terminals with a
 /// command still running, and never touches an attached session no matter
 /// how long it idles. A reaped agent revives on the next attach.
 #[tokio::test]
 async fn idle_sessions_reap_unwatched_but_spare_busy_and_attached() {
     let env = TestEnv::new();
     let repo = env.make_repo();
-    env.write_config(r#"{"session_idle_timeout": "2s"}"#);
-    let mut daemon = env.spawn_daemon_with("/bin/sh", &[(env::IDLE_REAP_MS, "200")]);
+    let mut daemon = env.spawn_daemon_with(
+        "/bin/sh",
+        &[(env::IDLE_REAP_MS, "200"), (env::IDLE_TIMEOUT_MS, "2000")],
+    );
     let mut c = connect(&env.sock()).await;
     handshake(&mut c).await;
     let worktree = add_project_get_main_worktree(&mut c, &repo).await;
@@ -3419,8 +3421,10 @@ async fn idle_sessions_reap_unwatched_but_spare_busy_and_attached() {
 async fn idle_agent_with_a_detached_job_is_spared_until_it_ends() {
     let env = TestEnv::new();
     let repo = env.make_repo();
-    env.write_config(r#"{"session_idle_timeout": "2s"}"#);
-    let mut daemon = env.spawn_daemon_with("/bin/sh", &[(env::IDLE_REAP_MS, "200")]);
+    let mut daemon = env.spawn_daemon_with(
+        "/bin/sh",
+        &[(env::IDLE_REAP_MS, "200"), (env::IDLE_TIMEOUT_MS, "2000")],
+    );
     let mut c = connect(&env.sock()).await;
     handshake(&mut c).await;
     let worktree = add_project_get_main_worktree(&mut c, &repo).await;

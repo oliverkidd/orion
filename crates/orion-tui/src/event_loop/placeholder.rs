@@ -697,7 +697,7 @@ mod tests {
 
             assert_eq!(
                 worktree_branches(&app),
-                ["main".into(), branch.clone(), "feat".into()]
+                ["main".into(), "feat".into(), branch.clone()]
             );
             let selected = app.selected_worktree().expect("a row is selected");
             assert_eq!(selected.id, rows.worktree, "the cursor is on the stand-in");
@@ -757,7 +757,7 @@ mod tests {
             );
             assert_eq!(
                 worktree_branches(&app),
-                ["main".into(), branch.clone(), "feat".into()],
+                ["main".into(), "feat".into(), branch.clone()],
                 "one row, not two"
             );
             assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w3"));
@@ -859,7 +859,7 @@ mod tests {
             );
             assert_eq!(
                 worktree_branches(&app),
-                ["main".into(), branch.clone(), "feat".into()]
+                ["main".into(), "feat".into(), branch.clone()]
             );
             assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w3"));
             assert!(!app.is_placeholder_worktree(&WorktreeId("w3".into())));
@@ -882,7 +882,7 @@ mod tests {
             seed_feat_worktree(&mut app, "w3", &branch);
             assert_eq!(
                 worktree_branches(&app),
-                ["main".into(), branch.clone(), "feat".into()],
+                ["main".into(), "feat".into(), branch.clone()],
                 "still one row"
             );
             assert_eq!(
@@ -1016,12 +1016,11 @@ mod tests {
                 },
                 &mut out,
             );
-            // Without its session the checkout is dormant, but the cursor
-            // is on it: it is the HELD CHECKOUT, and keeps its place among
-            // the live ones until the cursor leaves.
+            // Without its session the checkout stays where it was cut, the
+            // cursor on it.
             assert_eq!(
                 worktree_branches(&app),
-                ["main".to_string(), branch.clone(), "feat".to_string()]
+                ["main".to_string(), "feat".to_string(), branch.clone()]
             );
             assert_eq!(app.selected_worktree().map(|w| w.id.0.as_str()), Some("w3"));
             assert!(app.visible_session_rows().is_empty());

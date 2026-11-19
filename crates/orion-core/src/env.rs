@@ -44,6 +44,9 @@ pub const CONFIG_FILE: &str = "ORION_CONFIG_FILE";
 pub const AGENT_CMD: &str = "ORION_AGENT_CMD";
 /// Idle-session reaper sweep period in ms; tests shorten it.
 pub const IDLE_REAP_MS: &str = "ORION_IDLE_REAP_MS";
+/// How long (ms, default 15 min) a session nobody is viewing may sit idle
+/// before the reaper stops it; tests shorten it.
+pub const IDLE_TIMEOUT_MS: &str = "ORION_IDLE_TIMEOUT_MS";
 /// External-worktree sync probe period in ms; tests shorten it.
 pub const WORKTREE_SYNC_MS: &str = "ORION_WORKTREE_SYNC_MS";
 /// How often (ms, default 30 s) the DAEMON tends its SPARE WORKTREES:

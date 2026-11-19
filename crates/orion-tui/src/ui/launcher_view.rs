@@ -429,7 +429,7 @@ struct TabFit {
 /// [`TAB_NAME_MIN`]; the chip alone, holding them all; and nothing. The
 /// tabs keep their own order, so the lit tab drawn out of its place
 /// sits where it falls among the ones kept, and the ones kept are the
-/// first ones — the projects last worked in.
+/// first ones.
 fn fit_tabs(
     sizes: &[TabSize],
     lit: Option<usize>,
@@ -924,16 +924,6 @@ fn draw_bands(
     let facts: Vec<RuleFacts> = bands.iter().map(|b| rule_facts(app, b, th)).collect();
     let cols = RuleColumns::of(&facts);
     let list_cols = list_columns(panel, bands, &mut cfg);
-    if let Some(y) = panel.divider_y {
-        let line = Rect {
-            y,
-            height: 1,
-            ..area
-        };
-        if let Some(placed) = crate::launcher::place(window, scroll, line) {
-            draw_dormant_divider(f.buffer_mut(), placed.rect, th);
-        }
-    }
     for (index, band) in bands.iter().enumerate() {
         let pb = &panel.bands[index];
         let whole = Rect {
@@ -1025,24 +1015,6 @@ fn draw_bands(
 /// What an EMPTY BAND says under its rule, before the ways to start
 /// something there ([`empty_band_hint`]).
 const EMPTY_BAND: &str = "nothing running";
-
-/// What the DORMANT DIVIDER says, ahead of the dashes that fill its row.
-const DORMANT_LABEL: &str = "┄┄ dormant ";
-
-/// The DORMANT DIVIDER: one faint `┄┄ dormant ┄┄┄…` line across the grid,
-/// over the checkouts whose sessions have all gone cold. Nothing to click.
-fn draw_dormant_divider(buf: &mut Buffer, r: Rect, th: Theme) {
-    let width = r.width as usize;
-    if width < DORMANT_LABEL.chars().count() {
-        return;
-    }
-    let text: String = DORMANT_LABEL
-        .chars()
-        .chain(std::iter::repeat('┄'))
-        .take(width)
-        .collect();
-    buf.set_string(r.x, r.y, text, Style::default().fg(th.faint));
-}
 
 /// What an EMPTY BAND's line says in `width` columns: [`EMPTY_BAND`],
 /// then the keys that start something there, from the live keymap —
@@ -5387,7 +5359,6 @@ mod tests {
             })],
             archived: Vec::new(),
             drawer_open: false,
-            dormant: false,
         }
     }
 

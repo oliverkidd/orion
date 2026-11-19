@@ -5121,7 +5121,6 @@ fn draw_worktree_pick(
                     width.saturating_sub(PICK_INDENT.len()),
                     th,
                 ),
-                dormant: app.worktree_dormant(&w.id),
             }
         })
         .collect();
@@ -5181,13 +5180,11 @@ fn draw_work_pick(f: &mut Frame, area: Rect, app: &App, pick: &WorkPick, th: The
                 Span::styled(format!("  {}", ids.join(", ")), Style::default().fg(th.dim)),
             ],
             sessions: pick_session_lines(app, &w.id, width, th),
-            dormant: app.worktree_dormant(&w.id),
         })
         .collect();
     groups.push(PickGroup {
         head: vec![Span::raw("+ New worktree anyway")],
         sessions: Vec::new(),
-        dormant: false,
     });
     let on: Vec<&str> = pick
         .worktrees
@@ -5207,12 +5204,11 @@ const PICK_INDENT: &str = "   ";
 /// the rest are a `+N more` line.
 const PICK_SESSIONS_MAX: usize = 3;
 
-/// One checkout in the worktree picker: its line, its sessions' lines
-/// under it, and whether it stands in the DORMANT group.
+/// One checkout in the worktree picker: its line, and its sessions'
+/// lines under it.
 struct PickGroup<'a> {
     head: Vec<Span<'a>>,
     sessions: Vec<Vec<Span<'static>>>,
-    dormant: bool,
 }
 
 /// The lines under checkout `worktree` in the worktree picker: each
@@ -5259,9 +5255,7 @@ fn pick_session_lines(
 /// [`draw_side_pick`] for items that take several lines each: `heading`
 /// in bold, then each group's line with its own lines under it, the
 /// selected group's every line wearing the cursor's bar, scrolled so the
-/// whole selected group is in view. A faint `dormant` line, with a row of
-/// air either side, stands over the first dormant group when live ones
-/// are above it, as on the grid.
+/// whole selected group is in view.
 fn draw_grouped_pick(
     f: &mut Frame,
     area: Rect,
@@ -5285,27 +5279,9 @@ fn draw_grouped_pick(
         height: area.height.saturating_sub(HEAD_ROWS),
         ..area
     };
-    // Every line top to bottom, with the group it belongs to (None for
-    // the divider's lines).
-    let divider_at = groups
-        .iter()
-        .position(|g| g.dormant)
-        .filter(|&first| first > 0);
+    // Every line top to bottom, with the group it belongs to.
     let mut lines: Vec<(Option<usize>, Vec<Span>)> = Vec::new();
     for (i, group) in groups.iter().enumerate() {
-        if divider_at == Some(i) {
-            let rule: String = "┄┄ dormant "
-                .chars()
-                .chain(std::iter::repeat('┄'))
-                .take(usize::from(list.width).saturating_sub(2))
-                .collect();
-            lines.push((None, Vec::new()));
-            lines.push((
-                None,
-                vec![Span::styled(rule, Style::default().fg(th.faint))],
-            ));
-            lines.push((None, Vec::new()));
-        }
         lines.push((Some(i), group.head.clone()));
         lines.extend(group.sessions.iter().map(|l| (Some(i), l.clone())));
     }
@@ -7407,11 +7383,7 @@ pub(crate) mod tests {
         let view = the_view(&app);
         let pick = view.worktree_pick.as_ref().expect("the worktree picker");
         let branches: Vec<&str> = pick.worktrees.iter().map(|w| w.branch.as_str()).collect();
-        assert_eq!(
-            branches,
-            ["feature-x", "branch-41"],
-            "the grid's order: live first, then dormant"
-        );
+        assert_eq!(branches, ["feature-x", "branch-41"], "the grid's order");
         crate::hints::assert_hints_from(&hints(view), keys::ALL);
         let screen = shot(&mut app, 140, 40);
         assert!(
@@ -7430,7 +7402,7 @@ pub(crate) mod tests {
             .position(|l| l.contains("⎇ branch-41"))
             .expect("branch-41's line");
         assert!(lines[idle + 1].contains("no sessions"), "{screen}");
-        assert!(lines[idle - 2].contains("dormant"), "{screen}");
+        assert!(!screen.contains("dormant"), "{screen}");
 
         press(&mut app, plain(KeyCode::Enter));
         let view = the_view(&app);

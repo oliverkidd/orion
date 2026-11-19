@@ -10166,11 +10166,25 @@ fn restore_session(app: &mut App, out: &mut Vec<ClientRequest>) {
         .selected_worktree()
         .and_then(|w| app.last_session_for_worktree.get(&w.id).cloned());
     let attachable = |r: &SessionRow| r.sref().is_some() && !r.is_archived_agent();
+    // With nothing remembered, the session last worked in: the rows stand
+    // in the order they were made, so the top one is the oldest.
+    let most_recent = || {
+        rows.iter()
+            .enumerate()
+            .filter(|(_, r)| attachable(r))
+            .filter_map(|(i, r)| match r {
+                SessionRow::Agent(a) => Some((i, crate::app::recency_key(a))),
+                _ => None,
+            })
+            .min_by_key(|(_, key)| *key)
+            .map(|(i, _)| i)
+    };
     let target = remembered
         .and_then(|sref| {
             rows.iter()
                 .position(|r| r.sref().as_ref() == Some(&sref) && attachable(r))
         })
+        .or_else(most_recent)
         .or_else(|| rows.iter().position(attachable))
         .and_then(|i| rows[i].sref().map(|sref| (i, sref)));
     match target {
@@ -13051,13 +13065,6 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             // A row deleted here and not yet answered keeps the flip for a
             // refusal to put back.
             optimistic::hold_status(app, &agent, status, changed_at, unseen);
-            // The first turn in a session we just launched: its own stamp
-            // leads the list from here, so the launch stops having to.
-            if status != orion_core::AgentStatus::Fresh
-                && app.just_launched.as_ref() == Some(&agent)
-            {
-                app.just_launched = None;
-            }
             // A turn that finished in the pane the user is looking at was
             // watched: clear it before it can count anywhere.
             let on_screen = app
@@ -13483,12 +13490,6 @@ fn attach_created(
     if let (Some(stand_in), EntityId::Agent(real)) = (&placeholder, &id) {
         placeholder::resolve_agent(app, stand_in, real);
     }
-    // The card leads the sessions lists until its first turn starts, with
-    // or without `follow`: where the cursor goes is one question, and
-    // where the newest session sorts is another.
-    if let EntityId::Agent(real) = &id {
-        app.just_launched = Some(real.clone());
-    }
     let sref = match id {
         EntityId::Agent(id) => Some(SessionRef::Agent(id)),
         EntityId::Terminal(id) => Some(SessionRef::Terminal(id)),
@@ -13735,9 +13736,6 @@ struct SelectionSnapshot {
     /// takes its cursor's neighbour — but it makes two snapshots on
     /// different rows differ.
     pr: Option<String>,
-    /// Whether `worktree` stood among the DORMANT checkouts: a live one
-    /// that leaves hands its cursor to a live neighbour when it can.
-    worktree_dormant: bool,
     session: Option<SessionRef>,
     /// The Sessions panel row the cursor was on, and the group that row
     /// sat in. Following onto an archived row is only right when the
@@ -13774,43 +13772,10 @@ fn selection_snapshot(app: &App) -> SelectionSnapshot {
     SelectionSnapshot {
         project: app.selected_project().map(|p| p.id.clone()),
         worktree: app.selected_worktree().map(|w| w.id.clone()),
-        worktree_dormant: app
-            .selected_worktree()
-            .is_some_and(|w| in_dormant_group(app, w)),
         pr: app.selected_worktree_pr().map(|pr| pr.url.clone()),
         session_index,
         session_group: row.map(session_group),
         session: row.and_then(SessionRow::sref),
-    }
-}
-
-/// Whether checkout `w` sorts among the DORMANT ones
-/// ([`App::worktree_order`]): the root never does.
-fn in_dormant_group(app: &App, w: &orion_core::Worktree) -> bool {
-    !w.is_main && app.worktree_dormant(&w.id)
-}
-
-/// A live checkout that left its list put the cursor on the row that slid
-/// into its slot. When it was the last live one that row is the first
-/// DORMANT checkout, under the divider — and showing it attaches its
-/// session, which boots the reaped CLI, wakes the checkout and sends it
-/// back up the list with the cursor on a chat nobody picked. So the cursor
-/// steps up onto the live checkout above instead, as a session cursor
-/// steps out of the last row of its group.
-fn step_up_out_of_dormant(app: &mut App) {
-    let up = {
-        let rows = app.worktree_rows();
-        let at = app.worktree_index_in(&rows);
-        let dormant = |i: usize| {
-            rows.get(i)
-                .and_then(|row| row.checkout())
-                .map(|w| in_dormant_group(app, w))
-        };
-        at.checked_sub(1)
-            .filter(|&above| dormant(at) == Some(true) && dormant(above) == Some(false))
-    };
-    if let Some(at) = up {
-        app.set_sel_worktree(at);
     }
 }
 
@@ -13853,9 +13818,6 @@ fn reconcile_selection_inner(
     // on the row that took its place.
     if let Some(wid) = &before.worktree {
         if app.selected_worktree().map(|w| &w.id) != Some(wid) {
-            if !before.worktree_dormant {
-                step_up_out_of_dormant(app);
-            }
             restore_session(app, out);
             return;
         }
@@ -19485,11 +19447,11 @@ mod tests {
         );
     }
 
-    /// Running / needs-feedback sessions head the list and hold their
-    /// place there however long they have been working — an old status
-    /// timestamp doesn't drop them below a fresher finish.
+    /// Running / needs-feedback sessions stand where they were made, as
+    /// every session does: working does not lift one, an old stamp does
+    /// not sink one.
     #[test]
-    fn working_sessions_head_the_list_regardless_of_age() {
+    fn working_sessions_keep_the_order_they_were_made_in() {
         use orion_core::{Agent, AgentStatus, Entity};
         let mut app = App::new();
         seed_tree(&mut app);
@@ -19535,17 +19497,16 @@ mod tests {
         let names: Vec<&str> = rows.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["long-running", "long-blocked", "just-finished", "agent-1"],
-            "working sessions on top, then the freshly-changed row, then the rest"
+            vec!["agent-1", "just-finished", "long-running", "long-blocked"],
+            "made order, whatever each is doing"
         );
         assert_eq!(app.session_group_counts(), (4, 0));
     }
 
-    /// The list is ordered by last interaction, newest first — the session
-    /// you just ran surfaces at the top, and sessions that have never run
-    /// sink to the bottom in tree order. No group headers split it.
+    /// The list is in the order the sessions were made, oldest first, and
+    /// an interaction moves nothing. No group headers split it.
     #[test]
-    fn sessions_order_by_last_interaction() {
+    fn sessions_keep_the_order_they_were_made_in() {
         use orion_core::{Agent, AgentStatus, Entity};
         let mut app = App::new();
         seed_tree(&mut app); // agent-1: fresh, never run (stamp 0)
@@ -19584,13 +19545,10 @@ mod tests {
 
         let rows = app.visible_sessions();
         let names: Vec<&str> = rows.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "working", "done-1m", "done-10m", // working on top, then newest first
-                "cold-45m", "cold-2h", "agent-1", // never-run last
-            ],
-        );
+        let made = vec![
+            "agent-1", "working", "done-1m", "done-10m", "cold-2h", "cold-45m",
+        ];
+        assert_eq!(names, made);
         assert_eq!(app.session_group_counts(), (6, 0));
 
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -19600,7 +19558,7 @@ mod tests {
             assert!(!text.contains(header), "no {header} header:\n{text}");
         }
 
-        // A status flip is an interaction: the coldest row jumps the queue.
+        // A status flip is an interaction, and it moves nothing.
         hse(
             &mut app,
             ServerEvent::StatusChanged {
@@ -19613,23 +19571,13 @@ mod tests {
         );
         let rows = app.visible_sessions();
         let names: Vec<&str> = rows.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "working", "cold-2h", "done-1m", "done-10m", //
-                "cold-45m", "agent-1",
-            ],
-            "the cold row jumped to the top, behind only the live turn it ties with"
-        );
+        assert_eq!(names, made, "the cold row stays where it was");
     }
 
-    /// Every session mid-turn counts as interacting *now*, so the raw
-    /// stamp breaks that tie: the newest turn leads. This is what puts the
-    /// session just launched — created `running`, stamped as it was created
-    /// — at the top of the list instead of under the sessions that have
-    /// been working for an hour, in the checkout's row and the project's too.
+    /// A session just launched joins the end of the list, under the ones
+    /// already working: nothing above it moves to make room.
     #[test]
-    fn a_session_created_running_leads_the_working_ones() {
+    fn a_session_just_launched_joins_the_end() {
         use orion_core::{Agent, AgentStatus, Entity};
         let mut app = App::new();
         seed_tree(&mut app); // agent-1: fresh, never run
@@ -19680,15 +19628,15 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec!["just-launched", "blocked-20m", "working-1h", "agent-1"],
-            "the newest turn first, the oldest working row last"
+            vec!["agent-1", "working-1h", "blocked-20m", "just-launched"],
+            "made order"
         );
     }
 
-    /// A StatusChanged delta stamps the agent's timestamp, pulls it to the
-    /// top, and the selection follows the session it was on.
+    /// A StatusChanged delta stamps the agent's timestamp and moves no
+    /// row: the selection stays on the session it was on, where it was.
     #[test]
-    fn status_change_resorts_and_selection_follows() {
+    fn status_change_moves_no_row() {
         use orion_core::{Agent, AgentStatus, Entity};
         let mut app = App::new();
         seed_tree(&mut app);
@@ -19731,12 +19679,9 @@ mod tests {
             },
         );
         let rows = app.visible_sessions();
-        assert_eq!(
-            rows[0].name, "agent-2",
-            "the stamped agent bubbled to the top"
-        );
+        assert_eq!(rows[1].name, "agent-2", "the stamped agent stays put");
         assert_eq!(app.session_group_counts(), (2, 0));
-        assert_eq!(app.sel_session(), 0, "selection followed agent-2");
+        assert_eq!(app.sel_session(), 1, "selection still on agent-2");
     }
 
     /// Confirming a worktree delete drops the row (and its agents)
@@ -24017,14 +23962,10 @@ mod tests {
     }
 
     /// Worktrees keep one order below the root checkout: the order they
-    /// were made in. A turn starting or finishing moves nothing; the one
-    /// move is a checkout whose sessions have all gone cold sinking below
-    /// the divider, and coming up to the bottom of the live ones when one
-    /// wakes — not back to the slot it was made in, which would push every
-    /// live checkout under that slot down a row. The cursor follows its
-    /// row across that move.
+    /// were made in. Nothing moves one — a turn starting or finishing, its
+    /// sessions all going cold under the reaper, or waking again.
     #[test]
-    fn worktrees_keep_creation_order_and_dormant_ones_sink() {
+    fn worktrees_keep_creation_order_whatever_their_sessions_do() {
         use orion_core::AgentStatus;
         let mut app = App::new();
         seed_tree(&mut app); // w1 "main" (root) / a1 never run
@@ -24080,39 +24021,35 @@ mod tests {
             assert_eq!(app.sel_worktree(), 2);
         }
 
-        // "feat"'s one session goes cold: the checkout sinks below
-        // "older", and the cursor stays on "older".
+        // "feat"'s one session goes cold: it stays where it is.
         let mut cold = agent_stamped("a2", "w2", mins(50));
         if let orion_core::Entity::Agent(a) = &mut cold {
             a.alive = false;
         }
         hse(&mut app, ServerEvent::EntityUpserted { entity: cold });
-        assert!(app.worktree_dormant(&WorktreeId("w2".into())));
-        assert_eq!(branches(&app), ["main", "older", "feat"]);
+        assert_eq!(branches(&app), ["main", "feat", "older"]);
         assert_eq!(
             app.selected_worktree().map(|w| w.branch.as_str()),
             Some("older")
         );
 
-        // A checkout with no sessions is dormant from the start, below.
+        // A checkout with no sessions joins the end.
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
                 entity: wt_entity("w4", "p1", "idle", false),
             },
         );
-        assert_eq!(branches(&app), ["main", "older", "feat", "idle"]);
+        assert_eq!(branches(&app), ["main", "feat", "older", "idle"]);
 
-        // "feat" wakes: up to the bottom of the live ones, right above the
-        // divider, so "older" above it never moves.
+        // "feat" wakes: still where it was made.
         hse(
             &mut app,
             ServerEvent::EntityUpserted {
                 entity: agent_stamped("a2", "w2", now),
             },
         );
-        assert!(!app.worktree_dormant(&WorktreeId("w2".into())));
-        assert_eq!(branches(&app), ["main", "older", "feat", "idle"]);
+        assert_eq!(branches(&app), ["main", "feat", "older", "idle"]);
         assert_eq!(
             app.selected_worktree().map(|w| w.branch.as_str()),
             Some("older")
@@ -24272,8 +24209,9 @@ mod tests {
     }
 
     /// A worktree with no remembered session — the first visit, or a
-    /// remembered row that has since vanished — comes up on its top row,
-    /// the most recently interacted session, not on a blank pane.
+    /// remembered row that has since vanished — comes up on its most
+    /// recently interacted session, not on a blank pane, and not on the
+    /// top row, which is the oldest.
     #[test]
     fn a_worktree_with_nothing_remembered_shows_its_most_recent_session() {
         use orion_core::Entity;
@@ -24285,9 +24223,8 @@ mod tests {
                 entity: wt_entity("w2", "p1", "other", false),
             },
         );
-        // Two idle sessions on w2, upserted oldest-interaction first so
-        // tree order and recency order disagree: the fallback must land on
-        // the row the list shows at the top, which is by recency.
+        // Two idle sessions on w2, the newer interaction made second: the
+        // fallback lands on it, below the older one.
         let stamped = |id: &str, name: &str, stamp: i64| {
             let Entity::Agent(mut a) = agent_entity(id, "w2", name, false) else {
                 unreachable!()
@@ -24323,7 +24260,7 @@ mod tests {
             Some("other".into())
         );
         fire_pending_attach(&mut app, &mut out);
-        assert_eq!(app.sel_session(), 0, "cursor on the top row");
+        assert_eq!(app.sel_session(), 1, "cursor on its row, made second");
         assert_eq!(
             app.term.as_ref().map(|t| t.sref.clone()),
             Some(a3.clone()),
@@ -24349,11 +24286,11 @@ mod tests {
         out.clear();
         select_worktree_row(&mut app, 1, &mut out);
         fire_pending_attach(&mut app, &mut out);
-        assert_eq!(app.sel_session(), 0);
+        assert_eq!(app.sel_session(), 1);
         assert_eq!(
             app.term.as_ref().map(|t| t.sref.clone()),
             Some(a3.clone()),
-            "a vanished memory lands on the top row"
+            "a vanished memory lands on the most recent too"
         );
         assert!(
             out.iter()
@@ -27487,24 +27424,23 @@ mod tests {
     }
 
     #[test]
-    fn settings_hl_cycles_session_idle_timeout_and_persists() {
+    fn settings_hl_cycles_a_setting_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         crate::config::with_config_path(path, || {
             let mut app = App::new();
             let mut out = Vec::new();
             let (tab, row) =
-                crate::config::locate(crate::config::SettingKind::SessionIdleTimeout).unwrap();
+                crate::config::locate(crate::config::SettingKind::FollowNewSession).unwrap();
             open_settings_on(&mut app, tab, &mut out);
             for _ in 0..row {
                 press(&mut app, KeyCode::Char('j'), KeyModifiers::NONE, &mut out);
             }
+            assert!(crate::config::Config::load().follow_new_session);
             press(&mut app, KeyCode::Char('l'), KeyModifiers::NONE, &mut out);
-            let cfg = crate::config::Config::load();
-            assert_eq!(cfg.session_idle_timeout, "15m");
+            assert!(!crate::config::Config::load().follow_new_session);
             press(&mut app, KeyCode::Char('h'), KeyModifiers::NONE, &mut out);
-            let cfg = crate::config::Config::load();
-            assert_eq!(cfg.session_idle_timeout, "5m");
+            assert!(crate::config::Config::load().follow_new_session);
         });
     }
 

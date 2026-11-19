@@ -398,18 +398,19 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   in feat`). Esc leaves the box for the grid, keeping what you typed — `⌘N`
   opens on it again.
 - **The grid** is the body beside the pane: every unarchived session of
-  the **selected project**, a line apiece in its checkout's band, most recently touched first,
+  the **selected project**, a line apiece in its checkout's band, in the order they were made
+  (a new one joins the end; nothing moves when a session works, finishes, is read or is reaped),
   under a header of **PROJECT TABS** — ` +   web ●1 ×   api ●2 ●1 ×` — one tab per project you
-  have opened, the one you last worked in first, right after the `+`, and at its right end the
+  have opened, in the order you opened them (a drag along the header moves one; nothing else does), and at its right end the
   NEEDS YOU COUNT, `⌘K 4` in the waiting red: how many cards wait on the
   [Needs you board](keys.md#needs-you-k), nothing at all at zero, and a click opens the board (how
   many sessions run is the footer's to say). The tab the grid is on is lit, a raised chip with its name in the accent. The tabs are how
   you move between projects — there is no level above the grid to walk out to. Opening a project
-  that has no tab yet — from the `+`, a `⌘K` jump, a folder just opened — puts one first, next to the `+`,
-  and so does working in one: launching a session there (a `^P` launch into another project included),
-  opening a shell or a worktree there, sending a follow-up, or typing into one of its sessions in the
-  pane moves its tab to the front, so the header reads from the project you last worked in, left to
-  right. Only switching to a tab moves none of them, so `[` / `]` walk a row that holds still.
+  that has no tab yet — from the `+`, a `⌘K` jump, a folder just opened — puts one at the right end,
+  and so does working in one with no tab: launching a session there (a `^P` launch into another
+  project included), opening a shell or a worktree there, or sending a follow-up. A tab already open
+  never moves on its own — not for working in it, not for switching to it — so `[` / `]` and
+  `⌘1`–`⌘9` walk a row that holds still.
   A click on a tab, `[` / `]` for the tab to the left / right (stopping at either end), or `⌘1`–`⌘9` for
   the Nth from the left opens that project's sessions, on the row you last left it on — its session
   back in the pane — or its first row on a first visit. A project with no sessions yet — a folder
@@ -450,9 +451,8 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   you read it. Work in progress never sweeps a tab; the spinner says that. The tab you are on never
   sweeps at all: its accent says where you are. The sweep recolors the name in place, so no tab
   moves; the animations setting turns it off. The `+` in front of the tabs — a click, or **Switch
-  project** in the COMMAND PALETTE — drops the PROJECT DROPDOWN: every project on the machine — the
-  ones with a session waiting on you first, then the ones running, then the rest most recently
-  worked in — the one in front of you ticked and each with how many sessions it holds, and a last
+  project** in the COMMAND PALETTE — drops the PROJECT DROPDOWN: every project on the machine, in
+  the order they were added — a project waiting on you keeps its row — the one in front of you ticked and each with how many sessions it holds, and a last
   row, `+ open a folder…`, for a folder that is not a project yet (the prompt **Open a folder as a project** opens). It takes
   **type-ahead** — letters narrow the rows to what they fuzzy-match, best first, `↑`/`↓` move,
   Backspace widens, Esc clears the query before it closes the list — so opening a project is its
@@ -465,9 +465,9 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   header's cursor reach them too, each drawn in the lit tab's place. The lit tab is always drawn,
   its name whole wherever there is room for it. A tab's name, its `×`, the chip and the `+` all mark
   themselves while the pointer rests on them. The rows are grouped
-  into **BANDS**, one per checkout — the root first, then the rest most recently worked in first,
-  and last, under a faint `┄┄ dormant ┄┄` line, the checkouts whose sessions have all gone cold or
-  that have none.
+  into **BANDS**, one per checkout — the root first, then the rest in the order they were made. A
+  checkout whose sessions the idle reaper stopped stays where it is, its cards drawn gray; one
+  click on a card boots its session again.
   A checkout with nothing running in it is an EMPTY BAND, its rule over a single line that says so
   and how to start something — `nothing running · ⌘N new agent · ⌘⇧N new agent in a new worktree ·
   t terminal`, the keys your keymap's, the longest giving way on a narrow grid; dim, and in the

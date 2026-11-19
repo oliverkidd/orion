@@ -19,11 +19,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-/// Values the settings overlay cycles through for `session_idle_timeout`
-/// (daemon-owned: how long unwatched idle sessions live before their PTY
-/// is reaped).
-pub const SESSION_IDLE_TIMEOUTS: &[&str] = &["off", "1m", "5m", "15m", "30m", "1h"];
-
 /// Values the settings overlay cycles through for `done_sound` (what rings
 /// when a turn nobody watched reaches FINISHED) and `feedback_sound` (what
 /// rings when one stops at NEEDS FEEDBACK, or dies mid-turn). `off` is
@@ -380,7 +375,6 @@ pub struct SettingsTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingKind {
     FollowNewSession,
-    SessionIdleTimeout,
     OutsideEditor,
     DoneSound,
     FeedbackSound,
@@ -612,12 +606,6 @@ pub const GENERAL_SETTINGS: &[SettingSpec] = &[
         kind: SettingKind::FollowNewSession,
         label: "Follow new session",
         hint: "A new agent's row comes under the cursor, the grid scrolled to it, without entering it (off = stay on the row you're on)",
-        group: "Launching",
-    },
-    SettingSpec {
-        kind: SettingKind::SessionIdleTimeout,
-        label: "Idle session timeout",
-        hint: "Kill idle sessions in unviewed worktrees (busy ones spared; off disables)",
         group: "Launching",
     },
     SettingSpec {
@@ -1134,11 +1122,6 @@ pub struct Config {
     /// releases since. Empty on a config from before it existed. Local-only.
     #[serde(default)]
     pub seen_version: String,
-    /// How long an idle session in an unviewed worktree lives before the
-    /// daemon reaps its PTY: "1m", "5m", "15m", "30m", "1h"; "off"
-    /// disables. Owned by the daemon (which does the parsing and reaping);
-    /// the TUI writes it so the settings overlay can cycle it.
-    pub session_idle_timeout: String,
     /// What rings when a turn reaches FINISHED with nobody watching it:
     /// "off", "bell" (terminal BEL) or the name of a macOS system sound
     /// (`Glass` by default, `Ping`, …; see [`SOUNDS`]). Resolved by
@@ -1487,7 +1470,6 @@ impl Default for Config {
             linear_assignee_email: String::new(),
             onboarded: false,
             seen_version: String::new(),
-            session_idle_timeout: orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             done_sound: "Glass".into(),
             feedback_sound: "Sosumi".into(),
             theme: "default".into(),
@@ -2769,7 +2751,6 @@ impl Config {
     pub fn value_label(&self, kind: SettingKind) -> String {
         match kind {
             SettingKind::FollowNewSession => on_off(self.follow_new_session).into(),
-            SettingKind::SessionIdleTimeout => self.session_idle_timeout.clone(),
             SettingKind::OutsideEditor => crate::outside_editor::row_label(&self.outside_editor),
             SettingKind::DoneSound => self.done_sound.clone(),
             SettingKind::FeedbackSound => self.feedback_sound.clone(),
@@ -2925,10 +2906,6 @@ impl Config {
         match kind {
             SettingKind::FollowNewSession => {
                 self.follow_new_session = !self.follow_new_session;
-            }
-            SettingKind::SessionIdleTimeout => {
-                self.session_idle_timeout =
-                    cycle_choice(&self.session_idle_timeout, SESSION_IDLE_TIMEOUTS, step).into();
             }
             SettingKind::OutsideEditor => {
                 let current = crate::outside_editor::Choice::parse(&self.outside_editor);
@@ -4037,7 +4014,7 @@ mod tests {
     }
 
     #[test]
-    fn cycle_toggles_bools_and_walks_session_idle_timeout() {
+    fn cycle_toggles_bools() {
         let mut cfg = Config::default();
         let (t, r) = locate(SettingKind::FollowNewSession).unwrap();
         assert!(cfg.follow_new_session);
@@ -4045,15 +4022,6 @@ mod tests {
         assert!(!cfg.follow_new_session);
         cfg.cycle(t, r, 1);
         assert!(cfg.follow_new_session);
-
-        assert_eq!(cfg.session_idle_timeout, "5m");
-        let (t, r) = locate(SettingKind::SessionIdleTimeout).unwrap();
-        cfg.cycle(t, r, 0);
-        assert_eq!(cfg.session_idle_timeout, "15m");
-        cfg.cycle(t, r, -1);
-        assert_eq!(cfg.session_idle_timeout, "5m");
-        cfg.cycle(t, r, -1);
-        assert_eq!(cfg.session_idle_timeout, "1m");
     }
 
     /// A `config.json` without a `harnesses` key — `{}`, or a file from
@@ -4110,24 +4078,6 @@ mod tests {
         assert_eq!(load_from(&path).outside_editor, "sublime");
         let cfg: Config = serde_json::from_str("{}").unwrap();
         assert_eq!(cfg.outside_editor, "auto", "a config predating the key");
-    }
-
-    #[test]
-    fn session_idle_timeout_cycles_and_persists() {
-        let mut cfg = Config::default();
-        assert_eq!(cfg.session_idle_timeout, "5m");
-        let (tab, row) = locate(SettingKind::SessionIdleTimeout).unwrap();
-        cfg.cycle(tab, row, 1);
-        assert_eq!(cfg.session_idle_timeout, "15m");
-        cfg.cycle(tab, row, -2);
-        assert_eq!(cfg.session_idle_timeout, "1m");
-        cfg.cycle(tab, row, -1);
-        assert_eq!(cfg.session_idle_timeout, "off");
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        cfg.save_to(&path).unwrap();
-        assert_eq!(load_from(&path).session_idle_timeout, "off");
     }
 
     #[test]
@@ -5207,17 +5157,18 @@ mod tests {
 
         let mut cfg = load_from(&path);
         assert!(!cfg.animations);
-        assert_eq!(cfg.session_idle_timeout, "15m");
         cfg.spotify = false;
         cfg.animations = true;
-        cfg.session_idle_timeout = "1h".into();
         cfg.save_to(&path).unwrap();
 
         let saved: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["spotify"], false);
         assert_eq!(saved["animations"], true);
-        assert_eq!(saved["session_idle_timeout"], "1h");
+        assert_eq!(
+            saved["session_idle_timeout"], "15m",
+            "a key this build no longer reads is kept as written"
+        );
         assert_eq!(saved["future_daemon_flag"], true);
     }
 
@@ -5295,7 +5246,6 @@ mod tests {
             general,
             [
                 ("Launching", "Follow new session"),
-                ("Launching", "Idle session timeout"),
                 ("Launching", "Open files in"),
                 ("Sounds", "Turn finished"),
                 ("Sounds", "Needs you"),
@@ -5757,6 +5707,6 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(saved["follow_new_session"], true);
         assert_eq!(saved["spotify"], true);
-        assert_eq!(saved["session_idle_timeout"], "5m");
+        assert!(saved.get("session_idle_timeout").is_none());
     }
 }

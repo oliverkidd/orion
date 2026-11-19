@@ -14,15 +14,6 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Kill idle session PTYs in worktrees no client is looking at once
-    /// they've gone unwatched this long: "1m" | "5m" | "15m" | "30m" | "1h"
-    /// ("off" disables reaping entirely; any `<n>s`/`<n>m`/`<n>h` works).
-    /// Bounds what prewarmed and walked-away-from sessions cost. Running
-    /// or feedback-waiting agents, agents with a backgrounded tool call
-    /// still running, and terminals with a command running are spared; a
-    /// reaped session revives on the next attach or prewarm (agents resume
-    /// their conversation). Malformed values fall back to the 5m default.
-    pub session_idle_timeout: String,
     /// Per-harness deltas over the compiled-in registry (`harnesses` in
     /// config.json): repoint a program, rename a flag, switch a harness
     /// off, or define a whole new CLI. Merged by
@@ -86,7 +77,6 @@ pub struct ProjectConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            session_idle_timeout: DEFAULT_SESSION_IDLE_TIMEOUT.into(),
             harnesses: BTreeMap::new(),
             claude_accounts: Vec::new(),
             projects: BTreeMap::new(),
@@ -97,7 +87,25 @@ impl Default for Config {
     }
 }
 
-pub use orion_core::settings::DEFAULT_SESSION_IDLE_TIMEOUT;
+/// How long a session in a worktree no client is looking at may sit idle
+/// before the IDLE REAPER stops its PTY. One fixed span for everyone, not
+/// a setting: long enough that walking away for a coffee and back finds
+/// every session warm, short enough that a day of checkouts doesn't keep
+/// a CLI process apiece running. Running or feedback-waiting agents,
+/// agents with a backgrounded tool call still running, and terminals
+/// with a command running are spared; a reaped session revives on the
+/// next attach or prewarm (agents resume their conversation). Tests
+/// shorten it with [`orion_core::env::IDLE_TIMEOUT_MS`].
+pub const SESSION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// [`SESSION_IDLE_TIMEOUT`], or the test override when one is set.
+pub fn session_idle_timeout() -> std::time::Duration {
+    std::env::var(orion_core::env::IDLE_TIMEOUT_MS)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .map_or(SESSION_IDLE_TIMEOUT, std::time::Duration::from_millis)
+}
 
 impl Config {
     pub fn load() -> Self {
@@ -112,12 +120,6 @@ impl Config {
             tracing::warn!(keys = ?loaded.skipped, "settings this build can't read keep their defaults");
         }
         loaded.value
-    }
-
-    /// `session_idle_timeout` parsed to a duration; None = reaping disabled.
-    pub fn session_idle_timeout(&self) -> Option<std::time::Duration> {
-        parse_timeout(&self.session_idle_timeout)
-            .unwrap_or_else(|| parse_timeout(DEFAULT_SESSION_IDLE_TIMEOUT).expect("default parses"))
     }
 
     /// The BASE BRANCH set for the project checked out at `repo_path`, or
@@ -216,28 +218,6 @@ impl Config {
     }
 }
 
-/// "off"/"0" → Some(None); "<n>s"/"<n>m"/"<n>h" → Some(Some(d));
-/// malformed → None (caller falls back to the default).
-#[allow(clippy::option_option)]
-fn parse_timeout(s: &str) -> Option<Option<std::time::Duration>> {
-    let s = s.trim();
-    if s.eq_ignore_ascii_case("off") || s == "0" {
-        return Some(None);
-    }
-    let (digits, unit_secs) = match s.strip_suffix(['s', 'S']) {
-        Some(d) => (d, 1),
-        None => match s.strip_suffix(['m', 'M']) {
-            Some(d) => (d, 60),
-            None => (s.strip_suffix(['h', 'H'])?, 3_600),
-        },
-    };
-    let n: u64 = digits.trim().parse().ok()?;
-    if n == 0 {
-        return Some(None);
-    }
-    Some(Some(std::time::Duration::from_secs(n * unit_secs)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,7 +228,7 @@ mod tests {
     fn an_unreadable_key_costs_only_that_key() {
         let obj = serde_json::json!({
             "projects": "nope",
-            "session_idle_timeout": "1h",
+            "quick_prompt_kind": "codex",
         });
         let (cfg, skipped) =
             orion_core::settings::parse_lenient::<Config>(obj.as_object().unwrap());
@@ -256,7 +236,7 @@ mod tests {
             cfg.projects.is_empty(),
             "the unreadable key takes its default"
         );
-        assert_eq!(cfg.session_idle_timeout, "1h");
+        assert_eq!(cfg.quick_prompt_kind, "codex");
         assert_eq!(skipped.len(), 1);
     }
 
@@ -268,7 +248,6 @@ mod tests {
         let obj: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw).unwrap();
         let (cfg, skipped) = orion_core::settings::parse_lenient::<Config>(&obj);
         assert!(skipped.is_empty(), "{skipped:?}");
-        assert_eq!(cfg.session_idle_timeout, "30m");
         assert_eq!(
             cfg.harnesses.get("claude").and_then(|h| h.enabled),
             Some(false),
@@ -359,32 +338,17 @@ mod tests {
         assert_eq!(off.spare_launch(), None, "the map's switch wins");
     }
 
+    /// The idle timeout is one fixed span, whatever `config.json` says:
+    /// a `session_idle_timeout` an older build wrote is read by nothing.
     #[test]
-    fn session_idle_timeout_parses_and_falls_back() {
-        use std::time::Duration;
-        let timeout = |v: &str| {
-            let cfg: Config =
-                serde_json::from_str(&format!(r#"{{"session_idle_timeout": "{v}"}}"#)).unwrap();
-            cfg.session_idle_timeout()
-        };
-        assert_eq!(timeout("1m"), Some(Duration::from_secs(60)));
-        assert_eq!(timeout("5m"), Some(Duration::from_secs(300)));
-        assert_eq!(timeout("15m"), Some(Duration::from_secs(900)));
-        assert_eq!(timeout("30m"), Some(Duration::from_secs(1800)));
-        assert_eq!(timeout("1h"), Some(Duration::from_secs(3600)));
-        assert_eq!(
-            timeout("2s"),
-            Some(Duration::from_secs(2)),
-            "seconds for tests"
+    fn the_idle_timeout_is_fixed_at_fifteen_minutes() {
+        assert_eq!(SESSION_IDLE_TIMEOUT, std::time::Duration::from_secs(900));
+        let (_, skipped) = orion_core::settings::parse_lenient::<Config>(
+            serde_json::json!({ "session_idle_timeout": "off" })
+                .as_object()
+                .unwrap(),
         );
-        assert_eq!(timeout("off"), None);
-        assert_eq!(timeout("0"), None);
-        // Malformed values fall back to the default, not to disabled.
-        assert_eq!(timeout("soon"), Some(Duration::from_secs(300)));
-        assert_eq!(
-            Config::default().session_idle_timeout(),
-            Some(Duration::from_secs(300))
-        );
+        assert!(skipped.is_empty(), "an old key is ignored, not refused");
     }
 
     /// A project's base branch is its own: read under its repo path,
@@ -453,12 +417,12 @@ mod tests {
         // A `projects` this build can't read costs the map, not the rest.
         let obj = serde_json::json!({
             "projects": { "/tmp/demo": { "run_command": ["npm", "run", "dev"] } },
-            "session_idle_timeout": "1h",
+            "quick_prompt_kind": "codex",
         });
         let (cfg, skipped) =
             orion_core::settings::parse_lenient::<Config>(obj.as_object().unwrap());
         assert_eq!(cfg.run_command(Path::new("/tmp/demo")), None);
-        assert_eq!(cfg.session_idle_timeout, "1h");
+        assert_eq!(cfg.quick_prompt_kind, "codex");
         assert_eq!(skipped.into_iter().collect::<Vec<_>>(), ["projects"]);
     }
 

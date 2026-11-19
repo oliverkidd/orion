@@ -140,7 +140,7 @@ pub struct Daemon {
     attach_counts: Mutex<HashMap<SessionRef, usize>>,
     /// When each live session was last "looked at": spawned, prewarmed,
     /// attached, or covered by the in-view sweep refresh. The idle reaper
-    /// kills sessions whose stamp ages past `session_idle_timeout`.
+    /// kills sessions whose stamp ages past `config::session_idle_timeout`.
     session_interest: Mutex<HashMap<SessionRef, Instant>>,
     /// Last hook-reported cwd per agent, recorded only for payloads that
     /// passed the foreign-session gate. An agent that walks into a checkout
@@ -558,7 +558,7 @@ impl Daemon {
     }
 
     /// Kill idle sessions in worktrees no client is looking at, per
-    /// `session_idle_timeout` — this bounds what prewarming and
+    /// [`crate::config::SESSION_IDLE_TIMEOUT`] — this bounds what prewarming and
     /// walked-away-from sessions cost. "In view" = the worktree holding any
     /// attached session; in-view sessions get their stamps refreshed
     /// instead, so the full timeout starts only when the user leaves.
@@ -569,9 +569,7 @@ impl Daemon {
     /// session revives on the next attach or prewarm; agents resume their
     /// conversation.
     pub fn reap_idle_sessions(self: &Arc<Self>) {
-        let Some(timeout) = crate::config::Config::load().session_idle_timeout() else {
-            return;
-        };
+        let timeout = crate::config::session_idle_timeout();
         let sessions: Vec<(SessionRef, Arc<PtySession>)> = self
             .sessions
             .lock()

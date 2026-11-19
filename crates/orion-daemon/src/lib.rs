@@ -223,7 +223,7 @@ async fn serve() -> Result<()> {
     }
 
     // Idle-session reaper: kill PTYs in worktrees no client is looking at
-    // once they age past `session_idle_timeout` (bounds what prewarmed and
+    // once they age past `config::SESSION_IDLE_TIMEOUT` (bounds what prewarmed and
     // walked-away-from sessions cost). Its own loop so tests can speed the
     // sweep up without touching the status-machine cadence.
     {

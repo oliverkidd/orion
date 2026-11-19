@@ -28,7 +28,7 @@ back to its default, after a confirm, and removes `config.local.json`. **Presets
 [presets screen](#presets), kept in its own file; **Keys** lists every action and its chords and
 edits nothing (rebinding is [`keybindings`](#hand-edited)).
 
-The DAEMON reads `session_idle_timeout`, `harnesses`, `claude_accounts`, `quick_prompt_kind`,
+The DAEMON reads `harnesses`, `claude_accounts`, `quick_prompt_kind`,
 `claude_enabled` and three keys of each `projects` entry (`base_branch`, `setup_command`,
 `worktree_containers`). The TUI reads the rest.
 
@@ -37,7 +37,6 @@ The DAEMON reads `session_idle_timeout`, `harnesses`, `claude_accounts`, `quick_
 | Key | Default | Row | What it does |
 |---|---|---|---|
 | `follow_new_session` | `true` | Launching → **Follow new session** | A QUICK PROMPT launch puts the cursor on the new session's row and the pane on it, without entering it. Off, the cursor stays where it was and the footer names where the session went. |
-| `session_idle_timeout` | `"5m"` | **Idle session timeout** | How long a session in a worktree no client is viewing may sit idle before the IDLE REAPER kills its PTY. See [below](#idle-timeout). |
 | `outside_editor` | `"auto"` | **Open files in** | The app `⌘O` opens a file or checkout in: `auto`, `cursor`, `vscode` or `sublime`. `auto` is the first installed of Cursor, VS Code and Sublime Text, else macOS's `open`. `i` on the row installs a missing app (`brew install --cask cursor`, `visual-studio-code`, `sublime-text`). Over ssh a file opens in the BUILT-IN EDITOR. |
 | `done_sound` | `"Glass"` | Sounds → **Turn finished** | Rung when a turn you haven't seen finishes: `off`, `bell`, or a macOS system sound (`Glass`, `Ping`, `Pop`, `Hero`, …). `←` / `→` play each. While the window is in the background the finish is also a desktop notification; `off` silences both. |
 | `feedback_sound` | `"Sosumi"` | Sounds → **Needs you** | The same, for a turn that stops to ask you or a CLI that dies mid-turn. Never rung for the pane you are typing in. |
@@ -51,12 +50,13 @@ outside the app, with `osascript`; never over ssh.
 
 #### Idle timeout
 
-The overlay cycles `off`, `1m`, `5m`, `15m`, `30m`, `1h`; by hand any `<n>s`, `<n>m` or `<n>h`
-works, and `"off"` or `"0"` turns reaping off. A malformed value means `5m`, not off. The reaper
-sweeps every 15 s and spares running agents, agents waiting on you, agents with a backgrounded tool
-call still running, and terminals with a command running. A reaped session comes back on the next
-attach, and an agent resumes its conversation. A worktree's dead sessions also boot as the cursor
-rests on it, so attaching is instant; this timeout is what bounds that cost.
+A session in a worktree no client is viewing is stopped by the IDLE REAPER once it has sat idle for
+15 minutes. That span is fixed, not a setting; a `session_idle_timeout` an older orion wrote to
+`config.json` is ignored. The reaper sweeps every 15 s and spares running agents, agents waiting on
+you, agents with a backgrounded tool call still running, and terminals with a command running. A
+reaped session is drawn gray where it stands; nothing on the grid moves. One click on it boots it
+again, and an agent resumes its conversation. A worktree's dead sessions also boot as the cursor
+rests on it, so attaching is instant; the timeout is what bounds that cost.
 
 ### Accounts
 
@@ -589,6 +589,7 @@ Everything orion writes under its data dir:
 | `ORION_WEEK_REVIEW_CHECK_SECS` | how often week in review looks whether its **When** has come round (default 60; `0` off, so it never runs on its own) |
 | `ORION_WEEK_REVIEW_RETRY_SECS` | how long week in review waits before each try again of a GitHub or Linear fetch that failed, and before running again a scheduled run that could not fetch (defaults 10, 30 and 90 seconds, and 15 minutes; `0` off, so the first failure is final) |
 | `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |
+| `ORION_IDLE_TIMEOUT_MS` | how long an unviewed session may sit idle before the reaper stops it (default 15 minutes; tests) |
 
 The DAEMON sets `ORION_AGENT_ID`, `ORION_API_URL` and `ORION_API_TOKEN` on every agent so its hooks
 can reach it; they are not for you to set. A session an automation started also gets

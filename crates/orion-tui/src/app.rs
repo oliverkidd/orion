@@ -8,7 +8,7 @@ use orion_core::{
     TerminalId, TerminalTab, Worktree, WorktreeId,
 };
 use ratatui::layout::{Position, Rect};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Frame duration of the status-sweep text animation: the event loop's
@@ -2931,9 +2931,9 @@ impl<'a> WorktreeRow<'a> {
 }
 
 /// A PANEL CURSOR: the row it is on BY IDENTITY, and where that row last
-/// stood. Every list the cursors walk re-sorts under them on its own — on
-/// a turn finishing, a session read or reaped, a checkout going dormant, a
-/// pull request list landing — so the row is what is kept, and its index
+/// stood. A list the cursors walk can change under them on its own — a
+/// row arriving or leaving, a pull request list landing, a draft hidden,
+/// a group folded — so the row is what is kept, and its index
 /// is looked up in the rows as they stand ([`PanelCursor::index`]).
 ///
 /// `last_index` answers only when the row is not in the list: it left
@@ -3147,14 +3147,6 @@ pub fn unread_finish(agent: &Agent) -> bool {
 /// still, and counts on no PROJECT TAB.
 pub fn drawn_cold(agent: &Agent) -> bool {
     !agent.alive && agent.status != AgentStatus::Terminated && !unread_finish(agent)
-}
-
-/// A session put up as working before any PTY is behind it: a QUICK
-/// PROMPT's stand-in, there before the intent that marks it one is
-/// filed. A real row is never running without its process for longer
-/// than the daemon takes to say so.
-fn starting(agent: &Agent) -> bool {
-    agent.status == AgentStatus::Running && !agent.alive
 }
 
 /// A session that is mid-turn or blocked on the user. These count as
@@ -4026,14 +4018,6 @@ pub struct App {
     /// rest, moved with [`App::set_sel_project`] and the rest.
     project_cursor: PanelCursor<ProjectId>,
     worktree_cursor: PanelCursor<WorktreeRowKey>,
-    /// The HELD CHECKOUT: the one the Worktrees cursor is on, and whether
-    /// it was DORMANT when the cursor arrived. It keeps that group, and so
-    /// its place, for as long as the cursor stays on it — clicking a
-    /// dormant card wakes its checkout, and reading a live one's last
-    /// unread finish puts it to sleep, and either used to move the row out
-    /// from under the click. It goes to its group as the cursor leaves.
-    /// Set by [`App::hold_cursor_worktree`] on every move of that cursor.
-    worktree_hold: Option<(WorktreeId, bool)>,
     session_cursor: PanelCursor<SessionRowKey>,
     /// Bumped on every cursor move: what the ROWS MEMO keys on
     /// ([`RowsKey`]), so rows kept for one selection are never read for
@@ -4309,18 +4293,6 @@ pub struct App {
     pub left_behind: std::collections::HashSet<u64>,
     /// Session created by us, awaiting its upsert to fix the selection.
     pub select_when_seen: Option<SessionRef>,
-    /// The session this client just launched, held first in the sessions
-    /// lists until its own first turn starts. It is the launch with nothing
-    /// to submit that needs this — one carrying a task is created `running`
-    /// and leads on its stamp alone ([`recency_key`]). Without it such a row
-    /// arrives `fresh`, stamped a moment ago, while every session mid-turn
-    /// counts as interacting *now* ([`last_interaction_ms`]) — so the new
-    /// card landed *below* the working ones and only jumped to the top left
-    /// a second later, when its first turn began. Cleared by that first
-    /// status change (recency holds the card there from then on), and
-    /// replaced by the next launch; a row that has gone away just stops
-    /// matching, so nothing has to clear it.
-    pub just_launched: Option<AgentId>,
     /// Project added by us, awaiting its upsert to fix the selection.
     pub select_project_when_seen: Option<ProjectId>,
     /// Worktree created by us, awaiting its upsert to fix the selection.
@@ -4822,40 +4794,6 @@ pub struct App {
     pub round_caps: bool,
     /// The ROWS MEMO, armed by the frame and by [`App::reading_url`].
     pub rows_memo: RowsMemo,
-    /// The WAKE ORDER the live checkouts stand in ([`App::worktree_order`]).
-    wake_order: std::cell::RefCell<WakeOrder>,
-}
-
-/// The order the LIVE checkouts stand in: the order they went live in, as
-/// this TUI saw it. A checkout waking from DORMANT goes to the bottom of
-/// the live ones, right above the divider it came up from, so nothing
-/// above it moves. The checkouts live when a project's list is first
-/// drawn take their places in creation order.
-#[derive(Default)]
-struct WakeOrder {
-    /// Each live checkout's place: lower stands higher.
-    seq: HashMap<WorktreeId, u64>,
-    next: u64,
-}
-
-impl WakeOrder {
-    /// Bring the places up to date with `rows`, one project's checkouts in
-    /// tree order, each with whether it sorts live: a newly live one takes
-    /// the next place, a dormant one gives its place up.
-    fn note<'a>(&mut self, rows: impl Iterator<Item = (&'a WorktreeId, bool)>) {
-        for (id, live) in rows {
-            if !live {
-                self.seq.remove(id);
-            } else if !self.seq.contains_key(id) {
-                self.seq.insert(id.clone(), self.next);
-                self.next += 1;
-            }
-        }
-    }
-
-    fn place(&self, id: &WorktreeId) -> u64 {
-        self.seq.get(id).copied().unwrap_or(u64::MAX)
-    }
 }
 
 impl Default for App {
@@ -4873,7 +4811,6 @@ impl App {
             focus: Focus::Sessions,
             project_cursor: PanelCursor::default(),
             worktree_cursor: PanelCursor::default(),
-            worktree_hold: None,
             session_cursor: PanelCursor::default(),
             cursor_moves: 0,
             follow_up: None,
@@ -4939,7 +4876,6 @@ impl App {
             pending: HashMap::new(),
             left_behind: std::collections::HashSet::new(),
             select_when_seen: None,
-            just_launched: None,
             select_project_when_seen: None,
             select_worktree_when_seen: None,
             pr_checkout_waiting: None,
@@ -5066,7 +5002,6 @@ impl App {
             animations: true,
             round_caps: false,
             rows_memo: RowsMemo::default(),
-            wake_order: std::cell::RefCell::default(),
         }
     }
 
@@ -5836,27 +5771,6 @@ impl App {
         let key = self.worktree_rows().get(index).map(|row| row.key());
         self.worktree_cursor.set(key, index);
         self.cursor_moves += 1;
-        self.hold_cursor_worktree();
-    }
-
-    /// Hold the checkout the Worktrees cursor is on, in the group it is in
-    /// now ([`App::worktree_hold`]) — unless it is already the one held,
-    /// whose group stands from when the cursor arrived. Off a checkout (a
-    /// pull request or issue row, nothing), nothing is held.
-    fn hold_cursor_worktree(&mut self) {
-        let Some(WorktreeRowKey::Checkout(id)) = &self.worktree_cursor.key else {
-            self.worktree_hold = None;
-            return;
-        };
-        if self
-            .worktree_hold
-            .as_ref()
-            .is_some_and(|(held, _)| held == id)
-        {
-            return;
-        }
-        let dormant = !self.live_worktrees().contains(id);
-        self.worktree_hold = Some((id.clone(), dormant));
     }
 
     /// Where the Sessions cursor stands in [`App::visible_session_rows`].
@@ -5904,7 +5818,6 @@ impl App {
         if let Some((key, at)) = worktree {
             self.worktree_cursor.set(key, at);
             self.cursor_moves += 1;
-            self.hold_cursor_worktree();
         }
         let session = self.with_session_rows(|rows| {
             let find = |key: &SessionRowKey| rows.iter().position(|row| row.has_key(key));
@@ -5924,11 +5837,6 @@ impl App {
         if self.worktree_cursor.key.as_ref() == Some(&WorktreeRowKey::Checkout(from.clone())) {
             self.worktree_cursor.key = Some(WorktreeRowKey::Checkout(to.clone()));
             self.cursor_moves += 1;
-            if let Some((held, _)) = &mut self.worktree_hold {
-                if held == from {
-                    *held = to.clone();
-                }
-            }
         }
     }
 
@@ -6266,87 +6174,24 @@ impl App {
 
     /// `project`'s checkouts as indices into `tree.worktrees`, in the one
     /// order every list of them uses: the root checkout first, then the
-    /// LIVE ones in the order they went live ([`WakeOrder`]), then the
-    /// DORMANT ones ([`App::worktree_dormant`]) oldest first: in tree
-    /// order, which is the order the DAEMON registered them in (its store
-    /// loads them by `created_at`), with a checkout cut since appended.
+    /// rest oldest first: in tree order, which is the order the DAEMON
+    /// registered them in (its store loads them by `created_at`), with a
+    /// checkout cut since appended.
     ///
-    /// Never by recency. Ordering on the last turn moved a checkout every
-    /// time one of its sessions started or finished one, and the list
-    /// reshuffled under the reader all day. The one move left is a whole
-    /// checkout going cold and sinking below the divider, or waking and
-    /// coming up to sit right above it, at the bottom of the live ones —
-    /// never back into the slot it was made in, which shifted every live
-    /// checkout below that slot. The HELD CHECKOUT under the cursor does
-    /// not make even that move until the cursor leaves it
-    /// ([`App::worktree_hold`]).
+    /// Never by activity. Ordering on the last turn, or sinking checkouts
+    /// whose sessions the idle reaper stopped below the live ones, moved
+    /// rows every time a session started, finished, was read or was
+    /// reaped, and the list reshuffled under the reader all day. A
+    /// checkout keeps the place it was made in; a cold one is drawn gray
+    /// where it stands.
     pub fn worktree_order(&self, project: &ProjectId) -> Vec<usize> {
         let worktrees = &self.tree.worktrees;
-        let rows: Vec<usize> = (0..worktrees.len())
+        let mut rows: Vec<usize> = (0..worktrees.len())
             .filter(|&i| &worktrees[i].project_id == project)
             .collect();
-        let live = self.live_worktrees();
-        let dormant: Vec<bool> = rows
-            .iter()
-            .map(|&i| self.dormant_in(&live, &worktrees[i].id))
-            .collect();
-        let mut wake = self.wake_order.borrow_mut();
-        wake.note(
-            rows.iter()
-                .zip(&dormant)
-                .map(|(&i, &dormant)| (&worktrees[i].id, !dormant)),
-        );
-        let mut keyed: Vec<(usize, bool)> = rows.iter().copied().zip(dormant).collect();
-        // A stable sort: the dormant ones keep tree order.
-        keyed.sort_by_key(|&(i, dormant)| {
-            let w = &worktrees[i];
-            let place = if dormant { 0 } else { wake.place(&w.id) };
-            (std::cmp::Reverse(w.is_main), dormant, place)
-        });
-        keyed.into_iter().map(|(i, _)| i).collect()
-    }
-
-    /// Whether checkout `id` sorts as DORMANT, given the `live` ones: the
-    /// group the HELD CHECKOUT arrived in, for that one.
-    fn dormant_in(&self, live: &HashSet<&WorktreeId>, id: &WorktreeId) -> bool {
-        match &self.worktree_hold {
-            Some((held, dormant)) if held == id => *dormant,
-            _ => !live.contains(id),
-        }
-    }
-
-    /// Whether checkout `id` is DORMANT: no session in it is doing anything
-    /// or has anything to say. Every unarchived session is drawn cold
-    /// ([`drawn_cold`]), or it has none. A checkout still being cut, or
-    /// with a session still starting up, is live. The HELD CHECKOUT is in
-    /// the group it was in when the cursor arrived ([`App::worktree_hold`]).
-    pub fn worktree_dormant(&self, id: &WorktreeId) -> bool {
-        self.dormant_in(&self.live_worktrees(), id)
-    }
-
-    /// Every checkout with a live session in it, in one pass over the
-    /// sessions: a sort asks once per comparison.
-    pub(crate) fn live_worktrees(&self) -> HashSet<&WorktreeId> {
-        let mut live: HashSet<&WorktreeId> = self
-            .tree
-            .agents
-            .iter()
-            .filter(|a| {
-                !a.archived && (!drawn_cold(a) || starting(a) || self.is_placeholder_agent(&a.id))
-            })
-            .map(|a| &a.worktree_id)
-            .collect();
-        // A stand-in checkout has no path until the DAEMON's upsert names
-        // it — and that, unlike the in-flight intent, is true from the
-        // moment the row goes up, before the intent is filed.
-        live.extend(
-            self.tree
-                .worktrees
-                .iter()
-                .filter(|w| w.path.as_os_str().is_empty() || self.is_placeholder_worktree(&w.id))
-                .map(|w| &w.id),
-        );
-        live
+        // A stable sort: everything but the root keeps tree order.
+        rows.sort_by_key(|&i| std::cmp::Reverse(worktrees[i].is_main));
+        rows
     }
 
     /// Every branch `project` already has a checkout for — hidden ROOT
@@ -6567,11 +6412,11 @@ impl App {
     /// Session rows for the selected worktree: the live agents, then (when
     /// shown) the archived ones.
     ///
-    /// The live rows are ordered by last interaction, newest first, so the
-    /// session you just ran surfaces at the top and the list reads as a
-    /// history of what you have been doing. Working sessions count as
-    /// interacting now, which keeps them on top however long the turn has
-    /// taken.
+    /// The live rows stand in the order they were made in, oldest first —
+    /// tree order, which is the DAEMON's `created_at` order with a launch
+    /// since appended. Never by activity: a session starting or finishing
+    /// a turn, being read or being reaped moves nothing, and a new one
+    /// joins at the end.
     pub fn visible_sessions(&self) -> Vec<Agent> {
         let Some(wt) = self.selected_worktree() else {
             return vec![];
@@ -6583,8 +6428,8 @@ impl App {
     /// builder does not pay for `selected_worktree` to find it again
     /// ([`App::visible_session_rows`]).
     fn sessions_in(&self, wt: &WorktreeId) -> Vec<Agent> {
-        // Stable throughout, so ties — never-run rows especially, which all
-        // stamp 0 — keep tree order instead of shuffling between frames.
+        // Tree order: the order the sessions were made in
+        // ([`App::visible_sessions`]).
         let mut rows: Vec<Agent> = self
             .tree
             .agents
@@ -6592,13 +6437,6 @@ impl App {
             .filter(|a| &a.worktree_id == wt && !a.archived)
             .cloned()
             .collect();
-        rows.sort_by_key(recency_key);
-        // A stable pass over the top of it: the session just launched
-        // leads the list from the moment its row arrives, rather than
-        // sitting under the working ones until its own turn starts.
-        if let Some(id) = &self.just_launched {
-            rows.sort_by_key(|a| &a.id != id);
-        }
         // The ARCHIVED VIEW lists every checkout's archived rows; on the
         // live grid, a checkout whose ARCHIVED DRAWER is open lists its
         // own, so the cursor can rest on one there.

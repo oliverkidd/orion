@@ -455,11 +455,8 @@ mod tests {
 
     /// FOLLOW NEW SESSION off: Enter from a card leaves that card
     /// under the cursor and in the pane, the keys where they were, while
-    /// the new session's card goes up at the head of the band — through
-    /// its upsert, its Ack and its first turn, each of which re-sorts the
-    /// band under a cursor that is a row index. The card the user is on
-    /// is mid-turn, which counts as *now*: the fresh new card sorts under
-    /// it until the Ack puts it first (`App::just_launched`).
+    /// the new session's card joins the end of the band — through its
+    /// upsert, its Ack and its first turn.
     #[test]
     fn enter_from_a_card_keeps_it_under_the_cursor_and_in_the_pane() {
         with_config_json(FOLLOW_OFF, || {
@@ -487,9 +484,9 @@ mod tests {
             acked(&mut app, req_id, &worktree);
 
             assert_eq!(
-                app.visible_sessions().first().map(|a| a.id.0.clone()),
+                app.visible_sessions().last().map(|a| a.id.0.clone()),
                 Some("a9".into()),
-                "the new card leads the band"
+                "the new card joins the end of the band"
             );
             assert_eq!(
                 cursor(&app),

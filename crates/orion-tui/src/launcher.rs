@@ -58,23 +58,14 @@ impl RowPr {
     }
 }
 
-/// Every session the list shows, most recently touched first: the
-/// unarchived AGENTS of the project on screen, ordered on the
-/// SESSIONS panel's own `recency_key` so the grid reads the way that panel
-/// reads — newest at the top left, along the row and wrapping — instead of
-/// the creation order, which left a card that had sat for half an hour
-/// above one that moved a minute ago. Working and blocked sessions count
-/// as interacting *now*, so they hold the first row however long the turn
-/// has taken (the `23m ago` on such a card is how long the turn has run,
-/// not how stale it is). Among those, and among never-run sessions, which
-/// all stamp 0, the newest by id — ULIDs sort by creation — comes first,
-/// so ties never shuffle between frames. A launch is not one of those
-/// ties, though: one carrying a task is created `running`, stamped as it
-/// is created, so it leads the working rows on the stamp alone; one with
-/// nothing to submit arrives `fresh`, and a `fresh` row loses to every
-/// session mid-turn — so the session this client just launched leads the
-/// list outright until its own first turn starts, which is when its stamp
-/// takes over ([`crate::app::App::just_launched`]).
+/// Every session the list shows: the unarchived AGENTS of the project on
+/// screen in the order they were made in, oldest first — tree order, the
+/// SESSIONS panel's own ([`crate::app::App::visible_sessions`]), so a
+/// session sits in the same place in either. Never by activity: a card
+/// stays where it is when its session starts or finishes a turn, is read
+/// or is reaped, and a new one joins the end of its band. The ARCHIVED
+/// VIEW's cards are most recently archived first, as the drawer lists
+/// them.
 ///
 /// The list is the SELECTED PROJECT's alone — the one whose PROJECT TAB is
 /// lit in the header. Every jump moves the project cursor with it, so the
@@ -95,16 +86,10 @@ pub fn rows(app: &App) -> Vec<LauncherRow> {
         .iter()
         .filter_map(|agent| row_of(app, agent, scope.as_ref(), Some(want_archived)))
         .collect();
-    rows.sort_by(|a, b| {
-        crate::app::recency_key(&a.agent)
-            .cmp(&crate::app::recency_key(&b.agent))
-            .then_with(|| b.agent.id.cmp(&a.agent.id))
-    });
-    // A stable pass over the top of it, so the launch just fired is the
-    // top left card from the moment its row arrives — see
-    // `App::just_launched`.
-    if let Some(id) = &app.just_launched {
-        rows.sort_by_key(|r| &r.agent.id != id);
+    if want_archived {
+        // Stable: a row archived before the stamp existed (0) keeps tree
+        // order after every one that has it.
+        rows.sort_by_key(|r| std::cmp::Reverse(r.agent.archived_at));
     }
     rows
 }
@@ -245,10 +230,6 @@ pub struct Band {
     pub archived: Vec<LauncherRow>,
     /// The ARCHIVED DRAWER is unfolded (`App::archived_open`).
     pub drawer_open: bool,
-    /// Every session in the checkout is cold, or it has none
-    /// ([`App::worktree_dormant`]): the band stands in the DORMANT group
-    /// at the bottom. Never the ROOT WORKTREE's, which leads either way.
-    pub dormant: bool,
 }
 
 impl Band {
@@ -305,7 +286,7 @@ pub fn drawer_cursor(app: &App, band: &Band) -> Option<usize> {
 
 /// The grid's BANDS: one per checkout of the SELECTED PROJECT, its cards
 /// the sessions on the list `rows` builds and its terminals — the root
-/// first, then the rest most recently worked in first
+/// first, then the rest in the order they were made in
 /// (`App::visible_worktrees`). A checkout with nothing running in it has
 /// an empty band, a place to aim a launch at and `d` to delete it. The
 /// ARCHIVED VIEW's bands hold the archived sessions alone; a terminal is
@@ -318,9 +299,6 @@ pub fn bands(app: &App) -> Vec<Band> {
         return Vec::new();
     };
     let rows = rows(app);
-    // Asked once: every checkout has a band, and the grid asks for its
-    // bands several times a frame.
-    let live = app.live_worktrees();
     let mut out = Vec::new();
     for w in app.visible_worktrees() {
         let mut cards: Vec<Card> = rows
@@ -353,7 +331,6 @@ pub fn bands(app: &App) -> Vec<Band> {
             cards,
             archived,
             drawer_open,
-            dormant: !w.is_main && !app.show_archived && !live.contains(&w.id),
         });
     }
     out
@@ -495,18 +472,6 @@ pub const LIST_ROW_H: u16 = 1;
 pub const EMPTY_BAND_ROW_H: u16 = 1;
 /// The blank row between one band and the next.
 pub const GAP_Y: u16 = 1;
-/// Rows the DORMANT DIVIDER takes over the first dormant band, on top of
-/// the [`GAP_Y`] every band has: the `┄┄ dormant ┄┄` line and a row of air
-/// under it, so the air over and under it matches.
-pub const DORMANT_DIVIDER_H: u16 = 2;
-
-/// The band the DORMANT DIVIDER stands over: the first dormant one, when
-/// a live band is above it — a panel that is all one group needs no line
-/// between groups.
-pub fn dormant_divider_at(bands: &[Band]) -> Option<usize> {
-    let first = bands.iter().position(|b| b.dormant)?;
-    (first > 0).then_some(first)
-}
 /// The margin the grid keeps off the body's edges.
 pub const PAD_X: u16 = 2;
 /// Rows above the grid: a blank, the PROJECT TABS, the rule under them,
@@ -812,10 +777,6 @@ pub struct PanelLayout {
     /// Where the bands go: the body under the header, inset by [`PAD_X`].
     pub area: Rect,
     pub bands: Vec<PanelBand>,
-    /// The DORMANT DIVIDER's line, in panel rows: the row under the gap
-    /// over the first dormant band ([`dormant_divider_at`]). None when the
-    /// panel is one group.
-    pub divider_y: Option<u16>,
     /// Rows the whole panel takes.
     height: u16,
 }
@@ -825,13 +786,7 @@ pub struct PanelLayout {
 pub fn panel_layout(body: Rect, bands: &[Band]) -> PanelLayout {
     let mut y = 0u16;
     let mut out = Vec::with_capacity(bands.len());
-    let divider_at = dormant_divider_at(bands);
-    let mut divider_y = None;
-    for (index, band) in bands.iter().enumerate() {
-        if divider_at == Some(index) {
-            divider_y = Some(y);
-            y += DORMANT_DIVIDER_H;
-        }
+    for band in bands {
         let content = list_layout(body, band);
         let above = content.height();
         let height = above + band.drawer_h();
@@ -846,7 +801,6 @@ pub fn panel_layout(body: Rect, bands: &[Band]) -> PanelLayout {
     PanelLayout {
         area: grid_area(body),
         bands: out,
-        divider_y,
         height: y.saturating_sub(GAP_Y),
     }
 }
@@ -1142,9 +1096,6 @@ pub struct ProjectCard {
     pub sessions: Vec<Agent>,
     /// The loudest status under it; None for a project with no session.
     pub status: Option<AgentStatus>,
-    /// When it was last worked in: the order two projects with the same
-    /// standing come in.
-    pub recency: crate::app::Recency,
 }
 
 /// How far up a card its status lifts it: the rollup's own priority, and
@@ -1153,13 +1104,12 @@ fn attention(status: Option<AgentStatus>) -> u8 {
     status.map_or(0, crate::app::status_rank)
 }
 
-/// Every project on this machine — what the PROJECT DROPDOWN lists: the
-/// ones with a session waiting on a human first, then the ones with one
-/// running, then the rest most recently worked in first, so the project
-/// to look at is the one the eye lands on at the top.
+/// Every project on this machine — what the PROJECT DROPDOWN lists — in
+/// the order they were added (tree order), never by activity: a project
+/// whose session starts, finishes or wants you keeps its row, and says
+/// so with its status, not with a move.
 pub fn project_cards(app: &App) -> Vec<ProjectCard> {
-    let mut cards: Vec<ProjectCard> = app
-        .tree
+    app.tree
         .projects
         .iter()
         .map(|p| {
@@ -1168,23 +1118,10 @@ pub fn project_cards(app: &App) -> Vec<ProjectCard> {
                 id: p.id.clone(),
                 name: p.name.clone(),
                 status: crate::app::rollup(sessions.iter().map(|a| a.status)),
-                recency: crate::app::project_recency(&app.tree, &p.id),
                 sessions,
             }
         })
-        .collect();
-    // Two stable passes: recency first, then the standing over it, so two
-    // cards with the same standing keep the panel's order between them.
-    // The raw stamp breaks the tie every project with a session mid-turn
-    // shares, as it does in the panels (`crate::app::recency_key`).
-    cards.sort_by_key(|c| {
-        (
-            std::cmp::Reverse(c.recency.interacted),
-            std::cmp::Reverse(c.recency.stamped),
-        )
-    });
-    cards.sort_by_key(|c| std::cmp::Reverse(attention(c.status)));
-    cards
+        .collect()
 }
 
 /// A project's sessions as its tab and its dropdown row count them: the
@@ -1762,40 +1699,11 @@ mod tests {
         );
     }
 
-    /// A checkout with nothing live in it stands below a DORMANT DIVIDER,
-    /// which takes its line plus a row of air under it, on top of the gap
-    /// every band has over it.
-    #[test]
-    fn dormant_checkouts_stand_below_a_divider() {
-        let mut app = app();
-        app.tree.worktrees.push(worktree("w5", "p1", "idle", false));
-        let bands = super::bands(&app);
-        let idle = bands
-            .iter()
-            .position(|b| b.branch == "idle")
-            .expect("every checkout");
-        assert!(bands[idle].dormant, "no sessions: dormant");
-        assert_eq!(idle, bands.len() - 1, "dormant last");
-        assert_eq!(super::dormant_divider_at(&bands), Some(idle));
-        let body = Rect::new(0, 0, 120, 60);
-        let panel = super::panel_layout(body, &bands);
-        let above = &panel.bands[idle - 1];
-        let gap_end = above.rule_y + above.height + GAP_Y;
-        assert_eq!(panel.divider_y, Some(gap_end));
-        assert_eq!(panel.bands[idle].rule_y, gap_end + DORMANT_DIVIDER_H);
-
-        // All one group: no line.
-        let only_idle: Vec<_> = bands.into_iter().skip(idle).collect();
-        assert_eq!(super::dormant_divider_at(&only_idle), None);
-    }
-
     /// The list is the SELECTED PROJECT's sessions, each carrying the
     /// project and worktree its row names under it. The projects beside it
     /// are not in the list — their tabs are how to get to them — nor is an
     /// archived one. (The order is
-    /// `rows_are_ordered_the_way_the_sessions_panel_orders_them`'s
-    /// subject; here every session is working, so they tie and fall back
-    /// to newest created.)
+    /// `rows_keep_the_order_their_sessions_were_made_in`'s subject.)
     #[test]
     fn rows_list_the_selected_projects_sessions() {
         let mut app = app();
@@ -1805,14 +1713,14 @@ mod tests {
             "the cursor opens on the first project"
         );
         let rows = super::rows(&app);
-        assert_eq!(names(&rows), ["add-search", "fix-login"]);
+        assert_eq!(names(&rows), ["fix-login", "add-search"]);
         assert_eq!(
             (rows[0].project.as_str(), rows[0].branch.as_str()),
-            ("api", "feat")
+            ("api", "main")
         );
         assert_eq!(
             (rows[1].project.as_str(), rows[1].branch.as_str()),
-            ("api", "main")
+            ("api", "feat")
         );
 
         // Switched to `web`, and the list is its one session instead —
@@ -1835,85 +1743,47 @@ mod tests {
             .expect("web has a row")
     }
 
-    /// The order is the one the SESSIONS panel uses: a session that last
-    /// moved a minute ago comes before one that has been sitting for half
-    /// an hour, however long ago either was created. Working and blocked
-    /// sessions count as moving now, so they head the grid — among those
-    /// the raw stamp decides, newest turn first — and rows that are equally
-    /// recent fall back to the newest by id, so a launch still lands top
-    /// left.
+    /// The cards stand in the order their sessions were made in — tree
+    /// order, the SESSIONS panel's own — and nothing a session does moves
+    /// one: not a turn starting or finishing, not a read, not the reaper
+    /// stopping it. A launch joins the end.
     #[test]
-    fn rows_are_ordered_the_way_the_sessions_panel_orders_them() {
+    fn rows_keep_the_order_their_sessions_were_made_in() {
         let mut app = app();
-        // A third session in the selected project: the level lists one
-        // project's, so the order needs three of them to have something
-        // to say.
         app.tree.agents.push(agent("a5", "w2", "poll-ci"));
+        let made = ["fix-login", "add-search", "poll-ci"];
         let now = crate::app::now_ms();
-        // Nothing is running: each session is only as recent as its stamp,
-        // and the oldest-created one moved most recently.
         for a in &mut app.tree.agents {
             a.status = AgentStatus::Finished;
         }
-        app.tree.agents[0].status_changed_at = now - 60_000; // fix-login: 1m
-        app.tree.agents[1].status_changed_at = now - 1_800_000; // add-search: 30m
-        app.tree.agents[4].status_changed_at = now - 600_000; // poll-ci: 10m
-        assert_eq!(names(&rows(&app)), ["fix-login", "poll-ci", "add-search"]);
+        app.tree.agents[0].status_changed_at = now - 1_800_000;
+        app.tree.agents[1].status_changed_at = now - 60_000;
+        app.tree.agents[4].status_changed_at = now - 600_000;
+        assert_eq!(names(&rows(&app)), made, "however recent the turns");
 
-        // A turn starting in the stalest session puts it on top: it is
-        // producing output as you look at it.
-        app.tree.agents[1].status = AgentStatus::Running;
-        assert_eq!(names(&rows(&app)), ["add-search", "fix-login", "poll-ci"]);
+        app.tree.agents[0].status = AgentStatus::Running;
+        assert_eq!(names(&rows(&app)), made, "a turn starting moves nothing");
 
-        // Every one working means every one interacting *now*, so the raw
-        // stamp decides among them: the newest turn leads
-        // (`crate::app::recency_key`).
+        app.tree.agents[0].status = AgentStatus::Finished;
+        app.tree.agents[0].status_changed_at = now;
+        app.tree.agents[0].unseen = true;
+        assert_eq!(names(&rows(&app)), made, "nor one finishing");
+
         for a in &mut app.tree.agents {
-            a.status = AgentStatus::Running;
+            a.alive = false;
+            a.unseen = false;
         }
-        assert_eq!(names(&rows(&app)), ["fix-login", "poll-ci", "add-search"]);
+        assert_eq!(names(&rows(&app)), made, "nor the reaper");
 
-        // Rows that are *equally* recent — never run, all stamping 0 —
-        // fall back to newest created, so the order never shuffles between
-        // frames and a launch lands first.
-        for a in &mut app.tree.agents {
-            a.status = AgentStatus::Fresh;
-            a.status_changed_at = 0;
-        }
-        assert_eq!(names(&rows(&app)), ["poll-ci", "add-search", "fix-login"]);
-    }
-
-    /// A session just launched is the top left card from the moment its
-    /// row arrives — while it is still `fresh`, stamped a moment ago, and
-    /// every other session is mid-turn and so counts as interacting now.
-    #[test]
-    fn a_just_launched_session_leads_the_grid() {
-        let mut app = app();
-        let now = crate::app::now_ms();
-        for a in &mut app.tree.agents {
-            a.status = AgentStatus::Running;
-            a.status_changed_at = now - 600_000;
-        }
-        // The row as the DAEMON's create makes it: `fresh`, stamped now.
-        app.tree.agents.push(agent("a5", "w2", "poll-ci"));
-        let new_row = app.tree.agents.len() - 1;
-        app.tree.agents[new_row].status = AgentStatus::Fresh;
-        app.tree.agents[new_row].status_changed_at = now - 5;
+        let mut launched = agent("a6", "w1", "new-one");
+        launched.status = AgentStatus::Running;
+        launched.status_changed_at = now;
+        app.tree.agents.push(launched);
         assert_eq!(
             names(&rows(&app)),
-            ["add-search", "fix-login", "poll-ci"],
-            "its own stamp puts it under every working session"
+            ["fix-login", "add-search", "poll-ci", "new-one"],
+            "a launch joins the end"
         );
-
-        app.just_launched = Some(AgentId("a5".into()));
-        assert_eq!(names(&rows(&app))[0], "poll-ci", "the launch leads");
-
-        // Its first turn starts: the stamp holds it there on its own, so
-        // the card does not move as the flag is dropped.
-        app.just_launched = None;
-        app.tree.agents[new_row].status = AgentStatus::Running;
-        app.tree.agents[new_row].status_changed_at = now;
-        assert_eq!(names(&rows(&app))[0], "poll-ci", "and keeps leading");
     }
 
     /// A row's pull request is what `gh pr view` said about its branch,
@@ -1942,7 +1812,11 @@ mod tests {
             app.prs.observe(&url, seen, crate::fetch::Asked::Cached);
         }
         let rows = rows(&app);
-        let pr = rows[0].pr.as_ref().expect("a2's checkout has a PR");
+        let pr = rows
+            .iter()
+            .find(|r| r.agent.id.0 == "a2")
+            .and_then(|r| r.pr.as_ref())
+            .expect("a2's checkout has a PR");
         assert_eq!((pr.number, pr.standing), (42, Standing::Merged));
         assert_eq!(pr.badge(), "merged");
 
@@ -2055,15 +1929,14 @@ mod tests {
         ));
     }
 
-    /// The PROJECT DROPDOWN's list puts what is waiting on a human first,
-    /// then what is running, then the rest in the PROJECTS PANEL's own
-    /// order — every project on the machine — and each project's sessions
-    /// are sorted the same way, so the one it leads with is the one to
-    /// look at.
+    /// The PROJECT DROPDOWN lists every project on the machine in the
+    /// order they were added, and a project wanting a human keeps its row,
+    /// saying so with its status. Inside a card the sessions wanting a
+    /// human come first, so the one it leads with is the one to look at.
     #[test]
-    fn project_cards_put_what_wants_a_human_first() {
+    fn project_cards_keep_their_order_whatever_wants_a_human() {
         let mut app = app();
-        // Everything idle: the cards keep the panel's order, api first.
+        // Everything idle: the order the projects were added, api first.
         for a in &mut app.tree.agents {
             a.status = AgentStatus::Finished;
         }
@@ -2075,15 +1948,15 @@ mod tests {
         );
         assert_eq!(cards[0].sessions.len(), 2, "api's two");
 
-        // web's session blocks on a human and its card comes first, with
-        // the status to match.
+        // web's session blocks on a human: its card stays put, with the
+        // status to match.
         app.tree.agents[2].status = AgentStatus::NeedsFeedback;
         let cards = project_cards(&app);
         assert_eq!(
             cards.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
-            ["web", "api", "ops"]
+            ["api", "web", "ops"]
         );
-        assert_eq!(cards[0].status, Some(AgentStatus::NeedsFeedback));
+        assert_eq!(cards[1].status, Some(AgentStatus::NeedsFeedback));
 
         // Inside a card the same order holds: api's blocked session leads
         // its running one, whatever their stamps say.
