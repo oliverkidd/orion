@@ -5796,6 +5796,101 @@ async fn a_lost_answer_and_a_newer_question_reach_the_phone() {
     wait_for_exit(&mut daemon);
 }
 
+/// THE PHONE BRIDGE catching up, against a fake Slack. A session that
+/// asks while you are at the desk posts nothing; going away by hand posts
+/// it, and coming back and going away again posts it no second time.
+#[tokio::test]
+async fn a_session_already_waiting_reaches_the_phone_as_you_go_away() {
+    use orion_core::AgentStatus;
+    let slack = FakeSlack::start().await;
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    env.write_config(r#"{"away": {"quiet": null}}"#);
+    let transcript = env.tmp.path().join("transcript.jsonl");
+    std::fs::write(
+        &transcript,
+        serde_json::json!({"type": "assistant", "message": {"id": "m1", "role": "assistant",
+            "content": [{"type": "text", "text": "Looking."}]}})
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+    let ask = env.tmp.path().join("ask.json");
+    std::fs::write(
+        &ask,
+        serde_json::json!({
+            "session_id": "sess-1",
+            "hook_event_name": "PreToolUse",
+            "transcript_path": transcript,
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": [{"question": "Which color do you like?",
+                "multiSelect": false, "options": [{"label": "Red"}, {"label": "Green"}]}]}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let script = env.tmp.path().join("agent.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             curl -sS -m 3 -X POST -H \"Authorization: Bearer $ORION_API_TOKEN\" \
+             -H 'Content-Type: application/json' --data-binary @'{ask}' \
+             \"$ORION_API_URL/api/hooks/claude?agentId=$ORION_AGENT_ID&hookEvent=PreToolUse\" >/dev/null\n\
+             sleep 30\n",
+            ask = ask.display(),
+        ),
+    )
+    .unwrap();
+    make_executable(&script);
+    let mut daemon = env.spawn_daemon_with(
+        script.to_str().unwrap(),
+        &[
+            (env::SLACK_API_URL, &slack.base_url),
+            (env::SLACK_TOKENS, FAKE_TOKENS),
+            (env::AWAY_POLL_MS, "0"),
+        ],
+    );
+
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    tokio::time::timeout(SLOW_TIMEOUT, slack.connected.notified())
+        .await
+        .expect("the daemon never opened Socket Mode");
+    let agent_id = create_agent_get_id(&mut c, &worktree.id, "pick a colour", 2).await;
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| {
+        status_change_at(evs, &agent_id, AgentStatus::NeedsFeedback).is_some()
+    })
+    .await;
+    // At the desk: nothing goes.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(slack.cards().is_empty(), "{:#?}", slack.chats());
+
+    let set_away = |on: bool| ClientRequest::SetAway { on };
+    write_frame(&mut c, &set_away(true)).await.unwrap();
+    slack
+        .wait_for("the waiting session's message", |_| {
+            slack.cards().len() == 1
+        })
+        .await;
+    let (_, blocks) = slack.cards()[0].clone();
+    assert!(
+        block_texts(&blocks["blocks"])
+            .iter()
+            .any(|t| t.contains("Which color do you like?")),
+        "{blocks:#?}"
+    );
+
+    write_frame(&mut c, &set_away(false)).await.unwrap();
+    write_frame(&mut c, &set_away(true)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(slack.cards().len(), 1, "{:#?}", slack.chats());
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
 /// The live agent rows, off a Snapshot on a connection of their own.
 async fn agents_now(sock: &Path) -> Vec<orion_core::Agent> {
     let mut c = connect(sock).await;

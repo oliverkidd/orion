@@ -139,11 +139,19 @@ fn config_escape(value: &str) -> String {
 /// this user alone and removed on drop.
 struct BodyFile(PathBuf);
 
+/// Numbers each body file this process writes. The clock alone is not
+/// enough: macOS hands out microseconds, so two threads asking at once
+/// (the bug fixer and the feature builder polling Linear together) got
+/// the same name — one failed with "File exists", and its drop then
+/// deleted the other's body under its curl.
+static BODY_FILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl BodyFile {
     fn write(bytes: &[u8]) -> Result<BodyFile, String> {
         let path = std::env::temp_dir().join(format!(
-            "orion-http-{}-{}.body",
+            "orion-http-{}-{}-{}.body",
             std::process::id(),
+            BODY_FILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
@@ -153,10 +161,11 @@ impl BodyFile {
         open.write(true).create_new(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+        // Ours only once it is made: a name some other file already holds
+        // is never removed on the way out.
+        let mut handle = open.open(&path).map_err(|e| e.to_string())?;
         let file = BodyFile(path);
-        open.open(&file.0)
-            .and_then(|mut f| f.write_all(bytes))
-            .map_err(|e| e.to_string())?;
+        handle.write_all(bytes).map_err(|e| e.to_string())?;
         Ok(file)
     }
 }
@@ -208,5 +217,23 @@ mod tests {
         }
         drop(file);
         assert!(!path.exists());
+    }
+
+    /// Many threads at once each get a file of their own, and none loses
+    /// its body to another's clean-up.
+    #[test]
+    fn body_files_written_at_once_never_share_a_name() {
+        let threads: Vec<_> = (0..32u8)
+            .map(|n| {
+                std::thread::spawn(move || {
+                    let file = BodyFile::write(&[n]).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    assert_eq!(std::fs::read(&file.0).unwrap(), [n]);
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
     }
 }

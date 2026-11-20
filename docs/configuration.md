@@ -136,7 +136,7 @@ connects it and `o` disconnects it. GITHUB AND LINEAR is two switches (below). A
 | Away after no keys or mouse | `10m` | `never`, `5m`, `10m`, `15m`, `30m` or `60m` with no keys or mouse. |
 | Away by hand | `⌘⇧A` | Says which key does it; `Enter` here does it too. Your next key, in any orion, clears it. |
 | Send to your phone while away | `questions, plans, crashes` | `←→` steps through every mix of the three, down to `nothing`. |
-| Quiet hours | `22:00 to 07:00` | Nothing goes to your phone between them. `Enter` types them (`22:00 to 07:00`, `22:00-07:00`); empty is `off`. |
+| Quiet hours | `22:00 to 07:00` | Nothing goes to your phone between them; a question or plan still waiting as they end goes then. `Enter` types them (`22:00 to 07:00`, `22:00-07:00`); empty is `off`. |
 
 The software factory's Slack cards follow the same rule: a card to you goes to Slack only while you
 are away and outside quiet hours. At the desk it shows in orion instead, and goes to Slack, once, if

@@ -1274,6 +1274,27 @@ impl Store {
             .collect())
     }
 
+    /// Sessions waiting on you that no phone message is about yet: red,
+    /// not archived, with no message of theirs still open and none posted
+    /// since they turned red — one closed "answered in Orion" while still
+    /// red doesn't count: the session opened a newer dialog at the desk.
+    /// Oldest wait first.
+    pub fn unsent_waiting_agents(&self) -> Result<Vec<Agent>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {AGENT_COLUMNS} FROM agents a
+              WHERE status = 'needs_feedback' AND archived = 0
+                AND NOT EXISTS (
+                  SELECT 1 FROM phone_messages p
+                   WHERE p.agent_id = a.id
+                     AND (p.answered IS NULL
+                          OR (p.posted_at >= a.status_changed_at AND p.answered != 'orion')))
+              ORDER BY status_changed_at, id"
+        ))?;
+        let rows = stmt.query_map([], row_to_agent)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Mark a phone message answered — `phone`, `orion`, or closed as
     /// `moved` on or `resent` (`phone::Close`) — or, None,
     /// waiting again (an answer that did not go in).
@@ -1697,6 +1718,113 @@ fn row_to_link(r: &rusqlite::Row) -> rusqlite::Result<Link> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A red session is unsent until a message is posted about its wait:
+    /// one still open, or one posted since it turned red (answered or
+    /// not), covers it. A new wait after an old answered message, or
+    /// once archived, is judged afresh.
+    #[test]
+    fn a_waiting_session_is_unsent_until_a_message_covers_its_wait() {
+        let store = Store::open_in_memory().unwrap();
+        let project = Project {
+            id: ProjectId::generate(),
+            name: "demo".into(),
+            repo_path: "/tmp/demo".into(),
+            sort_order: 0,
+        };
+        store.insert_project(&project).unwrap();
+        let worktree = Worktree {
+            id: WorktreeId::generate(),
+            project_id: project.id.clone(),
+            path: "/tmp/demo".into(),
+            branch: "main".into(),
+            is_main: true,
+            sort_order: 0,
+        };
+        store.insert_worktree(&worktree).unwrap();
+        let agent = Agent {
+            id: AgentId::generate(),
+            worktree_id: worktree.id.clone(),
+            name: "asks".into(),
+            status: AgentStatus::Running,
+            archived: false,
+            archived_at: 0,
+            unseen: false,
+            kind: AgentKind::Claude,
+            custom_harness: None,
+            model: None,
+            effort: None,
+            session_id: None,
+            sort_order: 0,
+            status_changed_at: 0,
+            alive: false,
+            recent_prompts: Vec::new(),
+            usage_limit: None,
+            automation: None,
+        };
+        store.insert_agent(&agent).unwrap();
+        let unsent = |store: &Store| -> Vec<AgentId> {
+            store
+                .unsent_waiting_agents()
+                .unwrap()
+                .into_iter()
+                .map(|a| a.id)
+                .collect()
+        };
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(3));
+
+        assert!(unsent(&store).is_empty(), "running is not waiting");
+        store
+            .set_agent_status(&agent.id, AgentStatus::NeedsFeedback)
+            .unwrap();
+        assert_eq!(unsent(&store), std::slice::from_ref(&agent.id));
+
+        tick();
+        let message = crate::phone::PhoneMessage {
+            channel: "D1".into(),
+            ts: "1.0001".into(),
+            agent: agent.id.clone(),
+            kind: orion_core::away::PhoneKind::Question,
+            blocks: "[]".into(),
+            reason: None,
+        };
+        store.insert_phone_message(&message).unwrap();
+        assert!(unsent(&store).is_empty(), "an open message covers it");
+        store
+            .set_phone_answered("D1", "1.0001", Some("phone"))
+            .unwrap();
+        assert!(
+            unsent(&store).is_empty(),
+            "answered on the phone while still red: still covered"
+        );
+        store
+            .set_phone_answered("D1", "1.0001", Some("orion"))
+            .unwrap();
+        assert_eq!(
+            unsent(&store),
+            std::slice::from_ref(&agent.id),
+            "closed in orion while still red: a newer dialog"
+        );
+        store
+            .set_phone_answered("D1", "1.0001", Some("phone"))
+            .unwrap();
+
+        tick();
+        store
+            .set_agent_status(&agent.id, AgentStatus::Running)
+            .unwrap();
+        store
+            .set_agent_status(&agent.id, AgentStatus::NeedsFeedback)
+            .unwrap();
+        assert_eq!(
+            unsent(&store),
+            std::slice::from_ref(&agent.id),
+            "a new wait"
+        );
+
+        store.set_agent_archived(&agent.id, true).unwrap();
+        assert!(unsent(&store).is_empty(), "archived");
+    }
 
     #[test]
     fn roundtrip_tree() {

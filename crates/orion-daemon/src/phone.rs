@@ -7,6 +7,11 @@
 //!   while you are away (`away`), outside quiet hours, of a kind
 //!   `away.phone` lists. Never delayed. A crash of a session the bug fixer
 //!   or the feature builder started never goes: orion relaunches it.
+//! - **Already waiting**: a session that turned red while you were at
+//!   the desk, or in quiet hours, goes as soon as you are away outside
+//!   them (`Daemon::phone_flush`, on every away reading and on ⌘⇧A) —
+//!   once per wait: a message still open about it, or one posted since it
+//!   turned red, covers it. Crashes are not caught up on.
 //! - **The message** (design 5.4): a context line `● Agent · web · 10:42`,
 //!   the session's name, its whole last response (never summarised, in
 //!   3000-character sections), then what it waits on and its buttons:
@@ -98,6 +103,15 @@ pub const DIDNT_TAKE: &str =
 pub const NOTHING_WAITING: &str = "Nothing is waiting for you.";
 /// What a modal submitted on an answered message shows.
 pub const ALREADY_ANSWERED: &str = "This one was already answered";
+
+/// One phone post at a time: a status change and the away flush never
+/// both post about the same wait.
+static POSTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Waits the away flush tried to post and Slack refused — `(agent,
+/// status_changed_at)` — so it tries each once, like a status change
+/// does, instead of every away reading.
+static FLUSH_FAILED: std::sync::Mutex<Vec<(AgentId, i64)>> = std::sync::Mutex::new(Vec::new());
 /// What a modal question with neither a pick nor words shows.
 const NOTHING_PICKED: &str = "Pick one, or write your own below";
 /// The line under a question's buttons.
@@ -1012,6 +1026,7 @@ impl Daemon {
         let Some(session) = self.slack.session() else {
             return;
         };
+        let _one_at_a_time = POSTING.lock().await;
         let kind = kind_of(status, reason.as_ref());
         // A plan with nothing to build has the No-change card instead, and
         // a factory session's crash is the TUI's to relaunch.
@@ -1050,16 +1065,16 @@ impl Daemon {
             && settings.sends(kind)
     }
 
-    /// Post `agent`'s phone message, at once.
+    /// Post `agent`'s phone message, at once; whether it went.
     async fn phone_post(
         self: &Arc<Self>,
         session: &Arc<Session>,
         agent: &AgentId,
         kind: PhoneKind,
         reason: Option<WaitReason>,
-    ) {
+    ) -> bool {
         let Ok(Some(row)) = self.store.get_agent(agent) else {
-            return;
+            return false;
         };
         let project = self
             .store
@@ -1098,7 +1113,7 @@ impl Daemon {
         })
         .await
         else {
-            return;
+            return false;
         };
         tracing::info!(agent = %agent, ?kind, %ts, "sent to the phone");
         let message = PhoneMessage {
@@ -1111,6 +1126,66 @@ impl Daemon {
         };
         if let Err(e) = self.store.insert_phone_message(&message) {
             tracing::warn!(error = %e, "phone message not recorded");
+        }
+        true
+    }
+
+    /// Every session already waiting on a question or a plan that no
+    /// message is about yet, to the phone now that you are away outside
+    /// quiet hours: it turned red while you were at the desk, or in quiet
+    /// hours, and no status change is coming to send it. Each wait once.
+    pub(crate) async fn phone_flush(self: &Arc<Self>) {
+        if !self.away.is_away() {
+            return;
+        }
+        let Some(session) = self.slack.session() else {
+            return;
+        };
+        let _one_at_a_time = POSTING.lock().await;
+        let waiting = match self.store.unsent_waiting_agents() {
+            Ok(waiting) => waiting,
+            Err(e) => {
+                tracing::warn!(error = %e, "waiting sessions not read");
+                return;
+            }
+        };
+        let tried = {
+            // A wait that is over is forgotten.
+            let mut failed = FLUSH_FAILED.lock().unwrap();
+            failed.retain(|(id, at)| {
+                waiting
+                    .iter()
+                    .any(|a| &a.id == id && a.status_changed_at == *at)
+            });
+            failed.clone()
+        };
+        let mut sent = 0;
+        for agent in waiting {
+            let wait = (agent.id.clone(), agent.status_changed_at);
+            if tried.contains(&wait) {
+                continue;
+            }
+            let reason = {
+                let daemon = self.clone();
+                let id = agent.id.clone();
+                tokio::task::spawn_blocking(move || daemon.wait_reason(&id))
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            let Some(kind) = kind_of(AgentStatus::NeedsFeedback, reason.as_ref()) else {
+                continue;
+            };
+            if !self.phone_sends(kind) || factory_verdict(reason.as_ref()) {
+                continue;
+            }
+            match self.phone_post(&session, &agent.id, kind, reason).await {
+                true => sent += 1,
+                false => FLUSH_FAILED.lock().unwrap().push(wait),
+            }
+        }
+        if sent > 0 {
+            tracing::info!(sent, "away: sessions already waiting to the phone");
         }
     }
 
@@ -1137,6 +1212,7 @@ impl Daemon {
     /// session no longer waits closes as answered in Orion; one session's
     /// second open message closes without a copy.
     async fn phone_resend(self: &Arc<Self>, session: &Arc<Session>) -> usize {
+        let _one_at_a_time = POSTING.lock().await;
         let open = self
             .store
             .open_phone_messages_in(&session.dm)

@@ -318,7 +318,9 @@
   `IOConsoleLocked`, read with `ioreg` every 5 s), after the set minutes with no keys or mouse
   (`HIDIdleTime`), or by hand with `⌘⇧A` until your next key in any orion. Being in a meeting is never
   away. Quiet hours and **Send to your phone while away** (Settings › Connections) hold messages
-  back. The DM reads `● Agent · <project> · <HH:MM>`, then the session's name, then its whole last
+  back. A session already waiting on a question or a plan when you go away (it asked while you were
+  at the desk, or in quiet hours) goes then, or as quiet hours end while you are still away: once
+  per wait, never again once a message about it is up. The DM reads `● Agent · <project> · <HH:MM>`, then the session's name, then its whole last
   response from the transcript (never summarised; split into Slack's 3000-character sections, and
   continued in the thread past Slack's 50 blocks), then what it waits on. One single-select question
   is in bold with a button per option, `Type an answer…` and `or reply in this thread` under them. A

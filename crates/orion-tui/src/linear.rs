@@ -6229,8 +6229,12 @@ async fn curl_graphql(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|why| format!("Linear request failed: {why}"))?;
-    serde_json::from_slice(&response.body)
-        .map_err(|_| "Linear returned something that wasn't JSON".into())
+    serde_json::from_slice(&response.body).map_err(|_| {
+        format!(
+            "Linear returned something that wasn't JSON (HTTP {})",
+            response.status
+        )
+    })
 }
 
 /// A [`fetch_lists`] answer as the list keeps it: both lists' issues,
