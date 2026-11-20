@@ -282,11 +282,11 @@ pub fn run_open(files: Vec<String>) -> Result<()> {
     runtime()?.block_on(ipc::open_files_for_current_agent(&files))
 }
 
-/// `orion run <command>` / `orion run --stop` — the agent's checkout's
-/// app started in, or stopped from, its run line (see
-/// `ipc::agent_run_for_current_agent`).
-pub fn run_agent_run(command: Option<String>) -> Result<()> {
-    runtime()?.block_on(ipc::agent_run_for_current_agent(command))
+/// `orion run <command>` / `--stop` / `--restart` / `--status` — the
+/// agent's checkout's stack started in, stopped from or restarted in its
+/// run line, or said up or down (see `ipc::agent_run_for_current_agent`).
+pub fn run_agent_run(action: orion_core::protocol::AgentRunAction) -> Result<()> {
+    runtime()?.block_on(ipc::agent_run_for_current_agent(action))
 }
 
 /// `orion open-link <url>` — a link a session's CLI opens itself, through

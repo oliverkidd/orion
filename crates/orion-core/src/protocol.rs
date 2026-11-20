@@ -1,9 +1,9 @@
-use crate::compose::Stack;
 use crate::entities::{
     Agent, AgentKind, AgentStatus, Entity, EntityId, Link, Project, TerminalTab, WaitReason,
     Worktree,
 };
 use crate::ids::{AgentId, LinkId, ProjectId, TerminalId, WorktreeId};
+use crate::stack::StackStatus;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -30,6 +30,18 @@ pub const MAX_FRAME_LEN: u32 = 4 * 1024 * 1024;
 pub enum SessionRef {
     Agent(AgentId),
     Terminal(TerminalId),
+}
+
+/// What `orion run` asks of the agent's checkout's stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentRunAction {
+    /// Start this command in its run line.
+    Start(String),
+    Stop,
+    /// Stop it and start it again with the command it last ran.
+    Restart,
+    /// Say whether it is up, and on which ports (`StackStatusReply`).
+    Status,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -293,7 +305,7 @@ pub enum ClientRequest {
     AgentRun {
         req_id: u64,
         id: AgentId,
-        command: Option<String>,
+        action: AgentRunAction,
     },
     /// Kills the PTY, sets archived=1.
     ArchiveAgent {
@@ -719,6 +731,12 @@ pub enum ServerEvent {
         req_id: u64,
         created: Option<EntityId>,
     },
+    /// Reply to `AgentRun` with `AgentRunAction::Status`: the stack of the
+    /// agent's checkout.
+    StackStatusReply {
+        req_id: u64,
+        status: StackStatus,
+    },
     /// Reply to `EnterWorktree`: the worktree the agent now belongs to, and
     /// what that meant for its process.
     WorktreeEntered {
@@ -775,12 +793,11 @@ pub enum ServerEvent {
         lines: Vec<Option<u64>>,
     },
 
-    /// STACK STATUS: every docker compose project on the machine, sent
-    /// when it changes and right after `Snapshot`. `stacks: None` is docker
-    /// out of reach, `error` saying why; `Some(vec![])` is no stacks.
-    StacksChanged {
-        stacks: Option<Vec<Stack>>,
-        error: Option<String>,
+    /// STACK STATUS: every checkout's stack that is not down, sent whole
+    /// when any changes and right after `Snapshot` (`stack`). A checkout
+    /// missing from it is down.
+    StackStatuses {
+        statuses: Vec<(WorktreeId, StackStatus)>,
     },
 
     // -- PTY plane (only to clients attached to that session) --
@@ -923,23 +940,19 @@ mod stack_tests {
 
     #[test]
     fn stack_frames_round_trip() {
-        let ev = ServerEvent::StacksChanged {
-            stacks: Some(vec![Stack {
-                project: "riplo-wt".into(),
-                dirs: vec![PathBuf::from("/src/wt")],
-                running: 4,
-                total: 5,
-            }]),
-            error: None,
+        let ev = ServerEvent::StackStatuses {
+            statuses: vec![(
+                WorktreeId("w1".into()),
+                StackStatus::Up {
+                    ports: vec![3000],
+                    outside: false,
+                },
+            )],
         };
         let back: ServerEvent = rmp_serde::from_slice(&rmp_serde::to_vec(&ev).unwrap()).unwrap();
-        let ServerEvent::StacksChanged {
-            stacks: Some(s),
-            error: None,
-        } = back
-        else {
+        let ServerEvent::StackStatuses { statuses } = back else {
             panic!("{back:?}");
         };
-        assert_eq!((s[0].running, s[0].total), (4, 5));
+        assert_eq!(statuses[0].1.ports(), [3000]);
     }
 }

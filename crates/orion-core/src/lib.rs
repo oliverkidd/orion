@@ -16,9 +16,12 @@ pub mod kitty;
 pub mod mem;
 pub mod paths;
 pub mod protocol;
+pub mod run_targets;
 pub mod secrets;
 pub mod settings;
 pub mod shell;
+pub mod stack;
+pub mod stack_cmd;
 
 pub use entities::*;
 pub use harness::*;

@@ -5530,9 +5530,10 @@ pub(crate) fn toggle_stack_in(
         });
         return;
     }
-    if app.stack_running(&id) {
+    if !app.stack_status(&id).is_down() {
         // Up, but not from a run line of orion's — an agent started it in
-        // its own shell: the DAEMON stops its compose projects.
+        // its own shell: the DAEMON stops what serves it and its compose
+        // projects.
         app.flash = Some(crate::flash::Flash::note("stopping the stack"));
         send(app, out, |req_id| ClientRequest::StopRun {
             req_id,
@@ -10866,6 +10867,11 @@ fn send_attach(app: &mut App, sref: SessionRef, out: &mut Vec<ClientRequest>) {
     if app.is_placeholder_session(&sref) {
         return;
     }
+    // A stack started outside orion has a run line but no terminal
+    // behind it: nothing to attach.
+    if matches!(&sref, SessionRef::Terminal(id) if orion_core::stack::is_outside_line(id)) {
+        return;
+    }
     let (cols, rows) = pane_size(app);
     // A screen kept from an earlier visit asks for the bytes it missed
     // rather than the whole ring; the daemon answers with a replay that
@@ -13292,8 +13298,8 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             refresh_palette(app);
             app.dirty = true;
         }
-        ServerEvent::StacksChanged { stacks, .. } => {
-            crate::stacks::listed(app, stacks);
+        ServerEvent::StackStatuses { statuses } => {
+            crate::stacks::listed(app, statuses);
         }
         ServerEvent::AwayChanged { away, by_hand } => {
             crate::phone::away_changed(app, away, by_hand);
@@ -29085,50 +29091,105 @@ mod tests {
 
     // ---- stacks ----
 
-    fn a_stack(project: &str, dir: &str, running: u16, total: u16) -> orion_core::compose::Stack {
-        orion_core::compose::Stack {
-            project: project.into(),
-            dirs: vec![dir.into()],
-            running,
-            total,
-        }
-    }
-
-    fn list_stacks(app: &mut App, stacks: Vec<orion_core::compose::Stack>) {
+    fn list_stacks(app: &mut App, statuses: Vec<(&str, orion_core::stack::StackStatus)>) {
         hse(
             app,
-            ServerEvent::StacksChanged {
-                stacks: Some(stacks),
-                error: None,
+            ServerEvent::StackStatuses {
+                statuses: statuses
+                    .into_iter()
+                    .map(|(w, s)| (orion_core::WorktreeId(w.into()), s))
+                    .collect(),
             },
         );
     }
 
-    /// A running stack on a worktree on screen keeps the sweep clock
-    /// going for its trail; a stopped one, or animations off, does not.
+    /// An up stack on a worktree on screen keeps the sweep clock going
+    /// for its trail; a starting one, or animations off, does not.
     #[test]
     fn a_running_stack_keeps_the_sweep_ticking() {
+        use orion_core::stack::StackStatus;
         let mut app = App::new();
         seed_tree(&mut app);
         let w1 = orion_core::WorktreeId("w1".into());
         assert!(!app.status_anim_active());
-        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 0, 3)]);
-        assert!(app.stack_of(&w1).is_some());
-        assert!(!app.status_anim_active(), "stopped: still");
-        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 3)]);
-        assert!(app.status_anim_active(), "running: the trail moves");
+        list_stacks(
+            &mut app,
+            vec![("w1", StackStatus::Starting { outside: false })],
+        );
+        assert!(!app.stack_status(&w1).is_down());
+        assert!(!app.status_anim_active(), "starting: still");
+        let up = StackStatus::Up {
+            ports: vec![3000],
+            outside: false,
+        };
+        list_stacks(&mut app, vec![("w1", up)]);
+        assert!(app.status_anim_active(), "up: the trail moves");
         app.animations = false;
         assert!(!app.status_anim_active());
         app.animations = true;
-        hse(
-            &mut app,
-            ServerEvent::StacksChanged {
-                stacks: None,
-                error: Some("Cannot connect to the Docker daemon".into()),
-            },
-        );
-        assert!(app.stack_of(&w1).is_none(), "docker gone: no marks");
+        list_stacks(&mut app, vec![]);
+        assert!(app.stack_status(&w1).is_down(), "missing: down, no marks");
         assert!(!app.status_anim_active());
+    }
+
+    /// A run line is drawn only while its stack is not down, and a stack
+    /// started outside orion gets one of its own, with its ports; `⌘⇧S`
+    /// stops either.
+    #[test]
+    fn the_run_line_follows_the_stack_status() {
+        use orion_core::stack::StackStatus;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let w1 = orion_core::WorktreeId("w1".into());
+        let run_lines = |app: &App| -> Vec<orion_core::TerminalTab> {
+            crate::launcher::bands(app)
+                .into_iter()
+                .filter(|b| b.worktree == w1)
+                .flat_map(|b| b.cards)
+                .filter_map(|c| match c {
+                    crate::launcher::Card::Terminal(t) if t.is_run() => Some(t),
+                    _ => None,
+                })
+                .collect()
+        };
+        app.tree.terminals.push(orion_core::TerminalTab {
+            id: orion_core::TerminalId("run1".into()),
+            worktree_id: w1.clone(),
+            name: "run".into(),
+            sort_order: 0,
+            alive: false,
+            run_command: Some("just start".into()),
+            setup: false,
+            run: Default::default(),
+        });
+        assert!(run_lines(&app).is_empty(), "down: no run line");
+        list_stacks(
+            &mut app,
+            vec![("w1", StackStatus::Starting { outside: false })],
+        );
+        assert_eq!(run_lines(&app).len(), 1);
+
+        app.tree.terminals.clear();
+        let outside = StackStatus::Up {
+            ports: vec![3000],
+            outside: true,
+        };
+        list_stacks(&mut app, vec![("w1", outside)]);
+        let lines = run_lines(&app);
+        assert_eq!(lines.len(), 1);
+        assert!(orion_core::stack::is_outside_line(&lines[0].id));
+        assert_eq!(
+            lines[0].run_command.as_deref(),
+            Some(orion_core::stack::OUTSIDE_LINE_TEXT)
+        );
+        assert_eq!(crate::stacks::app_port(&app, &w1), Some(3000));
+        assert_eq!(crate::stacks::menu_label(&app, &w1), "Stop stack");
+        let mut out = Vec::new();
+        toggle_stack_in(&mut app, &w1, &mut out);
+        assert!(
+            matches!(out.as_slice(), [ClientRequest::StopRun { worktree, .. }] if *worktree == w1),
+            "{out:?}"
+        );
     }
 
     /// `⌘⇧S` on the grid starts the cursor's checkout's stack — its run —
@@ -29194,6 +29255,7 @@ mod tests {
 
     #[test]
     fn cmd_shift_s_starts_and_stops_the_checkouts_stack() {
+        use orion_core::stack::StackStatus;
         use orion_core::{Entity, TerminalId, TerminalTab};
         let mut app = App::new();
         seed_tree(&mut app);
@@ -29232,6 +29294,10 @@ mod tests {
                 entity: Entity::Terminal(run(true, None)),
             },
         );
+        list_stacks(
+            &mut app,
+            vec![("w1", StackStatus::Starting { outside: false })],
+        );
         assert!(footer(&app).contains(" stop stack"), "{}", footer(&app));
         assert_eq!(crate::ui::footer::stopping_line(&app), None);
         out.clear();
@@ -29249,6 +29315,15 @@ mod tests {
             ServerEvent::EntityUpserted {
                 entity: Entity::Terminal(run(true, Some(kill_at))),
             },
+        );
+        list_stacks(
+            &mut app,
+            vec![(
+                "w1",
+                StackStatus::Stopping {
+                    kill_at: Some(kill_at),
+                },
+            )],
         );
         let held = crate::ui::footer::stopping_line(&app).expect("held while it stops");
         assert_eq!(&*held, "stopping run · ⌘⇧S again kills it now");
@@ -29277,7 +29352,16 @@ mod tests {
             },
         );
         assert_eq!(crate::ui::footer::stopping_line(&app), None);
-        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 3)]);
+        list_stacks(
+            &mut app,
+            vec![(
+                "w1",
+                StackStatus::Up {
+                    ports: vec![3000],
+                    outside: true,
+                },
+            )],
+        );
         assert_eq!(
             crate::stacks::menu_label(&app, &orion_core::WorktreeId("w1".into())),
             "Stop stack"
@@ -29290,7 +29374,7 @@ mod tests {
         );
 
         // Once it is down, a start again.
-        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 0, 3)]);
+        list_stacks(&mut app, vec![]);
         out.clear();
         out.extend(run_action(&mut app, crate::keymap::Action::ToggleStack));
         assert!(
@@ -29410,14 +29494,13 @@ mod tests {
         assert_eq!(crate::ui::footer::setup_wait_line(&app), None);
     }
 
-    /// **Stop all stacks** stops every checkout's run, and nothing when
-    /// none runs: a stack orion didn't start is left as it is.
+    /// **Stop all stacks** stops every checkout's stack that is up or
+    /// starting, and nothing when none is.
     #[test]
     fn stop_all_stops_every_running_run() {
         use orion_core::{Entity, TerminalId, TerminalTab};
         let mut app = App::new();
         seed_tree(&mut app);
-        list_stacks(&mut app, vec![a_stack("demo", "/tmp/demo", 2, 2)]);
         let none = run_action(&mut app, crate::keymap::Action::StopAllStacks);
         assert!(none.is_empty(), "{none:?}");
         assert_eq!(app.flash.as_deref(), Some("no stack is running"));
@@ -29436,6 +29519,16 @@ mod tests {
                     run: Default::default(),
                 }),
             },
+        );
+        list_stacks(
+            &mut app,
+            vec![(
+                "w1",
+                orion_core::stack::StackStatus::Up {
+                    ports: vec![],
+                    outside: false,
+                },
+            )],
         );
         let sent = run_action(&mut app, crate::keymap::Action::StopAllStacks);
         assert!(

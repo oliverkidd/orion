@@ -4507,10 +4507,9 @@ pub struct App {
     /// beside its changed files: commits ahead, commits behind — a band's
     /// `⇡4 ⇣1`. Only a checkout that is either has an entry.
     pub worktree_ahead: HashMap<WorktreeId, (usize, usize)>,
-    /// STACK STATUS: every docker compose stack on the machine, as the
-    /// DAEMON last saw it — `None` while docker is out of reach (or before
-    /// the first answer).
-    pub stacks: Option<Vec<orion_core::compose::Stack>>,
+    /// STACK STATUS: every checkout whose stack is not down, as the
+    /// DAEMON last worked it out (`ServerEvent::StackStatuses`).
+    pub stack_status: HashMap<WorktreeId, orion_core::stack::StackStatus>,
     /// The app `⌘⇧S` last started in each project, by its command: first
     /// in the next pick (`run_targets`).
     pub run_picks: HashMap<orion_core::ProjectId, String>,
@@ -4929,7 +4928,7 @@ impl App {
             worktree_read_at: HashMap::new(),
             worktree_lines: HashMap::new(),
             worktree_ahead: HashMap::new(),
-            stacks: None,
+            stack_status: HashMap::new(),
             run_picks: HashMap::new(),
             pull_requests: HashMap::new(),
             merge_landed: HashMap::new(),
@@ -5315,6 +5314,10 @@ impl App {
             .terminals
             .iter()
             .any(|t| t.run.stopping_until.is_some())
+            || self
+                .stack_status
+                .values()
+                .any(|s| matches!(s, orion_core::stack::StackStatus::Stopping { .. }))
         {
             return true;
         }
@@ -5327,7 +5330,7 @@ impl App {
                 !a.archived && (self.spins(a) || self.shows_unread(a) || fresh_alarm(a, now))
             }) || self.visible_worktrees().iter().any(|w| {
                 self.merge_sweeping(&w.id)
-                    || (self.any_stack_running() && self.stack_running(&w.id))
+                    || (!self.stack_status.is_empty() && self.stack_running(&w.id))
             }) || self
                 .flash
                 .as_ref()
@@ -5367,33 +5370,19 @@ impl App {
         !self.window_focused && !self.is_remote
     }
 
-    /// STACK STATUS: the compose stack started in `worktree`'s checkout,
-    /// if any — a nested checkout's stack is its own, not its parent's.
-    pub fn stack_of(&self, worktree: &WorktreeId) -> Option<&orion_core::compose::Stack> {
-        let stacks = self.stacks.as_deref().filter(|s| !s.is_empty())?;
-        let wt = self.tree.worktrees.iter().find(|w| &w.id == worktree)?;
-        orion_core::compose::stack_in(stacks, &wt.path, &self.checkout_paths())
-    }
-
-    /// Every checkout's directory, for [`orion_core::compose::owner_of`].
-    pub fn checkout_paths(&self) -> Vec<&std::path::Path> {
-        self.tree
-            .worktrees
-            .iter()
-            .map(|w| w.path.as_path())
-            .collect()
-    }
-
-    /// Whether any stack on the machine is up — the cheap check before
-    /// asking which band it is on.
-    fn any_stack_running(&self) -> bool {
-        self.stacks.iter().flatten().any(|s| s.running > 0)
+    /// STACK STATUS: `worktree`'s stack, as the DAEMON last worked it out
+    /// — down when it said nothing of it.
+    pub fn stack_status(&self, worktree: &WorktreeId) -> &orion_core::stack::StackStatus {
+        static DOWN: orion_core::stack::StackStatus = orion_core::stack::StackStatus::Down;
+        self.stack_status.get(worktree).unwrap_or(&DOWN)
     }
 
     /// Whether `worktree`'s stack is up: its band's `⬡` runs the trail.
     pub fn stack_running(&self, worktree: &WorktreeId) -> bool {
-        self.stack_of(worktree)
-            .is_some_and(|s| s.state() == orion_core::compose::StackState::Running)
+        matches!(
+            self.stack_status(worktree),
+            orion_core::stack::StackStatus::Up { .. }
+        )
     }
 
     /// Whether `worktree`'s MERGED BAND is still inside its ONE-SHOT SWEEP.
@@ -6112,11 +6101,19 @@ impl App {
     }
 
     /// The same for a checkout already in hand ([`App::sessions_in`]).
+    /// Whether terminal `t` has a line: always, but a RUN LINE only
+    /// while its stack is not down — or while its run is alive, ahead of
+    /// the status that will say so.
+    pub fn shows_terminal(&self, t: &TerminalTab) -> bool {
+        !t.is_run() || t.alive || !self.stack_status(&t.worktree_id).is_down()
+    }
+
+    /// `wt`'s terminals that have a line ([`App::shows_terminal`]).
     fn terminals_in(&self, wt: &WorktreeId) -> Vec<TerminalTab> {
         self.tree
             .terminals
             .iter()
-            .filter(|t| &t.worktree_id == wt)
+            .filter(|t| &t.worktree_id == wt && self.shows_terminal(t))
             .cloned()
             .collect()
     }
@@ -6619,8 +6616,8 @@ impl App {
             )
     }
 
-    /// The worktree's RUN TERMINAL — the terminal `r` started there, still
-    /// running or exited on its own — when it has one.
+    /// The worktree's RUN TERMINAL — the terminal `⌘⇧S` started there —
+    /// when it has one.
     pub fn run_terminal(&self, worktree_id: &WorktreeId) -> Option<&TerminalTab> {
         self.tree
             .terminals

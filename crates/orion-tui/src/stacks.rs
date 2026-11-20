@@ -1,23 +1,30 @@
-//! STACK STATUS in the TUI: the DAEMON's listing of every docker compose
-//! stack on the machine (`ServerEvent::StacksChanged`), which the band's
-//! `⬡` reads through [`App::stack_of`]. Starting and stopping a checkout's
-//! stack is `⌘⇧S`'s (`event_loop::toggle_stack_in`): an app found in the
-//! checkout (`crate::run_targets`), in the background, on a run line in
-//! its band. The ports that run prints
-//! are its app: a click on one, or ⌘O's **Open app**, opens it.
+//! STACK STATUS in the TUI: each checkout's stack — up, starting,
+//! stopping or down — as the DAEMON works it out
+//! (`ServerEvent::StackStatuses`, `orion_core::stack`). The band's `⬡` is
+//! green while it is up, amber while it starts or stops, and gone while
+//! it is down; the run line is drawn only while it is not down, with the
+//! ports it serves. Starting and stopping it is `⌘⇧S`'s
+//! (`event_loop::toggle_stack_in`): an app found in the checkout
+//! (`crate::run_targets`), in the background, on a run line in its band.
+//! A click on a port, or ⌘O's **Open app**, opens the app.
 
 use crate::app::{App, PendingIntent};
-use orion_core::compose::Stack;
 use orion_core::protocol::ClientRequest;
+use orion_core::stack::StackStatus;
 use orion_core::WorktreeId;
 
 /// The mark a stack wears on its band.
 pub const MARK: &str = "⬡";
 
-/// `StacksChanged`: the new listing.
-pub(crate) fn listed(app: &mut App, stacks: Option<Vec<Stack>>) {
-    app.stacks = stacks;
+/// `StackStatuses`: every checkout's stack that is not down.
+pub(crate) fn listed(app: &mut App, statuses: Vec<(WorktreeId, StackStatus)>) {
+    app.stack_status = statuses.into_iter().filter(|(_, s)| !s.is_down()).collect();
     app.dirty = true;
+}
+
+/// Whether `worktree`'s stack is up or coming up: what a stop stops.
+pub(crate) fn live(app: &App, worktree: &WorktreeId) -> bool {
+    app.stack_status(worktree).is_live()
 }
 
 /// A checkout's menu item for ⌘O's **Open app**: the first localhost
@@ -29,13 +36,14 @@ pub(crate) fn open_app_item() -> crate::app::MenuItem {
     )
 }
 
-/// A checkout's menu item for `⌘⇧S`: **Stop stack** while its run is up,
-/// **Cancel start** while a start waits on its setup, else **Start stack**.
+/// A checkout's menu item for `⌘⇧S`: **Cancel start** while a start waits
+/// on its setup, **Stop stack** while its stack is not down, else **Start
+/// stack**.
 pub(crate) fn menu_label(app: &App, worktree: &WorktreeId) -> &'static str {
-    if app.worktree_running(worktree) || app.stack_running(worktree) {
-        "Stop stack"
-    } else if run_queued(app, worktree) {
+    if run_queued(app, worktree) {
         "Cancel start"
+    } else if !app.stack_status(worktree).is_down() {
+        "Stop stack"
     } else {
         "Start stack"
     }
@@ -81,14 +89,15 @@ pub(crate) fn restart(app: &mut App, worktree: &WorktreeId, out: &mut Vec<Client
     });
 }
 
-/// **Stop all stacks**: every checkout's run sent its `^C`, so its trap
-/// winds its stack down in view.
+/// **Stop all stacks**: every checkout's stack that is up or starting is
+/// stopped — orion's runs sent their `^C`, so their traps wind them down
+/// in view, and the rest stopped by the DAEMON.
 pub(crate) fn stop_all(app: &mut App, out: &mut Vec<ClientRequest>) {
     let runs: Vec<WorktreeId> = app
         .tree
         .worktrees
         .iter()
-        .filter(|w| app.worktree_running(&w.id) && app.run_stopping(&w.id).is_none())
+        .filter(|w| live(app, &w.id) && !run_queued(app, &w.id))
         .map(|w| w.id.clone())
         .collect();
     if runs.is_empty() {
@@ -110,9 +119,9 @@ pub(crate) fn port_url(port: u16) -> String {
     format!("http://localhost:{port}")
 }
 
-/// `worktree`'s app: the first localhost port its live run printed.
+/// `worktree`'s app: the first port its stack serves.
 pub(crate) fn app_port(app: &App, worktree: &WorktreeId) -> Option<u16> {
-    app.run_terminal(worktree)?.run.ports.first().copied()
+    app.stack_status(worktree).ports().first().copied()
 }
 
 /// A click on a run line's `:3000`: that port, in the browser.
@@ -133,8 +142,8 @@ pub(crate) fn open_app(app: &mut App) {
         open_port(app, port);
         return;
     }
-    let note = if app.worktree_running(&worktree) {
-        "the run hasn't printed a localhost address yet".to_string()
+    let note = if live(app, &worktree) {
+        "the stack isn't serving a port yet".to_string()
     } else {
         let key = crate::hints::key_or(
             &app.keymap,

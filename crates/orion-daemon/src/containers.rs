@@ -89,7 +89,7 @@ pub(crate) async fn running_in(docker: &Path, dir: &Path) -> Option<compose::Sta
         .ok()?;
     let running: Vec<compose::Container> = compose::parse_ps_state(&listed)
         .into_iter()
-        .filter_map(|(container, running)| running.then_some(container))
+        .filter_map(|(container, health)| health.running.then_some(container))
         .collect();
     Some(compose::started_in(&running, dir))
 }

@@ -519,17 +519,16 @@ pub struct RunState {
     /// That stop is a restart's: once the run has gone it starts again in
     /// this row (`restarting… 1:52`) rather than taking the row with it.
     pub restarting: bool,
-    /// A run that ended on its own, nobody having stopped it: the code it
-    /// exited with — the run line's faint `done` for 0, a red `exited 1`
-    /// for anything else. None while it runs, and for one whose ending
-    /// this DAEMON did not see (a run from before it restarted). A run a
-    /// stop ended has no row left to carry one.
+    /// On a SETUP TERMINAL that failed: the code it exited with, for its
+    /// red `setup failed (1)`. None while it runs, and once the DAEMON
+    /// that saw it end has restarted. A run that ends has no row left to
+    /// carry one (STACK STATUS: its stack is down).
     pub exit_code: Option<i32>,
     /// The localhost ports the live run has printed —
     /// `http://localhost:3000` is 3000 — first seen first, kept after the
-    /// lines scroll away: the run line's `:3000 :5173`, the first of them
-    /// what ⌘O's **Open app** opens. Empty once the run has ended, and
-    /// again from a start.
+    /// lines scroll away. STACK STATUS puts the one printed first at the
+    /// head of the ports its stack serves (`StackStatus::Up`), which is
+    /// what the run line shows.
     pub ports: Vec<u16>,
     /// On a SETUP TERMINAL: a **Start stack** pressed while it runs is
     /// waiting for it. The run starts once the setup exits cleanly, and

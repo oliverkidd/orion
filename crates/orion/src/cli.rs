@@ -189,14 +189,22 @@ pub(crate) enum Command {
     /// Run from inside a orion agent session: the command runs in the
     /// checkout's run terminal, as ⌘⇧S starts it — a run line with the
     /// ports it prints, stopped by ⌘⇧S — rather than in the agent's shell.
-    /// Returns at once. `--stop` stops it.
+    /// Returns at once. `--stop` stops it, `--restart` starts it again,
+    /// `--status` says whether it is up, starting, stopping or down.
     Run {
         /// The command to run; multiple words need no quotes.
-        #[arg(num_args = 1.., required_unless_present = "stop", conflicts_with = "stop", trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(num_args = 1.., required_unless_present_any = ["stop", "restart", "status"], conflicts_with_all = ["stop", "restart", "status"], trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
-        /// Stop the run instead.
-        #[arg(long)]
+        /// Stop the stack instead.
+        #[arg(long, conflicts_with_all = ["restart", "status"])]
         stop: bool,
+        /// Stop the stack and start it again with the command it last ran.
+        #[arg(long, conflicts_with = "status")]
+        restart: bool,
+        /// Print whether the stack is up, starting, stopping or down, and
+        /// the localhost addresses it serves.
+        #[arg(long)]
+        status: bool,
     },
     /// What an autofix session runs on itself.
     ///

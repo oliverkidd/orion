@@ -497,14 +497,15 @@ already — so a new agent in a new worktree is that one chord, the task and `En
   The band the keys are on opens on `❯` where the rest open on `──`.
   The entries under it are the checkout's sessions, then its terminals, the names and what each
   runs on in columns down the band. A shell is `❯ shell-1` with `shell` for what it runs on, and a
-  faint `exited` at the right once it is gone. A RUN TERMINAL is its RUN LINE, `▶ run`: its command
-  on a `$` where a session's prompt goes, and its state at the right where a session's age is — a
-  dim `running`, `stopping… 1:52` while a stop winds it down (the line goes once it has), or, for a
-  run that ended with nobody stopping it, a faint `done` or a red `exited 1`. After the command come
-  the localhost ports the run has printed — `http://localhost:3000`, `127.0.0.1` or `0.0.0.0` —
-  underlined, `:3000 :5173`, kept after the lines that said them scroll away and cleared when the run
-  starts again. A click on one opens it in the browser; the first is the app, and `⌘O` → **Open
-  app** opens it too. The run line's right-click menu has **Stop stack** (or **Start stack**) and
+  faint `exited` at the right once it is gone. A RUN TERMINAL is its RUN LINE, `▶ run`, drawn only
+  while the checkout's stack is not down: its command on a `$` where a session's prompt goes, and
+  the stack's state at the right where a session's age is — `starting…` in the working gold, a dim
+  `running`, `stopping… 1:52` while a stop winds it down. A run that ends leaves no line behind. A
+  stack started outside orion (an agent's shell, another terminal) gets a run line of its own,
+  `$ started outside orion`, with nothing to attach. After the command come the ports the stack
+  serves — those listening from inside the checkout, the one the run printed first leading —
+  underlined, `:3000 :5173`. A click on one opens it in the browser; the first is the app, and
+  `⌘O` → **Open app** opens it too. The run line's right-click menu has **Stop stack** (or **Start stack**) and
   **Restart stack**: a stop, then a start in the same line once the run has gone, `restarting… 1:52`
   meanwhile. A worktree orion has just created for a project with a setup command (set by hand in
   `config.json`) has its SETUP

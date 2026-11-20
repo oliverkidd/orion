@@ -45,8 +45,22 @@ fn main() -> Result<()> {
             base,
         }) => orion_tui::run_spawn(task.join(" "), kind, worktree, base),
         Some(Command::Open { files }) => orion_tui::run_open(files),
-        Some(Command::Run { command, stop }) => {
-            orion_tui::run_agent_run((!stop).then(|| command.join(" ")))
+        Some(Command::Run {
+            command,
+            stop,
+            restart,
+            status,
+        }) => {
+            use orion_core::protocol::AgentRunAction;
+            orion_tui::run_agent_run(if stop {
+                AgentRunAction::Stop
+            } else if restart {
+                AgentRunAction::Restart
+            } else if status {
+                AgentRunAction::Status
+            } else {
+                AgentRunAction::Start(command.join(" "))
+            })
         }
         Some(Command::Autofix(AutofixCommand::StandDown { reason })) => {
             orion_tui::run_stand_down(reason.join(" "))

@@ -1443,7 +1443,8 @@ fn draw_list_row(
             }
         }
         crate::launcher::Card::Terminal(t) => {
-            let (badge, badge_style) = terminal_badge(t, crate::app::now_ms(), th);
+            let stack = app.stack_status(&t.worktree_id);
+            let (badge, badge_style) = terminal_badge(t, stack, crate::app::now_ms(), th);
             Entry {
                 lead: terminal_mark(t, th),
                 tag: None,
@@ -1459,7 +1460,12 @@ fn draw_list_row(
                 },
                 text: t.run_command.clone().unwrap_or_default(),
                 text_style: Style::default().fg(th.muted),
-                ports: &t.run.ports,
+                // A run line's ports are the ones its stack serves.
+                ports: if t.is_run() {
+                    stack.ports()
+                } else {
+                    &t.run.ports
+                },
                 todo: None,
                 badge,
                 badge_style,
@@ -2051,14 +2057,17 @@ fn draw_band_rule(
 
 /// STACK STATUS on a band's rule: the `⬡` over its last `─` — the tail's,
 /// or the fill's when there is no right block — green while the
-/// worktree's compose stack runs, faint while it is stopped, and nothing
-/// without one. A running stack's STACK TRAIL runs into it down the
-/// rule's dashes, one column a frame, and it flashes as the light lands;
-/// the light skips text but keeps time across it, so its pace is even.
+/// worktree's stack is up, in the working gold while it starts or stops,
+/// and nothing while it is down. An up stack's STACK TRAIL runs into it
+/// down the rule's dashes, one column a frame, and it flashes as the
+/// light lands; the light skips text but keeps time across it, so its
+/// pace is even.
 fn paint_stack_mark(buf: &mut Buffer, r: Rect, app: &App, worktree: &orion_core::WorktreeId) {
-    let Some(stack) = app.stack_of(worktree) else {
+    use orion_core::stack::StackStatus;
+    let status = app.stack_status(worktree);
+    if status.is_down() {
         return;
-    };
+    }
     let th = app.theme;
     // The rightmost dash: the rule's own last cell unless it was cut.
     let Some(h) = (r.x..r.right())
@@ -2067,8 +2076,8 @@ fn paint_stack_mark(buf: &mut Buffer, r: Rect, app: &App, worktree: &orion_core:
     else {
         return;
     };
-    let running = stack.state() == orion_core::compose::StackState::Running;
-    let mut mark = if running { th.ok } else { th.faint };
+    let running = matches!(status, StackStatus::Up { .. });
+    let mut mark = if running { th.ok } else { th.warn };
     if running && app.animations {
         let x0 = (r.x..h)
             .find(|&x| buf[(x, r.y)].symbol() == "─")
@@ -2123,37 +2132,52 @@ const RUN_PORTS_SHOWN: usize = 2;
 const RUN_MARK: &str = "$ ";
 
 /// What a terminal's entry says at its right end, where a session's age
-/// goes, at `now` (epoch ms). A live run is a dim `running`; one winding
-/// down from its stop counts down to its kill, `stopping… 1:52` (or
-/// `restarting… 1:52`, a restart's), in the working gold. One that
-/// ended with nobody stopping it says how: a faint `done` for a clean
-/// exit, a red `exited 1` for any other; a run whose ending the DAEMON
-/// never saw (it restarted since) is a faint `stopped`. A dead shell is a
-/// faint `exited`. A stop that was asked for leaves no row to say any of
-/// it. A SETUP TERMINAL says [`setup_badge`].
-fn terminal_badge(t: &orion_core::TerminalTab, now: i64, th: Theme) -> (String, Style) {
+/// goes, at `now` (epoch ms). A RUN LINE says its stack's status
+/// (`stack`): a dim `running` while it is up, `starting…` in the working
+/// gold while it comes up, and while it winds down from a stop a count to
+/// its kill, `stopping… 1:52` (or `restarting… 1:52`, a restart's). It is
+/// not drawn at all while its stack is down. A dead shell is a faint
+/// `exited`. A SETUP TERMINAL says [`setup_badge`].
+fn terminal_badge(
+    t: &orion_core::TerminalTab,
+    stack: &orion_core::stack::StackStatus,
+    now: i64,
+    th: Theme,
+) -> (String, Style) {
+    use orion_core::stack::StackStatus;
     if t.setup {
         return setup_badge(t, th);
     }
     let faint = Style::default().fg(th.faint);
-    if let Some(kill_at) = t.run.stopping_until {
-        let doing = if t.run.restarting {
-            "restarting"
-        } else {
-            "stopping"
+    let warn = Style::default().fg(th.warn);
+    if t.run_command.is_none() {
+        return match t.alive {
+            true => (String::new(), Style::default()),
+            false => ("exited".into(), faint),
         };
-        return (
-            format!("{doing}… {}", countdown(kill_at - now)),
-            Style::default().fg(th.warn),
-        );
     }
-    match (t.run_command.is_some(), t.alive, t.run.exit_code) {
-        (false, true, _) => (String::new(), Style::default()),
-        (false, false, _) => ("exited".into(), faint),
-        (true, true, _) => ("running".into(), Style::default().fg(th.dim)),
-        (true, false, Some(0)) => ("done".into(), faint),
-        (true, false, Some(code)) => (format!("exited {code}"), Style::default().fg(th.err)),
-        (true, false, None) => ("stopped".into(), faint),
+    // The row's own word lands before the next status does: a stop under
+    // way, or a run just spawned.
+    let stack = match (t.run.stopping_until, stack) {
+        (Some(at), _) => &StackStatus::Stopping { kill_at: Some(at) },
+        (None, StackStatus::Down) if t.alive => &StackStatus::Starting { outside: false },
+        (None, stack) => stack,
+    };
+    match stack {
+        StackStatus::Stopping { kill_at } => {
+            let doing = if t.run.restarting {
+                "restarting"
+            } else {
+                "stopping"
+            };
+            let left = kill_at
+                .map(|at| format!(" {}", countdown(at - now)))
+                .unwrap_or_default();
+            (format!("{doing}…{left}"), warn)
+        }
+        StackStatus::Starting { .. } => ("starting…".into(), warn),
+        StackStatus::Up { .. } => ("running".into(), Style::default().fg(th.dim)),
+        StackStatus::Down => (String::new(), faint),
     }
 }
 
@@ -4076,6 +4100,13 @@ mod tests {
                 run: Default::default(),
             });
         }
+        app.stack_status.insert(
+            WorktreeId("w0".into()),
+            orion_core::stack::StackStatus::Up {
+                ports: Vec::new(),
+                outside: false,
+            },
+        );
         let body = Rect::new(0, 0, 100, 30);
         let row_of = |lines: &[String], name: &str| -> String {
             lines
@@ -4113,26 +4144,53 @@ mod tests {
         }
     }
 
+    /// The `api` checkout's (`w0`) stack is `status`.
+    fn stack_is(app: &mut App, status: orion_core::stack::StackStatus) {
+        app.stack_status
+            .insert(orion_core::WorktreeId("w0".into()), status);
+    }
+
+    fn up(ports: &[u16]) -> orion_core::stack::StackStatus {
+        orion_core::stack::StackStatus::Up {
+            ports: ports.to_vec(),
+            outside: false,
+        }
+    }
+
     /// A run winding down from its stop says so at the right end of its
     /// line, counting down to the kill in the working gold.
     #[test]
     fn a_stopping_run_counts_down_to_its_kill() {
+        use orion_core::stack::StackStatus;
         let th = Theme::default();
-        let mut run = a_run(true);
+        let run = a_run(true);
         assert_eq!(
-            terminal_badge(&run, 0, th),
+            terminal_badge(&run, &up(&[]), 0, th),
             ("running".into(), Style::default().fg(th.dim))
         );
-        run.run.stopping_until = Some(112_000);
-        let (badge, style) = terminal_badge(&run, 0, th);
+        let stopping = StackStatus::Stopping {
+            kill_at: Some(112_000),
+        };
+        let (badge, style) = terminal_badge(&run, &stopping, 0, th);
         assert_eq!(badge, "stopping… 1:52");
         assert_eq!(style.fg, Some(th.warn));
-        assert_eq!(terminal_badge(&run, 111_500, th).0, "stopping… 0:01");
-        assert_eq!(terminal_badge(&run, 200_000, th).0, "stopping… 0:00");
+        assert_eq!(
+            terminal_badge(&run, &stopping, 111_500, th).0,
+            "stopping… 0:01"
+        );
+        assert_eq!(
+            terminal_badge(&run, &stopping, 200_000, th).0,
+            "stopping… 0:00"
+        );
 
         let mut app = a_tree();
         select(&mut app, "api");
-        run.run.stopping_until = Some(crate::app::now_ms() + 60_000);
+        stack_is(
+            &mut app,
+            StackStatus::Stopping {
+                kill_at: Some(crate::app::now_ms() + 60_000),
+            },
+        );
         app.tree.terminals.push(run);
         let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
         let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
@@ -4157,6 +4215,7 @@ mod tests {
             text: "fix the login redirect".into(),
             submitted_at: 0,
         }];
+        stack_is(&mut app, up(&[]));
         app.tree.terminals.push(a_run(true));
         let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
         let line_of = |needle: &str| {
@@ -4191,7 +4250,7 @@ mod tests {
         select(&mut app, "api");
         let mut run = a_run(true);
         run.run_command = Some("docker compose up --build --remove-orphans api web worker".into());
-        run.run.ports = vec![3000, 5173];
+        stack_is(&mut app, up(&[3000, 5173]));
         app.tree.terminals.push(run);
         let lines = drawn_lines(&mut app, Rect::new(0, 0, 60, 30));
         let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
@@ -4207,7 +4266,7 @@ mod tests {
         select(&mut app, "api");
         let mut run = a_run(true);
         run.run_command = Some("just os start".into());
-        run.run.ports = vec![30045, 30055, 30056, 30057, 30049];
+        stack_is(&mut app, up(&[30045, 30055, 30056, 30057, 30049]));
         app.tree.terminals.push(run);
         let lines = drawn_lines(&mut app, Rect::new(0, 0, 120, 30));
         let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
@@ -4215,40 +4274,47 @@ mod tests {
         assert!(!line.contains(":30056"), "{line:?}");
     }
 
-    /// A run that ended with nobody stopping it says how at the right
-    /// end of its line: a faint `done` for a clean exit, a red `exited N`
-    /// for any other, a faint `stopped` when the DAEMON never saw it end.
-    /// Nothing is copper any more, a dead shell's `exited` included.
+    /// A run line is drawn only while its stack is not down — a run that
+    /// ended leaves no row saying how — and says `starting…` in the
+    /// working gold while its stack comes up. A dead shell is a faint
+    /// `exited`.
     #[test]
-    fn a_run_that_ended_on_its_own_says_how() {
+    fn a_run_line_shows_only_while_its_stack_is_not_down() {
+        use orion_core::stack::StackStatus;
         let th = Theme::default();
-        let mut run = a_run(false);
-        for (code, said, color) in [
-            (Some(0), "done", th.faint),
-            (Some(1), "exited 1", th.err),
-            (Some(137), "exited 137", th.err),
-            (None, "stopped", th.faint),
-        ] {
-            run.run.exit_code = code;
-            let (badge, style) = terminal_badge(&run, 0, th);
-            assert_eq!((badge.as_str(), style.fg), (said, Some(color)), "{code:?}");
-        }
+        let run = a_run(true);
+        assert_eq!(
+            terminal_badge(&run, &StackStatus::Starting { outside: false }, 0, th),
+            ("starting…".into(), Style::default().fg(th.warn))
+        );
         let shell = orion_core::TerminalTab {
             run_command: None,
             ..a_run(false)
         };
         assert_eq!(
-            terminal_badge(&shell, 0, th),
+            terminal_badge(&shell, &StackStatus::Down, 0, th),
             ("exited".into(), Style::default().fg(th.faint))
+        );
+
+        // A row whose run is alive is starting, ahead of the status
+        // that will say so.
+        assert_eq!(
+            terminal_badge(&run, &StackStatus::Down, 0, th).0,
+            "starting…"
         );
 
         let mut app = a_tree();
         select(&mut app, "api");
-        run.run.exit_code = Some(2);
-        app.tree.terminals.push(run);
+        app.tree.terminals.push(a_run(false));
+        let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
+        assert!(
+            !lines.iter().any(|l| l.contains("▶ run")),
+            "down: {lines:#?}"
+        );
+        stack_is(&mut app, StackStatus::Starting { outside: false });
         let lines = drawn_lines(&mut app, Rect::new(0, 0, 100, 30));
         let line = lines.iter().find(|l| l.contains("▶ run")).unwrap();
-        assert!(line.trim_end().ends_with("exited 2"), "{line:?}");
+        assert!(line.trim_end().ends_with("starting…"), "{line:?}");
     }
 
     /// A SETUP LINE looks like a run line — its command with the prompts,
@@ -4263,14 +4329,15 @@ mod tests {
             setup: true,
             ..a_run(true)
         };
+        let down = orion_core::stack::StackStatus::Down;
         assert_eq!(
-            terminal_badge(&setup, 0, th),
+            terminal_badge(&setup, &down, 0, th),
             ("setting up…".into(), Style::default().fg(th.warn))
         );
         setup.alive = false;
         for (code, said) in [(Some(1), "setup failed (1)"), (None, "setup failed")] {
             setup.run.exit_code = code;
-            let (badge, style) = terminal_badge(&setup, 0, th);
+            let (badge, style) = terminal_badge(&setup, &down, 0, th);
             assert_eq!((badge.as_str(), style.fg), (said, Some(th.err)), "{code:?}");
         }
 
@@ -5503,8 +5570,9 @@ mod tests {
         assert!(!text.contains('*'), "the counts go first: {text:?}");
     }
 
-    /// An app whose checkout `w1` (at `/src/feat-x`) has a compose stack with
-    /// `running` of its 5 containers up, at STACK TRAIL frame `phase`.
+    /// An app whose checkout `w1` (at `/src/feat-x`) has its stack up when
+    /// `running` is non-zero, starting otherwise, at STACK TRAIL frame
+    /// `phase`.
     fn with_stack(running: u16, phase: usize) -> App {
         use orion_core::{ProjectId, Worktree, WorktreeId};
         let mut app = App::new();
@@ -5516,12 +5584,14 @@ mod tests {
             is_main: false,
             sort_order: 0,
         });
-        app.stacks = Some(vec![orion_core::compose::Stack {
-            project: "riplo-wt".into(),
-            dirs: vec!["/src/feat-x".into()],
-            running,
-            total: 5,
-        }]);
+        let status = match running {
+            0 => orion_core::stack::StackStatus::Starting { outside: false },
+            _ => orion_core::stack::StackStatus::Up {
+                ports: vec![3000],
+                outside: false,
+            },
+        };
+        app.stack_status.insert(WorktreeId("w1".into()), status);
         let frame = crate::app::SWEEP_FRAME.as_millis() as u64;
         app.splash_epoch = std::time::Instant::now()
             - std::time::Duration::from_millis(phase as u64 * frame + frame / 2);
@@ -5545,16 +5615,16 @@ mod tests {
         assert_eq!(painted(&buf, 0, th.ok), "⬡");
     }
 
-    /// With no right block the `⬡` takes the fill's last dash; a stopped
-    /// stack's is faint.
+    /// With no right block the `⬡` takes the fill's last dash; a stack
+    /// starting or stopping wears it in the working gold, and still.
     #[test]
-    fn a_stopped_stack_marks_the_last_fill_dash_faintly() {
+    fn a_starting_stack_marks_the_last_fill_dash_in_gold() {
         let app = with_stack(0, 0);
         let th = app.theme;
         let buf = rule_row(&app, &a_band(false, "feat-x"), 40);
         let text = row_string(&buf, 0);
         assert!(text.ends_with("──⬡"), "{text:?}");
-        assert!(painted(&buf, 0, th.faint).contains('⬡'));
+        assert!(painted(&buf, 0, th.warn).contains('⬡'));
         assert_eq!(painted(&buf, 0, th.ok), "");
     }
 
@@ -5564,7 +5634,7 @@ mod tests {
         let mut app = with_stack(5, 0);
         let band = a_band(false, "feat-x");
         let marked = row_string(&rule_row(&app, &band, 40), 0);
-        app.stacks = Some(Vec::new());
+        app.stack_status.clear();
         let plain = row_string(&rule_row(&app, &band, 40), 0);
         assert!(!plain.contains('⬡'), "{plain:?}");
         assert!(plain.ends_with("───"));

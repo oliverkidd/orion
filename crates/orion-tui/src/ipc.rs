@@ -543,37 +543,79 @@ pub async fn open_files_for_current_agent(files: &[String]) -> Result<()> {
     Ok(())
 }
 
-/// CLI: `orion run <command>` / `orion run --stop` from inside an agent
-/// session — the daemon starts the command in the session's checkout's
-/// run line, or stops that run. Never spawns a daemon.
-pub async fn agent_run_for_current_agent(command: Option<String>) -> Result<()> {
+/// CLI: `orion run <command>` / `--stop` / `--restart` / `--status` from
+/// inside an agent session — the daemon starts the command in the
+/// session's checkout's run line, stops or restarts that stack, or says
+/// whether it is up. Never spawns a daemon.
+pub async fn agent_run_for_current_agent(
+    action: orion_core::protocol::AgentRunAction,
+) -> Result<()> {
+    use orion_core::protocol::AgentRunAction;
     let agent_id = current_agent_id("run")?;
     let sock = paths::socket_path();
     let Ok(stream) = try_connect(&sock).await else {
-        bail!("no orion daemon is running — nothing started");
+        bail!("no orion daemon is running — nothing done");
     };
     let mut conn = handshake(stream).await?;
     let req_id = ONE_SHOT_REQ_ID;
-    let stopping = command.is_none();
     write_frame(
         &mut conn.stream,
         &ClientRequest::AgentRun {
             req_id,
             id: AgentId(agent_id),
-            command,
+            action: action.clone(),
         },
     )
     .await?;
+    if action == AgentRunAction::Status {
+        loop {
+            match read_frame::<ServerEvent, _>(&mut conn.stream).await? {
+                Some(ServerEvent::StackStatusReply { req_id: r, status }) if r == req_id => {
+                    println!("{}", status_line(&status));
+                    return Ok(());
+                }
+                Some(ServerEvent::Error {
+                    req_id: Some(r),
+                    message,
+                }) if r == req_id => bail!("{message}"),
+                Some(_) => continue,
+                None => bail!("{CLOSED_BEFORE_REPLY}"),
+            }
+        }
+    }
     await_ack(&mut conn, req_id).await?;
-    if stopping {
-        println!("stopping the run in orion's run line — it winds down in the background.");
-    } else {
-        println!(
-            "started in orion's run line — the user sees it with its ports and stops it with ⌘⇧S. \
-             It runs in the background; carry on."
-        );
+    match action {
+        AgentRunAction::Start(_) => println!(
+            "starting in orion's run line — the user sees it with its ports and stops it with ⌘⇧S. \
+             It runs in the background; `orion run --status` says when it is up."
+        ),
+        AgentRunAction::Stop => {
+            println!("stopping the stack — it winds down in the background.")
+        }
+        AgentRunAction::Restart => println!(
+            "restarting the stack in orion's run line — `orion run --status` says when it is up again."
+        ),
+        AgentRunAction::Status => {}
     }
     Ok(())
+}
+
+/// `orion run --status`'s line: the state, and for an up stack where it
+/// serves.
+fn status_line(status: &orion_core::stack::StackStatus) -> String {
+    use orion_core::stack::StackStatus;
+    let outside = if status.is_outside() {
+        " (started outside orion)"
+    } else {
+        ""
+    };
+    match status {
+        StackStatus::Up { ports, .. } if !ports.is_empty() => {
+            let urls: Vec<String> = ports.iter().map(|&p| crate::stacks::port_url(p)).collect();
+            format!("up{outside}: {}", urls.join(" "))
+        }
+        _ => format!("{}{outside}", status.word()),
+    }
 }
 
 /// CLI: `orion worktree [name] [--base <ref>]` from inside an agent

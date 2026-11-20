@@ -18,6 +18,7 @@ orion rename <title>       title the session this runs inside          (agents r
 orion worktree [name]      move this session into a worktree           (agents run this)
 orion spawn <task>         start another agent session beside it       (agents run this)
 orion open <file[:line]>…  show files in this orion's file tabs       (agents run this)
+orion run <command>        start this checkout's app in its run line   (agents run this)
 orion config <cmd>         locate this machine's settings
 orion ssh <host>           open orion on a remote host over ssh
 orion setup                open orion on its setup: Claude, your first project, the keys
@@ -70,6 +71,13 @@ orion open <file>…       # show the files in this orion's FILE TABS — a moda
                           # binary is refused, and the agent names the path instead). `file:42`
                           # (also `:42:7`, `#L42`) opens that tab at line 42; a file whose own
                           # name ends that way opens whole
+orion run <command>      # start the checkout's app or stack in its RUN TERMINAL, as ⌘⇧S does —
+                          # the run line with its ports, stopped by ⌘⇧S — and return at once
+orion run --stop         # stop the checkout's stack, whoever started it
+orion run --restart      # stop it and start it again with the command it last ran
+orion run --status       # print `up: http://localhost:3000 …`, `starting`, `stopping` or `down`
+                          # (agents run these instead of starting a stack in their own shell; a
+                          # Claude session's Bash call that would is turned away with the right one)
 ```
 
 ## Settings

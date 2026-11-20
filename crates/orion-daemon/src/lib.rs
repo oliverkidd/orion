@@ -12,6 +12,7 @@ pub mod git;
 pub mod hooks;
 pub mod lifecycle;
 pub mod link_shim;
+pub mod listeners;
 pub mod metrics;
 pub mod open_files;
 pub mod phone;
@@ -30,6 +31,10 @@ pub mod stacks;
 pub mod status;
 pub mod store;
 pub mod transcript;
+
+/// How long boot waits before starting again the runs a restart cut off:
+/// the last daemon's runs may still be running their own exit traps.
+const RESUME_RUNS_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 
 use anyhow::{bail, Context, Result};
 use orion_core::{env, paths};
@@ -199,6 +204,15 @@ async fn serve() -> Result<()> {
     // Sessions the restart cut off mid-turn carry on without waiting for
     // someone to attach and type "continue".
     daemon.resume_interrupted(interrupted);
+    // Stacks the restart cut off come back up, as the sessions do; a stop
+    // it cut off is finished, a moment later ([`RESUME_RUNS_DELAY`]).
+    {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RESUME_RUNS_DELAY).await;
+            daemon.resume_runs();
+        });
+    }
 
     // Learn which agent CLIs are installed before anyone asks, so a create
     // that has to refuse ("codex was not found on your PATH") answers at once
@@ -328,11 +342,11 @@ async fn serve() -> Result<()> {
         });
     }
 
-    // STACK STATUS: which docker compose stacks exist and run, for the
-    // band's `⬡`.
+    // STACK STATUS: whether each checkout's stack is up, starting,
+    // stopping or down, for the band's `⬡` and the run line.
     {
         let daemon = daemon.clone();
-        let interval = env_interval(env::STACK_POLL_MS, 5_000);
+        let interval = env_interval(env::STACK_POLL_MS, 3_000);
         tokio::spawn(stacks::watch(daemon, interval));
     }
 

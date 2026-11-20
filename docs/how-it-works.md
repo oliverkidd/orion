@@ -200,9 +200,12 @@
   row's `▶`; **Stop stack** writes a `^C` into that PTY so the run's own trap winds down, broadcasts
   the row as stopping (`stopping_until`, the moment of the kill, which every client counts down to),
   and drops the row once the run has wound down — killing the process tree first on a second stop or
-  after two minutes. The idle reaper and the prewarm sweep leave that terminal alone, and a run that
-  exits with nobody stopping it keeps its row, its exit code (`done`, `exited 1`) and its PTY, so an
-  attach replays the ending instead of respawning — a command starts only when you pick **Start stack**. The DAEMON reads a run's output for the localhost addresses it prints and sends
+  after two minutes. The idle reaper and the prewarm sweep leave that terminal alone. A run that
+  exits with nobody stopping it takes its row with it and the checkout's compose projects down, a
+  failure warned of with its output saved to `state/runs/`; a command starts only when you pick
+  **Start stack**, `orion run` asks, or boot starts again a run the daemon's end cut off
+  (`terminals.run_wanted`). STACK STATUS (`stacks`) works out each checkout's stack — up, starting,
+  stopping or down — every 3 s from the run, `docker ps` and `lsof`, and sends it as `StackStatuses`. The DAEMON reads a run's output for the localhost addresses it prints and sends
   their ports on its row (`run.ports`, kept as the lines scroll away, reset by a new start): the run
   line's `:3000` links, the first of them ⌘O's **Open app**. **Restart stack** is `RestartRun`: the
   same stop, marked a restart (`run.restarting`), whose end starts the run again in its row rather

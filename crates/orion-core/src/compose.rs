@@ -98,40 +98,86 @@ pub fn ps_args() -> Vec<&'static str> {
     ]
 }
 
-/// [`ps_args`] with a third column: the container's state (`running`,
-/// `exited`, `created`, …) — what STACK STATUS reads.
+/// [`ps_args`] with two more columns: the container's state (`running`,
+/// `exited`, `restarting`, …) and docker's status line (`Up 5 seconds
+/// (health: starting)`) — what STACK STATUS reads.
 pub fn ps_state_args() -> Vec<&'static str> {
     vec![
         "ps",
         "--all",
         "--format",
-        "{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.project.working_dir\"}}\t{{.State}}",
+        "{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.project.working_dir\"}}\t{{.State}}\t{{.Status}}",
     ]
 }
 
-/// [`ps_state_args`]' output: each compose container, and whether it is
-/// running.
-pub fn parse_ps_state(out: &str) -> Vec<(Container, bool)> {
+/// One container's state, as [`parse_ps_state`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Health {
+    pub running: bool,
+    /// Still coming up: restarting, or its healthcheck still `starting`.
+    pub starting: bool,
+    /// How long ago it started, while it runs; None when docker's words
+    /// for it can't be read.
+    pub up_secs: Option<u64>,
+}
+
+/// [`ps_state_args`]' output: each compose container, and its [`Health`].
+pub fn parse_ps_state(out: &str) -> Vec<(Container, Health)> {
     out.lines()
         .filter_map(|line| {
             let mut cols = line.split('\t').map(str::trim);
             let (project, dir) = (cols.next()?, cols.next()?);
-            let running = cols.next() == Some("running");
+            let state = cols.next().unwrap_or("");
+            let status = cols.next().unwrap_or("");
+            let running = state == "running";
+            let health = Health {
+                running,
+                starting: state == "restarting" || (running && status.contains("health: starting")),
+                up_secs: running.then(|| up_secs(status)).flatten(),
+            };
             (!project.is_empty() && !dir.is_empty()).then(|| {
                 (
                     Container {
                         project: project.to_string(),
                         working_dir: PathBuf::from(dir),
                     },
-                    running,
+                    health,
                 )
             })
         })
         .collect()
 }
 
-/// STACK STATUS: one compose project on the machine, whoever started it —
-/// what the band's `⬡` reads.
+/// How long ago a running container started, from docker's status line:
+/// `Up 5 seconds`, `Up About a minute (healthy)`, `Up 3 days`. None for
+/// anything else.
+pub fn up_secs(status: &str) -> Option<u64> {
+    let since = status.strip_prefix("Up ")?;
+    let since = since.split(" (").next()?.trim();
+    match since {
+        "Less than a second" => return Some(0),
+        "About a minute" => return Some(60),
+        "About an hour" => return Some(3_600),
+        _ => {}
+    }
+    let (n, unit) = since.split_once(' ')?;
+    let n: u64 = n.parse().ok()?;
+    let unit = unit.trim_end_matches('s');
+    let per = match unit {
+        "second" => 1,
+        "minute" => 60,
+        "hour" => 3_600,
+        "day" => 86_400,
+        "week" => 604_800,
+        "month" => 2_592_000,
+        "year" => 31_536_000,
+        _ => return None,
+    };
+    Some(n * per)
+}
+
+/// One compose project on the machine, whoever started it — what STACK
+/// STATUS reads of a checkout's containers (`stack`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stack {
     pub project: String,
@@ -141,43 +187,36 @@ pub struct Stack {
     pub running: u16,
     /// … of how many it has.
     pub total: u16,
-}
-
-impl Stack {
-    pub fn state(&self) -> StackState {
-        if self.running > 0 {
-            StackState::Running
-        } else {
-            StackState::Stopped
-        }
-    }
-}
-
-/// Whether anything in a stack is up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StackState {
-    /// At least one container running.
-    Running,
-    /// Containers exist, none running.
-    Stopped,
+    /// How many are still coming up ([`Health::starting`]).
+    pub starting: u16,
+    /// How long ago its most recently started running container started.
+    pub newest_up_secs: Option<u64>,
 }
 
 /// [`parse_ps_state`]'s containers summed per project, sorted by project.
-pub fn stacks(rows: &[(Container, bool)]) -> Vec<Stack> {
+pub fn stacks(rows: &[(Container, Health)]) -> Vec<Stack> {
     let mut map: BTreeMap<&str, Stack> = BTreeMap::new();
-    for (c, running) in rows {
+    for (c, health) in rows {
         let stack = map.entry(&c.project).or_insert_with(|| Stack {
             project: c.project.clone(),
             dirs: Vec::new(),
             running: 0,
             total: 0,
+            starting: 0,
+            newest_up_secs: None,
         });
         if !stack.dirs.contains(&c.working_dir) {
             stack.dirs.push(c.working_dir.clone());
         }
         stack.total = stack.total.saturating_add(1);
-        if *running {
+        if health.running {
             stack.running = stack.running.saturating_add(1);
+        }
+        if health.starting {
+            stack.starting = stack.starting.saturating_add(1);
+        }
+        if let Some(up) = health.up_secs {
+            stack.newest_up_secs = Some(stack.newest_up_secs.map_or(up, |n| n.min(up)));
         }
     }
     map.into_values()
@@ -206,19 +245,16 @@ pub fn owner_of<'a>(stack: &Stack, checkouts: &[&'a Path]) -> Option<&'a Path> {
         .max_by_key(|c| c.components().count())
 }
 
-/// The stack checkout `dir` owns ([`owner_of`] over `checkouts`, `dir`
-/// among them) — a running one first when it has several, then the first
-/// by name.
-pub fn stack_in<'a>(stacks: &'a [Stack], dir: &Path, checkouts: &[&Path]) -> Option<&'a Stack> {
-    let mut mine = stacks
+/// Every stack checkout `dir` owns ([`owner_of`] over `checkouts`, `dir`
+/// among them).
+pub fn owned_by<'a>(
+    stacks: &'a [Stack],
+    dir: &'a Path,
+    checkouts: &'a [&'a Path],
+) -> impl Iterator<Item = &'a Stack> + 'a {
+    stacks
         .iter()
-        .filter(|s| owner_of(s, checkouts) == Some(dir));
-    let first = mine.next()?;
-    if first.state() == StackState::Running {
-        return Some(first);
-    }
-    mine.find(|s| s.state() == StackState::Running)
-        .or(Some(first))
+        .filter(move |s| owner_of(s, checkouts) == Some(dir))
 }
 
 /// One container compose made.
@@ -294,7 +330,7 @@ fn by_project(containers: &[Container]) -> BTreeMap<String, Vec<PathBuf>> {
 
 /// `path` is `dir` or under it, component-wise: `/a/wt` is not within
 /// `/a/w`. A trailing slash on either side changes nothing.
-fn is_within(path: &Path, dir: &Path) -> bool {
+pub fn is_within(path: &Path, dir: &Path) -> bool {
     !dir.as_os_str().is_empty() && path.starts_with(dir)
 }
 
@@ -395,24 +431,55 @@ mod tests {
 
     #[test]
     fn ps_state_reads_running_and_skips_foreign_containers() {
-        let out = "app\t/src/wt\trunning\napp\t/src/wt\texited\n\t\trunning\nold\t/src/x\n";
+        let out = "app\t/src/wt\trunning\tUp 5 seconds (health: starting)\napp\t/src/wt\texited\tExited (0) 3 days ago\n\t\trunning\nold\t/src/x\nre\t/src/r\trestarting\tRestarting (1) 2 seconds ago\n";
+        let up = |starting, up_secs| Health {
+            running: true,
+            starting,
+            up_secs,
+        };
         assert_eq!(
             parse_ps_state(out),
             [
-                (c("app", "/src/wt"), true),
-                (c("app", "/src/wt"), false),
-                (c("old", "/src/x"), false),
+                (c("app", "/src/wt"), up(true, Some(5))),
+                (c("app", "/src/wt"), Health::default()),
+                (c("old", "/src/x"), Health::default()),
+                (
+                    c("re", "/src/r"),
+                    Health {
+                        starting: true,
+                        ..Health::default()
+                    }
+                ),
             ]
         );
     }
 
     #[test]
+    fn docker_says_how_long_a_container_has_been_up() {
+        assert_eq!(up_secs("Up Less than a second"), Some(0));
+        assert_eq!(up_secs("Up 45 seconds"), Some(45));
+        assert_eq!(up_secs("Up 1 second"), Some(1));
+        assert_eq!(up_secs("Up About a minute (healthy)"), Some(60));
+        assert_eq!(up_secs("Up 2 minutes"), Some(120));
+        assert_eq!(up_secs("Up About an hour"), Some(3_600));
+        assert_eq!(up_secs("Up 3 days (healthy)"), Some(259_200));
+        assert_eq!(up_secs("Exited (0) 3 days ago"), None);
+        assert_eq!(up_secs("Up forever"), None);
+    }
+
+    #[test]
     fn stacks_count_per_project_with_their_dirs_once_each() {
+        let on = |up| Health {
+            running: true,
+            starting: false,
+            up_secs: Some(up),
+        };
+        let off = Health::default();
         let rows = [
-            (c("b", "/src/b"), true),
-            (c("a", "/src/a/sub"), false),
-            (c("a", "/src/a"), true),
-            (c("a", "/src/a"), false),
+            (c("b", "/src/b"), on(9)),
+            (c("a", "/src/a/sub"), off),
+            (c("a", "/src/a"), on(30)),
+            (c("a", "/src/a"), off),
         ];
         let found = stacks(&rows);
         assert_eq!(found.len(), 2);
@@ -422,8 +489,9 @@ mod tests {
             [PathBuf::from("/src/a"), PathBuf::from("/src/a/sub")]
         );
         assert_eq!((found[0].running, found[0].total), (1, 3));
-        assert_eq!(found[0].state(), StackState::Running);
         assert_eq!((found[1].running, found[1].total), (1, 1));
+        assert_eq!(found[0].newest_up_secs, Some(30));
+        assert_eq!(found[1].newest_up_secs, Some(9));
     }
 
     fn stack(project: &str, dirs: &[&str], running: u16) -> Stack {
@@ -432,11 +500,13 @@ mod tests {
             dirs: dirs.iter().map(PathBuf::from).collect(),
             running,
             total: 3,
+            starting: 0,
+            newest_up_secs: None,
         }
     }
 
     #[test]
-    fn a_checkouts_stack_prefers_a_running_one_and_skips_shared_ones() {
+    fn a_checkouts_stacks_are_its_own_and_never_shared_ones() {
         let all = [
             stack("a-old", &["/src/wt"], 0),
             stack("b-live", &["/src/wt/nested"], 2),
@@ -448,27 +518,20 @@ mod tests {
             Path::new("/src/wt/nested"),
             Path::new("/src/main"),
         );
-        assert_eq!(stack_in(&all, wt, &[wt]).unwrap().project, "b-live");
-        assert_eq!(stack_in(&all[..1], wt, &[wt]).unwrap().project, "a-old");
+        let names = |dir, checkouts: &[&Path]| -> Vec<String> {
+            owned_by(&all, dir, checkouts)
+                .map(|s| s.project.clone())
+                .collect()
+        };
+        assert_eq!(names(wt, &[wt]), ["a-old", "b-live"]);
+        assert!(names(main, &[wt, main]).is_empty(), "shared is nobody's");
+        assert!(names(wt, &[]).is_empty(), "a checkout orion doesn't know");
         assert_eq!(
-            stack_in(&all, main, &[wt, main]),
-            None,
-            "shared is nobody's"
-        );
-        assert_eq!(
-            stack_in(&all, wt, &[]),
-            None,
-            "a checkout orion doesn't know"
-        );
-        assert_eq!(
-            stack_in(&all, wt, &[wt, nested]).unwrap().project,
-            "a-old",
+            names(wt, &[wt, nested]),
+            ["a-old"],
             "the nested checkout's stack is its own"
         );
-        assert_eq!(
-            stack_in(&all, nested, &[wt, nested]).unwrap().project,
-            "b-live"
-        );
+        assert_eq!(names(nested, &[wt, nested]), ["b-live"]);
         assert_eq!(owner_of(&all[2], &[wt, main]), None);
         assert_eq!(owner_of(&all[1], &[wt, nested]), Some(nested));
     }

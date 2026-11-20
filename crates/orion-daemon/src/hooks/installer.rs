@@ -66,6 +66,9 @@ const GROK_HOOKS_FILE: &str = "orion.json";
 /// turn, so a hung daemon has to cost seconds, not a stuck session.
 const HOOK_CURL_TIMEOUT_SECS: u32 = 3;
 
+/// The tools Claude's `PreToolUse` hook fires for.
+const CLAUDE_PRE_TOOL_MATCHER: &str = "AskUserQuestion|ExitPlanMode|Bash";
+
 /// (hook event, optional matcher)
 const CLAUDE_EVENTS: &[(&str, Option<&str>)] = &[
     ("UserPromptSubmit", None),
@@ -80,8 +83,11 @@ const CLAUDE_EVENTS: &[(&str, Option<&str>)] = &[
     // The two tools whose call puts a dialog on screen: a question, and a
     // plan waiting for approval. Their `tool_input` carries the question
     // or the plan (`WaitReason`). A plan's `PermissionRequest` carries it
-    // too, but its `PreToolUse` is the first word.
-    ("PreToolUse", Some("AskUserQuestion|ExitPlanMode")),
+    // too, but its `PreToolUse` is the first word. And every Bash call: a
+    // line that starts, stops or restarts the checkout's stack is turned
+    // away with the `orion run …` that does it (`stack_cmd`), so the stack
+    // runs where orion keeps its status.
+    ("PreToolUse", Some(CLAUDE_PRE_TOOL_MATCHER)),
     // Every tool's end, unmatched. Three signals ride it: the answer to an
     // `AskUserQuestion` (the row leaves red); the approval of a permission
     // prompt, which fires no hook of its own — the gated tool simply runs,
@@ -162,7 +168,9 @@ fn hook_command(endpoint: &str, event: &str) -> String {
     // model's context, which is how the session auto-title instruction
     // reaches the agent. The daemon keeps that body empty except when an
     // instruction is due. Every other event stays fully silent.
-    if event != "UserPromptSubmit" {
+    // PreToolUse passes it through too: the daemon's answer turning a
+    // stack command away (`permissionDecision: deny`), empty otherwise.
+    if event != "UserPromptSubmit" && event != "PreToolUse" {
         return silent_hook_command(endpoint, event);
     }
     format!(
@@ -736,7 +744,7 @@ mod tests {
         let notification = &settings["hooks"]["Notification"];
         assert!(notification[0].get("matcher").is_none());
         let pre = &settings["hooks"]["PreToolUse"];
-        assert_eq!(pre[0]["matcher"], json!("AskUserQuestion|ExitPlanMode"));
+        assert_eq!(pre[0]["matcher"], json!(CLAUDE_PRE_TOOL_MATCHER));
         // StopFailure carries none either: every API error ends the turn,
         // and a usage limit is one of them.
         let failure = &settings["hooks"]["StopFailure"];

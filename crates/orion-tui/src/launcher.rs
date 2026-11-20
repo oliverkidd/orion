@@ -284,6 +284,24 @@ pub fn drawer_cursor(app: &App, band: &Band) -> Option<usize> {
     band.drawer().iter().position(|r| r.agent.id == id)
 }
 
+/// The run line of `worktree`'s stack started outside orion: no terminal
+/// behind it, so nothing attaches; it carries the stack's ports.
+fn outside_line(worktree: &WorktreeId, status: &orion_core::stack::StackStatus) -> TerminalTab {
+    TerminalTab {
+        id: orion_core::stack::outside_line_id(worktree),
+        worktree_id: worktree.clone(),
+        name: "run".into(),
+        sort_order: i64::MAX,
+        alive: true,
+        run_command: Some(orion_core::stack::OUTSIDE_LINE_TEXT.into()),
+        setup: false,
+        run: orion_core::RunState {
+            ports: status.ports().to_vec(),
+            ..Default::default()
+        },
+    }
+}
+
 /// The grid's BANDS: one per checkout of the SELECTED PROJECT, its cards
 /// the sessions on the list `rows` builds and its terminals — the root
 /// first, then the rest in the order they were made in
@@ -309,14 +327,21 @@ pub fn bands(app: &App) -> Vec<Band> {
             .collect();
         let mut archived = Vec::new();
         if !app.show_archived {
+            // A stack started outside orion gets a run line of its own,
+            // for its ports.
+            let status = app.stack_status(&w.id);
             cards.extend(
                 app.tree
                     .terminals
                     .iter()
-                    .filter(|t| t.worktree_id == w.id)
+                    .filter(|t| t.worktree_id == w.id && app.shows_terminal(t))
                     .cloned()
                     .map(Card::Terminal),
             );
+            let has_run = app.run_terminal(&w.id).is_some();
+            if status.is_outside() && !has_run {
+                cards.push(Card::Terminal(outside_line(&w.id, status)));
+            }
             archived = archived_in(app, &w.id, &project.id);
         }
         if cards.is_empty() && app.show_archived {

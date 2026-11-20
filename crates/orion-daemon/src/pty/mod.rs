@@ -208,6 +208,9 @@ pub struct PtySession {
     /// though an agent run as a job under a login shell sits in a group of
     /// its own below it) and the metrics modal's process-tree sums.
     pub child_pid: Option<u32>,
+    /// When the child was spawned (epoch ms): how long a run has been up,
+    /// for STACK STATUS.
+    pub started_ms: i64,
     pub ring: Mutex<ScrollbackRing>,
     pub events: broadcast::Sender<PtyEvent>,
     /// Last applied size, for the attach-time SIGWINCH jiggle.
@@ -318,6 +321,7 @@ impl PtySession {
             master: Mutex::new(pair.master),
             killer: Mutex::new(killer),
             child_pid,
+            started_ms: orion_core::clock::now_ms(),
             ring: Mutex::new(ScrollbackRing::new(RING_CAPACITY)),
             events,
             last_size: Mutex::new((spec.cols, spec.rows)),

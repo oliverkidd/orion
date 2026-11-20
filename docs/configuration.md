@@ -402,9 +402,21 @@ Worktrees made outside orion run nothing.
   background, in a RUN TERMINAL through your login shell. Its run line shows in the band with the
   localhost ports it prints (`:3000 :5173`, each a link; `⌘O` → **Open app** opens the first).
   `⌘⇧S` again sends it `^C`; the line counts down `stopping… 1:52` and a further press, or two
-  minutes, kills it. A stop you asked for removes the line; an exit nobody asked for leaves `done`
-  or a red `exited 1`. **Restart stack** stops it and starts the same app again. One run per
+  minutes, kills it. **Restart stack** stops it and starts the same app again. One run per
   worktree. A `run_command` left in `config.json` from before is kept through a save, unused.
+  A stack is always up, starting, stopping or down, worked out by the DAEMON every 3 s from what
+  is true: orion's run, the checkout's compose containers, and what listens on a port from inside
+  the checkout — so it is right however the stack was started or stopped. When the run ends with
+  nobody stopping it (it crashed, or something outside orion stopped it), its line goes and the
+  compose projects started from the checkout are stopped with it, so a stack is never left half
+  up; a failure says so, naming the file its output was saved to (`state/runs/` in the data
+  directory). A run that exits cleanly within 10 s (`docker compose up -d`) leaves what it started.
+  A daemon restart (an upgrade, `orion kill`) starts the runs it cut off again once it is back,
+  and finishes a stop it cut off.
+  Agents start, stop and check the stack with `orion run` ([Commands](commands.md)). A Claude
+  session's Bash call that would do it in its own shell — the checkout's own start, stop or restart
+  recipe, a foreground `docker compose up`, `docker compose stop` — is turned away with the
+  `orion run …` that does the same.
 The apps are looked for fresh at every press. There is no open command: `⌘O` → **Open app**
 opens the first localhost address the run printed. An `open_command` left in `config.json` is kept
 through a save, unused.
@@ -423,8 +435,10 @@ through a save, unused.
 A project is matched by the directory its containers were started in, never by name; one with
 containers started elsewhere too is left alone, with a warning. It runs only after a delete that
 succeeded, works with any docker engine (OrbStack, Docker Desktop, Colima), and only ever warns on
-failure. While a checkout is there, its band shows a `⬡` while it has a stack: green running,
-faint stopped. The DAEMON asks `docker ps` every 5 s, and only while a client is connected.
+failure. While a checkout is there, its band's `⬡` says its stack: green up, amber starting or
+stopping, none down ([Starting the app](#starting-the-app)). The DAEMON asks `docker ps` and
+`lsof` every 3 s while a client is connected, a run is up or a stack isn't down. Containers left
+running with no app serving are not a stack: the band shows nothing, and orion leaves them be.
 `orion doctor` lists compose projects whose checkout is gone.
 
 ## Spare worktrees

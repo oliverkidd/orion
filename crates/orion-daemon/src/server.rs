@@ -141,12 +141,14 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             .await;
                     }
                     let mut rx = daemon.events.subscribe();
-                    // The docker poll sleeps while nobody is subscribed: a
-                    // client arriving gets the last listing at once, and a
-                    // fresh one right after.
-                    daemon.stacks.poke();
+                    // STACK STATUS sleeps while nobody is subscribed: a
+                    // client arriving gets the last statuses at once, and
+                    // fresh ones right after; it counts as watching until
+                    // it goes.
+                    let watching = daemon.stacks.watching();
                     let tx = out_tx.clone();
                     tokio::spawn(async move {
+                        let _watching = watching;
                         loop {
                             // A client gone drops its subscription at once,
                             // not on the next event, so the poll can tell.
@@ -182,8 +184,8 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             let size = PaneSize { cols, rows };
                             let (events_rx, replay_end) =
                                 attach::bind(&session, &sref, &out_tx, size, from_seq).await;
-                            // A RUN TERMINAL whose command already exited
-                            // replays how it ended. Say it is over, or the
+                            // A SETUP TERMINAL that failed replays how it
+                            // ended. Say it is over, or the
                             // pane would offer to type into a process that
                             // is gone.
                             if let Some(exit_code) = daemon.finished_run_exit(&sref) {
@@ -556,12 +558,15 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 } => {
                     reply_done(&out_tx, req_id, daemon.open_files(&id, paths, lines)).await;
                 }
-                ClientRequest::AgentRun {
-                    req_id,
-                    id,
-                    command,
-                } => {
-                    reply_done(&out_tx, req_id, daemon.agent_run(&id, command.as_deref())).await;
+                ClientRequest::AgentRun { req_id, id, action } => {
+                    match daemon.agent_run(&id, &action) {
+                        Ok(Some(status)) => {
+                            let _ = out_tx
+                                .send(ServerEvent::StackStatusReply { req_id, status })
+                                .await;
+                        }
+                        result => reply_done(&out_tx, req_id, result.map(drop)).await,
+                    }
                 }
                 ClientRequest::EnterWorktree {
                     req_id,

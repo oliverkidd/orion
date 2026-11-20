@@ -9,7 +9,7 @@ use orion_core::{
     Agent, AgentId, AgentKind, AgentStatus, Link, LinkId, PrSeen, Project, ProjectId, PromptEntry,
     TerminalId, TerminalTab, UsageLimit, Worktree, WorktreeId, RECENT_PROMPTS_KEPT,
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -451,6 +451,18 @@ const MIGRATIONS: &[&str] = &[
       card        TEXT NOT NULL,
       created_at  INTEGER NOT NULL
     );
+    ",
+    // 40: STACK STATUS. `terminals.run_wanted`: a RUN TERMINAL's run was
+    // started and not stopped (1) or a stop was asked for (0), so a run
+    // the daemon's end cut off — an upgrade's restart, a crash — is
+    // started again at boot, and a stop it cut off is finished. NULL on
+    // rows from before: nothing is known of them, so boot only drops the
+    // row. `worktrees.known_ports`: the ports the checkout's runs have
+    // served, comma-separated, most recent first — how a stack started
+    // outside orion is recognised.
+    "
+    ALTER TABLE terminals ADD COLUMN run_wanted INTEGER;
+    ALTER TABLE worktrees ADD COLUMN known_ports TEXT;
     ",
 ];
 
@@ -1107,6 +1119,61 @@ impl Store {
         self.delete_by_id("terminals", id.as_str())
     }
 
+    /// Record whether RUN TERMINAL `id`'s run is wanted up (`run_wanted`,
+    /// migration 40): set as it starts, cleared as a stop is asked for.
+    pub fn set_run_wanted(&self, id: &TerminalId, wanted: bool) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE terminals SET run_wanted = ?2 WHERE id = ?1",
+            params![id.as_str(), wanted],
+        )?;
+        Ok(())
+    }
+
+    /// Every RUN TERMINAL with whether its run is wanted up — None for a
+    /// row from before that was recorded: what boot reads to start again
+    /// the runs a restart cut off.
+    pub fn run_terminals_wanted(&self) -> Result<Vec<(TerminalTab, Option<bool>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TERMINAL_COLUMNS}, run_wanted FROM terminals WHERE run_command IS NOT NULL AND setup = 0 ORDER BY created_at"
+        ))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((row_to_terminal(r)?, r.get::<_, Option<bool>>(6)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The ports worktree `id`'s runs have served, most recent first.
+    pub fn known_ports(&self, id: &WorktreeId) -> Result<Vec<u16>> {
+        let text: Option<String> = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT known_ports FROM worktrees WHERE id = ?1",
+                params![id.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(parse_ports(text.as_deref()))
+    }
+
+    pub fn set_known_ports(&self, id: &WorktreeId, ports: &[u16]) -> Result<()> {
+        let text = ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.conn.lock().unwrap().execute(
+            "UPDATE worktrees SET known_ports = ?2 WHERE id = ?1",
+            params![id.as_str(), text],
+        )?;
+        Ok(())
+    }
+
     /// Point a RUN TERMINAL at the command it runs next: the project's run
     /// command is read fresh at every start, so a restart picks up an
     /// edited one.
@@ -1540,6 +1607,22 @@ impl Store {
 
     // ---- whole tree ----
 
+    /// Every worktree, with the ports its runs have served: what STACK
+    /// STATUS walks each poll.
+    pub fn worktrees_with_ports(&self) -> Result<Vec<(Worktree, Vec<u16>)>> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn
+            .prepare(&format!(
+                "SELECT {WORKTREE_COLUMNS}, known_ports FROM worktrees ORDER BY is_main DESC, sort_order, created_at"
+            ))?
+            .query_map([], |r| {
+                let ports: Option<String> = r.get(WORKTREE_COLUMN_COUNT)?;
+                Ok((row_to_worktree(r)?, parse_ports(ports.as_deref())))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn load_tree(&self) -> Result<TreeRows> {
         let conn = self.conn.lock().unwrap();
 
@@ -1602,6 +1685,8 @@ impl Store {
 // Column orders the `row_to_*` mappers below read.
 const PROJECT_COLUMNS: &str = "id, name, repo_path, sort_order";
 const WORKTREE_COLUMNS: &str = "id, project_id, path, branch, is_main, sort_order";
+/// How many columns [`WORKTREE_COLUMNS`] names: the index of a column read after them.
+const WORKTREE_COLUMN_COUNT: usize = 6;
 const AGENT_COLUMNS: &str = "id, worktree_id, name, status, archived, kind, \
                              claude_session_id, sort_order, status_changed_at, model, effort, \
                              archived_at, unseen, recent_prompts, custom_harness, \
@@ -1690,6 +1775,14 @@ fn parse_prompts(json: Option<&str>) -> Vec<PromptEntry> {
 /// fails to load over it.
 fn parse_usage_limit(json: Option<&str>) -> Option<UsageLimit> {
     serde_json::from_str(json?).ok()
+}
+
+/// `worktrees.known_ports` back to its ports.
+fn parse_ports(text: Option<&str>) -> Vec<u16> {
+    text.unwrap_or_default()
+        .split(',')
+        .filter_map(|p| p.trim().parse().ok())
+        .collect()
 }
 
 /// `alive` is daemon state, filled in by the registry like the agent's.

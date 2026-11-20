@@ -322,6 +322,37 @@ pub fn parse_event(hook_event: &str, payload: &HookPayload) -> Option<HookEvent>
     })
 }
 
+/// The `PreToolUse` reply turning agent `agent_id`'s Bash call away when
+/// its line starts, stops or restarts its checkout's stack
+/// (`orion_core::stack_cmd`), naming the `orion run …` to run instead.
+/// None for any other line — the call goes ahead — and whenever the agent
+/// or its checkout can't be found.
+fn stack_command_decision(
+    store: &Store,
+    agent_id: &AgentId,
+    payload: &HookPayload,
+) -> Option<String> {
+    let command = payload.tool_input.as_ref()?.get("command")?.as_str()?;
+    let agent = store.get_agent(agent_id).ok().flatten()?;
+    let worktree = store.get_worktree(&agent.worktree_id).ok().flatten()?;
+    let verbs = orion_core::run_targets::verbs(&worktree.path);
+    let intent = orion_core::stack_cmd::classify(command, &verbs)?;
+    tracing::info!(agent = %agent_id, ?intent, "turned a stack command toward orion run");
+    Some(pre_tool_deny(&orion_core::stack_cmd::redirect(&intent)))
+}
+
+/// A `PreToolUse` reply denying the call, `reason` shown to the model.
+fn pre_tool_deny(reason: &str) -> String {
+    serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    })
+    .to_string()
+}
+
 /// Bind 127.0.0.1:0 and serve the hook route. Returns the env (port + fresh
 /// bearer token) and the receiving end of the event pipe.
 pub async fn start_hook_server(
@@ -435,8 +466,11 @@ async fn receive_hook(
 ) -> (StatusCode, String) {
     // On this path the response body reaches the model's context, so every
     // outcome (auth failure included) must answer with empty-or-instruction.
-    let injectable =
-        cli.dialect() == HookDialect::Injectable && query.hook_event == "UserPromptSubmit";
+    // Claude's PreToolUse passes its body through too: empty, or the
+    // decision turning a stack command away.
+    let prompt_submit = query.hook_event == "UserPromptSubmit";
+    let injectable = cli.dialect() == HookDialect::Injectable
+        && (prompt_submit || query.hook_event == "PreToolUse");
     let quiet_or = |status: StatusCode, diag: &str| {
         let body = if injectable {
             String::new()
@@ -463,6 +497,21 @@ async fn receive_hook(
     };
     let agent_id = AgentId(query.agent_id.clone());
     tracing::debug!(agent = %agent_id, event = ?event, "hook received");
+    // A Bash call is only asked about for its line: it says nothing the
+    // status machine reads, which never heard a Bash `PreToolUse` before.
+    if let HookEvent::PreToolUse {
+        tool_name: Some(tool),
+        ..
+    } = &event
+    {
+        if tool == "Bash" {
+            let body = match cli {
+                HookCli::Claude => stack_command_decision(&state.store, &agent_id, &payload),
+                _ => None,
+            };
+            return (StatusCode::OK, body.unwrap_or_default());
+        }
+    }
     // A subagent's tool traffic reports the payload's cwd too, but that is
     // the Task's position, not the session's — an isolated subagent working
     // in a scratch checkout must never drag the row out from under the
@@ -502,6 +551,9 @@ async fn receive_hook(
         })
         .await;
 
+    if injectable && !prompt_submit {
+        return (StatusCode::OK, String::new());
+    }
     if injectable {
         // Prompt submitted on a still-untitled session: hand the CLI the
         // titling instruction. Unknown ids (prewarm, stale env) and store
@@ -836,6 +888,62 @@ mod tests {
         assert_eq!(status, 200);
         let delivery = rx.recv().await.unwrap();
         assert!(delivery.cwd.is_none(), "subagent cwd: {:?}", delivery.cwd);
+    }
+
+    /// A Bash call that starts or stops the checkout's stack is turned
+    /// away with the `orion run …` that does it; any other line goes
+    /// ahead on an empty reply. Neither reaches the status machine. A
+    /// question's `PreToolUse` still does, its reply empty too — Claude
+    /// reads this hook's stdout now.
+    #[tokio::test]
+    async fn a_stack_command_is_turned_toward_orion_run() {
+        let store = seeded_store();
+        let (env, mut rx) = start_hook_server(store).await.unwrap();
+        let bash = |command: &str| {
+            serde_json::json!({
+                "session_id": "s1",
+                "tool_name": "Bash",
+                "tool_input": { "command": command },
+            })
+            .to_string()
+        };
+        let route = "/api/hooks/claude?agentId=titled&hookEvent=PreToolUse";
+        let (status, body) = http_post(
+            env.port,
+            route,
+            &env.token,
+            &bash("docker compose up --build"),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let out = &reply["hookSpecificOutput"];
+        assert_eq!(out["hookEventName"], "PreToolUse");
+        assert_eq!(out["permissionDecision"], "deny");
+        assert!(out["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .contains("`orion run docker compose up --build`"));
+
+        let (status, body) = http_post(env.port, route, &env.token, &bash("ls -la")).await;
+        assert_eq!((status, body.as_str()), (200, ""));
+        assert!(
+            rx.try_recv().is_err(),
+            "a Bash PreToolUse says nothing to the status machine"
+        );
+
+        let (status, body) = http_post(
+            env.port,
+            route,
+            &env.token,
+            r#"{"session_id":"s1","tool_name":"AskUserQuestion","tool_input":{}}"#,
+        )
+        .await;
+        assert_eq!((status, body.as_str()), (200, ""));
+        assert!(matches!(
+            rx.recv().await.unwrap().event,
+            HookEvent::PreToolUse { .. }
+        ));
     }
 
     /// The prompt reaches the drain loop condensed, on its own event

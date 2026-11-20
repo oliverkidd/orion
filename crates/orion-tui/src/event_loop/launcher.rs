@@ -3854,9 +3854,22 @@ mod tests {
         );
     }
 
-    /// `seed_tree`'s root checkout running `npm run dev`, its run having
-    /// printed `ports`.
+    /// `seed_tree`'s root checkout running `npm run dev`, its stack serving
+    /// `ports` — starting while it serves none.
     fn seed_run(app: &mut App, ports: Vec<u16>) {
+        let status = match ports.is_empty() {
+            true => orion_core::stack::StackStatus::Starting { outside: false },
+            false => orion_core::stack::StackStatus::Up {
+                ports: ports.clone(),
+                outside: false,
+            },
+        };
+        hse(
+            app,
+            ServerEvent::StackStatuses {
+                statuses: vec![(WorktreeId("w1".into()), status)],
+            },
+        );
         hse(
             app,
             ServerEvent::EntityUpserted {
@@ -3947,7 +3960,7 @@ mod tests {
         super::super::run_action(&mut app, act);
         assert_eq!(
             app.flash.as_deref(),
-            Some("the run hasn't printed a localhost address yet")
+            Some("the stack isn't serving a port yet")
         );
 
         seed_run(&mut app, vec![5173, 3000]);
