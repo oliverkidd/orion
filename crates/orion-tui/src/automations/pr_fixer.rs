@@ -30,9 +30,10 @@
 //!   notification while the window is away). `⌘G` in the PULL REQUESTS
 //!   MODAL, or on the pane's PULL REQUEST PAGE ([`open_asked`]), still
 //!   opens the AUTOFIX MODAL for any PR — the issues as a checklist and a
-//!   note — whatever the setting. An unasked send waits while
-//!   `automations.max_running` automation sessions are running
-//!   ([`super::may_start`]).
+//!   note — whatever the setting. An unasked send never waits for a
+//!   place under `automations.max_running` and holds none
+//!   ([`super::uncapped`]); only the factory's pause at its account's
+//!   usage limit holds it back ([`super::paused`]).
 //! * **One branch, one agent.** [`dispatch`] hands the breakage to the
 //!   FIX ROUTER ([`router`]): an `autofix-<n>` already live there keeps
 //!   it; the branch's own agent, idle and under 75% of its context, gets
@@ -398,8 +399,9 @@ pub struct State {
     pub measuring: HashMap<orion_core::AgentId, Instant>,
     /// By PR URL: fresh fixers launched and not in the tree yet.
     pub launches: HashMap<String, router::Launch>,
-    /// By PR URL: Cubic findings held back — at the cap, or the owner in
-    /// the session — and when to try again ([`retry_cubic`]).
+    /// By PR URL: Cubic findings held back — the factory paused at its
+    /// limit, or the owner in the session — and when to try again
+    /// ([`retry_cubic`]).
     pub cubic_retry: HashMap<String, Instant>,
 }
 
@@ -795,9 +797,9 @@ fn relay_comments(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<Cli
 /// that were never sent go to the branch's agent through the router, in
 /// one turn ([`router::cubic_turn`]) — its own agent first, since it
 /// knows what was left out on purpose. Each thread goes once. A fresh
-/// fixer waits for a place under the cap, a turn while the owner is using
-/// the session ([`in_use`]); once [`CUBIC_ROUNDS`] rounds have gone, the
-/// owner is told instead.
+/// fixer waits out the factory's pause at its limit — never the cap — and
+/// a turn waits while the owner is using the session ([`in_use`]); once
+/// [`CUBIC_ROUNDS`] rounds have gone, the owner is told instead.
 fn relay_cubic(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<ClientRequest>) {
     // The list said green; the body may have landed after a push since.
     let Some((project, factory)) = app
@@ -842,12 +844,13 @@ fn relay_cubic(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<Client
         app.dirty = true;
         return;
     }
-    // A fresh fixer is a new session: at the cap, it waits for a place.
+    // A fresh fixer is a new session, outside the cap: only the
+    // factory's pause at its account's limit holds it back.
     // The owner's own conversation with the branch's agent isn't cut into
     // either: it waits while they are using that session — tried again
     // from the body in hand ([`retry_cubic`]).
     let wait = match router::route(app, &project, &pr.head, pr.number, url) {
-        router::Route::Fresh { .. } => !super::may_start(app),
+        router::Route::Fresh { .. } => super::paused(app),
         router::Route::Turn(id) => in_use(app, &id),
         _ => false,
     };
@@ -1024,7 +1027,7 @@ pub fn land_detail(
         return;
     }
     // Only a fresh fixer is a new session: it alone checks with the
-    // branch's other live sessions, and waits for a place under the cap.
+    // branch's other live sessions, and waits out the factory's pause.
     // Whether it is one waits on the branch agent's context, read off the
     // loop: the body is read again shortly, by when it is in.
     let mut to = router::route(app, &watch.project, &pr.head, pr.number, url);
@@ -1072,9 +1075,10 @@ pub fn land_detail(
         return;
     }
     let record = app.autofix.ledger.get(url).cloned().unwrap_or_default();
-    // At the cap: the breakage waits, still watched, for a place.
+    // Never the cap ([`super::uncapped`]): only the factory paused at its
+    // account's limit keeps the breakage waiting, still watched.
     let on = app.automations.is_on(Automation::PrFixer);
-    if fresh && on && record.attempts < AUTO_ATTEMPTS && !super::may_start(app) {
+    if fresh && on && record.attempts < AUTO_ATTEMPTS && super::paused(app) {
         app.autofix.recheck_later(url);
         return;
     }
@@ -4130,6 +4134,42 @@ mod tests {
         assert!(
             app.autofix.ledger[&pr().url].handled.is_some(),
             "said once per breakage"
+        );
+    }
+
+    /// The cap never holds the PR fixer back: with every place taken, a
+    /// breakage still launches its fixer at once. Only the factory paused
+    /// at its account's limit keeps it waiting, still watched.
+    #[test]
+    fn a_full_cap_never_holds_the_fixer_back() {
+        let launched = |out: &[ClientRequest]| {
+            out.iter().any(|req| {
+                matches!(req, ClientRequest::CreatePrAgent { name, .. } if name == "autofix-7")
+            })
+        };
+        let mut app = app_with(vec![broken(true, false)], true);
+        app.automations.settings.max_running = 1;
+        app.automations.launching.insert(99, Automation::BugFixer);
+        assert!(!super::super::may_start(&app), "the cap is full");
+        listed(&mut app);
+        let out = landed(&mut app, &detail(true, Vec::new()));
+        assert!(launched(&out), "{out:?}");
+
+        let mut app = app_with(vec![broken(true, false)], true);
+        app.automations.account.paused = Some(super::super::limit::Pause {
+            account: "claude".into(),
+            label: "Work".into(),
+            program: "claude".into(),
+            env: Vec::new(),
+            until_ms: i64::MAX,
+            said: "You've hit your weekly limit".into(),
+        });
+        listed(&mut app);
+        let out = landed(&mut app, &detail(true, Vec::new()));
+        assert!(!launched(&out), "paused at the limit: {out:?}");
+        assert!(
+            app.autofix.watching.contains_key(&pr().url),
+            "still watched"
         );
     }
 

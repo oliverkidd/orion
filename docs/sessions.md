@@ -744,8 +744,9 @@ Automations                                       2 of at most 3 running · caps
   together; no runner has a cap of its own. A session waiting on you — a plan, a question, a pull
   request to merge — holds no place, and nothing caps how much may wait on you: leave a card on
   Slack to pick up at the desk and the factory carries on meanwhile. Work that comes while the cap
-  is full waits for a place — a breakage the PR fixer sees stays watched, and a ticket reads
-  `queued, N running`.
+  is full waits for a place — a ticket reads `queued, N running`. The PR fixer stands outside the
+  cap: its agents start the moment a breakage or a Cubic finding needs one, and they hold no place
+  either. Only the factory's pause at its account's usage limit holds them back.
 - **The factory account.** <a id="factory-account"></a>**Factory account** picks the Claude account
   everything the factory runs goes through: its sessions, the knowledge harvest and backfill, and
   its model asks (a ticket's intake, the week in review, the meeting takeaways). `←` / `→` step

@@ -116,7 +116,8 @@ impl Automation {
     }
 
     /// Its rows in Settings › Factory, in order. None has a cap of its
-    /// own: **Agents working at once** is the one cap, for all of them.
+    /// own: **Agents working at once** is the one cap, for all of them
+    /// but the PR fixer, which stands outside it ([`uncapped`]).
     pub const fn settings(self) -> &'static [SettingRow] {
         use SettingRow::*;
         match self {
@@ -409,16 +410,33 @@ pub(crate) fn state_dir() -> std::path::PathBuf {
     orion_core::paths::data_dir().join("automations")
 }
 
-/// How many automation sessions are running: tagged, not archived, at
-/// work — plus the creates still on their way.
+/// How many automation sessions hold a place under the cap: tagged, not
+/// archived, at work — plus the creates still on their way. The PR
+/// fixer's are never counted ([`uncapped`]).
 pub fn running(app: &App) -> usize {
     let live = app
         .tree
         .agents
         .iter()
-        .filter(|a| a.automation.is_some() && !a.archived && occupies(a))
+        .filter(|a| a.automation.is_some() && !kind_of(a).is_some_and(uncapped))
+        .filter(|a| !a.archived && occupies(a))
         .count();
-    live + app.automations.launching.len()
+    let coming = app.automations.launching.values();
+    live + coming.filter(|w| !uncapped(**w)).count()
+}
+
+/// Whether `which` stands outside the cap: the PR fixer mends pull
+/// requests already open, so it never waits for a place and holds none.
+/// Only the factory's pause at its account's limit ([`paused`]) holds it
+/// back.
+pub const fn uncapped(which: Automation) -> bool {
+    matches!(which, Automation::PrFixer)
+}
+
+/// Whether the factory is paused at its account's usage limit
+/// ([`limit`]): nothing starts, the PR fixer included.
+pub fn paused(app: &App) -> bool {
+    app.automations.account.paused.is_some()
 }
 
 /// How many of `which`'s own sessions are running, as [`running`] counts
@@ -451,10 +469,11 @@ pub(crate) fn on_task(agent: &Agent) -> bool {
     occupies(agent) || agent.status == AgentStatus::NeedsFeedback
 }
 
-/// Whether one more of `which`'s sessions may start: the factory not
-/// paused at its account's limit ([`limit`]), and under the cap.
+/// Whether one more capped automation's session may start: the factory
+/// not paused at its account's limit ([`paused`]), and under the cap. The
+/// PR fixer asks only [`paused`] ([`uncapped`]).
 pub fn may_start(app: &App) -> bool {
-    app.automations.account.paused.is_none() && running(app) < app.automations.settings.cap()
+    !paused(app) && running(app) < app.automations.settings.cap()
 }
 
 /// The automations whose work is the software factory's.
@@ -744,7 +763,7 @@ mod tests {
     fn the_running_cap_counts_live_tagged_sessions_and_creates_on_their_way() {
         let mut app = App::new();
         app.tree.agents = vec![
-            tagged("a", AgentStatus::Running, Some("pr_fixer")),
+            tagged("a", AgentStatus::Running, Some("feature_builder")),
             tagged("b", AgentStatus::NeedsFeedback, Some("bug_fixer")),
             tagged("c", AgentStatus::Finished, Some("bug_fixer")),
             tagged("d", AgentStatus::Running, None),
@@ -802,11 +821,36 @@ mod tests {
         assert!(may_start(&app), "no cap of its own");
         app.tree
             .agents
-            .push(tagged("b", AgentStatus::Running, Some("pr_fixer")));
+            .push(tagged("b", AgentStatus::Running, Some("feature_builder")));
         assert!(!may_start(&app), "two at work");
         for which in Automation::ALL {
             assert!(!which.settings().is_empty(), "{}", which.name());
         }
+    }
+
+    /// The PR fixer stands outside the cap: its sessions at work, and its
+    /// creates on their way, hold no place — and only the factory's pause
+    /// at its account's limit holds it back.
+    #[test]
+    fn the_pr_fixer_neither_waits_for_nor_holds_a_place() {
+        let mut app = App::new();
+        app.automations.settings.max_running = 1;
+        app.tree.agents = (0..4)
+            .map(|n| tagged(&format!("f{n}"), AgentStatus::Running, Some("pr_fixer")))
+            .collect();
+        app.automations.launching.insert(7, Automation::PrFixer);
+        assert_eq!(running(&app), 0, "four fixers at work, one on its way");
+        assert!(may_start(&app), "a bug fixer still finds its place");
+        app.tree
+            .agents
+            .push(tagged("b", AgentStatus::Running, Some("bug_fixer")));
+        assert!(!may_start(&app), "the cap is full");
+        assert!(
+            Automation::ALL
+                .into_iter()
+                .all(|w| uncapped(w) == (w == Automation::PrFixer)),
+            "the PR fixer alone stands outside the cap"
+        );
     }
 
     /// A saved cap of 8 (stepped up before the default came down) is kept

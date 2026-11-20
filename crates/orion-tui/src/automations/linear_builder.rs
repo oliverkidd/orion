@@ -2198,7 +2198,10 @@ mod tests {
                 let mut app = app_with_project();
                 with_workflow_doc(&mut app, dir.path());
                 app.automations.settings.max_running = 1;
-                app.tree.agents.push(running_agent("busy"));
+                // A PR fixer would hold no place: another runner's does.
+                let mut busy = running_agent("busy");
+                busy.automation = Some("feature_builder".into());
+                app.tree.agents.push(busy);
                 app.automations.linear_builder.queue.push(Group::of(
                     Automation::BugFixer,
                     ProjectId("p".into()),

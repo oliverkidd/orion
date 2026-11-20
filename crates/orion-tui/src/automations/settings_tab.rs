@@ -258,7 +258,7 @@ pub fn line(
 /// What the line under **Agents working at once** says, its cap `n`.
 pub fn cap_explained(n: usize) -> String {
     format!(
-        "At most {n} agents work at the same time, all automations together. One waiting on you holds no place, and nothing caps what waits on you."
+        "At most {n} agents work at the same time, all automations together; the PR fixer stands outside it and never waits for a place. One waiting on you holds no place, and nothing caps what waits on you."
     )
 }
 
