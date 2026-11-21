@@ -1,0 +1,38 @@
+crates/orion-daemon/src/pty/mod.rs
+  s_9bb9188fb699c9::t_9426957864d73c 2,498-504
+  s_9bb9188fb699c9::t_9cd51d269358fa 505-506
+crates/orion-daemon/src/pty/cursor.rs
+  s_9bb9188fb699c9::t_9426957864d73c 52
+crates/orion-daemon/src/config.rs
+  s_9bb9188fb699c9::t_ce5cce6b010512 95-96
+  s_9bb9188fb699c9::t_b43bf1bf4e0a7f 97-99
+crates/orion-daemon/src/pty/draft.rs
+  s_9bb9188fb699c9::t_c3f04f630698c4 1-42,44-65,69-75,77,79-192
+  s_9bb9188fb699c9::t_b43bf1bf4e0a7f 43,76,78
+  s_9bb9188fb699c9::t_782d270e8f474e 66-68
+crates/orion-daemon/src/registry.rs
+  s_9bb9188fb699c9::t_271b55c0b02589 585-586,639-643
+  s_9bb9188fb699c9::t_edd753137b4563 587-588
+  s_9bb9188fb699c9::t_782d270e8f474e 645
+docs/configuration.md
+  s_9bb9188fb699c9::t_ce5cce6b010512 56-57
+crates/orion/tests/e2e_pty.rs
+  s_9bb9188fb699c9::t_47846d2459ef63 3563-3574
+  s_9bb9188fb699c9::t_aad2c3d8233633 3498-3562,3575-3593
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0e19bb1b11945f66d848c97e96901fd1dd3ccbd7",
+  "prompts": {},
+  "sessions": {
+    "s_9bb9188fb699c9": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "951505e5-8759-4aa0-82b1-3e304ad9b54f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
