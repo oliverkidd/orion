@@ -582,9 +582,10 @@ impl Daemon {
     /// Spared regardless of age: agents that are running or waiting on
     /// feedback, agents with a backgrounded tool call still running (a job
     /// detached from their terminal — see `pty::detached_job_under`),
-    /// terminals with a command running, and sessions with no row. A reaped
-    /// session revives on the next attach or prewarm; agents resume their
-    /// conversation.
+    /// agents with text typed into their input box and not sent (killing
+    /// the CLI loses it), terminals with a command running, and sessions
+    /// with no row. A reaped session revives on the next attach or prewarm;
+    /// agents resume their conversation.
     pub fn reap_idle_sessions(self: &Arc<Self>) {
         let timeout = crate::config::session_idle_timeout();
         let sessions: Vec<(SessionRef, Arc<PtySession>)> = self
@@ -635,8 +636,13 @@ impl Daemon {
                     // process tree still knows (#78). Restamped rather than
                     // just skipped: the job ending is the moment the agent
                     // wakes to read its result, so the clock starts there.
+                    //
+                    // An UNSENT DRAFT lives only in the CLI's memory: notes
+                    // parked in the box to pick up later would go with the
+                    // process. Restamped likewise, so a parked draft costs
+                    // one screen read per timeout, not one per sweep.
                     Some(_) => {
-                        let busy = agent_has_detached_job(&session);
+                        let busy = agent_has_detached_job(&session) || session.input_holds_draft();
                         if busy {
                             self.touch_session(&sref);
                         }

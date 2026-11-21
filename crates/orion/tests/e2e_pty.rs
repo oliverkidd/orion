@@ -3495,6 +3495,102 @@ async fn idle_agent_with_a_detached_job_is_spared_until_it_ends() {
     wait_for_exit(&mut daemon);
 }
 
+/// An idle agent with text typed into its input box and not sent is spared
+/// by the idle reaper: the draft lives only in the CLI's memory, so killing
+/// it would lose notes parked there to pick up later. An empty box — its
+/// placeholder drawn dim — is reaped on schedule, and so is the parked
+/// agent once its box no longer holds text.
+#[tokio::test]
+async fn idle_agent_with_an_unsent_draft_is_spared() {
+    let env = TestEnv::new();
+    let repo = env.make_repo();
+    let mut daemon = env.spawn_daemon_with(
+        "/bin/sh",
+        &[(env::IDLE_REAP_MS, "200"), (env::IDLE_TIMEOUT_MS, "2000")],
+    );
+    let mut c = connect(&env.sock()).await;
+    handshake(&mut c).await;
+    let worktree = add_project_get_main_worktree(&mut c, &repo).await;
+    let parked = create_agent_get_id(&mut c, &worktree.id, "parked", 2).await;
+    let blank = create_agent_get_id(&mut c, &worktree.id, "blank", 3).await;
+
+    // Each stand-in agent (`/bin/sh`) draws Claude Code's input box: the
+    // prompt between two rules. The parked one's holds typed notes; the
+    // blank one's only the dim placeholder. Octal escapes, so the shell's
+    // echo of the command carries no box of its own.
+    let rule = r"\342\224\200".repeat(40);
+    let draw = |inside: &str| format!("printf '{rule}\\n\\342\\235\\257 {inside}\\n{rule}\\n'\n");
+    for (id, line) in [
+        (&parked, draw("notes for later")),
+        (&blank, draw(r"\033[2mTry refactor\033[22m")),
+    ] {
+        let session = SessionRef::Agent(id.clone());
+        write_frame(
+            &mut c,
+            &ClientRequest::Attach {
+                session: session.clone(),
+                from_seq: None,
+                cols: 80,
+                rows: 24,
+            },
+        )
+        .await
+        .unwrap();
+        write_frame(
+            &mut c,
+            &ClientRequest::Input {
+                session: session.clone(),
+                data: line.into_bytes(),
+            },
+        )
+        .await
+        .unwrap();
+        write_frame(&mut c, &ClientRequest::Detach { session })
+            .await
+            .unwrap();
+    }
+    let reaped = |evs: &[ServerEvent], id: &orion_core::AgentId| {
+        evs.iter().any(|e| {
+            matches!(e, ServerEvent::EntityUpserted { entity: Entity::Agent(a) }
+                if &a.id == id && !a.alive)
+        })
+    };
+
+    // The blank box goes after ~2s…
+    let events = read_events_until(&mut c, SLOW_TIMEOUT, |evs| reaped(evs, &blank)).await;
+    assert!(!reaped(&events, &parked), "draft spared: {events:#?}");
+    // …and the draft keeps the parked agent alive well past the timeout.
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    write_frame(
+        &mut c,
+        &ClientRequest::RenameAgent {
+            req_id: 4,
+            id: parked.clone(),
+            name: "still-parked".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let events = read_events_until(&mut c, EVENT_TIMEOUT, |evs| find_ack(evs, 4).is_some()).await;
+    assert!(!reaped(&events, &parked), "draft still spared: {events:#?}");
+
+    // The box cleared (the screen wiped), the parked agent is reaped too.
+    let session = SessionRef::Agent(parked.clone());
+    write_frame(
+        &mut c,
+        &ClientRequest::Input {
+            session,
+            data: b"printf '\\033[H\\033[2J'\n".to_vec(),
+        },
+    )
+    .await
+    .unwrap();
+    read_events_until(&mut c, SLOW_TIMEOUT, |evs| reaped(evs, &parked)).await;
+
+    write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
+    wait_for_exit(&mut daemon);
+}
+
 fn wait_for_exit(daemon: &mut DaemonProc) {
     let deadline = std::time::Instant::now() + EVENT_TIMEOUT;
     loop {

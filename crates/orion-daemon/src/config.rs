@@ -92,10 +92,11 @@ impl Default for Config {
 /// a setting: long enough that walking away for a coffee and back finds
 /// every session warm, short enough that a day of checkouts doesn't keep
 /// a CLI process apiece running. Running or feedback-waiting agents,
-/// agents with a backgrounded tool call still running, and terminals
-/// with a command running are spared; a reaped session revives on the
-/// next attach or prewarm (agents resume their conversation). Tests
-/// shorten it with [`orion_core::env::IDLE_TIMEOUT_MS`].
+/// agents with a backgrounded tool call still running, agents with an
+/// unsent draft in their input box, and terminals with a command running
+/// are spared; a reaped session revives on the next attach or prewarm
+/// (agents resume their conversation). Tests shorten it with
+/// [`orion_core::env::IDLE_TIMEOUT_MS`].
 pub const SESSION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// [`SESSION_IDLE_TIMEOUT`], or the test override when one is set.

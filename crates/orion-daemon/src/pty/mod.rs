@@ -1,4 +1,5 @@
 pub mod cursor;
+mod draft;
 pub use orion_core::kitty;
 mod osc;
 pub mod ports;
@@ -492,6 +493,15 @@ impl PtySession {
         let (base_seq, data) = self.ring.lock().unwrap().snapshot_from(from_seq);
         let modes = self.kitty.lock().unwrap().replay_modes();
         with_modes(from_seq, base_seq, data, &modes)
+    }
+
+    /// Does the child's screen show text typed into its input box and not
+    /// yet sent (see [`draft`])? Replays the ring, so it is for a rare
+    /// question — the idle reaper's — not the output path.
+    pub fn input_holds_draft(&self) -> bool {
+        let (cols, rows) = *self.last_size.lock().unwrap();
+        let (_, history) = self.snapshot(None);
+        draft::replay_holds_draft(cols, rows, &history)
     }
 
     /// The child's current kitty keyboard flags (0 = legacy).

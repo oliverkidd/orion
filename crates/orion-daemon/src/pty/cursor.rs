@@ -49,7 +49,7 @@ impl CursorTracker {
 /// character in one column) — a panic that would take the pump with it.
 const MIN_SIDE: u16 = 2;
 
-fn grid_size(cols: u16, rows: u16) -> (u16, u16) {
+pub(crate) fn grid_size(cols: u16, rows: u16) -> (u16, u16) {
     (cols.max(MIN_SIDE), rows.max(MIN_SIDE))
 }
 
