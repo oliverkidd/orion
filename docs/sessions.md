@@ -26,8 +26,11 @@ flag, boots fresh every time (no resume), and stays process-based: working while
 done when it ends, never needing you. `→` on any row drills
 into model and reasoning-effort submenus (Cursor's model is a family such as `claude-opus-5-thinking`, and
 its effort list follows the family, `-fast` variants included — `cursor-agent --list-models` bakes both
-into the id, so orion launches `--model claude-opus-5-thinking-high-fast`; the list is a built-in seed
-merged with `--list-models`, cached in `cursor_models.json` in the DATA DIR and refreshed daily).
+into the id, so orion launches `--model claude-opus-5-thinking-high-fast`; the list is `--list-models`
+first, then a built-in seed for the variants it leaves out, cached in `cursor_models.json` in the DATA
+DIR and refreshed daily. Codex's model list is the installed CLI's own, from `codex debug models`,
+cached in `codex_models.json` the same way; a built-in list stands until it lands. A signed-out
+`cursor-agent` lists nothing, so its rows stay the seed's until you run `cursor-agent login`).
 In those submenus you type to filter — `opus` narrows the rows to the Opus families, `↑`/`↓` move, `Backspace` widens, `Esc` clears — and the preset editor's Harness / Model / Effort rows take the same type-ahead.
 `Enter` anywhere takes your configured defaults. `Enter` on a row opens the QUICK PROMPT set to
 that harness, model and effort, aimed at the checkout under the cursor: type the task and `Enter`

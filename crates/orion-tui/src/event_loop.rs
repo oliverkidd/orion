@@ -291,6 +291,9 @@ async fn main_loop(
     // The Cursor MODEL / EFFORT lists: cached `cursor-agent --list-models`
     // now, a background refresh when the cache is a day old.
     crate::cursor_catalogue::bootstrap(cfg.cursor_enabled);
+    // The Codex MODEL list: cached `codex debug models` now, likewise
+    // refreshed when a day old, so a model OpenAI ships is offered at once.
+    crate::codex_catalogue::bootstrap(cfg.codex_enabled);
     // The Claude MODEL list: Claude Code's own `availableModels` allowlist
     // when its settings carry one, so an org-restricted machine offers the
     // ids the CLI will accept instead of aliases it refuses.
@@ -20488,7 +20491,7 @@ mod tests {
             app.focus = Focus::Sessions;
             let mut out = Vec::new();
 
-            // n → Codex row → models → Luna → efforts → low → Enter.
+            // n → Codex row → models → GPT-6.1-Sol → efforts → low → Enter.
             open_picker(&mut app);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Right, KeyModifiers::NONE, &mut out);
@@ -20500,8 +20503,8 @@ mod tests {
             let luna = menu
                 .items
                 .iter()
-                .position(|item| item.label.starts_with("gpt-6-luna"))
-                .expect("Luna row");
+                .position(|item| item.label.starts_with("gpt-6.1-sol"))
+                .expect("GPT-6.1-Sol row");
             for _ in 0..luna {
                 press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             }
@@ -20518,7 +20521,7 @@ mod tests {
                         model: Some(m),
                         effort: Some(e),
                         ..
-                    }] if m == "gpt-6-luna" && e == "low"
+                    }] if m == "gpt-6.1-sol" && e == "low"
                 ),
                 "one create, and no Claude refill behind a Codex launch: {out:?}"
             );
@@ -32936,7 +32939,7 @@ mod tests {
 
     /// Route the preset store at a temp file (and the config at a default
     /// one) and pre-seed two presets: "reviewer" (claude · opus · high,
-    /// wrapped) then "scratch" (codex · gpt-6-luna, bare).
+    /// wrapped) then "scratch" (codex · gpt-6.1-sol, bare).
     pub(super) fn with_seeded_presets(f: impl FnOnce()) {
         use crate::agent_presets::AgentPreset;
         let dir = tempfile::tempdir().unwrap();
@@ -32960,7 +32963,7 @@ mod tests {
                         kind: AgentKind::Codex,
                         custom_harness: None,
                         follow_box: None,
-                        model: Some("gpt-6-luna".into()),
+                        model: Some("gpt-6.1-sol".into()),
                         effort: None,
                         text: String::new(),
                         skip_task: false,
@@ -33532,7 +33535,7 @@ mod tests {
             };
             assert_eq!(editor.name.as_str(), "tested");
             assert_eq!(editor.kind, AgentKind::Codex);
-            assert_eq!(editor.model, "gpt-6-astra", "→ steps off the default");
+            assert_eq!(editor.model, "gpt-6.2-sol", "→ steps off the default");
             assert_eq!(editor.effort, "low");
             assert_eq!(editor.text.as_str(), "Line one\nLine two\n\nLine four");
             assert_eq!(editor.field, PresetField::Name);
@@ -33559,7 +33562,7 @@ mod tests {
             let saved = presets.last().unwrap();
             assert_eq!(saved.name, "tested");
             assert_eq!(saved.kind, AgentKind::Codex);
-            assert_eq!(saved.model.as_deref(), Some("gpt-6-astra"));
+            assert_eq!(saved.model.as_deref(), Some("gpt-6.2-sol"));
             assert_eq!(saved.effort.as_deref(), Some("low"));
             assert_eq!(saved.text, "Line one\nLine two\n\nLine four");
             assert!(
@@ -33803,7 +33806,7 @@ mod tests {
             assert_eq!(editor.editing, Some(1));
             assert_eq!(editor.name.as_str(), "scratch");
             assert_eq!(editor.kind, AgentKind::Codex);
-            assert_eq!(editor.model, "gpt-6-luna");
+            assert_eq!(editor.model, "gpt-6.1-sol");
             assert_eq!(editor.effort, crate::config::DEFAULT_CHOICE);
 
             // Tab to Model; the last choice wraps to the default.

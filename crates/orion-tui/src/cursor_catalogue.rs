@@ -8,23 +8,21 @@
 //!
 //! One parser ([`split_id`]) feeds two sources: [`SEED_IDS`], the catalogue as
 //! observed on 2026-08-28, and — at runtime — `cursor-agent --list-models`,
-//! cached in the DATA DIR for [`CACHE_TTL`] and refreshed on a background
-//! thread by [`bootstrap`]. The two are unioned (seed order first), so a family
-//! Cursor adds shows up by itself while nothing the seed knows is lost:
-//! `--list-models` prints only the featured ids, and many accepted variants
-//! (`claude-fable-5-low`, …) never appear in it.
+//! cached in the DATA DIR for a day ([`crate::model_cache`]) and refreshed on
+//! a background thread by [`bootstrap`]. The two are unioned (the CLI's order
+//! first, see [`merged`]), so a family Cursor adds shows up by itself, ahead
+//! of the seed's, while nothing the seed knows is lost: `--list-models` has
+//! left accepted variants out (`claude-fable-5-low`, …), and a signed-out CLI
+//! lists nothing at all. On 2026-11-21 (cursor-agent 2026.08.31, signed in)
+//! it listed 284 ids in 60 families, Claude Opus 5.5, Fable 5.2 and Sonnet
+//! 5.5 among them, every seed family but `gemini-3.7-flash` too.
 //!
 //! Lists are handed out as `&'static` slices — the same shape as
 //! `CLAUDE_MODELS` — by leaking each installed catalogue once; a refresh happens
 //! at most once per TUI process.
 
-use orion_core::clock::now_secs;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{OnceLock, RwLock};
-use std::time::Duration;
-
-use serde::{Deserialize, Serialize};
 
 use crate::config::DEFAULT_CHOICE;
 
@@ -173,8 +171,6 @@ const EFFORT_ORDER: &[&str] = &[
 ];
 const FAST: &str = "fast";
 
-/// How long a cached `--list-models` answer is trusted before a refresh.
-pub const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const CACHE_FILE: &str = "cursor_models.json";
 
 /// One model family and the effort suffixes it ships. `efforts` leads with
@@ -417,15 +413,10 @@ pub fn fallback_effort(family: &str) -> Option<&'static str> {
         .and_then(|(_, e)| *e)
 }
 
-/// Replace the installed catalogue with seed ∪ `runtime_ids`. Not called from
-/// tests: the view is process-global.
+/// Replace the installed catalogue with `runtime_ids` ∪ seed ([`merged`]).
+/// Not called from tests: the view is process-global.
 pub fn install(runtime_ids: &[String]) {
-    let merged = Catalogue::from_ids(
-        SEED_IDS
-            .iter()
-            .copied()
-            .chain(runtime_ids.iter().map(String::as_str)),
-    );
+    let merged = merged(runtime_ids);
     let installed = leak(&merged);
     let lock = CURRENT.get_or_init(|| RwLock::new(installed));
     *lock
@@ -433,35 +424,20 @@ pub fn install(runtime_ids: &[String]) {
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = installed;
 }
 
-// --- cache and refresh -------------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Cache {
-    fetched_at: u64,
-    ids: Vec<String>,
+/// The catalogue `cursor-agent --list-models` and the seed make together:
+/// the CLI's families first, in its order — its own picker's — then the
+/// seed's others. Seed first would put a family Cursor added after every
+/// family the seed knew.
+pub fn merged(runtime_ids: &[String]) -> Catalogue {
+    Catalogue::from_ids(
+        runtime_ids
+            .iter()
+            .map(String::as_str)
+            .chain(SEED_IDS.iter().copied()),
+    )
 }
 
-fn cache_path() -> PathBuf {
-    orion_core::paths::data_dir().join(CACHE_FILE)
-}
-
-fn read_cache(path: &std::path::Path) -> Option<Cache> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
-}
-
-fn write_cache(path: &std::path::Path, ids: &[String]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let cache = Cache {
-        fetched_at: now_secs(),
-        ids: ids.to_vec(),
-    };
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(&cache)?)?;
-    std::fs::rename(tmp, path)
-}
+// --- refresh -----------------------------------------------------------------
 
 /// Run `cursor-agent --list-models` and parse it; None when the CLI is
 /// missing, fails (not logged in), or lists nothing.
@@ -479,32 +455,10 @@ pub fn fetch_ids() -> Option<Vec<String>> {
     (!ids.is_empty()).then_some(ids)
 }
 
-/// TUI startup: install the cached catalogue at once and, when the cache is
-/// missing or older than [`CACHE_TTL`], refresh it on a background thread.
-/// Skipped when Cursor is switched off (HARNESS TOGGLE) and under
-/// `ORION_AGENT_CMD` (tests, STUB AGENTS), so no test ever shells out.
+/// TUI startup: the cached catalogue now, a background `--list-models`
+/// when the cache is a day old ([`crate::model_cache`]).
 pub fn bootstrap(cursor_enabled: bool) {
-    if !cursor_enabled || orion_core::env::non_empty(orion_core::env::AGENT_CMD).is_some() {
-        return;
-    }
-    let path = cache_path();
-    let cached = read_cache(&path);
-    if let Some(cache) = &cached {
-        install(&cache.ids);
-    }
-    let fresh =
-        cached.is_some_and(|c| now_secs().saturating_sub(c.fetched_at) < CACHE_TTL.as_secs());
-    if fresh {
-        return;
-    }
-    std::thread::spawn(move || {
-        if let Some(ids) = fetch_ids() {
-            if let Err(err) = write_cache(&path, &ids) {
-                tracing::warn!("cursor catalogue cache not written: {err}");
-            }
-            install(&ids);
-        }
-    });
+    crate::model_cache::bootstrap(cursor_enabled, CACHE_FILE, fetch_ids, install);
 }
 
 #[cfg(test)]
@@ -658,6 +612,19 @@ mod tests {
         }
     }
 
+    /// A family the CLI lists comes before the seed's, so a model Cursor
+    /// added is at the top of the picker; the seed's variants still merge
+    /// into a family both know.
+    #[test]
+    fn the_clis_families_lead_the_seeds() {
+        let runtime = ["auto", "claude-opus-6-high", "claude-fable-5-high"].map(String::from);
+        let cat = merged(&runtime);
+        let names: Vec<&str> = cat.families.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names[..3], ["auto", "claude-opus-6", "claude-fable-5"]);
+        assert!(cat.family("claude-fable-5").unwrap().efforts.len() > 1);
+        assert!(cat.family("gemini-3.7-flash").is_some(), "seed kept");
+    }
+
     #[test]
     fn parse_list_models_takes_the_id_column() {
         let text = "Available models\n\nauto - Auto (default)\ngpt-5.3-codex-low - Codex 5.3 Low\n                    claude-opus-5-thinking-high - Claude Opus 5 1M Thinking\nnot a model line\n";
@@ -666,20 +633,5 @@ mod tests {
             vec!["auto", "gpt-5.3-codex-low", "claude-opus-5-thinking-high"]
         );
         assert!(parse_list_models("").is_empty());
-    }
-
-    #[test]
-    fn cache_round_trips_and_ages() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sub").join(CACHE_FILE);
-        assert!(read_cache(&path).is_none());
-        write_cache(&path, &["auto".to_string(), "gpt-5.2".to_string()]).unwrap();
-        let cache = read_cache(&path).unwrap();
-        assert_eq!(cache.ids, vec!["auto", "gpt-5.2"]);
-        assert!(now_secs().saturating_sub(cache.fetched_at) < CACHE_TTL.as_secs());
-        assert!(
-            !path.with_extension("json.tmp").exists(),
-            "tmp renamed away"
-        );
     }
 }

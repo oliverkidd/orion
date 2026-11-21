@@ -104,15 +104,16 @@ pub fn model_row_label(
 /// [`model_choices`] against an explicit descriptor, for callers that
 /// already resolved one (the Accounts tab, the launch sites).
 pub fn model_choices_in(descriptor: &orion_core::harness::HarnessDescriptor) -> Vec<String> {
-    match descriptor.model.catalog {
-        Some(orion_core::harness::HarnessCatalog::Claude) => crate::claude_catalogue::models()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
-        Some(orion_core::harness::HarnessCatalog::Cursor) => crate::cursor_catalogue::models()
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+    use orion_core::harness::HarnessCatalog;
+    let runtime = match descriptor.model.catalog {
+        Some(HarnessCatalog::Claude) => Some(crate::claude_catalogue::models()),
+        Some(HarnessCatalog::Cursor) => Some(crate::cursor_catalogue::models()),
+        // The descriptor's list stands until a `codex debug models` lands.
+        Some(HarnessCatalog::Codex) => crate::codex_catalogue::models(),
+        None => None,
+    };
+    match runtime {
+        Some(list) => list.iter().map(|s| s.to_string()).collect(),
         None => headed(
             descriptor
                 .model
@@ -2294,6 +2295,9 @@ impl Config {
                 ),
                 Some(orion_core::harness::HarnessCatalog::Cursor) => format!(
                     "Default model family for new {label} sessions; rows follow cursor-agent --list-models"
+                ),
+                Some(orion_core::harness::HarnessCatalog::Codex) => format!(
+                    "Default model for new {label} sessions; rows follow codex debug models"
                 ),
                 None => format!("Default model for new {label} sessions (default = CLI's pick)"),
             },

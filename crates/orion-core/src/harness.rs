@@ -43,13 +43,15 @@ pub struct ModelEntry {
 
 /// Which TUI-side catalogue supplies a harness's model (and, for Cursor,
 /// effort) rows at runtime, in place of the descriptor's static lists:
-/// Claude's `claude_models` / `availableModels` allowlist, or Cursor's
-/// `--list-models` union over its seed.
+/// Claude's `claude_models` / `availableModels` allowlist, Cursor's
+/// `--list-models` union over its seed, or Codex's `debug models` listing
+/// (its static list standing until that lands).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessCatalog {
     Claude,
     Cursor,
+    Codex,
 }
 
 impl HarnessCatalog {
@@ -57,6 +59,7 @@ impl HarnessCatalog {
         match self {
             HarnessCatalog::Claude => "claude",
             HarnessCatalog::Cursor => "cursor",
+            HarnessCatalog::Codex => "codex",
         }
     }
 
@@ -64,6 +67,7 @@ impl HarnessCatalog {
         Some(match s.trim() {
             "claude" => HarnessCatalog::Claude,
             "cursor" => HarnessCatalog::Cursor,
+            "codex" => HarnessCatalog::Codex,
             _ => return None,
         })
     }
@@ -693,18 +697,24 @@ pub fn builtin(id: &str) -> Option<HarnessDescriptor> {
             },
             ..base
         },
-        // Codex's models and efforts as its docs list them on 2026-11-05
-        // (learn.chatgpt.com/docs/models: the recommended four, GPT-5.5
-        // retired from ChatGPT sign-in on 2026-10-14; config-reference:
-        // `model_reasoning_effort` up to `max` and `ultra`).
+        // Codex's models come from the installed CLI (`codex debug models`,
+        // the TUI's codex_catalogue); this list stands until that lands: the
+        // top four of codex-cli 0.171.0's bundled catalogue (2026-11-21).
+        // Efforts as config-reference lists `model_reasoning_effort`, up to
+        // `max` and `ultra`.
         "codex" => HarnessDescriptor {
             label: "Codex".into(),
             program: "codex".into(),
             model: ModelSpec {
                 flag: Some("--model".into()),
                 default: default_model_choice(),
-                models: models(&["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]),
-                catalog: None,
+                models: models(&[
+                    "gpt-6.2-sol",
+                    "gpt-6.2-astra",
+                    "gpt-6.1-terra",
+                    "gpt-6.1-sol",
+                ]),
+                catalog: Some(HarnessCatalog::Codex),
             },
             effort: EffortSpec {
                 config_flag: Some("-c".into()),
@@ -1154,10 +1164,11 @@ mod tests {
         assert!(!grok.claude_like());
     }
 
-    /// The static lists are what the CLIs offer today: Codex's four
-    /// recommended models and its efforts up to `ultra` (`minimal` and
-    /// the GPT-5.5 / 5.6 ids gone), OpenCode's `provider/model` ids
-    /// on the newest Claude and GPT generations.
+    /// The static lists are what the CLIs offer today: the top four of
+    /// Codex's bundled catalogue and its efforts up to `ultra` (`minimal`
+    /// gone), OpenCode's `provider/model` ids on the newest Claude and GPT
+    /// generations. Codex's list only stands until the installed CLI's
+    /// catalogue lands, so a session moved onto it keeps any model.
     #[test]
     fn builtin_model_lists_are_the_clis_current_ones() {
         let ids = |d: &HarnessDescriptor| -> Vec<String> {
@@ -1166,14 +1177,20 @@ mod tests {
         let codex = builtin("codex").unwrap();
         assert_eq!(
             ids(&codex),
-            ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"]
+            [
+                "gpt-6.2-sol",
+                "gpt-6.2-astra",
+                "gpt-6.1-terra",
+                "gpt-6.1-sol"
+            ]
         );
+        assert_eq!(codex.model.catalog, Some(HarnessCatalog::Codex));
         assert_eq!(
             codex.effort.efforts,
             ["low", "medium", "high", "xhigh", "max", "ultra"]
         );
-        assert!(codex.offers_model("gpt-6.1-sol"));
-        assert!(!codex.offers_model("gpt-5.5"), "retired");
+        assert!(codex.offers_model("gpt-6.2-sol"));
+        assert!(codex.offers_model("gpt-7"), "the CLI's catalogue decides");
         assert!(codex.offers_effort("ultra"));
         assert!(!codex.offers_effort("minimal"));
 

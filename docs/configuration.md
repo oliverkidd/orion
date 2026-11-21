@@ -53,10 +53,10 @@ outside the app, with `osascript`; never over ssh.
 A session in a worktree no client is viewing is stopped by the IDLE REAPER once it has sat idle for
 15 minutes. That span is fixed, not a setting; a `session_idle_timeout` an older orion wrote to
 `config.json` is ignored. The reaper sweeps every 15 s and spares running agents, agents waiting on
-you, agents with a backgrounded tool call still running, Claude agents with text typed into their
-input box and not sent (killing the CLI would lose it), and terminals with a command running. A
-reaped session is drawn gray where it stands; nothing on the grid moves. One click on it boots it
-again, and an agent resumes its conversation. A worktree's dead sessions also boot as the cursor
+you, agents with a backgrounded tool call still running, agents with text typed into their input
+box and not sent (Claude Code, Codex and Cursor; killing the CLI would lose it), and terminals with
+a command running. A reaped session is drawn gray where it stands; nothing on the grid moves. One
+click on it boots it again, and an agent resumes its conversation. A worktree's dead sessions also boot as the cursor
 rests on it, so attaching is instant; the timeout is what bounds that cost.
 
 ### Accounts
