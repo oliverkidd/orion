@@ -68,18 +68,23 @@
 //! (`DiffView::back`).
 //!
 //! Nothing is fetched here the panels do not already keep. The rows are
-//! the project's open list and its merged tail (`App::open_prs`) — kept
-//! warm on the OPEN PRS
-//! beat and remembered across launches (`pr_cache`) — so the modal paints
-//! at once, and opening it on a list older than [`FRESH`] asks again
-//! underneath. The reading side is the PULL REQUEST PAGE the pane shows
-//! (`pr_preview`) — fetched on the pane's debounce into the same
-//! `App::pr_detail`, so a pull request read in one is read in the other.
-//! A page is read again once it is older than `event_loop::PR_DETAIL_FRESH`
-//! — on the cursor's next rest, and on the list's beat while the cursor
-//! stays — so its checks keep up with CI. Opening the modal reads every one
-//! of your own pull requests' pages at once, and the rest one at a time
-//! behind them ([`Prefetch`]), so walking the list finds them read.
+//! the project's open list and its merged tail (`App::open_prs`) —
+//! remembered across launches (`pr_cache`) — so the modal paints at once.
+//! Opening it is a visit to the list as the thing you are in (`sync::
+//! Seen::Focused`): THE RESOLVER asks again underneath when the list is
+//! more than half a minute old, and every minute after while the modal
+//! stays open and the window focused — the light list (`OpenPrs`) and
+//! what only the modal draws of it (`PrExtras`: labels, review requests,
+//! the checks' tally) — and its `Merged` and `Closed` sections
+//! (`PrTails`) when they are more than ten minutes old. Its status line
+//! says how the last ask went: `updated 4m ago`, or GitHub's limit and
+//! when it resets. The reading side is the PULL REQUEST PAGE the pane
+//! shows (`pr_preview`) — read for the row the cursor rests on, past the
+//! pane's debounce, into the same `App::pr_detail`, so a pull request read
+//! in one is read in the other. A page is read again on a rest once it is
+//! older than `event_loop::pr_detail_fresh_for`, every half minute while its
+//! checks run and the cursor stays (`sync::scope`), and when its row moves
+//! — never ahead of the cursor: a page nobody rests on costs nothing.
 //! From the list its tabs are walked with `⇧←`/`⇧→` and a listing's rows
 //! with `⇧↑`/`⇧↓`, without moving the keys.
 
@@ -107,50 +112,11 @@ use crate::ui::{
     SPLIT_PANE_LAYOUT_MIN,
 };
 
-/// A list younger than this is what opening the modal shows, with no
-/// second ask: the list the OPEN PRS beat landed moments ago *is* the
-/// answer. `r` asks regardless.
-pub(crate) const FRESH: std::time::Duration = std::time::Duration::from_secs(30);
-/// How long the cursor rests on a row before its body and conversation
-/// are fetched — the pane's own debounce, so walking the list with `j`
-/// fetches only the rows actually paused on.
-pub(crate) const DETAIL_DEBOUNCE: std::time::Duration = crate::event_loop::PR_DETAIL_DEBOUNCE;
 /// The list column's share of the modal, and its floor.
 pub(crate) const LIST_PCT: u16 = 38;
 pub(crate) const MIN_LIST_W: u16 = 24;
 /// Lines one wheel notch scrolls the reading pane.
 pub(crate) const WHEEL_LINES: i32 = 3;
-/// How many pages the prefetch lets be in flight at once, counting the
-/// cursor's own: enough that a handful of your pull requests land
-/// together, few enough not to stampede `gh`.
-pub(crate) const PREFETCH_PARALLEL: usize = 3;
-/// The gap between the prefetch's asks for the pull requests that aren't
-/// yours: the list fills in underneath without a burst.
-pub(crate) const PREFETCH_GAP: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// The pages the modal reads ahead of the cursor. `soon` holds your own
-/// pull requests, asked for the moment there is room in flight; `later`
-/// the rest, one per [`PREFETCH_GAP`]. Each is checked again as it is
-/// taken, so one the cursor read meanwhile costs nothing. It lives on the
-/// view, so closing the modal drops whatever was still queued.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Prefetch {
-    pub soon: std::collections::VecDeque<PendingPrDetail>,
-    pub later: std::collections::VecDeque<PendingPrDetail>,
-    /// When the next of `later` may go; None until one has.
-    pub next: Option<std::time::Instant>,
-}
-
-impl Prefetch {
-    fn is_empty(&self) -> bool {
-        self.soon.is_empty() && self.later.is_empty()
-    }
-
-    fn holds(&self, url: &str) -> bool {
-        self.soon.iter().chain(&self.later).any(|p| p.url == url)
-    }
-}
-
 /// Which panel of the modal has the keys — the one wearing the accent.
 /// `Tab` and `⇧Tab` hand them across, as the DIFF VIEWER's panels do.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -266,8 +232,6 @@ pub struct PullRequestsView {
     /// choose a pull request for its marked issues; None opened on its
     /// own.
     pub pick: Option<PrPick>,
-    /// The pages read ahead of the cursor.
-    pub prefetch: Prefetch,
     /// The DIFF VIEWER this modal was opened over with `⌘U`: its last Esc
     /// puts it back ([`open_from_diff`]).
     pub from_diff: Option<FromDiff>,
@@ -332,7 +296,6 @@ impl PullRequestsView {
             focus: PrFocus::List,
             form: None,
             pick: None,
-            prefetch: Prefetch::default(),
             from_diff: None,
             comment: None,
         }
@@ -391,107 +354,11 @@ fn show(app: &mut App, mut view: PullRequestsView) {
     view.selected = clamp_selection(start as i64, list.len());
     view.selected_url = list.get(view.selected).map(|pr| pr.url.clone());
     app.overlay = Some(Overlay::PullRequests(view));
-    // A list the beat landed moments ago is the answer; an older one
-    // paints now while a fresh copy lands underneath.
-    if !is_fresh(app, &project) {
-        request_list(app, &project);
-    }
+    // The list paints now; THE RESOLVER asks again underneath when it is
+    // older than the modal wants (`sync::scope`: the modal's list is the
+    // focused key).
     schedule_detail(app);
-    queue_prefetch(app, true);
     app.dirty = true;
-}
-
-/// Queue the list's pages for the prefetch, in the order the list shows
-/// them. Opening (`opening`) asks for each of yours that isn't fresh —
-/// what you came to look at — and every other one this session hasn't
-/// read; a list landing later queues only what is still unread, so the
-/// beat never turns into a sweep of every page. The merged rows are left
-/// out: a week of them is a page each nobody may walk down to, read when
-/// the cursor rests on one.
-fn queue_prefetch(app: &mut App, opening: bool) {
-    let Some(Overlay::PullRequests(view)) = &app.overlay else {
-        return;
-    };
-    let list = &rows(app, &view.project);
-    let mut soon = Vec::new();
-    let mut later = Vec::new();
-    for (i, _) in visible_rows("", list, &app.prs) {
-        let pr = &list[i];
-        if pr.is_settled() || view.prefetch.holds(&pr.url) {
-            continue;
-        }
-        let pending = PendingPrDetail {
-            url: pr.url.clone(),
-            number: pr.number,
-            dir: view.dir.clone(),
-        };
-        let unread = app.pr_detail_unread(&pr.url);
-        if pr.mine && (unread || opening && app.pr_detail_owed(&pr.url)) {
-            soon.push(pending);
-        } else if unread {
-            later.push(pending);
-        }
-    }
-    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
-        return;
-    };
-    view.prefetch.soon.extend(soon);
-    view.prefetch.later.extend(later);
-}
-
-/// When the prefetch next has a page to ask for: now for one of yours,
-/// at the gap for the rest, never while [`PREFETCH_PARALLEL`] are in
-/// flight (a landing runs the loop again, which asks again).
-pub(crate) fn prefetch_delay(app: &App) -> Option<std::time::Duration> {
-    let Some(Overlay::PullRequests(view)) = &app.overlay else {
-        return None;
-    };
-    let queue = &view.prefetch;
-    if queue.is_empty() || app.pr_detail_inflight.len() >= PREFETCH_PARALLEL {
-        return None;
-    }
-    if !queue.soon.is_empty() {
-        return Some(std::time::Duration::ZERO);
-    }
-    let wait = queue
-        .next
-        .map(|next| next.saturating_duration_since(std::time::Instant::now()));
-    Some(wait.unwrap_or_default())
-}
-
-/// The pages due now, taken off the queue: as many of yours as there is
-/// room for in flight, then one of the rest if its gap has passed. A
-/// page read since it was queued is dropped, not asked for again.
-pub(crate) fn take_prefetch(app: &mut App) -> Vec<PendingPrDetail> {
-    let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
-        return Vec::new();
-    };
-    let mut queue = std::mem::take(&mut view.prefetch);
-    let mut room = PREFETCH_PARALLEL.saturating_sub(app.pr_detail_inflight.len());
-    let mut due = Vec::new();
-    while room > 0 {
-        let Some(pending) = queue.soon.pop_front() else {
-            break;
-        };
-        if app.pr_detail_owed(&pending.url) {
-            due.push(pending);
-            room -= 1;
-        }
-    }
-    let now = std::time::Instant::now();
-    if room > 0 && queue.soon.is_empty() && queue.next.is_none_or(|next| now >= next) {
-        while let Some(pending) = queue.later.pop_front() {
-            if app.pr_detail_unread(&pending.url) {
-                due.push(pending);
-                queue.next = Some(now + PREFETCH_GAP);
-                break;
-            }
-        }
-    }
-    if let Some(Overlay::PullRequests(view)) = &mut app.overlay {
-        view.prefetch = queue;
-    }
-    due
 }
 
 /// `⌘U` in the DIFF VIEWER (`diff_actions`): the modal for the selected
@@ -572,11 +439,12 @@ fn close(app: &mut App) {
 /// modal's cursor may have taken over the fetch it was waiting on, so that
 /// one is armed again, without touching the pane's scroll.
 fn rearm_pane_detail(app: &mut App) {
-    let pending = app.previewed_pr().and_then(|pr| {
+    let previewed = app.previewed_pr();
+    let pending = previewed.clone().and_then(|pr| {
         let dir = app.selected_project()?.repo_path.clone();
         pending_for(app, pr.url, pr.number, dir)
     });
-    app.pending_pr_detail = pending.map(|p| (p, std::time::Instant::now() + DETAIL_DEBOUNCE));
+    crate::event_loop::rest_on(app, previewed.map(|pr| pr.url), pending);
 }
 
 /// Put the modal back as it was — the COMMENT BOX stood in for it — on the
@@ -723,24 +591,15 @@ fn cursor_index(view: &PullRequestsView, list: &[OpenPr], prs: &PrStore) -> Opti
     crate::list_filter::cursor_in(&visible_rows(&view.query, list, prs), view.selected)
 }
 
-/// A list that landed within [`FRESH`]: the modal opens on it as it is.
-fn is_fresh(app: &App, project: &ProjectId) -> bool {
-    app.open_prs
-        .get(project)
-        .is_some_and(|open| open.at.elapsed() < FRESH)
-}
-
-/// Ask for the project's open list on the loop's next turn, past its
-/// beat — `Shift+R`'s path (`App::pr_refresh_requested`), which asks for
-/// the selected project, the modal's. A lookup already in flight may have
-/// been asked before whatever this is for (a merge, a new pull request):
-/// it owes a fresh one, which starts the moment it lands.
-pub(crate) fn request_list(app: &mut App, project: &ProjectId) {
-    if let Some(open) = app.open_prs.get_mut(project) {
-        open.due = std::time::Instant::now();
-    }
-    app.open_prs_inflight.want_fresh(project);
-    app.pr_refresh_requested = true;
+/// The project's open list changed on GitHub by orion's own hand — a
+/// merge, a new pull request, one marked ready: THE RESOLVER asks for it
+/// again now while it is on screen (the modal's, above all), and on its
+/// next visit otherwise. A lookup already in flight may have been asked
+/// before the change: it owes a fresh one, which starts the moment it
+/// lands.
+pub(crate) fn invalidate_list(app: &mut App, project: &ProjectId) {
+    app.resolver
+        .invalidate(&crate::sync::QueryKey::OpenPrs(project.clone()));
 }
 
 /// The pull request under the cursor, while the modal is up and the list
@@ -780,7 +639,7 @@ fn selected_url(app: &App) -> Option<String> {
 }
 
 /// The detail fetch a pull request is owed, if any (`App::pr_detail_owed`):
-/// none for one read within `PR_DETAIL_FRESH`, in flight, or refused
+/// none for one read within `pr_detail_fresh_for`, in flight, or refused
 /// moments ago. A body the cache hydrated (`pr_detail_stale`), or one read
 /// longer ago, shows at once and is fetched fresh over the top, as the
 /// pane's is.
@@ -799,11 +658,14 @@ pub(crate) fn schedule_detail(app: &mut App) {
         return;
     };
     let dir = view.dir.clone();
-    if let Some(pr) = selected_pr(app) {
+    let selected = selected_pr(app);
+    if let Some(pr) = &selected {
         crate::conflicts::want(app, &pr.url, &dir);
     }
-    let pending = selected_pr(app).and_then(|pr| pending_for(app, pr.url, pr.number, dir));
-    app.pending_pr_detail = pending.map(|p| (p, std::time::Instant::now() + DETAIL_DEBOUNCE));
+    let pending = selected
+        .clone()
+        .and_then(|pr| pending_for(app, pr.url, pr.number, dir));
+    crate::event_loop::rest_on(app, selected.map(|pr| pr.url), pending);
 }
 
 /// The list under the modal changed — an answer landed, or a detail said
@@ -842,17 +704,15 @@ pub(crate) fn list_changed(app: &mut App) {
     let Some(Overlay::PullRequests(view)) = &mut app.overlay else {
         return;
     };
+    // Still on the same pull request, nothing is asked: a page whose row
+    // moved was made stale by the landing (`event_loop::
+    // stale_details_behind`), and one whose checks run is read on the
+    // live beat (`sync::scope`).
     if moved {
         view.scroll = 0;
         view.tabs.rewind();
         schedule_detail(app);
-    } else if app.pending_pr_detail.is_none() {
-        // Still on the same pull request: the list's beat reads its page
-        // again once it has aged out, so checks running under the reader
-        // catch up on their own.
-        schedule_detail(app);
     }
-    queue_prefetch(app, false);
     app.dirty = true;
 }
 
@@ -995,20 +855,17 @@ fn refresh(app: &mut App) {
     let Some(Overlay::PullRequests(view)) = &app.overlay else {
         return;
     };
-    let (project, dir) = (view.project.clone(), view.dir.clone());
-    request_list(app, &project);
+    let project = view.project.clone();
+    for key in [
+        crate::sync::QueryKey::OpenPrs(project.clone()),
+        crate::sync::QueryKey::PrExtras(project.clone()),
+        crate::sync::QueryKey::PrTails(project),
+    ] {
+        app.resolver.refresh(&key);
+    }
     if let Some(pr) = selected_pr(app) {
-        if !app.pr_detail_inflight.want_fresh(&pr.url) {
-            app.pr_detail_failed.remove(&pr.url);
-            app.pending_pr_detail = Some((
-                PendingPrDetail {
-                    url: pr.url,
-                    number: pr.number,
-                    dir,
-                },
-                std::time::Instant::now(),
-            ));
-        }
+        app.pr_detail_failed.remove(&pr.url);
+        crate::event_loop::reread_pr_page(app, pr.url);
     }
     app.dirty = true;
 }
@@ -1959,6 +1816,39 @@ fn record_list(
 /// the right. `backdrop` draws it as the layer under a QUICK PROMPT box
 /// opened from it (`QuickLaunch::under`): dim frames and an unfocused
 /// cursor row, the box in front having the eye.
+/// What the row under the filter says of the list's last ask, when it is
+/// news: GitHub paused by a rate limit and when it is back, or a failed
+/// ask — with how old the rows on screen are, when this run has had an
+/// answer — and how to try again. `None` when the last ask worked, or
+/// none has been made. `empty` says whether there are rows to be stale.
+fn status_note(
+    status: &crate::sync::Status,
+    empty: bool,
+    now: std::time::Instant,
+) -> Option<String> {
+    let retry = keys::REFRESH.label();
+    let updated = status
+        .updated_at
+        .map(|at| now.saturating_duration_since(at).as_millis() as i64)
+        .map(|age| format!("updated {}", crate::hosts::ago_label(age)));
+    if let Some(until) = status.paused_until {
+        let back = format!(
+            "GitHub limit, back at {}",
+            crate::sync::gate::wall_time(until, now)
+        );
+        return Some(match updated {
+            Some(updated) => format!("{back} · {updated}"),
+            None => back,
+        });
+    }
+    status.error.as_ref()?;
+    Some(match (updated, empty) {
+        (Some(updated), _) => format!("couldn't refresh, {updated} ({retry} retries)"),
+        (None, true) => format!("couldn't ask GitHub ({retry} retries)"),
+        (None, false) => format!("couldn't refresh ({retry} retries)"),
+    })
+}
+
 pub(crate) fn draw(
     f: &mut Frame,
     app: &mut App,
@@ -1978,11 +1868,19 @@ pub(crate) fn draw(
     .areas(area);
 
     let rows: Vec<OpenPr> = rows(app, &view.project);
-    let inflight = app.open_prs_inflight.in_flight(&view.project);
+    let now = std::time::Instant::now();
+    let status = app
+        .resolver
+        .status(&crate::sync::QueryKey::OpenPrs(view.project.clone()), now);
+    let inflight = status.fetching;
     let asked = app.open_prs.contains_key(&view.project);
-    // The last ask came back with nothing — these rows are the last
-    // answer that worked, however old — and no second ask is running yet.
-    let stale = app.open_prs_failed.contains(&view.project) && !inflight;
+    // What the list's last ask says, when it is news: GitHub paused by a
+    // rate limit, or the last ask came back with nothing — these rows are
+    // then the last answer that worked, however old — and no second ask
+    // is running yet.
+    let note = (!inflight)
+        .then(|| status_note(&status, rows.is_empty(), now))
+        .flatten();
     // The rows the filter leaves, and where the cursor sits among them.
     let parsed = crate::list_filter::parse(&view.query, FACETS);
     let visible = visible_rows(&view.query, &rows, &app.prs);
@@ -2058,13 +1956,8 @@ pub(crate) fn draw(
     // A list GitHub could not be asked for says so on a row of its own
     // under the filter, never only in a title a narrow list would cut:
     // rows that stopped refreshing look exactly like current ones (#106).
-    if stale {
-        let retry = keys::REFRESH.label();
-        let note = if rows.is_empty() {
-            format!("couldn't ask GitHub ({retry} retries)")
-        } else {
-            format!("couldn't refresh ({retry} retries)")
-        };
+    let stale = note.is_some();
+    if let Some(note) = note {
         if let Some(note_area) = row_rect(rows_area, 0) {
             let note = Line::from(vec![
                 Span::raw("  "),
@@ -2422,11 +2315,26 @@ mod tests {
                 merged: Vec::new(),
                 list,
                 at: now,
-                due: now + std::time::Duration::from_secs(60),
-                step: std::time::Duration::from_secs(60),
             },
         );
         (app, project)
+    }
+
+    /// What one turn of the loop would ask GitHub for now: THE RESOLVER's
+    /// step (nothing spawns in a test), each left in flight.
+    fn asked_now(app: &mut App) -> Vec<crate::sync::QueryKey> {
+        crate::sync::spawn::step_remote(app)
+            .into_iter()
+            .map(|t| t.key)
+            .collect()
+    }
+
+    /// Run a turn and land everything it asked as answered `ago` back.
+    fn settled(app: &mut App, ago: std::time::Duration) {
+        let at = std::time::Instant::now() - ago;
+        for ticket in crate::sync::spawn::step_remote(app) {
+            app.resolver.land(&ticket, Ok(()), at);
+        }
     }
 
     /// `App::prs` as it stands once `list` has landed.
@@ -2462,6 +2370,16 @@ mod tests {
         app.pending_pr_detail.as_ref().map(|(p, _)| p.url.as_str())
     }
 
+    /// `url`'s page being read: THE RESOLVER's flight for it started.
+    fn reading(app: &mut App, url: &str) {
+        let key = crate::sync::QueryKey::PrDetail(url.to_string());
+        let now = std::time::Instant::now();
+        app.resolver
+            .visit(vec![(key.clone(), crate::sync::Seen::Shown)], now);
+        app.resolver.refresh(&key);
+        assert!(app.resolver.due(now).iter().any(|t| t.key == key));
+    }
+
     fn screen(app: &mut App, w: u16, h: u16) -> String {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
@@ -2485,11 +2403,18 @@ mod tests {
     }
 
     /// The hotkey opens on the project's open list as it is — no second
-    /// ask for a list that just landed — with the first row's body asked
-    /// for on the debounce; an older list is asked for again underneath.
+    /// ask for a list that landed within half a minute — with the first
+    /// row's body asked for on the debounce; an older list is asked for
+    /// again underneath, though the sidebar would let it stand. What only
+    /// the modal draws — the extras, the merged and closed tails — is
+    /// asked on its first open.
     #[test]
     fn opening_reads_the_first_pull_request_and_asks_only_for_a_stale_list() {
         let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
+        let list = crate::sync::QueryKey::OpenPrs(project.clone());
+        let extras = crate::sync::QueryKey::PrExtras(project.clone());
+        let tails = crate::sync::QueryKey::PrTails(project.clone());
+        settled(&mut app, std::time::Duration::from_secs(10));
         open(&mut app);
         assert_eq!(view(&app).project, project);
         assert_eq!(view(&app).selected, 0);
@@ -2498,16 +2423,62 @@ mod tests {
             Some("https://github.com/o/r/pull/42")
         );
         assert_eq!(pending_url(&app), Some("https://github.com/o/r/pull/42"));
-        assert!(!app.pr_refresh_requested, "fresh: nothing to ask");
+        assert_eq!(
+            asked_now(&mut app),
+            vec![extras.clone(), tails.clone()],
+            "a fresh list stands; the modal's own parts are asked"
+        );
 
         app.overlay = None;
-        let stale = std::time::Instant::now()
-            .checked_sub(FRESH + std::time::Duration::from_secs(1))
-            .expect("machine up for a minute");
-        app.open_prs.get_mut(&project).unwrap().at = stale;
+        let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
+        settled(&mut app, std::time::Duration::from_secs(40));
+        assert!(asked_now(&mut app).is_empty(), "the sidebar lets it stand");
         open(&mut app);
-        assert!(app.pr_refresh_requested, "stale: asked on the next turn");
-        assert!(app.open_prs_lookup_due(&project), "past its beat");
+        assert_eq!(
+            asked_now(&mut app),
+            vec![list, extras, tails],
+            "the modal asks again"
+        );
+    }
+
+    /// While the modal is up and somebody is looking, its list is asked
+    /// again every minute; with the window in the background, not at all.
+    #[test]
+    fn an_open_modal_keeps_its_list_live_while_looked_at() {
+        let t0 = std::time::Instant::now();
+        let later = t0 + std::time::Duration::from_secs(61);
+        let modal_answered_at_t0 = || {
+            let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
+            open(&mut app);
+            app.resolver.set_live(true);
+            app.resolver.visit(crate::sync::scope::visible(&app), t0);
+            for ticket in app.resolver.due(t0) {
+                app.resolver.land(&ticket, Ok(()), t0);
+            }
+            (app, crate::sync::QueryKey::OpenPrs(project))
+        };
+        let (mut app, list) = modal_answered_at_t0();
+        let keys: Vec<_> = app
+            .resolver
+            .due(later)
+            .into_iter()
+            .map(|t| t.key)
+            .filter(|k| k.provider() != crate::sync::Provider::Local)
+            .collect();
+        let crate::sync::QueryKey::OpenPrs(project) = list.clone() else {
+            unreachable!()
+        };
+        assert_eq!(
+            keys,
+            vec![list, crate::sync::QueryKey::PrExtras(project)],
+            "a minute on: the list and its extras, never the tails"
+        );
+
+        let (mut app, _) = modal_answered_at_t0();
+        app.window_focused = false;
+        let _ = asked_now(&mut app);
+        assert!(app.resolver.due(later).is_empty(), "nobody looking");
+        assert_eq!(app.resolver.next_wake(later), None);
     }
 
     /// A body already read arms nothing; one the cache hydrated is shown
@@ -2573,8 +2544,7 @@ mod tests {
         handle_key(&mut app, key(KeyCode::Down), &mut Vec::new());
         // The loop fired #41's fetch: in flight, nothing armed.
         app.pending_pr_detail = None;
-        app.pr_detail_inflight
-            .begin("https://github.com/o/r/pull/41".into(), crate::fetch::now());
+        reading(&mut app, "https://github.com/o/r/pull/41");
         app.open_prs.get_mut(&project).unwrap().list = vec![
             pr(43, "New", false),
             pr(42, "Fix login", false),
@@ -3040,6 +3010,7 @@ mod tests {
             assert_eq!(form.notice.as_deref(), Some("not allowed"));
             assert_eq!(form.comment.as_str(), "dup", "nothing typed is lost");
 
+            settled(&mut app, std::time::Duration::ZERO);
             crate::pr_actions::land_answer(
                 &mut app,
                 Answer::Edited {
@@ -3050,7 +3021,11 @@ mod tests {
                 },
             );
             assert!(view(&app).form.is_none());
-            assert!(app.pr_refresh_requested, "the list is asked for again");
+            assert_eq!(
+                asked_now(&mut app),
+                vec![crate::sync::QueryKey::OpenPrs(ProjectId("p1".into()))],
+                "the list is asked for again"
+            );
             let flash = format!("{:?}", app.flash);
             assert!(flash.contains("closed #42, branch deleted"), "{flash}");
         });
@@ -3207,6 +3182,7 @@ mod tests {
         let url = "https://github.com/o/r/pull/42".to_string();
         app.pr_detail.insert(url.clone(), detail(42, "Fix login"));
         app.pending_pr_detail = None;
+        settled(&mut app, std::time::Duration::ZERO);
         crate::pr_actions::land_answer(
             &mut app,
             Answer::Readied {
@@ -3219,7 +3195,11 @@ mod tests {
         );
         assert!(app.pr_detail_stale.contains(&url));
         assert_eq!(pending_url(&app), Some(url.as_str()));
-        assert!(app.pr_refresh_requested);
+        assert_eq!(
+            asked_now(&mut app),
+            vec![crate::sync::QueryKey::OpenPrs(ProjectId("p1".into()))],
+            "the list is asked for again"
+        );
         let flash = format!("{:?}", app.flash);
         assert!(flash.contains("#42 is ready for review"), "{flash}");
     }
@@ -3635,6 +3615,18 @@ mod tests {
         assert!(screen(&mut app, 100, 20).contains("asking GitHub…"));
     }
 
+    /// Ask the RESOLVER for `project`'s list as the modal's, and land
+    /// what came back as `answer`.
+    fn land_list(app: &mut App, project: &ProjectId, answer: Result<(), crate::sync::FetchError>) {
+        let key = crate::sync::QueryKey::OpenPrs(project.clone());
+        let now = std::time::Instant::now();
+        app.resolver
+            .visit(vec![(key.clone(), crate::sync::Seen::Focused)], now);
+        app.resolver.refresh(&key);
+        let ticket = app.resolver.due(now).remove(0);
+        app.resolver.land(&ticket, answer.as_ref().map(|_| ()), now);
+    }
+
     /// A list GitHub could not be asked for says so, on a row of its own
     /// under the filter where a narrow modal cannot cut it off — rows that
     /// stopped refreshing must not pass for current ones (#106). The rows
@@ -3648,7 +3640,7 @@ mod tests {
         assert!(!fine.contains("couldn't refresh"), "{fine}");
         let first_row = view(&app).list_area.y;
 
-        app.open_prs_failed.insert(project.clone());
+        land_list(&mut app, &project, Err(crate::sync::FetchError::Missing));
         let stale = screen(&mut app, 100, 20);
         assert!(stale.contains("couldn't refresh (⌘R retries)"), "{stale}");
         assert!(stale.contains("#42 Fix login"), "{stale}");
@@ -3658,25 +3650,53 @@ mod tests {
             "the rows' hit area starts under the note"
         );
 
-        let ticket = app
-            .open_prs_inflight
-            .begin(project.clone(), crate::fetch::now())
-            .unwrap();
+        let key = crate::sync::QueryKey::OpenPrs(project.clone());
+        app.resolver.refresh(&key);
+        let ticket = app.resolver.due(std::time::Instant::now()).remove(0);
         // Wide enough for the title to say it in full.
         let retrying = screen(&mut app, 160, 20);
         assert!(!retrying.contains("couldn't refresh"), "{retrying}");
         assert!(retrying.contains("refreshing…"), "{retrying}");
-        app.open_prs_inflight.land(&ticket);
+        let failed = crate::sync::FetchError::Missing;
+        app.resolver
+            .land(&ticket, Err(&failed), std::time::Instant::now());
 
         app.open_prs.get_mut(&project).unwrap().list = vec![];
         let never = screen(&mut app, 100, 20);
         assert!(never.contains("couldn't ask GitHub"), "{never}");
         assert!(!never.contains("no open pull requests"), "{never}");
 
-        app.open_prs_failed.remove(&project);
+        land_list(&mut app, &project, Ok(()));
         let answered = screen(&mut app, 100, 20);
         assert!(!answered.contains("couldn't"), "{answered}");
         assert!(answered.contains("no open pull requests"), "{answered}");
+
+        // Failing after an answer: how old the rows are.
+        app.open_prs.get_mut(&project).unwrap().list = vec![pr(42, "Fix login", false)];
+        land_list(&mut app, &project, Err(crate::sync::FetchError::Missing));
+        let behind = screen(&mut app, 200, 20);
+        assert!(
+            behind.contains("couldn't refresh, updated just now"),
+            "{behind}"
+        );
+    }
+
+    /// GitHub's rate limit is named, with when it is back, rather than
+    /// passed off as a list that merely failed.
+    #[test]
+    fn a_rate_limited_list_says_when_github_is_back() {
+        let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
+        open(&mut app);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        land_list(
+            &mut app,
+            &project,
+            Err(crate::sync::FetchError::RateLimited { until }),
+        );
+        let limited = screen(&mut app, 100, 20);
+        assert!(limited.contains("GitHub limit, back at"), "{limited}");
+        assert!(!limited.contains("couldn't refresh"), "{limited}");
+        assert!(limited.contains("#42 Fix login"), "{limited}");
     }
 
     /// `⌘O` and a click on the reading pane's `↗` button run one open: the
@@ -4005,10 +4025,19 @@ mod tests {
     fn the_verb_chords_run_and_the_plain_letters_type() {
         let (mut app, project) = app_with(vec![pr(42, "Fix login", false)], true);
         open(&mut app);
+        settled(&mut app, std::time::Duration::ZERO);
         handle_key(&mut app, ctrl('r'), &mut Vec::new());
         assert_eq!(app.flash, None, "the title says it is refreshing");
-        assert!(app.pr_refresh_requested);
-        assert!(app.open_prs_lookup_due(&project));
+        assert_eq!(
+            asked_now(&mut app),
+            vec![
+                crate::sync::QueryKey::OpenPrs(project.clone()),
+                crate::sync::QueryKey::PrExtras(project.clone()),
+                crate::sync::QueryKey::PrTails(project.clone()),
+                crate::sync::QueryKey::PrDetail("https://github.com/o/r/pull/42".into()),
+            ],
+            "the list, its extras and tails, and the page: asked again, however fresh"
+        );
         app.flash = None;
         for chord in [ctrl('e'), cmd('e')] {
             app.flash = None;
@@ -4251,10 +4280,6 @@ mod tests {
                 .find(|l| l.contains("#39  Speed up the grid"))
                 .unwrap_or_default();
             assert!(row.contains("    merged      2d │"), "word, age: {row:?}");
-            assert!(
-                !view(&app).prefetch.holds(&url),
-                "a merged page is read when the cursor rests on it"
-            );
 
             let list = rows(&app, &project);
             let shown = |query: &str| -> Vec<u64> {
@@ -4627,11 +4652,13 @@ mod tests {
         }
     }
 
-    /// An instant `PR_DETAIL_FRESH` and a bit ago: a page read then has
+    /// An instant `pr_detail_fresh_for` and a bit ago: a page read then has
     /// aged out.
     fn aged() -> std::time::Instant {
         std::time::Instant::now()
-            .checked_sub(crate::event_loop::PR_DETAIL_FRESH + std::time::Duration::from_secs(1))
+            .checked_sub(
+                crate::event_loop::pr_detail_fresh_for() + std::time::Duration::from_secs(1),
+            )
             .expect("machine up for a minute")
     }
 
@@ -4640,12 +4667,8 @@ mod tests {
         app.pr_detail_at.insert(url(number), at);
     }
 
-    fn urls<'a>(due: impl IntoIterator<Item = &'a PendingPrDetail>) -> Vec<String> {
-        due.into_iter().map(|p| p.url.clone()).collect()
-    }
-
     /// A page read moments ago shows as it is; one read longer ago than
-    /// `PR_DETAIL_FRESH` is read again when the cursor rests on it — the
+    /// `pr_detail_fresh_for` is read again when the cursor rests on it — the
     /// Checks tab must not say `pending` until `⌘R` forces it.
     #[test]
     fn a_page_older_than_the_window_is_read_again_on_the_next_rest() {
@@ -4664,20 +4687,22 @@ mod tests {
         );
     }
 
-    /// The list's beat, landing while the cursor stays on a pull request,
-    /// reads its page again once that page has aged — checks running under
-    /// the reader catch up without a key.
+    /// A list landing while the cursor stays on a pull request asks for
+    /// nothing: its page is read again when its row moved (the landing
+    /// makes it stale) or, while its checks run, on THE RESOLVER's live
+    /// beat — never because a list landed.
     #[test]
-    fn the_lists_beat_reads_the_cursors_aged_page_again() {
+    fn a_list_landing_on_the_same_row_reads_nothing() {
         let (mut app, _) = app_with(vec![pr(42, "Fix login", false)], true);
         read_at(&mut app, 42, std::time::Instant::now());
         open(&mut app);
         list_changed(&mut app);
-        assert_eq!(pending_url(&app), None, "still fresh");
+        assert_eq!(pending_url(&app), None, "fresh");
+        assert_eq!(app.pr_detail_rest.as_deref(), Some(url(42).as_str()));
 
         app.pr_detail_at.insert(url(42), aged());
         list_changed(&mut app);
-        assert_eq!(pending_url(&app), Some(url(42).as_str()));
+        assert_eq!(pending_url(&app), None, "aged, but nothing moved");
     }
 
     /// A refusal is kept for the window — no hammering a `gh` that just
@@ -4692,67 +4717,25 @@ mod tests {
         assert!(app.pr_detail_owed(&url(42)));
     }
 
-    /// Opening the modal reads every one of your pull requests that isn't
-    /// fresh at once, up to `PREFETCH_PARALLEL` in flight, and the others
-    /// this session hasn't read one per `PREFETCH_GAP` behind them. Pages
-    /// already read — fresh, or someone else's however old — wait for the
-    /// cursor.
+    /// Opening the modal reads the cursor's page alone, once it rests —
+    /// none ahead of it, yours or anyone's: a page nobody rests on costs
+    /// nothing.
     #[test]
-    fn opening_reads_yours_at_once_and_the_rest_one_at_a_time() {
+    fn opening_reads_no_page_ahead_of_the_cursor() {
         let (mut app, _) = app_with(
             vec![
                 mine(50, "Mine, unread"),
-                mine(49, "Mine, aged"),
-                mine(48, "Mine, fresh"),
+                mine(49, "Mine, unread too"),
                 pr(47, "Theirs, unread", false),
-                pr(46, "Theirs, aged", false),
-                pr(45, "Theirs, unread too", false),
             ],
             true,
         );
-        read_at(&mut app, 49, aged());
-        read_at(&mut app, 48, std::time::Instant::now());
-        read_at(&mut app, 46, aged());
         open(&mut app);
-        let queue = &view(&app).prefetch;
-        assert_eq!(urls(&queue.soon), [url(50), url(49)]);
-        assert_eq!(urls(&queue.later), [url(47), url(45)]);
-        assert_eq!(prefetch_delay(&app), Some(std::time::Duration::ZERO));
-
-        let due = take_prefetch(&mut app);
-        assert_eq!(
-            urls(&due),
-            [url(50), url(49), url(47)],
-            "yours, then one of theirs"
-        );
-        for p in &due {
-            app.pr_detail_inflight
-                .begin(p.url.clone(), crate::fetch::now());
-        }
-        assert_eq!(
-            prefetch_delay(&app),
-            None,
-            "three in flight: wait for a landing"
-        );
-
-        app.pr_detail_inflight.clear();
-        let gap = prefetch_delay(&app).expect("one still queued");
-        assert!(gap > std::time::Duration::ZERO, "theirs wait out the gap");
-        assert!(take_prefetch(&mut app).is_empty(), "not before the gap");
-    }
-
-    /// A page the cursor read while it sat in the queue is dropped when
-    /// its turn comes, and closing the modal drops the queue with it.
-    #[test]
-    fn the_prefetch_skips_what_was_read_meanwhile_and_dies_with_the_modal() {
-        let (mut app, _) = app_with(vec![mine(50, "Mine"), mine(49, "Also mine")], true);
-        open(&mut app);
-        read_at(&mut app, 50, std::time::Instant::now());
-        assert_eq!(urls(&take_prefetch(&mut app)), [url(49)]);
-
-        open(&mut app);
-        close(&mut app);
-        assert_eq!(prefetch_delay(&app), None);
-        assert!(take_prefetch(&mut app).is_empty());
+        assert_eq!(pending_url(&app), Some(url(50).as_str()), "on its rest");
+        let pages: Vec<_> = crate::sync::spawn::step_remote(&mut app)
+            .into_iter()
+            .filter(|t| matches!(t.key, crate::sync::QueryKey::PrDetail(_)))
+            .collect();
+        assert!(pages.is_empty(), "nothing before the rest");
     }
 }

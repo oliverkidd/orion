@@ -15,7 +15,7 @@
 //!   up — so the board lists only the cards that are about no session
 //!   (`needs_you::factory`). A press in either place closes it in the
 //!   other.
-//! - **Never stale** ([`reconcile`], on every git tick): a card whose
+//! - **Never stale** ([`reconcile`], on every turn of the automations): a card whose
 //!   work moved on closes itself, on Slack too — its session at work
 //!   again after it was idle (you wrote to it, here or on the phone, or
 //!   the fixer did): "Picked up in orion"; the plan it was about answered
@@ -497,7 +497,8 @@ const RETIRED_NOTE: &str = "No longer needed";
 const EXPIRED: &str = "Expired";
 
 /// Close every open card to you whose work has moved on, here and on
-/// Slack — see the module's doc. Run on every git tick, once the tree
+/// Slack — see the module's doc. Run on every turn of the automations
+/// (the `Automations` CHORE), once the tree
 /// is in.
 pub(crate) fn reconcile(app: &mut App) {
     if app.tree.worktrees.is_empty() {

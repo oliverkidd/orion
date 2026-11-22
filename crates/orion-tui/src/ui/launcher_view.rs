@@ -658,15 +658,14 @@ fn tab_dots(tally: Tally, sweep: Option<usize>, th: Theme) -> Vec<Span<'static>>
 
 /// The ramp an unlit PROJECT TAB's name sweeps on: the red ONE-SHOT SWEEP
 /// for the few seconds after something there starts needing you or
-/// crashes, and otherwise the UNREAD SHIMMER for as long as a finish
-/// there is left unread — the tab is how a finish in a project you are
-/// not on gets noticed at all, so it keeps moving until you look. A
-/// project with neither holds still, running or not: work in progress is
-/// the spinner's to say.
+/// crashes, and otherwise the UNREAD SHIMMER for the few seconds after a
+/// finish there that nobody has read. After that the tab holds still,
+/// its done-colored `●` saying a finish waits. A project with neither
+/// holds still, running or not: work in progress is the spinner's to say.
 fn tab_ramp(tally: Tally, th: Theme) -> Option<[Color; 3]> {
     if tally.alarm {
         Some(th.err_sweep)
-    } else if tally.done > 0 {
+    } else if tally.fresh_done {
         Some(th.done_sweep)
     } else {
         None
@@ -2328,7 +2327,7 @@ fn session_look(app: &App, a: &orion_core::Agent, selected: bool, th: Theme) -> 
     } else {
         sweep_ramp(
             Some(a.status),
-            a.unseen,
+            crate::app::fresh_unread(a, crate::app::now_ms()),
             app.agent_fresh_alarm(a),
             th,
             app.animations,
@@ -4818,8 +4817,6 @@ mod tests {
                 }],
                 merged: Vec::new(),
                 at: now,
-                due: now,
-                step: std::time::Duration::ZERO,
             },
         );
         let th = app.theme;
@@ -5049,6 +5046,7 @@ mod tests {
         for a in &mut app.tree.agents {
             a.status = AgentStatus::Finished;
             a.unseen = true;
+            a.status_changed_at = crate::app::now_ms();
         }
         select(&mut app, "api");
         let busy = head_tabs(&mut app, r);
@@ -5072,8 +5070,9 @@ mod tests {
 
     /// A tab sweeps red only for the seconds after something there starts
     /// needing you (the one-shot), and otherwise shimmers in the done color
-    /// for as long as a finish there is unread; work in progress, and a
-    /// question already announced, hold still — the marks say those.
+    /// for the seconds after a finish there nobody has read; an older
+    /// unread finish, work in progress, and a question already announced
+    /// hold still — the marks say those.
     #[test]
     fn a_tab_sweeps_for_a_fresh_alarm_or_an_unread_finish_only() {
         let th = Theme::default();
@@ -5082,10 +5081,16 @@ mod tests {
             done,
             running,
             alarm,
+            fresh_done: done > 0,
             ..Tally::default()
         };
         assert_eq!(tab_ramp(tally(1, 3, 2, true), th), Some(th.err_sweep));
         assert_eq!(tab_ramp(tally(1, 3, 2, false), th), Some(th.done_sweep));
+        let settled = Tally {
+            fresh_done: false,
+            ..tally(0, 0, 2, false)
+        };
+        assert_eq!(tab_ramp(settled, th), None, "unread, but not news");
         assert_eq!(
             tab_ramp(tally(1, 3, 0, false), th),
             None,

@@ -800,8 +800,6 @@ mod tests {
                 merged: Vec::new(),
                 list: vec![pr(7, "Attach links", false), pr(9, "Still cooking", true)],
                 at: now,
-                due: now,
-                step: std::time::Duration::from_secs(1),
             },
         );
         let texts = |hide: bool| -> Vec<String> {
@@ -879,8 +877,6 @@ mod tests {
                     ),
                 ],
                 at: now,
-                due: now,
-                step: std::time::Duration::from_secs(1),
             },
         );
         let palette = Palette::new(&tree, &open_prs, &observed(&open_prs), false);
@@ -940,8 +936,6 @@ mod tests {
                     pr(9, "Number the lines", true),
                 ],
                 at: now,
-                due: now,
-                step: std::time::Duration::from_secs(1),
             },
         );
         let palette = Palette::new(&tree, &open_prs, &observed(&open_prs), false);

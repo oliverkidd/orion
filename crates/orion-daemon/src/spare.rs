@@ -1,9 +1,10 @@
-//! SPARE WORKTREES: the warm next worktree, one per project in use, so a
+//! SPARE WORKTREES: the warm next worktree of the project in use, so a
 //! launch into a new worktree starts at once.
 //!
 //! A CLI's working directory is fixed when it boots, and Claude ties its
 //! memory and transcripts to it, so nothing repo-agnostic can stand by.
-//! What can is a worktree: for every project used in the last day the
+//! What can is a worktree: for the project used most recently — one
+//! spare in all, each holding a CLI and a checkout's worth of setup — the
 //! DAEMON keeps one cut from the project's **Base branch**, its `.env`
 //! links made and its SETUP COMMAND run, with a `claude` booted in it on
 //! the `⌘N` account at that account's default model and effort, sitting at
@@ -26,11 +27,18 @@
 //! ([`Daemon::send_first_turn`]). A new spare is cut behind it. Any other
 //! launch is cut cold, as before.
 //!
-//! [`Daemon::tend_spares`], on its own tick, keeps the book: it cuts the
-//! spare a project in use lacks — one at a time, and none while another
-//! spare is still setting up — and takes away the spare of a project
-//! nobody has used for a day, one whose setup failed, and one whose
-//! checkout has gone. A CLI that died, or never said it had booted, is
+//! [`Daemon::tend_spares`], on its own tick, keeps the book: it picks the
+//! project the spare is for ([`spare_project`]: the one used most
+//! recently, kept on its holder until another has been the one in use for
+//! a while, so flitting between two projects doesn't cut and remove a
+//! spare at every switch), cuts that project's spare when it lacks one —
+//! none while another spare is still in the book or setting up — and
+//! takes away the spare of any other project, of a project nobody has
+//! used for a day, one whose setup failed, and one whose checkout has
+//! gone. A spare that went wrong waits before the next is cut, ten
+//! minutes doubling to a day while it keeps going wrong, or until the
+//! repo's HEAD moves ([`recut_wait`]) — a repo with no commits once cut
+//! and failed every ten minutes, forever. A CLI that died, or never said it had booted, is
 //! booted again a little later; one booted for another account is
 //! replaced. At boot ([`Daemon::sweep_spares_at_boot`]) a spare the last
 //! DAEMON left is kept when it finished setting up under the setup command
@@ -39,7 +47,11 @@
 //! and removed otherwise; so are spare branches no checkout holds and
 //! spare directories git no longer lists. Removing a project removes its
 //! spare. When the project's base moves — `origin` is fetched for it
-//! every few minutes — or its **Base branch** setting names another, the
+//! every half hour, or five minutes after a visit to the project, and
+//! never while you are away ([`fetch_due_at`]), a fetch anyone else made
+//! in the repo meanwhile (the TUI's BASE SYNC) counting as its own
+//! ([`fetch_head_at`]) — or its **Base branch**
+//! setting names another, the
 //! spare is reset to the new base (`git reset --hard`: nothing in it is
 //! anyone's) and its CLI booted again. Only a spare still in the book is
 //! ever reset, and only while it is still on its own branch: a taken one
@@ -62,10 +74,15 @@ use std::time::{Duration, Instant};
 
 /// How long a project goes unused before its spare is taken away.
 const IDLE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long another project must have been the one in use, past the
+/// spare's holder, before the spare moves to it ([`spare_project`]).
+const SWITCH_AFTER: Duration = Duration::from_secs(30 * 60);
 /// How long after a spare went wrong — its cut or its setup failed — the
 /// project waits for the next one, so a setup that always fails is not
-/// run again on every tick.
+/// run again on every tick; doubled for each time in a row it went wrong,
+/// up to [`RECUT_MAX`] ([`recut_wait`]).
 const RECUT_AFTER: Duration = Duration::from_secs(10 * 60);
+const RECUT_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long after a spare's CLI died, or never booted, it waits to be
 /// booted again.
 const REBOOT_AFTER: Duration = Duration::from_secs(2 * 60);
@@ -88,8 +105,11 @@ const HELD_LIMIT: Duration = Duration::from_secs(2 * 60);
 /// not crowd the launch that just started.
 const RECUT_DELAY: Duration = Duration::from_secs(2);
 /// How often a project with a spare has `origin` fetched, to see whether
-/// its base has moved.
-const FETCH_EVERY: Duration = Duration::from_secs(5 * 60);
+/// its base has moved…
+const FETCH_EVERY: Duration = Duration::from_secs(30 * 60);
+/// …or, once the project has been visited since the last fetch (an
+/// attach there), how soon after that fetch.
+const VISIT_FETCH_AFTER: Duration = Duration::from_secs(5 * 60);
 
 /// The DAEMON's SPARE WORKTREES, and what it keeps to tend them.
 #[derive(Default)]
@@ -106,25 +126,43 @@ impl Book {
     }
 
     /// Take project `project`'s spare out of the book, nothing of it left
-    /// behind. `recut`: it went wrong, and the next waits [`RECUT_AFTER`].
+    /// behind. `recut`: it went wrong, and the next waits ([`recut_wait`]).
     fn take_out(&mut self, project: &ProjectId, recut: bool) -> Option<Spare> {
         let spare = self.spares.remove(project);
         if let Some(cli) = spare.as_ref().and_then(|s| s.cli.as_ref()) {
             self.boots.remove(&cli.agent.id);
         }
         self.fetched_at.remove(project);
-        if recut {
-            self.recut_at
-                .insert(project.clone(), Instant::now() + RECUT_AFTER);
+        if let (true, Some(spare)) = (recut, &spare) {
+            self.went_wrong(project, &spare.repo);
         }
         spare
+    }
+
+    /// Project `project`'s spare went wrong (its cut, or its setup): the
+    /// next waits [`recut_wait`] for how many times in a row it has, or
+    /// until the HEAD of `repo` moves. That wait.
+    fn went_wrong(&mut self, project: &ProjectId, repo: &Path) -> Duration {
+        let fails = self.recut.get(project).map_or(0, |r| r.fails) + 1;
+        let wait = recut_wait(fails);
+        self.recut.insert(
+            project.clone(),
+            Recut {
+                fails,
+                at: Instant::now() + wait,
+                head: head_fingerprint(repo),
+            },
+        );
+        wait
     }
 
     /// Forget all the book keeps of project `project`, which has gone.
     fn forget_project(&mut self, project: &ProjectId) {
         self.used.remove(project);
-        self.recut_at.remove(project);
+        self.recut.remove(project);
         self.fetched_at.remove(project);
+        self.visited.remove(project);
+        self.wake_cli.remove(project);
     }
 }
 
@@ -144,10 +182,23 @@ struct Book {
     /// When each project was last used here, epoch ms, beside what the
     /// store's agent rows say ([`Daemon::last_used`]).
     used: HashMap<ProjectId, i64>,
-    /// No spare is cut for these projects before then.
-    recut_at: HashMap<ProjectId, Instant>,
+    /// Projects whose last spare went wrong, and when the next may be cut.
+    recut: HashMap<ProjectId, Recut>,
     /// When `origin` was last fetched for each project's spare.
     fetched_at: HashMap<ProjectId, Instant>,
+    /// Projects visited (an attach there) since their last fetch.
+    visited: HashSet<ProjectId>,
+    /// Projects visited since their spare last booted a CLI: on battery,
+    /// only these get one ([`cli_may_start`]).
+    wake_cli: HashSet<ProjectId>,
+}
+
+/// A project's spare that went wrong, `fails` times in a row: none is cut
+/// before `at`, unless the repo's HEAD has moved off `head` meanwhile.
+struct Recut {
+    fails: u32,
+    at: Instant,
+    head: Option<String>,
 }
 
 struct Spare {
@@ -229,6 +280,19 @@ impl Boot {
     }
 }
 
+/// What one tick knows that every project's look shares.
+#[derive(Clone, Copy)]
+struct TendTick<'a> {
+    /// This project is the one the spare is for.
+    wanted: bool,
+    /// What `⌘N` launches now: what a spare's CLI boots as.
+    launch: Option<&'a LaunchSpec>,
+    /// A spare was cut this tick already.
+    cut_this_tick: bool,
+    /// The Mac runs on its battery (`power`).
+    on_battery: bool,
+}
+
 /// What a tick does about one project's spare.
 enum Tend {
     Cut,
@@ -272,19 +336,22 @@ impl SpareBook {
     }
 
     /// Whether project `project`'s spare is due a look at its base, and if
-    /// so whether `origin` is due a fetch for it; None when it has no
-    /// spare.
-    fn fetch_due(&self, project: &ProjectId) -> Option<bool> {
+    /// so whether `origin` is due a fetch for it ([`fetch_due_at`]); None
+    /// when it has no spare.
+    fn fetch_due(&self, project: &ProjectId, away: bool) -> Option<bool> {
         let mut book = self.book.lock().unwrap();
-        if !book.spares.contains_key(project) {
-            return None;
-        }
-        let due = book
-            .fetched_at
-            .get(project)
-            .is_none_or(|at| at.elapsed() >= FETCH_EVERY);
+        let repo = book.spares.get(project)?.repo.clone();
+        let now = Instant::now();
+        let ours = book.fetched_at.get(project).copied();
+        let due = fetch_due_at(
+            ours.max(fetch_head_at(&repo, now)),
+            book.visited.contains(project),
+            away,
+            now,
+        );
         if due {
-            book.fetched_at.insert(project.clone(), Instant::now());
+            book.fetched_at.insert(project.clone(), now);
+            book.visited.remove(project);
         }
         Some(due)
     }
@@ -304,6 +371,17 @@ impl SpareBook {
         let mut book = self.book.lock().unwrap();
         let stamp = book.used.entry(project.clone()).or_insert(at);
         *stamp = (*stamp).max(at);
+        book.visited.insert(project.clone());
+        book.wake_cli.insert(project.clone());
+    }
+
+    /// Whether project `project`'s spare may start a CLI now
+    /// ([`cli_may_start`]).
+    fn cli_allowed(&self, project: &ProjectId, on_battery: bool) -> bool {
+        cli_may_start(
+            on_battery,
+            self.book.lock().unwrap().wake_cli.contains(project),
+        )
     }
 
     /// A `SessionStart` from agent `id`: a spare CLI's says it is up.
@@ -334,7 +412,11 @@ impl SpareBook {
                 return true;
             }
             spare.setup = Setup::Done;
-            (spare.worktree.path.clone(), spare.setup_command.clone())
+            let done = (spare.worktree.path.clone(), spare.setup_command.clone());
+            // Set up: the project's run of failures is over.
+            let project = spare.worktree.project_id.clone();
+            book.recut.remove(&project);
+            done
         };
         mark_set_up(&done.0, done.1.as_deref());
         true
@@ -650,15 +732,33 @@ impl Daemon {
             .used
             .retain(|id, _| projects.iter().any(|p| &p.id == id));
         self.drop_held_in(&[]);
+        let holders: Vec<ProjectId> = self
+            .spares
+            .book
+            .lock()
+            .unwrap()
+            .spares
+            .keys()
+            .cloned()
+            .collect();
+        let chosen =
+            self.chosen_spare_project(launch.as_ref(), (&projects, &worktrees, &agents), &holders);
+        let away = self.away.is_away();
+        let on_battery = crate::power::on_battery();
         let mut cut_this_tick = false;
         for project in &projects {
-            let used = self.last_used(project, &worktrees, &agents);
-            let wanted = launch.is_some() && used_lately(used);
-            let base = match self.spares.fetch_due(&project.id) {
+            let wanted = chosen.as_ref() == Some(&project.id);
+            let base = match self.spares.fetch_due(&project.id, away) {
                 Some(fetch) if wanted => spare_base(&project.repo_path, config, fetch).await,
                 _ => None,
             };
-            match self.what_to_tend(project, wanted, launch.as_ref(), cut_this_tick, base) {
+            let tick = TendTick {
+                wanted,
+                launch: launch.as_ref(),
+                cut_this_tick,
+                on_battery,
+            };
+            match self.what_to_tend(project, tick, base) {
                 Some(Tend::Cut) => {
                     cut_this_tick = true;
                     self.cut_spare(project, config).await;
@@ -673,6 +773,23 @@ impl Daemon {
                 None => {}
             }
         }
+    }
+
+    /// The project the spare is for now ([`spare_project`]), with
+    /// `holders` holding one: None when there is no spare to launch
+    /// (`launch`), or no project of `tree` has been used lately.
+    fn chosen_spare_project(
+        &self,
+        launch: Option<&LaunchSpec>,
+        (projects, worktrees, agents): (&[Project], &[Worktree], &[Agent]),
+        holders: &[ProjectId],
+    ) -> Option<ProjectId> {
+        launch?;
+        let used: Vec<(ProjectId, i64)> = projects
+            .iter()
+            .map(|p| (p.id.clone(), self.last_used(p, worktrees, agents)))
+            .collect();
+        spare_project(&used, holders, orion_core::clock::now_ms())
     }
 
     /// When project `project` was last used, epoch ms: a create or an
@@ -705,31 +822,28 @@ impl Daemon {
     /// What this tick does for `project`: nothing while something is
     /// already under way for it. `cut_this_tick`: a spare was cut this tick.
     /// `base`: where its spare would be cut from now, when it has one.
-    fn what_to_tend(
-        &self,
-        project: &Project,
-        wanted: bool,
-        launch: Option<&LaunchSpec>,
-        cut_this_tick: bool,
-        base: Option<Base>,
-    ) -> Option<Tend> {
+    fn what_to_tend(&self, project: &Project, tick: TendTick, base: Option<Base>) -> Option<Tend> {
+        let TendTick {
+            wanted,
+            launch,
+            cut_this_tick,
+            on_battery,
+        } = tick;
         let mut guard = self.spares.book.lock().unwrap();
         let book = &mut *guard;
         if book.busy.contains(&project.id) {
             return None;
         }
         let Some(spare) = book.spares.get_mut(&project.id) else {
-            // One cut a tick, and none while another spare's setup runs
-            // ([`Daemon::cut_spare`]).
-            let due = match book.recut_at.get(&project.id) {
-                Some(at) if Instant::now() < *at => false,
-                Some(_) => {
-                    book.recut_at.remove(&project.id);
-                    true
-                }
-                None => true,
-            };
-            return (wanted && due && !cut_this_tick && !book.setting_up()).then_some(Tend::Cut);
+            // One cut a tick, none while another spare is in the book (it
+            // goes first: one spare in all) or setting up
+            // ([`Daemon::cut_spare`]), and none while a last one that went
+            // wrong is still waiting.
+            let due = book.recut.get(&project.id).is_none_or(|r| {
+                Instant::now() >= r.at || head_fingerprint(&project.repo_path) != r.head
+            });
+            let clear = book.spares.is_empty() && !book.setting_up();
+            return (wanted && due && !cut_this_tick && clear).then_some(Tend::Cut);
         };
         if !wanted {
             return Some(Tend::Remove { recut: false });
@@ -755,7 +869,13 @@ impl Daemon {
             spare.reboot_at = Some(Instant::now() + REBOOT_AFTER);
         }
         let reboot_due = spare.reboot_at.is_none_or(|at| Instant::now() >= at);
-        let tend = (spare.cli.is_none() && reboot_due).then_some(Tend::BootCli);
+        // On battery a CLI waits for a visit to the project; one running
+        // has had the visit it needed.
+        if spare.cli.is_some() {
+            book.wake_cli.remove(&project.id);
+        }
+        let may_start = cli_may_start(on_battery, book.wake_cli.contains(&project.id));
+        let tend = (spare.cli.is_none() && reboot_due && may_start).then_some(Tend::BootCli);
         if let Some(cli) = stale {
             book.boots.remove(&cli.agent.id);
             drop(guard);
@@ -766,7 +886,7 @@ impl Daemon {
 
     /// Cut project `project` a spare: its base fetched, the worktree
     /// added, its `.env` links made, its setup and its CLI started. A cut
-    /// that fails is logged, and the project waits [`RECUT_AFTER`].
+    /// that fails is logged, and the project waits ([`recut_wait`]).
     pub(crate) async fn cut_spare(self: &Arc<Self>, project: &Project, config: &Config) {
         let Some(launch) = config.spare_launch() else {
             return;
@@ -797,12 +917,22 @@ impl Daemon {
                 }
                 // The cut fetched: the next look at its base need not.
                 book.fetched_at.insert(project.id.clone(), Instant::now());
+                book.visited.remove(&project.id);
+                // Set up already (no setup command): its run of failures
+                // is over. A setup still running says so as it ends.
+                if matches!(spare.setup, Setup::None | Setup::Done) {
+                    book.recut.remove(&project.id);
+                }
                 book.spares.insert(project.id.clone(), spare);
             }
             Err(e) => {
-                tracing::warn!(project = %project.name, error = %e, "couldn't cut a spare worktree");
-                book.recut_at
-                    .insert(project.id.clone(), Instant::now() + RECUT_AFTER);
+                let wait = book.went_wrong(&project.id, &project.repo_path);
+                tracing::warn!(
+                    project = %project.name,
+                    error = %e,
+                    retry_mins = wait.as_secs() / 60,
+                    "couldn't cut a spare worktree"
+                );
             }
         }
     }
@@ -861,8 +991,15 @@ impl Daemon {
             },
             None => mark_set_up(&spare.worktree.path, None),
         }
-        spare.cli = self.spawn_spare_cli(&spare.worktree, &spare.launch).await;
-        spare.reboot_at = spare.cli.is_none().then(|| Instant::now() + REBOOT_AFTER);
+        // On battery the checkout is cut and set up, and its CLI waits for
+        // a visit to the project (the tick boots it then).
+        if self
+            .spares
+            .cli_allowed(&project.id, crate::power::on_battery())
+        {
+            spare.cli = self.spawn_spare_cli(&spare.worktree, &spare.launch).await;
+            spare.reboot_at = spare.cli.is_none().then(|| Instant::now() + REBOOT_AFTER);
+        }
         Ok(spare)
     }
 
@@ -948,6 +1085,7 @@ impl Daemon {
         if let Some(cli) = cli {
             book.boots.insert(cli.agent.id.clone(), cli.boot.clone());
             book.spares.get_mut(project).expect("still there").cli = Some(cli);
+            book.wake_cli.remove(project);
         }
     }
 
@@ -1013,13 +1151,15 @@ impl Daemon {
             self.kill_session(&SessionRef::Agent(cli.agent.id));
         }
         // Booted as it was before; a `⌘N` that moved meanwhile is the next
-        // tick's to replace.
-        self.boot_spare_cli(project, &launch).await;
+        // tick's to replace. On battery it waits for a visit, as any does.
+        if self.spares.cli_allowed(project, crate::power::on_battery()) {
+            self.boot_spare_cli(project, &launch).await;
+        }
     }
 
     /// Take project `project`'s spare off the disk — its PTYs killed, its
     /// checkout and branch removed. `recut`: it went wrong, and the next
-    /// one waits [`RECUT_AFTER`].
+    /// one waits ([`recut_wait`]).
     pub(crate) async fn remove_spare(self: &Arc<Self>, project: &ProjectId, recut: bool) {
         let spare = {
             let mut book = self.spares.book.lock().unwrap();
@@ -1062,13 +1202,16 @@ impl Daemon {
             return;
         };
         let launch = config.spare_launch();
+        // One spare in all: the boot keeps at most the one for the project
+        // in use, as the tick would.
+        let chosen =
+            self.chosen_spare_project(launch.as_ref(), (&projects, &worktrees, &agents), &[]);
         for project in &projects {
             let repo = &project.repo_path;
             let Ok(found) = git::list_spare_worktrees(repo).await else {
                 continue;
             };
-            let wanted =
-                launch.is_some() && used_lately(self.last_used(project, &worktrees, &agents));
+            let wanted = chosen.as_ref() == Some(&project.id);
             let command = config.setup_command(repo);
             let mut kept = None;
             for entry in &found {
@@ -1250,9 +1393,107 @@ fn set_up_with(checkout: &Path) -> Option<String> {
     std::fs::read_to_string(set_up_mark(checkout)?).ok()
 }
 
-/// Whether a project last used at `used` (epoch ms) still has a spare.
-fn used_lately(used: i64) -> bool {
-    orion_core::clock::now_ms() - used < IDLE_AFTER.as_millis() as i64
+/// Whether a project last used at `used` (epoch ms) may still have a
+/// spare at `now_ms`.
+fn used_lately_at(used: i64, now_ms: i64) -> bool {
+    now_ms - used < IDLE_AFTER.as_millis() as i64
+}
+
+/// The one project that has the spare at `now_ms`, from when each was last
+/// used (epoch ms) and the projects holding a spare now: the one used most
+/// recently in the last day — but a holder used in the last day keeps it
+/// until another has been in use [`SWITCH_AFTER`] longer, so moving back
+/// and forth between two projects doesn't cut and remove a spare (a
+/// checkout, its setup, a CLI) at every switch. None when no project has
+/// been used in the last day.
+fn spare_project(
+    used: &[(ProjectId, i64)],
+    holders: &[ProjectId],
+    now_ms: i64,
+) -> Option<ProjectId> {
+    let lately = |at: i64| used_lately_at(at, now_ms);
+    let newest = used
+        .iter()
+        .filter(|(_, at)| lately(*at))
+        .max_by_key(|(_, at)| *at)?;
+    let switch_after = SWITCH_AFTER.as_millis() as i64;
+    let holder = used
+        .iter()
+        .filter(|(id, at)| holders.contains(id) && lately(*at))
+        .max_by_key(|(_, at)| *at);
+    match holder {
+        Some((id, at)) if newest.1 - at < switch_after => Some(id.clone()),
+        _ => Some(newest.0.clone()),
+    }
+}
+
+/// Whether a spare may start its CLI: on AC, yes; on battery, only once
+/// its project has been `visited` (an attach there) since its last CLI —
+/// the checkout stays cut and set up meanwhile, and a launch that takes it
+/// boots its own CLI cold.
+fn cli_may_start(on_battery: bool, visited: bool) -> bool {
+    !on_battery || visited
+}
+
+/// The wait before the next spare is cut after the last went wrong
+/// `fails` times in a row: [`RECUT_AFTER`], doubling each time, at most
+/// [`RECUT_MAX`].
+fn recut_wait(fails: u32) -> Duration {
+    orion_core::backoff::doubling(RECUT_AFTER, RECUT_MAX, fails)
+}
+
+/// Whether a spare's `origin` is due a fetch at `now`, last fetched at
+/// `fetched_at` (None: never), with the project `visited` since: every
+/// [`FETCH_EVERY`], or [`VISIT_FETCH_AFTER`] once visited — never while
+/// you are `away`, when nothing will be launched from it.
+fn fetch_due_at(fetched_at: Option<Instant>, visited: bool, away: bool, now: Instant) -> bool {
+    if away {
+        return false;
+    }
+    let Some(at) = fetched_at else {
+        return true;
+    };
+    let age = now.saturating_duration_since(at);
+    age >= FETCH_EVERY || (visited && age >= VISIT_FETCH_AFTER)
+}
+
+/// When the repo at `repo` last fetched, by anyone: its `FETCH_HEAD`'s
+/// mtime, as an [`Instant`] against `now`. One fetch clock per repo, so a
+/// fetch the TUI's BASE SYNC or a terminal just made spares the spare its
+/// own. None with no such file, or one stamped in the future.
+fn fetch_head_at(repo: &Path, now: Instant) -> Option<Instant> {
+    let head = crate::git_common_dir(repo)?.join("FETCH_HEAD");
+    let written = std::fs::metadata(head).ok()?.modified().ok()?;
+    let age = std::time::SystemTime::now().duration_since(written).ok()?;
+    now.checked_sub(age)
+}
+
+/// What the repo at `repo` has checked out, read off its git files (no
+/// `git` run, as this is asked every tick a project waits): `HEAD`, and
+/// the commit its branch is at — loose or packed — or nothing for a
+/// branch with no commits yet. A spare cut that failed is tried again when
+/// this changes: a first commit, a pull, a switch of branch.
+fn head_fingerprint(repo: &Path) -> Option<String> {
+    let git_dir = crate::git_common_dir(repo)?;
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let Some(branch) = head.strip_prefix("ref:").map(str::trim) else {
+        return Some(head.to_string());
+    };
+    let loose = std::fs::read_to_string(git_dir.join(branch))
+        .ok()
+        .map(|sha| sha.trim().to_string());
+    let packed = || {
+        std::fs::read_to_string(git_dir.join("packed-refs"))
+            .ok()?
+            .lines()
+            .find_map(|line| {
+                let (sha, name) = line.split_once(' ')?;
+                (name.trim() == branch).then(|| sha.to_string())
+            })
+    };
+    let sha = loose.or_else(packed).unwrap_or_default();
+    Some(format!("{branch} {sha}"))
 }
 
 /// The base a spare of the project at `repo` starts from: the ref a cold
@@ -1288,6 +1529,176 @@ mod tests {
             "projects": { repo.display().to_string(): rows },
         }))
         .unwrap()
+    }
+
+    fn pid(name: &str) -> ProjectId {
+        ProjectId(name.into())
+    }
+
+    const MIN: i64 = 60_000;
+
+    /// One spare in all: for the project used most recently, kept on its
+    /// holder until another has been the one in use half an hour longer.
+    #[test]
+    fn the_spare_is_the_most_recent_projects_and_sticks_to_its_holder() {
+        let now = 10 * 24 * 60 * MIN;
+        let used = [(pid("a"), now - 50 * MIN), (pid("b"), now - 5 * MIN)];
+        assert_eq!(spare_project(&used, &[], now), Some(pid("b")), "newest");
+        assert_eq!(
+            spare_project(&used, &[pid("a")], now),
+            Some(pid("b")),
+            "b in use 45 minutes past a's holder: it moves"
+        );
+        let close = [(pid("a"), now - 20 * MIN), (pid("b"), now - MIN)];
+        assert_eq!(
+            spare_project(&close, &[pid("a")], now),
+            Some(pid("a")),
+            "a switch back and forth leaves it where it is"
+        );
+        let stale = [
+            (pid("a"), now - 25 * 60 * MIN),
+            (pid("b"), now - 26 * 60 * MIN),
+        ];
+        assert_eq!(
+            spare_project(&stale, &[pid("a")], now),
+            None,
+            "a day unused"
+        );
+        let holder_stale = [(pid("a"), now - 25 * 60 * MIN), (pid("b"), now - MIN)];
+        assert_eq!(
+            spare_project(&holder_stale, &[pid("a")], now),
+            Some(pid("b"))
+        );
+    }
+
+    #[test]
+    fn on_battery_a_spare_cli_waits_for_a_visit_to_its_project() {
+        assert!(cli_may_start(false, false), "on AC: always");
+        assert!(!cli_may_start(true, false), "on battery: not unvisited");
+        assert!(cli_may_start(true, true), "on battery: once visited");
+        let book = SpareBook::default();
+        let p = pid("p");
+        assert!(!book.cli_allowed(&p, true));
+        book.note_used(&p);
+        assert!(book.cli_allowed(&p, true), "an attach there wakes it");
+    }
+
+    #[test]
+    fn a_spare_that_keeps_going_wrong_waits_ten_minutes_doubling_to_a_day() {
+        let mins = |n: u64| Duration::from_secs(n * 60);
+        assert_eq!(recut_wait(1), mins(10));
+        assert_eq!(recut_wait(2), mins(20));
+        assert_eq!(recut_wait(3), mins(40));
+        assert_eq!(recut_wait(8), mins(1280));
+        assert_eq!(recut_wait(9), RECUT_MAX);
+        assert_eq!(recut_wait(u32::MAX), RECUT_MAX);
+    }
+
+    #[test]
+    fn origin_is_fetched_half_hourly_or_soon_after_a_visit_and_never_away() {
+        let now = Instant::now() + Duration::from_secs(3600);
+        let ago = |m: u64| Some(now - Duration::from_secs(m * 60));
+        assert!(fetch_due_at(None, false, false, now), "never fetched");
+        assert!(!fetch_due_at(ago(10), false, false, now));
+        assert!(fetch_due_at(ago(30), false, false, now));
+        assert!(fetch_due_at(ago(6), true, false, now), "visited");
+        assert!(!fetch_due_at(ago(2), true, false, now), "just fetched");
+        assert!(!fetch_due_at(None, true, true, now), "away");
+        assert!(!fetch_due_at(ago(600), false, true, now), "away");
+    }
+
+    /// A fetch anyone made in the repo — its `FETCH_HEAD` — counts toward
+    /// the spare's clock: one just made holds the spare's own off, one
+    /// older than the window doesn't.
+    #[test]
+    fn a_fetch_made_elsewhere_spares_the_spare_its_own() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git_in(&repo, &["init", "-q", "-b", "main"]);
+        let now = Instant::now();
+        assert_eq!(fetch_head_at(&repo, now), None, "never fetched");
+        let head = repo.join(".git/FETCH_HEAD");
+        std::fs::write(&head, "").unwrap();
+        let just = fetch_head_at(&repo, now).expect("fetched");
+        assert!(!fetch_due_at(Some(just), true, false, now), "just fetched");
+        let old = std::time::SystemTime::now() - FETCH_EVERY - Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&head)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let then = fetch_head_at(&repo, now);
+        assert!(fetch_due_at(then, false, false, now), "past the window");
+        assert!(
+            !fetch_due_at(then.max(Some(now)), false, false, now),
+            "the later of the two clocks counts"
+        );
+    }
+
+    /// A failed cut is tried again when the repo's HEAD moves: an empty
+    /// repo's first commit, a branch switch.
+    #[test]
+    fn the_head_fingerprint_moves_with_a_commit_and_a_switch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("empty");
+        std::fs::create_dir(&repo).unwrap();
+        git_in(&repo, &["init", "-q", "-b", "main"]);
+        let unborn = head_fingerprint(&repo).expect("a repo");
+        assert_eq!(unborn, "refs/heads/main ");
+        git_in(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        let first = head_fingerprint(&repo).unwrap();
+        assert_ne!(first, unborn);
+        git_in(&repo, &["pack-refs", "--all"]);
+        assert_eq!(
+            head_fingerprint(&repo).unwrap(),
+            first,
+            "packed reads the same"
+        );
+        git_in(&repo, &["checkout", "-q", "-b", "other"]);
+        assert_ne!(head_fingerprint(&repo).unwrap(), first);
+        assert_eq!(head_fingerprint(&tmp.path().join("nothing")), None);
+    }
+
+    /// One spare in all: a second project in use gets none while the
+    /// first holds it.
+    #[tokio::test]
+    async fn only_the_project_in_use_has_a_spare() {
+        let daemon = test_daemon();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("a")).unwrap();
+        std::fs::create_dir(tmp.path().join("b")).unwrap();
+        let repo_a = init_repo(&tmp.path().join("a"));
+        let repo_b = init_repo(&tmp.path().join("b"));
+        let a = project_at(&daemon, &repo_a);
+        let b = Project {
+            id: pid("b"),
+            name: "b".into(),
+            repo_path: repo_b.clone(),
+            sort_order: 1,
+        };
+        daemon.store.insert_project(&b).unwrap();
+        crate::registry::tests::seed_worktree(
+            &daemon,
+            "b",
+            "rt-b",
+            &repo_b.to_string_lossy(),
+            true,
+        );
+        let _cmd = EnvGuard::set(env::AGENT_CMD, "/bin/cat");
+        let cfg: Config =
+            serde_json::from_value(serde_json::json!({ "claude_enabled": true })).unwrap();
+        daemon
+            .spares
+            .note_used_at(&a.id, orion_core::clock::now_ms() - 60_000);
+        daemon.spares.note_used(&b.id);
+        for _ in 0..3 {
+            daemon.tend_spares_with(&cfg).await;
+        }
+        assert!(daemon.spare_of(&b.id).is_some(), "the newest has it");
+        assert!(daemon.spare_of(&a.id).is_none(), "and no other");
+        daemon.kill_all();
     }
 
     /// `git worktree list --porcelain` as git says it, spares and all.

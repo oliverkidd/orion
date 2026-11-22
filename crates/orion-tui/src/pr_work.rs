@@ -397,8 +397,6 @@ mod tests {
                     meta: Default::default(),
                 }],
                 at: now,
-                due: now + std::time::Duration::from_secs(60),
-                step: std::time::Duration::from_secs(60),
             },
         );
         app

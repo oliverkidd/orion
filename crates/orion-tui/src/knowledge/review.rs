@@ -242,6 +242,38 @@ static REFRESHED: Mutex<Option<Vec<ProjectPending>>> = Mutex::new(None);
 /// Whether a refresh is on its way.
 static REFRESHING: AtomicBool = AtomicBool::new(false);
 
+/// How long the pending review goes without being worked out again when
+/// nothing has asked for it: the backstop for a change nothing here saw
+/// (a teammate's merge landing on the base).
+pub(crate) const REFRESH_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Something moved what the review waits on — a harvest committed, a
+/// sign-off, the base fetched, the review opened — so the next beat works
+/// it out again ([`refresh_due`]).
+static REFRESH_WANTED: AtomicBool = AtomicBool::new(true);
+
+/// When the last refresh was started.
+static REFRESHED_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+/// Ask for the pending review to be worked out again on the next beat.
+pub(crate) fn want_refresh() {
+    REFRESH_WANTED.store(true, Ordering::SeqCst);
+}
+
+/// Whether the beat should refresh now: asked for since the last one, or
+/// [`REFRESH_BACKSTOP`] since it. Taking it resets both. It used to run on
+/// every 30 s beat for every project — a `gh pr list` and a handful of
+/// `git rev-parse` each time.
+pub(crate) fn refresh_due(now: std::time::Instant) -> bool {
+    let mut at = REFRESHED_AT.lock().unwrap_or_else(|e| e.into_inner());
+    let wanted = REFRESH_WANTED.swap(false, Ordering::SeqCst);
+    let due = wanted || at.is_none_or(|at| now.saturating_duration_since(at) >= REFRESH_BACKSTOP);
+    if due {
+        *at = Some(now);
+    }
+    due
+}
+
 /// Work out every project's pending review off the loop — one refresh at
 /// a time — for [`take_refreshed`]. `signed` forgets what has reached the
 /// base as it goes.
@@ -287,6 +319,7 @@ pub(crate) fn refresh(projects: Vec<(String, String, PathBuf)>) {
         }
         *REFRESHED.lock().unwrap_or_else(|e| e.into_inner()) = Some(out);
         REFRESHING.store(false, Ordering::SeqCst);
+        crate::chores::wake(crate::chores::Chore::Knowledge);
     });
 }
 
@@ -304,6 +337,7 @@ fn say(ok: bool, text: impl Into<String>) {
     SAID.lock()
         .unwrap_or_else(|e| e.into_inner())
         .push((ok, text.into()));
+    crate::chores::wake(crate::chores::Chore::Knowledge);
 }
 
 /// Post what the background said: its last failure if any went wrong,
@@ -361,7 +395,10 @@ pub(crate) fn sign_off(all: Vec<SignOff>) {
     for one in all {
         let key = one.id.clone();
         spawn_once(&SIGNING, &key, async move {
-            match run_sign_off(&one).await {
+            let result = run_sign_off(&one).await;
+            // Signed or not, what waits may have moved.
+            want_refresh();
+            match result {
                 Ok(line) => {
                     crate::rule_review::clear_draft(&one.id);
                     say(true, line)
@@ -955,6 +992,14 @@ pub(crate) fn start_docs_merge(
                     s.docs_pr = None;
                 }),
                 Ok(Merge::Waiting(_)) | Ok(Merge::Conflicting) => {}
+                // GitHub's limit is no failure of the merge: it goes again
+                // once the limit resets.
+                Err(why) if runner::rate_limited(&why) => {
+                    tracing::info!(
+                        "knowledge: agent docs #{} waits for GitHub's limit",
+                        docs.pr.number
+                    );
+                }
                 Err(why) => {
                     let gave_up = State::update(&local, |s| {
                         let Some(d) = s.docs_pr.as_mut() else {

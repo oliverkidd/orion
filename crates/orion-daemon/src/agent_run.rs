@@ -37,6 +37,9 @@ impl Daemon {
     ) -> Result<Option<StackStatus>> {
         let agent = self.store.get_agent(id)?.context("agent not found")?;
         let worktree = agent.worktree_id;
+        // An agent at work on the stack is the checkout in use: its IDLE
+        // STACK STOP waits.
+        self.stacks.note_activity(&worktree);
         match action {
             AgentRunAction::Start(command) => self.start_run(&worktree, Some(command)).map(drop)?,
             AgentRunAction::Stop => self.stop_run(&worktree)?,

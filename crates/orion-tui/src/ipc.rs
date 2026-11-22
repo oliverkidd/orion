@@ -71,11 +71,39 @@ fn spawn_daemon() -> Result<()> {
     // shell (CLI probes, login-shell agent wrap), and an interactive zsh that
     // can reach a tty via /dev/tty grabs its foreground process group —
     // SIGTTIN-stopping the TUI running on this terminal mid-frame.
+    //
+    // And never this client's child: started from a child of its own that
+    // exits at once (the classic double fork), so the daemon belongs to
+    // launchd. A daemon this process had started would, once it ended —
+    // `⌘⇧R`, an upgrade that restarts it, `orion kill` — sit as a zombie
+    // of the TUI for as long as the TUI lived, and the TUI lives through
+    // those: **Restart orion** and an upgrade exec over the same process,
+    // which keeps every unreaped child it had. Only the go-between is
+    // ours, and it is reaped here.
     unsafe {
-        cmd.pre_exec(own_session);
+        cmd.pre_exec(|| {
+            own_session()?;
+            leave_parent()
+        });
     }
-    cmd.spawn().context("spawn orion daemon")?;
+    let mut go_between = cmd.spawn().context("spawn orion daemon")?;
+    let _ = go_between.wait();
     Ok(())
+}
+
+/// `pre_exec` hook that forks once more and lets the parent go: the
+/// child carries on into the exec with launchd as its parent, and the
+/// process that spawned it reaps only the go-between, which exits here.
+fn leave_parent() -> std::io::Result<()> {
+    extern "C" {
+        fn fork() -> i32;
+        fn _exit(status: i32) -> !;
+    }
+    match unsafe { fork() } {
+        -1 => Err(std::io::Error::last_os_error()),
+        0 => Ok(()),
+        _ => unsafe { _exit(0) },
+    }
 }
 
 /// `pre_exec` hook putting the child in a session of its own (`setsid`).

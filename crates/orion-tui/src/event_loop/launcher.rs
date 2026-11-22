@@ -2816,11 +2816,11 @@ fn pick(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::handle_terminal_event;
     use super::super::tests::{
-        buffer_text, hse, pick_fresh_worktree, seed_open_prs, seed_tree, with_config_json,
-        with_default_config,
+        buffer_text, fetched_now, hse, pick_fresh_worktree, seed_open_prs, seed_tree, settle_sync,
+        with_config_json, with_default_config,
     };
-    use super::super::{handle_terminal_event, sweep_target};
     use crate::app::{
         App, ContextMenu, Focus, HitTarget, MenuAction, Overlay, PendingAction, PromptKind,
     };
@@ -4688,8 +4688,6 @@ mod tests {
                     meta: Default::default(),
                 }],
                 at: now,
-                due: now + std::time::Duration::from_secs(60),
-                step: std::time::Duration::from_secs(60),
             },
         );
         app
@@ -9947,16 +9945,22 @@ mod tests {
         });
     }
 
-    /// `⇧R` on the grid reloads from GitHub: the pull requests on the
-    /// loop's next turn, past every timer.
+    /// `⇧R` on the grid reloads from GitHub: what the grid shows of it,
+    /// on the loop's next turn, however fresh.
     #[test]
     fn shift_r_on_the_grid_reloads_pull_requests() {
         with_default_config(|| {
             let mut app = two_sessions();
             draw(&mut app);
+            settle_sync(&mut app, std::time::Duration::ZERO);
+            assert!(fetched_now(&mut app).is_empty(), "fresh");
             let sent = key(&mut app, KeyCode::Char('r'), KeyModifiers::SUPER);
             assert!(sent.is_empty(), "gh runs client-side: {sent:?}");
-            assert!(app.pr_refresh_requested, "the pull requests are re-asked");
+            let project = app.selected_project().unwrap().id.clone();
+            assert!(
+                fetched_now(&mut app).contains(&crate::sync::QueryKey::OpenPrs(project)),
+                "the pull requests are re-asked"
+            );
             assert!(app.flash.is_none());
         });
     }
@@ -10582,9 +10586,9 @@ mod tests {
         cells[at..at + want.len()].iter().map(|c| c.fg).collect()
     }
 
-    /// An unlit PROJECT TAB's name shimmers in the done color for as long
-    /// as a finish there is left unread — so the sweep clock keeps running
-    /// for it — and holds still once it is read. It takes the red one-shot
+    /// An unlit PROJECT TAB's name shimmers in the done color for the few
+    /// seconds after a finish there that nobody has read — the sweep clock
+    /// running for it only that long — and holds still after, read or not. It takes the red one-shot
     /// for the seconds after something there starts needing you, then
     /// holds still, bright, while it waits. Work in progress never sweeps a
     /// tab (the spinner says that), and the lit tab never sweeps at all:
@@ -10646,12 +10650,23 @@ mod tests {
                 "announced already: still, and bright while it waits"
             );
 
-            set(&mut app, "a3", AgentStatus::Finished, true, 1);
+            set(
+                &mut app,
+                "a3",
+                AgentStatus::Finished,
+                true,
+                crate::app::now_ms(),
+            );
             let term = draw(&mut app);
-            assert!(sweeps(&term, "web", th.done_sweep), "unread, however old");
+            assert!(sweeps(&term, "web", th.done_sweep), "just finished, unread");
             assert!(
                 app.status_anim_active(),
-                "long-finished, but unread: the shimmer keeps the clock running"
+                "the shimmer keeps the clock running"
+            );
+            set(&mut app, "a3", AgentStatus::Finished, true, 1);
+            assert!(
+                !sweeps(&draw(&mut app), "web", th.done_sweep),
+                "long-finished, still unread: held still"
             );
 
             set(&mut app, "a1", AgentStatus::Finished, true, 1);
@@ -10811,25 +10826,34 @@ mod tests {
         });
     }
 
-    /// The PR sweep covers every checkout the SESSIONS level lists — not
-    /// only the one under the worktree cursor, since the level names a
-    /// pull request under every card — and follows the level when it is
-    /// walked into another project, which is the only list it has.
+    /// The grid asks GitHub about the project it shows — its open list,
+    /// which names the pull request under every card — and follows the
+    /// level when it is walked into another project. A project whose only
+    /// checkout is its root has no branch to look up.
     #[test]
-    fn the_pr_sweep_reaches_every_listed_sessions_checkout() {
+    fn the_grid_asks_about_the_project_it_shows() {
+        use crate::sync::QueryKey;
         let feat = tempfile::tempdir().unwrap();
         let mut app = App::new();
         seed_tree(&mut app);
         seed_feat(&mut app, feat.path().to_path_buf());
         seed_web(&mut app);
         app.set_sel_project(project_row(&app, "p1"));
-        let (id, _) = sweep_target(&mut app).expect("demo's other checkout is listed");
-        assert_eq!(id, WorktreeId("w2".into()));
+        let keys = |app: &App| -> Vec<QueryKey> {
+            crate::sync::scope::visible(app)
+                .into_iter()
+                .map(|(k, _)| k)
+                .filter(|k| k.provider() != crate::sync::Provider::Local)
+                .collect()
+        };
+        assert!(keys(&app).contains(&QueryKey::OpenPrs(ProjectId("p1".into()))));
 
-        // Walked into `web`, whose only checkout is its root: the sweep
-        // went with the level and has nothing to spend the tick on.
         app.set_sel_project(project_row(&app, "p2"));
-        assert_eq!(sweep_target(&mut app), None, "the sweep followed the level");
+        assert_eq!(
+            keys(&app),
+            vec![QueryKey::OpenPrs(ProjectId("p2".into()))],
+            "the level's list, and no branch lookup for a root"
+        );
     }
 
     /// The first Esc lets the card under the cursor go; a click on the

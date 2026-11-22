@@ -1,14 +1,17 @@
 //! MEETING TAKEAWAYS: a Teams meeting's transcript, read for what was
 //! agreed and placed in your todos for you to check.
 //!
-//! * **Watching.** Every online meeting on the calendar (2D's poll,
-//!   `App::microsoft.events`) is noted as it is seen; once one has ended it
-//!   is kept ([`Kept`], `<data dir>/automations/meeting-takeaways.json`)
-//!   and its transcript looked for every [`interval`] (2 minutes,
-//!   `ORION_MEETING_TAKEAWAYS_POLL_SECS`) for up to [`WINDOW`] after it
-//!   ended ([`crate::microsoft::transcripts`]). Nothing is asked while
-//!   Microsoft 365 is not signed in or **Takeaways from Teams
-//!   transcripts** is off.
+//! * **Watching.** Every online meeting on the calendar (read every half
+//!   hour while this is on, `App::microsoft.events`) is noted as it is
+//!   seen; once one has ended it is kept ([`Kept`], `<data dir>/automations/meeting-takeaways.json`)
+//!   and its transcript looked for at [`LOOKS_AFTER`] — 2, 10 and 30
+//!   minutes after it ended — then given up on
+//!   ([`crate::microsoft::transcripts`]; the RESOLVER's `Transcript`,
+//!   [`transcripts_due`]). The online meeting's id is kept from the first
+//!   look, so the join link is asked about once.
+//!   `ORION_MEETING_TAKEAWAYS_POLL_SECS=0` turns the looks off. Nothing
+//!   is asked while Microsoft 365 is not signed in or **Takeaways from
+//!   Teams transcripts** is off.
 //! * **Extracting.** One [`crate::oneshot::run_json`] ask, told by the
 //!   **Meeting takeaways** preset plus its extra steer ([`super::compose`]),
 //!   with the transcript, who you are, and every project with **Link to
@@ -49,9 +52,18 @@ Answer {\"takeaways\": [...]}, each takeaway an object: \
 \"ticket\" (the id of a listed open ticket it is about, else null). \
 Use only names and ticket ids from the lists given.";
 
-/// How long after a meeting ends its transcript is looked for.
+/// How long after a meeting ends its transcript is looked for at most.
 pub const WINDOW: chrono::Duration = chrono::Duration::minutes(60);
-/// How often, out of the box.
+/// When after a meeting ends its transcript is looked for: Teams has one
+/// a minute or two after most meetings, a long one takes a while longer,
+/// and one not there at half an hour is not coming.
+pub const LOOKS_AFTER: [chrono::Duration; 3] = [
+    chrono::Duration::minutes(2),
+    chrono::Duration::minutes(10),
+    chrono::Duration::minutes(30),
+];
+/// What [`interval`] reads when nothing overrides it: only whether the
+/// looks are on — their times are [`LOOKS_AFTER`].
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(2 * 60);
 /// How long the model may take over one meeting.
 const TIMEOUT: Duration = Duration::from_secs(240);
@@ -64,9 +76,8 @@ const TRANSCRIPT_MAX: usize = 120_000;
 /// The file the meetings are kept in, under the data dir.
 const FILE: &str = "meeting-takeaways.json";
 
-/// The poll's cadence: `ORION_MEETING_TAKEAWAYS_POLL_SECS` when set, `None`
-/// when it is `0` (off: the e2e tests, the screenshots); else
-/// [`DEFAULT_INTERVAL`].
+/// Whether the looks are on: `None` when `ORION_MEETING_TAKEAWAYS_POLL_SECS`
+/// is `0` (off: the e2e tests, the screenshots).
 pub fn interval() -> Option<Duration> {
     orion_core::env::secs_override(
         orion_core::env::MEETING_TAKEAWAYS_POLL_SECS,
@@ -156,6 +167,17 @@ pub struct Meeting {
     /// The last look's failure, while looking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// The online meeting's id, from the first look that found it: the
+    /// later looks list its transcripts straight away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub online_id: Option<String>,
+    /// How many of [`LOOKS_AFTER`] have been made.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub looks: u8,
+}
+
+fn is_zero(n: &u8) -> bool {
+    *n == 0
 }
 
 impl Meeting {
@@ -172,7 +194,18 @@ impl Meeting {
             transcript: String::new(),
             me: String::new(),
             last_error: None,
+            online_id: None,
+            looks: 0,
         }
+    }
+
+    /// Whether a look for its transcript is due at `now`: waiting for one,
+    /// and the next of [`LOOKS_AFTER`] has come.
+    pub fn look_due(&self, now: DateTime<Utc>) -> bool {
+        self.stage == Stage::Waiting
+            && LOOKS_AFTER
+                .get(self.looks as usize)
+                .is_some_and(|after| now >= self.end + *after)
     }
 
     /// The accepted takeaways: what Enter adds.
@@ -224,10 +257,8 @@ pub struct Shared {
     /// The online meetings the calendar has shown, by id, so one that ends
     /// after the calendar stopped listing it is still caught.
     watching: HashMap<String, Event>,
-    /// Meetings with a look or a read out.
+    /// Meetings with a read out.
     in_flight: HashSet<String>,
-    /// When each waiting meeting is looked at next.
-    next_look: HashMap<String, DateTime<Utc>>,
 }
 
 impl Shared {
@@ -285,9 +316,55 @@ pub struct MeetingTakeaways;
 
 /// Whether the takeaways may ask Microsoft anything: signed in, and
 /// **Takeaways from Teams transcripts** on.
-fn connected(app: &App) -> bool {
-    let ms = crate::config::Config::load().microsoft;
-    ms.takeaways && app.microsoft.connected(&ms)
+pub fn connected(app: &App) -> bool {
+    let ms = &app.microsoft.settings;
+    ms.takeaways && app.microsoft.connected(ms)
+}
+
+/// Whether meeting takeaways read Microsoft in the background now: the
+/// automation is on, its looks aren't turned off, and it may ask.
+pub fn watching(app: &App) -> bool {
+    interval().is_some() && app.automations.is_on(Automation::MeetingTakeaways) && connected(app)
+}
+
+/// The meetings whose transcript is due a look at `now`
+/// ([`Meeting::look_due`]), while meeting takeaways are [`watching`]: what
+/// the RESOLVER asks Graph for (`QueryKey::Transcript`).
+pub fn transcripts_due(app: &App, now: DateTime<Utc>) -> Vec<String> {
+    if !watching(app) {
+        return Vec::new();
+    }
+    app.automations
+        .meetings
+        .kept
+        .meetings
+        .iter()
+        .filter(|m| m.look_due(now))
+        .map(|m| m.id.clone())
+        .collect()
+}
+
+/// What a look found: the transcript's WebVTT with your name, None while
+/// there is none yet, or why it couldn't look.
+pub type Found = Result<Option<(String, String)>, String>;
+
+/// Look for meeting `id`'s transcript, blocking (the RESOLVER runs it on
+/// the blocking pool): the online meeting's id when it was found, and the
+/// WebVTT with your name — None while there is none yet.
+pub fn look_blocking(
+    ms: &crate::config::MicrosoftSettings,
+    join_url: &str,
+    known: Option<&str>,
+    start: DateTime<Utc>,
+) -> (Option<String>, Found) {
+    match crate::microsoft::transcripts::look(ms, join_url, known, start) {
+        Err(why) => (known.map(str::to_string), Err(why)),
+        Ok((online_id, None)) => (Some(online_id), Ok(None)),
+        Ok((online_id, Some(vtt))) => {
+            let me = crate::microsoft::graph::display_name(ms).unwrap_or_default();
+            (Some(online_id), Ok(Some((vtt, me))))
+        }
+    }
 }
 
 impl Runner for MeetingTakeaways {
@@ -296,12 +373,11 @@ impl Runner for MeetingTakeaways {
     }
 
     /// Note the online meetings the calendar shows; keep each one that
-    /// ended; look for its transcript when due; read one that came in.
+    /// ended; read one whose transcript came in; give up on one whose
+    /// looks have all been made. The looks themselves are the RESOLVER's
+    /// ([`transcripts_due`]).
     fn tick(&mut self, app: &mut App, _out: &mut Vec<ClientRequest>) {
-        let Some(every) = interval() else {
-            return;
-        };
-        if !connected(app) {
+        if interval().is_none() || !connected(app) {
             return;
         }
         let now = Utc::now();
@@ -320,22 +396,18 @@ impl Runner for MeetingTakeaways {
             if shared.in_flight.contains(&id) {
                 continue;
             }
-            let due = shared.next_look.get(&id).is_none_or(|at| *at <= now);
             let Some(meeting) = shared.meeting_mut(&id) else {
                 continue;
             };
+            let looked_all = meeting.looks as usize >= LOOKS_AFTER.len();
             if meeting.stage == Stage::Reading {
                 extract(app, &id);
-            } else if now > meeting.end + WINDOW {
+            } else if looked_all || now > meeting.end + WINDOW {
                 meeting.stage = match meeting.last_error.take() {
                     Some(why) => Stage::Failed(why),
                     None => Stage::NoTranscript,
                 };
                 shared.save();
-            } else if due {
-                let next = now + chrono::Duration::from_std(every).unwrap_or(WINDOW);
-                shared.next_look.insert(id.clone(), next);
-                look(app, &id);
             }
         }
     }
@@ -431,12 +503,15 @@ pub fn retry(app: &mut App, id: &str) {
         Stage::Waiting
     };
     meeting.last_error = None;
-    // A look that ran out of time gets the window again.
-    if !reading && Utc::now() > meeting.end + WINDOW {
-        meeting.end = Utc::now();
+    // A look that ran out of time or of looks gets them all again, from
+    // now.
+    if !reading {
+        meeting.looks = 0;
+        if Utc::now() > meeting.end + LOOKS_AFTER[0] {
+            meeting.end = Utc::now() - LOOKS_AFTER[0];
+        }
     }
     let subject = meeting.subject.clone();
-    shared.next_look.remove(id);
     shared.save();
     app.flash = Some(crate::flash::Flash::done(format!(
         "Meeting takeaways: reading {subject} again"
@@ -480,11 +555,12 @@ fn watch(app: &mut App, now: DateTime<Utc>) {
 /// What lands back on the loop.
 #[derive(Debug)]
 pub enum Answer {
-    /// A look for a transcript: the WebVTT and your name, None while there
-    /// is none yet.
+    /// A look for a transcript: the online meeting's id when it was
+    /// found, and the WebVTT and your name, None while there is none yet.
     Looked {
         id: String,
-        found: Result<Option<(String, String)>, String>,
+        online_id: Option<String>,
+        found: Found,
     },
     /// A read: the takeaways, mapped onto `places`.
     Read {
@@ -494,42 +570,25 @@ pub enum Answer {
     },
 }
 
-/// Look for `id`'s transcript off the loop.
-fn look(app: &mut App, id: &str) {
-    let Some(tx) = app.automations.tx.clone() else {
-        return;
-    };
-    let shared = &mut app.automations.meetings;
-    let Some(meeting) = shared.meeting(id) else {
-        return;
-    };
-    let (join_url, start) = (meeting.join_url.clone(), meeting.start);
-    shared.in_flight.insert(id.to_string());
-    let ms = crate::config::Config::load().microsoft;
-    let id = id.to_string();
-    tokio::spawn(async move {
-        let found = tokio::task::spawn_blocking(move || {
-            let vtt = crate::microsoft::transcripts::look(&ms, &join_url, start)?;
-            Ok(vtt.map(|vtt| {
-                let me = crate::microsoft::graph::display_name(&ms).unwrap_or_default();
-                (vtt, me)
-            }))
-        })
-        .await
-        .unwrap_or_else(|e| Err(e.to_string()));
-        let _ = tx.send(super::Answer::MeetingTakeaways(Answer::Looked {
-            id,
-            found,
-        }));
-    });
-}
-
 /// An answer, landed.
 pub fn land(app: &mut App, answer: Answer) {
     let shared = &mut app.automations.meetings;
     match answer {
-        Answer::Looked { id, found } => {
-            shared.in_flight.remove(&id);
+        Answer::Looked {
+            id,
+            online_id,
+            found,
+        } => {
+            let Some(meeting) = shared.meeting_mut(&id) else {
+                return;
+            };
+            // Every look counts, found or failed: three, then the tick
+            // gives up.
+            meeting.looks = meeting.looks.saturating_add(1);
+            if online_id.is_some() {
+                meeting.online_id = online_id;
+            }
+            shared.save();
             let Some(meeting) = shared.meeting_mut(&id) else {
                 return;
             };
@@ -1313,13 +1372,19 @@ mod tests {
         std::env::set_var(orion_core::env::MICROSOFT_TOKEN, "fake-token");
         let ms = crate::config::MicrosoftSettings::default();
         let m = meeting();
-        let vtt = crate::microsoft::transcripts::look(&ms, join, m.start)
-            .unwrap()
-            .expect("today's transcript");
-        let me = crate::microsoft::graph::display_name(&ms).unwrap();
+        let (online_id, found) = look_blocking(&ms, join, None, m.start);
+        assert_eq!(
+            online_id.as_deref(),
+            Some("MSo1N2Y5"),
+            "kept for the next look"
+        );
+        let (vtt, me) = found.unwrap().expect("today's transcript");
         assert_eq!(me, "Ada Lovelace");
+        // The kept id goes straight to the transcripts.
+        let (_, again) = look_blocking(&ms, "https://nope", Some("MSo1N2Y5"), m.start);
+        assert!(again.unwrap().is_some());
         // A join link Graph doesn't know is said.
-        assert!(crate::microsoft::transcripts::look(&ms, "https://nope", m.start).is_err());
+        assert!(look_blocking(&ms, "https://nope", None, m.start).1.is_err());
 
         let dir = tempfile::tempdir().unwrap();
         store::with_dir(dir.path().to_path_buf(), || {
@@ -1333,6 +1398,7 @@ mod tests {
                 &mut app,
                 Answer::Looked {
                     id: "evt-1".into(),
+                    online_id,
                     found: Ok(Some((vtt, me))),
                 },
             );

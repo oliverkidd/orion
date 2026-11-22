@@ -13,9 +13,18 @@
 //!   is ready. [`land_detail`] reads each body that lands. Checks still running
 //!   beside a failed one are waited out, up to [`SETTLE_LIMIT`], so one
 //!   agent sees every failure at once; conflicts alone are acted on
-//!   straight away. The open-PR list is the clock: the body is asked for
-//!   again the moment the PR's row moves (a check finishes, a push), with
-//!   [`RECHECK`] only as the fallback for a row that sits still.
+//!   straight away. The rows are the clock — a project's open list, and
+//!   the cross-repo `MyPrs` read that keeps your rows current while you
+//!   are elsewhere (`sync::github`): a body is read again only when the
+//!   PR's row moves ([`signal`]: its verdict, a push, a comment or review)
+//!   since the body last read ([`Record::read`], kept across launches), by
+//!   THE RESOLVER, on its demand ([`detail_needs`]) and its backoff. No
+//!   timer of its own, but two scoped ones: a breakage whose checks are
+//!   still settling is read every [`SETTLE_RECHECK`], and one whose branch
+//!   agent's context is being measured every [`MEASURE_RECHECK`]. One held
+//!   back — a session at work on the branch, the factory paused — asks
+//!   nothing; it is looked at again from the body in hand
+//!   ([`HOLD_RELOOK`]).
 //! * **Once per breakage.** What broke is a [`Fingerprint`] — the head
 //!   commit, the conflicts and the failing checks' names — and a per-PR
 //!   ledger (`Record`, kept in the PR cache) remembers the last one sent or
@@ -51,9 +60,8 @@
 //!   conversation comments — goes to the branch's agent through the same
 //!   router, verbatim, once each ([`relay_comments`]).
 //! * **Cubic's findings.** Each of your pull requests that is green is
-//!   read again when its row's review-thread count moves (`PrMeta::
-//!   threads`) or it turns green, and every [`CUBIC_POLL`] besides
-//!   ([`poll`]). The Cubic threads on it that nobody has answered and that
+//!   read again when its row moves — a review thread, a comment, turning
+//!   green ([`poll`]). The Cubic threads on it that nobody has answered and that
 //!   were never sent go to the branch's agent through the same router —
 //!   the session that built it, which knows what was left out on purpose
 //!   — to fix what is right as a new commit on top (so Cubic reviews the
@@ -112,13 +120,18 @@ use std::time::{Duration, Instant};
 pub(crate) mod router;
 use router::Work;
 
-/// How often a watched pull request's checks are read again while some
-/// are still running and its row has not moved — the fallback; a row that
-/// moves has them read at once ([`note_list`]).
-pub const RECHECK: Duration = Duration::from_secs(60);
+/// How often a breakage's body is read again while checks beside its
+/// failure are still running (up to [`SETTLE_LIMIT`]): GitHub's rollup
+/// may already say failing and not move again when the rest finish, so
+/// the row alone can't say when they have.
+pub const SETTLE_RECHECK: Duration = Duration::from_secs(60);
 /// How soon a body is read again while its branch agent's context is
 /// being measured ([`router::measure`]).
 const MEASURE_RECHECK: Duration = Duration::from_secs(3);
+/// How often a breakage held back — a session at work on its branch, the
+/// factory paused, a peer whose conversation can't be read — is looked at
+/// again, from the body in hand: no GitHub, a local decision.
+pub const HOLD_RELOOK: Duration = Duration::from_secs(30);
 /// How long `gh run rerun` is given to start a cancelled run again.
 const RERUN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long running checks are waited out before acting on the failures
@@ -127,14 +140,6 @@ pub const SETTLE_LIMIT: Duration = Duration::from_secs(20 * 60);
 /// `auto` sends this many times in a row without the PR going green, then
 /// asks.
 pub const AUTO_ATTEMPTS: u8 = 3;
-/// How often a factory pull request's body is read for the owner's new
-/// comments while nothing else asks for it — sooner when its row's comment
-/// count moves.
-pub const COMMENT_POLL: Duration = Duration::from_secs(120);
-/// How often a green pull request is read for Cubic's findings while
-/// nothing on its row moves: a fallback, since a new review thread moves
-/// the row's thread count and has it read at once.
-pub const CUBIC_POLL: Duration = Duration::from_secs(30 * 60);
 /// How many rounds of Cubic's findings go to a pull request's agent;
 /// after them, what Cubic finds is the owner's.
 pub const CUBIC_ROUNDS: u8 = 3;
@@ -329,38 +334,51 @@ pub struct Record {
     /// Rounds of Cubic's findings sent ([`CUBIC_ROUNDS`] at most).
     #[serde(default)]
     pub cubic_rounds: u8,
+    /// Its row's [`signal`] when its body was last read for the fixer: a
+    /// row that has not moved since is not read again — not on the next
+    /// list, and not on the next launch.
+    #[serde(default)]
+    pub read: Option<String>,
 }
 
-/// A watched pull request: in trouble, its body asked for.
+/// A watched pull request: in trouble, its body read when its row moves.
 #[derive(Debug, Clone)]
 pub struct Watch {
     pub project: ProjectId,
     pub number: u64,
     pub dir: PathBuf,
     pub first_seen: Instant,
-    /// When its body is next asked for; None while an ask is out.
-    pub next_fetch: Option<Instant>,
-    /// Its row as the open list last showed it ([`RowState`]).
-    pub row: RowState,
-    /// The row moved while an ask was out: the answer may predate it, so
-    /// the next one goes at once.
-    pub moved: bool,
+    /// Checks beside its failure still running when its body last
+    /// landed: read every [`SETTLE_RECHECK`] until they settle.
+    pub settling: bool,
+    /// Its branch agent's context being measured: read every
+    /// [`MEASURE_RECHECK`] until it is in.
+    pub measuring: bool,
+    /// Held back when its body last landed, looked at again from that
+    /// body at this time ([`HOLD_RELOOK`]).
+    pub relook: Option<Instant>,
 }
 
-/// What of a pull request's row says its checks or commit changed: the
-/// head commit, its health, and GitHub's tally of passed, failed and
-/// running checks.
-pub type RowState = (
-    String,
-    crate::pull_request::Health,
-    Option<crate::pull_request::CheckTally>,
-);
-
-/// `pr`'s [`RowState`]: the head commit and health as `App::prs` has
-/// them, the tally off the row's meta line.
-fn row_state(app: &App, pr: &OpenPr) -> RowState {
+/// What of a pull request's row says its body may have moved: its head
+/// commit, conflicts and checks as `App::prs` has them (an unknown answer
+/// never overwriting a known one), whether it is a draft, and its talk —
+/// the comment and review-thread counts and `updatedAt`, which a reply
+/// in a thread moves too. A body read at one signal is read again only
+/// once the row says another.
+pub fn signal(app: &App, pr: &OpenPr) -> String {
     let status = app.prs.status_or_open(&pr.url);
-    (status.head_sha, status.health, pr.meta.checks)
+    format!(
+        "{}|{:?}:{:?}|{:?}:{:?}|{:?}|{}|{}|{}",
+        status.head_sha,
+        status.conflicts_known,
+        status.health.conflicts,
+        status.checks_known,
+        status.health.checks,
+        status.standing,
+        pr.meta.comments,
+        pr.meta.threads,
+        pr.meta.updated_at
+    )
 }
 
 /// The app's AUTOFIX state (`App::autofix`).
@@ -397,6 +415,10 @@ pub struct State {
     pub context: HashMap<orion_core::AgentId, router::Context>,
     /// By agent: context reads out on the blocking pool, and since when.
     pub measuring: HashMap<orion_core::AgentId, Instant>,
+    /// By PR URL: bodies the fixer wants read, and the row [`signal`] it
+    /// wanted them at — THE RESOLVER's background demand
+    /// ([`detail_needs`]) until one lands.
+    pub want: HashMap<String, String>,
     /// By PR URL: fresh fixers launched and not in the tree yet.
     pub launches: HashMap<String, router::Launch>,
     /// By PR URL: Cubic findings held back — the factory paused at its
@@ -405,24 +427,18 @@ pub struct State {
     pub cubic_retry: HashMap<String, Instant>,
 }
 
-/// A pull request whose body is read on a beat of its own: a factory one
-/// for the owner's comments, a green one of yours for Cubic's findings.
+/// A pull request whose body is read for its talk: a factory one for the
+/// owner's comments, a green one of yours for Cubic's findings — read
+/// again whenever its row's [`signal`] moves.
 #[derive(Debug, Clone)]
 pub struct Poll {
     pub project: ProjectId,
     pub number: u64,
     pub dir: PathBuf,
-    /// When its body is next asked for.
-    pub due: Instant,
-    /// Its row's comment count, the last list: a move reads it at once.
-    pub count: u32,
-    /// Its row's review-thread count, the last list: a move — Cubic
-    /// opening a thread — reads it at once.
-    pub threads: u32,
     /// A factory pull request: the owner's comments are relayed.
     pub factory: bool,
     /// Green, with the PR fixer on: Cubic's findings are sent
-    /// ([`cubic_wanted`]). Turning so reads it at once.
+    /// ([`cubic_wanted`]).
     pub cubic: bool,
 }
 
@@ -450,18 +466,11 @@ impl State {
         self.ledger.entry(url.to_string()).or_default()
     }
 
-    /// Re-read `url`'s body after [`RECHECK`] — or at once when its row
-    /// moved while this answer was out.
-    fn recheck_later(&mut self, url: &str) {
-        self.recheck_in(url, RECHECK);
-    }
-
-    /// [`recheck_later`](Self::recheck_later) after `wait`.
-    fn recheck_in(&mut self, url: &str, wait: Duration) {
+    /// Look at `url`'s breakage again from the body in hand after
+    /// [`HOLD_RELOOK`]: what held it back may have let go.
+    fn relook_later(&mut self, url: &str) {
         if let Some(w) = self.watching.get_mut(url) {
-            let wait = if w.moved { Duration::ZERO } else { wait };
-            w.moved = false;
-            w.next_fetch = Some(Instant::now() + wait);
+            w.relook = Some(Instant::now() + HOLD_RELOOK);
         }
     }
 
@@ -470,6 +479,9 @@ impl State {
         self.watching.remove(url);
         self.held.remove(url);
         self.conflicted.remove(url);
+        if !self.polls.contains_key(url) {
+            self.want.remove(url);
+        }
     }
 
     /// A send for `url` is waiting on its conflicting files.
@@ -480,10 +492,11 @@ impl State {
 
 // ---- detection ----
 
-/// A project's open-PR list landed: watch each of the user's PRs in
-/// trouble that this breakage has not been handled for, read a watched
-/// one's body again now that its row moved, and forget the attempts of
-/// each one that has gone green. Where each stands is
+/// A project's open-PR list landed — or `MyPrs` replaced its rows of
+/// yours: watch each of the user's PRs in trouble that this breakage has
+/// not been handled for, have a watched or polled one's body read again
+/// when its row moved since it was last read ([`ask_if_moved`]), and
+/// forget the attempts of each one that has gone green. Where each stands is
 /// `App::prs`'s word, the list already observed into it. Green is known,
 /// never guessed ([`PrStatus::is_green`]): while GitHub has not said
 /// whether the branch merges, or checks are still running, a watch and its
@@ -503,6 +516,9 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
             true => poll(app, project, pr, factory, cubic),
             false => {
                 app.autofix.polls.remove(&pr.url);
+                if !app.autofix.watching.contains_key(&pr.url) {
+                    app.autofix.want.remove(&pr.url);
+                }
             }
         }
         if status.is_green() {
@@ -525,15 +541,8 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
             app.autofix.forget(&pr.url);
             continue;
         }
-        let row = row_state(app, pr);
-        if let Some(watch) = app.autofix.watching.get_mut(&pr.url) {
-            if watch.row != row {
-                watch.row = row;
-                match &mut watch.next_fetch {
-                    Some(at) => *at = Instant::now(),
-                    None => watch.moved = true,
-                }
-            }
+        if app.autofix.watching.contains_key(&pr.url) {
+            ask_if_moved(app, pr);
             continue;
         }
         // Not in trouble, but not known green either: nothing to watch —
@@ -541,7 +550,7 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
         // cancelled, whose body is read for the runs to start again.
         if fixer_trouble(&status).is_none() {
             if factory && wants_rerun(app, &pr.url, &status) {
-                watch(app, project, pr, Instant::now());
+                watch(app, project, pr);
             }
             continue;
         }
@@ -555,7 +564,7 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
         if handled || record.is_some_and(|r| r.parked) {
             continue;
         }
-        watch(app, project, pr, Instant::now());
+        watch(app, project, pr);
     }
     // PRs that left the list were merged or closed.
     let open: HashSet<&str> = list.iter().map(|pr| pr.url.as_str()).collect();
@@ -572,7 +581,32 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
     app.autofix
         .polls
         .retain(|url, p| &p.project != project || open.contains(url.as_str()));
+    let (watching, polls) = (&app.autofix.watching, &app.autofix.polls);
+    app.autofix
+        .want
+        .retain(|url, _| watching.contains_key(url) || polls.contains_key(url));
     close_settled_cant_fix(app);
+}
+
+/// Have `pr`'s body read when its row has moved ([`signal`]) since the
+/// body was last read for the fixer — or since it was last asked for, a
+/// read still on its way — and not otherwise. Asked: wanted
+/// ([`State::want`], THE RESOLVER's demand) and its page invalidated, so
+/// it is read now, a read already running owing one more.
+fn ask_if_moved(app: &mut App, pr: &OpenPr) {
+    let now = signal(app, pr);
+    let read = app
+        .autofix
+        .ledger
+        .get(&pr.url)
+        .and_then(|r| r.read.as_deref());
+    let asked = app.autofix.want.get(&pr.url).map(String::as_str);
+    if read == Some(now.as_str()) || asked == Some(now.as_str()) {
+        return;
+    }
+    app.autofix.want.insert(pr.url.clone(), now);
+    app.resolver
+        .invalidate(&crate::sync::QueryKey::PrDetail(pr.url.clone()));
 }
 
 /// Close each open *Can't fix* card whose pull request has merged or
@@ -701,25 +735,16 @@ fn fixer_trouble(status: &PrStatus) -> Option<crate::pull_request::Trouble> {
     }
 }
 
-/// Read `pr`'s body on its own beat — a factory pull request's for the
-/// owner's comments, a green one's for Cubic's findings (`cubic`): at once
-/// the first time, whenever its comment or review-thread count moves, and
-/// as it turns green; else every [`COMMENT_POLL`] for a factory one,
-/// [`CUBIC_POLL`] for the rest.
+/// Read `pr`'s body for its talk — a factory pull request's for the
+/// owner's comments, a green one's for Cubic's findings (`cubic`): the
+/// first time, and whenever its row moves ([`ask_if_moved`]) — a comment,
+/// a review or a reply moves `updatedAt`, a new thread the thread count,
+/// turning green the checks. Never on a clock.
 fn poll(app: &mut App, project: &ProjectId, pr: &OpenPr, factory: bool, cubic: bool) {
-    let (count, threads) = (pr.meta.comments, pr.meta.threads);
     match app.autofix.polls.get_mut(&pr.url) {
         Some(poll) => {
-            let moved = (factory && poll.count != count)
-                || poll.threads != threads
-                || (cubic && !poll.cubic);
-            poll.count = count;
-            poll.threads = threads;
             poll.factory = factory;
             poll.cubic = cubic;
-            if moved {
-                poll.due = Instant::now();
-            }
         }
         None => {
             let Some(dir) = repo_dir(app, project) else {
@@ -731,15 +756,13 @@ fn poll(app: &mut App, project: &ProjectId, pr: &OpenPr, factory: bool, cubic: b
                     project: project.clone(),
                     number: pr.number,
                     dir,
-                    due: Instant::now(),
-                    count,
-                    threads,
                     factory,
                     cubic,
                 },
             );
         }
     }
+    ask_if_moved(app, pr);
 }
 
 /// Whether one of your pull requests, standing at `status` (seen through
@@ -857,7 +880,7 @@ fn relay_cubic(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<Client
     if wait {
         app.autofix
             .cubic_retry
-            .insert(url.to_string(), Instant::now() + RECHECK);
+            .insert(url.to_string(), Instant::now() + HOLD_RELOOK);
         return;
     }
     app.autofix.cubic_retry.remove(url);
@@ -894,12 +917,13 @@ fn retry_cubic(app: &mut App, out: &mut Vec<ClientRequest>) {
     }
 }
 
-/// Watch `pr`, its body asked for at `next_fetch`.
-fn watch(app: &mut App, project: &ProjectId, pr: &OpenPr, next_fetch: Instant) {
+/// Watch `pr`: its body read now, unless it was read at the row it has
+/// now — in this run or the last ([`Record::read`]) — when the body in
+/// hand is looked at again instead, no GitHub asked.
+fn watch(app: &mut App, project: &ProjectId, pr: &OpenPr) {
     let Some(dir) = repo_dir(app, project) else {
         return;
     };
-    let row = row_state(app, pr);
     app.autofix.watching.insert(
         pr.url.clone(),
         Watch {
@@ -907,11 +931,19 @@ fn watch(app: &mut App, project: &ProjectId, pr: &OpenPr, next_fetch: Instant) {
             number: pr.number,
             dir,
             first_seen: Instant::now(),
-            next_fetch: Some(next_fetch),
-            row,
-            moved: false,
+            settling: false,
+            measuring: false,
+            relook: None,
         },
     );
+    ask_if_moved(app, pr);
+    // Read at this row already: the body in hand is the one to decide on.
+    let read = !app.autofix.want.contains_key(&pr.url);
+    if read && app.pr_detail.contains_key(&pr.url) {
+        if let Some(w) = app.autofix.watching.get_mut(&pr.url) {
+            w.relook = Some(Instant::now());
+        }
+    }
 }
 
 /// The project's repo path — where `gh` reads it from, as the open-PR list
@@ -924,44 +956,91 @@ fn repo_dir(app: &App, project: &ProjectId) -> Option<PathBuf> {
         .map(|p| p.repo_path.clone())
 }
 
-/// The bodies whose turn has come: each watched PR's next fetch, made due
-/// now and marked out until it lands. `(url, number, dir)`. One already on
-/// its way (the pane's own read) is waited for instead — [`land_detail`]
-/// reads every body that lands.
-pub fn due_fetches(app: &mut App) -> Vec<(String, u64, PathBuf)> {
+/// The bodies the fixer needs read, for THE RESOLVER's background demand
+/// (`sync::github::needs`): each it wants ([`State::want`]) once — read
+/// when invalidated, retried on the resolver's backoff while that fails,
+/// never on a clock (`sync::github::ON_CHANGE`) — and the two scoped
+/// beats: a breakage settling every [`SETTLE_RECHECK`], one whose branch
+/// agent is being measured every [`MEASURE_RECHECK`]. A breakage held
+/// back needs nothing ([`HOLD_RELOOK`] looks again from the body in
+/// hand), and none while the factory is paused at its account's limit:
+/// nothing could be sent.
+pub fn detail_needs(app: &App) -> Vec<(String, Duration)> {
+    let paused = super::paused(app);
+    let held = |url: &str| {
+        paused
+            && app
+                .autofix
+                .watching
+                .get(url)
+                .is_some_and(|w| w.relook.is_some())
+    };
+    let mut needs: Vec<(String, Duration)> = app
+        .autofix
+        .want
+        .keys()
+        .filter(|url| !held(url))
+        .map(|url| (url.clone(), crate::sync::github::ON_CHANGE))
+        .collect();
+    for (url, watch) in &app.autofix.watching {
+        if paused {
+            continue;
+        }
+        if watch.measuring {
+            needs.push((url.clone(), MEASURE_RECHECK));
+        } else if watch.settling {
+            needs.push((url.clone(), SETTLE_RECHECK));
+        }
+    }
+    needs
+}
+
+/// Whether AUTOFIX is in the middle of something: a breakage watched, a
+/// fix queued for a busy agent, or a fresh fixer on its way — when the
+/// automations' `MyPrs` read keeps its quicker beat.
+pub fn mid_cycle(app: &App) -> bool {
+    !app.autofix.watching.is_empty()
+        || !app.autofix.queued.is_empty()
+        || !app.autofix.launches.is_empty()
+}
+
+/// The beat's look at each breakage held back, once its [`HOLD_RELOOK`]
+/// is up: its decision taken again from the body in hand — the session
+/// that held it may be done, the pause lifted.
+fn relook_held(app: &mut App, out: &mut Vec<ClientRequest>) {
     let now = Instant::now();
-    let mut due = Vec::new();
-    for (url, watch) in app.autofix.watching.iter_mut() {
-        if watch.next_fetch.is_some_and(|at| at <= now) {
-            watch.next_fetch = None;
-            if !app.pr_detail_inflight.in_flight(url) {
-                due.push((url.clone(), watch.number, watch.dir.clone()));
+    let due: Vec<String> = app
+        .autofix
+        .watching
+        .iter()
+        .filter(|(_, w)| w.relook.is_some_and(|at| at <= now))
+        .map(|(url, _)| url.clone())
+        // A fresh read on its way decides instead.
+        .filter(|url| !app.autofix.want.contains_key(url))
+        .collect();
+    for url in due {
+        if let Some(w) = app.autofix.watching.get_mut(&url) {
+            w.relook = None;
+        }
+        match app.pr_detail.get(&url).cloned() {
+            Some(detail) => decide(app, &url, &detail, out),
+            // No body in hand: read one.
+            None => {
+                app.autofix.want.insert(url.clone(), String::new());
+                app.resolver
+                    .invalidate(&crate::sync::QueryKey::PrDetail(url));
             }
         }
     }
-    // A factory pull request's comments and a green one's Cubic findings,
-    // read on their own beat — unless its body is on its way already.
-    for (url, poll) in app.autofix.polls.iter_mut() {
-        if poll.due <= now {
-            poll.due = now
-                + if poll.factory {
-                    COMMENT_POLL
-                } else {
-                    CUBIC_POLL
-                };
-            if !app.pr_detail_inflight.in_flight(url) && !due.iter().any(|(u, _, _)| u == url) {
-                due.push((url.clone(), poll.number, poll.dir.clone()));
-            }
-        }
-    }
-    due
 }
 
 /// A body landed (any body: a watched PR's, or the pane's), already
-/// observed into `App::prs`: act on a watched one's breakage once its
-/// checks have settled. A body that shows nothing wrong forgets the watch
-/// only once GitHub has said the branch merges; with conflicts unknown it
-/// is read again on the next beat.
+/// observed into `App::prs`: whatever the fixer wanted read of it is read
+/// ([`Record::read`] takes the row's [`signal`], so the next list asks
+/// again only once the row moves), its talk relayed, and a watched one's
+/// breakage acted on once its checks have settled ([`decide`]). A body
+/// that couldn't be read is left wanted: THE RESOLVER tries again on its
+/// backoff.
 pub fn land_detail(
     app: &mut App,
     url: &str,
@@ -972,18 +1051,33 @@ pub fn land_detail(
         app.autofix.pending_open = None;
         open_pending(app, url, detail);
     }
-    if let Some(detail) = detail {
-        relay_comments(app, url, detail, out);
-        relay_cubic(app, url, detail, out);
-    }
-    let Some(watch) = app.autofix.watching.get(url).cloned() else {
-        return;
-    };
     let Some(detail) = detail else {
-        // `gh` could not answer: try again on the next beat.
-        app.autofix.recheck_later(url);
         return;
     };
+    if let Some(wanted) = app.autofix.want.remove(url) {
+        let read = open_anywhere(app, url).map_or(wanted, |(_, pr)| signal(app, &pr));
+        if app.autofix.ledger.get(url).and_then(|r| r.read.as_ref()) != Some(&read) {
+            app.autofix.record(url).read = Some(read);
+        }
+    }
+    relay_comments(app, url, detail, out);
+    relay_cubic(app, url, detail, out);
+    decide(app, url, detail, out);
+}
+
+/// A watched pull request's body in hand — just landed, or looked at again
+/// ([`relook_held`]): act on its breakage once its checks have settled. A
+/// body that shows nothing wrong forgets the watch only once GitHub has
+/// said the branch merges; with conflicts unknown it waits for the row to
+/// say (a row moving has it read again).
+fn decide(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<ClientRequest>) {
+    let Some(watch) = app.autofix.watching.get_mut(url) else {
+        return;
+    };
+    watch.settling = false;
+    watch.measuring = false;
+    watch.relook = None;
+    let watch = watch.clone();
     let pr = open_pr(app, &watch.project, url).cloned();
     let factory = pr
         .as_ref()
@@ -1006,7 +1100,6 @@ pub fn land_detail(
         return;
     }
     if diagnosis.is_empty() && status.is_open() && pr.is_some() && !status.conflicts_known {
-        app.autofix.recheck_later(url);
         return;
     }
     let (Some(pr), true, false) = (pr, status.is_open(), diagnosis.is_empty()) else {
@@ -1022,8 +1115,14 @@ pub fn land_detail(
     let settling = diagnosis.running
         && !diagnosis.conflicts_only()
         && watch.first_seen.elapsed() < SETTLE_LIMIT;
-    if settling || fixer_on_it(app, &watch.project, &pr) || app.autofix.is_waiting(url) {
-        app.autofix.recheck_later(url);
+    if settling {
+        if let Some(w) = app.autofix.watching.get_mut(url) {
+            w.settling = true;
+        }
+        return;
+    }
+    if fixer_on_it(app, &watch.project, &pr) || app.autofix.is_waiting(url) {
+        app.autofix.relook_later(url);
         return;
     }
     // Only a fresh fixer is a new session: it alone checks with the
@@ -1036,7 +1135,9 @@ pub fn land_detail(
         to = router::route(app, &watch.project, &pr.head, pr.number, url);
     }
     if matches!(to, router::Route::Measure(_)) {
-        app.autofix.recheck_in(url, MEASURE_RECHECK);
+        if let Some(w) = app.autofix.watching.get_mut(url) {
+            w.measuring = true;
+        }
         return;
     }
     let fresh = matches!(to, router::Route::Fresh { .. });
@@ -1071,7 +1172,7 @@ pub fn land_detail(
             )));
             app.dirty = true;
         }
-        app.autofix.recheck_later(url);
+        app.autofix.relook_later(url);
         return;
     }
     let record = app.autofix.ledger.get(url).cloned().unwrap_or_default();
@@ -1079,7 +1180,7 @@ pub fn land_detail(
     // account's limit keeps the breakage waiting, still watched.
     let on = app.automations.is_on(Automation::PrFixer);
     if fresh && on && record.attempts < AUTO_ATTEMPTS && super::paused(app) {
-        app.autofix.recheck_later(url);
+        app.autofix.relook_later(url);
         return;
     }
     app.autofix.watching.remove(url);
@@ -1157,7 +1258,7 @@ pub(crate) fn send_words(
 
 /// Open pull request `url`'s row and its project, whichever project's
 /// open list has it.
-fn open_anywhere(app: &App, url: &str) -> Option<(ProjectId, OpenPr)> {
+pub(crate) fn open_anywhere(app: &App, url: &str) -> Option<(ProjectId, OpenPr)> {
     app.open_prs.iter().find_map(|(project, open)| {
         let pr = open.list.iter().find(|pr| pr.url == url)?;
         Some((project.clone(), pr.clone()))
@@ -1503,6 +1604,7 @@ impl Runner for PrFixer {
     fn tick(&mut self, app: &mut App, out: &mut Vec<ClientRequest>) {
         send_waiting(app, out);
         retry_cubic(app, out);
+        relook_held(app, out);
         router::deliver_queued(app, out);
         archive_green(app, out);
         note_stand_downs(app);
@@ -2838,8 +2940,6 @@ mod tests {
                 merged: Vec::new(),
                 list,
                 at: now,
-                due: now,
-                step: Duration::from_secs(15),
             },
         );
         app.automations.settings.of_mut(Automation::PrFixer).on = Some(on);
@@ -2873,6 +2973,14 @@ mod tests {
             );
         }
         note_list(app, &project, &list);
+    }
+
+    /// The bodies the fixer wants read now, and how often (THE
+    /// RESOLVER's background demand).
+    fn needs(app: &App) -> Vec<(String, Duration)> {
+        let mut needs = detail_needs(app);
+        needs.sort();
+        needs
     }
 
     /// A body as `land_pr_detail` lands it: observed, then handed over.
@@ -3003,11 +3111,12 @@ mod tests {
         listed(&mut app);
         assert!(app.autofix.watching.contains_key(&pr().url));
         assert_eq!(
-            due_fetches(&mut app).len(),
-            1,
-            "its body is asked for at once"
+            needs(&app),
+            vec![(pr().url, crate::sync::github::ON_CHANGE)],
+            "its body is asked for at once, and on no clock"
         );
-        assert!(due_fetches(&mut app).is_empty(), "and only once");
+        listed(&mut app);
+        assert_eq!(app.autofix.want.len(), 1, "and only once");
     }
 
     #[test]
@@ -3023,9 +3132,11 @@ mod tests {
         );
         let out = landed(&mut app, &running);
         assert!(out.is_empty(), "still settling");
-        assert!(
-            app.autofix.watching[&pr().url].next_fetch.is_some(),
-            "asked again later"
+        assert!(app.autofix.watching[&pr().url].settling);
+        assert_eq!(
+            needs(&app),
+            vec![(pr().url, SETTLE_RECHECK)],
+            "asked again on the settle beat"
         );
 
         let mut app = app_with(vec![broken(true, false)], true);
@@ -3758,8 +3869,9 @@ mod tests {
         );
         make_factory(&mut app);
         listed(&mut app);
-        assert_eq!(due_fetches(&mut app).len(), 1, "read at once");
-        assert!(due_fetches(&mut app).is_empty(), "then on its beat");
+        assert_eq!(app.autofix.want.len(), 1, "read at once");
+        listed(&mut app);
+        assert_eq!(app.autofix.want.len(), 1, "and not again till it moves");
 
         let comment = |at: &str, body: &str| crate::pull_request::PrComment {
             author: "o".into(),
@@ -3856,7 +3968,7 @@ mod tests {
             10_000,
         );
         listed(&mut app);
-        assert_eq!(due_fetches(&mut app).len(), 1, "a green PR is read");
+        assert_eq!(app.autofix.want.len(), 1, "a green PR is read");
 
         let mut answered = cubic_thread("PRRT_answered", 9, "**P1** stale cache");
         answered
@@ -4252,28 +4364,21 @@ mod tests {
         }
     }
 
-    /// The open list is the clock: a check finishing moves the row, and the
-    /// body is read again on that beat rather than a minute later.
+    /// The rows are the clock: a settling breakage is read again on the
+    /// settle beat, not on every list, and at once when its row moves —
+    /// a push, a comment (`updatedAt`) — whenever that is.
     #[test]
     fn a_settling_pr_is_read_again_as_soon_as_its_row_moves() {
-        let tally = |failed, pending| {
-            Some(crate::pull_request::CheckTally {
-                passed: 0,
-                failed,
-                pending,
-                cancelled: 0,
-            })
-        };
-        let row = |pending| OpenPr {
+        let row = |updated: &str| OpenPr {
             meta: crate::pull_request::PrMeta {
-                checks: tally(1, pending),
+                updated_at: updated.into(),
                 ..Default::default()
             },
             ..broken(false, true)
         };
-        let mut app = app_with(vec![row(1)], true);
+        let mut app = app_with(vec![row("1")], true);
         listed(&mut app);
-        assert_eq!(due_fetches(&mut app).len(), 1);
+        assert_eq!(app.autofix.want.len(), 1);
         let running = detail(
             false,
             vec![
@@ -4282,21 +4387,27 @@ mod tests {
             ],
         );
         landed(&mut app, &running);
-        assert!(due_fetches(&mut app).is_empty(), "settling");
+        assert!(app.autofix.want.is_empty(), "read");
+        assert_eq!(needs(&app), vec![(pr().url, SETTLE_RECHECK)], "settling");
 
         listed(&mut app);
-        assert!(due_fetches(&mut app).is_empty(), "the row sat still");
+        assert!(app.autofix.want.is_empty(), "the row sat still");
 
-        app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = vec![row(0)];
+        app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = vec![row("2")];
         listed(&mut app);
-        assert_eq!(due_fetches(&mut app).len(), 1, "the e2e run finished");
+        assert_eq!(app.autofix.want.len(), 1, "the row moved");
 
-        // Moving while that read is out: the next goes at once, whatever
-        // the answer.
-        app.open_prs.get_mut(&ProjectId("p".into())).unwrap().list = vec![row(1)];
-        listed(&mut app);
+        // The relaunch's ledger says it was read at this row: not again.
+        let read = app.autofix.ledger[&pr().url].read.clone();
         landed(&mut app, &running);
-        assert_eq!(due_fetches(&mut app).len(), 1);
+        assert_ne!(
+            app.autofix.ledger[&pr().url].read,
+            read,
+            "read at the new row"
+        );
+        app.autofix.watching.clear();
+        listed(&mut app);
+        assert!(app.autofix.want.is_empty(), "nothing moved since the read");
     }
 
     // ---- the conflicting files ----

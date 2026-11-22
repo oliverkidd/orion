@@ -24,7 +24,11 @@
 //! The daemon sweeps the transcripts the Claude hooks named (see
 //! `Daemon::note_transcript`) every second and reads only what was
 //! appended since the last pass — a transcript runs to megabytes, and a
-//! switch is one line somewhere in the middle of it. The newest marker is
+//! switch is one line somewhere in the middle of it. Only sessions a client
+//! is attached to are read, and each one once more as the last client
+//! leaves it (`Daemon::model_sweep_targets`): `/model` is typed into the
+//! session on screen, and a transcript out of view keeps its offset, so
+//! whatever it gained meanwhile is read on the next attach. The newest marker is
 //! mapped onto the harness's model list (`opus`, `opus[1m]`, …) and written
 //! to the row's `model`, which is also what a resume passes back as
 //! `--model`, so the session comes back on the model it was switched to.
@@ -166,8 +170,11 @@ fn adopt(current: Option<&str>, seen: &str) -> Option<String> {
 }
 
 impl Daemon {
-    /// One pass of the model sweep over every live session's transcript.
+    /// One pass of the model sweep over the transcripts of the live
+    /// sessions a client is attached to, or just left. Every live
+    /// session's offset is kept, read or not.
     pub fn sweep_claude_models(&self, offsets: &mut TranscriptOffsets) {
+        let targets = self.model_sweep_targets();
         let known: Vec<(AgentId, PathBuf)> = self
             .transcripts
             .lock()
@@ -175,19 +182,35 @@ impl Daemon {
             .iter()
             .map(|(id, t)| (id.clone(), t.transcript_path.clone()))
             .collect();
-        let live = known
+        let live: Vec<(AgentId, PathBuf)> = known
             .into_iter()
             .filter(|(id, _)| self.is_alive(&SessionRef::Agent(id.clone())))
             .collect();
-        self.sync_transcript_models(live, offsets);
+        offsets.retain(|id, _| live.iter().any(|(t, _)| t == id));
+        let due = live
+            .into_iter()
+            .filter(|(id, _)| targets.contains(id))
+            .collect();
+        self.read_transcript_models(due, offsets);
     }
 
+    /// Read `transcripts`, forgetting the offsets of every other.
+    #[cfg(test)]
     fn sync_transcript_models(
         &self,
         transcripts: Vec<(AgentId, PathBuf)>,
         offsets: &mut TranscriptOffsets,
     ) {
         offsets.retain(|id, _| transcripts.iter().any(|(t, _)| t == id));
+        self.read_transcript_models(transcripts, offsets);
+    }
+
+    /// Read what each of `transcripts` gained since its offset.
+    fn read_transcript_models(
+        &self,
+        transcripts: Vec<(AgentId, PathBuf)>,
+        offsets: &mut TranscriptOffsets,
+    ) {
         for (id, path) in transcripts {
             let len = std::fs::metadata(&path).map(|m| m.len()).ok();
             let read_to = offsets
@@ -357,6 +380,27 @@ mod tests {
             Some("sonnet")
         );
         assert_eq!(adopt(Some("gateway-big-1"), "gateway-big-1"), None);
+    }
+
+    /// The sweep reads the sessions a client is attached to, on every
+    /// pass, and each one once more as its last client leaves.
+    #[test]
+    fn only_attached_sessions_and_one_last_look_are_swept() {
+        let (daemon, id) = seeded_daemon(AgentKind::Claude);
+        let sref = SessionRef::Agent(id.clone());
+        assert!(daemon.model_sweep_targets().is_empty(), "nobody looking");
+        daemon.note_attached(&sref);
+        daemon.note_attached(&sref);
+        assert!(daemon.model_sweep_targets().contains(&id));
+        assert!(daemon.model_sweep_targets().contains(&id), "every pass");
+        daemon.note_detached(&sref);
+        assert!(
+            daemon.model_sweep_targets().contains(&id),
+            "a second client still attached"
+        );
+        daemon.note_detached(&sref);
+        assert!(daemon.model_sweep_targets().contains(&id), "one last look");
+        assert!(daemon.model_sweep_targets().is_empty(), "then none");
     }
 
     fn seeded_daemon(kind: AgentKind) -> (Arc<Daemon>, AgentId) {

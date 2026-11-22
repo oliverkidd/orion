@@ -60,9 +60,10 @@ pub const SHARED_SETUP: &[&str] = &[
 ];
 
 /// How often the loop's slow beat re-reads the records unasked, to catch
-/// a `/login` typed in a session's own pane. Anything orion does itself —
-/// a sign-in, an add — asks at once.
-const POLL: Duration = Duration::from_secs(5);
+/// a `/login` typed in a session's own pane — and only while somebody is
+/// looking (`App::idle`): a rename can wait for them. Anything orion does
+/// itself — a sign-in, an add — asks at once.
+const POLL: Duration = Duration::from_secs(30);
 
 // ---- who each account is signed in as ----
 
@@ -212,7 +213,7 @@ pub fn refresh_now() -> bool {
     if !crate::config::config_pinned() {
         return false;
     }
-    let cfg = Config::load();
+    let cfg = Config::cached();
     let all = cfg.raw_harness_registry();
     let accounts: Vec<(String, Option<String>, Record)> = all
         .iter()

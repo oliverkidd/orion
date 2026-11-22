@@ -125,8 +125,8 @@ pub const NO_TEXT: &str = "(no textual changes)";
 /// off. `git status` and `git diff` refresh the index's stat cache as a
 /// side effect and, when it is stale — it always is while an agent edits
 /// files — write it back through `.git/index.lock`. The WORKTREES PANEL's
-/// changed-files badge polls `status` every two seconds on the checkout
-/// the user is working in, so left on, that write lands under the agent's
+/// changed-files badge reads `status` on the checkout the user is working
+/// in every time THE GIT WATCHER sees it change, so left on, that write lands under the agent's
 /// own `git add` / `commit` / `checkout`, which then fails with "Unable to
 /// create '.git/index.lock': File exists" (issue #15). Nothing the TUI
 /// runs needs the refresh persisted — the agent CLIs themselves run their
@@ -580,7 +580,12 @@ pub fn has_head(root: &Path) -> bool {
 /// HEAD's commit OID, `None` on an unborn HEAD (or outside a repo). The
 /// review marks are scoped to this: any HEAD move invalidates them.
 pub fn head_oid(root: &Path) -> Option<String> {
-    let output = run_git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).ok()?;
+    rev_parse(root, "HEAD")
+}
+
+/// The full sha `rev` names in the checkout at `root`, or None.
+pub fn rev_parse(root: &Path, rev: &str) -> Option<String> {
+    let output = run_git(root, &["rev-parse", "--verify", "--quiet", rev]).ok()?;
     output
         .status
         .success()
@@ -1403,8 +1408,8 @@ mod tests {
         assert!(diff.contains("+content"), "{diff}");
     }
 
-    /// The WORKTREES PANEL badge polls `changed_files` every two seconds on
-    /// the checkout the user's agent is working in. A plain `git status`
+    /// The WORKTREES PANEL badge reads `changed_files` on the checkout the
+    /// user's agent is working in, every time it changes. A plain `git status`
     /// rewrites the index through `.git/index.lock` whenever its stat cache
     /// is stale, and an agent mid-`git add` or `commit` then fails with
     /// "index.lock: File exists" (issue #15). The poll must read without

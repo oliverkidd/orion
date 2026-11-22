@@ -208,23 +208,45 @@ pub(crate) async fn base_of(main: &Path, gh: &dyn Gh) -> String {
 
 /// How many recent merged pull requests [`base_of`] reads.
 const MERGED_LOOK: &str = "30";
-/// How long the branch they went into is kept before GitHub is asked
-/// again: one ask an hour, not one a harvest, and one answer through a
-/// backfill.
+/// How long what GitHub said of the branch they went into is kept before
+/// it is asked again: one ask an hour, not one a harvest, and one answer
+/// through a backfill. A failure, or a repo with no merged pull request to
+/// read, is kept as long — it used to be asked again on every 30 s beat,
+/// for every project, rate limited or not — and so is a repo with no
+/// GitHub remote, which is never asked at all. Opening the rule review
+/// forgets them all ([`forget_bases`]).
 const MERGED_FOR: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-/// Each repo's [`most_merged_into`], and when GitHub said it.
+/// Each repo's [`most_merged_into`] — `None` where GitHub gave none — and
+/// when it was asked.
 static MERGED_BASES: std::sync::Mutex<
-    std::collections::BTreeMap<PathBuf, (String, std::time::Instant)>,
+    std::collections::BTreeMap<PathBuf, (Option<String>, std::time::Instant)>,
 > = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Forget what GitHub said of every repo's merged base: the next
+/// [`base_of`] asks again. The rule review opening is when.
+pub(crate) fn forget_bases() {
+    if let Ok(mut m) = MERGED_BASES.lock() {
+        m.clear();
+    }
+}
 
 /// The branch most of the repo at `main`'s recent merged pull requests
 /// went into, asked of GitHub at most once in [`MERGED_FOR`] — and its
-/// last answer while GitHub doesn't give one.
+/// last answer while GitHub doesn't give one. A repo whose remote is not
+/// on GitHub's web is not asked.
 async fn merged_base(main: &Path, gh: &dyn Gh) -> Option<String> {
     let known = MERGED_BASES.lock().ok().and_then(|m| m.get(main).cloned());
     if let Some((base, _)) = known.as_ref().filter(|(_, at)| at.elapsed() < MERGED_FOR) {
-        return Some(base.clone());
+        return base.clone();
+    }
+    let at = main.to_path_buf();
+    let on_github = tokio::task::spawn_blocking(move || crate::remote::repo_url(&at).is_ok())
+        .await
+        .unwrap_or(false);
+    if !on_github {
+        remember_base(main, None);
+        return None;
     }
     let args = [
         "pr",
@@ -237,23 +259,24 @@ async fn merged_base(main: &Path, gh: &dyn Gh) -> Option<String> {
         "baseRefName",
     ];
     // GitHub not answering keeps the last answer, so a blip never moves
-    // the pull request to origin's default.
-    let Some(base) = gh
+    // the pull request to origin's default — and is itself kept, so the
+    // next harvest does not ask again within the hour.
+    let base = gh
         .run(main, &args)
         .await
         .ok()
         .as_deref()
         .and_then(most_merged_into)
-    else {
-        return known.map(|(base, _)| base);
-    };
+        .or_else(|| known.and_then(|(base, _)| base));
+    remember_base(main, base.clone());
+    base
+}
+
+/// Keep `base` as what GitHub last said of the repo at `main`, as of now.
+fn remember_base(main: &Path, base: Option<String>) {
     if let Ok(mut m) = MERGED_BASES.lock() {
-        m.insert(
-            main.to_path_buf(),
-            (base.clone(), std::time::Instant::now()),
-        );
+        m.insert(main.to_path_buf(), (base, std::time::Instant::now()));
     }
-    Some(base)
 }
 
 /// The branch most of the pull requests in `json` (`gh pr list --json

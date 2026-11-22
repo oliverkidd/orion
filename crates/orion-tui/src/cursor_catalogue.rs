@@ -8,8 +8,8 @@
 //!
 //! One parser ([`split_id`]) feeds two sources: [`SEED_IDS`], the catalogue as
 //! observed on 2026-08-28, and — at runtime — `cursor-agent --list-models`,
-//! cached in the DATA DIR for a day ([`crate::model_cache`]) and refreshed on
-//! a background thread by [`bootstrap`]. The two are unioned (the CLI's order
+//! cached in the DATA DIR for a day ([`crate::model_cache`]; a failed listing
+//! waits six hours) and refreshed on a background thread by [`bootstrap`]. The two are unioned (the CLI's order
 //! first, see [`merged`]), so a family Cursor adds shows up by itself, ahead
 //! of the seed's, while nothing the seed knows is lost: `--list-models` has
 //! left accepted variants out (`claude-fable-5-low`, …), and a signed-out CLI
@@ -21,7 +21,6 @@
 //! `CLAUDE_MODELS` — by leaking each installed catalogue once; a refresh happens
 //! at most once per TUI process.
 
-use std::process::{Command, Stdio};
 use std::sync::{OnceLock, RwLock};
 
 use crate::config::DEFAULT_CHOICE;
@@ -440,18 +439,14 @@ pub fn merged(runtime_ids: &[String]) -> Catalogue {
 // --- refresh -----------------------------------------------------------------
 
 /// Run `cursor-agent --list-models` and parse it; None when the CLI is
-/// missing, fails (not logged in), or lists nothing.
+/// missing, fails (not logged in), runs past
+/// [`crate::model_cache::LIST_TIMEOUT`], or lists nothing.
 pub fn fetch_ids() -> Option<Vec<String>> {
-    let output = Command::new(orion_core::AgentKind::Cursor.cli_program())
-        .arg("--list-models")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let ids = parse_list_models(&String::from_utf8_lossy(&output.stdout));
+    let out = crate::model_cache::listing(
+        orion_core::AgentKind::Cursor.cli_program(),
+        &["--list-models"],
+    )?;
+    let ids = parse_list_models(&out);
     (!ids.is_empty()).then_some(ids)
 }
 

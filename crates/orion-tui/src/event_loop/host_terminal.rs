@@ -28,10 +28,12 @@ use std::time::Duration;
 
 pub(super) type HostTerminal = Terminal<CrosstermBackend<BufWriter<Stdout>>>;
 
-/// How often the runtime modes are re-asked while the loop runs. Every
-/// enable is idempotent and the whole burst is a few dozen bytes, so the
-/// beat is set by how long a dead mouse may stay dead, not by cost.
-pub(super) const MODE_REASSERT: Duration = Duration::from_secs(2);
+/// How often the runtime modes are re-asked while somebody is looking
+/// (`App::idle`). Every enable is idempotent and the whole burst is a few
+/// dozen bytes, but each is a write the host's renderer wakes for — so
+/// the beat is slow, and the moments a host is likely to have reset
+/// itself (focus back, a resize) re-ask at once instead.
+pub(super) const MODE_REASSERT: Duration = Duration::from_secs(30);
 
 /// The kitty keyboard flags pushed on the host: without them Cmd-combos
 /// never reach us and Option/Esc combos arrive ambiguous. The flags the

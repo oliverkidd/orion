@@ -5,9 +5,15 @@
 //! labels ([`labels_of`]) and its own SYSTEM PRESET.
 //!
 //! * **Watch.** Every [`POLL`] ([`interval`]; `ORION_LINEAR_BUILDER_POLL_SECS`
-//!   overrides it, `0` turns it off), for each distinct Linear key across
-//!   the projects, the tickets assigned to the key's owner that carry one
-//!   of the runner's labels, sit in no Linear project (a project's
+//!   overrides it, `0` turns it off) while either runner is on, one read
+//!   per distinct Linear key across the projects — both runners' labels
+//!   in one query, the RESOLVER's `LinearIntake` ([`intake_query`]); what
+//!   changed since the last look, and the whole list on a run's first
+//!   look and every [`FULL_EVERY`]. The stamps and the tickets the model
+//!   has answered for are kept on disk (`linear-intake.json`), so a
+//!   restart neither looks early nor asks again. Each runner takes the
+//!   tickets assigned to the key's owner that carry one
+//!   of its labels, sit in no Linear project (a project's
 //!   tickets are planned work) and wait in **Todo, Triage or the
 //!   backlog** — picked in that order, then by priority ([`issues_query`],
 //!   [`pick_rank`]); the queue keeps that order too. A
@@ -66,7 +72,7 @@ pub(crate) mod stages;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use orion_core::{AgentId, AgentMode, ClientRequest, ProjectId};
@@ -131,8 +137,17 @@ pub const FEATURE_BUILDER_TEXT: &str = concat!(
     builder_rules!()
 );
 
-/// How often each runner looks for tickets.
-pub const POLL: Duration = Duration::from_secs(2 * 60);
+/// How often the intake looks for tickets, for both runners at once.
+pub const POLL: Duration = Duration::from_secs(5 * 60);
+
+/// How often a look reads the whole list rather than what changed since
+/// the last one: what catches a ticket left waiting unchanged — one
+/// skipped while a checkout worked on it, one let go back to you.
+pub const FULL_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// How far before the last look an incremental one reaches back: Linear's
+/// clock and ours need not agree to the second.
+const SKEW_MS: i64 = 60 * 1000;
 
 /// The look's cadence: `ORION_LINEAR_BUILDER_POLL_SECS` when set, `None`
 /// when it is `0` (off); else [`POLL`].
@@ -170,7 +185,7 @@ pub fn carries(issue: &LinearIssue, labels: &[String]) -> bool {
 
 /// The states a ticket is picked up in, in the order they are picked:
 /// Todo (`unstarted`) first, then Triage, then the backlog.
-const PICK_ORDER: [&str; 3] = ["unstarted", "triage", "backlog"];
+pub(crate) const PICK_ORDER: [&str; 3] = ["unstarted", "triage", "backlog"];
 
 /// The most tickets one look reads in each state.
 const ISSUES_LIMIT: usize = 50;
@@ -181,7 +196,13 @@ const ISSUES_LIMIT: usize = 50;
 /// `state.type.eq`, `project.null` and `labels.some.or` of
 /// `name.eqIgnoreCase`. Asked state by state so a long backlog never
 /// crowds Todo out of a list.
-pub fn issues_query(labels: &[String]) -> (String, serde_json::Value) {
+///
+/// `since` (an RFC 3339 time) cuts each list to the tickets updated after
+/// it: the incremental look ([`intake_query`]).
+pub fn issues_query(labels: &[String], since: Option<&str>) -> (String, serde_json::Value) {
+    let updated = since
+        .map(|at| format!("updatedAt: {{ gt: \"{at}\" }}, "))
+        .unwrap_or_default();
     let parts: Vec<String> = PICK_ORDER
         .iter()
         .map(|state| {
@@ -189,7 +210,7 @@ pub fn issues_query(labels: &[String]) -> (String, serde_json::Value) {
                 "{state}: issues(first: {ISSUES_LIMIT}, filter: {{ \
                  assignee: {{ isMe: {{ eq: true }} }}, \
                  state: {{ type: {{ eq: \"{state}\" }} }}, \
-                 project: {{ null: true }}, \
+                 project: {{ null: true }}, {updated}\
                  labels: {{ some: {{ or: $labels }} }} }}) {{ nodes {{ {} }} }}",
                 crate::linear::ISSUE_FIELDS
             )
@@ -585,8 +606,21 @@ pub struct Shared {
     pub queue: Vec<Group>,
     /// Tickets being routed and grouped now.
     claimed: HashSet<String>,
-    /// When each runner looks next.
-    next_look: HashMap<Automation, Instant>,
+    /// When each Linear key's intake last looked, and how far back it
+    /// read — kept on disk with [`Self::intake_seen`] (`linear-intake.json`),
+    /// so a restart neither looks again early nor asks the model about
+    /// tickets it answered for already.
+    pub(crate) intake: HashMap<String, Stamps>,
+    /// The keys whose whole list has been read this run: a run's first
+    /// look at a key is a full one, since the queue it filled last run
+    /// is gone.
+    full_this_run: HashSet<String>,
+    /// Where the intake's stamps are kept; None (the tests) keeps them in
+    /// memory.
+    intake_path: Option<PathBuf>,
+    /// A ticket you cleared waits for no beat: the next step looks again
+    /// ([`Self::look_now`], taken by the runner's tick).
+    pub(crate) look_again: bool,
     /// Tickets said once to be worked on elsewhere.
     said: HashSet<String>,
     /// Tickets the intake ask answered for and put nowhere, by id, at the
@@ -662,8 +696,63 @@ impl Shared {
 
     /// Look again on the next tick: a ticket you cleared starts now.
     pub(crate) fn look_now(&mut self) {
-        self.next_look.clear();
+        for stamps in self.intake.values_mut() {
+            stamps.looked_ms = 0;
+        }
+        self.look_again = true;
     }
+
+    /// Keep the intake's stamps and the tickets it has answered for. The
+    /// answers for tickets untouched in [`SEEN_KEEP_MS`] go: one changed
+    /// since is asked about afresh anyway.
+    pub(crate) fn save_intake(&mut self) {
+        let now = crate::app::now_ms();
+        self.intake_seen.retain(|_, at| {
+            crate::pull_request::rfc3339_ms(at).is_none_or(|at| now - at < SEEN_KEEP_MS)
+        });
+        let Some(path) = &self.intake_path else {
+            return;
+        };
+        let log = IntakeLog {
+            seen: self.intake_seen.clone(),
+            keys: self.intake.clone(),
+        };
+        let written = serde_json::to_vec_pretty(&log)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| orion_core::settings::write_atomic(path, &bytes));
+        if let Err(err) = written {
+            tracing::warn!("automations: writing the Linear intake's stamps: {err}");
+        }
+    }
+}
+
+/// How long the intake remembers answering for a ticket nobody has
+/// touched since.
+const SEEN_KEEP_MS: i64 = 60 * orion_core::clock::DAY_MS;
+
+/// One Linear key's intake, as of its last look (epoch ms; 0 for never).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stamps {
+    /// When the last look was asked, answered or not: the next is due a
+    /// [`POLL`] after.
+    #[serde(default)]
+    pub looked_ms: i64,
+    /// When the last look that answered was asked: the next incremental
+    /// one reads what changed since (less [`SKEW_MS`]).
+    #[serde(default)]
+    pub synced_ms: i64,
+    /// When the last full look that answered was asked.
+    #[serde(default)]
+    pub full_ms: i64,
+}
+
+/// `linear-intake.json`: [`Shared::intake`] and [`Shared::intake_seen`].
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct IntakeLog {
+    #[serde(default)]
+    seen: HashMap<String, String>,
+    #[serde(default)]
+    keys: HashMap<String, Stamps>,
 }
 
 /// What Needs you says of a factory session that crashed past its
@@ -722,9 +811,17 @@ pub fn load(app: &mut App) {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
+    let intake_path = super::state_dir().join("linear-intake.json");
+    let log: IntakeLog = std::fs::read(&intake_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
     let shared = &mut app.automations.linear_builder;
     shared.ledger = ledger;
     shared.path = Some(path);
+    shared.intake_seen = log.seen;
+    shared.intake = log.keys;
+    shared.intake_path = Some(intake_path);
 }
 
 // ---- the runner ----
@@ -739,21 +836,25 @@ impl Runner for LinearBuilder {
 
     /// The shared ledger's `stages::follow` and `owner::send_writes` run
     /// once per tick, around every runner's (`automations::tick`).
+    ///
+    /// The look for tickets is no runner's: both runners' tickets come in
+    /// one read per Linear key, which the RESOLVER makes while either is
+    /// on ([`intake_due`], [`intake_landed`]). A cleared ticket's
+    /// [`Shared::look_now`] asks it again here.
     fn tick(&mut self, app: &mut App, out: &mut Vec<ClientRequest>) {
         launch_queued(app, self.0, out);
-        let now = Instant::now();
-        let due = app
-            .automations
-            .linear_builder
-            .next_look
-            .get(&self.0)
-            .is_none_or(|at| *at <= now);
-        if let (true, Some(every)) = (due, interval()) {
-            app.automations
+        if std::mem::take(&mut app.automations.linear_builder.look_again) {
+            let tags: Vec<String> = app
+                .automations
                 .linear_builder
-                .next_look
-                .insert(self.0, now + every);
-            look(app, self.0);
+                .intake
+                .keys()
+                .cloned()
+                .collect();
+            for tag in tags {
+                app.resolver
+                    .invalidate(&crate::sync::QueryKey::LinearIntake(tag));
+            }
         }
     }
 
@@ -772,13 +873,6 @@ impl Runner for LinearBuilder {
 /// What lands from off the loop.
 #[derive(Debug)]
 pub enum Answer {
-    /// One key's tickets for `which`; `projects` are the projects that key
-    /// is read from.
-    Fetched {
-        which: Automation,
-        projects: Vec<ProjectId>,
-        issues: Result<Vec<LinearIssue>, String>,
-    },
     /// Tickets routed and grouped; `released` are the ones that could not
     /// be placed, to be looked at again; `possible` the ones the model
     /// judged very like a live session's work, to ask you about; `seen`
@@ -801,37 +895,111 @@ pub enum Answer {
     Labels(Result<Vec<String>, String>),
 }
 
-/// Ask Linear, under every distinct key, for `which`'s tickets.
-fn look(app: &mut App, which: Automation) {
-    let Some(tx) = app.automations.tx.clone() else {
-        return;
+/// The runners that are on, each with its labels: whose tickets the
+/// intake reads.
+fn on_with_labels(app: &App) -> Vec<(Automation, Vec<String>)> {
+    [Automation::BugFixer, Automation::FeatureBuilder]
+        .into_iter()
+        .filter(|which| app.automations.is_on(*which))
+        .map(|which| (which, labels_of(&app.automations.settings, which)))
+        .collect()
+}
+
+/// Whether the intake under Linear key `tag` is due a look at `now_ms`
+/// (epoch ms): a builder is on, the beat isn't off, and a [`POLL`] has
+/// passed since the last look — this run's or, kept on disk, the last
+/// run's.
+pub fn intake_due(app: &App, tag: &str, now_ms: i64) -> bool {
+    let Some(every) = interval() else {
+        return false;
     };
-    let (query, variables) = issues_query(&labels_of(&app.automations.settings, which));
-    for (key, projects) in crate::linear::keys_by_project(app) {
-        let (tx, query, variables) = (tx.clone(), query.clone(), variables.clone());
-        tokio::spawn(async move {
-            let issues = crate::linear::graphql(&key, &query, variables)
-                .await
-                .and_then(|json| crate::linear::parse_my_issues(&json, &PICK_ORDER));
-            let _ = tx.send(super::Answer::LinearBuilder(Answer::Fetched {
-                which,
-                projects,
-                issues,
-            }));
-        });
+    if on_with_labels(app).is_empty() {
+        return false;
+    }
+    let looked = app
+        .automations
+        .linear_builder
+        .intake
+        .get(tag)
+        .map_or(0, |s| s.looked_ms);
+    now_ms - looked >= every.as_millis() as i64
+}
+
+/// One look of the intake under key `tag`, asked at `now_ms`: one query
+/// for both runners — every label of each one that is on, the tickets
+/// split between them by label when they land ([`intake_landed`]) — and
+/// whether it reads the whole list. A run's first look at a key, and one
+/// an [`FULL_EVERY`] after the last full one, reads it all; the rest read
+/// what changed since the last look that answered. None with no runner
+/// on.
+pub fn intake_query(
+    app: &App,
+    tag: &str,
+    now_ms: i64,
+) -> Option<(String, serde_json::Value, bool)> {
+    let mut labels: Vec<String> = Vec::new();
+    for (_, own) in on_with_labels(app) {
+        for label in own {
+            if !labels
+                .iter()
+                .any(|l| l.trim().eq_ignore_ascii_case(label.trim()))
+            {
+                labels.push(label);
+            }
+        }
+    }
+    if labels.is_empty() {
+        return None;
+    }
+    let shared = &app.automations.linear_builder;
+    let stamps = shared.intake.get(tag).copied().unwrap_or_default();
+    let full = !shared.full_this_run.contains(tag)
+        || stamps.synced_ms == 0
+        || now_ms - stamps.full_ms >= FULL_EVERY.as_millis() as i64;
+    let since = (!full)
+        .then(|| chrono::DateTime::from_timestamp_millis(stamps.synced_ms - SKEW_MS))
+        .flatten()
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    let (query, variables) = issues_query(&labels, since.as_deref());
+    Some((query, variables, full))
+}
+
+/// The intake's look under key `tag`, asked at `asked_ms`, landed: its
+/// stamps moved on and kept, and — when it answered — its tickets handed
+/// to each runner that is on, which takes the ones carrying its labels
+/// ([`fresh`]). A failed look waits a [`POLL`] like any other.
+pub fn intake_landed(
+    app: &mut App,
+    tag: &str,
+    projects: Vec<ProjectId>,
+    asked_ms: i64,
+    full: bool,
+    issues: Result<Vec<LinearIssue>, String>,
+) {
+    let shared = &mut app.automations.linear_builder;
+    let stamps = shared.intake.entry(tag.to_string()).or_default();
+    stamps.looked_ms = asked_ms;
+    let issues = match issues {
+        Ok(issues) => issues,
+        Err(why) => {
+            tracing::warn!("linear intake: asking Linear: {why}");
+            shared.save_intake();
+            return;
+        }
+    };
+    stamps.synced_ms = asked_ms;
+    if full {
+        stamps.full_ms = asked_ms;
+        shared.full_this_run.insert(tag.to_string());
+    }
+    shared.save_intake();
+    for (which, _) in on_with_labels(app) {
+        fetched(app, which, projects.clone(), issues.clone());
     }
 }
 
 pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
     match answer {
-        Answer::Fetched {
-            which,
-            projects,
-            issues,
-        } => match issues {
-            Ok(issues) => fetched(app, which, projects, issues),
-            Err(why) => tracing::warn!("{}: asking Linear: {why}", which.name()),
-        },
         Answer::Placed {
             which,
             groups,
@@ -839,7 +1007,11 @@ pub fn land(app: &mut App, answer: Answer, out: &mut Vec<ClientRequest>) {
             possible,
             seen,
         } => {
-            app.automations.linear_builder.intake_seen.extend(seen);
+            if !seen.is_empty() {
+                let shared = &mut app.automations.linear_builder;
+                shared.intake_seen.extend(seen);
+                shared.save_intake();
+            }
             placed(app, groups, released, possible);
             if app.automations.is_on(which) {
                 launch_queued(app, which, out);
@@ -1736,6 +1908,7 @@ mod tests {
     use crate::factory::cards::{CardState, Recipient};
     use crate::linear::LinearTag;
     use orion_core::{Agent, AgentKind, AgentStatus, Worktree, WorktreeId};
+    use std::time::Instant;
 
     fn issue(id: &str, labels: &[&str]) -> LinearIssue {
         LinearIssue {
@@ -2348,7 +2521,7 @@ mod tests {
 
     #[test]
     fn the_queries_ask_linear_as_its_schema_has_it() {
-        let (query, vars) = issues_query(&["Bug".into(), " Regression ".into()]);
+        let (query, vars) = issues_query(&["Bug".into(), " Regression ".into()], None);
         for state in ["unstarted", "triage", "backlog"] {
             let part = format!(
                 r#"{state}: issues(first: 50, filter: {{ assignee: {{ isMe: {{ eq: true }} }}, state: {{ type: {{ eq: "{state}" }} }}, project: {{ null: true }}, "#
@@ -2374,6 +2547,115 @@ mod tests {
             { "name": " Feature ", "isGroup": false }
         ] } } });
         assert_eq!(parse_labels(&json).unwrap(), ["Bug", "Feature"]);
+    }
+
+    /// The intake is one read a key for both runners — both runners'
+    /// labels — while either is on: due a [`POLL`] after the last look,
+    /// whole on a run's first look and hourly, else what changed since
+    /// the last answer (less a minute). Its stamps outlive a restart.
+    #[test]
+    fn the_intake_is_one_read_for_both_runners_incremental_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::new();
+        app.automations.linear_builder.intake_path = Some(dir.path().join("linear-intake.json"));
+        for which in [Automation::BugFixer, Automation::FeatureBuilder] {
+            app.automations.settings.of_mut(which).on = Some(false);
+        }
+        let t0: i64 = 1_800_000_000_000;
+        assert!(!intake_due(&app, "k", t0), "no runner on");
+        assert!(intake_query(&app, "k", t0).is_none());
+        app.automations.settings.of_mut(Automation::BugFixer).on = Some(true);
+        app.automations
+            .settings
+            .of_mut(Automation::FeatureBuilder)
+            .on = Some(true);
+        assert!(intake_due(&app, "k", t0), "never looked");
+
+        let (query, vars, full) = intake_query(&app, "k", t0).unwrap();
+        assert!(full, "a run's first look reads it all");
+        assert!(!query.contains("updatedAt: {"), "{query}");
+        let labels: Vec<&str> = vars["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["name"]["eqIgnoreCase"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Bug",
+                "Regression",
+                "Customer bug",
+                "Feature",
+                "Improvement"
+            ]
+        );
+
+        let ticket = |id: &str, label: &str| LinearIssue {
+            status_type: "unstarted".into(),
+            ..issue(id, &[label])
+        };
+        let tickets = vec![ticket("b1", "Bug"), ticket("f1", "Feature")];
+        intake_landed(&mut app, "k", Vec::new(), t0, true, Ok(tickets));
+        let poll = POLL.as_millis() as i64;
+        assert!(!intake_due(&app, "k", t0 + poll - 1));
+        assert!(intake_due(&app, "k", t0 + poll));
+
+        let (query, _, full) = intake_query(&app, "k", t0 + poll).unwrap();
+        assert!(!full, "the next reads what changed");
+        assert!(
+            query.contains(r#"updatedAt: { gt: "2027-01-15T07:59:00Z" }"#),
+            "{query}"
+        );
+        let hour = FULL_EVERY.as_millis() as i64;
+        assert!(
+            intake_query(&app, "k", t0 + hour).unwrap().2,
+            "hourly, all of it"
+        );
+
+        // A failed look waits its beat too, and moves nothing else on.
+        intake_landed(
+            &mut app,
+            "k",
+            Vec::new(),
+            t0 + poll,
+            false,
+            Err("down".into()),
+        );
+        let stamps = app.automations.linear_builder.intake["k"];
+        assert_eq!(
+            (stamps.looked_ms, stamps.synced_ms, stamps.full_ms),
+            (t0 + poll, t0, t0)
+        );
+
+        // A restart: the stamps and the answers come back off disk, and its
+        // first look reads it all again (the queue it filled is gone).
+        app.automations
+            .linear_builder
+            .intake_seen
+            .insert("b1".into(), "2027-01-15T08:00:00Z".into());
+        app.automations.linear_builder.save_intake();
+        let mut again = App::new();
+        again.automations.settings = app.automations.settings.clone();
+        let log: IntakeLog =
+            serde_json::from_slice(&std::fs::read(dir.path().join("linear-intake.json")).unwrap())
+                .unwrap();
+        again.automations.linear_builder.intake = log.keys;
+        again.automations.linear_builder.intake_seen = log.seen;
+        assert!(
+            !intake_due(&again, "k", t0 + poll + 1),
+            "not early after a restart"
+        );
+        assert!(again
+            .automations
+            .linear_builder
+            .intake_seen
+            .contains_key("b1"));
+        assert!(intake_query(&again, "k", t0 + 2 * poll).unwrap().2);
+
+        // A ticket you clear asks again at once.
+        app.automations.linear_builder.look_now();
+        assert!(intake_due(&app, "k", t0 + poll + 1));
     }
 
     #[test]
@@ -2594,8 +2876,6 @@ mod tests {
             list,
             merged,
             at: Instant::now(),
-            due: Instant::now(),
-            step: Duration::from_secs(60),
         }
     }
 

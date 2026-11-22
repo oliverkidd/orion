@@ -3,9 +3,10 @@
 //! * each project's open list (`App::open_prs`), whose rows carry
 //!   `PrMeta::review_requested` — Enter lands on the row, as a `⌘K` jump
 //!   to it does;
-//! * one `gh search prs --review-requested=@me --state=open` on the
-//!   board's poll, which reaches repos that are no orion project — Enter
-//!   opens those in the browser.
+//! * one `gh search prs --review-requested=@me --state=open` as the board
+//!   opens (THE RESOLVER's `ReviewRequests`, a minute fresh), which
+//!   reaches repos that are no orion project — Enter opens those in the
+//!   browser.
 
 use chrono::{DateTime, Utc};
 use orion_core::ProjectId;
@@ -45,9 +46,11 @@ pub fn parse(stdout: &str) -> Option<Vec<Found>> {
     serde_json::from_str(stdout).ok()
 }
 
-/// Ask GitHub for the open pull requests that ask you to review them.
-pub async fn search() -> Option<Vec<Found>> {
-    let out = crate::pull_request::gh(
+/// Ask GitHub for the open pull requests that ask you to review them —
+/// THE RESOLVER's `ReviewRequests`, asked when the board opens and its
+/// last answer is over a minute old, never on a beat of its own.
+pub async fn search() -> Result<Vec<Found>, crate::sync::FetchError> {
+    let out = crate::sync::gate::github(
         None,
         &[
             "search",
@@ -62,7 +65,9 @@ pub async fn search() -> Option<Vec<Found>> {
         std::time::Duration::from_secs(20),
     )
     .await?;
-    parse(&out)
+    parse(&out).ok_or_else(|| {
+        crate::sync::FetchError::Failed("GitHub's answer didn't read as a search".into())
+    })
 }
 
 fn card(

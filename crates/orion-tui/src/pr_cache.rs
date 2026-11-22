@@ -11,11 +11,11 @@
 //! at.
 //!
 //! The cache is never the source of truth. GitHub is, and every hydrated
-//! entry is re-asked on the same beats a fresh answer would be — the
-//! project's list on arrival, the selected checkout on the next tick, its
-//! neighbours one per tick, a cached body the moment the cursor rests on
-//! its row. What lands replaces what was hydrated; what fails to land
-//! leaves it (see `pull_request::Lookup`).
+//! entry is asked again the first time it is looked at — a project's list
+//! on its first visit (THE RESOLVER counts nothing read from here as an
+//! answer), a checkout's branch when it is selected, a cached body the
+//! moment the cursor rests on its row. What lands replaces what was
+//! hydrated; what fails to land leaves it (see `pull_request::Lookup`).
 //!
 //! Layout, under the DATA DIR (`ORION_DATA_DIR` isolates it for tests and
 //! parallel instances, like everything else there):
@@ -26,7 +26,8 @@
 //! ```
 //!
 //! The document is rewritten whole, atomically, whenever something in it
-//! changed — at most once per GIT POLL, and once more on quit. It is
+//! changed — at most once per cache flush (`chores::Chore::Flush`), and
+//! once more on quit. It is
 //! small: a line or two per row. A page is tens of kilobytes — nine tenths
 //! of what the cache holds — so each lives in a file of its own, written
 //! only when that page was read again, and a busy repo's hundred pages are
@@ -44,8 +45,7 @@ use std::path::{Path, PathBuf};
 use orion_core::{ProjectId, WorktreeId};
 use serde::{Deserialize, Serialize};
 
-use crate::app::{App, OpenPrs, OPEN_PRS_MIN_AGE};
-use crate::event_loop::{OPEN_PRS_RECHECK_MIN, OPEN_PRS_REFRESH};
+use crate::app::{App, OpenPrs};
 use crate::pull_request::{OpenPr, PrDetail, PullRequest};
 
 /// Directory under the DATA DIR everything below lives in.
@@ -98,6 +98,39 @@ pub struct Store {
     /// dismissed, so a relaunch does not ask about it again.
     #[serde(default)]
     pub autofix: HashMap<String, crate::automations::pr_fixer::Record>,
+    /// When each project's PULL REQUESTS MODAL extras and its merged and
+    /// closed tail last landed, and the automations' `MyPrs` read: unix
+    /// seconds. Each kind of answer is asked on its own clock (THE
+    /// RESOLVER's `PrExtras`, `PrTails`, `MyPrs`), so each keeps its own
+    /// stamp, and a relaunch counts it as that key's last answer
+    /// (`sync::Resolver::seed`): a tail read five minutes before quitting
+    /// is not read again on the first open of the modal, nor `MyPrs`
+    /// before its beat. The open lists have no stamp: the first visit
+    /// after a launch reads each again, over the rows painted from here.
+    #[serde(default)]
+    pub stamps: Stamps,
+}
+
+/// [`Store::stamps`].
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Stamps {
+    pub extras: HashMap<ProjectId, u64>,
+    pub tails: HashMap<ProjectId, u64>,
+    pub my_prs: Option<u64>,
+}
+
+/// `at` on this run's clock as unix seconds, `now_unix` being now.
+fn unix_of(at: std::time::Instant, now_unix: u64) -> u64 {
+    now_unix.saturating_sub(at.elapsed().as_secs())
+}
+
+/// Unix seconds `secs` on this run's clock, `now_unix` being now; `None`
+/// for a stamp from the future (a clock set back) or older than this
+/// process's clock can go.
+fn instant_of(secs: u64, now_unix: u64) -> Option<std::time::Instant> {
+    let age = now_unix.checked_sub(secs)?;
+    std::time::Instant::now().checked_sub(std::time::Duration::from_secs(age))
 }
 
 /// Where this instance keeps its cache. Cheap to clone: it is a path.
@@ -261,7 +294,7 @@ fn file_name(url: &str, ext: &str) -> String {
 /// crash mid-write leaves the previous document, not half of the new one.
 ///
 /// Each write has a temp file of its own ([`temp_path`]). Flushes run off
-/// the loop, so two can overlap — a GIT POLL's and the one on quit — and
+/// the loop, so two can overlap — a flush chore's and the one on quit — and
 /// with one shared temp name the older snapshot's bytes could be the ones
 /// renamed into place after the newer one's.
 pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
@@ -297,7 +330,7 @@ fn temp_path(path: &Path) -> PathBuf {
 }
 
 /// Startup: read the document and paint the app from it. Every hydrated
-/// entry is armed to be re-asked as soon as its beat allows — see
+/// entry is asked again the first time it comes on screen — see
 /// [`install`].
 pub fn hydrate(app: &mut App) {
     let Some(store) = app.pr_cache.as_ref().and_then(PrCache::load_store) else {
@@ -310,14 +343,11 @@ pub fn hydrate(app: &mut App) {
 /// app already knows — a lookup that has answered beats a cached copy of
 /// the same row.
 ///
-/// * Checkout rows land as-is. Their recheck timers are left unarmed, so
-///   the selected checkout is re-asked on the first tick and its
-///   neighbours one per tick after — the same first minute a launch with
-///   no cache spends, only with the rows already painted.
-/// * Open lists land *due*: `at` sits past [`OPEN_PRS_MIN_AGE`] so arriving
-///   at the project re-asks at once, and the step is the one a fresh answer
-///   of the same shape would have left, so the backoff picks up where the
-///   last run's did.
+/// * Checkout rows land as-is.
+/// * Open lists land as-is too. The RESOLVER (`sync`) has no answer of its
+///   own for them yet, so the first visit to each project — the one
+///   selected at launch among them — asks GitHub at once, over rows that
+///   are already painted.
 /// * Bodies land marked stale (`pr_detail_stale`): the pane shows them the
 ///   instant the cursor rests on the row, and the same rest that would
 ///   have fetched a missing body fetches a fresh copy over the top.
@@ -346,33 +376,19 @@ pub fn install(app: &mut App, store: Store) {
     for (worktree, pr) in store.worktrees {
         app.pull_requests.entry(worktree).or_insert(Some(pr));
     }
-    let now = std::time::Instant::now();
-    let at = now.checked_sub(OPEN_PRS_MIN_AGE).unwrap_or(now);
+    let at = std::time::Instant::now();
     let mut merged = store.merged;
     for (project, list) in store.projects {
         if app.open_prs.contains_key(&project) {
             continue;
         }
-        let step = if list.is_empty() {
-            OPEN_PRS_RECHECK_MIN
-        } else {
-            OPEN_PRS_REFRESH
-        };
         let merged = merged.remove(&project).unwrap_or_default();
-        app.open_prs.insert(
-            project,
-            OpenPrs {
-                list,
-                merged,
-                at,
-                due: now,
-                step,
-            },
-        );
+        app.open_prs.insert(project, OpenPrs { list, merged, at });
     }
     for (url, record) in store.autofix {
         app.autofix.ledger.entry(url).or_insert(record);
     }
+    seed_stamps(app, &store.stamps);
     for (url, detail) in store.details {
         if app.pr_detail.contains_key(&url) {
             continue;
@@ -381,6 +397,49 @@ pub fn install(app: &mut App, store: Store) {
         app.pr_detail_stale.insert(url);
     }
     app.dirty = true;
+}
+
+/// Each stamp the last run kept, counted as its key's last answer
+/// ([`Store::stamps`]).
+fn seed_stamps(app: &mut App, stamps: &Stamps) {
+    use crate::sync::QueryKey;
+    let now = now_secs();
+    let seed = |app: &mut App, key: QueryKey, secs: u64| {
+        if let Some(at) = instant_of(secs, now) {
+            app.resolver.seed(&key, at);
+        }
+    };
+    for (project, secs) in &stamps.extras {
+        seed(app, QueryKey::PrExtras(project.clone()), *secs);
+    }
+    for (project, secs) in &stamps.tails {
+        seed(app, QueryKey::PrTails(project.clone()), *secs);
+    }
+    if let Some(secs) = stamps.my_prs {
+        seed(app, QueryKey::MyPrs, secs);
+    }
+}
+
+/// When each kind with a stamp last landed, as THE RESOLVER has it (a seed
+/// from the last run counting until this one has an answer).
+fn stamps_of(app: &App) -> Stamps {
+    use crate::sync::QueryKey;
+    let now = now_secs();
+    let mut stamps = Stamps::default();
+    for (key, at) in app.resolver.answered() {
+        let secs = unix_of(at, now);
+        match key {
+            QueryKey::PrExtras(project) => {
+                stamps.extras.insert(project.clone(), secs);
+            }
+            QueryKey::PrTails(project) => {
+                stamps.tails.insert(project.clone(), secs);
+            }
+            QueryKey::MyPrs => stamps.my_prs = Some(secs),
+            _ => {}
+        }
+    }
+    stamps
 }
 
 /// The document as the app would write it now, and the pages read since
@@ -426,6 +485,7 @@ pub fn snapshot(app: &App) -> Store {
                 .map(|(url, record)| (url.clone(), record.clone()))
                 .collect()
         },
+        stamps: stamps_of(app),
     }
 }
 
@@ -560,7 +620,47 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            stamps: Stamps {
+                extras: [(ProjectId("p1".into()), 1_000)].into_iter().collect(),
+                tails: [(ProjectId("p1".into()), 1_000)].into_iter().collect(),
+                my_prs: Some(1_000),
+            },
         }
+    }
+
+    /// Each kind of answer keeps its own stamp across a launch: a tail,
+    /// the modal's extras and `MyPrs` read minutes before quitting count
+    /// as the resolver's last answer — not asked again at once — while an
+    /// open list is asked on its first visit as ever.
+    #[test]
+    fn each_answer_keeps_its_own_stamp_across_a_launch() {
+        use crate::sync::{QueryKey, Seen};
+        let p1 = ProjectId("p1".into());
+        let now = now_secs();
+        let mut doc = store();
+        doc.stamps = Stamps {
+            extras: [(p1.clone(), now - 10)].into_iter().collect(),
+            tails: [(p1.clone(), now - 120)].into_iter().collect(),
+            my_prs: Some(now - 60),
+        };
+        let mut app = App::new();
+        install(&mut app, doc);
+        let t = std::time::Instant::now();
+        app.resolver.visit(
+            vec![
+                (QueryKey::OpenPrs(p1.clone()), Seen::Shown),
+                (QueryKey::PrTails(p1.clone()), Seen::Shown),
+                (QueryKey::PrExtras(p1.clone()), Seen::Focused),
+            ],
+            t,
+        );
+        let due: Vec<QueryKey> = app.resolver.due(t).into_iter().map(|t| t.key).collect();
+        assert_eq!(due, vec![QueryKey::OpenPrs(p1.clone())], "only the list");
+        // And the stamps go back out with the next flush.
+        let back = snapshot(&app).stamps;
+        assert!(back.tails[&p1].abs_diff(now - 120) <= 1);
+        assert!(back.my_prs.is_some_and(|s| s.abs_diff(now - 60) <= 1));
+        assert_eq!(instant_of(now + 60, now), None, "a stamp from the future");
     }
 
     /// The document survives the disk byte for byte — ids as JSON keys,
@@ -689,11 +789,11 @@ mod tests {
         assert_eq!(cache.load_store().expect("readable"), back, "and stays so");
     }
 
-    /// Hydration paints the rows, arms every list to be re-asked at once
-    /// and marks every body stale — and never overwrites what a lookup
-    /// already answered.
+    /// Hydration paints the rows and marks every body stale — and never
+    /// overwrites what a lookup already answered. Nothing it paints counts
+    /// as asked: the first visit to each list asks GitHub at once.
     #[test]
-    fn hydration_paints_rows_and_arms_their_refresh() {
+    fn hydration_paints_rows_and_leaves_them_to_be_asked() {
         let mut app = App::new();
         // A lookup that already answered for w1 wins over the cache.
         app.pull_requests
@@ -714,10 +814,6 @@ mod tests {
             Some("merged"),
             "a cached merged row paints purple from the first frame"
         );
-        assert!(
-            app.pr_lookup_due(&WorktreeId("w2".into())),
-            "a hydrated row is re-asked on its first turn"
-        );
 
         let p1 = ProjectId("p1".into());
         let p2 = ProjectId("p2".into());
@@ -728,16 +824,18 @@ mod tests {
             Some("merged"),
             "a cached merged row is purple from the first frame too"
         );
-        assert!(app.open_prs_lookup_due(&p1), "hydrated lists are due");
-        assert_eq!(app.open_prs[&p1].step, OPEN_PRS_REFRESH);
+        assert!(app.open_prs[&p2].list.is_empty());
+        let key = crate::sync::QueryKey::OpenPrs(p1.clone());
+        let now = std::time::Instant::now();
         assert_eq!(
-            app.open_prs[&p2].step, OPEN_PRS_RECHECK_MIN,
-            "an empty list resumes the backoff, not the steady beat"
+            app.resolver.status(&key, now).updated_at,
+            None,
+            "the cache is not an answer: the first visit asks"
         );
-        assert!(
-            app.open_prs[&p1].at + OPEN_PRS_MIN_AGE <= std::time::Instant::now(),
-            "old enough that arriving at the project re-asks at once"
-        );
+        app.resolver
+            .visit(vec![(key.clone(), crate::sync::Seen::Shown)], now);
+        let asked: Vec<_> = app.resolver.due(now).into_iter().map(|t| t.key).collect();
+        assert_eq!(asked, vec![key]);
 
         let url = detail(7).url;
         assert!(app.pr_detail.contains_key(&url));

@@ -2228,7 +2228,14 @@ fn draw_overlay_over_backdrop(f: &mut Frame, app: &mut App) {
                     // The UNREAD SHIMMER, as on the row's own line; no
                     // ONE-SHOT SWEEP in a list the user just summoned — it
                     // is for the change nobody was looking at.
-                    sweep_ramp(status, item.unseen, false, th, app.animations),
+                    sweep_ramp(
+                        status,
+                        item.unseen
+                            && crate::app::within_one_shot(item.stamped, crate::app::now_ms()),
+                        false,
+                        th,
+                        app.animations,
+                    ),
                     app.sweep_phase(),
                     // A pull request in trouble paints its title in its
                     // row's red — the end-to-end red its sidebar row wears.
@@ -3559,9 +3566,10 @@ pub(crate) fn open_prs_badge(count: usize, th: Theme) -> Option<Vec<BadgePart>> 
 }
 
 /// Sweep shades for a session's name, or `None` for a name that holds
-/// still. The shimmer means *unread*: a finish nobody has looked at sweeps
-/// on the done ramp for as long as it stays unread — the UNREAD SHIMMER —
-/// and stops the moment the session is read. A session that changes into
+/// still. The shimmer means *news*: a finish nobody has looked at sweeps
+/// on the done ramp for its ONE-SHOT SWEEP — the UNREAD SHIMMER, `unseen`
+/// being true only inside that window (`app::fresh_unread`) — and stops
+/// the moment the session is read. A session that changes into
 /// needing you, or crashes, takes the red ONE-SHOT SWEEP while `fresh`
 /// says that change is only seconds old (`app::fresh_alarm`), then holds
 /// still in its red. A running session never sweeps: its dot is the

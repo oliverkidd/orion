@@ -28,6 +28,37 @@ const COALESCE_BYTES: usize = 8 * 1024;
 /// output that breaks a silence — the echo of a typed character, a prompt
 /// redrawn after Enter — is not held at all (`flush_deadline`).
 const COALESCE_HOLD: std::time::Duration = std::time::Duration::from_millis(5);
+/// The hold and the size cap for a session no client is attached to — a
+/// dev server's log, a watcher, an agent working out of sight. Nobody is
+/// waiting on its bytes, which only go into the ring and past the output
+/// scanners, so a stream is gathered into a tenth of a second (or 64 KB)
+/// at a time rather than two hundred wakeups a second. Output after a quiet
+/// spell still goes at once (`flush_deadline`), so a terminal query (a
+/// cursor-position report, kitty's flags) is answered without delay.
+const UNWATCHED_HOLD: std::time::Duration = std::time::Duration::from_millis(100);
+const UNWATCHED_BYTES: usize = 64 * 1024;
+
+/// How the pump gathers output: how long a stream is held, and at most how
+/// much of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Coalesce {
+    hold: std::time::Duration,
+    bytes: usize,
+}
+
+/// The gathering for a session a client is (`watched`) or isn't attached to.
+fn coalesce_for(watched: bool) -> Coalesce {
+    match watched {
+        true => Coalesce {
+            hold: COALESCE_HOLD,
+            bytes: COALESCE_BYTES,
+        },
+        false => Coalesce {
+            hold: UNWATCHED_HOLD,
+            bytes: UNWATCHED_BYTES,
+        },
+    }
+}
 /// Reader thread → pump channel bound; blocking_send gives natural
 /// backpressure against a fire-hosing child.
 const READER_CHANNEL_BOUND: usize = 64;
@@ -228,6 +259,19 @@ pub struct PtySession {
     /// Screen for answering cursor position reports; `None` until the child
     /// first asks, so sessions that never do parse nothing.
     cursor: Mutex<Option<CursorTracker>>,
+    /// How many clients' attachments are forwarding this PTY's output
+    /// ([`PtySession::viewer`]): none, and its output is gathered in larger
+    /// lumps ([`coalesce_for`]).
+    viewers: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// One client attachment forwarding a PTY's output, counted while it lives.
+pub struct Viewer(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 pub struct SpawnSpec {
@@ -331,12 +375,26 @@ impl PtySession {
             title: Mutex::new(title::TitleScanner::new()),
             ports: spec.scan_ports.then(Mutex::default),
             cursor: Mutex::new(None),
+            viewers: Arc::default(),
         });
 
         let (tx, rx) = mpsc::channel::<ReaderMsg>(READER_CHANNEL_BOUND);
         spawn_reader_thread(reader, child, tx);
         tokio::spawn(pump(session.clone(), rx));
         Ok(session)
+    }
+
+    /// A client attachment now forwards this PTY's output: counted until
+    /// the guard drops.
+    pub fn viewer(&self) -> Viewer {
+        self.viewers
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Viewer(Arc::clone(&self.viewers))
+    }
+
+    /// Whether any client is attached to this PTY now.
+    pub fn watched(&self) -> bool {
+        self.viewers.load(std::sync::atomic::Ordering::Relaxed) > 0
     }
 
     /// The localhost ports the child has printed, first seen first: none
@@ -601,10 +659,11 @@ fn with_modes(from_seq: Option<u64>, base_seq: u64, data: Vec<u8>, modes: &[u8])
     (start, replay)
 }
 
-/// When output that arrived at `now` has to be on its way to the clients.
+/// When output that arrived at `now` has to be on its way to the clients,
+/// under a `hold` of [`COALESCE_HOLD`] (attached) or [`UNWATCHED_HOLD`].
 /// The hold exists to turn a stream of small writes into fewer, larger
 /// events — so it is spent only while there is a stream: a flush less than
-/// [`COALESCE_HOLD`] ago means more is likely right behind, and the bytes
+/// `hold` ago means more is likely right behind, and the bytes
 /// wait out the rest of that window. After a quiet spell they go at once.
 /// That is every keystroke's echo: held, it reached the TUI 5 ms late on
 /// every character typed into a pane, which the INPUT LATENCY PROBE put at
@@ -613,9 +672,10 @@ fn with_modes(from_seq: Option<u64>, base_seq: u64, data: Vec<u8>, modes: &[u8])
 fn flush_deadline(
     now: tokio::time::Instant,
     last_flush: Option<tokio::time::Instant>,
+    hold: std::time::Duration,
 ) -> tokio::time::Instant {
     match last_flush {
-        Some(last) if now < last + COALESCE_HOLD => last + COALESCE_HOLD,
+        Some(last) if now < last + hold => last + hold,
         _ => now,
     }
 }
@@ -683,8 +743,11 @@ async fn pump(session: Arc<PtySession>, mut rx: mpsc::Receiver<ReaderMsg>) {
         // flush on time. Biased toward the channel: a deadline that has
         // already passed (the quiet-spell case) still takes along whatever
         // the reader has queued, so one write read in two pieces is one event.
-        let deadline = flush_deadline(tokio::time::Instant::now(), last_flush);
-        while pending.len() < COALESCE_BYTES {
+        // A session nobody is attached to is gathered in larger lumps,
+        // decided afresh each round so an attach tightens it at once.
+        let coalesce = coalesce_for(session.watched());
+        let deadline = flush_deadline(tokio::time::Instant::now(), last_flush, coalesce.hold);
+        while pending.len() < coalesce.bytes {
             tokio::select! {
                 biased;
                 msg = rx.recv() => match msg {
@@ -718,10 +781,42 @@ mod tests {
     #[test]
     fn output_after_a_quiet_spell_is_flushed_at_once() {
         let now = tokio::time::Instant::now();
-        assert_eq!(flush_deadline(now, None), now, "the session's first bytes");
+        assert_eq!(
+            flush_deadline(now, None, COALESCE_HOLD),
+            now,
+            "the session's first bytes"
+        );
         let long_ago = now - COALESCE_HOLD * 10;
-        assert_eq!(flush_deadline(now, Some(long_ago)), now);
-        assert_eq!(flush_deadline(now, Some(now - COALESCE_HOLD)), now);
+        assert_eq!(flush_deadline(now, Some(long_ago), COALESCE_HOLD), now);
+        assert_eq!(
+            flush_deadline(now, Some(now - COALESCE_HOLD), COALESCE_HOLD),
+            now
+        );
+        // Unwatched too: a quiet spell is answered at once.
+        let hold = coalesce_for(false).hold;
+        assert_eq!(flush_deadline(now, Some(now - hold), hold), now);
+    }
+
+    /// A session nobody is attached to gathers a stream for a tenth of a
+    /// second, up to 64 KB; an attached one keeps the 5 ms / 8 KB it had.
+    #[test]
+    fn an_unwatched_session_is_gathered_in_larger_lumps() {
+        assert_eq!(
+            coalesce_for(true),
+            Coalesce {
+                hold: COALESCE_HOLD,
+                bytes: COALESCE_BYTES
+            }
+        );
+        let unwatched = coalesce_for(false);
+        assert_eq!(unwatched.hold, std::time::Duration::from_millis(100));
+        assert_eq!(unwatched.bytes, 64 * 1024);
+        let now = tokio::time::Instant::now();
+        let just_flushed = now - std::time::Duration::from_millis(1);
+        assert_eq!(
+            flush_deadline(now, Some(just_flushed), unwatched.hold),
+            just_flushed + unwatched.hold
+        );
     }
 
     /// A stream is still coalesced: bytes arriving inside the hold of the
@@ -732,7 +827,7 @@ mod tests {
         let now = tokio::time::Instant::now();
         let just_flushed = now - std::time::Duration::from_millis(1);
         assert_eq!(
-            flush_deadline(now, Some(just_flushed)),
+            flush_deadline(now, Some(just_flushed), COALESCE_HOLD),
             just_flushed + COALESCE_HOLD
         );
     }

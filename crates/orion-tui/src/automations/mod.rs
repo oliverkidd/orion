@@ -5,7 +5,7 @@
 //! * **The registry.** [`Automation`] names every one, with what
 //!   Settings › Automations ([`settings_tab`]) and the running overview
 //!   (`⌘J`, [`view`]) say about it and the SYSTEM PRESET it is told by. Each one that does anything has a [`Runner`]
-//!   in [`Engine`], which the git tick drives ([`tick`]).
+//!   in [`Engine`], which the loop's `Automations` CHORE drives ([`tick`]).
 //! * **Tagged sessions.** Every session an automation starts carries its
 //!   id in `Agent::automation` ([`launch`], or a draft's own
 //!   `AgentLaunchDraft::automation`), which the DAEMON keeps with the row:
@@ -237,7 +237,9 @@ impl Panel {
 /// own; what it starts goes through [`launch`].
 pub trait Runner {
     fn automation(&self) -> Automation;
-    /// The git tick (every few seconds): look for work, start what is due.
+    /// The automations' turn (`chores`: every few seconds, sooner when a
+    /// session's status moves or an answer lands): look for work, start
+    /// what is due.
     fn tick(&mut self, _app: &mut App, _out: &mut Vec<ClientRequest>) {}
     /// Its dot, state and lists, as of now.
     fn panel(&self, app: &App) -> Panel;
@@ -378,7 +380,7 @@ pub fn with_runner<T>(
     Some(out)
 }
 
-/// The git tick: the factory account's turn first ([`account::tick`]),
+/// The automations' turn (the `Automations` CHORE): the factory account's turn first ([`account::tick`]),
 /// then every runner of an automation that is on looks for work — none
 /// while the factory is paused at its account's limit ([`limit`]). The
 /// bug fixer and the feature builder share one ledger: it is brought up

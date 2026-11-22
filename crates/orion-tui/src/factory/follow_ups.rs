@@ -6,8 +6,9 @@
 //!   missed), the run's pull request is asked of `gh` once: the commits
 //!   it landed as, and the lines it changed on the merged side
 //!   (`changed_lines`, from its diff).
-//! - **Every few hours** ([`tick`], [`EVERY`]), for each run merged in
-//!   the last [`DAYS`] days: every later pull request merged into the
+//! - **Once a day** ([`tick`], [`EVERY`]), and at launch unless a sweep
+//!   ran in the last [`LAUNCH_GAP`], for each run merged in the last
+//!   [`DAYS`] days: every later pull request merged into the
 //!   same repo whose title starts with fix or bug ([`is_fix_title`]) and
 //!   that touches the run's lines is a follow-up. "Touches" is `git
 //!   blame` in the project's main checkout: the lines the fix changed,
@@ -21,11 +22,20 @@
 //! the whole window again, so a sweep missed is caught by the next. A fix
 //! found not to touch a run is kept on its record (`checked_fixes`), so
 //! its diff isn't asked for again, and each diff is asked once a sweep.
+//!
+//! A follow-up is a slow fact — a fix lands days after the merge it
+//! follows, and week in review reads them weekly — so a sweep a day is
+//! plenty. Only runs with something in their record from the last
+//! [`RECENT_DAYS`] are swept ([`recent`]): an older run's merge window has
+//! closed, and one that never merged would otherwise be asked of `gh` on
+//! every sweep forever. With no such run there is nothing to sweep, so
+//! nothing is asked at all: the factory's builders switched off long
+//! enough leave no recent records, and the sweep stops with them.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use orion_core::clock::DAY_MS;
 use orion_core::WorktreeId;
@@ -35,8 +45,14 @@ use super::runs::{self, ChangedLines, FollowUp, RunRecord};
 use crate::app::App;
 use crate::pull_request::rfc3339_ms;
 
-/// How often the sweep runs.
-pub(crate) const EVERY: Duration = Duration::from_secs(3 * 60 * 60);
+/// How often the sweep runs while orion stays up.
+pub(crate) const EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// A launch sweeps unless the last sweep — this orion's or an earlier
+/// one's, by the stamp ([`stamp_path`]) — is younger than this: an
+/// upgrade's reopen, or a quit and relaunch, asks nothing again.
+pub(crate) const LAUNCH_GAP: Duration = Duration::from_secs(3 * 60 * 60);
+/// How recent a run's record must be to be swept at all ([`recent`]).
+pub(crate) const RECENT_DAYS: i64 = 30;
 /// How long after its merge a fix counts as a follow-up.
 pub(crate) const DAYS: i64 = 14;
 const GH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -73,19 +89,54 @@ pub(crate) fn merge_landed(app: &App, worktree: &WorktreeId) {
     });
 }
 
-/// The loop's beat: every [`EVERY`], one sweep off the loop over every
-/// project's checkout.
+/// When the sweep last ran, as this orion knows it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Swept {
+    /// Whether the stamp has been read yet: until it has, the next sweep
+    /// is the launch's.
+    read: bool,
+    /// The last sweep (epoch ms), this run's or, at launch, the stamp's.
+    at_ms: Option<i64>,
+}
+
+/// Whether a sweep is due at `now_ms`: at launch, unless the last one ran
+/// within [`LAUNCH_GAP`]; after that, [`EVERY`] after the last. A stamp
+/// from the future (the clock was set back) is no reason to wait.
+fn due(swept: Swept, now_ms: i64) -> bool {
+    let gap = match swept.read {
+        false => LAUNCH_GAP,
+        true => EVERY,
+    };
+    swept
+        .at_ms
+        .is_none_or(|at| at > now_ms || now_ms - at >= gap.as_millis() as i64)
+}
+
+/// The loop's beat: at launch and then every [`EVERY`] ([`due`]), one
+/// sweep off the loop over every project's checkout.
 pub(crate) fn tick(app: &mut App) {
-    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    static SWEPT: Mutex<Swept> = Mutex::new(Swept {
+        read: false,
+        at_ms: None,
+    });
     if crate::oneshot::offline() {
         return;
     }
+    let now = orion_core::clock::now_ms();
     {
-        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if last.is_some_and(|at| at.elapsed() < EVERY) {
+        let mut swept = SWEPT.lock().unwrap_or_else(|e| e.into_inner());
+        if !swept.read {
+            swept.at_ms = stamp_path().and_then(|path| read_stamp(&path));
+        }
+        let due_now = due(*swept, now);
+        swept.read = true;
+        if !due_now {
             return;
         }
-        *last = Some(Instant::now());
+        swept.at_ms = Some(now);
+    }
+    if let Some(path) = stamp_path() {
+        write_stamp(&path, now);
     }
     let checkouts: Vec<PathBuf> = app
         .tree
@@ -96,11 +147,43 @@ pub(crate) fn tick(app: &mut App) {
     tokio::spawn(sweep(checkouts));
 }
 
+/// Where the last sweep's time is kept, so a relaunch knows it:
+/// `<data_dir>/automations/follow-ups-swept`, the epoch ms as text. None
+/// under test, as the run records are.
+fn stamp_path() -> Option<PathBuf> {
+    (!cfg!(test)).then(|| crate::automations::state_dir().join("follow-ups-swept"))
+}
+
+fn read_stamp(path: &Path) -> Option<i64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn write_stamp(path: &Path, at_ms: i64) {
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(path, at_ms.to_string()));
+    if let Err(err) = written {
+        tracing::warn!(path = %path.display(), "follow-up sweep stamp not written: {err}");
+    }
+}
+
+/// Whether `record` is worth a sweep at `now_ms`: something in it — a
+/// stage, the merge, a follow-up — happened in the last [`RECENT_DAYS`].
+fn recent(record: &RunRecord, now_ms: i64) -> bool {
+    now_ms - record.last_at_ms() <= RECENT_DAYS * DAY_MS
+}
+
 // ---- the sweep ----
 
 /// One sweep: the merges not yet recorded, then each recent merge's
-/// follow-ups.
+/// follow-ups. Nothing at all when no run is [`recent`].
 async fn sweep(checkouts: Vec<PathBuf>) {
+    let now = orion_core::clock::now_ms();
+    let records: Vec<RunRecord> = runs::all().into_iter().filter(|r| recent(r, now)).collect();
+    if records.is_empty() {
+        return;
+    }
     let repos: Vec<(PathBuf, String)> = checkouts
         .into_iter()
         .filter_map(|dir| {
@@ -108,10 +191,9 @@ async fn sweep(checkouts: Vec<PathBuf>) {
             Some((dir, web.to_ascii_lowercase()))
         })
         .collect();
-    let now = orion_core::clock::now_ms();
     // The runs merged lately, each with its checkout.
     let mut recent: Vec<(RunRecord, PathBuf, i64)> = Vec::new();
-    for record in runs::all() {
+    for record in records {
         let Some(url) = record.pr_url.clone() else {
             continue;
         };
@@ -651,6 +733,65 @@ new file mode 100644
 +one
 +two
 ";
+
+    const HOUR_MS: i64 = 60 * 60 * 1000;
+
+    fn after_launch(at_ms: i64) -> Swept {
+        Swept {
+            read: true,
+            at_ms: Some(at_ms),
+        }
+    }
+
+    #[test]
+    fn a_launch_sweeps_unless_one_ran_in_the_last_three_hours() {
+        let now = 1_000 * HOUR_MS;
+        assert!(due(Swept::default(), now), "never swept");
+        let stamped = |at_ms| Swept {
+            read: false,
+            at_ms: Some(at_ms),
+        };
+        assert!(!due(stamped(now - 2 * HOUR_MS), now), "a quick relaunch");
+        assert!(due(stamped(now - 3 * HOUR_MS), now));
+        assert!(due(stamped(now + HOUR_MS), now), "the clock set back");
+    }
+
+    #[test]
+    fn after_launch_the_sweep_is_daily() {
+        let now = 1_000 * HOUR_MS;
+        assert!(!due(after_launch(now - 3 * HOUR_MS), now));
+        assert!(!due(after_launch(now - 23 * HOUR_MS), now));
+        assert!(due(after_launch(now - 24 * HOUR_MS), now));
+    }
+
+    #[test]
+    fn the_stamp_survives_a_relaunch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("automations").join("follow-ups-swept");
+        assert_eq!(read_stamp(&path), None);
+        write_stamp(&path, 1_234);
+        assert_eq!(read_stamp(&path), Some(1_234));
+    }
+
+    #[test]
+    fn only_a_run_active_in_the_last_thirty_days_is_swept() {
+        let now = 100 * DAY_MS;
+        let merged_at = |at| RunRecord {
+            merged_at_ms: Some(at),
+            ..Default::default()
+        };
+        assert!(recent(&merged_at(now - 30 * DAY_MS), now));
+        assert!(!recent(&merged_at(now - 31 * DAY_MS), now));
+        let followed = RunRecord {
+            follow_ups: vec![FollowUp {
+                what: "#5 fix".into(),
+                at_ms: now - DAY_MS,
+            }],
+            ..merged_at(now - 40 * DAY_MS)
+        };
+        assert!(recent(&followed, now), "its latest moment counts");
+        assert!(!recent(&RunRecord::default(), now), "a record of nothing");
+    }
 
     #[test]
     fn a_diff_gives_each_files_changed_lines_on_both_sides() {

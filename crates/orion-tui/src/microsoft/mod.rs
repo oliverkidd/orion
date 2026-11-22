@@ -53,11 +53,11 @@ pub enum SignIn {
     Failed(String),
 }
 
-/// What runs off the loop and lands on it.
+/// What runs off the loop and lands on it. The calendar lands through the
+/// RESOLVER ([`land_calendar`]).
 #[derive(Debug)]
 pub enum Answer {
     SignIn(Step),
-    Calendar(Result<Vec<calendar::Event>, String>),
 }
 
 /// A sign-in's progress.
@@ -81,16 +81,15 @@ pub struct State {
     /// The calendar from now to twelve hours on, start order: the footer's
     /// next meeting, and the meetings takeaways watch end.
     pub events: Vec<calendar::Event>,
-    /// A calendar read is out.
-    pub calendar_in_flight: bool,
-    /// When the calendar is next read; None reads it on the next tick.
-    pub next_read: Option<tokio::time::Instant>,
     /// **Next meeting in the footer**, mirrored from the config.
     pub footer: bool,
+    /// The config's Microsoft 365 settings, mirrored: what the RESOLVER's
+    /// scope reads after every turn, which must not parse the config.
+    pub settings: MicrosoftSettings,
 }
 
 /// The loop's beat for Microsoft 365 while signed in: the footer's
-/// countdown repaints, and the calendar is read when it is due.
+/// countdown repaints.
 pub const TICK: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl State {
@@ -160,7 +159,6 @@ pub fn disconnect(app: &mut App, ms: &MicrosoftSettings) -> String {
     stop_sign_in(app);
     app.microsoft.sign_in = SignIn::Idle;
     app.microsoft.events.clear();
-    app.microsoft.next_read = None;
     std::thread::spawn(auth::forget);
     match (was, signing_in) {
         (Some(email), _) => format!("signed out {email} · o again clears the app IDs"),
@@ -175,7 +173,10 @@ fn forget_app(app: &mut App) -> String {
     app.microsoft.sign_in = SignIn::Idle;
     let defaults = MicrosoftSettings::default();
     match save_app(&defaults.client_id, &defaults.tenant) {
-        Ok(_) => "app IDs cleared · c adds them again".into(),
+        Ok(ms) => {
+            app.microsoft.settings = ms;
+            "app IDs cleared · c adds them again".into()
+        }
         Err(why) => format!("the app IDs were not cleared: {why}"),
     }
 }
@@ -289,7 +290,10 @@ pub fn submit_app_id(app: &mut App, client_id: Option<String>, value: &str) {
             );
         }
         Typed::Both { client_id, tenant } => match save_app(&client_id, &tenant) {
-            Ok(ms) => connect(app, &ms),
+            Ok(ms) => {
+                app.microsoft.settings = ms.clone();
+                connect(app, &ms)
+            }
             Err(why) => format!("the IDs were not saved: {why}"),
         },
     };
@@ -360,43 +364,23 @@ async fn blocking<T: Send + 'static>(
         .unwrap_or_else(|e| Err(e.to_string()))
 }
 
-/// The calendar should be polled: signed in, and the footer or takeaways
-/// want it.
-pub fn calendar_wanted(app: &App, ms: &MicrosoftSettings) -> bool {
-    app.microsoft.connected(ms) && (ms.footer_meeting || ms.takeaways)
-}
-
-/// The loop's [`TICK`] while signed in: repaint a countdown on show, and
-/// read the calendar once every `every`.
-pub fn tick(app: &mut App, every: std::time::Duration) {
+/// The loop's [`TICK`] while signed in: repaint a countdown on show.
+pub fn tick(app: &mut App) {
     if footer_text(app).is_some() {
         app.dirty = true;
     }
-    let now = tokio::time::Instant::now();
-    if app.microsoft.next_read.is_some_and(|at| now < at) {
-        return;
-    }
-    let ms = crate::config::Config::load().microsoft;
-    if calendar_wanted(app, &ms) {
-        spawn_calendar(app, &ms);
-        app.microsoft.next_read = Some(now + every);
-    }
 }
 
-/// Read the calendar off the loop, unless a read is already out.
-fn spawn_calendar(app: &mut App, ms: &MicrosoftSettings) {
-    let Some(tx) = app.microsoft.tx.clone() else {
-        return;
-    };
-    if app.microsoft.calendar_in_flight {
-        return;
+/// The calendar read landed (the RESOLVER's `Calendar`). A read that
+/// failed keeps the meetings already known, so a blip doesn't blank the
+/// footer; one that lands after a sign-out is dropped.
+pub fn land_calendar(app: &mut App, events: Result<Vec<calendar::Event>, String>) {
+    app.dirty = true;
+    match events {
+        Ok(_) if app.microsoft.email.is_none() => {}
+        Ok(events) => app.microsoft.events = events,
+        Err(why) => tracing::debug!(%why, "calendar read failed"),
     }
-    app.microsoft.calendar_in_flight = true;
-    let ms = ms.clone();
-    tokio::spawn(async move {
-        let events = blocking(move || calendar::fetch(&ms, Utc::now())).await;
-        let _ = tx.send(Answer::Calendar(events));
-    });
 }
 
 /// An answer from off the loop.
@@ -416,23 +400,12 @@ pub fn land(app: &mut App, answer: Answer) {
                 "Microsoft 365 signed in as {email}"
             )));
             app.microsoft.email = Some(email);
-            // The loop's tick reads the calendar straight away.
-            app.microsoft.next_read = None;
+            // Read the calendar straight away, for whatever wants it.
+            app.resolver.invalidate(&crate::sync::QueryKey::Calendar);
         }
         Answer::SignIn(Step::Failed(why)) => {
             app.microsoft.sign_in_task = None;
             app.microsoft.sign_in = SignIn::Failed(why);
-        }
-        Answer::Calendar(events) => {
-            app.microsoft.calendar_in_flight = false;
-            match events {
-                // Signed out while it was out: drop it.
-                Ok(_) if app.microsoft.email.is_none() => {}
-                Ok(events) => app.microsoft.events = events,
-                // A read that failed keeps the meetings already known, so a
-                // blip doesn't blank the footer.
-                Err(why) => tracing::debug!(%why, "calendar read failed"),
-            }
         }
     }
 }
@@ -578,19 +551,6 @@ mod tests {
         let (title, label) = app_id_prompt_text(Some("x"));
         assert_eq!(title, "Connect Microsoft 365 · 2 of 2");
         assert!(label.starts_with("Directory (tenant) ID"));
-    }
-
-    #[test]
-    fn the_calendar_is_read_only_when_signed_in_and_wanted() {
-        let mut app = App::new();
-        let mut ms = with_app();
-        assert!(!calendar_wanted(&app, &ms), "nobody signed in");
-        app.microsoft.email = Some("ada@riplo.ai".into());
-        assert!(calendar_wanted(&app, &ms));
-        ms.footer_meeting = false;
-        ms.takeaways = false;
-        assert!(!calendar_wanted(&app, &ms), "nothing wants it");
-        assert!(!calendar_wanted(&app, &MicrosoftSettings::default()));
     }
 
     #[test]

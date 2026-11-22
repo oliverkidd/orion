@@ -4,10 +4,11 @@
 //! LAUNCHER's bands and cards, the `/` PALETTE, Linear's work column, the
 //! merge form and AUTOFIX.
 //!
-//! orion hears about one pull request from up to four answers: the
-//! project's open list (every 15s for the selected project), the failing-
-//! checks recheck folded into it, a checkout's own `gh pr view` lookup,
-//! and the page the cursor rests on (`gh pr view N`) — plus the cache the
+//! orion hears about one pull request from up to five answers: the
+//! project's open list (asked on a visit, `sync`), the failing-checks
+//! recheck folded into it, your pull requests across every repo (`MyPrs`,
+//! for the automations), a checkout's own `gh pr view` lookup, and the
+//! page the cursor rests on (`PrDetail`) — plus the cache the
 //! last launch left (`pr_cache`). Each lands on its own beat and keeps its
 //! own copy (`OpenPr`, `PullRequest`, `PrDetail`) for what only it says:
 //! list order, the meta line, the body, the conversation. What they all

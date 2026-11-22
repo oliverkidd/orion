@@ -26,7 +26,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::pull_request::{bool_at, login, run_piped, str_at};
+use crate::pull_request::{bool_at, login, str_at};
 
 /// How long one call may take before it is given up on.
 pub(crate) const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
@@ -204,7 +204,7 @@ pub struct NewThread {
 const COMMENT: &str = "id author { login } body createdAt viewerDidAuthor state";
 
 /// The fields of a thread, wherever one is asked for.
-fn thread_fields() -> String {
+pub(crate) fn thread_fields() -> String {
     format!(
         "id isResolved isOutdated path line startLine originalLine diffSide \
          comments(first: 100) {{ nodes {{ {COMMENT} }} }}"
@@ -456,6 +456,19 @@ fn gh(dir: &Path, args: &[&str]) -> tokio::process::Command {
     cmd
 }
 
+/// Run `cmd` through THE GATE (`sync::gate::github_piped`): nothing goes
+/// while GitHub is rate limited, and a call that hits the limit pauses
+/// every other. Err is `gh`'s complaint, or what the pause says.
+async fn through_gate(
+    cmd: tokio::process::Command,
+    stdin: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    crate::sync::gate::github_piped(cmd, stdin, timeout)
+        .await
+        .map_err(crate::sync::FetchError::into_stderr)
+}
+
 /// Pull request `number`'s threads, its pending review and its node id,
 /// from `dir`'s repo, within `timeout`.
 pub async fn read(
@@ -465,14 +478,14 @@ pub async fn read(
 ) -> Result<Threads, String> {
     let args = threads_args(number);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = run_piped(gh(dir, &args), "", timeout).await?;
+    let out = through_gate(gh(dir, &args), "", timeout).await?;
     parse_threads(&answer(&out)?).ok_or_else(|| "GitHub named no such pull request".to_string())
 }
 
 /// Send one mutation, its `body` on stdin: the answer's `data`.
 async fn mutate(dir: &Path, body: &Value) -> Result<Value, String> {
     let cmd = gh(dir, &["api", "graphql", "-X", "POST", "--input", "-"]);
-    let out = run_piped(cmd, &body.to_string(), TIMEOUT).await?;
+    let out = through_gate(cmd, &body.to_string(), TIMEOUT).await?;
     answer(&out)?
         .get("data")
         .cloned()

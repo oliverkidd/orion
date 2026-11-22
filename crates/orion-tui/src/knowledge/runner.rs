@@ -45,6 +45,10 @@ use crate::factory::cards::{self, Button, Card, Press, Recipient};
 
 /// How often [`tick`] does its work.
 const EVERY: Duration = Duration::from_secs(30);
+/// How early a run may come and still count as the beat: the `Knowledge`
+/// chore is due [`EVERY`] after it started, a hair before this beat's
+/// stamp is.
+const BEAT_SLACK: Duration = Duration::from_secs(1);
 /// How many times a merge that is refused is tried before a card says so.
 const MERGE_TRIES: u32 = 2;
 /// How often orion looks for topics due a staleness check. Cheap: git
@@ -254,6 +258,21 @@ async fn work(job: Job) {
             hold_for_reset(job);
             return;
         }
+        // GitHub's rate limit is no fault of the job: parked, its tries
+        // untouched, until GitHub's pause lifts (`sync::gate`).
+        if rate_limited(why) {
+            tracing::warn!(
+                "knowledge: harvest of #{} of {} waits for GitHub's limit to reset",
+                job.number,
+                job.project
+            );
+            hold_for_github(job);
+            return;
+        }
+    }
+    if matches!(result, Ok(Some(_))) {
+        // A harvest committed: the rule review has more to show.
+        review::want_refresh();
     }
     let retry = match &result {
         Ok(Some(o)) => {
@@ -305,6 +324,28 @@ fn hold_for_reset(job: Job) {
     };
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+        let _ = tx.send(job);
+    });
+}
+
+/// Whether `why` — a step's failure — is GitHub's rate limit: a `gh` that
+/// said so, or THE GATE refusing to ask while GitHub is paused.
+pub(crate) fn rate_limited(why: &str) -> bool {
+    crate::sync::gate::classify(why) == crate::sync::gate::Signal::RateLimit
+}
+
+/// Hand `job` — still on its queue — back to the worker once GitHub's
+/// rate-limit pause lifts (`sync::gate`), or after the gate's
+/// `UNKNOWN_PAUSE` when none is known.
+fn hold_for_github(job: Job) {
+    let wait = crate::sync::gate::github_paused_until()
+        .map(|until| until.saturating_duration_since(Instant::now()))
+        .unwrap_or(crate::sync::gate::UNKNOWN_PAUSE);
+    let Some(tx) = worker() else {
+        return;
+    };
+    tokio::spawn(async move {
+        tokio::time::sleep(wait).await;
         let _ = tx.send(job);
     });
 }
@@ -676,7 +717,8 @@ pub(crate) fn tick(app: &mut App) {
         return;
     }
     // What the last refresh found and what the background said land at
-    // once, not on the next beat.
+    // once, not on the next beat: either wakes this tick
+    // (`chores::wake`).
     if let Some(found) = review::take_refreshed() {
         crate::rule_review::refreshed(app, found);
     }
@@ -684,7 +726,7 @@ pub(crate) fn tick(app: &mut App) {
     crate::rule_review::maybe_open(app);
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if last.is_some_and(|at| at.elapsed() < EVERY) {
+        if last.is_some_and(|at| at.elapsed() + BEAT_SLACK < EVERY) {
             return;
         }
         let first = last.is_none();
@@ -704,7 +746,9 @@ pub(crate) fn tick(app: &mut App) {
         .iter()
         .map(|p| (p.id.to_string(), p.name.clone(), p.repo_path.clone()))
         .collect();
-    review::refresh(projects.clone());
+    if review::refresh_due(Instant::now()) {
+        review::refresh(projects.clone());
+    }
     let cutoff = review::cutoff(now);
     let morning = review::past_review_time(now) && app.rule_review.loaded;
     let opened_today = app.rule_review.opened_on == today;
@@ -753,7 +797,9 @@ pub(crate) fn tick(app: &mut App) {
             }
         }
         if let Some((Some(pr), pushed)) = merge {
-            start_merge(local.clone(), root.clone(), name.clone(), pr, pushed);
+            if readiness_due(app, &pr.url, Instant::now()) {
+                start_merge(local.clone(), root.clone(), name.clone(), pr, pushed);
+            }
         }
         if stale {
             start_staleness(local.clone(), root.clone(), name.clone());
@@ -761,11 +807,70 @@ pub(crate) fn tick(app: &mut App) {
         if promote {
             review::start_promote_scan(local.clone(), root.clone(), name.clone());
         }
-        if let Some(docs) = docs {
+        if let Some(docs) = docs.filter(|d| readiness_due(app, &d.pr.url, Instant::now())) {
             review::start_docs_merge(local, root, name, docs, auto);
         }
     }
     crate::rule_review::maybe_open(app);
+}
+
+/// When each knowledge or agent docs pull request (by URL) was last asked
+/// about with `gh pr view` ([`share::Sharer::readiness_of`]), what its row
+/// said then, and how long to wait before asking again with no row.
+static READINESS: Mutex<BTreeMap<String, Readiness>> = Mutex::new(BTreeMap::new());
+
+#[derive(Debug, Clone)]
+struct Readiness {
+    row: Option<String>,
+    at: Instant,
+    gap: Duration,
+}
+
+/// The first wait between asks about a knowledge pull request no row
+/// has, doubling to [`READINESS_CAP`].
+const READINESS_GAP: Duration = Duration::from_secs(5 * 60);
+const READINESS_CAP: Duration = Duration::from_secs(30 * 60);
+
+/// What `url`'s row says of whether it may merge — its state, conflicts,
+/// checks and head as `App::prs` has them, from a project's open list or
+/// the automations' `MyPrs` (it is your own pull request). None when no
+/// row has it.
+fn readiness_row(app: &App, url: &str) -> Option<String> {
+    let s = app.prs.status(url)?;
+    Some(format!(
+        "{:?}|{:?}{}|{:?}{}|{}",
+        s.standing,
+        s.health.conflicts,
+        s.conflicts_known,
+        s.health.checks,
+        s.checks_known,
+        s.head_sha
+    ))
+}
+
+/// Whether to ask GitHub about knowledge pull request `url` now — what a
+/// merge (or noticing one) starts with. It used to be asked every 30 s
+/// until a person merged it, rate limit or not. Now: when its row has
+/// moved since the last ask (the rows are read anyway); else every
+/// [`READINESS_CAP`] as a backstop; and with no row at all, after
+/// [`READINESS_GAP`], doubling.
+fn readiness_due(app: &App, url: &str, now: Instant) -> bool {
+    let row = readiness_row(app, url);
+    let mut asked = READINESS.lock().unwrap_or_else(|e| e.into_inner());
+    let due = match asked.get(url) {
+        None => true,
+        Some(last) if row.is_some() && last.row != row => true,
+        Some(last) => now.saturating_duration_since(last.at) >= last.gap,
+    };
+    if due {
+        let gap = match (&row, asked.get(url)) {
+            (Some(_), _) => READINESS_CAP,
+            (None, Some(last)) if last.row.is_none() => (last.gap * 2).min(READINESS_CAP),
+            (None, _) => READINESS_GAP,
+        };
+        asked.insert(url.to_string(), Readiness { row, at: now, gap });
+    }
+    due
 }
 
 /// Whether the knowledge pull request should be merged now: the switch
@@ -833,6 +938,14 @@ pub(crate) fn merge_result(local: &Local, project: &str, pr: &Pr, result: Result
             tracing::info!("knowledge: #{} of {project} waits: {why}", pr.number);
         }
         Ok(Merge::Conflicting) => {}
+        // GitHub's limit is no refusal of the merge: it goes again once
+        // the limit resets, and never counts toward the card.
+        Err(why) if rate_limited(&why) => {
+            tracing::info!(
+                "knowledge: #{} of {project} waits for GitHub's limit",
+                pr.number
+            );
+        }
         Err(why) => {
             tracing::warn!("knowledge: #{} of {project} can't merge: {why}", pr.number);
             State::update(local, |s| {
@@ -985,6 +1098,80 @@ mod tests {
             ..state.clone()
         };
         assert!(!merge_due(&unpushed, true));
+    }
+
+    /// GitHub's rate limit is never a refusal of the merge: however often
+    /// it says so, nothing is counted and no card goes.
+    #[test]
+    fn a_rate_limit_is_no_merge_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = Local::at("01R", dir.path());
+        State::update(&local, |s| {
+            s.pr = Some(pr());
+            s.pushed = "abc".into();
+            s.signed_head = "abc".into();
+        });
+        for why in [
+            "GitHub rate limit: paused until it resets",
+            "GraphQL: API rate limit exceeded for user ID 1.",
+        ] {
+            assert!(rate_limited(why));
+            merge_result(&local, "app", &pr(), Err(why.into()));
+        }
+        let s = State::load(&local);
+        assert_eq!(s.merge_failures, 0);
+        assert_eq!(s.signed_head, "abc", "still due once the limit resets");
+        assert!(s.notices.is_empty());
+        assert!(!rate_limited("a check is failing"));
+    }
+
+    /// A knowledge pull request is asked about when its row moves, and
+    /// otherwise on a slow backstop — never on the 30 s beat; one no row
+    /// has, five minutes apart, doubling.
+    #[test]
+    fn readiness_is_asked_when_the_row_moves() {
+        let url = "https://github.com/o/app/pull/9123";
+        let mut app = App::new();
+        let t0 = Instant::now();
+        assert!(readiness_due(&app, url, t0), "first look");
+        assert!(!readiness_due(&app, url, t0 + Duration::from_secs(30)));
+        assert!(
+            readiness_due(&app, url, t0 + READINESS_GAP),
+            "no row: five minutes"
+        );
+        let t1 = t0 + READINESS_GAP;
+        assert!(!readiness_due(&app, url, t1 + READINESS_GAP), "then ten");
+        assert!(readiness_due(&app, url, t1 + READINESS_GAP * 2));
+        let t2 = t1 + READINESS_GAP * 2;
+        app.prs.observe(
+            url,
+            crate::pr_store::PrObservation {
+                state: Some(crate::pull_request::STATE_OPEN.into()),
+                checks: Some(crate::pull_request::Checks::Pending),
+                ..Default::default()
+            },
+            crate::fetch::Asked::Cached,
+        );
+        assert!(
+            readiness_due(&app, url, t2 + Duration::from_secs(1)),
+            "a row came"
+        );
+        assert!(
+            !readiness_due(&app, url, t2 + Duration::from_secs(60)),
+            "still"
+        );
+        app.prs.observe(
+            url,
+            crate::pr_store::PrObservation {
+                checks: Some(crate::pull_request::Checks::Passing),
+                ..Default::default()
+            },
+            crate::fetch::Asked::At(crate::fetch::now()),
+        );
+        assert!(
+            readiness_due(&app, url, t2 + Duration::from_secs(61)),
+            "it moved"
+        );
     }
 
     #[test]

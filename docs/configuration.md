@@ -50,14 +50,17 @@ outside the app, with `osascript`; never over ssh.
 
 #### Idle timeout
 
-A session in a worktree no client is viewing is stopped by the IDLE REAPER once it has sat idle for
+A session no client is viewing is stopped by the IDLE REAPER once it has sat idle for
 15 minutes. That span is fixed, not a setting; a `session_idle_timeout` an older orion wrote to
-`config.json` is ignored. The reaper sweeps every 15 s and spares running agents, agents waiting on
-you, agents with a backgrounded tool call still running, agents with text typed into their input
-box and not sent (Claude Code, Codex and Cursor; killing the CLI would lose it), and terminals with
-a command running. A reaped session is drawn gray where it stands; nothing on the grid moves. One
-click on it boots it again, and an agent resumes its conversation. A worktree's dead sessions also boot as the cursor
-rests on it, so attaching is instant; the timeout is what bounds that cost.
+`config.json` is ignored. In a worktree a client is viewing, its terminals and its agents that are
+working, waiting on you or unread stay up; a finished agent you have read ages like any other. The
+reaper sweeps every minute and spares running agents, agents waiting on you, agents with a
+backgrounded tool call still running, agents with text typed into their input box and not sent
+(Claude Code, Codex and Cursor; killing the CLI would lose it), and terminals with a command
+running; each spare restarts its clock. While the Mac runs on its battery an idle agent goes after
+5 minutes instead. A reaped session is drawn gray where it stands; nothing on
+the grid moves. One click on it boots it again, and an agent resumes its conversation. As the
+cursor rests on a worktree, its most recently active agent boots too, so opening it is instant.
 
 ### Accounts
 
@@ -193,7 +196,8 @@ lists, two switches `←`/`→` or `Enter` turn on and off:
 
 - **Code reviews asked of you** (`inbox.code_reviews`): open pull requests that ask you to review
   them — your projects' own, as their open lists say, and every other repo's, through one
-  `gh search prs --review-requested=@me` every five minutes.
+  `gh search prs --review-requested=@me` as the board opens, when the last one is over a minute
+  old.
 - **Linear tickets and mentions** (`inbox.linear_mentions`): the Linear tickets assigned to you in
   a live state (triage, todo, in progress — never the backlog, done or cancelled), and your unread
   notifications about a live ticket — a mention, a new comment on an issue you're in, an issue
@@ -216,6 +220,7 @@ lists, two switches `←`/`→` or `Enter` turn on and off:
 | `away.idle_minutes` | `10` | Minutes with no keys or mouse before you count as away; `0` is never. |
 | `away.phone` | `["question", "plan", "crash"]` | What goes to your phone while you are away. |
 | `away.quiet` | `["22:00", "07:00"]` | Quiet hours: nothing goes to your phone between them. `null` is none. |
+| `stacks.idle_stop` | `"1h"` | How long a dev stack may stay up with nothing happening in its checkout before the DAEMON stops it (`"90m"`, `"2h30m"`, `"45s"`), or `"off"`. See [Starting the app](#starting-the-app). |
 | `slack.dms`, `slack.mentions`, `slack.threads` | `true` | Direct messages, mentions of you, and new replies in threads you're in count as messages for you. |
 | `slack.channels`, `slack.keywords` | `[]` | Channels whose every message counts, and words that make a message count anywhere. |
 | `slack.banner` | `"dms_and_mentions"` | Which messages bring a banner and a sound: `every`, `dms_and_mentions` or `never`. |
@@ -266,6 +271,7 @@ These have no row.
 | `keybindings` | `{}` | Key overrides by action id, each a comma-separated chord list: `{"git_diff": "cmd+g, g"}`. An empty string unbinds; an unknown id is ignored. `Ctrl+q` always unlocks a terminal, whatever is bound. |
 | `claude_models` | `[]` | The Claude model rows the pickers offer, in place of the built-in aliases (`fable`, `opus`, `sonnet`, `haiku`): `["claude-sonnet-5", "us.anthropic.claude-opus-5-v1:0"]`, for an organization allowlist or a provider such as Bedrock. Empty follows Claude Code's own `availableModels` when one is set, else the aliases. |
 | `hide_draft_prs` | `false` | Leaves draft pull requests out of the grid's PR count and `⌘K`'s rows. The pull requests modal lists them either way. |
+| `base_fetch` | `"30m"` | How old a project's last fetch of origin may be when you switch to it, or come back to the window on it, before its ROOT WORKTREE fetches again (and fast-forwards when it sits on the base branch): `"15m"`, `"2h"`, `"90m"`, or `"off"` for never. Nothing is fetched while you are away. See [What orion fetches, and when](#what-orion-fetches-and-when). |
 | `linear_assignee_email` | `""` | Whose issues `⌘L` lists. Empty is the owner of the project's `LINEAR_API_KEY`. Kept in `config.local.json`. |
 | `diff_tree_view` | `true` | Whether `⌘E` lists files as a tree. `⌘B` in the viewer flips it and writes it here. |
 | `onboarded` | `false` | Whether setup has been seen. Kept in `config.local.json`; delete it, or run **Run setup** (palette) or `orion setup`, to see it again. |
@@ -405,15 +411,19 @@ Worktrees made outside orion run nothing.
   `⌘⇧S` again sends it `^C`; the line counts down `stopping… 1:52` and a further press, or two
   minutes, kills it. **Restart stack** stops it and starts the same app again. One run per
   worktree. A `run_command` left in `config.json` from before is kept through a save, unused.
-  A stack is always up, starting, stopping or down, worked out by the DAEMON every 3 s from what
-  is true: orion's run, the checkout's compose containers, and what listens on a port from inside
-  the checkout — so it is right however the stack was started or stopped. When the run ends with
+  A stack is always up, starting, stopping or down, worked out by the DAEMON from what is true:
+  orion's run, the checkout's compose containers, and what listens on a port from inside the
+  checkout — so it is right however the stack was started or stopped. When the run ends with
   nobody stopping it (it crashed, or something outside orion stopped it), its line goes and the
   compose projects started from the checkout are stopped with it, so a stack is never left half
   up; a failure says so, naming the file its output was saved to (`state/runs/` in the data
   directory). A run that exits cleanly within 10 s (`docker compose up -d`) leaves what it started.
   A daemon restart (an upgrade, `orion kill`) starts the runs it cut off again once it is back,
   and finishes a stop it cut off.
+  A stack left up for an hour with nothing happening in its checkout — no session there attached
+  to or left, no selection resting on it, no agent there working, no start — is stopped as
+  `⌘⇧S` stops it, and every client hears "stopped idle stack for <branch>". `stacks.idle_stop`
+  sets the span, or `"off"`.
   Agents start, stop and check the stack with `orion run` ([Commands](commands.md)). A Claude
   session's Bash call that would do it in its own shell — the checkout's own start, stop or restart
   recipe, a foreground `docker compose up`, `docker compose stop` — is turned away with the
@@ -437,14 +447,20 @@ A project is matched by the directory its containers were started in, never by n
 containers started elsewhere too is left alone, with a warning. It runs only after a delete that
 succeeded, works with any docker engine (OrbStack, Docker Desktop, Colima), and only ever warns on
 failure. While a checkout is there, its band's `⬡` says its stack: green up, amber starting or
-stopping, none down ([Starting the app](#starting-the-app)). The DAEMON asks `docker ps` and
-`lsof` every 3 s while a client is connected, a run is up or a stack isn't down. Containers left
+stopping, none down ([Starting the app](#starting-the-app)). The DAEMON follows docker through one
+`docker events` stream and asks `docker ps` when a container changes, while a stack is starting or
+stopping, and once a minute otherwise; `lsof` while a stack is starting or stopping, and every 30 s
+with a client connected (a minute with none). Either is asked at once when a client connects or a
+run starts or stops. Nothing is asked while no client is connected, no run is up and every stack is
+down; and while no checkout has a run, running containers, ports its runs served or a compose file,
+only docker, and only when a client connects. Containers left
 running with no app serving are not a stack: the band shows nothing, and orion leaves them be.
 `orion doctor` lists compose projects whose checkout is gone.
 
 ## Spare worktrees
 
-For each project used in the last 24 hours, the DAEMON keeps one SPARE WORKTREE: cut from the
+For the project used most recently (in the last 24 hours), the DAEMON keeps one SPARE WORKTREE —
+one in all; it moves to another project once that one has been the one in use for half an hour — cut from the
 project's **Base branch**, its `.env` links made and its setup command (when one was set by hand) run, with a `claude`
 booted on the `⌘N` account at its default model and effort, waiting at its prompt. Its branch and
 directory are `orion-spare-<id>`; the grid, worktree sync and the worktree picker leave it out.
@@ -454,10 +470,14 @@ effort, in edit mode, takes it: the branch is renamed to the launch's (the direc
 name), the worktree appears, the task is typed in as the first turn, and a new spare is cut behind
 it. Any other launch cuts a worktree as usual.
 
-The DAEMON fetches origin for a spare every 5 minutes; when the base moves, an untaken spare is
-reset to it and its CLI rebooted (setup is not run again). A finished spare survives a DAEMON
+The DAEMON fetches origin for a spare every 30 minutes, or 5 minutes after the last fetch once
+you have been in the project, and never while you are away; when the base moves, an untaken spare
+is reset to it and its CLI rebooted (setup is not run again). A spare whose cut or setup fails is
+tried again after 10 minutes, doubling to a day while it keeps failing, or as soon as the repo's
+HEAD moves. A finished spare survives a DAEMON
 restart; a half-made one is removed. There is no switch: no spare is kept while `⌘N` starts another
-harness or its account is off. Each costs one idle worktree and a 150–300 MB process, counted in the
+harness or its account is off. On battery the spare is cut and set up but its CLI waits until you
+are next in the project. Each costs one idle worktree and a 150–300 MB process, counted in the
 footer's memory readout.
 
 ## Linear
@@ -533,6 +553,63 @@ Nothing of this machine's travels with it. Each destination is remembered in `ss
 
 To back up or move settings, copy `config.json` (it applies at once) and `agent_presets.json`.
 
+## What orion fetches, and when
+
+Everything orion reads from GitHub, Linear, Microsoft 365, the usage endpoints and your checkouts'
+git goes through one place in the TUI, THE RESOLVER (`orion-tui/src/sync/`). Each question has a
+key scoped to what a screen shows — one project's open pull requests, one checkout's `git status`,
+one Linear key's notifications — and the resolver alone decides when it is asked: one fetch per key
+at a time, however many screens want it (a refresh asked meanwhile is owed exactly one more); a
+failure backs off, doubling, and nothing but `⌘R` / `Shift+R` cuts that short; a rate limit pauses
+the whole provider until it resets, `⌘R` included, and the PULL REQUESTS MODAL says `GitHub limit,
+back at 22:11` instead of failing.
+
+**Displayed data is read when you look at it**, not on a beat: as it comes on screen, when the
+window takes focus back, when you open the modal or tab that shows it, and on `⌘R`. A visit within
+the key's freshness reads the cache. Only the thing you are in keeps a beat, and only while the
+window is focused and you are not away:
+
+| On screen | Read on a visit once older than | Beat while you look |
+|---|---|---|
+| The selected project's open pull requests | 1 min | — |
+| The PULL REQUESTS MODAL's list and its labels and checks | 30 s | 1 min |
+| Its **Merged** and **Closed** sections | 10 min | — |
+| The pull request a cursor rests on | 1 min | 30 s while its checks run |
+| A checkout's pull request, for a branch no open list has (never the base branch) | 5 min | — |
+| Needs you's reviews and Linear notifications | 1 min | — |
+| The Linear view | 1 min (5 min for the selected project's prefetch) | — |
+| Account usage | 10 min | — |
+| The selected checkout's changed files, lines and `⇡⇣` | every selection | 15 s, besides every change THE GIT WATCHER sees |
+| Every other band's | 1 min | 1 min |
+| The selected project's fetch of origin (BASE SYNC) | `base_fetch` (30 min) | — |
+
+**The GIT WATCHER** (FSEvents) watches the selected checkout — its files, outside `.git`,
+`node_modules`, `target` and the other build dirs, and its HEAD, index and refs — and has it read
+again half a second after a change: an agent's edit shows on the badge without a poll. While the
+window is in the background a change is read at most every 30 s, and while you are away not until
+you are back. The 15 s beat is only a safety net; with nobody looking there is none. A read runs
+`git status` and then only what moved: `git rev-list` for `⇡⇣` when HEAD or the base names another
+commit (read from the ref files, no process), and `git diff --numstat` for the line counts when the
+status or a changed file did.
+
+**Only the automations fetch with nobody looking**, scoped to exactly what each acts on, only while
+it is on, and only in the one orion that holds `<data dir>/sync.lock` (a second `orion` in another
+terminal reads what it shows and leaves these to the first):
+
+| Read | For | How often |
+|---|---|---|
+| Your open pull requests everywhere, and recent merges (one GraphQL search) | the PR fixer, the factory's pull request bodies | 3 min while a check runs or a fixer is mid-cycle, else 15 min; a page only for a pull request that moved |
+| Linear intake, one read per key for both | the bug fixer, the feature builder | 5 min |
+| The calendar, then each finished meeting's transcript | meeting takeaways | 30 min; 2, 10 and 30 min after a meeting |
+| The releases page | the upgrade indicator | at launch and every 6 h, until one is found |
+
+The TUI's own housekeeping — the automations' turn, the knowledge beat, the factory's follow-ups,
+who each Claude account is, the caches' writes — runs on deadlines of its own rather than on a
+shared clock: the automations' turn every 5 s with one on (60 s with all off) and at once when a
+session's status moves, stretched six to ten times over while you are away; nothing that only
+paints runs while the window is unfocused. Settings themselves are read from disk only when
+`config.json` or `config.local.json` has changed.
+
 ## Logs
 
 `daemon.log` and `tui.log` are in `<data dir>/state/`. `ORION_LOG=debug` logs more. A log past 5 MB
@@ -560,6 +637,7 @@ Everything orion writes under its data dir:
 | `reviewed.json` | the diff viewer's reviewed marks | until the checkout's HEAD moves |
 | `needs-you.json` | which Needs you cards are done or snoozed, and the Slack cards | a done card until no source offers it; a snooze for its hour |
 | `automations/linear-builder.json` | every Linear ticket the bug fixer and feature builder have picked up, so none is picked up twice | — |
+| `automations/linear-intake.json` | when the bug fixer and feature builder last looked under each Linear key, and the tickets the intake has already answered for, so a restart neither looks early nor asks the model again | — |
 | `automations/meeting-takeaways.json` | each meeting's takeaways and where they stand | two weeks after the meeting |
 | `pr-facts/` | the facts each factory agent handed over with `orion pr facts set`, one file per pull request | — |
 | `automations/pr-body.json` | per factory pull request: its ticket, whether its plan was posted, the verdict last recorded, its tier, and the card last sent | — |
@@ -589,18 +667,18 @@ Everything orion writes under its data dir:
 | `ORION_AGENT_CMD` | one command line in place of every agent CLI (tests) |
 | `ORION_INSTALL_URL` | the install script `orion upgrade` and `orion ssh` fetch |
 | `ORION_USAGE` | `off` stops usage reads |
-| `ORION_UPDATE_CHECK_SECS` | how often to check for a new release (default 3600; `0` off) |
-| `ORION_SPOTIFY_POLL_SECS` | how often to ask Spotify (default 1; `0` off) |
-| `ORION_MICROSOFT_POLL_SECS` | how often to read your Microsoft 365 calendar (default 300; `0` off) |
-| `ORION_MEETING_TAKEAWAYS_POLL_SECS` | how often meeting takeaways looks for a finished Teams meeting's transcript, for up to an hour after it ends (default 120; `0` off) |
+| `ORION_UPDATE_CHECK_SECS` | how often to check for a new release (default 21600, six hours, until one is found; `0` off) |
+| `ORION_SPOTIFY_POLL_SECS` | how often to ask Spotify while a track plays and you are looking (default 5, and 30 with none playing; `0` off) |
+| `ORION_MICROSOFT_POLL_SECS` | how often to read your Microsoft 365 calendar while meeting takeaways is on, and how old a read the footer's next meeting takes before reading again as you come back to the window (default 1800; `0` off) |
+| `ORION_MEETING_TAKEAWAYS_POLL_SECS` | `0` turns off meeting takeaways' looks for a finished Teams meeting's transcript, which are made 2, 10 and 30 minutes after it ends |
 | `ORION_MICROSOFT_GRAPH_URL`, `ORION_MICROSOFT_TOKEN` | a Microsoft Graph base URL and access token used instead of `https://graph.microsoft.com/v1.0` and your sign-in (tests: a fake Graph) |
 | `ORION_AWAY_POLL_MS` | how often the DAEMON reads whether you are away, from the screen lock and the time since your last key, while Slack is connected (default 5000; `0` off, so only `⌘⇧A` makes you away) |
 | `ORION_PHONE_ANSWER_CHECK_MS` | how long after a phone answer goes into a dialog the DAEMON looks again: a session still waiting on the same thing didn't take it, and its Slack message gets its buttons back (default 20000) |
 | `ORION_SLACK_API_URL`, `ORION_SLACK_TOKENS` | a Slack Web API base URL used instead of `https://slack.com/api`, and the three tokens as `<app>,<bot>,<user>` used instead of the Keychain's (tests: a fake Slack) |
 | `ORION_PROJECT_ABOUT` | `off` stops orion writing a project's **What it is** (tests) |
 | `ORION_BLUE_SKY_DIR` | the folder the Blue sky builder builds ideas tied to no project in (default `~/Code/orion-blue-sky`) |
-| `ORION_NEEDS_YOU_POLL_SECS` | how often Needs you asks Linear for your notifications and `gh` for the reviews asked of you (default 300; `0` off) |
-| `ORION_LINEAR_BUILDER_POLL_SECS` | how often the bug fixer and feature builder look for labelled Linear tickets assigned to you (default 120; `0` off) |
+| `ORION_NEEDS_YOU_POLL_SECS` | `0` stops Needs you asking `gh` for the reviews asked of you and Linear for your notifications, which are otherwise read as the board opens when the last read is a minute old (tests) |
+| `ORION_LINEAR_BUILDER_POLL_SECS` | how often the bug fixer and feature builder look for labelled Linear tickets assigned to you, in one read per Linear key for both (default 300; `0` off) |
 | `ORION_WEEK_REVIEW_CHECK_SECS` | how often week in review looks whether its **When** has come round (default 60; `0` off, so it never runs on its own) |
 | `ORION_WEEK_REVIEW_RETRY_SECS` | how long week in review waits before each try again of a GitHub or Linear fetch that failed, and before running again a scheduled run that could not fetch (defaults 10, 30 and 90 seconds, and 15 minutes; `0` off, so the first failure is final) |
 | `ORION_IDLE_REAP_MS`, `ORION_WORKTREE_SYNC_MS`, `ORION_STACK_POLL_MS`, `ORION_SPARE_TICK_MS` | the DAEMON's reaper, worktree sync, docker poll and spare worktree periods (tests) |

@@ -60,23 +60,38 @@ struct Transcript {
     created_date_time: Option<String>,
 }
 
+/// The online meeting a join link belongs to, by its id: what a look asks
+/// first, once — the caller keeps it (`meeting_takeaways::Meeting::online_id`).
+pub fn meeting_id(ms: &MicrosoftSettings, join_url: &str) -> Result<String, String> {
+    let meetings: List<Meeting> = graph::get_json(ms, &meeting_path(join_url), &[])?;
+    meetings
+        .value
+        .into_iter()
+        .next()
+        .map(|m| m.id)
+        .ok_or_else(|| "Microsoft Graph doesn't know this meeting by its join link".into())
+}
+
 /// The transcript of the meeting at `join_url` that started at `start`, as
-/// WebVTT — None while there is none yet.
+/// WebVTT — None while there is none yet — with the online meeting's id.
+/// `known` is that id from an earlier look: the join link isn't asked
+/// about again.
 pub fn look(
     ms: &MicrosoftSettings,
     join_url: &str,
+    known: Option<&str>,
     start: DateTime<Utc>,
-) -> Result<Option<String>, String> {
-    let meetings: List<Meeting> = graph::get_json(ms, &meeting_path(join_url), &[])?;
-    let Some(meeting) = meetings.value.into_iter().next() else {
-        return Err("Microsoft Graph doesn't know this meeting by its join link".into());
+) -> Result<(String, Option<String>), String> {
+    let meeting = match known {
+        Some(id) => id.to_string(),
+        None => meeting_id(ms, join_url)?,
     };
-    let body = graph::get(ms, &transcripts_path(&meeting.id), &[])?;
+    let body = graph::get(ms, &transcripts_path(&meeting), &[])?;
     let Some(transcript) = pick(&body, start)? else {
-        return Ok(None);
+        return Ok((meeting, None));
     };
-    let vtt = graph::get(ms, &content_path(&meeting.id, &transcript), &[])?;
-    Ok(Some(String::from_utf8_lossy(&vtt).into_owned()))
+    let vtt = graph::get(ms, &content_path(&meeting, &transcript), &[])?;
+    Ok((meeting, Some(String::from_utf8_lossy(&vtt).into_owned())))
 }
 
 /// Of a meeting's transcripts (a `…/transcripts` answer), the one this

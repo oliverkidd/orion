@@ -184,8 +184,53 @@ pub(crate) async fn run_in(
     reply
 }
 
+/// What every ask adds so that it runs as the CLI alone, not as the
+/// user's whole setup. A session the user drives loads their MCP servers,
+/// plugins and hooks; a one-shot needs none of them, and paying for them
+/// on every background ask is the waste: each MCP server is a process
+/// started and torn down per ask (and may itself reach the network), and
+/// a `PreToolUse`/`PostToolUse` hook in their settings would run on every
+/// file the harvest's check reads.
+///
+/// - `--strict-mcp-config` with an empty `--mcp-config` starts no MCP
+///   server at all: only the config given counts, and it names none. The
+///   CLI takes the config as a JSON string, so no temp file is needed;
+///   each is its own argument, never shell-quoted.
+/// - `--setting-sources ""` loads none of the user, project or local
+///   settings files — no hooks, no `enabledPlugins`, no permission rules
+///   (the ask names its tools itself, `--allowedTools`). Sign-in is not a
+///   setting: a browser sign-in lives in the keychain under the account's
+///   `CLAUDE_CONFIG_DIR`, and an API key arrives in the environment, both
+///   of which still reach the CLI. Managed (policy) settings and the CLI's
+///   built-in plugins still apply; nothing here can turn those off. The
+///   one setup that loses out is auth through an `apiKeyHelper` in the
+///   user's settings file — rare enough, for a background ask, to trade
+///   for never running their hooks.
+const ISOLATED: [&str; 5] = [
+    "--strict-mcp-config",
+    "--mcp-config",
+    r#"{"mcpServers":{}}"#,
+    "--setting-sources",
+    "",
+];
+
 /// The account's CLI, asked once.
 async fn run_cli(ask: Ask, cwd: Option<&Path>, tools: Option<&str>) -> Result<Reply, String> {
+    let cmd = command(&ask, cwd, tools);
+    // A refused ask (a usage limit, a sign-out) exits non-zero with its
+    // reason in the JSON on stdout: that reason is the failure.
+    let out = crate::pull_request::run_piped(cmd, &ask.prompt, ask.timeout)
+        .await
+        .map_err(|why| match why.trim_start().starts_with('{') {
+            true => parse_reply(&why).err().unwrap_or(why),
+            false => why,
+        })?;
+    parse_reply(&out)
+}
+
+/// The command [`run_cli`] runs: the account's CLI in print mode, as the
+/// ask says, [`ISOLATED`] from the user's own setup.
+fn command(ask: &Ask, cwd: Option<&Path>, tools: Option<&str>) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(&ask.account.program);
     cmd.envs(ask.account.env.iter().map(|(name, value)| (name, value)));
     if let Some(cwd) = cwd {
@@ -211,15 +256,8 @@ async fn run_cli(ask: Ask, cwd: Option<&Path>, tools: Option<&str>) -> Result<Re
         "--output-format",
         "json",
     ]);
-    // A refused ask (a usage limit, a sign-out) exits non-zero with its
-    // reason in the JSON on stdout: that reason is the failure.
-    let out = crate::pull_request::run_piped(cmd, &ask.prompt, ask.timeout)
-        .await
-        .map_err(|why| match why.trim_start().starts_with('{') {
-            true => parse_reply(&why).err().unwrap_or(why),
-            false => why,
-        })?;
-    parse_reply(&out)
+    cmd.args(ISOLATED);
+    cmd
 }
 
 /// [`run`], told to answer in JSON only, with the answer parsed as `T`
@@ -364,6 +402,54 @@ mod tests {
     #[derive(Debug, serde::Deserialize, PartialEq)]
     struct Shape {
         n: u32,
+    }
+
+    fn args_of(cmd: &tokio::process::Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn ask() -> Ask {
+        Ask {
+            prompt: "hi".into(),
+            system: "be brief".into(),
+            account: Account {
+                program: "claude".into(),
+                ..Default::default()
+            },
+            model: "haiku".into(),
+            effort: "low".into(),
+            timeout: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn every_ask_starts_no_mcp_server_and_reads_no_settings() {
+        for tools in [None, Some("Read,Grep,Glob")] {
+            let args = args_of(&command(&ask(), None, tools));
+            assert_eq!(args[0], "-p");
+            let at = |flag: &str| args.iter().position(|a| a == flag).unwrap();
+            assert!(args.contains(&"--strict-mcp-config".to_string()));
+            // Each its own argument: the JSON is never shell-quoted.
+            assert_eq!(args[at("--mcp-config") + 1], r#"{"mcpServers":{}}"#);
+            assert_eq!(args[at("--setting-sources") + 1], "", "no settings file");
+            let empty: serde_json::Value =
+                serde_json::from_str(&args[at("--mcp-config") + 1]).unwrap();
+            assert_eq!(empty["mcpServers"], serde_json::json!({}));
+        }
+    }
+
+    #[test]
+    fn an_ask_names_its_own_tools() {
+        let args = args_of(&command(&ask(), None, Some("Read,Grep")));
+        let at = args.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(args[at + 1], "Read,Grep");
+        let none = args_of(&command(&ask(), None, None));
+        assert!(!none.contains(&"--allowedTools".to_string()));
+        let at = none.iter().position(|a| a == "--tools").unwrap();
+        assert_eq!(none[at + 1], "", "no tools at all");
     }
 
     #[test]

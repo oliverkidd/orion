@@ -3085,12 +3085,12 @@ async fn create_agent_runs_the_shells_own_claude_and_archive_clears_its_job() {
     wait_for_exit(&mut daemon);
 }
 
-/// One PrewarmWorktreeSessions must revive every dead session under the
-/// worktree — no Attach involved — so the TUI can boot a worktree's
-/// sessions the moment the user's selection rests on it. Archived agents
-/// stay dead.
+/// One PrewarmWorktreeSessions boots the worktree's most recently active
+/// agent — no Attach involved — so the session the selection most likely
+/// opens next replays a booted screen. Nothing else is warmed: a plain
+/// terminal waits for its own attach, and archived agents stay dead.
 #[tokio::test]
-async fn prewarm_worktree_sessions_boots_dead_sessions() {
+async fn prewarm_worktree_sessions_boots_the_most_recent_agent() {
     let env = TestEnv::new();
     let repo = env.make_repo();
     let mut daemon = env.spawn_daemon();
@@ -3212,7 +3212,7 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
         "terminals dead after restart"
     );
 
-    // One prewarm revives the agent and the terminal (upserts flip alive)…
+    // One prewarm revives the agent (its upsert flips alive)…
     write_frame(
         &mut c2,
         &ClientRequest::PrewarmWorktreeSessions {
@@ -3224,17 +3224,20 @@ async fn prewarm_worktree_sessions_boots_dead_sessions() {
     .await
     .unwrap();
     let events = read_events_until(&mut c2, SLOW_TIMEOUT, |evs| {
-        let agent_alive = evs.iter().any(|e| {
+        evs.iter().any(|e| {
             matches!(e, ServerEvent::EntityUpserted { entity: Entity::Agent(a) }
                 if a.id == agent_id && a.alive)
-        });
-        let term_alive = evs.iter().any(|e| {
-            matches!(e, ServerEvent::EntityUpserted { entity: Entity::Terminal(t) }
-                if t.id == term_id && t.alive)
-        });
-        agent_alive && term_alive
+        })
     })
     .await;
+    // …leaves the terminal for its own attach…
+    assert!(
+        !events.iter().any(|e| {
+            matches!(e, ServerEvent::EntityUpserted { entity: Entity::Terminal(t) }
+                if t.id == term_id && t.alive)
+        }),
+        "terminal not warmed: {events:#?}"
+    );
     // …and never touches the archived agent.
     assert!(
         !events.iter().any(|e| {

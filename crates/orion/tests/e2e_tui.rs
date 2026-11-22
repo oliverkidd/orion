@@ -1006,6 +1006,14 @@ fn tui_autofix_sends_unasked_when_my_pr_conflicts() {
         &gh,
         concat!(
             "#!/bin/sh\n",
+            // The pull request's page: one GraphQL query by number.
+            "case \"$*\" in\n",
+            "  *number=7*) printf '%s' '{\"data\":{\"repository\":{\"pullRequest\":",
+            "{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",",
+            "\"title\":\"Add things\",\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"CONFLICTING\",",
+            "\"author\":{\"login\":\"me\"},\"baseRefName\":\"main\",",
+            "\"headRefName\":\"feat\",\"headRefOid\":\"abc123\"}}}}'; exit 0 ;;\n",
+            "esac\n",
             "case \"$1 $2 $3\" in\n",
             "  'api graphql'*) printf '%s' '{\"data\":{\"repository\":{\"pullRequests\":{\"nodes\":[",
             "{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",\"title\":\"Add things\",",
@@ -1103,9 +1111,9 @@ fn tui_conflict_resolver_runs_through_to_the_pull_request() {
             "{{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",\"title\":\"Add things\",",
             "\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"CONFLICTING\",",
             "\"statusCheckRollup\":[],\"author\":{{\"login\":\"me\"}},\"baseRefName\":\"main\",",
-            "\"headRefName\":\"feat\",\"headRefOid\":\"{head}\",\"comments\":[],\"reviews\":[],",
-            "\"files\":[{{\"path\":\"a.txt\",\"additions\":1,\"deletions\":1,",
-            "\"changeType\":\"MODIFIED\"}}]}}"
+            "\"headRefName\":\"feat\",\"headRefOid\":\"{head}\",",
+            "\"files\":{{\"nodes\":[{{\"path\":\"a.txt\",\"additions\":1,\"deletions\":1,",
+            "\"changeType\":\"MODIFIED\"}}]}}}}"
         ),
         head = head
     );
@@ -1124,7 +1132,7 @@ fn tui_conflict_resolver_runs_through_to_the_pull_request() {
     std::fs::write(
         &gh,
         format!(
-            "#!/bin/sh\ncase \"$1 $2 $3\" in\n  'api graphql'*) printf '%s' '{list}' ;;\n  'pr view 7') printf '%s' '{body}' ;;\n  *) exit 1 ;;\nesac\n"
+            "#!/bin/sh\ncase \"$*\" in\n  *number=7*) printf '%s' '{{\"data\":{{\"repository\":{{\"pullRequest\":{body}}}}}}}' ;;\n  'api graphql'*) printf '%s' '{list}' ;;\n  *) exit 1 ;;\nesac\n"
         ),
     )
     .unwrap();
@@ -1227,9 +1235,9 @@ fn tui_pr_review_comments_on_a_line_and_sends_the_review() {
             "{{\"number\":7,\"url\":\"https://github.com/o/r/pull/7\",\"title\":\"Add things\",",
             "\"state\":\"OPEN\",\"isDraft\":false,\"mergeable\":\"MERGEABLE\",",
             "\"statusCheckRollup\":[],\"author\":{{\"login\":\"ada\"}},\"baseRefName\":\"main\",",
-            "\"headRefName\":\"feat\",\"headRefOid\":\"{head}\",\"comments\":[],\"reviews\":[],",
-            "\"files\":[{{\"path\":\"a.txt\",\"additions\":1,\"deletions\":1,",
-            "\"changeType\":\"MODIFIED\"}}]}}"
+            "\"headRefName\":\"feat\",\"headRefOid\":\"{head}\",",
+            "\"files\":{{\"nodes\":[{{\"path\":\"a.txt\",\"additions\":1,\"deletions\":1,",
+            "\"changeType\":\"MODIFIED\"}}]}}}}"
         ),
         head = head
     );
@@ -1272,9 +1280,10 @@ fn tui_pr_review_comments_on_a_line_and_sends_the_review() {
              \x20     *addPullRequestReview*) printf '%s' '{started}' ;;\n\
              \x20     *) exit 1 ;;\n\
              \x20   esac ;;\n\
+             \x20 *'pullRequests('*) printf '%s' '{list}' ;;\n\
+             \x20 *changedFiles*) printf '%s' '{{\"data\":{{\"repository\":{{\"pullRequest\":{detail}}}}}}}' ;;\n\
              \x20 *reviewThreads*) printf '%s' '{threads}' ;;\n\
              \x20 'api graphql'*) printf '%s' '{list}' ;;\n\
-             \x20 'pr view 7'*) printf '%s' '{detail}' ;;\n\
              \x20 *) exit 1 ;;\n\
              esac\n",
             sent = sent.display(),

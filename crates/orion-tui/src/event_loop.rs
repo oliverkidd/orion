@@ -93,15 +93,6 @@ pub(super) const KEYBOARD_MENU_ANCHOR: (u16, u16) = (30, 4);
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
-/// How often the worktree panel's changed-file badge re-reads `git status`
-/// for the selected checkout, so agent edits surface without a keypress.
-const GIT_POLL: Duration = Duration::from_secs(2);
-
-/// Repaint cadence for the sessions list's "23m ago" labels. They tick at
-/// minute granularity, so half a minute keeps the worst-case staleness
-/// under the resolution anyone can see.
-const AGO_REFRESH: Duration = Duration::from_secs(30);
-
 /// How long the worktree selection must rest before asking the daemon to
 /// pre-spawn that worktree's dead sessions — long enough that walking the
 /// list doesn't boot every CLI passed, short enough that the sessions are
@@ -117,92 +108,37 @@ pub(crate) const PREWARM_DEBOUNCE: Duration = Duration::from_millis(250);
 /// attaches it on the keypress.
 const ATTACH_DEBOUNCE: Duration = Duration::from_millis(180);
 
-/// How soon a worktree that came back without a pull request is asked
-/// again, and how far that gap may grow. Switching into a worktree resets
-/// it to the floor, so a PR an agent opens while the user watches lands on
-/// the row within seconds; resting on a checkout that will never have one
-/// backs off to a cadence that costs nothing. Each answer costs a `gh`
-/// process and a network round trip, so the selected worktree is the only
-/// one asked on every tick; the rest of the project's checkouts take turns
-/// (`sweep_pull_request`), one per tick, on the same backoff.
-const PR_RECHECK_MIN: Duration = Duration::from_secs(10);
-const PR_RECHECK_MAX: Duration = Duration::from_secs(3 * 60);
-/// How often the selected worktree's *known* pull request is re-asked. The
-/// PR won't change, but its conversation and state will — this is the beat
-/// the row's unread-comment badge and its `merged` / `closed` badge run at,
-/// for the one checkout the cursor is resting on. Same cadence and the same
-/// budget reasoning as `OPEN_PRS_REFRESH` below.
-const PR_REFRESH: Duration = Duration::from_secs(15);
-/// The same beat for every *other* checkout of the selected project: how
-/// often a known pull request on a worktree the cursor is not resting on
-/// is re-asked. Slow, because it multiplies by the number of checkouts —
-/// thirty worktrees with pull requests is thirty calls a sweep, so at five
-/// minutes that is 360 an hour — and because nothing on those rows needs
-/// to be fresher: what they show is whether the branch has *merged*, a
-/// change the project's open list catches within `OPEN_PRS_REFRESH`
-/// anyway (`note_open_prs_answer` pulls a checkout's lookup forward the
-/// moment its pull request leaves that list). The sweep is what lets a
-/// checkout turn purple without ever being focused, and what has every
-/// PR ROW badged when the cursor does arrive.
-const PR_SWEEP_REFRESH: Duration = Duration::from_secs(5 * 60);
-
-/// How often the selected *project's* open-pull-request list is re-asked
-/// once a repo has proved it has any, and how a repo that answers empty (or
-/// can't answer at all) backs off. One list lookup is one GraphQL call —
-/// one point, however many pull requests come back. Every other project's
-/// list is on the slower `OPEN_PRS_SWEEP_REFRESH`.
-///
-/// The budget (docs.github.com, "Rate limits and node limits for the
-/// GraphQL API", checked 2026-08-28): 5,000 points an hour per user token,
-/// with a secondary cap of 2,000 points a minute. At fifteen seconds this
-/// list and the selected worktree's `PR_REFRESH` together spend 480 an hour
-/// — under a tenth of the quota — the sweep of the project's other
-/// checkouts (`PR_SWEEP_REFRESH`) adds twelve an hour per checkout with a
-/// pull request, and a focus-driven re-ask (see
-/// `schedule_pull_request_refresh`) adds at most one call per
-/// `OPEN_PRS_MIN_AGE`. The rest is left for the user's own `gh` and for the
-/// Claude sessions sharing the same token, which is why this isn't faster
-/// still.
-///
-/// This beat is the whole pruning mechanism: `--state open` stops returning
-/// a pull request the moment it is merged or closed, so a row that should
-/// no longer be there is gone within one refresh — which is why it is
-/// seconds rather than the minutes a pure "what's open?" readout could
-/// afford. Arriving at a project, or focusing a sidebar panel or the
-/// terminal window, pulls the next lookup forward, floored by
-/// `OPEN_PRS_MIN_AGE` so walking the project list can't spend a call per
-/// row. `Shift+R` (`refresh_pull_requests`) is the one gesture that skips
-/// the floor: a deliberate keypress may spend the call.
-pub(crate) const OPEN_PRS_REFRESH: Duration = Duration::from_secs(15);
-pub(crate) const OPEN_PRS_RECHECK_MIN: Duration = Duration::from_secs(30);
-pub(crate) const OPEN_PRS_RECHECK_MAX: Duration = Duration::from_secs(10 * 60);
-/// How often the open list of a project the cursor is *not* on is re-asked
-/// — the background pass that keeps every project's group warm, so
-/// switching to one shows a list minutes old at worst (and the cache the
-/// next launch hydrates from is as fresh as that). One list lookup per
-/// project per beat, one project per tick (`sweep_open_prs`): twelve
-/// calls an hour per project against the budget above, and a project that
-/// answers empty keeps its own backoff on top. Same reasoning and cadence
-/// as `PR_SWEEP_REFRESH`; the selected project's list stays on
-/// `OPEN_PRS_REFRESH`.
-pub(crate) const OPEN_PRS_SWEEP_REFRESH: Duration = Duration::from_secs(5 * 60);
-
 /// How long the Worktrees cursor must rest on an open-PR row before its
 /// description and conversation are fetched. Long enough that arrowing
 /// through a hundred rows spends nothing, short enough that stopping to
-/// read one feels immediate. Answers are kept for [`PR_DETAIL_FRESH`], so
+/// read one feels immediate. Answers are kept for [`pr_detail_fresh_for`], so
 /// this is paid at most once a window per pull request.
 pub(crate) const PR_DETAIL_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// How long a pull request's page — its checks above all — is shown as
-/// read before a cursor resting on it asks again. The body barely moves,
-/// but the Checks tab is a live thing: a page read while CI ran would
-/// otherwise say `pending` until `⌘R` forced it. The PULL REQUESTS
-/// MODAL's own row is read again on this window while it stays on it.
-pub(crate) const PR_DETAIL_FRESH: Duration = Duration::from_secs(30);
+/// How long a pull request's page is shown as read before a cursor
+/// resting on it asks again: THE RESOLVER's `PrDetail` freshness, from
+/// its policy. The body barely moves; the Checks tab does, and a page
+/// whose checks are running is read again every half minute for as long
+/// as a cursor stays on it (`sync::scope`), so it never says `pending`
+/// after CI has finished.
+pub(crate) fn pr_detail_fresh_for() -> Duration {
+    crate::sync::policy::policy(&crate::sync::QueryKey::PrDetail(String::new())).stale_after
+}
 
-/// How often the footer's memory/session readout is refreshed.
-const FOOTER_METRICS_POLL: Duration = Duration::from_secs(5);
+/// How often the footer's memory/session readout is refreshed — while
+/// somebody is looking (`App::idle`); regaining focus reads it at once.
+/// It moves on the order of minutes, and each reading is a `ps` here and
+/// a machine-wide one in the DAEMON.
+const FOOTER_METRICS_POLL: Duration = Duration::from_secs(30);
+
+/// How long after a session is made or removed the footer's readout is
+/// read again (`moves_session_count`): long enough for the DAEMON to have
+/// spawned its process, so the count it reads includes it.
+const SESSION_COUNT_SETTLE: Duration = Duration::from_secs(1);
+
+/// How often a MARKDOWN PAGE on screen looks at its file for an edit,
+/// while somebody is looking. A `stat`, so it can be quick.
+const PAGE_REFRESH: Duration = Duration::from_secs(2);
 
 /// The one hotkey that isn't only a hotkey. Whatever the user binds to
 /// [`crate::keymap::Action::UnlockTerminal`], Ctrl+q also unlocks a locked
@@ -318,22 +254,20 @@ async fn main_loop(
     // When the loop may paint again (FRAME PACING): back to back for a key
     // and its answer, 60 fps under sustained output.
     let mut pacer = pacing::FramePacer::new(next_draw);
-    let mut next_git_poll = tokio::time::Instant::now();
-    // The changed-file badge's `git status`, run off the loop; the count
-    // lands here and in `app.git_changes`.
-    let (git_tx, mut git_rx) = tokio::sync::mpsc::unbounded_channel::<ChangedFiles>();
-    // The cards' sweep of every other checkout the grid lists, one per
-    // tick; its counts land in `app.worktree_changes` (and its line counts
-    // in `app.worktree_lines`) and nowhere else.
-    let (sweep_git_tx, mut sweep_git_rx) = tokio::sync::mpsc::unbounded_channel::<SweptChanges>();
-    // Pull-request lookups run off the loop (they hit the network); answers
-    // come back here and land in `app.pull_requests`.
-    let (pr_tx, mut pr_rx) = tokio::sync::mpsc::unbounded_channel::<LookupLanded>();
-    // The selected project's open-pull-request list, on the same off-loop
-    // footing. `None` is "couldn't ask", which keeps the last good list.
-    let (prs_tx, mut prs_rx) = tokio::sync::mpsc::unbounded_channel::<ListLanded>();
-    // One pull request's body and conversation, for the preview pane.
-    let (detail_tx, mut detail_rx) = tokio::sync::mpsc::unbounded_channel::<DetailLanded>();
+    // THE GIT WATCHER's changes: a checkout's id, once per burst, read
+    // again after a debounce (`git_watch`).
+    let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel::<WorktreeId>();
+    app.git_watch.tx = Some(watch_tx);
+    // THE RESOLVER's fetches — GitHub, Linear, usage and Microsoft 365,
+    // and local git: each checkout's read (the badge, the bands) and each
+    // project's fetch of origin — run off the loop and land here
+    // (`land_sync`). This process runs the automations' background reads
+    // only while it holds the machine's `sync.lock`.
+    let (resolver_tx, mut resolver_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::sync::spawn::Landed>();
+    app.sync_tx = Some(resolver_tx);
+    app.sync_owner =
+        crate::sync::background::Owner::claim(&crate::sync::background::Owner::default_location());
     // A finished `gh pr comment`, which flashes its outcome when it lands
     // — and re-reads the pull request so the pane shows what was said.
     let (prcomment_tx, mut prcomment_rx) =
@@ -362,17 +296,14 @@ async fn main_loop(
     app.linear_tx = Some(linear_tx);
     app.linear_links =
         crate::linear::LinkStore::load(orion_core::paths::data_dir().join("linear-links.json"));
-    // NEEDS YOU: Done and Snooze from the last run, and the POLL for your
-    // Linear notifications and the reviews asked of you (`needs_you::
-    // interval`; the e2e tests turn it off), first at start. The Slack
-    // section's asks land on the same channel, poll or no poll: they
-    // follow Slack's own events.
+    // NEEDS YOU: Done and Snooze from the last run. Your Linear
+    // notifications and the reviews asked of you are THE RESOLVER's, read
+    // as the board opens (`sync::linear`, `sync::github`); the Slack
+    // section's asks land on this channel, following Slack's own events.
     crate::needs_you::load(&mut app);
     let (needs_you_tx, mut needs_you_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::needs_you::Answer>();
-    let needs_you_interval = crate::needs_you::interval();
     app.needs_you.tx = Some(needs_you_tx);
-    let mut next_needs_you = tokio::time::Instant::now();
     // The WORKTREE PICKER's branch listings and their background fetch
     // land here too.
     let (branch_tx, mut branch_rx) =
@@ -392,9 +323,6 @@ async fn main_loop(
     let (clone_tx, mut clone_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::clone_repo::Answer>();
     app.clone_repo.tx = Some(clone_tx);
-    // A BASE SYNC's fetch and fast-forward land here.
-    let (base_tx, mut base_rx) = tokio::sync::mpsc::unbounded_channel::<crate::base_sync::Answer>();
-    app.base_sync.tx = Some(base_tx);
     // BACKGROUND READS for the worktree views: the git and the disk behind
     // `g`, `f`, `F` and `b` run on the blocking pool and land here.
     let (views_tx, mut views_rx) =
@@ -405,18 +333,21 @@ async fn main_loop(
     app.usage =
         crate::usage::Usage::load(orion_core::paths::data_dir().join(crate::usage::CACHE_FILE));
     // A newer orion published on GitHub, probed off the loop at start and
-    // then on a slow beat (`update_check::interval`; the e2e tests turn it
-    // off). The beat's answers only ever light the footer's indicator, so
-    // once lit it survives a check that later can't ask. **Upgrade orion**
-    // asks again on demand through the same channel when no newer release
-    // is known yet, so one published within the beat is never missed.
+    // then on a slow beat (`update_check::Beat`, `update_check::interval`;
+    // the e2e tests turn it off) that stops once one is known and holds
+    // while IDLE. The beat's answers only ever light the footer's
+    // indicator, so once lit it survives a check that later can't ask.
+    // **Upgrade orion** asks again on demand through the same channel when
+    // no newer release is known yet, so one published within the beat is
+    // never missed.
     let (update_tx, mut update_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::update_check::Answer>();
     let update_interval = crate::update_check::interval();
     if update_interval.is_some() {
         app.update_tx = Some(update_tx.clone());
     }
-    let mut next_update_check = tokio::time::Instant::now();
+    let mut update_beat = update_interval
+        .map(|every| crate::update_check::Beat::starting(std::time::Instant::now(), every));
     // The BUILD-CACHE SWEEP (`build_cache`): Cargo output no checkout has
     // used in two weeks, deleted off the loop a few minutes after start —
     // so every upgrade's reopen runs one — and then once a day.
@@ -431,10 +362,10 @@ async fn main_loop(
     app.spotify_tx = Some(spotify_tx.clone());
     let spotify_interval = crate::spotify::interval();
     let mut next_spotify = tokio::time::Instant::now();
-    // MICROSOFT 365: a sign-in's steps and the calendar reads land here;
-    // while signed in, a minute's tick repaints the footer's countdown and
-    // reads the calendar when due (`microsoft::calendar::interval`; the
-    // e2e tests turn it off).
+    // MICROSOFT 365: a sign-in's steps land here; while signed in and
+    // looked at, a minute's tick repaints the footer's countdown. The
+    // calendar is the RESOLVER's (`sync::services`;
+    // `microsoft::calendar::interval`, which the e2e tests turn off).
     let (microsoft_tx, mut microsoft_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::microsoft::Answer>();
     app.microsoft.tx = Some(microsoft_tx);
@@ -462,9 +393,22 @@ async fn main_loop(
     let mut next_sweep_frame = tokio::time::Instant::now();
     // The last sweep tick still had something to animate (see the tick).
     let mut sweep_was_ticking = false;
-    let mut next_ago_refresh = tokio::time::Instant::now() + AGO_REFRESH;
     // The host's runtime modes, re-asked on a slow beat (see host_terminal).
     let mut next_mode_reassert = tokio::time::Instant::now() + MODE_REASSERT;
+    // A host that just took focus back, or was resized, is re-asked its
+    // modes at once rather than on the beat — the moments a host is most
+    // likely to have reset itself.
+    let mut modes_owed = false;
+    let mut next_page_refresh = tokio::time::Instant::now() + PAGE_REFRESH;
+    // IDLE as of the last turn: the turn it ends runs the CATCH-UP below.
+    let mut was_idle = app.idle();
+    // Something this turn may have moved what the screen shows or what the
+    // automations need: THE RESOLVER's step and the CHORES' schedule run
+    // after it. A turn that only painted — PTY output, an animation
+    // frame — owes neither.
+    let mut resolve_owed = true;
+    // When an "ago" label's turn last woke the loop (`AGO_WAKE_GAP`).
+    let mut last_ago_wake = std::time::Instant::now();
     // Editor-modal PTY output; the channel outlives individual editor
     // spawns (EditorEvent generations keep them apart).
     let (editor_tx, mut editor_rx) = tokio::sync::mpsc::unbounded_channel::<EditorEvent>();
@@ -480,19 +424,17 @@ async fn main_loop(
 
     loop {
         if app.dirty && tokio::time::Instant::now() >= next_draw {
-            // A selection change must never paint another checkout's badge:
-            // the badge stays off until this checkout's count lands, and
-            // between selections the slow poll keeps it fresh.
-            if app.git_changes_stale() {
-                request_git_changes(&mut app, &git_tx);
-            }
             let began = std::time::Instant::now();
             draw_frame(terminal, &mut app)?;
             if let Some(perf) = &mut perf {
                 perf.frame(began, &app);
             }
             app.dirty = false;
-            next_draw = pacer.drew(tokio::time::Instant::now(), began.elapsed());
+            next_draw = pacing::idle_cap(
+                pacer.drew(tokio::time::Instant::now(), began.elapsed()),
+                tokio::time::Instant::now(),
+                app.idle(),
+            );
             sync_pty_size(&mut app, &mut out);
             sync_editor_size(&mut app);
         }
@@ -516,83 +458,75 @@ async fn main_loop(
             .done_sounds
             .next_due()
             .map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std);
+        // When the UPDATE CHECK's beat next runs, if it is armed (its arm
+        // below).
+        let update_deadline = update_beat
+            .as_ref()
+            .and_then(|beat| beat.deadline(app.update_available.is_some(), app.idle()))
+            .map(tokio::time::Instant::from_std);
+        // When THE RESOLVER next has something come due, if ever.
+        let sync_wake = app
+            .resolver
+            .next_wake(std::time::Instant::now())
+            .map(tokio::time::Instant::from_std);
+        // When the next CHORE is due.
+        let chores_wake = app.chores.next_wake().map(tokio::time::Instant::from_std);
+        // When the GIT WATCHER's last burst of changes is read.
+        let watch_wake = crate::git_watch::due(&app).map(tokio::time::Instant::from_std);
+        // Whether this turn may move what THE RESOLVER and the CHORES see
+        // (`resolve_owed`): every arm but those that only paint.
+        let mut resolving = true;
+        // When the youngest "ago" label on screen next turns over.
+        let ago_wake = (!app.idle())
+            .then(|| next_ago_turn(&app, std::time::Instant::now()))
+            .flatten()
+            .map(|at| at.max(last_ago_wake + AGO_WAKE_GAP))
+            .map(tokio::time::Instant::from_std);
         tokio::select! {
             // Pending redraw: wake at the frame boundary even if no new
             // events arrive.
-            _ = tokio::time::sleep_until(next_draw), if app.dirty => {}
-            // Fixed deadline (not a fresh sleep per iteration) so heavy PTY
-            // traffic can't starve the badge refresh.
-            _ = tokio::time::sleep_until(next_git_poll) => {
-                request_git_changes(&mut app, &git_tx);
-                sweep_git_changes(&mut app, &sweep_git_tx);
-                // Rides the git tick rather than the repaint, so walking the
-                // worktree list with j/k can't spawn a `gh` per row passed —
-                // only whatever the selection is resting on when it fires,
-                // plus one of the project's other checkouts if its turn has
-                // come.
-                lookup_pull_request(&mut app, &pr_tx);
-                sweep_pull_request(&mut app, &pr_tx);
-                lookup_open_prs(&mut app, &prs_tx, &mut out);
-                sweep_open_prs(&mut app, &prs_tx, &mut out);
-                // AUTOFIX: the checks of each broken pull request it is
-                // watching, when their turn has come — and a queued ask
-                // onto a free screen.
-                for (url, number, dir) in crate::automations::pr_fixer::due_fetches(&mut app) {
-                    spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
-                }
-                // PR BODY: each factory pull request whose top may be due
-                // a rewrite.
-                for (url, number, dir) in crate::pr_body::due_fetches(&mut app) {
-                    spawn_pr_detail(&mut app, &detail_tx, url, number, dir);
-                }
-                // AUTOMATIONS: each runner's turn — the PR fixer's queued
-                // asks among them.
-                crate::automations::tick(&mut app, &mut out);
-                // BASE SYNC: the most overdue project's root fetched, and
-                // fast-forwarded when it sits on the base branch.
-                crate::base_sync::tick(&mut app);
-                // KNOWLEDGE: the session snapshot, harvests left queued,
-                // and the daily card of new rules.
-                crate::knowledge::tick(&mut app);
-                // FACTORY: every few hours, the bugs that followed each
-                // run's merge.
-                crate::factory::follow_ups::tick(&mut app);
-                // Who each CLAUDE ACCOUNT is signed in as, on a slower
-                // beat of its own: a `/login` typed in a session's pane
-                // renames its account here.
-                crate::claude_accounts::request_refresh(&mut app, false);
-                // ACCOUNT USAGE, which spaces itself to one ask per
-                // account every 15 minutes.
-                crate::usage::request(&mut app, false);
-                if let Some((path, readings)) = crate::usage::take_flush(&mut app) {
-                    tokio::task::spawn_blocking(move || crate::usage::write_cache(&path, &readings));
-                }
-                // Whatever the answers above changed since the last tick
-                // goes to disk, off the loop; the next launch paints from it.
-                if let Some((cache, store, live)) = crate::pr_cache::take_flush(&mut app) {
-                    tokio::task::spawn_blocking(move || {
-                        crate::pr_cache::write_all(&cache, &store, &live)
-                    });
-                }
-                if let Some((cache, store)) = crate::linear_cache::take_flush(&mut app) {
-                    tokio::task::spawn_blocking(move || crate::linear_cache::write(&cache, &store));
-                }
-                // The selected project's Linear issues, asked on arrival.
-                crate::linear::prefetch(&mut app);
-                next_git_poll = tokio::time::Instant::now() + GIT_POLL;
+            _ = tokio::time::sleep_until(next_draw), if app.dirty => {
+                resolving = false;
             }
-            // `Shift+R` asked for the pull requests now: the same lookups
-            // the git tick runs, on this turn instead of up to `GIT_POLL`
-            // later.
-            _ = std::future::ready(()), if app.pr_refresh_requested => {
-                app.pr_refresh_requested = false;
-                lookup_pull_request(&mut app, &pr_tx);
-                sweep_pull_request(&mut app, &pr_tx);
-                lookup_open_prs(&mut app, &prs_tx, &mut out);
+            // The next CHORE's deadline: the automations' turn, the
+            // knowledge beat, the caches' writes (`chores`).
+            _ = tokio::time::sleep_until(chores_wake.unwrap_or_else(tokio::time::Instant::now)),
+                if chores_wake.is_some() =>
+            {
+                crate::chores::tick(&mut app, &mut out);
             }
-            // Metrics poll: always on, for the footer's memory/session
-            // readout.
-            _ = tokio::time::sleep_until(next_metrics_poll), if matches!(app.conn, ConnState::Connected) => {
+            // THE GIT WATCHER saw the selected checkout change: once the
+            // debounce is out, it is read again. Its deadline also starts
+            // the watch on a selection that has come to rest.
+            // A background task has news for a CHORE (`chores::wake`).
+            _ = crate::chores::woken() => {
+                let now = std::time::Instant::now();
+                for chore in crate::chores::take_woken() {
+                    app.chores.kick(chore, now);
+                }
+            }
+            changed = watch_rx.recv() => {
+                // Never None: `app.git_watch.tx` keeps a sender alive.
+                if let Some(worktree) = changed {
+                    crate::git_watch::changed(&mut app, worktree, std::time::Instant::now());
+                }
+            }
+            _ = tokio::time::sleep_until(watch_wake.unwrap_or_else(tokio::time::Instant::now)),
+                if watch_wake.is_some() =>
+            {
+                crate::git_watch::on_deadline(&mut app, std::time::Instant::now());
+            }
+            // THE RESOLVER's next deadline: a live beat, a backoff or a
+            // rate limit's pause running out. What comes due is spawned by
+            // the step after every turn, below.
+            _ = tokio::time::sleep_until(sync_wake.unwrap_or_else(tokio::time::Instant::now)),
+                if sync_wake.is_some() => {}
+            // Metrics poll, for the footer's memory/session readout: only
+            // while somebody is looking at it.
+            _ = tokio::time::sleep_until(next_metrics_poll),
+                if matches!(app.conn, ConnState::Connected) && !app.idle() =>
+            {
+                resolving = false;
                 request_metrics(&mut app, &mut out);
                 next_metrics_poll = tokio::time::Instant::now() + FOOTER_METRICS_POLL;
             }
@@ -600,12 +534,14 @@ async fn main_loop(
             // same sky: while either is on screen nothing else repaints an
             // idle app, so tick the animation on a fixed cadence.
             _ = tokio::time::sleep_until(next_splash_frame), if app.splash_active() || app.welcome_active() => {
+                resolving = false;
                 app.dirty = true;
                 next_splash_frame = tokio::time::Instant::now() + SPLASH_FRAME;
             }
             // MERGE CONFETTI: a burst in the air repaints on its own
             // cadence, and the tick after the last piece lands clears it.
             _ = tokio::time::sleep_until(next_confetti_frame), if app.confetti.is_some() => {
+                resolving = false;
                 if app.confetti.as_ref().is_some_and(|c| c.done(std::time::Instant::now())) {
                     app.confetti = None;
                 }
@@ -619,37 +555,47 @@ async fn main_loop(
             // the row it leaves mid-band, so the tick after the last sweep
             // stops still fires: that frame is the row settling.
             _ = tokio::time::sleep_until(next_sweep_frame), if app.status_anim_active() || sweep_was_ticking => {
+                resolving = false;
                 app.dirty = true;
                 sweep_was_ticking = app.status_anim_active();
                 next_sweep_frame = tokio::time::Instant::now() + SWEEP_FRAME;
             }
             // "23m ago" labels age on their own with nothing else to
-            // repaint an idle app. Only worth a frame once some row carries
-            // one — a project or worktree row reads any session under it,
-            // so the whole tree is the test, not just the visible sessions.
-            _ = tokio::time::sleep_until(next_ago_refresh) => {
-                if app.tree.agents.iter().any(|a| a.status_changed_at > 0) {
-                    app.dirty = true;
-                }
-                next_ago_refresh = tokio::time::Instant::now() + AGO_REFRESH;
+            // repaint the app: a frame as the youngest of them turns over
+            // to its next minute — and none while IDLE, when nobody would
+            // see it (the CATCH-UP repaints).
+            _ = tokio::time::sleep_until(ago_wake.unwrap_or_else(tokio::time::Instant::now)),
+                if ago_wake.is_some() =>
+            {
+                resolving = false;
+                last_ago_wake = std::time::Instant::now();
+                app.dirty = true;
             }
             // The KEY COMBO DISPLAY clears itself a moment after the press
             // (`key_combo::LINGER`) — nothing else repaints an idle app, so
             // the deadline takes a wake of its own.
             _ = tokio::time::sleep_until(key_combo_deadline), if app.key_combo.is_some() => {
+                resolving = false;
                 app.key_combo = None;
                 app.dirty = true;
             }
             // A host that reset itself (iTerm2's ⌘R) drops mouse reporting
             // without a word, and a dead mouse can't report that it is
-            // dead — so re-ask on a beat rather than on a signal.
+            // dead — so re-ask on a slow beat while somebody is looking,
+            // and at once when the window takes focus back or is resized.
+            // Every re-ask is a write to the host, which wakes the host's
+            // renderer too, so an IDLE app writes none.
             // …but never while the left button is down. The re-ask is the
             // one thing orion writes to the host on a clock, and it is a
             // mode change under a gesture in progress: a host that takes
             // it as a fresh start drops the button, and the selection
             // stops growing a couple of seconds into every long drag. The
             // beat resumes on the release.
-            _ = tokio::time::sleep_until(next_mode_reassert), if !app.mouse_held() => {
+            _ = tokio::time::sleep_until(if modes_owed { tokio::time::Instant::now() } else { next_mode_reassert }),
+                if !app.mouse_held() && (modes_owed || !app.idle()) =>
+            {
+                resolving = false;
+                modes_owed = false;
                 // A RELEASE WATCH nothing has touched for a while goes
                 // first, so the beat re-asks the resting flags, not its.
                 if release_watch::expire(&mut app.release_watch, std::time::Instant::now()) {
@@ -657,14 +603,20 @@ async fn main_loop(
                 }
                 let _ = reassert_modes(terminal.backend_mut());
                 next_mode_reassert = tokio::time::Instant::now() + MODE_REASSERT;
-                // The same beat re-reads a MARKDOWN PAGE whose file moved —
-                // paused, like the re-ask, while a drag holds the button.
+            }
+            // A MARKDOWN PAGE whose file moved is re-read — paused, like
+            // the re-ask, while a drag holds the button.
+            _ = tokio::time::sleep_until(next_page_refresh),
+                if app.page.is_some() && !app.mouse_held() && !app.idle() =>
+            {
                 refresh_page(&mut app);
+                next_page_refresh = tokio::time::Instant::now() + PAGE_REFRESH;
             }
             // The EDGE AUTO-SCROLL beat: a drag-selection resting past the
             // pane's top or bottom edge scrolls the history under it, with
             // no further mouse report to prompt it.
             _ = tokio::time::sleep_until(drag_autoscroll_deadline), if app.next_drag_autoscroll.is_some() => {
+                resolving = false;
                 drag_autoscroll_tick(&mut app, &mut out);
             }
             // A finish has waited out the DONE SOUND's SETTLE. An idle app
@@ -672,7 +624,9 @@ async fn main_loop(
             // the finish off every tab, and no output — so the deadline
             // takes a wake of its own; the frame's drain below does the
             // ringing.
-            _ = tokio::time::sleep_until(done_sound_deadline), if app.done_sounds.next_due().is_some() => {}
+            _ = tokio::time::sleep_until(done_sound_deadline), if app.done_sounds.next_due().is_some() => {
+                resolving = false;
+            }
             // The selection rested past the debounce: tell the daemon what
             // the pane has been showing since the cursor landed here.
             _ = tokio::time::sleep(app.attach_delay().unwrap_or_default()),
@@ -693,6 +647,9 @@ async fn main_loop(
                     tracing::debug!(?event, "terminal event");
                     if matches!(event, Event::Resize(..)) {
                         on_host_resize(terminal)?;
+                    }
+                    if matches!(event, Event::Resize(..) | Event::FocusGained) {
+                        modes_owed = true;
                     }
                     let probe = perf
                         .as_ref()
@@ -721,11 +678,14 @@ async fn main_loop(
                     if let Some(perf) = &mut perf {
                         perf.server(crate::perf::server_name(&server_event));
                     }
+                    resolving = !paints_only(&server_event);
+                    before_server_event(&mut app, &server_event, &mut next_metrics_poll);
                     handle_server_event(&mut app, server_event, &mut out);
                 }
                 None => connection_lost(&mut app, &mut out),
             },
             ev = editor_rx.recv() => {
+                resolving = false;
                 // Never None: app.editor_tx keeps a sender alive.
                 if let Some(ev) = ev {
                     handle_editor_event(&mut app, ev);
@@ -737,40 +697,23 @@ async fn main_loop(
                     crate::claude_accounts::land_refresh(&mut app, ticket, changed);
                 }
             }
-            answer = pr_rx.recv() => {
-                // Never None: `pr_tx` lives as long as the loop.
-                if let Some(answer) = answer {
-                    land_lookup(&mut app, answer, &mut out);
-                }
-            }
-            answer = git_rx.recv() => {
-                // Never None: `git_tx` lives as long as the loop.
-                if let Some((ticket, files, lines, ahead)) = answer {
-                    // The selection moved on while this one was being read,
-                    // or a pull landed meanwhile: ask for where it is now,
-                    // rather than wait a poll.
-                    if land_git_read(&mut app, &ticket, files, lines, ahead) {
-                        request_git_changes(&mut app, &git_tx);
+            landed = resolver_rx.recv() => {
+                // Never None: `app.sync_tx` keeps a sender alive.
+                if let Some(landed) = landed {
+                    // What the automations read may have moved.
+                    if !matches!(landed.ticket.key.provider(), crate::sync::Provider::Local) {
+                        app.chores.kick(crate::chores::Chore::Automations, std::time::Instant::now());
                     }
+                    land_sync(&mut app, landed, &mut out);
                 }
             }
-            answer = sweep_git_rx.recv() => {
-                // Never None: `sweep_git_tx` lives as long as the loop.
-                if let Some((ticket, count, lines, ahead)) = answer {
-                    land_sweep_read(&mut app, &ticket, count, lines, ahead);
-                }
-            }
-            answer = prs_rx.recv() => {
-                // Never None: `prs_tx` lives as long as the loop.
-                if let Some(answer) = answer {
-                    land_open_prs(&mut app, &prs_tx, answer, &mut out);
-                    refresh_palette(&mut app);
-                }
-            }
-            _ = tokio::time::sleep_until(next_update_check), if update_interval.is_some() => {
+            _ = tokio::time::sleep_until(
+                update_deadline.unwrap_or_else(tokio::time::Instant::now)
+            ), if update_deadline.is_some() => {
                 crate::update_check::spawn(update_tx.clone(), false);
-                next_update_check = tokio::time::Instant::now()
-                    + update_interval.unwrap_or(crate::update_check::DEFAULT_INTERVAL);
+                if let Some(beat) = &mut update_beat {
+                    beat.ran(std::time::Instant::now());
+                }
             }
             answer = update_rx.recv() => {
                 // Never None: `update_tx` lives as long as the loop.
@@ -785,8 +728,13 @@ async fn main_loop(
                 next_build_sweep = tokio::time::Instant::now()
                     + build_sweep_interval.unwrap_or(crate::build_cache::DEFAULT_INTERVAL);
             }
+            // Spotify's readout, polled only while somebody is looking:
+            // on the beat while a track plays, slower while none does.
             _ = tokio::time::sleep_until(next_spotify),
-                if spotify_interval.is_some() && app.spotify_enabled && !app.spotify_denied =>
+                if spotify_interval.is_some()
+                    && app.spotify_enabled
+                    && !app.spotify_denied
+                    && !app.idle() =>
             {
                 if app.spotify_in_flight == 0 {
                     app.spotify_in_flight += 1;
@@ -794,7 +742,7 @@ async fn main_loop(
                 }
                 let beat = spotify_interval.unwrap_or(crate::spotify::DEFAULT_INTERVAL);
                 next_spotify = tokio::time::Instant::now()
-                    + if app.spotify.is_some() {
+                    + if app.spotify.as_ref().is_some_and(|np| np.playing) {
                         beat
                     } else {
                         beat.max(crate::spotify::IDLE_INTERVAL)
@@ -807,10 +755,9 @@ async fn main_loop(
                 }
             }
             _ = tokio::time::sleep_until(next_microsoft),
-                if calendar_interval.is_some() && app.microsoft.email.is_some() =>
+                if calendar_interval.is_some() && app.microsoft.email.is_some() && !app.idle() =>
             {
-                let every = calendar_interval.unwrap_or(crate::microsoft::calendar::DEFAULT_INTERVAL);
-                crate::microsoft::tick(&mut app, every);
+                crate::microsoft::tick(&mut app);
                 next_microsoft = tokio::time::Instant::now() + crate::microsoft::TICK;
             }
             answer = microsoft_rx.recv() => {
@@ -827,23 +774,12 @@ async fn main_loop(
             // long enough to mean it.
             _ = tokio::time::sleep(app.pr_detail_delay().unwrap_or(Duration::MAX)),
                 if app.pr_detail_delay().is_some() => {
-                lookup_pr_detail(&mut app, &detail_tx);
+                lookup_pr_detail(&mut app);
             }
             // The LINEAR VIEW's cursor has rested on an issue: its comments.
             _ = tokio::time::sleep(crate::linear::comments_delay(&app).unwrap_or(Duration::MAX)),
                 if crate::linear::comments_delay(&app).is_some() => {
                 crate::linear::fire_comments(&mut app);
-            }
-            // The PULL REQUESTS MODAL's prefetch: your pull requests at
-            // once, the rest one at a time behind them.
-            _ = tokio::time::sleep(app.pr_prefetch_delay().unwrap_or(Duration::MAX)),
-                if app.pr_prefetch_delay().is_some() => {
-                prefetch_pr_details(&mut app, &detail_tx);
-            }
-            answer = detail_rx.recv() => {
-                if let Some(answer) = answer {
-                    land_detail(&mut app, &detail_tx, answer, &mut out);
-                }
             }
             answer = prcomment_rx.recv() => {
                 if let Some(answer) = answer {
@@ -870,11 +806,6 @@ async fn main_loop(
                     crate::linear::land_answer(&mut app, answer);
                 }
             }
-            _ = tokio::time::sleep_until(next_needs_you), if needs_you_interval.is_some() => {
-                crate::needs_you::poll(&mut app);
-                next_needs_you = tokio::time::Instant::now()
-                    + needs_you_interval.unwrap_or(crate::needs_you::DEFAULT_INTERVAL);
-            }
             answer = needs_you_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::needs_you::land(&mut app, answer);
@@ -883,11 +814,13 @@ async fn main_loop(
             answer = pr_body_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::pr_body::land(&mut app, answer);
+                    app.chores.kick(crate::chores::Chore::Automations, std::time::Instant::now());
                 }
             }
             answer = automations_rx.recv() => {
                 if let Some(answer) = answer {
                     crate::automations::land(&mut app, answer, &mut out);
+                    app.chores.kick(crate::chores::Chore::Automations, std::time::Instant::now());
                 }
             }
             answer = branch_rx.recv() => {
@@ -919,11 +852,6 @@ async fn main_loop(
                     crate::clone_repo::land(&mut app, answer, &mut out);
                 }
             }
-            answer = base_rx.recv() => {
-                if let Some(answer) = answer {
-                    crate::base_sync::land(&mut app, answer);
-                }
-            }
             answer = views_rx.recv() => {
                 // Never None: `app.view_jobs` keeps a sender alive.
                 if let Some(answer) = answer {
@@ -935,6 +863,29 @@ async fn main_loop(
             tracing::debug!(from = ?focus_before, to = ?app.focus, "focus changed");
             note_focus_change(&mut app);
         }
+        // CATCH-UP: somebody is looking again. What IDLE paused runs once
+        // now rather than whenever its beat would have come round — the
+        // Spotify readout, the footer's memory, a fresh frame at full pace.
+        let idle = app.idle();
+        if was_idle && !idle {
+            let now = tokio::time::Instant::now();
+            next_spotify = now;
+            next_metrics_poll = now;
+            next_draw = next_draw.min(now);
+            app.chores.catch_up(now.into_std());
+            crate::git_watch::catch_up(&mut app, now.into_std());
+            app.dirty = true;
+        }
+        was_idle = idle;
+        // THE RESOLVER's turn: what the screen shows now is visited, and
+        // whatever that, a landing or a deadline made due is fetched. Then
+        // the CHORES' schedule, for what this turn turned on or off. Only
+        // after a turn that could have moved either.
+        resolve_owed |= resolving;
+        if std::mem::take(&mut resolve_owed) {
+            let _ = crate::sync::spawn::step(&mut app);
+            crate::chores::rearm(&mut app);
+        }
 
         // Drain whatever else is immediately ready before redrawing once
         // (burst coalescing for PTY output).
@@ -943,6 +894,8 @@ async fn main_loop(
             if let Some(perf) = &mut perf {
                 perf.server(crate::perf::server_name(&ev));
             }
+            resolve_owed |= !paints_only(&ev);
+            before_server_event(&mut app, &ev, &mut next_metrics_poll);
             handle_server_event(&mut app, ev, &mut out);
         }
         while let Ok(ev) = editor_rx.try_recv() {
@@ -1101,132 +1054,112 @@ async fn main_loop(
     }
 }
 
-/// Read the changed-file count behind the worktree panel's badge for the
-/// selected checkout, off the loop: a `git status` is tens of milliseconds
-/// on a big checkout, and it used to run inline before the first frame of
-/// every worktree switch — a late frame on the one keypress that should
-/// feel instant — and on every poll, a hitch under the user's typing.
-/// Skipped while one is in flight (a repaint must never stack processes);
-/// the answer arrives on `git_tx`, with the ticket saying when it was
-/// asked, and lands in [`land_git_read`].
-fn request_git_changes(app: &mut App, git_tx: &tokio::sync::mpsc::UnboundedSender<ChangedFiles>) {
-    if !app.git_reads.is_empty() {
-        return;
-    }
-    let Some((id, path)) = app
-        .selected_worktree()
-        .map(|w| (w.id.clone(), w.path.clone()))
-    else {
-        return;
-    };
-    let Some(ticket) = app.git_reads.begin(id, std::time::Instant::now()) else {
-        return;
-    };
-    let git_tx = git_tx.clone();
-    let repo = app.tree.repo_of(&path);
-    tokio::task::spawn_blocking(move || {
-        let (files, lines, ahead) = read_checkout(&path, repo.as_deref());
-        let _ = git_tx.send((ticket, files, lines, ahead));
-    });
+/// Whether a DAEMON event may have moved something the automations act
+/// on — a session's status, a row coming or going, the whole tree — so
+/// their turn is kicked forward (`chores::Chores::kick`) instead of
+/// waiting out its beat. PTY output and the rest are not.
+fn moves_automations(event: &ServerEvent) -> bool {
+    matches!(
+        event,
+        ServerEvent::Snapshot { .. }
+            | ServerEvent::EntityUpserted { .. }
+            | ServerEvent::EntityRemoved { .. }
+            | ServerEvent::StatusChanged { .. }
+    )
 }
 
-/// What the badge's `git status` found in a checkout, the lines behind it
-/// and its commits ahead of and behind its base; None when git could not
-/// say. The ticket names the checkout and when it was asked.
-type ChangedFiles = (
-    crate::fetch::Ticket<WorktreeId>,
-    Option<Vec<crate::git_diff::DiffFile>>,
-    Option<crate::git_diff::LineChanges>,
-    Option<(usize, usize)>,
-);
-
-/// The sweep's answer for one checkout: its changed-file count, its line
-/// counts and its commits ahead and behind.
-type SweptChanges = (
-    crate::fetch::Ticket<WorktreeId>,
-    Option<usize>,
-    Option<crate::git_diff::LineChanges>,
-    Option<(usize, usize)>,
-);
-
-/// What [`read_checkout`] found: the changed files, the lines behind them,
-/// and the commits ahead of and behind the base.
-type CheckoutRead = (
-    Option<Vec<crate::git_diff::DiffFile>>,
-    Option<crate::git_diff::LineChanges>,
-    Option<(usize, usize)>,
-);
-
-/// One read of a checkout for the badge and its band's rule: its changed
-/// files, the lines behind them, and its commits ahead of and behind the
-/// base it is measured against — the **Base branch** of `repo`, its
-/// project, read fresh like every other setting
-/// (`commit_list::ahead_behind`). Blocking: run off the loop.
-fn read_checkout(path: &std::path::Path, repo: Option<&std::path::Path>) -> CheckoutRead {
-    let files = crate::git_diff::changed_files(path).ok();
-    let lines = line_changes_of(path, files.as_deref());
-    let base = crate::config::base_branch_of(repo);
-    (files, lines, crate::commit_list::ahead_behind(path, &base))
+/// Whether a DAEMON event only paints — a pane's output, its scrollback,
+/// its keyboard flags, the footer's readout — and so moves nothing THE
+/// RESOLVER or the CHORES look at. Output arrives by the hundred a second
+/// while an agent works: those turns skip the step.
+fn paints_only(event: &ServerEvent) -> bool {
+    matches!(
+        event,
+        ServerEvent::Output { .. }
+            | ServerEvent::Scrollback { .. }
+            | ServerEvent::KittyFlags { .. }
+            | ServerEvent::Metrics { .. }
+    )
 }
 
-/// The line counts behind `files` when the `git status` read them; a
-/// second git process, so only then.
-fn line_changes_of(
-    path: &std::path::Path,
-    files: Option<&[crate::git_diff::DiffFile]>,
-) -> Option<crate::git_diff::LineChanges> {
-    files.and_then(|files| crate::git_diff::line_changes(path, files))
-}
-
-/// Whether a read of `ticket`'s checkout is the newest asked yet, and so
-/// may set its counts: one asked before the read already taken — the
-/// other reader's, landing late — is dropped (`fetch` rule 1). A read
-/// taken stamps the checkout with its asked time.
-fn take_read(app: &mut App, ticket: &crate::fetch::Ticket<WorktreeId>) -> bool {
-    if app
-        .worktree_read_at
-        .get(&ticket.key)
-        .is_some_and(|&taken| ticket.at < taken)
-    {
-        return false;
-    }
-    app.worktree_read_at.insert(ticket.key.clone(), ticket.at);
-    true
-}
-
-/// The selected checkout's read landed: its counts are noted — unless
-/// its flight was cancelled (the branch switched under it) or a read of
-/// the checkout asked after it has already landed. True when it should
-/// be asked for again at once: the selection moved on while it ran, or a
-/// PULL or PUSH landed meanwhile and owes a read from after it
-/// ([`reread_checkouts`]).
-fn land_git_read(
+/// What a DAEMON event moves before it is handled: the automations' turn
+/// kicked forward when it may have moved what they act on
+/// ([`moves_automations`]), and the footer's readout read a moment on when
+/// a session was made or ended ([`moves_session_count`]) rather than on its
+/// half-minute beat.
+fn before_server_event(
     app: &mut App,
-    ticket: &crate::fetch::Ticket<WorktreeId>,
-    files: Option<Vec<crate::git_diff::DiffFile>>,
-    lines: Option<crate::git_diff::LineChanges>,
-    ahead: Option<(usize, usize)>,
-) -> bool {
-    let Some(landed) = app.git_reads.land(ticket) else {
-        return app.git_changes_stale();
-    };
-    if take_read(app, ticket) {
-        let worktree = ticket.key.clone();
-        let count = files.as_ref().map(Vec::len);
-        note_worktree_lines(app, &worktree, lines);
-        note_worktree_ahead(app, &worktree, ahead);
+    event: &ServerEvent,
+    next_metrics_poll: &mut tokio::time::Instant,
+) {
+    if moves_automations(event) {
+        app.chores
+            .kick(crate::chores::Chore::Automations, std::time::Instant::now());
+    }
+    if moves_session_count(event) {
+        let soon = tokio::time::Instant::now() + SESSION_COUNT_SETTLE;
+        *next_metrics_poll = (*next_metrics_poll).min(soon);
+    }
+}
+
+/// Whether a DAEMON event makes or ends a session — what the footer's
+/// `N agents` counts: a create's `Ack`, a row removed. Status changes and
+/// renames, which arrive by the dozen, don't.
+fn moves_session_count(event: &ServerEvent) -> bool {
+    use orion_core::EntityId;
+    matches!(
+        event,
+        ServerEvent::Ack {
+            created: Some(EntityId::Agent(_) | EntityId::Terminal(_)),
+            ..
+        } | ServerEvent::EntityRemoved {
+            id: EntityId::Agent(_) | EntityId::Terminal(_),
+        }
+    )
+}
+
+/// The least time between two wakes for an "ago" label alone: a dozen
+/// sessions' labels turn over at a dozen different seconds of each
+/// minute, and a label a few seconds late is still right enough.
+const AGO_WAKE_GAP: Duration = Duration::from_secs(30);
+
+/// When the next "ago" label turns over (`hosts::ago_turns_in`): the
+/// soonest of every live session's, which is what the rows and cards
+/// print — the whole tree, since a project or worktree row reads any
+/// session under it; an archived one is drawn only in the archive. None
+/// with no label anywhere.
+fn next_ago_turn(app: &App, now: std::time::Instant) -> Option<std::time::Instant> {
+    let now_ms = crate::app::now_ms();
+    app.tree
+        .agents
+        .iter()
+        .filter(|a| a.status_changed_at > 0 && !a.archived)
+        .map(|a| crate::hosts::ago_turns_in(now_ms - a.status_changed_at))
+        .min()
+        .map(|ms| now + Duration::from_millis(ms.max(0) as u64))
+}
+
+/// A checkout's read landed (THE RESOLVER's `GitStatus`, `sync::local`):
+/// its counts feed its band, and — while it is the selected checkout —
+/// the badge and the file list `g` opens on. A read git couldn't make
+/// keeps what was there. A selection change never paints another
+/// checkout's badge: `git_changes` names the checkout it counts, and the
+/// badge stays off until the selected one's own read lands.
+fn land_git_status(app: &mut App, worktree: WorktreeId, read: crate::checkout_read::Read) {
+    let crate::checkout_read::Read {
+        files,
+        lines,
+        ahead,
+    } = read;
+    let count = files.as_ref().map(Vec::len);
+    note_worktree_lines(app, &worktree, lines);
+    note_worktree_ahead(app, &worktree, ahead);
+    if app.selected_worktree().is_some_and(|w| w.id == worktree) {
         keep_changed_files(app, &worktree, files);
         land_git_changes(app, worktree, count);
     } else {
-        // A sweep read asked after this one already landed: its count
-        // stands, but this read is still the selected checkout's own, so
-        // the badge is pointed at it rather than left waiting a poll.
-        land_git_changes(app, ticket.key.clone(), None);
+        note_worktree_changes(app, worktree, count);
     }
-    if landed.owed {
-        owe_read(app, &ticket.key);
-    }
-    app.git_changes_stale()
 }
 
 /// Record the line counts a read found in `worktree`, for its cards;
@@ -1268,16 +1201,16 @@ fn note_worktree_ahead(app: &mut App, worktree: &WorktreeId, ahead: Option<(usiz
     }
 }
 
-/// The most changed files worth holding on to between polls for `g` to open
-/// on: a couple of hundred kilobytes of paths at the outside. A checkout
-/// with more than this changed waits for its own `git status` instead.
+/// The most changed files worth holding on to between reads for `g` to
+/// open on: a couple of hundred kilobytes of paths at the outside. A
+/// checkout with more than this changed waits for its own `git status`
+/// instead.
 const CHANGED_FILES_KEEP: usize = 2000;
 
-/// Keep the list the badge's count was taken from. The poll has already
-/// paid for it, every two seconds, for the checkout the user is in — which
-/// is the checkout `g` opens the DIFF VIEWER on, and the `git status` that
-/// `g` would otherwise wait for before it can show a single file
-/// (`open_diff_view`).
+/// Keep the list the badge's count was taken from. The read has already
+/// paid for it, for the checkout the user is in — which is the checkout
+/// `g` opens the DIFF VIEWER on, and the `git status` that `g` would
+/// otherwise wait for before it can show a single file (`open_diff_view`).
 fn keep_changed_files(
     app: &mut App,
     worktree: &WorktreeId,
@@ -1286,7 +1219,7 @@ fn keep_changed_files(
     app.changed_files = files
         .filter(|files| files.len() <= CHANGED_FILES_KEEP)
         .map(|files| (worktree.clone(), files));
-    // A TREE BROWSER open on the checkout keeps its marks to the poll.
+    // A TREE BROWSER open on the checkout keeps its marks to the reads.
     let root = app.tree.worktrees.iter().find(|w| &w.id == worktree);
     if let (Some(root), Some(Overlay::Tree(view))) =
         (root.map(|w| w.path.clone()), &mut app.overlay)
@@ -1313,9 +1246,8 @@ fn land_git_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
 }
 
 /// Record what a `git status` found in `worktree` for the cards that print
-/// it, stamped now so the sweep knows how old it is; a changed count
-/// redraws. None (git couldn't say) keeps the last count, and still
-/// stamps it, so the sweep moves on rather than retrying it every tick.
+/// it, stamped now; a changed count redraws. None (git couldn't say)
+/// keeps the last count.
 fn note_worktree_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
     let now = std::time::Instant::now();
     let was = app.worktree_changes.get(&worktree).map(|(c, _)| *c);
@@ -1326,131 +1258,45 @@ fn note_worktree_changes(app: &mut App, worktree: WorktreeId, count: Option<usiz
     }
 }
 
-/// Read the changed-file count of one more checkout the LAUNCHER VIEW's
-/// grid has a card for, off the loop, so every card can print its own and
-/// not only the one under the cursor (`request_git_changes` keeps that one
-/// fresh on every tick). One process per tick at most, and none while the
-/// last is still out; the answer lands in [`land_sweep_read`].
-fn sweep_git_changes(app: &mut App, tx: &tokio::sync::mpsc::UnboundedSender<SweptChanges>) {
-    if !app.sweep_reads.is_empty() {
-        return;
-    }
-    let Some((id, path)) = changes_sweep_target(app) else {
-        return;
-    };
-    let Some(ticket) = app.sweep_reads.begin(id, std::time::Instant::now()) else {
-        return;
-    };
-    let tx = tx.clone();
-    let repo = app.tree.repo_of(&path);
-    tokio::task::spawn_blocking(move || {
-        let (files, lines, ahead) = read_checkout(&path, repo.as_deref());
-        let _ = tx.send((ticket, files.map(|f| f.len()), lines, ahead));
-    });
-}
-
-/// The checkout the bands' sweep spends this tick on: of the unselected
-/// checkouts the grid has a band for — an EMPTY BAND too, whose rule
-/// prints the same counts — the one read least recently — never read at
-/// all first, so a band that just appeared gets its counts on the next
-/// tick. Nothing off the grid: the collapsed view draws no bands.
-fn changes_sweep_target(app: &App) -> Option<(WorktreeId, std::path::PathBuf)> {
-    if !app.launcher_grid() {
-        return None;
-    }
-    let selected = app.selected_worktree().map(|w| &w.id);
-    let held: std::collections::HashSet<WorktreeId> = crate::launcher::bands(app)
-        .into_iter()
-        .map(|band| band.worktree)
-        .collect();
-    app.tree
-        .worktrees
-        .iter()
-        .filter(|w| held.contains(&w.id) && Some(&w.id) != selected)
-        .min_by_key(|w| app.worktree_changes.get(&w.id).map(|(_, at)| *at))
-        .map(|w| (w.id.clone(), w.path.clone()))
-}
-
-/// What a PULL, a PUSH or a base sync moved, read again soon, against a
-/// base resolved afresh (`commit_list::forget_base`). A read of one of
-/// `ids` already running was asked before the move landed: it is marked
-/// owed, so a read from after the move follows it ([`owe_read`] once it
-/// lands). The rest are owed now — with their counts kept on screen
-/// meanwhile.
+/// What a PULL, a PUSH or a base sync moved, read again: each checkout's
+/// `GitStatus` invalidated (`Resolver::invalidate`) — at once while it is
+/// on screen, on its next visit otherwise, and a read already running is
+/// owed one more, since it was asked before the move landed — against a
+/// base resolved afresh (`commit_list::forget_base`). Their counts stay on
+/// screen meanwhile.
 pub(crate) fn reread_checkouts(app: &mut App, ids: &std::collections::HashSet<WorktreeId>) {
     for w in app.tree.worktrees.iter().filter(|w| ids.contains(&w.id)) {
         crate::commit_list::forget_base(&w.path);
     }
     for id in ids {
-        let running = app.git_reads.want_fresh(id) | app.sweep_reads.want_fresh(id);
-        if !running {
-            owe_read(app, id);
-        }
-    }
-}
-
-/// Have `worktree` read again soon: the selected checkout's own read on
-/// the next frame, any other put ahead of every one in the sweep's queue —
-/// stamped just older than the oldest read there is, since
-/// [`changes_sweep_target`] takes the oldest first.
-fn owe_read(app: &mut App, worktree: &WorktreeId) {
-    if app.selected_worktree().is_some_and(|w| &w.id == worktree) {
-        app.git_changes = None;
-    }
-    let Some(oldest) = app.worktree_changes.values().map(|(_, at)| *at).min() else {
-        return;
-    };
-    let first = oldest
-        .checked_sub(Duration::from_millis(1))
-        .unwrap_or(oldest);
-    if let Some((_, at)) = app.worktree_changes.get_mut(worktree) {
-        *at = first;
+        app.resolver
+            .invalidate(&crate::sync::QueryKey::GitStatus(id.clone()));
     }
 }
 
 /// A checkout's branch changed under its readings: a read running there
-/// answers for the old branch, so it is dropped when it lands, and the
-/// base its `⇡⇣` is measured against is resolved afresh.
+/// answers for the old branch, so it is dropped when it lands (and a new
+/// one asked), and the base its `⇡⇣` is measured against is resolved
+/// afresh — what the last read kept of it too (`checkout_read::forget`).
 pub(crate) fn forget_checkout_reads(app: &mut App, worktree: &WorktreeId) {
-    app.git_reads.cancel(worktree);
-    app.sweep_reads.cancel(worktree);
+    let key = crate::sync::QueryKey::GitStatus(worktree.clone());
+    app.resolver.cancel(&key);
+    app.resolver.invalidate(&key);
     if let Some(w) = app.tree.worktrees.iter().find(|w| &w.id == worktree) {
         crate::commit_list::forget_base(&w.path);
+        crate::checkout_read::forget(&w.path);
     }
 }
 
-/// The sweep's read landed: its counts feed the cards — unless its flight
-/// was cancelled or a newer read of the checkout already landed — and a
-/// PULL or PUSH that landed while it ran puts the checkout first in the
-/// queue again.
-fn land_sweep_read(
-    app: &mut App,
-    ticket: &crate::fetch::Ticket<WorktreeId>,
-    count: Option<usize>,
-    lines: Option<crate::git_diff::LineChanges>,
-    ahead: Option<(usize, usize)>,
-) {
-    let Some(landed) = app.sweep_reads.land(ticket) else {
-        return;
-    };
-    if take_read(app, ticket) {
-        note_worktree_lines(app, &ticket.key, lines);
-        note_worktree_ahead(app, &ticket.key, ahead);
-        land_swept_changes(app, ticket.key.clone(), count);
-    }
-    if landed.owed {
-        owe_read(app, &ticket.key);
+/// Checkouts `ids` are gone: what their reads kept goes with them.
+fn forget_checkouts(app: &App, ids: &[WorktreeId]) {
+    for w in app.tree.worktrees.iter().filter(|w| ids.contains(&w.id)) {
+        crate::checkout_read::forget(&w.path);
     }
 }
 
-/// Land the sweep's count: it feeds the cards only — the selected
-/// checkout's `git_changes` is its own reads' to set.
-fn land_swept_changes(app: &mut App, worktree: WorktreeId, count: Option<usize>) {
-    note_worktree_changes(app, worktree, count);
-}
-
-/// `request_git_changes` and `land_git_changes` in one synchronous step,
-/// for tests of the badge.
+/// A read of the selected checkout and its landing in one synchronous
+/// step, for tests of the badge.
 #[cfg(test)]
 fn refresh_git_changes(app: &mut App) {
     let Some((id, path)) = app
@@ -1461,212 +1307,6 @@ fn refresh_git_changes(app: &mut App) {
     };
     let count = crate::git_diff::changed_files(&path).ok().map(|f| f.len());
     land_git_changes(app, id, count);
-}
-
-/// A checkout's lookup back on the loop: its ticket (which checkout, and
-/// when it was asked), the branch the checkout was on when it was asked,
-/// and what `gh` said.
-pub(crate) struct LookupLanded {
-    ticket: crate::fetch::Ticket<WorktreeId>,
-    branch: String,
-    answer: Lookup,
-}
-
-/// A project's open list back on the loop: its ticket, the repo it was
-/// asked from (for an owed re-ask), and the answer — `None` is "couldn't
-/// ask", which keeps the last good list.
-pub(crate) struct ListLanded {
-    ticket: crate::fetch::Ticket<ProjectId>,
-    dir: std::path::PathBuf,
-    answer: Option<crate::pull_request::ListAnswer>,
-}
-
-/// One pull request's page back on the loop: its ticket (keyed by URL),
-/// what it was asked with (for an owed re-ask), and the page.
-pub(crate) struct DetailLanded {
-    ticket: crate::fetch::Ticket<String>,
-    number: u64,
-    dir: std::path::PathBuf,
-    detail: Option<crate::pull_request::PrDetail>,
-}
-
-/// Ask `gh` for the selected worktree's pull request, off the loop. Skipped
-/// while one is in flight — a repaint must never stack `gh` processes — and
-/// until the timer the last answer armed expires. The reply arrives on
-/// `pr_tx`.
-fn lookup_pull_request(app: &mut App, pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>) {
-    let Some((id, path)) = app
-        .selected_worktree()
-        .map(|w| (w.id.clone(), w.path.clone()))
-    else {
-        return;
-    };
-    if !app.pr_lookup_due(&id) {
-        return;
-    }
-    // A checkout that isn't on disk (deleted outside orion) has no branch
-    // for gh to resolve; don't spend a process finding that out — but let
-    // the backoff run, since a worktree can be restored underneath us.
-    if !path.is_dir() {
-        note_pr_answer(app, &id, false);
-        app.dirty |= app.pull_requests.insert(id, None) != Some(None);
-        return;
-    }
-    spawn_pull_request(app, pr_tx, id, path);
-}
-
-/// Start one checkout's lookup, its ticket stamped now and the branch it
-/// is on beside it, so an answer about a branch switched away from since
-/// is dropped (`land_lookup`).
-fn spawn_pull_request(
-    app: &mut App,
-    pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>,
-    id: WorktreeId,
-    path: std::path::PathBuf,
-) {
-    let branch = app
-        .tree
-        .worktrees
-        .iter()
-        .find(|w| w.id == id)
-        .map(|w| w.branch.clone())
-        .unwrap_or_default();
-    let Some(ticket) = app.pr_inflight.begin(id, crate::fetch::now()) else {
-        return;
-    };
-    let pr_tx = pr_tx.clone();
-    tokio::spawn(async move {
-        let answer = crate::pull_request::lookup(&path).await;
-        let _ = pr_tx.send(LookupLanded {
-            ticket,
-            branch,
-            answer,
-        });
-    });
-}
-
-/// Ask `gh` about one of the selected project's *other* checkouts, off the
-/// loop — the sweep that turns a worktree purple without the cursor ever
-/// visiting it. One process per tick at most, whatever the number of
-/// worktrees: the first unselected checkout in row order whose timer has
-/// expired gets this tick, the next one waits for the next tick, so a
-/// project of thirty checkouts fills in over a minute at startup and then
-/// idles on `PR_SWEEP_REFRESH`. The reply lands on `pr_tx` like any other.
-fn sweep_pull_request(app: &mut App, pr_tx: &tokio::sync::mpsc::UnboundedSender<LookupLanded>) {
-    let Some((id, path)) = sweep_target(app) else {
-        return;
-    };
-    spawn_pull_request(app, pr_tx, id, path);
-}
-
-/// The checkout the sweep should spend this tick on: the first of the
-/// selected project's unselected, non-root worktrees, in row order, that
-/// is due and on disk. The ROOT WORKTREE is skipped — nobody deletes it
-/// over a merged pull request, and its own turn comes when it is selected.
-/// A checkout that isn't on disk (deleted outside orion) is noted as a
-/// miss on the way past, without spending a process or the tick, since
-/// its branch has nothing for `gh` to resolve; the backoff still runs, as
-/// a worktree can be restored underneath us.
-fn sweep_target(app: &mut App) -> Option<(WorktreeId, std::path::PathBuf)> {
-    let selected = app.selected_worktree().map(|w| w.id.clone());
-    // The LAUNCHER VIEW names a pull request under every session it lists,
-    // so the sweep there covers every checkout of the SESSIONS level's
-    // list — the selected project's, the root aside — rather than only
-    // the one under the worktree cursor. Walk the level into another
-    // project and the sweep goes with it.
-    let listed: Vec<&orion_core::Worktree> = if app.launcher_active() {
-        let held: std::collections::HashSet<WorktreeId> = crate::launcher::rows(app)
-            .into_iter()
-            .map(|row| row.agent.worktree_id)
-            .collect();
-        app.tree
-            .worktrees
-            .iter()
-            .filter(|w| held.contains(&w.id))
-            .collect()
-    } else {
-        app.visible_worktrees()
-    };
-    let candidates: Vec<(WorktreeId, std::path::PathBuf)> = listed
-        .iter()
-        .filter(|w| !w.is_main && Some(&w.id) != selected.as_ref())
-        .map(|w| (w.id.clone(), w.path.clone()))
-        .collect();
-    for (id, path) in candidates {
-        if !app.pr_lookup_due(&id) {
-            continue;
-        }
-        if !path.is_dir() {
-            note_pr_answer(app, &id, false);
-            app.dirty |= app.pull_requests.insert(id, None) != Some(None);
-            continue;
-        }
-        return Some((id, path));
-    }
-    None
-}
-
-/// Record what a lookup came back with, and arm the next one. A found PR
-/// settles onto a steady beat — it keeps being asked because its comment
-/// count and its state have to keep up with GitHub — `PR_REFRESH` for the
-/// checkout the cursor is resting on, the slower `PR_SWEEP_REFRESH` for
-/// any other, since a row nobody is reading only has to keep up with its
-/// merge. An empty answer arms the next attempt one backoff step further
-/// out, so a checkout that never grows a PR settles at `PR_RECHECK_MAX`
-/// instead of asking every few seconds forever.
-fn note_pr_answer(app: &mut App, worktree: &WorktreeId, found: bool) {
-    let selected = app.selected_worktree().is_some_and(|w| &w.id == worktree);
-    let step = if found && selected {
-        PR_REFRESH
-    } else if found {
-        PR_SWEEP_REFRESH
-    } else {
-        match app.pr_recheck.get(worktree) {
-            Some((_, prev)) => (*prev * 2).min(PR_RECHECK_MAX),
-            None => PR_RECHECK_MIN,
-        }
-    };
-    app.pr_recheck
-        .insert(worktree.clone(), (std::time::Instant::now() + step, step));
-}
-
-/// A branch lookup landed. One whose flight was cancelled — the checkout
-/// was switched to another branch, or a daemon upsert
-/// cleared its row — is dropped, and so is one asked while the checkout
-/// was on a branch it has left since (a switch made outside orion): its
-/// pull request is the old branch's, and the row would bring it back. An
-/// owed lookup is asked on the next tick.
-fn land_lookup(app: &mut App, landed: LookupLanded, out: &mut Vec<ClientRequest>) {
-    let Some(flight) = app.pr_inflight.land(&landed.ticket) else {
-        return;
-    };
-    let worktree = landed.ticket.key.clone();
-    let branch = app
-        .tree
-        .worktrees
-        .iter()
-        .find(|w| w.id == worktree)
-        .map(|w| w.branch.as_str());
-    if branch != Some(landed.branch.as_str()) {
-        app.pr_recheck.remove(&worktree);
-        return;
-    }
-    let url = match &landed.answer {
-        Lookup::Found(pr) => Some(pr.url.clone()),
-        Lookup::Absent | Lookup::Unavailable => None,
-    };
-    land_pull_request_at(app, worktree, landed.answer, landed.ticket.asked());
-    // A checkout's own lookup that says merged or closed retires the row
-    // from the open lists now, as a page does, rather than leaving it
-    // there reading `merged` until the next list.
-    if let Some(url) = url.filter(|url| !app.prs.status_or_open(url).is_open()) {
-        drop_retired_pr(app, &url, out);
-    }
-    // The answer just armed the next lookup's timer; a fresh one asked
-    // for meanwhile goes on the next tick instead.
-    if flight.owed {
-        app.pr_recheck.remove(&landed.ticket.key);
-    }
 }
 
 /// [`land_pull_request_at`] for an answer asked just now — the tests'
@@ -1681,13 +1321,107 @@ fn land_pull_request(app: &mut App, worktree: WorktreeId, answer: Lookup) {
     );
 }
 
+/// A RESOLVER fetch landed. The resolver hears first — whether it
+/// answered, which settles its backoff, a rate limit's pause and an owed
+/// refetch — and drops one whose flight was cancelled; then what it
+/// brought goes to the stores that keep it: a project's open list to
+/// `note_open_prs_answer_at`, a checkout's branch lookup to
+/// `land_branch_pr`, every other GitHub key's answer to
+/// `sync::github::land`, a checkout's read to `land_git_status`, a
+/// project's fetch to `base_sync::land`. Each store repaints what it
+/// changed; and for a key on screen the status a screen draws
+/// (`refreshing…`, `couldn't refresh`) may have moved, so the frame
+/// repaints. An automation's read that changed nothing paints nothing.
+fn land_sync(app: &mut App, landed: crate::sync::spawn::Landed, out: &mut Vec<ClientRequest>) {
+    use crate::sync::spawn::Answer;
+    use crate::sync::QueryKey;
+    let now = std::time::Instant::now();
+    let on_screen = app.resolver.is_visible(&landed.ticket.key);
+    let outcome = landed.answer.outcome();
+    let Some(flight) = app.resolver.land(&landed.ticket, outcome, now) else {
+        return;
+    };
+    let asked = landed.ticket.asked();
+    match (landed.ticket.key, landed.answer) {
+        (QueryKey::OpenPrs(project), Answer::OpenPrs { answer }) => {
+            note_open_prs_answer_at(app, project, answer.ok(), asked, out);
+            refresh_palette(app);
+        }
+        (QueryKey::BranchPr(worktree), Answer::BranchPr { branch, answer }) => {
+            let answer = answer.unwrap_or(Lookup::Unavailable);
+            land_branch_pr(app, worktree, &branch, answer, asked, out);
+        }
+        (key, Answer::GitHub(answer)) => {
+            crate::sync::github::land(app, key, answer, asked, flight.owed, out);
+        }
+        (key, Answer::Linear(answer)) => {
+            crate::sync::linear::land(app, key, answer, landed.ticket.at);
+        }
+        (key, Answer::Service(answer)) => crate::sync::services::land(app, key, answer),
+        // A checkout's read redraws only what it changed: the selected
+        // one is read every quarter minute, and an unchanged badge is no
+        // reason for a frame.
+        (QueryKey::GitStatus(worktree), Answer::Local(answer)) => {
+            use crate::sync::local::Answer as Local;
+            match answer {
+                Ok(Local::Git(read)) => land_git_status(app, worktree, read),
+                _ => note_worktree_changes(app, worktree, None),
+            }
+            return;
+        }
+        (QueryKey::BaseFetch(project), Answer::Local(answer)) => {
+            if let Ok(crate::sync::local::Answer::Base(outcome)) = answer {
+                crate::base_sync::land(app, project, outcome);
+            }
+            return;
+        }
+        _ => {}
+    }
+    app.dirty |= on_screen;
+}
+
+/// A checkout's branch lookup landed, asked while it was on `branch`. One
+/// asked on a branch the checkout has left since (a switch made outside
+/// orion) is dropped — its pull request is the old branch's, and the row
+/// would bring it back — and the key is asked again for the branch it is
+/// on now. A lookup that says merged or closed retires the row from the
+/// open lists now, as a page does, rather than leaving it there reading
+/// `merged` until the next list.
+fn land_branch_pr(
+    app: &mut App,
+    worktree: WorktreeId,
+    branch: &str,
+    answer: Lookup,
+    asked: crate::fetch::Asked,
+    out: &mut Vec<ClientRequest>,
+) {
+    let on = app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| w.id == worktree)
+        .map(|w| w.branch.as_str());
+    if on != Some(branch) {
+        app.resolver
+            .invalidate(&crate::sync::QueryKey::BranchPr(worktree));
+        return;
+    }
+    let url = match &answer {
+        Lookup::Found(pr) => Some(pr.url.clone()),
+        Lookup::Absent | Lookup::Unavailable => None,
+    };
+    land_pull_request_at(app, worktree, answer, asked);
+    if let Some(url) = url.filter(|url| !app.prs.status_or_open(url).is_open()) {
+        drop_retired_pr(app, &url, out);
+    }
+}
+
 /// A branch lookup's answer, asked at `asked`. The row takes a found pull
 /// request, or clears on a definite "no pull request"; a call that never
 /// reached GitHub leaves it as it was — this run's last answer, or the one
-/// the cache hydrated — and only backs off the next attempt
-/// (`note_pr_answer`). What it says of the pull request's state goes to
-/// `prs` under that stamp. A row that changed goes to the cache at the
-/// next flush.
+/// the cache hydrated — and the RESOLVER backs off the next attempt. What
+/// it says of the pull request's state goes to `prs` under that stamp. A
+/// row that changed goes to the cache at the next flush.
 fn land_pull_request_at(
     app: &mut App,
     worktree: WorktreeId,
@@ -1699,7 +1433,6 @@ fn land_pull_request_at(
         Lookup::Absent => Some(None),
         Lookup::Unavailable => None,
     };
-    note_pr_answer(app, &worktree, matches!(row, Some(Some(_))));
     let Some(row) = row else {
         return;
     };
@@ -1732,138 +1465,15 @@ fn land_pull_request_at(
     app.pr_cache_dirty |= changed;
 }
 
-/// Ask `gh` for every pull request open on the selected project's repo, off
-/// the loop. Only the selected project is ever asked — the group only shows
-/// for the project on screen, and a machine with thirty repos must not
-/// cost thirty API calls a beat. Skipped while one is in flight and until the
-/// timer the last answer armed. The reply arrives on `prs_tx`.
-fn lookup_open_prs(
-    app: &mut App,
-    prs_tx: &tokio::sync::mpsc::UnboundedSender<ListLanded>,
-    out: &mut Vec<ClientRequest>,
-) {
-    let Some((id, path)) = app
-        .selected_project()
-        .map(|p| (p.id.clone(), p.repo_path.clone()))
-    else {
-        return;
-    };
-    if !app.open_prs_lookup_due(&id) {
-        return;
-    }
-    // A repo that isn't on disk has nothing for `gh` to resolve against;
-    // don't spend a process finding that out, but let the backoff run — the
-    // checkout can come back (an unmounted volume, a restored directory).
-    if !path.is_dir() {
-        note_open_prs_answer(app, id, None, out);
-        return;
-    }
-    spawn_open_prs(app, prs_tx, id, path);
-}
-
-/// Start one project's list, its ticket stamped now. Nothing when one is
-/// already running: a beat has nothing to add to it, and a refresh asked
-/// for marks it owed instead (`pr_modal::request_list`).
-fn spawn_open_prs(
-    app: &mut App,
-    prs_tx: &tokio::sync::mpsc::UnboundedSender<ListLanded>,
-    id: ProjectId,
-    dir: std::path::PathBuf,
-) {
-    let Some(ticket) = app.open_prs_inflight.begin(id, crate::fetch::now()) else {
-        return;
-    };
-    let prs_tx = prs_tx.clone();
-    tokio::spawn(async move {
-        let answer = crate::pull_request::list(&dir).await;
-        let _ = prs_tx.send(ListLanded {
-            ticket,
-            dir,
-            answer,
-        });
-    });
-}
-
-/// A list landed. One whose flight was superseded is dropped; the rest
-/// land under their ticket's stamp (`note_open_prs_answer_at`). A fresh
-/// list asked for while this one ran (`⌘R`, a merge from the modal)
-/// starts now: this answer may predate what it was asked after.
-fn land_open_prs(
-    app: &mut App,
-    prs_tx: &tokio::sync::mpsc::UnboundedSender<ListLanded>,
-    landed: ListLanded,
-    out: &mut Vec<ClientRequest>,
-) {
-    let Some(flight) = app.open_prs_inflight.land(&landed.ticket) else {
-        return;
-    };
-    let project = landed.ticket.key.clone();
-    note_open_prs_answer_at(
-        app,
-        project.clone(),
-        landed.answer,
-        landed.ticket.asked(),
-        out,
-    );
-    if flight.owed && landed.dir.is_dir() {
-        spawn_open_prs(app, prs_tx, project, landed.dir);
-    }
-}
-
-/// Ask `gh` for the open list of one project the cursor is *not* on, off
-/// the loop — the background pass that keeps every project's group, and
-/// the cache the next launch paints from, warm without the user visiting
-/// it. One process per tick at most: the first project in row order whose
-/// list is missing, or older than `OPEN_PRS_SWEEP_REFRESH` (or its own
-/// backoff, when that is longer), gets this tick. The reply lands on
-/// `prs_tx` like the selected project's own, which stays `lookup_open_prs`'s
-/// on its faster beat.
-fn sweep_open_prs(
-    app: &mut App,
-    prs_tx: &tokio::sync::mpsc::UnboundedSender<ListLanded>,
-    out: &mut Vec<ClientRequest>,
-) {
-    let Some((id, path)) = open_prs_sweep_target(app) else {
-        return;
-    };
-    // Not on disk: noted as a miss without spending a process, and left to
-    // the backoff — the checkout can come back.
-    if !path.is_dir() {
-        note_open_prs_answer(app, id, None, out);
-        return;
-    }
-    spawn_open_prs(app, prs_tx, id, path);
-}
-
-/// The project the sweep should spend this tick on, if any: the first
-/// project, in row order, that isn't selected, isn't in flight, and was never asked or was last asked longer ago than the
-/// sweep's beat allows.
-fn open_prs_sweep_target(app: &App) -> Option<(ProjectId, std::path::PathBuf)> {
-    let selected = app.selected_project().map(|p| p.id.clone());
-    let now = std::time::Instant::now();
-    app.project_rows()
-        .into_iter()
-        .map(|i| &app.tree.projects[i])
-        .filter(|p| Some(&p.id) != selected.as_ref() && !app.open_prs_inflight.in_flight(&p.id))
-        .find(|p| match app.open_prs.get(&p.id) {
-            Some(open) => now >= open.at + open.step.max(OPEN_PRS_SWEEP_REFRESH),
-            None => true,
-        })
-        .map(|p| (p.id.clone(), p.repo_path.clone()))
-}
-
-/// Record what a list lookup came back with, and arm the next one. A repo
-/// with pull requests open settles onto the steady `OPEN_PRS_REFRESH` beat;
-/// an empty answer — or one `gh` couldn't give at all — arms the next
-/// attempt a backoff step further out, so a repo with no PRs (or a machine
-/// with no `gh`) settles at `OPEN_PRS_RECHECK_MAX` instead of asking all
-/// day. A failed call keeps whatever list was already on screen: one flaky
-/// network round trip is no reason to blank the group. It is noted,
-/// though (`App::open_prs_failed`), so a call that keeps failing shows as
-/// a list that `couldn't refresh` rather than a current one.
+/// Record what a list lookup came back with. A failed call keeps
+/// whatever list was already on screen: one flaky network round trip is no
+/// reason to blank the group. The RESOLVER notes the failure, so a call
+/// that keeps failing shows as a list that `couldn't refresh` rather than
+/// a current one, and backs off the next attempt.
 ///
-/// This is the answer asked just now, from the full query: a list that
-/// was never asked (a repo not on disk) and the tests' rows.
+/// This is the answer asked just now, from the full query: the tests'
+/// rows.
+#[cfg(test)]
 fn note_open_prs_answer(
     app: &mut App,
     project: orion_core::ProjectId,
@@ -1884,6 +1494,12 @@ fn note_open_prs_answer(
 /// since — a page asked after this list was asked said so, and a list
 /// already on its way must not bring the row back. An answer with no
 /// merged tail — a failed one's — keeps the last tail there was.
+///
+/// The checkouts follow: one on a listed branch takes its pull request
+/// from the row (`derive_checkout_prs`), one whose pull request the
+/// merged tail now says merged starts its ONE-SHOT SWEEP
+/// (`note_merges_seen`), and one whose pull request left the list is
+/// asked by branch on its next visit (`invalidate_checkouts_whose_pr_left`).
 fn note_open_prs_answer_at(
     app: &mut App,
     project: orion_core::ProjectId,
@@ -1894,14 +1510,23 @@ fn note_open_prs_answer_at(
     // The pull request row the cursor rests on, before the list under it
     // changes (`reconcile_open_pr_cursor`).
     let was_on = app.selected_worktree_pr().cloned();
+    let merged_before = checkout_merges(app, &project);
     let mut status_changed = false;
     let mut merged = None;
+    let previous_rows = app
+        .open_prs
+        .get(&project)
+        .map(|o| o.list.clone())
+        .unwrap_or_default();
     let list = answer.map(|answer| {
         let mut rows = answer.rows;
         for row in &rows {
             let cut = answer.cut.contains(&row.url);
             status_changed |= app.prs.observe_list_row(row, cut, asked);
         }
+        // What the light list does not ask — labels, review requests, the
+        // tally — stays as the modal's extras last said it.
+        crate::pull_request::carry_extras(&mut rows, &previous_rows);
         // The merged tail after the open rows: a pull request GitHub
         // listed under both in the moment it merged reads as merged, and
         // leaves the open rows below.
@@ -1914,25 +1539,8 @@ fn note_open_prs_answer_at(
         rows
     });
     let failed = list.is_none();
-    if failed != app.open_prs_failed.contains(&project) {
-        app.dirty = true;
-        if failed {
-            app.open_prs_failed.insert(project.clone());
-        } else {
-            app.open_prs_failed.remove(&project);
-        }
-    }
     let previous = app.open_prs.get(&project);
     let previous_list = previous.map(|o| o.list.clone());
-    let found = list.as_ref().is_some_and(|l| !l.is_empty());
-    let step = if found {
-        OPEN_PRS_REFRESH
-    } else {
-        match previous {
-            Some(open) => (open.step * 2).min(OPEN_PRS_RECHECK_MAX),
-            None => OPEN_PRS_RECHECK_MIN,
-        }
-    };
     let now = std::time::Instant::now();
     // The pull requests that were open at the last answer and are not in
     // this one: each has merged or closed since, and if a checkout of this
@@ -1948,6 +1556,11 @@ fn note_open_prs_answer_at(
             .collect(),
         _ => Vec::new(),
     };
+    let at = if failed {
+        previous.map_or(now, |o| o.at)
+    } else {
+        now
+    };
     let mut list = list.unwrap_or_else(|| previous.map(|o| o.list.clone()).unwrap_or_default());
     // Drafts sink to the bottom of the group here, on the one path every
     // answer lands through; the cursor reconcile below follows its PR by
@@ -1958,23 +1571,25 @@ fn note_open_prs_answer_at(
         previous.map(|o| (&o.list, &o.merged)) != Some((&list, &merged)) || status_changed;
     app.dirty |= changed;
     app.pr_cache_dirty |= changed;
-    reask_checkouts_whose_pr_left(app, &left);
+    invalidate_checkouts_whose_pr_left(app, &left);
+    // A pull request that left the open list merged or closed: the tail
+    // that lists it is behind, for the modal's next look.
+    if !left.is_empty() {
+        app.resolver
+            .invalidate(&crate::sync::QueryKey::PrTails(project.clone()));
+    }
     // AUTOFIX watches the user's pull requests that broke — on a real
     // answer, not the old list kept over a failed one.
     if !failed {
         crate::automations::pr_fixer::note_list(app, &project, &list);
     }
     let project_id = project.clone();
-    app.open_prs.insert(
-        project,
-        crate::app::OpenPrs {
-            list,
-            merged,
-            at: now,
-            due: now + step,
-            step,
-        },
-    );
+    app.open_prs
+        .insert(project, crate::app::OpenPrs { list, merged, at });
+    if !failed {
+        derive_checkout_prs(app, &project_id);
+    }
+    note_merges_seen(app, merged_before);
     forget_retired_prs(app);
     reconcile_open_pr_cursor(app, was_on, out);
     // An open `/` palette lists these rows too: a pull request marked
@@ -2004,23 +1619,248 @@ fn note_open_prs_answer_at(
     }
 }
 
+/// A project's merged and closed tail landed (`PrTails`), asked at
+/// `asked`: each row's state goes to `prs` under that stamp, the tail
+/// replaces the last one under the open rows, and an open row `prs` now
+/// says merged or closed leaves — a merge seen to happen there starts its
+/// checkouts' ONE-SHOT SWEEP (`note_merges_seen`), as a list's tail did.
+pub(crate) fn land_pr_tails(
+    app: &mut App,
+    project: ProjectId,
+    rows: Vec<crate::pull_request::OpenPr>,
+    asked: crate::fetch::Asked,
+    out: &mut Vec<ClientRequest>,
+) {
+    let was_on = app.selected_worktree_pr().cloned();
+    let merged_before = checkout_merges(app, &project);
+    let mut changed = false;
+    for row in &rows {
+        let seen = crate::pr_store::PrObservation::of_tail_row(row);
+        changed |= app.prs.observe(&row.url, seen, asked);
+    }
+    let open = app
+        .open_prs
+        .entry(project.clone())
+        .or_insert_with(|| crate::app::OpenPrs {
+            list: Vec::new(),
+            merged: Vec::new(),
+            at: std::time::Instant::now(),
+        });
+    changed |= open.merged != rows;
+    open.merged = rows;
+    let before = open.list.len();
+    let prs = &app.prs;
+    open.list
+        .retain(|row| prs.status_or_open(&row.url).is_open());
+    changed |= open.list.len() != before;
+    note_merges_seen(app, merged_before);
+    forget_retired_prs(app);
+    reconcile_open_pr_cursor(app, was_on, out);
+    if changed {
+        app.pr_cache_dirty = true;
+        refresh_palette(app);
+    }
+    crate::pr_modal::list_changed(app);
+    app.dirty = true;
+}
+
+/// `MyPrs` said which of `project`'s open pull requests are yours
+/// (`mine`, already observed into `prs`): they replace the project's rows
+/// of yours — a row kept where it was, with what the modal's extras put
+/// on it, one new appended, and, when the answer was `complete` (it held
+/// every pull request of yours), one of yours it no longer has dropped as
+/// merged or closed. The rest of the list — other people's rows — is
+/// left as the last list said it. A project with no list yet gets one of
+/// your rows alone, until its own first visit asks for the rest.
+///
+/// What follows is what a list landing runs: the checkouts on those
+/// branches take their rows, a checkout whose pull request left is asked
+/// by branch, AUTOFIX looks the rows over (`pr_fixer::note_list`), the
+/// pages behind a moved row go stale, and the cursors follow.
+pub(crate) fn adopt_my_rows(
+    app: &mut App,
+    project: ProjectId,
+    mine: Vec<crate::pull_request::OpenPr>,
+    complete: bool,
+    out: &mut Vec<ClientRequest>,
+) {
+    let was_on = app.selected_worktree_pr().cloned();
+    let previous = app
+        .open_prs
+        .get(&project)
+        .map(|o| o.list.clone())
+        .unwrap_or_default();
+    let mut list = previous.clone();
+    let left: Vec<String> = match complete {
+        true => previous
+            .iter()
+            .filter(|pr| pr.mine && !mine.iter().any(|m| m.url == pr.url))
+            .map(|pr| pr.url.clone())
+            .collect(),
+        false => Vec::new(),
+    };
+    list.retain(|pr| !left.contains(&pr.url));
+    let mut fresh = mine;
+    crate::pull_request::carry_extras(&mut fresh, &previous);
+    for row in fresh {
+        match list.iter_mut().find(|pr| pr.url == row.url) {
+            Some(slot) => *slot = row,
+            None => list.push(row),
+        }
+    }
+    list.retain(|row| app.prs.status_or_open(&row.url).is_open());
+    crate::pull_request::drafts_last(&mut list, &app.prs);
+    if list == previous {
+        return;
+    }
+    let (merged, at) = app
+        .open_prs
+        .get(&project)
+        .map_or((Vec::new(), std::time::Instant::now()), |o| {
+            (o.merged.clone(), o.at)
+        });
+    app.open_prs.insert(
+        project.clone(),
+        crate::app::OpenPrs {
+            list: list.clone(),
+            merged,
+            at,
+        },
+    );
+    invalidate_checkouts_whose_pr_left(app, &left);
+    if !left.is_empty() {
+        app.resolver
+            .invalidate(&crate::sync::QueryKey::PrTails(project.clone()));
+    }
+    crate::automations::pr_fixer::note_list(app, &project, &list);
+    derive_checkout_prs(app, &project);
+    forget_retired_prs(app);
+    reconcile_open_pr_cursor(app, was_on, out);
+    refresh_palette(app);
+    crate::pr_modal::list_changed(app);
+    stale_details_behind(app, &previous, &project);
+    app.pr_cache_dirty = true;
+    app.dirty = true;
+}
+
+/// Each of `project`'s checkouts with a pull request on its row, and
+/// whether `prs` says that pull request has merged — taken before a list
+/// lands, for [`note_merges_seen`] after.
+pub(crate) fn checkout_merges(app: &App, project: &ProjectId) -> Vec<(WorktreeId, bool)> {
+    app.tree
+        .worktrees
+        .iter()
+        .filter(|w| &w.project_id == project)
+        .filter_map(|w| {
+            let pr = app.pull_requests.get(&w.id)?.as_ref()?;
+            let merged = app
+                .prs
+                .status(&pr.url)
+                .is_some_and(|s| s.standing == crate::pull_request::Standing::Merged);
+            Some((w.id.clone(), merged))
+        })
+        .collect()
+}
+
+/// A merge seen to happen in a list's merged tail: each checkout that was
+/// not merged `before` and whose pull request `prs` now says merged starts
+/// its ONE-SHOT SWEEP (and the harvest and follow-ups a merge sets off) —
+/// the same seen-to-happen merge a branch lookup stamps, learned from the
+/// list without asking the branch.
+pub(crate) fn note_merges_seen(app: &mut App, before: Vec<(WorktreeId, bool)>) {
+    let now: Vec<(WorktreeId, bool)> = before
+        .iter()
+        .filter_map(|(w, _)| {
+            let pr = app.pull_requests.get(w)?.as_ref()?;
+            let merged = app
+                .prs
+                .status(&pr.url)
+                .is_some_and(|s| s.standing == crate::pull_request::Standing::Merged);
+            Some((w.clone(), merged))
+        })
+        .collect();
+    for (worktree, merged) in now {
+        let was = before.iter().any(|(w, m)| w == &worktree && *m);
+        if merged && !was {
+            app.note_merge_landed(worktree);
+        }
+    }
+}
+
+/// Every checkout of `project` on a branch its open list has takes that
+/// pull request as its own row — what `gh pr view` on the branch would
+/// say, without asking it. The ROOT WORKTREE never does (a fork's `main`
+/// is not ours). What the row last knew of the conversation (`activity`)
+/// stays while it is the same pull request.
+fn derive_checkout_prs(app: &mut App, project: &ProjectId) {
+    let Some(open) = app.open_prs.get(project) else {
+        return;
+    };
+    let derived: Vec<(WorktreeId, crate::pull_request::PullRequest)> = app
+        .tree
+        .worktrees
+        .iter()
+        .filter(|w| &w.project_id == project && !w.is_main)
+        .filter_map(|w| {
+            let row = open.list.iter().find(|pr| pr.head == w.branch)?;
+            let activity = app
+                .pull_requests
+                .get(&w.id)
+                .and_then(Option::as_ref)
+                .filter(|pr| pr.url == row.url)
+                .map(|pr| pr.activity.clone())
+                .unwrap_or_default();
+            Some((
+                w.id.clone(),
+                crate::pull_request::PullRequest::listed(row, activity),
+            ))
+        })
+        .collect();
+    for (worktree, pr) in derived {
+        let row = Some(pr);
+        if app.pull_requests.get(&worktree) != Some(&row) {
+            app.pull_requests.insert(worktree, row);
+            app.dirty = true;
+            app.pr_cache_dirty = true;
+        }
+    }
+}
+
 /// What a pull request's row says that its page says too: the draft, the
-/// title, the conflict, the checks' verdict and the head commit — what the
-/// row observes into `prs`. A change in any is news the page read before
-/// it has not caught up to.
+/// title, the conflict, the checks' verdict and the head commit. A change
+/// in any is news the page read before it has not caught up to. The
+/// checks are the row's own word (GitHub's rollup), never a tally the
+/// modal's extras left on it, which a light list does not carry.
 fn row_status(row: &crate::pull_request::OpenPr) -> crate::pr_store::PrObservation {
-    crate::pr_store::PrObservation::of_list_row(row)
+    crate::pr_store::PrObservation {
+        checks: row.answered.checks,
+        ..crate::pr_store::PrObservation::of_list_row(row)
+    }
+}
+
+/// Whether a pull request's row moved from `was` to `now` in a way its
+/// page has not caught up to ([`row_status`]). A conflict GitHub has
+/// stopped knowing — `mergeable: UNKNOWN`, which it says for a while after
+/// every push and at random besides — is no move: what was known still
+/// stands (`PrStore`), and re-reading the page for it read pages for
+/// nothing.
+fn row_moved(was: &crate::pull_request::OpenPr, now: &crate::pull_request::OpenPr) -> bool {
+    let (mut before, after) = (row_status(was), row_status(now));
+    if after.conflicts.is_none() {
+        before.conflicts = None;
+    }
+    before != after
 }
 
 /// The list answer moved a pull request's row on — its draft, title or
-/// health differ from the last answer's — so the page read before it is
-/// behind. Each such page is marked stale, read afresh on the next visit,
-/// and read again now, in place, when it is the one on screen: the PULL
-/// REQUESTS MODAL's row or the pane's, the reader's scroll kept. Measured
-/// list against list, never list against page: the row's checks are
-/// GitHub's own rollup and the page folds every check itself, so the two
-/// may never agree, and comparing them would re-read the page on every
-/// beat.
+/// health differ from the last answer's ([`row_moved`]) — so the page read
+/// before it is behind (`App::pr_detail_behind`): marked stale, and read
+/// again by THE RESOLVER now, in place, when a cursor rests on it — the
+/// PULL REQUESTS MODAL's row or the pane's, the reader's scroll kept — and
+/// otherwise on the next rest. Measured list against list, never list
+/// against page: the row's checks are GitHub's own rollup and the page
+/// folds every check itself, so the two may never agree, and comparing
+/// them would re-read the page on every beat.
 fn stale_details_behind(
     app: &mut App,
     previous: &[crate::pull_request::OpenPr],
@@ -2037,41 +1877,24 @@ fn stale_details_behind(
             previous
                 .iter()
                 .find(|was| was.url == row.url)
-                .is_some_and(|was| row_status(was) != row_status(row))
+                .is_some_and(|was| row_moved(was, row))
         })
         .map(|row| row.url.clone())
         .collect();
-    if behind.is_empty() {
-        return;
-    }
-    // A page already being read may have been asked before the row moved:
-    // it is owed a fresh read once it lands, and stays stale till then.
     for url in &behind {
-        app.pr_detail_inflight.want_fresh(url);
-    }
-    app.pr_detail_stale.extend(behind.iter().cloned());
-    if crate::pr_modal::is_up(app) {
-        crate::pr_modal::schedule_detail(app);
-    } else if app
-        .previewed_pr()
-        .is_some_and(|pr| behind.contains(&pr.url))
-    {
-        refetch_pr_detail(app);
+        app.pr_detail_behind(url);
     }
 }
 
-/// Pull the lookup of every checkout whose *open* pull request is among
-/// `left` — the URLs that just dropped out of the project's open list —
-/// forward to the next tick, past whatever `PR_SWEEP_REFRESH` timer the
-/// sweep had armed. The list is the fast signal that a branch has merged
-/// (it runs every `OPEN_PRS_REFRESH`, and a merged PR stops coming back);
-/// the checkout's own `gh pr view` is what says *merged* rather than
-/// *closed* and repaints the row purple, so the one is made to follow the
-/// other within seconds instead of minutes. A checkout whose PR is already
-/// known merged or closed has nothing left to learn and is left on its beat.
-/// One whose lookup is running is owed another: that one may have been
-/// asked before the merge.
-fn reask_checkouts_whose_pr_left(app: &mut App, left: &[String]) {
+/// Every checkout whose *open* pull request is among `left` — the URLs
+/// that just dropped out of the project's open list — is asked by branch
+/// again (`BranchPr`): the list says the pull request is no longer open,
+/// and the branch's own lookup is what says *merged* rather than *closed*
+/// when the merged tail did not. The selected checkout is asked now (its
+/// branch is in no list any more, so it is on screen as a lookup); the
+/// rest on their next visit. A checkout whose pull request is already
+/// known merged or closed has nothing left to learn and is left alone.
+fn invalidate_checkouts_whose_pr_left(app: &mut App, left: &[String]) {
     if left.is_empty() {
         return;
     }
@@ -2085,8 +1908,8 @@ fn reask_checkouts_whose_pr_left(app: &mut App, left: &[String]) {
         })
         .collect();
     for wt in due {
-        app.pr_inflight.want_fresh(&wt);
-        app.pr_recheck.remove(&wt);
+        app.resolver
+            .invalidate(&crate::sync::QueryKey::BranchPr(wt));
     }
 }
 
@@ -2157,13 +1980,27 @@ fn forget_retired_prs(app: &mut App) {
     app.pr_cache_dirty |= app.pr_detail.len() != before;
     // Their facts too, once no list still on its way could need them.
     app.prs.prune(&live, std::time::Instant::now());
+    // And THE RESOLVER's record of their pages — but the one a cursor
+    // rests on, and the ones an automation still wants read.
+    let rest = app.pr_detail_rest.clone();
+    let wanted: std::collections::HashSet<String> = crate::automations::pr_fixer::detail_needs(app)
+        .into_iter()
+        .chain(crate::pr_body::detail_needs(app))
+        .map(|(url, _)| url)
+        .collect();
+    app.resolver.retain(|key| match key {
+        crate::sync::QueryKey::PrDetail(url) => {
+            live.contains(url) || rest.as_ref() == Some(url) || wanted.contains(url)
+        }
+        _ => true,
+    });
 }
 
 /// A page just turned pull request `url` merged in `prs` (`was_merged`
 /// is what `prs` said before it landed). The checkout rows that show the
 /// same pull request draw from `prs` too, so their badge — `ready` to
-/// `merged` the moment the pane learns it, not up to fifteen seconds later
-/// — has already moved; what is left is the ONE-SHOT SWEEP, the same
+/// `merged` the moment the pane learns it, not on the list's next visit —
+/// has already moved; what is left is the ONE-SHOT SWEEP, the same
 /// seen-to-happen merge `land_pull_request_at` stamps, learned a beat
 /// earlier.
 fn adopt_pr_state(app: &mut App, url: &str, was_merged: bool) {
@@ -2221,9 +2058,17 @@ fn prune_pull_requests_to_tree(app: &mut App) {
         app.tree.projects.iter().map(|p| p.id.clone()).collect();
     let before = (app.pull_requests.len(), app.open_prs.len());
     app.pull_requests.retain(|w, _| worktrees.contains(w));
-    app.pr_recheck.retain(|w, _| worktrees.contains(w));
     app.open_prs.retain(|p, _| projects.contains(p));
-    app.open_prs_failed.retain(|p| projects.contains(p));
+    app.resolver.retain(|key| match key {
+        crate::sync::QueryKey::BranchPr(w) | crate::sync::QueryKey::GitStatus(w) => {
+            worktrees.contains(w)
+        }
+        crate::sync::QueryKey::OpenPrs(p)
+        | crate::sync::QueryKey::PrExtras(p)
+        | crate::sync::QueryKey::PrTails(p)
+        | crate::sync::QueryKey::BaseFetch(p) => projects.contains(p),
+        _ => true,
+    });
     app.pr_cache_dirty |= before != (app.pull_requests.len(), app.open_prs.len());
     forget_retired_prs(app);
 }
@@ -2232,7 +2077,7 @@ fn prune_pull_requests_to_tree(app: &mut App) {
 /// reading (`App::previewed_pr`) — the Worktrees cursor's open-PR row or the
 /// Sessions cursor's PR ROW. Called wherever the Worktrees cursor moves, and
 /// from `note_preview_change` whenever the previewed URL changes for any
-/// other reason. A PR fetched within `PR_DETAIL_FRESH`, already in flight,
+/// other reason. A PR fetched within `pr_detail_fresh_for`, already in flight,
 /// or refused moments ago arms nothing (`App::pr_detail_owed`) — the pane has something to show either
 /// way, and re-asking would spend an API call on a row the user is only
 /// passing through. A body the cache hydrated (`pr_detail_stale`) is the
@@ -2246,7 +2091,8 @@ fn schedule_pr_detail(app: &mut App) {
         crate::pr_modal::schedule_detail(app);
         return;
     }
-    let pending = app.previewed_pr().and_then(|pr| {
+    let previewed = app.previewed_pr();
+    let pending = previewed.clone().and_then(|pr| {
         let url = pr.url;
         if !app.pr_detail_owed(&url) {
             return None;
@@ -2264,6 +2110,23 @@ fn schedule_pr_detail(app: &mut App) {
     // something else now. Its tab stays; the rows of its tabs rewind.
     app.pr_preview_scroll = 0;
     app.pr_tabs.rewind();
+    rest_on(app, previewed.map(|pr| pr.url), pending);
+}
+
+/// The page a cursor is on is `url` now, and `pending` the read it is
+/// owed. Owed, the page is shown to THE RESOLVER only once the cursor has
+/// rested past the debounce (`lookup_pr_detail`), so walking a list reads
+/// nothing; not owed — fresh, or being read — it is shown at once, so its
+/// live beat (checks running) keeps going for as long as the cursor stays.
+pub(crate) fn rest_on(
+    app: &mut App,
+    url: Option<String>,
+    pending: Option<crate::app::PendingPrDetail>,
+) {
+    app.pr_detail_rest = match &pending {
+        Some(_) => None,
+        None => url,
+    };
     app.pending_pr_detail = pending.map(|p| (p, std::time::Instant::now() + PR_DETAIL_DEBOUNCE));
 }
 
@@ -2274,23 +2137,21 @@ fn schedule_pr_detail(app: &mut App) {
 /// for the pane, a refresh retired the row — re-arms the detail fetch and
 /// rewinds the scroll; the same URL leaves a reader exactly where they
 /// were. Keyed on URL, not the whole row, so a
-/// re-titled PR arriving on the GIT POLL is not a change.
+/// re-titled PR arriving with a fresh open list is not a change.
 fn note_preview_change(app: &mut App, before: Option<String>) {
     if app.reading_url() != before {
         schedule_pr_detail(app);
     }
 }
 
-/// Fire the debounced fetch. Disarms first, so a `gh` that never answers
-/// can't re-fire on every loop turn.
-fn lookup_pr_detail(app: &mut App, detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>) {
+/// The cursor rested past the debounce: its page is shown to THE
+/// RESOLVER (`App::pr_detail_rest`), which reads it when it is older than
+/// a minute or behind (`PrDetail`), and its answer lands in
+/// `land_pr_detail`. A checkout that has gone has nothing to ask from.
+fn lookup_pr_detail(app: &mut App) {
     let Some((pending, _)) = app.pending_pr_detail.take() else {
         return;
     };
-    // The modal's prefetch got there first; its answer lands for both.
-    if app.pr_detail_inflight.in_flight(&pending.url) {
-        return;
-    }
     if !pending.dir.is_dir() {
         app.pr_detail_at
             .insert(pending.url.clone(), std::time::Instant::now());
@@ -2298,69 +2159,7 @@ fn lookup_pr_detail(app: &mut App, detail_tx: &tokio::sync::mpsc::UnboundedSende
         app.dirty = true;
         return;
     }
-    spawn_pr_detail(app, detail_tx, pending.url, pending.number, pending.dir);
-}
-
-/// Fire what the PULL REQUESTS MODAL's prefetch has due
-/// (`pr_modal::take_prefetch`). A checkout that has gone is skipped: the
-/// cursor's own fetch is the one that says so.
-fn prefetch_pr_details(
-    app: &mut App,
-    detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>,
-) {
-    for pending in crate::pr_modal::take_prefetch(app) {
-        if pending.dir.is_dir() {
-            spawn_pr_detail(app, detail_tx, pending.url, pending.number, pending.dir);
-        }
-    }
-}
-
-/// Ask `gh pr view` for one pull request's body, off the loop, marked in
-/// flight until it lands in `land_detail`. Nothing when one is already
-/// running for it: that one's answer lands for both.
-fn spawn_pr_detail(
-    app: &mut App,
-    detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>,
-    url: String,
-    number: u64,
-    dir: std::path::PathBuf,
-) {
-    let Some(ticket) = app.pr_detail_inflight.begin(url, crate::fetch::now()) else {
-        return;
-    };
-    let detail_tx = detail_tx.clone();
-    tokio::spawn(async move {
-        let detail = crate::pull_request::detail(&dir, number).await;
-        let _ = detail_tx.send(DetailLanded {
-            ticket,
-            number,
-            dir,
-            detail,
-        });
-    });
-}
-
-/// A page landed. One whose flight was superseded is dropped; the rest
-/// land under their ticket's stamp (`land_pr_detail`). When the page was
-/// asked to be read again while this fetch ran — the list said it moved,
-/// a review or `⌘D` changed it — this answer may predate that, so the
-/// page stays stale and a fresh read starts now.
-fn land_detail(
-    app: &mut App,
-    detail_tx: &tokio::sync::mpsc::UnboundedSender<DetailLanded>,
-    landed: DetailLanded,
-    out: &mut Vec<ClientRequest>,
-) {
-    let Some(flight) = app.pr_detail_inflight.land(&landed.ticket) else {
-        return;
-    };
-    let url = landed.ticket.key.clone();
-    let asked = landed.ticket.asked();
-    land_pr_detail(app, url.clone(), landed.detail, asked, flight.owed, out);
-    crate::conflicts::want(app, &url, &landed.dir);
-    if flight.owed && landed.dir.is_dir() {
-        spawn_pr_detail(app, detail_tx, url, landed.number, landed.dir);
-    }
+    app.pr_detail_rest = Some(pending.url);
 }
 
 /// A body and conversation landed, asked at `asked`. It replaces whatever
@@ -2371,7 +2170,7 @@ fn land_detail(
 /// fresh read `owed`, the page stays stale until that one lands. A fetch
 /// that failed leaves a cached copy where it is; stale is still the best
 /// answer there is.
-fn land_pr_detail(
+pub(crate) fn land_pr_detail(
     app: &mut App,
     url: String,
     detail: Option<crate::pull_request::PrDetail>,
@@ -2541,9 +2340,9 @@ pub(crate) fn start_pr_comment(
 }
 
 /// A `gh pr comment` landed. Posted: read the pull request again so the
-/// pane's conversation carries the new comment — in place
-/// when the pane is still on it (`refetch_pr_detail`, which keeps the
-/// reader's scroll), and on the next visit otherwise (`pr_detail_stale`).
+/// pane's conversation carries the new comment — in place, the reader's
+/// scroll kept, when a cursor is still on it, and on the next rest
+/// otherwise (`App::pr_detail_behind`).
 /// Refused: say why, in `gh`'s words, and put the box back with the text
 /// — at once when nothing else is on screen (or only the PULL REQUESTS
 /// MODAL, which the box stands in for again), and otherwise the next `y`
@@ -2560,13 +2359,9 @@ fn land_pr_comment(app: &mut App, answer: PrCommentAnswer) {
     app.pr_comment_inflight.remove(&url);
     match result {
         Ok(_) => {
-            app.pr_detail_stale.insert(url.clone());
-            if matches!(&app.overlay, Some(Overlay::PullRequests(_))) {
-                // The modal reads its row again, the new comment in.
-                crate::pr_modal::schedule_detail(app);
-            } else if app.previewed_pr().is_some_and(|pr| pr.url == url) {
-                refetch_pr_detail(app);
-            }
+            // The page reads again with the new comment in: now, where a
+            // cursor is on it, else on the next rest.
+            app.pr_detail_behind(&url);
         }
         Err(why) => {
             app.flash = Some(crate::flash::Flash::failed(format!(
@@ -2822,79 +2617,21 @@ fn land_pr_review_at(view: &mut DiffView) {
     crate::commit_list::show_selected(view);
 }
 
-/// Arm the selected project for a prompt open-pull-request lookup: arriving
-/// at a project is exactly when the user wants to know what's still open on
-/// it. Floored at `OPEN_PRS_MIN_AGE` past the last answer, so bouncing
-/// between two projects re-reads the cache instead of spending an API call
-/// per switch.
-fn schedule_open_prs_lookup(app: &mut App) {
-    let Some(id) = app.selected_project().map(|p| p.id.clone()) else {
-        return;
-    };
-    if let Some(open) = app.open_prs.get_mut(&id) {
-        open.due = open.due.min(open.at + crate::app::OPEN_PRS_MIN_AGE);
-    }
-}
-
-/// Arm the selected worktree for a prompt pull-request lookup: switching
-/// into a checkout is exactly when the user wants to see the PR a session
-/// opened there — and, once it's known, whether anyone has commented since
-/// — so drop whatever timer had accumulated and ask on the next tick.
-fn schedule_pr_lookup(app: &mut App) {
-    if let Some(id) = app.selected_worktree().map(|w| w.id.clone()) {
-        app.pr_recheck.remove(&id);
-    }
-}
-
-/// Arm every checkout of the selected project for a prompt lookup: drop
-/// the timers the sweep armed, so its next passes re-ask each row in turn.
-fn schedule_pr_sweep(app: &mut App) {
-    let ids: Vec<WorktreeId> = app
-        .visible_worktrees()
-        .iter()
-        .map(|w| w.id.clone())
-        .collect();
-    for id in ids {
-        app.pr_recheck.remove(&id);
-    }
-}
-
-/// Pull both pull-request lookups forward — the project's open list and
-/// the selected worktree's own PR — so the next `GIT_POLL` tick asks GitHub
-/// again. Run on the gestures that mean "I want fresh data now": the
-/// terminal window regaining focus and the cursor entering a sidebar panel.
-/// The list keeps its `OPEN_PRS_MIN_AGE` floor, so a flurry of focus events
-/// costs one call, not one per event. Deliberately does *not* touch the PR
-/// preview: `schedule_pr_detail` resets its scroll, and a timer-shaped
-/// caller must never yank a reader back to the top.
-fn schedule_pull_request_refresh(app: &mut App) {
-    schedule_open_prs_lookup(app);
-    schedule_pr_lookup(app);
-}
-
-/// `Shift+R`, from any panel: reload from GitHub *now* — the selected
-/// project's open list, every one of its checkouts' own PR, and the body
-/// and conversation of the pull request the pane is reading — past
-/// every timer and floor the beats keep. `schedule_pull_request_refresh`
-/// is what a focus event may do; this is what a deliberate keypress may
-/// do, so the list's `OPEN_PRS_MIN_AGE` floor does not apply and the two
-/// list lookups fire on the loop's next turn rather than the next git
-/// tick. The other checkouts follow at the sweep's one-per-tick pace, so
-/// the key spends one process per row over the next seconds, never a
-/// burst. The rows repaint once the answers land.
+/// `Shift+R`, from any panel: reload from GitHub *now* — every pull
+/// request key the screen shows (the selected project's open list, the
+/// selected checkout's branch lookup) and the body and conversation of the
+/// pull request the pane is reading — past their freshness and any
+/// failure's backoff (`sync::Resolver::refresh`). A rate limit still
+/// holds: nothing is asked of GitHub until it resets. The rows repaint
+/// once the answers land.
 fn refresh_pull_requests(app: &mut App) {
-    let Some(project) = app.selected_project().map(|p| p.id.clone()) else {
-        return;
-    };
-    if let Some(open) = app.open_prs.get_mut(&project) {
-        open.due = std::time::Instant::now();
+    let now = std::time::Instant::now();
+    // What the screen shows as of this key, not the last turn's.
+    app.resolver.visit(crate::sync::scope::visible(app), now);
+    for key in app.resolver.visible_keys() {
+        app.resolver.refresh(&key);
     }
-    // A list already on its way was asked before the key: another follows.
-    app.open_prs_inflight.want_fresh(&project);
-    schedule_pr_lookup(app);
-    schedule_pr_sweep(app);
     refetch_pr_detail(app);
-    app.pr_refresh_requested = true;
     app.dirty = true;
 }
 
@@ -2908,31 +2645,31 @@ fn refetch_pr_detail(app: &mut App) {
     let Some(pr) = app.previewed_pr() else {
         return;
     };
-    // One in flight may have been asked before whatever this is for: it
-    // owes a fresh read when it lands.
-    if app.pr_detail_inflight.want_fresh(&pr.url) {
-        return;
-    }
-    let Some(dir) = app.selected_project().map(|p| p.repo_path.clone()) else {
-        return;
-    };
     app.pr_detail_failed.remove(&pr.url);
-    app.pending_pr_detail = Some((
-        crate::app::PendingPrDetail {
-            url: pr.url,
-            number: pr.number,
-            dir,
-        },
-        std::time::Instant::now(),
-    ));
+    reread_pr_page(app, pr.url);
 }
 
-/// The panel focus just moved. Landing on the Worktrees or Sessions panel —
-/// the two that show pull requests — is a reason to re-ask GitHub; walking
-/// off them into the pane is not.
+/// `⌘R` on page `url`, which a cursor is on: read now, past its
+/// freshness and a failure's backoff (`sync::Resolver::refresh`) — a read
+/// already running owes one more. Shown to THE RESOLVER at once, no
+/// debounce: the reader asked.
+pub(crate) fn reread_pr_page(app: &mut App, url: String) {
+    app.pending_pr_detail = None;
+    let key = crate::sync::QueryKey::PrDetail(url.clone());
+    app.pr_detail_rest = Some(url);
+    app.resolver
+        .visit(crate::sync::scope::visible(app), std::time::Instant::now());
+    app.resolver.refresh(&key);
+}
+
+/// The panel focus just moved. Landing on the Worktrees panel — where the
+/// open pull requests and the checkouts' badges are — is a visit: what it
+/// shows of GitHub is asked again when older than its policy allows
+/// (`sync::Resolver::touch`). Walking off it into the pane is not.
 fn note_focus_change(app: &mut App) {
-    if matches!(app.focus, Focus::Worktrees | Focus::Sessions) {
-        schedule_pull_request_refresh(app);
+    if app.focus == Focus::Worktrees {
+        let keys = crate::sync::scope::worktrees_panel(app);
+        app.resolver.touch(&keys, std::time::Instant::now());
     }
 }
 
@@ -2940,21 +2677,12 @@ fn note_focus_change(app: &mut App) {
 /// own RSS now (the daemon can't see us), ask the daemon for itself plus every
 /// session's process tree. The reply arrives as `ServerEvent::Metrics`.
 ///
-/// The client's own reading is a `ps`, and this runs on the footer's beat —
-/// every five seconds for as long as the TUI is up — so the `ps` runs off
-/// the loop and lands like any other BACKGROUND READ, rather than stall
-/// whatever key arrives during it.
+/// The client's own reading is one call into the kernel, so it is made
+/// here, on the footer's beat ([`FOOTER_METRICS_POLL`], while somebody is
+/// looking).
 fn request_metrics(app: &mut App, out: &mut Vec<ClientRequest>) {
-    let own_rss = || orion_core::mem::process_rss_bytes(std::process::id()).unwrap_or(0);
-    match app.view_jobs.clone() {
-        Some(jobs) => jobs.run(move || Some(crate::view_jobs::Answer::ClientRss(own_rss()))),
-        None => land_client_rss(app, own_rss()),
-    }
+    app.client_rss_bytes = orion_core::mem::process_rss_bytes(std::process::id()).unwrap_or(0);
     send(app, out, |req_id| ClientRequest::GetMetrics { req_id });
-}
-
-fn land_client_rss(app: &mut App, bytes: u64) {
-    app.client_rss_bytes = bytes;
 }
 
 /// Queue a request that wants no follow-up when its Ack lands.
@@ -3387,7 +3115,7 @@ fn dispatch_input(app: &mut App, event: Event, out: &mut Vec<ClientRequest>) {
         // browser tab where a pull request was just merged or closed.
         Event::FocusGained => {
             app.window_focused = true;
-            schedule_pull_request_refresh(app);
+            app.resolver.focus_gained(std::time::Instant::now());
         }
         // …and left it: from here until it is back, a session that stops
         // to ask gets a desktop notification, since the pane can't be seen.
@@ -4782,6 +4510,11 @@ fn select_launch_worktree(app: &mut App) {
 
 pub(crate) fn open_prompt(app: &mut App, kind: PromptKind) {
     use std::borrow::Cow;
+    // A launch box shows what its account has left: read it, when the
+    // last reading is old.
+    if matches!(kind, PromptKind::QuickPrompt(_)) {
+        crate::sync::services::glance_usage(app);
+    }
     let (title, label, input): (Cow<'static, str>, Cow<'static, str>, String) = match &kind {
         // Starts on the folder orion was started in — its parent listed,
         // the folder itself highlighted, so Enter opens it and ↑/↓ reach
@@ -5671,9 +5404,10 @@ fn load_worktree_files(app: &mut App, path: &std::path::Path) -> Option<(Vec<Str
 /// but commits of its own opens on those instead of saying "no changes".
 ///
 /// A checkout the changed-files badge already knows to be clean opens no
-/// modal that would only close again; the badge can be two seconds behind
-/// an agent, so git is still asked, and the modal opens after all if it
-/// disagrees — or if the branch has commits to show (`App::diff_probe`).
+/// modal that would only close again; the badge can trail an agent by the
+/// GIT WATCHER's debounce, so git is still asked, and the modal opens after
+/// all if it disagrees — or if the branch has commits to show
+/// (`App::diff_probe`).
 fn open_diff_view(app: &mut App) {
     let Some((path, branch)) = selected_checkout(app) else {
         return;
@@ -5696,13 +5430,14 @@ fn open_diff_view(app: &mut App) {
     } else {
         let mut view = DiffView::opening(path.clone(), branch, Some(jobs.clone()), ticket);
         dress_viewer(app, &mut view, true);
-        // The badge's last `git status` — two seconds old at most — is the
-        // list to open on: the files are up on this keypress and the first
-        // diff is being read while the `git status` below checks them, not
-        // after it. `fill_view` reconciles the two when that lands.
-        let polled = polled_changes(app, &path);
-        if !polled.is_empty() {
-            view.replace_files(polled.to_vec());
+        // The badge's last `git status` — as fresh as THE GIT WATCHER keeps
+        // it — is the list to open on: the files are up on this keypress
+        // and the first diff is being read while the `git status` below
+        // checks them, not after it. `fill_view` reconciles the two when
+        // that lands.
+        let read = badge_changes(app, &path);
+        if !read.is_empty() {
+            view.replace_files(read.to_vec());
             crate::git_diff::load_selected_diff(&mut view);
         }
         app.overlay = Some(Overlay::Diff(view));
@@ -5756,7 +5491,7 @@ fn open_file_finder(app: &mut App) {
     // The modal is up on this keypress, taking what is typed; the list
     // lands when `git ls-files` answers (`land_view_answer`).
     let recents = crate::recent_files::load(&path);
-    let changed: Vec<String> = polled_changes(app, &path)
+    let changed: Vec<String> = badge_changes(app, &path)
         .iter()
         .filter(|file| !file.is_deleted())
         .map(|file| file.path.clone())
@@ -5782,10 +5517,11 @@ fn open_file_finder(app: &mut App) {
 }
 
 /// The changed files of the checkout at `root` as the badge's last `git
-/// status` found them — two seconds old at most (`keep_changed_files`),
-/// and only ever of the selected checkout — or none when that poll was of
-/// another checkout, or hasn't run.
-fn polled_changes<'a>(app: &'a App, root: &std::path::Path) -> &'a [crate::git_diff::DiffFile] {
+/// status` found them (`keep_changed_files`) — read again whenever THE GIT
+/// WATCHER sees the checkout change, and only ever of the selected
+/// checkout — or none when that read was of another checkout, or hasn't
+/// run.
+fn badge_changes<'a>(app: &'a App, root: &std::path::Path) -> &'a [crate::git_diff::DiffFile] {
     match &app.changed_files {
         Some((id, files))
             if app
@@ -5832,7 +5568,7 @@ fn open_tree_browser(app: &mut App) {
 /// tree landing when `git ls-files` answers. None — flashing why, when
 /// git failed — when there is nothing to list.
 fn tree_browser_at(app: &mut App, root: std::path::PathBuf, branch: String) -> Option<TreeBrowser> {
-    let marks = crate::tree_browser::marks_of(polled_changes(app, &root));
+    let marks = crate::tree_browser::marks_of(badge_changes(app, &root));
     let mut view = match app.view_jobs.clone() {
         Some(jobs) => {
             let editor = crate::config::Config::load().editor_command();
@@ -5984,7 +5720,6 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
                 view.land_preview(ticket, preview);
             }
         }
-        Answer::Usage(answer) => crate::usage::land(app, answer),
         Answer::ClipboardViaTerminal { payload, flash } => {
             app.pending_clipboard = Some(payload);
             app.flash = Some(crate::flash::Flash::done(flash));
@@ -5995,7 +5730,6 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
         Answer::FixerContext { agent, used, said } => {
             crate::automations::pr_fixer::router::land_context(app, agent, used, said)
         }
-        Answer::ClientRss(bytes) => land_client_rss(app, bytes),
         Answer::Slow { ticket } => match &mut app.overlay {
             Some(Overlay::Diff(view)) => crate::git_diff::diff_slow(view, ticket),
             Some(Overlay::Tree(view)) => view.preview_slow(ticket),
@@ -7105,7 +6839,7 @@ fn note_update_answer(app: &mut App, answer: crate::update_check::Answer) {
                 app.flash = None;
                 app.overlay = Some(Overlay::Confirm(confirm_upgrade(&v)));
             }
-            app.update_available = Some(v);
+            app.note_update_available(v);
         }
         Status::Current if answer.asked => app.flash = Some(latest_release_flash()),
         // GitHub didn't answer, but an earlier check found one: offer that.
@@ -9062,6 +8796,7 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
         app.dirty = true;
     }
     app.microsoft.footer = cfg.microsoft.footer_meeting;
+    app.microsoft.settings = cfg.microsoft.clone();
     set_hide_draft_prs(app, cfg.hide_draft_prs);
     app.needs_you.inbox = cfg.inbox.clone();
     app.needs_you.slack.settings = cfg.slack.clone();
@@ -10138,13 +9873,12 @@ fn restore_context(app: &mut App, out: &mut Vec<ClientRequest>) {
 }
 
 /// Everything [`restore_context`] does except bring a session up: the new
-/// project's sweeps rescheduled and its remembered checkout under the
-/// Worktrees cursor. The LAUNCHER VIEW's PROJECT SWITCHER takes this half
+/// project's remembered checkout under the Worktrees cursor. Its open list
+/// is the RESOLVER's to ask: the project coming on screen is a visit. The LAUNCHER VIEW's PROJECT SWITCHER takes this half
 /// on its own — its grid draws no pane, so attaching the project's last
 /// session would boot a PTY nobody is looking at.
 fn restore_project_cursors(app: &mut App) {
     app.set_sel_worktree(0);
-    schedule_open_prs_lookup(app);
     schedule_pr_detail(app);
     if let Some(pid) = app.selected_project().map(|p| p.id.clone()) {
         if let Some(wid) = app.last_worktree_for_project.get(&pid).cloned() {
@@ -10164,7 +9898,6 @@ fn restore_project_cursors(app: &mut App) {
 /// than keep showing the previous context's session.
 fn restore_session(app: &mut App, out: &mut Vec<ClientRequest>) {
     schedule_prewarm(app);
-    schedule_pr_lookup(app);
     let rows = app.visible_session_rows();
     let remembered = app
         .selected_worktree()
@@ -11604,7 +11337,10 @@ fn copy_to_clipboard(text: &str) -> bool {
         .stdin
         .take()
         .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
-    wrote && child.wait().is_ok_and(|status| status.success())
+    // Waited on whether the write went or not: a `pbcopy` left unwaited
+    // stays a zombie of the TUI for as long as it runs.
+    let ended = child.wait().is_ok_and(|status| status.success());
+    wrote && ended
 }
 
 /// Two clicks on the same cell within this window make a double-click.
@@ -13066,6 +12802,15 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             let mut edge = None;
             if let Some(a) = app.tree.agents.iter_mut().find(|a| a.id == agent) {
                 edge = alerts::edge_alert(a.status, status);
+                // A turn that ended may have left its checkout changed:
+                // its band reads again (the selected one's watcher may
+                // have said so already).
+                if a.status == orion_core::AgentStatus::Running
+                    && status != orion_core::AgentStatus::Running
+                {
+                    app.resolver
+                        .invalidate(&crate::sync::QueryKey::GitStatus(a.worktree_id.clone()));
+                }
                 a.status = status;
                 a.status_changed_at = changed_at;
                 a.unseen = unseen;
@@ -13344,6 +13089,12 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             ask_to_force_delete(app, id, files);
             app.dirty = true;
         }
+        // News from the DAEMON that is not a failure — an idle stack it
+        // stopped: a neutral note, never the red flash an `Error` is.
+        ServerEvent::Notice { text } => {
+            app.flash = Some(crate::flash::Flash::note(text));
+            app.dirty = true;
+        }
         ServerEvent::Error { req_id, message } => {
             // A failed request's intent never gets an Ack; clear it — and if
             // it was an optimistic worktree delete, put the rows back. A
@@ -13562,22 +13313,30 @@ fn apply_upsert(app: &mut App, entity: orion_core::Entity) {
         Entity::Worktree(w) => {
             // A checkout switched to another branch outside orion: what
             // `gh pr view` found was the old branch's pull request, and the
-            // commits ahead and behind were the old branch's too. Both go,
-            // and the lookup is due at once, so the band never wears the
-            // last branch's pull request into the new one.
+            // commits ahead and behind were the old branch's too. Both go;
+            // a lookup still running for the old branch is dropped, and the
+            // new branch takes its pull request from the open list when it
+            // has one, or is asked by branch the next time it is on screen,
+            // so the band never wears the last branch's pull request into
+            // the new one.
             let switched = app
                 .tree
                 .worktrees
                 .iter()
                 .any(|x| x.id == w.id && x.branch != w.branch);
+            let (id, project) = (w.id.clone(), w.project_id.clone());
             if switched {
-                app.pull_requests.remove(&w.id);
-                app.pr_recheck.remove(&w.id);
-                app.pr_inflight.cancel(&w.id);
-                app.worktree_ahead.remove(&w.id);
-                forget_checkout_reads(app, &w.id);
+                app.pull_requests.remove(&id);
+                let key = crate::sync::QueryKey::BranchPr(id.clone());
+                app.resolver.cancel(&key);
+                app.resolver.invalidate(&key);
+                app.worktree_ahead.remove(&id);
+                forget_checkout_reads(app, &id);
             }
-            upsert_by(&mut app.tree.worktrees, w, |x, y| x.id == y.id)
+            upsert_by(&mut app.tree.worktrees, w, |x, y| x.id == y.id);
+            if switched {
+                derive_checkout_prs(app, &project);
+            }
         }
         Entity::Agent(a) => {
             // A row the daemon re-homed (`orion worktree`, a hook cwd in
@@ -13640,9 +13399,16 @@ fn apply_removal(app: &mut App, id: &orion_core::EntityId) {
                 .retain(|t| !wt_ids.contains(&t.worktree_id));
             app.tree.links.retain(|l| !wt_ids.contains(&l.worktree_id));
             app.pull_requests.retain(|w, _| !wt_ids.contains(w));
-            app.pr_recheck.retain(|w, _| !wt_ids.contains(w));
             app.open_prs.remove(id);
-            app.open_prs_failed.remove(id);
+            forget_checkouts(app, &wt_ids);
+            app.resolver.retain(|key| {
+                use crate::sync::QueryKey::*;
+                match key {
+                    BranchPr(w) | GitStatus(w) => !wt_ids.contains(w),
+                    OpenPrs(p) | PrExtras(p) | PrTails(p) | BaseFetch(p) | LinearView(p) => p != id,
+                    _ => true,
+                }
+            });
             app.pr_cache_dirty = true;
             app.tree.worktrees.retain(|w| &w.project_id != id);
             app.tree.projects.retain(|p| &p.id != id);
@@ -13652,8 +13418,11 @@ fn apply_removal(app: &mut App, id: &orion_core::EntityId) {
             app.tree.terminals.retain(|t| &t.worktree_id != id);
             app.tree.links.retain(|l| &l.worktree_id != id);
             app.pr_cache_dirty |= app.pull_requests.remove(id).is_some();
-            app.pr_recheck.remove(id);
-            app.pr_inflight.cancel(id);
+            forget_checkouts(app, std::slice::from_ref(id));
+            app.resolver
+                .forget(&crate::sync::QueryKey::BranchPr(id.clone()));
+            app.resolver
+                .forget(&crate::sync::QueryKey::GitStatus(id.clone()));
             app.tree.worktrees.retain(|w| &w.id != id);
         }
         EntityId::Agent(id) => app.tree.agents.retain(|a| &a.id != id),
@@ -13731,7 +13500,6 @@ pub(crate) fn open_palette(app: &mut App) {
     let palette = Palette::new(&app.tree, &app.open_prs, &app.prs, app.hide_draft_prs);
     app.overlay = Some(Overlay::Palette(palette.with_extra(extra)));
     crate::needs_you::refresh(app);
-    crate::needs_you::opened(app);
 }
 
 /// What each panel cursor pointed at, captured with `selection_snapshot`
@@ -14532,6 +14300,72 @@ mod tests {
         assert!(!app.term_locked && app.dirty);
     }
 
+    /// A turn that ends in a checkout reads its band again — its files may
+    /// have moved — while a turn starting there reads nothing.
+    #[test]
+    fn a_turn_ending_reads_its_checkout_again() {
+        use orion_core::AgentStatus;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        seed_second_agent(&mut app, AgentStatus::Fresh);
+        let band = crate::sync::QueryKey::GitStatus(WorktreeId("w1".into()));
+        let t0 = std::time::Instant::now();
+        app.resolver
+            .visit(vec![(band.clone(), crate::sync::Seen::Shown)], t0);
+        for ticket in app.resolver.due(t0) {
+            app.resolver.land(&ticket, Ok(()), t0);
+        }
+        let flip = |status: AgentStatus| ServerEvent::StatusChanged {
+            agent: AgentId("a2".into()),
+            status,
+            changed_at: crate::app::now_ms(),
+            unseen: false,
+            reason: None,
+        };
+        hse(&mut app, flip(AgentStatus::Running));
+        assert!(app.resolver.due(t0).is_empty(), "a turn starting: nothing");
+        hse(&mut app, flip(AgentStatus::Finished));
+        let due: Vec<_> = app.resolver.due(t0).into_iter().map(|t| t.key).collect();
+        assert_eq!(due, vec![band], "the turn ended: read again");
+    }
+
+    /// Only a pane's output and the like skip THE RESOLVER's step; a row
+    /// or a status moving does not.
+    #[test]
+    fn output_alone_skips_the_resolvers_step() {
+        let output = ServerEvent::Output {
+            session: SessionRef::Agent(AgentId("a1".into())),
+            seq: 0,
+            data: Vec::new(),
+        };
+        assert!(paints_only(&output));
+        let flip = ServerEvent::StatusChanged {
+            agent: AgentId("a1".into()),
+            status: orion_core::AgentStatus::Running,
+            changed_at: 0,
+            unseen: false,
+            reason: None,
+        };
+        assert!(!paints_only(&flip));
+    }
+
+    /// An archived session's "ago" label is not on the rows, so it wakes
+    /// nothing.
+    #[test]
+    fn an_archived_sessions_label_wakes_nothing() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let now = std::time::Instant::now();
+        for a in &mut app.tree.agents {
+            a.status_changed_at = crate::app::now_ms() - 10_000;
+        }
+        assert!(next_ago_turn(&app, now).is_some());
+        for a in &mut app.tree.agents {
+            a.archived = true;
+        }
+        assert_eq!(next_ago_turn(&app, now), None);
+    }
+
     /// A turn that stops to ask in the pane the user is locked into typing
     /// at, terminal window focused, is already in front of them: nothing
     /// is queued. Previewing that pane from a panel (unlocked) still
@@ -14795,6 +14629,72 @@ mod tests {
             }
         }
         panic!("{needle:?} is not on screen");
+    }
+
+    /// Start THE RESOLVER's fetch of `key` now, as a visit to it would:
+    /// the ticket its answer lands with. The resolver's screen is `key`
+    /// alone until the next turn's visit.
+    pub(super) fn begin_sync(
+        app: &mut App,
+        key: &crate::sync::QueryKey,
+    ) -> crate::fetch::Ticket<crate::sync::QueryKey> {
+        let now = std::time::Instant::now();
+        app.resolver
+            .visit(vec![(key.clone(), crate::sync::Seen::Shown)], now);
+        app.resolver.refresh(key);
+        app.resolver
+            .due(now)
+            .into_iter()
+            .find(|t| &t.key == key)
+            .expect("the key was free to fetch")
+    }
+
+    /// Land `ticket`'s answer as the loop does (`land_sync`).
+    pub(super) fn land_synced(
+        app: &mut App,
+        ticket: crate::fetch::Ticket<crate::sync::QueryKey>,
+        answer: crate::sync::spawn::Answer,
+    ) -> Vec<ClientRequest> {
+        let mut out = Vec::new();
+        land_sync(app, crate::sync::spawn::Landed { ticket, answer }, &mut out);
+        out
+    }
+
+    /// `worktree`'s branch lookup, begun now and landed with `answer`
+    /// asked on `branch`.
+    pub(super) fn land_branch_lookup(
+        app: &mut App,
+        worktree: &WorktreeId,
+        branch: &str,
+        answer: Result<Lookup, crate::sync::FetchError>,
+    ) {
+        let ticket = begin_sync(app, &crate::sync::QueryKey::BranchPr(worktree.clone()));
+        let branch = branch.to_string();
+        land_synced(
+            app,
+            ticket,
+            crate::sync::spawn::Answer::BranchPr { branch, answer },
+        );
+    }
+
+    /// The keys one turn of the loop would fetch right now: THE
+    /// RESOLVER's step run (spawning nothing — the tests have no channel),
+    /// and what it started. They stay in flight.
+    pub(super) fn fetched_now(app: &mut App) -> Vec<crate::sync::QueryKey> {
+        crate::sync::spawn::step_remote(app)
+            .into_iter()
+            .map(|t| t.key)
+            .collect()
+    }
+
+    /// Run a turn of THE RESOLVER and land everything it started as
+    /// answered `ago` back: the screen as the resolver sees it, all fresh
+    /// to that age.
+    pub(super) fn settle_sync(app: &mut App, ago: Duration) {
+        let at = std::time::Instant::now() - ago;
+        for ticket in crate::sync::spawn::step_remote(app) {
+            app.resolver.land(&ticket, Ok(()), at);
+        }
     }
 
     pub(super) fn seed_tree(app: &mut App) {
@@ -15574,8 +15474,6 @@ mod tests {
                     })
                     .collect(),
                 at: now,
-                due: now + OPEN_PRS_REFRESH,
-                step: OPEN_PRS_REFRESH,
             },
         );
     }
@@ -15791,19 +15689,14 @@ mod tests {
         assert!(on_w2(&app));
     }
 
-    /// A repo with nothing open backs off instead of asking every beat, and
-    /// a call `gh` couldn't answer keeps whatever list was already on screen
-    /// — one flaky round trip is no reason to blank the group.
+    /// A call `gh` couldn't answer keeps whatever list was already on
+    /// screen — one flaky round trip is no reason to blank the group — and
+    /// the next real answer replaces it, empty or not.
     #[test]
-    fn the_open_pr_list_backs_off_when_empty_and_survives_a_failed_call() {
+    fn a_failed_list_call_keeps_the_last_good_list() {
         let mut app = App::new();
         seed_tree(&mut app);
         let pid = app.selected_project().expect("a project").id.clone();
-
-        note_open_prs_answer(&mut app, pid.clone(), Some(vec![]), &mut Vec::new());
-        assert_eq!(app.open_prs[&pid].step, OPEN_PRS_RECHECK_MIN);
-        note_open_prs_answer(&mut app, pid.clone(), Some(vec![]), &mut Vec::new());
-        assert_eq!(app.open_prs[&pid].step, OPEN_PRS_RECHECK_MIN * 2);
 
         let found = vec![crate::pull_request::OpenPr {
             number: 7,
@@ -15817,126 +15710,108 @@ mod tests {
             meta: Default::default(),
         }];
         note_open_prs_answer(&mut app, pid.clone(), Some(found.clone()), &mut Vec::new());
-        assert_eq!(
-            app.open_prs[&pid].step, OPEN_PRS_REFRESH,
-            "a repo with pull requests settles onto the steady beat"
-        );
         assert_eq!(app.visible_open_prs().len(), 1);
 
-        assert!(!app.open_prs_failed.contains(&pid));
         note_open_prs_answer(&mut app, pid.clone(), None, &mut Vec::new());
         assert_eq!(
             app.open_prs[&pid].list, found,
             "a failed call keeps the last good list"
         );
-        assert!(app.open_prs[&pid].step > OPEN_PRS_REFRESH, "but backs off");
-        assert!(
-            app.open_prs_failed.contains(&pid),
-            "and marks it as one that couldn't be refreshed (#106)"
-        );
 
         note_open_prs_answer(&mut app, pid.clone(), Some(vec![]), &mut Vec::new());
         assert!(
-            !app.open_prs_failed.contains(&pid),
-            "the next real answer clears the mark"
+            app.open_prs[&pid].list.is_empty(),
+            "a real answer replaces it"
         );
     }
 
-    /// Arriving at a project asks again promptly — but never more often than
-    /// `OPEN_PRS_MIN_AGE`, so bouncing between two projects re-reads the
-    /// cache instead of spending an API call per switch.
+    /// Arriving at a project asks for its open list only when the one on
+    /// screen is older than a minute, so bouncing between two projects
+    /// re-reads the cache instead of spending an API call per switch — and
+    /// a list on screen for an hour is never asked again on its own.
     #[test]
-    fn arriving_at_a_project_re_asks_but_not_faster_than_the_floor() {
+    fn arriving_at_a_project_asks_only_when_its_list_is_old() {
         let mut app = App::new();
         seed_tree(&mut app);
         let pid = app.selected_project().expect("a project").id.clone();
-        note_open_prs_answer(&mut app, pid.clone(), Some(vec![]), &mut Vec::new());
-
-        schedule_open_prs_lookup(&mut app);
-        assert!(
-            !app.open_prs_lookup_due(&pid),
-            "the answer is seconds old: the floor holds the next call off"
-        );
-
-        // An answer older than the floor is re-asked the moment we arrive.
-        let stale = std::time::Instant::now() - crate::app::OPEN_PRS_MIN_AGE * 2;
-        app.open_prs.get_mut(&pid).unwrap().at = stale;
-        schedule_open_prs_lookup(&mut app);
-        assert!(app.open_prs_lookup_due(&pid));
-
-        // An in-flight call is never doubled up on.
-        app.open_prs_inflight
-            .begin(pid.clone(), crate::fetch::now());
-        assert!(!app.open_prs_lookup_due(&pid));
+        let list = crate::sync::QueryKey::OpenPrs(pid.clone());
+        assert_eq!(fetched_now(&mut app), vec![list.clone()], "never asked");
+        app.resolver.cancel(&list);
+        // Answered 30 s ago: leaving and coming back reads the cache.
+        let now = std::time::Instant::now();
+        let ticket = begin_sync(&mut app, &list);
+        app.resolver
+            .land(&ticket, Ok(()), now - Duration::from_secs(30));
+        app.resolver.visit(vec![], now);
+        assert!(fetched_now(&mut app).is_empty(), "fresh enough");
+        assert_eq!(app.resolver.next_wake(now), None, "and no beat");
+        // Answered two minutes ago: the next arrival asks.
+        let ticket = begin_sync(&mut app, &list);
+        app.resolver
+            .land(&ticket, Ok(()), now - Duration::from_secs(120));
+        app.resolver.visit(vec![], now);
+        assert_eq!(fetched_now(&mut app), vec![list.clone()]);
+        // One in flight is never doubled up on.
+        app.resolver.visit(vec![], now);
+        assert!(fetched_now(&mut app).is_empty());
     }
 
-    /// Focusing the Worktrees or Sessions panel re-asks GitHub for the open
-    /// list and the worktree's own PR; focusing the pane does not. The list
-    /// keeps its floor, so a quick bounce between panels stays one call.
+    /// Focusing the Worktrees panel is a visit: what it shows of GitHub is
+    /// asked again when older than a minute. The pane and the Sessions
+    /// panel ask nothing, and a list seconds old is not asked again.
     #[test]
-    fn focusing_a_sidebar_panel_re_asks_for_pull_requests() {
+    fn focusing_the_worktrees_panel_re_asks_for_an_old_list() {
         let mut app = App::new();
         seed_tree(&mut app);
         let pid = app.selected_project().expect("a project").id.clone();
-        let wid = app.selected_worktree().expect("a worktree").id.clone();
-        let stale = std::time::Instant::now() - crate::app::OPEN_PRS_MIN_AGE * 2;
-        let settle = |app: &mut App| {
-            note_open_prs_answer(app, pid.clone(), Some(vec![]), &mut Vec::new());
-            app.open_prs.get_mut(&pid).unwrap().at = stale;
-            note_pr_answer(app, &wid, true);
-        };
+        let list = crate::sync::QueryKey::OpenPrs(pid.clone());
+        settle_sync(&mut app, Duration::from_secs(120));
+        assert!(fetched_now(&mut app).is_empty(), "on screen: no beat");
 
-        settle(&mut app);
         app.focus = Focus::Terminal;
         note_focus_change(&mut app);
-        assert!(
-            !app.open_prs_lookup_due(&pid),
-            "the pane isn't a PR surface"
-        );
-        assert!(!app.pr_lookup_due(&wid));
-
-        app.focus = Focus::Worktrees;
-        note_focus_change(&mut app);
-        assert!(app.open_prs_lookup_due(&pid), "the Worktrees panel is");
-        assert!(app.pr_lookup_due(&wid));
-
-        settle(&mut app);
+        assert!(fetched_now(&mut app).is_empty(), "the pane isn't a visit");
         app.focus = Focus::Sessions;
         note_focus_change(&mut app);
-        assert!(app.open_prs_lookup_due(&pid), "so is the Sessions panel");
-        assert!(app.pr_lookup_due(&wid));
+        assert!(fetched_now(&mut app).is_empty(), "nor the Sessions panel");
 
-        // Seconds-fresh answer: the floor holds the list off, the PR row
-        // (one `gh pr view`, no floor of its own) is still re-asked.
-        note_open_prs_answer(&mut app, pid.clone(), Some(vec![]), &mut Vec::new());
-        note_pr_answer(&mut app, &wid, true);
         app.focus = Focus::Worktrees;
         note_focus_change(&mut app);
-        assert!(!app.open_prs_lookup_due(&pid), "floored");
-        assert!(app.pr_lookup_due(&wid));
+        assert_eq!(fetched_now(&mut app), vec![list], "the Worktrees panel is");
+
+        // Seconds-fresh: the visit stands on the cache.
+        let mut app = App::new();
+        seed_tree(&mut app);
+        settle_sync(&mut app, Duration::from_secs(5));
+        app.focus = Focus::Worktrees;
+        note_focus_change(&mut app);
+        assert!(fetched_now(&mut app).is_empty(), "fresh");
     }
 
     /// The terminal window taking focus again — back from the browser where
-    /// a pull request was just closed — re-asks on the next tick.
+    /// a pull request was just closed — asks again for what the screen
+    /// shows, when it is older than a minute. The main checkout is never
+    /// asked about by branch: it has no pull request of its own.
     #[test]
     fn terminal_window_focus_re_asks_for_pull_requests() {
         let mut app = App::new();
         seed_tree(&mut app);
         let pid = app.selected_project().expect("a project").id.clone();
-        let wid = app.selected_worktree().expect("a worktree").id.clone();
-        note_open_prs_answer(&mut app, pid.clone(), Some(vec![]), &mut Vec::new());
-        app.open_prs.get_mut(&pid).unwrap().at =
-            std::time::Instant::now() - crate::app::OPEN_PRS_MIN_AGE * 2;
-        note_pr_answer(&mut app, &wid, true);
-        assert!(!app.open_prs_lookup_due(&pid));
-        assert!(!app.pr_lookup_due(&wid));
+        settle_sync(&mut app, Duration::from_secs(120));
+        assert!(fetched_now(&mut app).is_empty());
 
         let mut out = Vec::new();
         handle_terminal_event(&mut app, Event::FocusLost, &mut out);
-        assert!(!app.open_prs_lookup_due(&pid), "losing focus asks nothing");
+        assert!(
+            fetched_now(&mut app).is_empty(),
+            "losing focus asks nothing"
+        );
         handle_terminal_event(&mut app, Event::FocusGained, &mut out);
-        assert!(app.open_prs_lookup_due(&pid));
-        assert!(app.pr_lookup_due(&wid));
+        assert_eq!(
+            fetched_now(&mut app),
+            vec![crate::sync::QueryKey::OpenPrs(pid)],
+            "the list, and no branch lookup for the main checkout"
+        );
         assert!(out.is_empty(), "no daemon traffic — gh runs client-side");
     }
 
@@ -16573,23 +16448,32 @@ mod tests {
             app.pr_detail_stale.contains(&pr_url(9)),
             "off screen: next visit"
         );
-        assert_eq!(
-            app.pending_pr_detail.as_ref().map(|(p, _)| p.url.as_str()),
-            Some(pr_url(7).as_str()),
+        let page = |n| crate::sync::QueryKey::PrDetail(pr_url(n));
+        let fetched = fetched_now(&mut app);
+        assert!(
+            fetched.contains(&page(7)),
             "the page on screen is read again"
         );
+        assert!(!fetched.contains(&page(9)), "the one off screen waits");
         match &app.overlay {
             Some(Overlay::PullRequests(view)) => assert_eq!(view.scroll, 5, "in place"),
             other => panic!("the modal stays: {other:?}"),
         }
         // The same answer again — the page (a fold of every check) still
         // disagreeing with the row's rollup — asks nothing: only a row that
-        // moved is news.
-        app.pending_pr_detail = None;
+        // moved is news. Nor does GitHub forgetting whether it conflicts.
         app.pr_detail_stale.clear();
-        note_open_prs_answer(&mut app, pid, Some(rows(&[7, 9])), &mut Vec::new());
-        assert!(app.pending_pr_detail.is_none());
+        note_open_prs_answer(&mut app, pid.clone(), Some(rows(&[7, 9])), &mut Vec::new());
         assert!(app.pr_detail_stale.is_empty());
+        let mut unknown = rows(&[7, 9]);
+        for row in &mut unknown {
+            row.answered.conflicts = None;
+        }
+        note_open_prs_answer(&mut app, pid, Some(unknown), &mut Vec::new());
+        assert!(
+            app.pr_detail_stale.is_empty(),
+            "mergeable: UNKNOWN is no move"
+        );
     }
 
     /// The pane, too: a list refresh ahead of the page it is reading reads
@@ -16606,15 +16490,23 @@ mod tests {
         app.pending_pr_detail = None;
         app.pr_preview_scroll = 4;
 
+        // The cursor has rested on it: the page is on screen.
+        app.pr_detail_rest = Some(pr_url(7));
+        assert!(fetched_now(&mut app).contains(&crate::sync::QueryKey::PrDetail(pr_url(7))));
+        let read = crate::sync::QueryKey::PrDetail(pr_url(7));
+        app.resolver.cancel(&read);
+        let ticket = begin_sync(&mut app, &read);
+        land_synced(
+            &mut app,
+            ticket,
+            crate::sync::spawn::Answer::GitHub(crate::sync::github::Answer::Detail(Ok(Box::new(
+                a_detail(7, "body", vec![]),
+            )))),
+        );
+
         let ready = a_pr(7, "Attach links — ready", false);
         note_open_prs_answer(&mut app, pid, Some(vec![ready]), &mut Vec::new());
-        assert!(
-            app.pending_pr_detail
-                .as_ref()
-                .is_some_and(|(p, _)| p.url == pr_url(7)),
-            "{:?}",
-            app.pending_pr_detail
-        );
+        assert!(fetched_now(&mut app).contains(&read), "read again at once");
         assert_eq!(app.pr_preview_scroll, 4);
     }
 
@@ -16705,19 +16597,12 @@ mod tests {
         detail: Option<crate::pull_request::PrDetail>,
         out: &mut Vec<ClientRequest>,
     ) {
-        let ticket = app
-            .pr_detail_inflight
-            .begin(url.to_string(), crate::fetch::now())
-            .expect("none in flight");
-        let flight = app.pr_detail_inflight.land(&ticket).expect("its own");
-        land_pr_detail(
-            app,
-            url.to_string(),
-            detail,
-            ticket.asked(),
-            flight.owed,
-            out,
-        );
+        let key = crate::sync::QueryKey::PrDetail(url.to_string());
+        let ticket = begin_sync(app, &key);
+        let answer = detail.map(Box::new).ok_or(crate::sync::FetchError::Missing);
+        let answer =
+            crate::sync::spawn::Answer::GitHub(crate::sync::github::Answer::Detail(answer));
+        out.extend(land_synced(app, ticket, answer));
     }
 
     /// Seed the Sessions panel's PR ROW: the pull request `gh` found on the
@@ -17047,20 +16932,20 @@ mod tests {
         // Posted: the pane re-reads the pull request it is on, in place.
         app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
         app.pending_pr_detail = None;
+        app.pr_detail_rest = Some(pr_url(7));
         app.pr_preview_scroll = 3;
         app.flash = None;
+        let page = crate::sync::QueryKey::PrDetail(pr_url(7));
         land_pr_comment(
             &mut app,
             answer("Looks good", Ok(format!("{}#issuecomment-1", pr_url(7)))),
         );
         assert_eq!(app.flash, None, "the conversation says it");
         assert!(
-            app.pending_pr_detail
-                .as_ref()
-                .is_some_and(|(p, _)| p.url == pr_url(7)),
-            "the conversation is asked for again: {:?}",
-            app.pending_pr_detail
+            fetched_now(&mut app).contains(&page),
+            "the conversation is asked for again"
         );
+        app.resolver.cancel(&page);
         assert_eq!(app.pr_preview_scroll, 3, "the reader's place is kept");
         assert!(app.overlay.is_none());
 
@@ -17068,8 +16953,10 @@ mod tests {
         // next visit reads it afresh.
         app.set_sel_worktree(0);
         app.pending_pr_detail = None;
+        app.pr_detail_rest = None;
+        app.pr_detail_stale.clear();
         land_pr_comment(&mut app, answer("Looks good", Ok(String::new())));
-        assert!(app.pending_pr_detail.is_none());
+        assert!(!fetched_now(&mut app).contains(&page));
         assert!(app.pr_detail_stale.contains(&pr_url(7)));
     }
 
@@ -17579,20 +17466,7 @@ mod tests {
         let mut merged = cached_pr(7);
         merged.answered_state = crate::pull_request::STATE_MERGED.into();
 
-        let ticket = app
-            .pr_inflight
-            .begin(w1.clone(), crate::fetch::now())
-            .unwrap();
-        let answer = Lookup::Found(merged);
-        land_lookup(
-            &mut app,
-            LookupLanded {
-                ticket,
-                branch,
-                answer,
-            },
-            &mut Vec::new(),
-        );
+        land_branch_lookup(&mut app, &w1, &branch, Ok(Lookup::Found(merged)));
 
         let listed: Vec<u64> = app
             .open_prs
@@ -17641,12 +17515,13 @@ mod tests {
         assert!(app.worktree_wears_merge(&w1), "the row keeps its merge");
     }
 
-    /// A finish nobody has read shimmers until it is read, however old, so
-    /// the sweep clock runs for it until then. A session that starts needing
-    /// you, or crashes, sweeps red for `ONE_SHOT_SWEEP` and no longer; an
-    /// unstamped one and an archived one never ask for a frame.
+    /// A finish nobody has read shimmers for its `ONE_SHOT_SWEEP` and then
+    /// holds still, unread; a session that starts needing you, or crashes,
+    /// sweeps red for the same few seconds and no longer; an unstamped one
+    /// and an archived one never ask for a frame. Nothing ticks while the
+    /// app is IDLE.
     #[test]
-    fn an_alarm_sweeps_for_a_few_seconds_and_an_unread_finish_until_read() {
+    fn an_alarm_and_an_unread_finish_sweep_for_a_few_seconds() {
         use orion_core::AgentStatus;
         let mut app = App::new();
         seed_tree(&mut app);
@@ -17665,14 +17540,9 @@ mod tests {
         let fresh = |app: &App| app.agent_fresh_alarm(&app.tree.agents[0]);
         assert!(!app.status_anim_active(), "everything read and at rest");
 
-        // An unread finish shimmers until it is read, however old — where it
-        // shows: its project's tab open, or the jump list up.
-        set(
-            &mut app,
-            AgentStatus::Finished,
-            true,
-            now - settled().as_millis() as i64,
-        );
+        // An unread finish shimmers for a few seconds — where it shows: its
+        // project's tab open, or the jump list up.
+        set(&mut app, AgentStatus::Finished, true, now);
         assert!(
             !app.status_anim_active(),
             "its project's tab closed: nothing shows it, nothing ticks"
@@ -17682,6 +17552,20 @@ mod tests {
         app.animations = false;
         assert!(!app.status_anim_active(), "unless animations are off");
         app.animations = true;
+        app.window_focused = false;
+        assert!(!app.status_anim_active(), "nor while nobody is looking");
+        app.window_focused = true;
+        app.away = true;
+        assert!(!app.status_anim_active(), "nor while away");
+        app.away = false;
+        set(
+            &mut app,
+            AgentStatus::Finished,
+            true,
+            now - settled().as_millis() as i64,
+        );
+        assert!(!app.status_anim_active(), "unread but not news: still");
+        set(&mut app, AgentStatus::Finished, true, now);
         app.tree.agents[0].unseen = false;
         assert!(!app.status_anim_active(), "read: still");
 
@@ -17729,10 +17613,6 @@ mod tests {
         seed_branch_pr(&mut app, 7, "Attach links");
         app.pr_cache_dirty = false;
 
-        let ticket = app
-            .pr_inflight
-            .begin(w1.clone(), crate::fetch::now())
-            .expect("none in flight");
         let branch = app
             .tree
             .worktrees
@@ -17740,16 +17620,10 @@ mod tests {
             .find(|w| w.id == w1)
             .map(|w| w.branch.clone())
             .unwrap();
-        land_lookup(
-            &mut app,
-            LookupLanded {
-                ticket,
-                branch,
-                answer: Lookup::Unavailable,
-            },
-            &mut Vec::new(),
-        );
-        assert!(!app.pr_inflight.in_flight(&w1));
+        let failed = crate::sync::FetchError::Failed("HTTP 502".into());
+        land_branch_lookup(&mut app, &w1, &branch, Err(failed));
+        let key = crate::sync::QueryKey::BranchPr(w1.clone());
+        assert!(!app.resolver.in_flight(&key));
         assert_eq!(
             app.pull_requests[&w1].as_ref().map(|p| p.number),
             Some(7),
@@ -17757,7 +17631,10 @@ mod tests {
         );
         assert!(!app.pr_cache_dirty, "nothing changed, nothing to write");
         assert!(
-            !app.pr_lookup_due(&w1),
+            app.resolver
+                .status(&key, std::time::Instant::now())
+                .retry_at
+                .is_some(),
             "but the next attempt is backed off"
         );
 
@@ -17919,67 +17796,50 @@ mod tests {
         let url = pr_url(7);
         let mut out = Vec::new();
 
-        let (detail_tx, _detail_rx) = tokio::sync::mpsc::unbounded_channel();
-        let ticket = app
-            .pr_detail_inflight
-            .begin(url.clone(), crate::fetch::now())
-            .unwrap();
-        app.pr_detail_inflight.want_fresh(&url);
-        app.pr_detail_stale.insert(url.clone());
-        let landed = DetailLanded {
-            ticket,
-            number: 7,
-            dir: dir.path().to_path_buf(),
-            detail: Some(a_detail(7, "body", vec![])),
-        };
-        land_detail(&mut app, &detail_tx, landed, &mut out);
+        let page = crate::sync::QueryKey::PrDetail(url.clone());
+        let ticket = begin_sync(&mut app, &page);
+        app.pr_detail_behind(&url);
+        let answer = crate::sync::spawn::Answer::GitHub(crate::sync::github::Answer::Detail(Ok(
+            Box::new(a_detail(7, "body", vec![])),
+        )));
+        out.extend(land_synced(&mut app, ticket, answer));
         assert_eq!(app.pr_detail[&url].body, "body", "the answer lands");
         assert!(
             app.pr_detail_stale.contains(&url),
             "but is not the last word"
         );
+        let now = std::time::Instant::now();
+        app.resolver
+            .visit(vec![(page.clone(), crate::sync::Seen::Shown)], now);
         assert!(
-            app.pr_detail_inflight.in_flight(&url),
-            "the owed read is out"
+            app.resolver.due(now).iter().any(|t| t.key == page),
+            "the owed read goes out"
         );
+        let _ = dir;
 
-        let (prs_tx, _prs_rx) = tokio::sync::mpsc::unbounded_channel();
-        let ticket = app
-            .open_prs_inflight
-            .begin(pid.clone(), crate::fetch::now())
-            .unwrap();
-        crate::pr_modal::request_list(&mut app, &pid);
-        let landed = ListLanded {
-            ticket,
-            dir: dir.path().to_path_buf(),
-            answer: Some(crate::pull_request::ListAnswer {
+        let list = crate::sync::QueryKey::OpenPrs(pid.clone());
+        let ticket = begin_sync(&mut app, &list);
+        // A merge from the modal while the list is out.
+        crate::pr_modal::invalidate_list(&mut app, &pid);
+        let answer = crate::sync::spawn::Answer::OpenPrs {
+            answer: Ok(crate::pull_request::ListAnswer {
                 rows: vec![a_pr(9, "Number lines", false)],
                 ..Default::default()
             }),
         };
-        land_open_prs(&mut app, &prs_tx, landed, &mut out);
+        land_synced(&mut app, ticket, answer);
         assert_eq!(open_pr_numbers(&app), vec![9], "the answer lands");
-        assert!(
-            app.open_prs_inflight.in_flight(&pid),
-            "the owed list is out"
-        );
+        let owed = crate::sync::spawn::step_remote(&mut app);
+        let keys: Vec<_> = owed.iter().map(|t| t.key.clone()).collect();
+        assert_eq!(keys, vec![list.clone()], "the owed list is out");
 
         // Nothing asked for meanwhile: nothing more goes out.
-        let ticket = app
-            .open_prs_inflight
-            .begin(ProjectId("p-other".into()), crate::fetch::now())
-            .unwrap();
-        let other = ticket.key.clone();
-        let landed = ListLanded {
-            ticket,
-            dir: dir.path().to_path_buf(),
-            answer: Some(crate::pull_request::ListAnswer {
-                rows: Vec::new(),
-                ..Default::default()
-            }),
+        let answer = crate::sync::spawn::Answer::OpenPrs {
+            answer: Ok(crate::pull_request::ListAnswer::default()),
         };
-        land_open_prs(&mut app, &prs_tx, landed, &mut out);
-        assert!(!app.open_prs_inflight.in_flight(&other));
+        land_synced(&mut app, owed.into_iter().next().unwrap(), answer);
+        assert!(fetched_now(&mut app).is_empty());
+        assert!(!app.resolver.in_flight(&list));
     }
 
     /// A lookup asked about a branch the checkout has left answers for the
@@ -17988,16 +17848,19 @@ mod tests {
     /// branch the checkout is on lands.
     #[test]
     fn a_lookup_about_a_branch_left_behind_is_dropped() {
+        use crate::sync::spawn::Answer;
         use orion_core::{Entity, WorktreeId};
         let mut app = App::new();
         seed_tree(&mut app);
         let w1 = WorktreeId("w1".into());
-        let found = |number| Lookup::Found(cached_pr(number));
+        let key = crate::sync::QueryKey::BranchPr(w1.clone());
+        let found = |number| Ok(Lookup::Found(cached_pr(number)));
+        let lookup = |branch: &str, answer| Answer::BranchPr {
+            branch: branch.into(),
+            answer,
+        };
 
-        let ticket = app
-            .pr_inflight
-            .begin(w1.clone(), crate::fetch::now())
-            .unwrap();
+        let ticket = begin_sync(&mut app, &key);
         let mut moved = app
             .tree
             .worktrees
@@ -18012,58 +17875,31 @@ mod tests {
                 entity: Entity::Worktree(moved),
             },
         );
-        assert!(!app.pr_inflight.in_flight(&w1), "the switch cancels it");
-        let branch = "main".to_string();
-        land_lookup(
-            &mut app,
-            LookupLanded {
-                ticket,
-                branch,
-                answer: found(7),
-            },
-            &mut Vec::new(),
-        );
+        assert!(!app.resolver.in_flight(&key), "the switch cancels it");
+        land_synced(&mut app, ticket, lookup("main", found(7)));
         assert_eq!(app.pull_requests.get(&w1), None, "dropped");
         assert!(app.prs.status(&pr_url(7)).is_none(), "and never observed");
 
-        let ticket = app
-            .pr_inflight
-            .begin(w1.clone(), crate::fetch::now())
-            .unwrap();
+        let ticket = begin_sync(&mut app, &key);
         if let Some(w) = app.tree.worktrees.iter_mut().find(|w| w.id == w1) {
             w.branch = "other".into();
         }
-        let branch = "feat".to_string();
-        land_lookup(
-            &mut app,
-            LookupLanded {
-                ticket,
-                branch,
-                answer: found(8),
-            },
-            &mut Vec::new(),
-        );
+        land_synced(&mut app, ticket, lookup("feat", found(8)));
         assert_eq!(app.pull_requests.get(&w1), None, "dropped");
         assert!(app.prs.status(&pr_url(8)).is_none());
-        assert!(
-            app.pr_lookup_due(&w1),
-            "the branch it is on now is asked next"
+        let now = std::time::Instant::now();
+        app.resolver.visit(vec![], now);
+        app.resolver
+            .visit(vec![(key.clone(), crate::sync::Seen::Shown)], now);
+        let next = app.resolver.due(now);
+        assert_eq!(
+            next.iter().map(|t| t.key.clone()).collect::<Vec<_>>(),
+            vec![key.clone()],
+            "the branch it is on now is asked on its next visit"
         );
 
-        let ticket = app
-            .pr_inflight
-            .begin(w1.clone(), crate::fetch::now())
-            .unwrap();
-        let branch = "other".to_string();
-        land_lookup(
-            &mut app,
-            LookupLanded {
-                ticket,
-                branch,
-                answer: found(9),
-            },
-            &mut Vec::new(),
-        );
+        let ticket = next.into_iter().next().unwrap();
+        land_synced(&mut app, ticket, lookup("other", found(9)));
         assert_eq!(app.pull_requests[&w1].as_ref().map(|pr| pr.number), Some(9));
     }
 
@@ -18087,15 +17923,13 @@ mod tests {
             .pull_requests
             .insert(gone_w.clone(), Some(cached_pr(8)));
         let now = std::time::Instant::now();
-        fresh
-            .pr_recheck
-            .insert(gone_w.clone(), (now, PR_RECHECK_MIN));
+        let gone_key = crate::sync::QueryKey::BranchPr(gone_w.clone());
+        let ticket = begin_sync(&mut fresh, &gone_key);
+        fresh.resolver.land(&ticket, Ok(()), now);
         let open = |list| crate::app::OpenPrs {
             merged: Vec::new(),
             list,
             at: now,
-            due: now,
-            step: OPEN_PRS_REFRESH,
         };
         fresh
             .open_prs
@@ -18124,7 +17958,11 @@ mod tests {
         );
         assert!(fresh.pull_requests.contains_key(&w1));
         assert!(!fresh.pull_requests.contains_key(&gone_w));
-        assert!(!fresh.pr_recheck.contains_key(&gone_w));
+        assert_eq!(
+            fresh.resolver.status(&gone_key, now).updated_at,
+            None,
+            "the resolver forgets the checkout too"
+        );
         assert!(fresh.open_prs.contains_key(&p1));
         assert!(!fresh.open_prs.contains_key(&gone_p));
         let mut kept: Vec<u64> = fresh.pr_detail.values().map(|d| d.number).collect();
@@ -18134,13 +17972,10 @@ mod tests {
         assert!(fresh.pr_cache_dirty);
     }
 
-    /// The background pass over the projects the cursor is not on: the
-    /// first in row order that was never asked, or whose list is older
-    /// than the sweep's beat (or its own backoff, when longer), gets the
-    /// tick. The selected project never does — it has its own, faster beat
-    /// — nor does one already in flight.
+    /// A project nobody visits is never asked about: its open list waits,
+    /// as the cache painted it, for the visit that puts it on screen.
     #[test]
-    fn the_open_list_sweep_visits_the_other_projects_on_a_slow_beat() {
+    fn a_project_nobody_visits_is_never_asked_about() {
         let mut app = App::new();
         seed_tree(&mut app);
         let p1 = orion_core::ProjectId("p1".into());
@@ -18160,78 +17995,41 @@ mod tests {
             app.selected_project().map(|p| p.id.clone()),
             Some(p1.clone())
         );
-        let target = |app: &App| open_prs_sweep_target(app).map(|(id, _)| id);
-        assert_eq!(target(&app), Some(p2.clone()), "never asked: due");
-
+        let other = crate::sync::QueryKey::OpenPrs(p2.clone());
+        settle_sync(&mut app, Duration::from_secs(3600));
         let now = std::time::Instant::now();
-        app.open_prs.insert(
-            p2.clone(),
-            crate::app::OpenPrs {
-                merged: Vec::new(),
-                list: Vec::new(),
-                at: now,
-                due: now,
-                step: OPEN_PRS_RECHECK_MIN,
-            },
-        );
-        assert_eq!(target(&app), None, "asked just now");
-
-        let stale = now
-            .checked_sub(OPEN_PRS_SWEEP_REFRESH + Duration::from_secs(1))
-            .expect("machine up for minutes");
-        app.open_prs.get_mut(&p2).unwrap().at = stale;
-        assert_eq!(target(&app), Some(p2.clone()), "older than the beat");
-
-        app.open_prs.get_mut(&p2).unwrap().step = OPEN_PRS_RECHECK_MAX;
-        assert_eq!(target(&app), None, "its own, longer backoff holds it");
-        app.open_prs.get_mut(&p2).unwrap().step = OPEN_PRS_RECHECK_MIN;
-
-        app.open_prs_inflight.begin(p2.clone(), crate::fetch::now());
-        assert_eq!(target(&app), None, "already in flight");
-        app.open_prs_inflight.clear();
-
-        app.open_prs.remove(&p1);
+        assert!(!app.resolver.in_flight(&other));
+        assert_eq!(app.resolver.status(&other, now).updated_at, None);
         assert_eq!(
-            target(&app),
-            Some(p2),
-            "the selected project is never the sweep's, even unasked"
+            app.resolver.next_wake(now),
+            None,
+            "nothing is on a timer: the selected list was read an hour ago"
         );
-        app.open_prs
-            .get_mut(&orion_core::ProjectId("p2".into()))
-            .unwrap()
-            .at = now;
-        assert_eq!(target(&app), None);
     }
 
-    /// `Shift+R` in the Worktrees panel asks GitHub again at once: the
-    /// project's open list is due despite the `OPEN_PRS_MIN_AGE` floor a
-    /// seconds-old answer keeps for focus events, the worktree's own PR is
-    /// due despite its beat, the loop is flagged to fire both on its next
-    /// turn rather than the git tick, and the flash says so. No prompt
-    /// opens, and no daemon traffic: `gh` runs client-side. Plain `r` —
-    /// the rename key — does nothing here, where nothing is renameable.
+    /// `Shift+R` in the Worktrees panel asks GitHub again at once for what
+    /// the panel shows: the project's open list, though seconds old enough
+    /// that a visit would stand on the cache. No prompt opens, and no
+    /// daemon traffic: `gh` runs client-side. Plain `r` — the rename key —
+    /// does nothing here, where nothing is renameable.
     #[test]
     fn shift_r_on_the_worktrees_panel_refreshes_pull_requests_now() {
         let mut app = App::new();
         seed_tree(&mut app);
         let pid = app.selected_project().expect("a project").id.clone();
-        let wid = app.selected_worktree().expect("a worktree").id.clone();
-        note_open_prs_answer(&mut app, pid.clone(), Some(vec![]), &mut Vec::new());
+        let list = crate::sync::QueryKey::OpenPrs(pid.clone());
+        settle_sync(&mut app, Duration::from_secs(5));
         app.focus = Focus::Worktrees;
-        schedule_pull_request_refresh(&mut app);
+        note_focus_change(&mut app);
         assert!(
-            !app.open_prs_lookup_due(&pid),
-            "seconds old: a focus event is held off by the floor"
+            fetched_now(&mut app).is_empty(),
+            "seconds old: a visit stands on the cache"
         );
-        // The worktree's own PR has no floor, so a focus event does re-ask
-        // it; settle it onto its beat so the key has a timer to skip.
-        note_pr_answer(&mut app, &wid, true);
-        assert!(!app.pr_lookup_due(&wid), "the beat hasn't come round");
 
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('r'), KeyModifiers::NONE, &mut out);
         assert!(
-            !app.open_prs_lookup_due(&pid) && !app.pr_refresh_requested,
+            fetched_now(&mut app).is_empty(),
             "plain r runs the checkout, and refreshes nothing"
         );
         assert!(
@@ -18242,21 +18040,11 @@ mod tests {
         assert!(app.overlay.is_none() && app.flash.is_none());
         out.clear();
 
-        // Another checkout of the project, resting on the sweep's beat.
-        let other = add_worktree(&mut app, "w2", "/tmp/demo-w2");
-        note_pr_answer(&mut app, &other, true);
-        assert!(!app.pr_lookup_due(&other), "swept minutes from now");
-
         press(&mut app, KeyCode::Char('r'), KeyModifiers::SUPER, &mut out);
-        assert!(app.open_prs_lookup_due(&pid), "the key skips the floor");
-        assert!(app.pr_lookup_due(&wid), "and the beat");
-        assert!(
-            app.pr_lookup_due(&other),
-            "and every other checkout's sweep timer"
-        );
-        assert!(
-            app.pr_refresh_requested,
-            "fired on the loop's next turn, not the next git tick"
+        assert_eq!(
+            fetched_now(&mut app),
+            vec![list.clone()],
+            "the key skips the list's freshness"
         );
         assert!(app.overlay.is_none(), "nothing to rename here");
         assert!(app.flash.is_none());
@@ -18267,20 +18055,17 @@ mod tests {
         seed_open_prs(&mut app, &[(7, "Attach links")]);
         app.set_sel_worktree(app.visible_worktrees().len());
         app.pr_detail.insert(pr_url(7), a_detail(7, "body", vec![]));
-        app.pr_refresh_requested = false;
         press(&mut app, KeyCode::Char('r'), KeyModifiers::SUPER, &mut out);
-        assert!(app.pr_refresh_requested);
-        assert_eq!(
-            app.pending_pr_detail.as_ref().map(|(p, _)| p.url.as_str()),
-            Some(pr_url(7).as_str()),
+        assert!(
+            fetched_now(&mut app).contains(&crate::sync::QueryKey::PrDetail(pr_url(7))),
             "the cached conversation is re-asked"
         );
         assert!(app.overlay.is_none());
     }
 
-    /// `Shift+R` on the Sessions panel's PR ROW re-asks GitHub: the row's
-    /// own lookup, the project's list, and the conversation the pane is
-    /// reading, fetched again over the cached copy (a refused one is asked
+    /// `Shift+R` on the Sessions panel's PR ROW re-asks GitHub: what the
+    /// screen shows of it (the project's list — the main checkout has no
+    /// branch lookup to ask), and the conversation the pane is reading, fetched again over the cached copy (a refused one is asked
     /// again too) without rewinding the reader's scroll. It is not tied to
     /// the row: from an agent row it refreshes just the same, while `r`
     /// there keeps its rename.
@@ -18302,7 +18087,8 @@ mod tests {
                 activity: Vec::new(),
             }),
         );
-        note_pr_answer(&mut app, &wid, true);
+        let list = crate::sync::QueryKey::OpenPrs(app.selected_project().unwrap().id.clone());
+        settle_sync(&mut app, Duration::from_secs(5));
         app.focus = Focus::Sessions;
         app.set_sel_session(
             app.visible_session_rows()
@@ -18316,21 +18102,20 @@ mod tests {
         app.pr_detail_failed.insert(url.clone());
         app.pending_pr_detail = None;
         app.pr_preview_scroll = 12;
-        assert!(!app.pr_lookup_due(&wid));
+        assert!(fetched_now(&mut app).is_empty());
 
         let mut out = Vec::new();
         press(&mut app, KeyCode::Char('r'), KeyModifiers::SUPER, &mut out);
         assert!(app.overlay.is_none(), "no prompt");
         assert!(app.flash.is_none());
-        assert!(app.pr_lookup_due(&wid), "the row's own lookup is due");
-        assert!(app.pr_refresh_requested);
-        let (pending, at) = app
-            .pending_pr_detail
-            .as_ref()
-            .expect("the conversation is fetched again");
-        assert_eq!(pending.url, url);
-        assert_eq!(pending.number, 7);
-        assert!(*at <= std::time::Instant::now(), "no hover debounce");
+        let page = crate::sync::QueryKey::PrDetail(url.clone());
+        let fetched = fetched_now(&mut app);
+        assert!(fetched.contains(&list), "the list is asked");
+        assert!(
+            fetched.contains(&page),
+            "the conversation is fetched again, with no hover debounce"
+        );
+        assert!(app.pending_pr_detail.is_none());
         assert!(
             app.pr_detail.contains_key(&url),
             "the cached copy stays on screen until the new one lands"
@@ -18341,19 +18126,21 @@ mod tests {
         );
         assert_eq!(app.pr_preview_scroll, 12, "the reader is not rewound");
 
-        // One already in flight is left to land: nothing is stacked on it.
-        app.pending_pr_detail = None;
-        app.pr_detail_inflight
-            .begin(url.clone(), crate::fetch::now());
+        // One already in flight is left to land: nothing starts beside it.
         press(&mut app, KeyCode::Char('r'), KeyModifiers::SUPER, &mut out);
         assert!(app.pending_pr_detail.is_none());
+        assert!(!fetched_now(&mut app).contains(&page));
+        app.resolver.cancel(&page);
 
         // From an agent row the key refreshes all the same…
         app.set_sel_session(0);
-        app.pr_refresh_requested = false;
+        schedule_pr_detail(&mut app);
+        app.resolver.cancel(&list);
+        settle_sync(&mut app, Duration::from_secs(5));
         app.flash = None;
         press(&mut app, KeyCode::Char('r'), KeyModifiers::SUPER, &mut out);
-        assert!(app.pr_refresh_requested && app.overlay.is_none());
+        assert_eq!(fetched_now(&mut app), vec![list]);
+        assert!(app.overlay.is_none());
         assert!(app.flash.is_none());
 
         // …while `r` there still renames.
@@ -18473,100 +18260,170 @@ mod tests {
         ));
     }
 
-    /// An empty `gh` answer doesn't retire the worktree: the next attempt
-    /// is armed one backoff step out, growing to the cap so a checkout that
-    /// never grows a PR stops costing a process every few seconds.
-    #[test]
-    fn empty_pr_answers_back_off_instead_of_settling() {
-        use orion_core::WorktreeId;
-        let mut app = App::new();
-        let wt = WorktreeId("w1".into());
-        assert!(app.pr_lookup_due(&wt), "never asked: due immediately");
-
-        note_pr_answer(&mut app, &wt, false);
-        let (_, first) = *app.pr_recheck.get(&wt).expect("backoff armed");
-        assert_eq!(first, PR_RECHECK_MIN);
-        assert!(!app.pr_lookup_due(&wt), "not due until the backoff expires");
-
-        note_pr_answer(&mut app, &wt, false);
-        let (_, second) = *app.pr_recheck.get(&wt).expect("backoff armed");
-        assert_eq!(second, PR_RECHECK_MIN * 2, "each miss doubles the gap");
-
-        for _ in 0..12 {
-            note_pr_answer(&mut app, &wt, false);
-        }
-        let (_, capped) = *app.pr_recheck.get(&wt).expect("backoff armed");
-        assert_eq!(capped, PR_RECHECK_MAX, "growth stops at the cap");
+    /// Select checkout `w` in the Worktrees panel.
+    /// Select `w` as if the selection had come to rest there.
+    fn select_checkout(app: &mut App, w: &orion_core::WorktreeId) {
+        app.focus = Focus::Worktrees;
+        let row = app.worktree_row_of(w).expect("a row for the checkout");
+        app.set_sel_worktree(row);
+        app.git_watch.rest = Default::default();
     }
 
-    /// A due backoff makes the worktree askable again — this is what lets a
-    /// PR opened by a session after the first lookup still land on the row.
+    /// Moving the selection asks nothing for where it lands until it has
+    /// rested there: holding `j` past a dozen checkouts reads none of
+    /// them, and the one it stops on is read once it has.
     #[test]
-    fn an_expired_backoff_asks_again() {
-        use orion_core::WorktreeId;
-        let mut app = App::new();
-        let wt = WorktreeId("w1".into());
-        app.pull_requests.insert(wt.clone(), None);
-        app.pr_recheck.insert(
-            wt.clone(),
-            (
-                std::time::Instant::now() - Duration::from_secs(1),
-                PR_RECHECK_MIN,
-            ),
-        );
-        assert!(app.pr_lookup_due(&wt), "a cached miss is not the last word");
-    }
-
-    /// Finding the PR settles the worktree onto a steady beat rather than
-    /// retiring it: the PR won't change, but its conversation will, and the
-    /// unread-comment badge is only as fresh as the last poll. The beat
-    /// depends on where the cursor is: the selected checkout keeps up with
-    /// its conversation, any other only with its merge.
-    #[test]
-    fn a_found_pr_keeps_being_refreshed() {
-        use orion_core::WorktreeId;
+    fn walking_the_list_asks_nothing_until_the_selection_rests() {
+        use crate::sync::QueryKey;
         let mut app = App::new();
         seed_tree(&mut app);
-        let wt = WorktreeId("w1".into());
+        let _ = fetched_now(&mut app);
+        let w2 = add_worktree(&mut app, "w2", "/tmp/demo-w2");
+        select_checkout(&mut app, &w2);
+        let _ = fetched_now(&mut app);
+        let root = app.root_worktree(&ProjectId("p1".into())).expect("root");
+        app.set_sel_worktree(app.worktree_row_of(&root).unwrap());
+        let ours = |app: &App| {
+            crate::sync::scope::visible(app)
+                .into_iter()
+                .filter(|(k, _)| match k {
+                    QueryKey::GitStatus(w) => w == &root,
+                    QueryKey::OpenPrs(_) => true,
+                    _ => false,
+                })
+                .count()
+        };
+        assert!(fetched_now(&mut app).is_empty(), "just moved");
+        assert_eq!(ours(&app), 0);
+        let rested = crate::git_watch::due(&app).expect("a rest deadline");
+        crate::git_watch::follow(&mut app, rested);
+        assert_eq!(ours(&app), 2, "its read and its project's list");
+    }
+
+    /// A checkout on a branch no open list has is asked about by branch
+    /// when it is selected — once, and not again on the next arrival
+    /// within five minutes; after that, arriving asks again. Nothing asks
+    /// it on a beat while it stays selected.
+    #[test]
+    fn a_branch_lookup_is_a_visit_that_holds_five_minutes() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let root = app.selected_worktree().expect("the root").id.clone();
+        let w2 = add_worktree(&mut app, "w2", "/tmp/demo-w2");
+        let key = crate::sync::QueryKey::BranchPr(w2.clone());
+        settle_sync(&mut app, Duration::ZERO);
+
+        select_checkout(&mut app, &w2);
+        let asked = crate::sync::spawn::step_remote(&mut app);
         assert_eq!(
-            app.selected_worktree().map(|w| w.id.clone()),
-            Some(wt.clone())
+            asked.iter().map(|t| t.key.clone()).collect::<Vec<_>>(),
+            vec![key.clone()],
+            "arriving asks"
         );
-        note_pr_answer(&mut app, &wt, false);
-        note_pr_answer(&mut app, &wt, true);
-        let (_, step) = *app.pr_recheck.get(&wt).expect("still scheduled");
-        assert_eq!(step, PR_REFRESH, "the miss backoff gives way to the beat");
+        let now = std::time::Instant::now();
+        app.resolver
+            .land(&asked[0], Ok(()), now - Duration::from_secs(60));
+        assert_eq!(app.resolver.next_wake(now), None, "no beat");
 
-        // A checkout the cursor is not on settles onto the sweep's slower
-        // beat instead: nobody is reading its badge.
-        let other = WorktreeId("w2".into());
-        note_pr_answer(&mut app, &other, true);
-        let (_, step) = *app.pr_recheck.get(&other).expect("scheduled");
-        assert_eq!(step, PR_SWEEP_REFRESH, "an unselected checkout is swept");
-        assert!(
-            PR_SWEEP_REFRESH > PR_RECHECK_MAX,
-            "slower than any miss backoff"
-        );
+        select_checkout(&mut app, &root);
+        assert!(fetched_now(&mut app).is_empty());
+        select_checkout(&mut app, &w2);
+        assert!(fetched_now(&mut app).is_empty(), "a minute old: it stands");
 
-        app.pull_requests.insert(
-            wt.clone(),
-            Some(crate::pull_request::PullRequest {
-                number: 7,
-                url: "https://github.com/o/r/pull/7".into(),
-                title: "done".into(),
-                answered_state: crate::pull_request::STATE_OPEN.into(),
-                answered_draft: false,
-                answered: Default::default(),
-                activity: Vec::new(),
-            }),
-        );
-        assert!(!app.pr_lookup_due(&wt), "not before the beat comes round");
+        let ticket = begin_sync(&mut app, &key);
+        app.resolver
+            .land(&ticket, Ok(()), now - Duration::from_secs(6 * 60));
+        select_checkout(&mut app, &root);
+        let _ = fetched_now(&mut app);
+        select_checkout(&mut app, &w2);
+        assert_eq!(fetched_now(&mut app), vec![key], "six minutes old: asked");
+    }
 
-        // Switching into the checkout is a reason to ask right now — that's
-        // when the user wants to know whether anyone has commented.
+    /// The ROOT WORKTREE, and a checkout on the project's base or default
+    /// branch, never have a pull request of their own: they are never
+    /// asked about by branch.
+    #[test]
+    fn the_main_checkout_and_base_branches_are_never_asked_by_branch() {
+        let mut app = App::new();
         seed_tree(&mut app);
-        schedule_pr_lookup(&mut app);
-        assert!(app.pr_lookup_due(&wt), "arriving re-asks immediately");
+        assert!(app.selected_worktree().unwrap().is_main);
+        let only_lists = |keys: Vec<crate::sync::QueryKey>| {
+            keys.iter()
+                .all(|k| matches!(k, crate::sync::QueryKey::OpenPrs(_)))
+        };
+        assert!(only_lists(fetched_now(&mut app)), "the root");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"projects": {"/tmp/demo": {"base_branch": "develop"}}}"#,
+        )
+        .unwrap();
+        crate::config::with_config_path(path, || {
+            for branch in ["develop", "master"] {
+                let w = add_worktree(&mut app, branch, &format!("/tmp/demo-{branch}"));
+                select_checkout(&mut app, &w);
+                assert!(only_lists(fetched_now(&mut app)), "{branch}");
+                assert!(crate::sync::scope::visible(&app)
+                    .iter()
+                    .all(|(k, _)| !matches!(k, crate::sync::QueryKey::BranchPr(_))));
+            }
+        });
+    }
+
+    /// A checkout on a branch its project's open list has takes its pull
+    /// request from the list as it lands — no `gh pr view` — and is not
+    /// asked about by branch while the list has it.
+    #[test]
+    fn a_listed_branch_takes_its_pull_request_from_the_list() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let pid = app.selected_project().unwrap().id.clone();
+        let w2 = add_worktree(&mut app, "w2", "/tmp/demo-w2");
+        let mut row = a_pr(7, "Attach links", true);
+        row.head = "w2".into();
+        note_open_prs_answer(&mut app, pid, Some(vec![row]), &mut Vec::new());
+        let pr = app.pull_requests[&w2]
+            .clone()
+            .expect("derived from the list");
+        assert_eq!((pr.number, pr.url.as_str()), (7, pr_url(7).as_str()));
+        assert!(pr.answered_draft);
+        assert!(app.pr_cache_dirty);
+
+        select_checkout(&mut app, &w2);
+        assert!(
+            !fetched_now(&mut app)
+                .iter()
+                .any(|k| matches!(k, crate::sync::QueryKey::BranchPr(_))),
+            "the list already said"
+        );
+    }
+
+    /// A branch lookup that failed waits out its backoff whatever the
+    /// cursor does: arriving again does not ask before it is out.
+    #[test]
+    fn a_failed_branch_lookup_waits_out_its_backoff_across_visits() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let root = app.selected_worktree().expect("the root").id.clone();
+        let w2 = add_worktree(&mut app, "w2", "/tmp/demo-w2");
+        let key = crate::sync::QueryKey::BranchPr(w2.clone());
+        settle_sync(&mut app, Duration::ZERO);
+        select_checkout(&mut app, &w2);
+        let asked = crate::sync::spawn::step_remote(&mut app);
+        let failed = crate::sync::FetchError::Failed("HTTP 502".into());
+        app.resolver
+            .land(&asked[0], Err(&failed), std::time::Instant::now());
+
+        select_checkout(&mut app, &root);
+        let _ = fetched_now(&mut app);
+        select_checkout(&mut app, &w2);
+        handle_terminal_event(&mut app, Event::FocusGained, &mut Vec::new());
+        assert!(fetched_now(&mut app).is_empty(), "backed off");
+        let now = std::time::Instant::now();
+        let retry = app.resolver.status(&key, now).retry_at.expect("a retry");
+        assert_eq!(app.resolver.next_wake(now), Some(retry), "woken for it");
     }
 
     /// Opening a pull request row banks everything orion knows about its
@@ -18614,58 +18471,6 @@ mod tests {
         assert_eq!(app.pr_seen.len(), 1);
     }
 
-    /// A lookup in flight blocks a second one, so the 2s git tick can't
-    /// stack `gh` processes on a slow network.
-    #[test]
-    fn an_inflight_lookup_blocks_a_second_one() {
-        use orion_core::WorktreeId;
-        let mut app = App::new();
-        let wt = WorktreeId("w1".into());
-        app.pr_inflight.begin(wt.clone(), crate::fetch::now());
-        assert!(!app.pr_lookup_due(&wt));
-        app.pr_inflight.cancel(&wt);
-        assert!(app.pr_lookup_due(&wt));
-    }
-
-    /// Switching into a worktree drops its accumulated backoff, so arriving
-    /// somewhere asks `gh` again on the next tick rather than up to three
-    /// minutes later.
-    #[test]
-    fn a_worktree_switch_clears_the_backoff() {
-        use orion_core::{Entity, ProjectId, Worktree, WorktreeId};
-        let mut app = App::new();
-        seed_tree(&mut app);
-        hse(
-            &mut app,
-            ServerEvent::EntityUpserted {
-                entity: Entity::Worktree(Worktree {
-                    id: WorktreeId("w2".into()),
-                    project_id: ProjectId("p1".into()),
-                    path: "/tmp/demo-w2".into(),
-                    branch: "feature".into(),
-                    is_main: false,
-                    sort_order: 1,
-                }),
-            },
-        );
-        let w2 = WorktreeId("w2".into());
-        app.pull_requests.insert(w2.clone(), None);
-        app.pr_recheck.insert(
-            w2.clone(),
-            (std::time::Instant::now() + PR_RECHECK_MAX, PR_RECHECK_MAX),
-        );
-        assert!(!app.pr_lookup_due(&w2), "backed off before the switch");
-
-        app.focus = Focus::Worktrees;
-        let mut out = Vec::new();
-        move_selection(&mut app, 1, &mut out);
-        assert_eq!(
-            app.selected_worktree().map(|w| w.id.clone()),
-            Some(w2.clone())
-        );
-        assert!(app.pr_lookup_due(&w2), "the switch re-arms the lookup");
-    }
-
     /// Add a non-root checkout to the seeded project, as the daemon's
     /// upsert would.
     fn add_worktree(app: &mut App, id: &str, path: &str) -> orion_core::WorktreeId {
@@ -18687,153 +18492,83 @@ mod tests {
         wid
     }
 
-    /// The sweep hands out one checkout per tick: the first unselected,
-    /// non-root worktree in row order that is due and on disk. A checkout
-    /// with a lookup in flight or a timer still running is passed over;
-    /// one that isn't on disk is noted as a miss on the way past without
-    /// taking the tick; the ROOT WORKTREE and the selected checkout are
-    /// never the sweep's — the root has no merge worth a call, and the
-    /// selected one has its own lookup.
-    #[test]
-    fn the_sweep_takes_the_projects_other_checkouts_one_per_tick() {
-        let mut app = App::new();
-        seed_tree(&mut app);
-        let root = app.selected_worktree().expect("the root").id.clone();
-        assert!(app.selected_worktree().unwrap().is_main);
-        let on_disk = tempfile::tempdir().unwrap();
-        let also_on_disk = tempfile::tempdir().unwrap();
-        let w2 = add_worktree(&mut app, "w2", on_disk.path().to_str().unwrap());
-        let w3 = add_worktree(&mut app, "w3", also_on_disk.path().to_str().unwrap());
-        let gone = add_worktree(&mut app, "w4", "/tmp/orion-sweep-no-such-checkout");
-        // The GRID names a pull request under every session it lists, so
-        // the sweep covers the checkouts its cards run in: give each one
-        // a session to be listed by.
-        for (i, w) in [&w2, &w3, &gone].into_iter().enumerate() {
-            seed_agent_in(&mut app, &format!("sweep-a{i}"), w);
-        }
-        let order: Vec<_> = app
-            .visible_worktrees()
-            .iter()
-            .map(|w| w.id.clone())
-            .collect();
-        assert_eq!(order[0], root, "root first");
-        let rest: Vec<_> = order[1..]
-            .iter()
-            .filter(|id| **id != gone)
-            .cloned()
-            .collect();
-
-        // First tick: the first on-disk checkout in row order.
-        let (first, path) = sweep_target(&mut app).expect("a checkout to sweep");
-        assert_eq!(first, rest[0]);
-        assert!(path.is_dir());
-        // Still the same one until its answer is in — the loop marks it in
-        // flight before spawning; here that is done by hand.
-        assert_eq!(
-            sweep_target(&mut app).map(|(id, _)| id),
-            Some(first.clone())
-        );
-        app.pr_inflight.begin(first.clone(), crate::fetch::now());
-        // Next tick: the other one. Then nothing until a timer expires.
-        let (second, _) = sweep_target(&mut app).expect("the other checkout");
-        assert_eq!(second, rest[1]);
-        assert_ne!(second, first);
-        app.pr_inflight.cancel(&second);
-        note_pr_answer(&mut app, &second, true);
-        assert!(app.pr_lookup_due(&gone), "not yet reached");
-        assert_eq!(
-            sweep_target(&mut app),
-            None,
-            "everything is in flight or on its beat"
-        );
-        assert!(
-            !app.pr_lookup_due(&gone),
-            "the missing checkout was noted as a miss on the way past"
-        );
-        assert_eq!(app.pull_requests.get(&gone), Some(&None));
-
-        // With a non-root checkout selected, that one is left to its own
-        // lookup and the root is still not swept.
-        app.pr_inflight.clear();
-        app.pr_recheck.clear();
-        app.focus = Focus::Worktrees;
-        app.set_sel_worktree(order.iter().position(|id| *id == w2).unwrap());
-        assert_eq!(
-            app.selected_worktree().map(|w| w.id.clone()),
-            Some(w2.clone())
-        );
-        assert_eq!(
-            sweep_target(&mut app).map(|(id, _)| id),
-            Some(w3.clone()),
-            "not the selected checkout, not the root"
-        );
-        app.pr_inflight.begin(w3, crate::fetch::now());
-        assert_eq!(
-            sweep_target(&mut app),
-            None,
-            "the root is never the sweep's"
-        );
-    }
-
     /// A pull request that drops out of the project's open list has merged
-    /// or closed; the checkout on that branch is re-asked on the next tick
-    /// rather than when its sweep timer comes round, so the row turns
-    /// purple within seconds of the merge. A failed list keeps its rows
-    /// and retires nothing; a checkout whose PR is already known merged
-    /// has nothing to learn.
+    /// or closed. Where the list's merged tail says merged, the checkout
+    /// on that branch wears it at once and starts its ONE-SHOT SWEEP; where
+    /// it doesn't say, the checkout is asked by branch — now while it is
+    /// selected, rather than when its last lookup goes stale. A failed
+    /// list keeps its rows and retires nothing.
     #[test]
     fn a_pull_request_that_leaves_the_open_list_re_asks_its_checkout() {
         let mut app = App::new();
         seed_tree(&mut app);
         let pid = app.selected_project().expect("a project").id.clone();
-        let wid = orion_core::WorktreeId("w1".into());
-        seed_branch_pr(&mut app, 7, "Attach links");
-        seed_open_prs(&mut app, &[(7, "Attach links"), (9, "Number lines")]);
-        let resting = || {
-            (
-                std::time::Instant::now() + PR_SWEEP_REFRESH,
-                PR_SWEEP_REFRESH,
-            )
+        let w2 = add_worktree(&mut app, "w2", "/tmp/demo-w2");
+        let key = crate::sync::QueryKey::BranchPr(w2.clone());
+        let mut seven = a_pr(7, "Attach links", false);
+        seven.head = "w2".into();
+        let nine = a_pr(9, "Number lines", false);
+        select_checkout(&mut app, &w2);
+        // Its branch lookup answered just now, before the list had it.
+        let ticket = begin_sync(&mut app, &key);
+        app.resolver
+            .land(&ticket, Ok(()), std::time::Instant::now());
+        let answer = |app: &mut App, rows: Option<Vec<crate::pull_request::OpenPr>>| {
+            note_open_prs_answer(app, pid.clone(), rows, &mut Vec::new());
         };
-        app.pr_recheck.insert(wid.clone(), resting());
-        assert!(!app.pr_lookup_due(&wid), "on the sweep's beat");
+        answer(&mut app, Some(vec![seven.clone(), nine.clone()]));
+        settle_sync(&mut app, Duration::ZERO);
 
-        // #9 is still open: nothing about #7's checkout changes.
-        let seven = app.open_prs[&pid].list[0].clone();
-        let nine = app.open_prs[&pid].list[1].clone();
-        assert_eq!((seven.number, nine.number), (7, 9));
-        note_open_prs_answer(
-            &mut app,
-            pid.clone(),
-            Some(vec![nine.clone(), seven]),
-            &mut Vec::new(),
-        );
-        assert!(!app.pr_lookup_due(&wid), "still listed: still on its beat");
+        // #9 is still open and #7 still listed: nothing to ask.
+        answer(&mut app, Some(vec![nine.clone(), seven.clone()]));
+        assert!(fetched_now(&mut app).is_empty(), "still listed");
 
-        // #7 leaves the list: its checkout is due now.
-        note_open_prs_answer(
-            &mut app,
-            pid.clone(),
-            Some(vec![nine.clone()]),
-            &mut Vec::new(),
-        );
-        assert!(
-            app.pr_lookup_due(&wid),
+        // #7 leaves the list with nothing to say how: asked by branch now.
+        answer(&mut app, Some(vec![nine.clone()]));
+        let asked = crate::sync::spawn::step_remote(&mut app);
+        assert_eq!(
+            asked.iter().map(|t| t.key.clone()).collect::<Vec<_>>(),
+            vec![key.clone()],
             "its pull request just left the open list"
         );
+        app.resolver
+            .land(&asked[0], Ok(()), std::time::Instant::now());
 
-        // A call that couldn't be made keeps the old rows and re-asks nothing.
-        seed_open_prs(&mut app, &[(7, "Attach links")]);
-        app.pr_recheck.insert(wid.clone(), resting());
-        note_open_prs_answer(&mut app, pid.clone(), None, &mut Vec::new());
-        assert!(!app.pr_lookup_due(&wid), "no answer, no retirement");
+        // A call that couldn't be made keeps the old rows and asks nothing.
+        answer(&mut app, Some(vec![seven.clone(), nine.clone()]));
+        settle_sync(&mut app, Duration::ZERO);
+        answer(&mut app, None);
+        assert_eq!(
+            open_pr_numbers(&app),
+            vec![7, 9],
+            "no answer, no retirement"
+        );
+        assert!(fetched_now(&mut app).is_empty());
 
-        // Known merged already: leaving the list says nothing new.
-        let mut merged = a_detail(7, "shipped", vec![]);
-        merged.answered_state = "MERGED".into();
-        adopt(&mut app, &merged);
-        note_open_prs_answer(&mut app, pid, Some(vec![]), &mut Vec::new());
-        assert!(!app.pr_lookup_due(&wid), "already wearing the merge");
+        // The merged tail says so: purple at once, the sweep starts, and
+        // there is nothing left to ask.
+        let mut tail = seven.clone();
+        tail.meta.merged_at = "2026-11-22T10:00:00Z".into();
+        note_open_prs_answer_at(
+            &mut app,
+            pid,
+            Some(crate::pull_request::ListAnswer {
+                rows: vec![nine],
+                merged: Some(vec![tail]),
+                ..Default::default()
+            }),
+            crate::fetch::Asked::At(crate::fetch::now()),
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            app.prs.status(&pr_url(7)).map(|s| s.standing),
+            Some(crate::pull_request::Standing::Merged)
+        );
+        assert!(app.merge_is_fresh(&w2), "the merge was seen to happen");
+        assert!(
+            fetched_now(&mut app).is_empty(),
+            "already wearing the merge"
+        );
     }
 
     /// Esc on the NEW AGENT PICKER sends nothing: opening it warmed
@@ -19215,19 +18950,28 @@ mod tests {
 
     /// A checkout switched to another branch outside orion drops the pull
     /// request and the commits ahead and behind read for the old branch,
-    /// and its lookup is due at once, so the band never wears the last
-    /// branch's pull request into the new one. A re-stamp of the same
-    /// branch keeps them.
+    /// and its branch lookup is asked again on its next visit however
+    /// fresh, so the band never wears the last branch's pull request into
+    /// the new one. A re-stamp of the same branch keeps them.
     #[test]
     fn a_branch_switch_outside_orion_drops_the_old_branchs_pull_request() {
         use orion_core::{Entity, ProjectId, Worktree};
         let mut app = App::new();
         seed_tree(&mut app);
         let w1 = WorktreeId("w1".into());
-        let later = std::time::Duration::from_secs(300);
+        let key = crate::sync::QueryKey::BranchPr(w1.clone());
+        let now = std::time::Instant::now();
+        let ticket = begin_sync(&mut app, &key);
+        app.resolver.land(&ticket, Ok(()), now);
+        let asked_on_visit = |app: &mut App| {
+            app.resolver.visit(vec![], now);
+            app.resolver
+                .visit(vec![(key.clone(), crate::sync::Seen::Shown)], now);
+            let asked = !app.resolver.due(now).is_empty();
+            app.resolver.cancel(&key);
+            asked
+        };
         app.pull_requests.insert(w1.clone(), None);
-        app.pr_recheck
-            .insert(w1.clone(), (std::time::Instant::now() + later, later));
         app.worktree_ahead.insert(w1.clone(), (2, 0));
         let upsert = |app: &mut App, branch: &str| {
             hse(
@@ -19249,12 +18993,12 @@ mod tests {
             app.pull_requests.contains_key(&w1),
             "the same branch keeps it"
         );
-        assert!(!app.pr_lookup_due(&w1));
+        assert!(!asked_on_visit(&mut app), "fresh: it stands");
         assert_eq!(app.worktree_ahead_behind(&w1), (2, 0));
 
         upsert(&mut app, "feat/other");
         assert!(!app.pull_requests.contains_key(&w1));
-        assert!(app.pr_lookup_due(&w1), "asked again at once");
+        assert!(asked_on_visit(&mut app), "asked again, fresh or not");
         assert_eq!(app.worktree_ahead_behind(&w1), (0, 0));
     }
 
@@ -19774,6 +19518,23 @@ mod tests {
             app.pending.is_empty(),
             "failed request leaves no pending intent"
         );
+    }
+
+    /// The daemon's news — an idle stack it stopped — is a neutral note in
+    /// the footer, not the red flash a refusal is.
+    #[test]
+    fn a_daemon_notice_is_a_note_not_a_failure() {
+        let mut app = App::new();
+        hse(
+            &mut app,
+            ServerEvent::Notice {
+                text: "stopped idle stack for feat/login".into(),
+            },
+        );
+        let flash = app.flash.as_ref().expect("a flash");
+        assert_eq!(flash.kind, crate::flash::FlashKind::Note);
+        assert_eq!(&**flash, "stopped idle stack for feat/login");
+        assert!(app.dirty);
     }
 
     fn dir_names(p: &crate::app::PromptDialog) -> Vec<&str> {
@@ -24593,6 +24354,7 @@ mod tests {
     /// project's checkouts read again at once.
     #[test]
     fn a_landed_pull_flashes_and_rereads_the_projects_checkouts() {
+        use crate::sync::{QueryKey, Seen};
         let mut app = App::new();
         let mut out = Vec::new();
         seed_tree(&mut app);
@@ -24601,12 +24363,20 @@ mod tests {
         app.set_sel_worktree(0);
         let root = WorktreeId("w1".into());
         let linked = WorktreeId("w2".into());
-        let old = std::time::Instant::now();
-        let new = old + Duration::from_secs(5);
-        app.worktree_changes.insert(linked.clone(), (Some(1), new));
         app.worktree_changes
-            .insert(WorktreeId("elsewhere".into()), (None, old));
+            .insert(linked.clone(), (Some(1), std::time::Instant::now()));
         app.git_changes = Some((root.clone(), Some(0)));
+        // Both read a moment ago: nothing due.
+        let now = std::time::Instant::now();
+        let keys = [
+            (QueryKey::GitStatus(root.clone()), Seen::Focused),
+            (QueryKey::GitStatus(linked.clone()), Seen::Shown),
+        ];
+        app.resolver.visit(keys.to_vec(), now);
+        for ticket in app.resolver.due(now) {
+            app.resolver.land(&ticket, Ok(()), now);
+        }
+        assert!(app.resolver.due(now).is_empty());
         press(&mut app, KeyCode::Char('p'), KeyModifiers::NONE, &mut out);
 
         crate::git_sync::land(
@@ -24625,10 +24395,21 @@ mod tests {
             app.flash.as_deref(),
             Some("⌂ main pulled 2 commits from origin/main")
         );
-        assert!(app.git_changes_stale(), "the pulled checkout is read again");
-        let (count, at) = app.worktree_changes[&linked];
-        assert_eq!(count, Some(1), "its sibling's count stays on screen");
-        assert!(at < old, "and it goes to the front of the sweep");
+        let mut again: Vec<QueryKey> = app.resolver.due(now).into_iter().map(|t| t.key).collect();
+        again.sort();
+        assert_eq!(
+            again,
+            vec![
+                QueryKey::GitStatus(root),
+                QueryKey::GitStatus(linked.clone())
+            ],
+            "the project's checkouts are read again"
+        );
+        assert_eq!(
+            app.worktree_changes(&linked),
+            Some(1),
+            "its sibling's count stays on screen meanwhile"
+        );
     }
 
     /// Every band's menu offers **Pull** and **Push**, the root's and a
@@ -24749,7 +24530,8 @@ mod tests {
         shift_p(&mut app, &mut out);
         assert_eq!(app.git_sync.inflight.get(&root), Some(&Op::PUSH));
 
-        app.pr_refresh_requested = false;
+        settle_sync(&mut app, Duration::ZERO);
+        let list = crate::sync::QueryKey::OpenPrs(app.selected_project().unwrap().id.clone());
         app.worktree_changes
             .insert(root.clone(), (Some(3), std::time::Instant::now()));
         crate::git_sync::land(
@@ -24769,7 +24551,11 @@ mod tests {
             app.flash.as_deref(),
             Some("⌂ main pushed 2 commits to origin/main · 3 uncommitted files not pushed")
         );
-        assert!(app.pr_refresh_requested);
+        assert_eq!(
+            fetched_now(&mut app),
+            vec![list],
+            "a push can open, move or close the branch's pull request"
+        );
     }
 
     /// The NEW AGENT PICKER for the selected checkout — what the card
@@ -25031,44 +24817,53 @@ mod tests {
         assert!(!app.git_changes_stale());
     }
 
-    /// The two readers feed the same counts, so the one asked later wins
-    /// whichever lands last: a sweep read from before the selected
-    /// checkout's own read is dropped when it lands after it.
+    /// One read lands in both places a checkout shows: its band, and —
+    /// while it is the selected one — the badge. Another checkout's read
+    /// feeds its band and leaves the badge to the selected one's own.
     #[test]
-    fn an_older_sweep_read_is_dropped_after_a_newer_one() {
+    fn a_read_feeds_its_band_and_the_badge_only_while_selected() {
+        use crate::checkout_read::Read;
         use crate::git_diff::LineChanges;
         let mut app = App::new();
-        seed_tree(&mut app);
+        seed_tree(&mut app); // w1 selected
         let w1 = WorktreeId("w1".into());
-        let now = std::time::Instant::now();
-        let swept = app.sweep_reads.begin(w1.clone(), now).expect("idle");
-        let read = app.git_reads.begin(w1.clone(), now).expect("idle");
-        assert!(swept.at < read.at);
+        let w2 = WorktreeId("w2".into());
         let lines = LineChanges {
             added: 5,
             removed: 1,
         };
-        land_git_read(&mut app, &read, Some(Vec::new()), Some(lines), Some((2, 0)));
-        land_sweep_read(
-            &mut app,
-            &swept,
-            Some(7),
-            Some(LineChanges {
-                added: 9,
-                removed: 9,
-            }),
-            Some((0, 4)),
-        );
-        assert_eq!(app.worktree_ahead.get(&w1), Some(&(2, 0)));
+        let read = |n: usize, ahead| Read {
+            files: Some(vec![
+                crate::git_diff::DiffFile {
+                    path: "a".into(),
+                    orig_path: None,
+                    xy: [' ', 'M'],
+                    lines: None,
+                };
+                n
+            ]),
+            lines: Some(lines),
+            ahead: Some(ahead),
+        };
+        land_git_status(&mut app, w2.clone(), read(7, (0, 4)));
+        assert_eq!(app.worktree_changes(&w2), Some(7));
+        assert_eq!(app.worktree_ahead.get(&w2), Some(&(0, 4)));
+        assert_eq!(app.selected_worktree_changes(), None, "not the badge's");
+        land_git_status(&mut app, w1.clone(), read(2, (2, 0)));
+        assert_eq!(app.selected_worktree_changes(), Some(2));
         assert_eq!(app.worktree_lines(&w1), Some(lines));
-        assert_eq!(app.worktree_changes[&w1].0, Some(0));
-        assert!(app.sweep_reads.is_empty(), "its slot is free all the same");
+        assert_eq!(
+            app.changed_files.as_ref().map(|(w, f)| (w, f.len())),
+            Some((&w1, 2)),
+            "the list `g` opens on"
+        );
     }
 
     /// A read git couldn't answer is no news: the band keeps its `⇡⇣`,
     /// its line counts and its changed-file count.
     #[test]
     fn a_failed_read_keeps_the_last_counts() {
+        use crate::checkout_read::Read;
         use crate::git_diff::LineChanges;
         let mut app = App::new();
         seed_tree(&mut app);
@@ -25077,32 +24872,31 @@ mod tests {
             added: 3,
             removed: 2,
         };
-        let read = app
-            .git_reads
-            .begin(w1.clone(), std::time::Instant::now())
-            .expect("idle");
-        land_git_read(&mut app, &read, Some(Vec::new()), Some(lines), Some((4, 1)));
-        let read = app
-            .git_reads
-            .begin(w1.clone(), std::time::Instant::now())
-            .expect("idle");
-        land_git_read(&mut app, &read, None, None, None);
+        let read = Read {
+            files: Some(Vec::new()),
+            lines: Some(lines),
+            ahead: Some((4, 1)),
+        };
+        land_git_status(&mut app, w1.clone(), read);
+        land_git_status(&mut app, w1.clone(), Read::default());
         assert_eq!(app.worktree_ahead.get(&w1), Some(&(4, 1)));
         assert_eq!(app.worktree_lines(&w1), Some(lines));
         assert_eq!(app.selected_worktree_changes(), Some(0));
     }
 
     /// A checkout switched to another branch while a read of it ran: the
-    /// read answers for the old branch, and is dropped when it lands.
+    /// read answers for the old branch, so it is dropped when it lands,
+    /// and a read of the new branch goes at once.
     #[test]
     fn a_read_from_before_a_branch_switch_is_dropped() {
+        use crate::sync::{QueryKey, Seen};
         let mut app = App::new();
         seed_tree(&mut app);
         let w1 = WorktreeId("w1".into());
-        let read = app
-            .git_reads
-            .begin(w1.clone(), std::time::Instant::now())
-            .expect("idle");
+        let key = QueryKey::GitStatus(w1.clone());
+        let now = std::time::Instant::now();
+        app.resolver.visit(vec![(key.clone(), Seen::Focused)], now);
+        let ticket = app.resolver.due(now).pop().expect("read on selection");
         let mut switched = app.tree.worktrees[0].clone();
         switched.branch = "feat".into();
         hse(
@@ -25111,9 +24905,11 @@ mod tests {
                 entity: orion_core::Entity::Worktree(switched),
             },
         );
-        assert!(!app.git_reads.in_flight(&w1), "cancelled");
-        land_git_read(&mut app, &read, None, None, Some((5, 0)));
-        assert_eq!(app.worktree_ahead.get(&w1), None, "the old branch's ⇡5");
+        assert!(!app.resolver.in_flight(&key), "cancelled");
+        assert!(app.resolver.land(&ticket, Ok(()), now).is_none(), "dropped");
+        let again = app.resolver.due(now);
+        assert_eq!(again.len(), 1, "the new branch read now");
+        assert_eq!(again[0].key, key);
     }
 
     #[test]
@@ -25164,20 +24960,43 @@ mod tests {
         );
 
         // Another checkout's count stays on that checkout's band.
-        land_swept_changes(&mut app, WorktreeId("w2".into()), Some(5));
+        note_worktree_changes(&mut app, WorktreeId("w2".into()), Some(5));
         terminal.draw(|f| ui::draw(f, &mut app)).unwrap();
         assert!(!rule(&terminal).contains("*5"), "{}", rule(&terminal));
     }
 
-    /// The cards' sweep reads the grid's other checkouts, never the
-    /// selected one (its own reads keep it fresh): one never read first,
-    /// then whichever was read longest ago.
+    /// THE GIT WATCHER follows the selection once it rests: walking past
+    /// a checkout starts nothing, and one whose watch can't start is left
+    /// to the safety net until it is selected anew.
     #[test]
-    fn the_change_sweep_takes_the_stalest_unselected_checkout() {
-        use orion_core::{Agent, Entity, Worktree};
+    fn the_git_watcher_follows_a_selection_that_rests() {
+        use crate::git_watch::{due, follow, on_deadline, FOLLOW_REST};
         let mut app = App::new();
-        seed_tree(&mut app); // w1 selected, its agent a1 on the grid
-        let one = app.tree.agents[0].clone();
+        seed_tree(&mut app); // w1, at a path not on disk
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.git_watch.tx = Some(tx);
+        let t0 = std::time::Instant::now();
+        follow(&mut app, t0);
+        assert_eq!(due(&app), Some(t0 + FOLLOW_REST));
+        follow(&mut app, t0 + FOLLOW_REST / 2);
+        assert_eq!(due(&app), Some(t0 + FOLLOW_REST), "not pushed back");
+        on_deadline(&mut app, t0 + FOLLOW_REST);
+        assert!(app.git_watch.current.is_none());
+        assert_eq!(app.git_watch.failed, Some(WorktreeId("w1".into())));
+        follow(&mut app, t0 + FOLLOW_REST * 2);
+        assert_eq!(due(&app), None, "not tried again");
+    }
+
+    /// What the grid shows of local git: the selected checkout as the
+    /// thing you are in (read on every selection, a safety-net beat), every
+    /// other band as only drawn (a minute's freshness) — and no band at
+    /// all once the grid is collapsed.
+    #[test]
+    fn the_grid_shows_every_bands_git_status() {
+        use crate::sync::{QueryKey, Seen};
+        use orion_core::{Entity, Worktree};
+        let mut app = App::new();
+        seed_tree(&mut app); // w1 selected
         for i in 2..=3 {
             hse(
                 &mut app,
@@ -25192,34 +25011,29 @@ mod tests {
                     }),
                 },
             );
-            hse(
-                &mut app,
-                ServerEvent::EntityUpserted {
-                    entity: Entity::Agent(Agent {
-                        id: AgentId(format!("a{i}")),
-                        worktree_id: WorktreeId(format!("w{i}")),
-                        name: format!("agent-{i}"),
-                        sort_order: i,
-                        ..one.clone()
-                    }),
-                },
-            );
         }
-        let target = |app: &App| changes_sweep_target(app).map(|(id, _)| id.0);
-        let first = target(&app).expect("a checkout to sweep");
-        assert_ne!(first, "w1", "never the selected checkout");
-        land_swept_changes(&mut app, WorktreeId(first.clone()), Some(1));
-        let second = target(&app).expect("the other one");
-        assert!(
-            second != first && second != "w1",
-            "the never-read one comes next: {second}"
-        );
-        land_swept_changes(&mut app, WorktreeId(second), Some(0));
+        let git = |app: &App| -> Vec<(String, Seen)> {
+            let mut seen: Vec<(String, Seen)> = crate::sync::local::visible(app)
+                .into_iter()
+                .filter_map(|(key, how)| match key {
+                    QueryKey::GitStatus(w) => Some((w.0, how)),
+                    _ => None,
+                })
+                .collect();
+            seen.sort();
+            seen
+        };
+        assert!(app.launcher_grid());
         assert_eq!(
-            target(&app).as_deref(),
-            Some(first.as_str()),
-            "then the stalest"
+            git(&app),
+            vec![
+                ("w1".into(), Seen::Focused),
+                ("w2".into(), Seen::Shown),
+                ("w3".into(), Seen::Shown),
+            ]
         );
+        app.collapsed = true;
+        assert_eq!(git(&app), vec![("w1".into(), Seen::Focused)]);
     }
 
     #[test]
@@ -32797,8 +32611,6 @@ mod tests {
                     meta: Default::default(),
                 }],
                 at: now,
-                due: now + OPEN_PRS_REFRESH,
-                step: OPEN_PRS_REFRESH,
             },
         );
         let mut out = Vec::new();
@@ -33069,8 +32881,6 @@ mod tests {
                     merged: Vec::new(),
                     list,
                     at: now,
-                    due: now + OPEN_PRS_REFRESH,
-                    step: OPEN_PRS_REFRESH,
                 },
             );
             let url = "https://github.com/o/r/pull/129";
@@ -38861,7 +38671,6 @@ mod tests {
         note_worktree_lines(&mut app, &w1, Some(lines));
         apply_config(&mut app, &crate::config::Config::default());
         assert_eq!(app.worktree_lines(&w1), Some(lines), "no setting drops it");
-        assert_eq!(line_changes_of(std::path::Path::new("."), None), None);
     }
 
     /// Where it draws: the footer's padding row, far left — the one blank

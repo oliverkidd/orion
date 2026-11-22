@@ -185,8 +185,7 @@ pub(super) fn land_submitted(
         return;
     }
     app.flash = Some(Flash::done(verdict.done(number)));
-    app.pr_detail_inflight.want_fresh(&url);
-    app.pr_detail_stale.insert(url.clone());
+    app.pr_detail_behind(&url);
     if !on_screen {
         return;
     }

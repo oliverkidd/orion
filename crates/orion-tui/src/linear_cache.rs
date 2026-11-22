@@ -20,8 +20,8 @@
 //! ```
 //!
 //! The document is rewritten whole, atomically, when a list or a read of
-//! comments landed since the last write — at most once per GIT POLL, and
-//! once more on quit. Nothing here touches the disk unless an [`App`]
+//! comments landed since the last write — at most once per cache flush
+//! (`chores::Chore::Flush`), and once more on quit. Nothing here touches the disk unless an [`App`]
 //! carries a [`LinearCache`]: the main loop installs one at startup, the
 //! unit tests never do, so no test can read or clobber the real cache.
 

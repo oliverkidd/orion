@@ -883,13 +883,6 @@ impl LinearList {
 /// A finished Linear call, back on the loop.
 #[derive(Debug, Clone)]
 pub enum LinearAnswer {
-    /// The project's lists (the ticket's key), asked from the checkout
-    /// `dir` when the ticket says.
-    List {
-        ticket: crate::fetch::Ticket<ProjectId>,
-        dir: PathBuf,
-        list: Result<LinearList, String>,
-    },
     /// The edit numbered `seq` — a `⌘S`, `⌘P` or `⌘I` — set `change` on
     /// an issue, or why not.
     Edited {
@@ -910,7 +903,8 @@ pub enum LinearAnswer {
     /// drop, by issue identifier and why, when one was.
     Detached {
         project: ProjectId,
-        dir: PathBuf,
+        /// The issues whose attachments went, by identifier.
+        issues: Vec<String>,
         refused: Option<(String, String)>,
     },
     /// TAKING ISSUES ON ([`start_issues`]): whether any issue moved, and
@@ -918,9 +912,17 @@ pub enum LinearAnswer {
     /// was.
     Started {
         project: ProjectId,
-        dir: PathBuf,
+        /// The issues asked to start, by id.
+        issues: Vec<String>,
         moved: bool,
         refused: Option<(String, String)>,
+    },
+    /// Issues of `project` read again after a change to them, asked at
+    /// `asked` ([`request_issues`]).
+    Reread {
+        project: ProjectId,
+        asked: std::time::Instant,
+        issues: Result<Vec<LinearIssue>, String>,
     },
     /// A project's **Linear key** tested: who the key in `dir` belongs to.
     Viewer {
@@ -931,7 +933,6 @@ pub enum LinearAnswer {
     /// title to put back.
     Created {
         project: ProjectId,
-        dir: PathBuf,
         team: LinearTeam,
         title: String,
         result: Result<Box<LinearIssue>, String>,
@@ -1906,9 +1907,10 @@ pub(crate) fn copy_worktree_issues(app: &mut App) {
     else {
         return;
     };
+    let _ = dir;
     app.linear_copy = Some(wt.id.clone());
     app.flash = Some(crate::flash::Flash::working("reading Linear…"));
-    request_list(app, wt.project_id.clone(), dir, false);
+    request_list(app, wt.project_id.clone(), false);
 }
 
 /// The issues `wt` works on, to the clipboard — or a flash saying it has
@@ -2023,7 +2025,8 @@ fn open_on(app: &mut App, project: ProjectId, name: String, dir: PathBuf, mode: 
     let mut view = LinearView::new(project.clone(), name, dir.clone(), mode);
     view.selected = clamp_selection(0, list_len(app, &project));
     app.overlay = Some(Overlay::Linear(view));
-    request_list(app, project, dir, false);
+    // The lists come on screen: the RESOLVER asks for them when they are
+    // older than a minute (`sync::linear::visible`), and not otherwise.
     schedule_comments(app);
     app.dirty = true;
 }
@@ -2039,81 +2042,135 @@ fn list_len(app: &App, project: &ProjectId) -> usize {
     app.linear.get(project).map_or(0, |l| l.list.len())
 }
 
-/// Ask Linear for `project`'s lists, off the loop — one ask at a time per
-/// project. `fresh` is a refresh the user asked for (`⌘R`), or one an
-/// edit needs: while a list is out, it is owed and asked as soon as that
-/// one lands, never dropped.
-pub(crate) fn request_list(app: &mut App, project: ProjectId, dir: PathBuf, fresh: bool) {
-    // Asked for by name, a refusal is said, even of a prefetch's ask.
-    app.linear_prefetch.quiet.remove(&project);
-    let Some(tx) = app.linear_tx.clone() else {
-        return;
-    };
-    let now = crate::fetch::now();
-    let ticket = if fresh {
-        app.linear_flights.begin_fresh(project.clone(), now)
+/// Ask Linear for `project`'s lists again, through the RESOLVER
+/// (`QueryKey::LinearView`) — one ask at a time per project. `fresh` is a
+/// refresh the user asked for (`⌘R`): while a list is out it is owed and
+/// asked as soon as that one lands, and with the view shut it waits,
+/// stale, for the view's next opening. Otherwise it is one look, asked
+/// only when the lists are older than a minute.
+pub(crate) fn request_list(app: &mut App, project: ProjectId, fresh: bool) {
+    let key = crate::sync::QueryKey::LinearView(project);
+    if fresh {
+        app.resolver.refresh(&key);
     } else {
-        app.linear_flights.begin(project.clone(), now)
-    };
-    let Some(ticket) = ticket else {
+        app.resolver.ask(key, std::time::Instant::now());
+    }
+    app.dirty = true;
+}
+
+/// Read `issues` of `project` again — by id or identifier — after a change
+/// to them: a start, a dropped attachment, an edit Linear refused. One
+/// small ask for the rows that changed rather than every list again
+/// ([`land_reread`]).
+pub(crate) fn request_issues(app: &mut App, project: ProjectId, issues: Vec<String>) {
+    if issues.is_empty() {
+        return;
+    }
+    let (Some(tx), Some(dir)) = (app.linear_tx.clone(), project_dir(app, &project)) else {
         return;
     };
-    app.linear_prefetch.asked.insert(project.clone(), now);
-    app.linear_failed.remove(&project);
-    app.dirty = true;
-    let email = crate::config::Config::load()
-        .linear_assignee_email
-        .trim()
-        .to_string();
+    let asked = crate::fetch::now();
     tokio::spawn(async move {
-        let list = fetch_lists(&dir, &email).await;
-        let _ = tx.send(LinearAnswer::List { ticket, dir, list });
+        let issues = fetch_issues(&dir, &issues).await;
+        let _ = tx.send(LinearAnswer::Reread {
+            project,
+            asked,
+            issues,
+        });
     });
 }
 
-/// The LIST PREFETCH: each project's lists asked as it is selected, so
-/// `⌘L` — and the `⌘K` palette's issue rows — have them before they are
-/// asked for (`linear_cache` keeps them across launches meanwhile).
-#[derive(Debug, Default)]
-pub struct Prefetch {
-    /// The project selected at the last look: a prefetch asks on arrival.
-    seen: Option<ProjectId>,
-    /// When each project's lists were last asked, by any ask.
-    asked: HashMap<ProjectId, std::time::Instant>,
-    /// The projects whose list out now a prefetch asked for: a refusal of
-    /// one says nothing — the LINEAR VIEW says it when it opens.
-    quiet: std::collections::HashSet<ProjectId>,
-}
-
-/// How long a project's lists stand before arriving at it asks again.
-const PREFETCH_FRESH: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-
-/// On the GIT POLL: arriving at a project asks for its lists, unless they
-/// were asked within [`PREFETCH_FRESH`] or it has no key to ask with —
-/// quietly either way.
-pub(crate) fn prefetch(app: &mut App) {
-    let Some((id, dir)) = app
-        .selected_project()
-        .map(|p| (p.id.clone(), p.repo_path.clone()))
-    else {
+/// Issues read again landed: each row put back as Linear has it, its
+/// comments kept and the edits asked since laid over it. A row not in the
+/// list is left out — the next list has it where it belongs. A failure
+/// leaves the rows as they are, and the lists stale for the view's next
+/// opening.
+fn land_reread(
+    app: &mut App,
+    project: ProjectId,
+    asked: std::time::Instant,
+    issues: Result<Vec<LinearIssue>, String>,
+) {
+    let mut issues = match issues {
+        Ok(issues) => issues,
+        Err(why) => {
+            tracing::debug!("linear: reading issues again: {why}");
+            app.resolver
+                .invalidate(&crate::sync::QueryKey::LinearView(project));
+            return;
+        }
+    };
+    let me = me_id(app, &project);
+    for issue in &mut issues {
+        issue.mine = !issue.assignee_id.is_empty() && me.as_deref() == Some(&issue.assignee_id);
+    }
+    app.linear_edits
+        .lay_over(&project, asked, &mut issues, me.as_deref());
+    let Some(list) = app.linear.get_mut(&project) else {
         return;
     };
-    let ahead = &mut app.linear_prefetch;
-    if ahead.seen.as_ref() == Some(&id) {
-        return;
+    let old = list.list.clone();
+    for mut issue in issues {
+        let Some(row) = list.list.iter_mut().find(|i| i.id == issue.id) else {
+            continue;
+        };
+        if issue.comments.is_empty() {
+            issue.comments = std::mem::take(&mut row.comments);
+        }
+        *row = issue;
     }
-    ahead.seen = Some(id.clone());
-    let fresh = ahead
-        .asked
-        .get(&id)
-        .is_some_and(|at| at.elapsed() < PREFETCH_FRESH);
-    // One already out is someone else's, to say as it likes.
-    let out = app.linear_flights.in_flight(&id);
-    if fresh || out || app.linear_tx.is_none() || key_source(&dir).is_none() {
-        return;
+    app.linear_cache_dirty = true;
+    follow_cursor(app, &project, &old);
+    app.dirty = true;
+}
+
+/// The issues `refs` names (ids or identifiers, which Linear's `issue`
+/// takes either of), as the lists read them — one aliased ask.
+async fn fetch_issues(dir: &Path, refs: &[String]) -> Result<Vec<LinearIssue>, String> {
+    let key = read_linear_key(dir).ok_or_else(|| NO_KEY.to_string())?;
+    let (query, variables) = issues_by_ref_query(refs);
+    let json = graphql(&key, &query, variables).await?;
+    if let Some(err) = graphql_error(&json) {
+        return Err(err);
     }
-    request_list(app, id.clone(), dir, false);
-    app.linear_prefetch.quiet.insert(id);
+    Ok((0..refs.len())
+        .filter_map(|i| json.pointer(&format!("/data/i{i}")).and_then(issue_from))
+        .collect())
+}
+
+/// [`fetch_issues`]' query: `i0: issue(id: $i0) { … }` and on.
+fn issues_by_ref_query(refs: &[String]) -> (String, serde_json::Value) {
+    let params: Vec<String> = (0..refs.len()).map(|i| format!("$i{i}: String!")).collect();
+    let parts: Vec<String> = (0..refs.len())
+        .map(|i| format!("i{i}: issue(id: $i{i}) {{ {ISSUE_FIELDS} }}"))
+        .collect();
+    let variables: serde_json::Map<String, serde_json::Value> = refs
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (format!("i{i}"), serde_json::json!(r)))
+        .collect();
+    (
+        format!("query({}) {{ {} }}", params.join(", "), parts.join(" ")),
+        serde_json::Value::Object(variables),
+    )
+}
+
+/// The LINEAR VIEW over `overlay`, wherever it stands — what the RESOLVER
+/// counts as the view being on screen ([`crate::sync::linear::visible`]).
+pub(crate) fn linear_view(overlay: &Option<Overlay>) -> Option<&LinearView> {
+    use crate::app::PromptKind;
+    match overlay.as_ref()? {
+        Overlay::Linear(view) => Some(view),
+        Overlay::PullRequests(prs) => prs.pick.as_ref().map(|pick| pick.back.as_ref()),
+        Overlay::Prompt(prompt) => match &prompt.kind {
+            PromptKind::QuickPrompt(launch) => match &launch.under {
+                Some(ModalUnder::Linear(view)) => Some(view.as_ref()),
+                _ => None,
+            },
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The LINEAR VIEW over `overlay`, wherever it stands: up, under the PR
@@ -2272,15 +2329,65 @@ fn put_comments(app: &mut App, id: &str, comments: Vec<IssueComment>) {
     }
 }
 
+/// `project`'s lists landed, asked at `asked` (the RESOLVER's
+/// `LinearView`, `sync::linear::land`): kept over the last ones, with the
+/// edits made since laid over them, the cursor on the issue it was on —
+/// and a palette copy waiting on them done. A refusal keeps the lists
+/// already known, and is said only to someone looking: the view open on
+/// the project, or a copy waiting on it — never to a project walked past.
+pub(crate) fn land_list(
+    app: &mut App,
+    project: ProjectId,
+    list: Result<LinearList, String>,
+    asked: std::time::Instant,
+) {
+    // A palette copy waiting on this list ([`copy_worktree_issues`]).
+    let waiting = app
+        .linear_copy
+        .as_ref()
+        .and_then(|id| app.tree.worktrees.iter().find(|w| &w.id == id))
+        .filter(|w| w.project_id == project)
+        .cloned();
+    if waiting.is_some() {
+        app.linear_copy = None;
+    }
+    match list {
+        Ok(mut fetched) => {
+            let old = app.linear.remove(&project).unwrap_or_default();
+            keep_cut_prs(&mut fetched, &old.list);
+            keep_comments(&mut fetched, &old.list);
+            keep_teams(app, &project, &mut fetched, &old);
+            let me = fetched.me_id().map(str::to_string);
+            app.linear_edits
+                .lay_over(&project, asked, &mut fetched.list, me.as_deref());
+            app.linear_failed.remove(&project);
+            app.linear.insert(project.clone(), fetched);
+            app.linear_cache_dirty = true;
+            follow_cursor(app, &project, &old.list);
+            schedule_comments(app);
+            if let Some(wt) = waiting {
+                copy_linked(app, &wt);
+            }
+        }
+        Err(err) => {
+            app.linear_failed.insert(project.clone());
+            let looking = linear_view(&app.overlay).is_some_and(|v| v.project == project);
+            if looking || waiting.is_some() {
+                app.flash = Some(crate::flash::Flash::failed(err));
+            }
+        }
+    }
+    app.dirty = true;
+}
+
 pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
     match answer {
         LinearAnswer::Created {
             project,
-            dir,
             team,
             title,
             result,
-        } => land_created(app, project, dir, team, title, result),
+        } => land_created(app, project, team, title, result),
         LinearAnswer::Comments { ticket, result } => {
             if app.linear_comments.flights.land(&ticket).is_none() {
                 return;
@@ -2318,61 +2425,11 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
             app.linear_test = Some((dir, source, test));
             app.dirty = true;
         }
-        LinearAnswer::List { ticket, dir, list } => {
-            // A list asked again since (or never asked) answers nothing.
-            let Some(landed) = app.linear_flights.land(&ticket) else {
-                return;
-            };
-            let project = ticket.key.clone();
-            // A palette copy waiting on this list ([`copy_worktree_issues`]).
-            let waiting = app
-                .linear_copy
-                .as_ref()
-                .and_then(|id| app.tree.worktrees.iter().find(|w| &w.id == id))
-                .filter(|w| w.project_id == project)
-                .cloned();
-            if waiting.is_some() {
-                app.linear_copy = None;
-            }
-            match list {
-                Ok(mut fetched) => {
-                    let old = app.linear.remove(&project).unwrap_or_default();
-                    keep_cut_prs(&mut fetched, &old.list);
-                    keep_comments(&mut fetched, &old.list);
-                    let me = fetched.me_id().map(str::to_string);
-                    app.linear_edits.lay_over(
-                        &project,
-                        ticket.at,
-                        &mut fetched.list,
-                        me.as_deref(),
-                    );
-                    app.linear_failed.remove(&project);
-                    app.linear_prefetch.quiet.remove(&project);
-                    app.linear.insert(project.clone(), fetched);
-                    app.linear_cache_dirty = true;
-                    follow_cursor(app, &project, &old.list);
-                    schedule_comments(app);
-                    if let Some(wt) = waiting {
-                        copy_linked(app, &wt);
-                    }
-                }
-                Err(err) => {
-                    app.linear_failed.insert(project.clone());
-                    if !app.linear_prefetch.quiet.remove(&project) {
-                        app.flash = Some(crate::flash::Flash::failed(err));
-                    }
-                }
-            }
-            app.dirty = true;
-            if landed.owed {
-                request_list(app, project, dir, false);
-            }
-        }
         LinearAnswer::Attach(run) => land_attach(app, run, true),
         LinearAnswer::Attached(run) => land_attach(app, run, false),
         LinearAnswer::Detached {
             project,
-            dir,
+            issues,
             refused,
         } => {
             match refused {
@@ -2382,13 +2439,13 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
                     )))
                 }
                 // The rows still show the pull request Linear just dropped.
-                None => request_list(app, project, dir, true),
+                None => request_issues(app, project, issues),
             }
             app.dirty = true;
         }
         LinearAnswer::Started {
             project,
-            dir,
+            issues,
             moved,
             refused,
         } => {
@@ -2399,10 +2456,15 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
             }
             // The rows still show the issues where they were.
             if moved {
-                request_list(app, project, dir, true);
+                request_issues(app, project, issues);
             }
             app.dirty = true;
         }
+        LinearAnswer::Reread {
+            project,
+            asked,
+            issues,
+        } => land_reread(app, project, asked, issues),
         LinearAnswer::Edited {
             project,
             issue_id,
@@ -2449,7 +2511,6 @@ fn land_edit(
         mv.sending = None;
     }
     let newer = mv.seq != seq;
-    let dir = mv.dir.clone();
     match result {
         Ok(()) => {
             mv.confirmed = change;
@@ -2457,7 +2518,7 @@ fn land_edit(
                 mv.landed = Some(crate::fetch::now());
             }
         }
-        Err(_) if newer => request_list(app, project, dir, true),
+        Err(_) if newer => request_issues(app, project, vec![issue_id.clone()]),
         Err(_) => {
             let back = mv.confirmed.clone();
             app.linear_edits.moves.remove(&key);
@@ -2469,7 +2530,7 @@ fn land_edit(
             {
                 back.put_on(issue, me.as_deref());
             }
-            request_list(app, project, dir, true);
+            request_issues(app, project, vec![issue_id.clone()]);
         }
     }
     if newer {
@@ -2659,6 +2720,7 @@ fn start_issues(app: &mut App, launch: &QuickLaunch, issues: &[LinearIssue]) {
             (issue.id.clone(), issue.identifier.clone(), state_id, me)
         })
         .collect();
+    let ids: Vec<String> = starts.iter().map(|(id, ..)| id.clone()).collect();
     tokio::spawn(async move {
         let mut moved = false;
         let mut refused = None;
@@ -2678,7 +2740,7 @@ fn start_issues(app: &mut App, launch: &QuickLaunch, issues: &[LinearIssue]) {
         }
         let _ = tx.send(LinearAnswer::Started {
             project,
-            dir,
+            issues: ids,
             moved,
             refused,
         });
@@ -2908,14 +2970,16 @@ fn detach_stale(app: &mut App, project: &ProjectId, stale: Vec<StaleAttachment>)
     let project = project.clone();
     tokio::spawn(async move {
         let mut refused = None;
+        let mut issues = Vec::new();
         for StaleAttachment { identifier, id } in stale {
             if let Err(why) = detach_pr(&dir, &id).await {
-                refused.get_or_insert((identifier, why));
+                refused.get_or_insert((identifier.clone(), why));
             }
+            issues.push(identifier);
         }
         let _ = tx.send(LinearAnswer::Detached {
             project,
-            dir,
+            issues,
             refused,
         });
     });
@@ -3646,7 +3710,6 @@ fn file_new_issue(app: &mut App) {
         let result = create_issue(&dir, &team, &draft).await.map(Box::new);
         let _ = tx.send(LinearAnswer::Created {
             project,
-            dir,
             team,
             title,
             result,
@@ -3654,13 +3717,12 @@ fn file_new_issue(app: &mut App) {
     });
 }
 
-/// `⌘N`'s issue, filed: on the list at once — the cursor on it, while the
-/// view is still up on its project — and the lists asked again. Refused:
+/// `⌘N`'s issue, filed: on the list at once, as Linear's answer has it —
+/// the cursor on it, while the view is still up on its project. Refused:
 /// why, and the form back with its title.
 fn land_created(
     app: &mut App,
     project: ProjectId,
-    dir: PathBuf,
     team: LinearTeam,
     title: String,
     result: Result<Box<LinearIssue>, String>,
@@ -3685,10 +3747,12 @@ fn land_created(
                 view.held.clear();
                 view.selected = 0;
             }
+            // Linear's answer is the issue as it now stands: no list to
+            // read again for it.
             if let Some(list) = app.linear.get_mut(&project) {
                 list.list.insert(0, issue);
             }
-            request_list(app, project, dir, true);
+            app.linear_cache_dirty = true;
         }
         Err(why) => {
             app.flash = Some(crate::flash::Flash::failed(format!(
@@ -4113,8 +4177,12 @@ fn refresh(app: &mut App) {
         return;
     };
     view.held.clear();
-    let (project, dir) = (view.project.clone(), view.dir.clone());
-    request_list(app, project, dir, true);
+    let project = view.project.clone();
+    if let Some(tag) = crate::sync::linear::tag_of(app, &project) {
+        app.resolver
+            .refresh(&crate::sync::QueryKey::LinearTeams(tag));
+    }
+    request_list(app, project, true);
 }
 
 fn clear_query(app: &mut App) {
@@ -4504,7 +4572,9 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &LinearView, th: Theme, b
     .areas(area);
 
     let issues: Vec<LinearIssue> = rows(app, &view.project).to_vec();
-    let inflight = app.linear_flights.in_flight(&view.project);
+    let inflight = app
+        .resolver
+        .in_flight(&crate::sync::QueryKey::LinearView(view.project.clone()));
     let failed = app.linear_failed.contains(&view.project);
     let more = app
         .linear
@@ -5633,11 +5703,19 @@ pub(crate) async fn fetch_lists(dir: &Path, email: &str) -> Result<LinearList, S
     parse_lists(&json)
 }
 
-/// [`fetch_lists`]' query and its variables.
-fn lists_query(email: &str) -> (String, serde_json::Value) {
-    // `me` picks out the configured user — as an assignee, and among a
-    // team's members.
-    let (head, me, not_me, me_field, variables) = if email.is_empty() {
+/// How a query picks out the configured user — as an assignee, and among
+/// a team's members: the key's owner, or whoever `linear_assignee_email`
+/// names. `(head, me, not me, the me field, variables)`.
+fn me_filters(
+    email: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    serde_json::Value,
+) {
+    if email.is_empty() {
         (
             "query",
             "isMe: { eq: true }",
@@ -5653,7 +5731,14 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
             "me: users(first: 1, filter: { email: { eq: $email } }) { nodes { id displayName } }",
             serde_json::json!({ "email": email }),
         )
-    };
+    }
+}
+
+/// [`fetch_lists`]' query and its variables: the four lists, and nothing
+/// of the teams — they are read once a launch, on their own
+/// ([`teams_query`]).
+fn lists_query(email: &str) -> (String, serde_json::Value) {
+    let (head, me, not_me, _, variables) = me_filters(email);
     let done = done_states();
     let query = format!(
         r#"{head} {{
@@ -5675,6 +5760,19 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
             or: [{{ assignee: {{ null: true }} }}, {{ assignee: {{ {not_me} }} }}]
             {done}
           }}) {{ nodes {{ {ISSUE_FIELDS} }} }}
+        }}"#
+    );
+    (query, variables)
+}
+
+/// Who the configured user is, and their `teams`: each one's members, who
+/// `⌘I` assigns to, and its workflow states, where `⌘S` moves an issue —
+/// what changes on the order of never, so read once a launch per key (the
+/// RESOLVER's `LinearTeams`) rather than with every list.
+fn teams_query(email: &str) -> (String, serde_json::Value) {
+    let (head, me, _, me_field, variables) = me_filters(email);
+    let query = format!(
+        r#"{head} {{
           {me_field}
           teams(first: {TEAMS_LIMIT}, filter: {{ members: {{ some: {{ {me} }} }} }}) {{
             nodes {{ id key name triageEnabled members(first: {MEMBERS_LIMIT}) {{ nodes {{ id displayName }} }} {TEAM_STATES} }}
@@ -5682,6 +5780,79 @@ fn lists_query(email: &str) -> (String, serde_json::Value) {
         }}"#
     );
     (query, variables)
+}
+
+/// What [`teams_query`] reads: the parts of a [`LinearList`] that are
+/// the key's, not the project's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Teams {
+    pub states: HashMap<String, Vec<LinearState>>,
+    pub me: Option<LinearUser>,
+    pub members: HashMap<String, Vec<LinearUser>>,
+    pub teams: Vec<LinearTeam>,
+}
+
+impl Teams {
+    /// Onto `list`, over what it had.
+    fn put_on(&self, list: &mut LinearList) {
+        list.states.clone_from(&self.states);
+        list.me.clone_from(&self.me);
+        list.members.clone_from(&self.members);
+        list.teams.clone_from(&self.teams);
+    }
+}
+
+/// The teams under `key`, and who the configured user (`email`, or the
+/// key's owner) is among them.
+pub(crate) async fn fetch_teams(key: &str, email: &str) -> Result<Teams, String> {
+    let (query, variables) = teams_query(email);
+    let json = graphql(key, &query, variables).await?;
+    if let Some(err) = graphql_error(&json) {
+        return Err(err);
+    }
+    if json.pointer("/data/teams").is_none() {
+        return Err("Linear sent no teams".into());
+    }
+    Ok(Teams {
+        states: parse_states(&json),
+        me: parse_me(&json),
+        members: parse_members(&json),
+        teams: parse_teams(&json),
+    })
+}
+
+/// The teams under the Linear key tagged `tag` landed
+/// (`sync::linear::land`): kept for the lists of every project that reads
+/// that key, and put on the ones already here.
+pub(crate) fn land_teams(app: &mut App, tag: &str, teams: Teams) {
+    let projects = crate::sync::linear::projects_of(app, tag);
+    for project in projects {
+        if let Some(list) = app.linear.get_mut(&project) {
+            teams.put_on(list);
+            app.linear_cache_dirty = true;
+        }
+    }
+    app.linear_teams.insert(tag.to_string(), teams);
+    app.dirty = true;
+}
+
+/// A landing list's teams, which it no longer reads itself: this launch's
+/// read of its key's teams, else what the list it replaces had. A list
+/// that came with its own (an older answer) keeps those.
+fn keep_teams(app: &App, project: &ProjectId, fresh: &mut LinearList, old: &LinearList) {
+    if !fresh.teams.is_empty() || fresh.me.is_some() {
+        return;
+    }
+    let read = crate::sync::linear::tag_of(app, project).and_then(|tag| app.linear_teams.get(&tag));
+    match read {
+        Some(teams) => teams.put_on(fresh),
+        None => {
+            fresh.states.clone_from(&old.states);
+            fresh.me.clone_from(&old.me);
+            fresh.members.clone_from(&old.members);
+            fresh.teams.clone_from(&old.teams);
+        }
+    }
 }
 
 /// Set `change` on issue `issue_id`: its state, priority or assignee —
@@ -6229,6 +6400,11 @@ async fn curl_graphql(
     .await
     .map_err(|e| e.to_string())?
     .map_err(|why| format!("Linear request failed: {why}"))?;
+    // Said in words the gate reads as a rate limit (`sync::gate::
+    // linear_failure`), whatever the body was.
+    if response.status == 429 {
+        return Err(RATE_LIMITED.into());
+    }
     serde_json::from_slice(&response.body).map_err(|_| {
         format!(
             "Linear returned something that wasn't JSON (HTTP {})",
@@ -6463,13 +6639,23 @@ fn status_rank(issue: &LinearIssue) -> u8 {
 }
 
 pub(crate) fn graphql_error(json: &serde_json::Value) -> Option<String> {
-    json.get("errors")
+    let first = json
+        .get("errors")
         .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|err| err.get("message"))
+        .and_then(|arr| arr.first())?;
+    // A spent limit answers 200 or 400 with `RATELIMITED` as its code:
+    // said the one way, so the gate pauses Linear on it.
+    if first.pointer("/extensions/code").and_then(|c| c.as_str()) == Some("RATELIMITED") {
+        return Some(RATE_LIMITED.into());
+    }
+    first
+        .get("message")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
+
+/// What a Linear call says when Linear's rate limit is spent.
+pub(crate) const RATE_LIMITED: &str = "Linear rate limit: RATELIMITED";
 
 /// Every distinct Linear key across the projects, each with the projects
 /// that read it, in project order: `(key, projects)`. Projects that share a
@@ -6502,16 +6688,8 @@ pub fn key_source(dir: &Path) -> Option<KeySource> {
 }
 
 fn find_key(dir: &Path) -> Option<(String, KeySource)> {
-    for name in ENV_FILES {
-        let Some(path) = readable_env_file(dir, name) else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        if let Some(key) = parse_env_key(&text) {
-            return Some((key, KeySource::File(name)));
-        }
+    if let Some((key, name)) = key_in_files(dir) {
+        return Some((key, KeySource::File(name)));
     }
     std::env::var(KEY_NAME)
         .ok()
@@ -6557,6 +6735,9 @@ fn test_label(test: &LinearTest) -> String {
 /// the loop. The row says `testing…` until the answer lands
 /// ([`land_answer`]). No key is an answer at once, with no call made.
 pub(crate) fn test_connection(app: &mut App, dir: PathBuf) {
+    // A test is what follows adding or changing a key: the resolver's
+    // memo of which key each project reads looks at the env files again.
+    app.linear_keys.forget();
     let Some((key, source)) = find_key(&dir) else {
         if let Some(Overlay::Settings(view)) = &mut app.overlay {
             view.warn(format!("Linear: {NO_KEY}"));
@@ -6577,7 +6758,8 @@ pub(crate) fn test_connection(app: &mut App, dir: PathBuf) {
 }
 
 /// What a project with no key says, wherever it is asked.
-const NO_KEY: &str = "no LINEAR_API_KEY in this project's .env / .env.local (or the process env)";
+pub(crate) const NO_KEY: &str =
+    "no LINEAR_API_KEY in this project's .env / .env.local (or the process env)";
 
 async fn fetch_viewer(key: &str) -> Result<Viewer, String> {
     let json = graphql(
@@ -6651,6 +6833,49 @@ fn parse_viewer(json: &serde_json::Value) -> Result<Viewer, String> {
         name: field("name"),
         email: field("email"),
     })
+}
+
+/// The key in `dir`'s env files, and which file had it — read again only
+/// when one of the files has changed (its modified time or length) since
+/// the last read of `dir`. Every Linear read asks for its project's key,
+/// and the automations ask for every project's: two `stat`s each, not a
+/// read and a parse of every `.env` on the machine.
+fn key_in_files(dir: &Path) -> Option<(String, &'static str)> {
+    type Stamp = Vec<Option<(std::time::SystemTime, u64)>>;
+    type Read = (Stamp, Option<(String, &'static str)>);
+    static READ: std::sync::Mutex<Option<HashMap<PathBuf, Read>>> = std::sync::Mutex::new(None);
+    let stamp: Stamp = ENV_FILES
+        .iter()
+        .map(|name| {
+            let meta = std::fs::metadata(dir.join(name)).ok()?;
+            Some((meta.modified().ok()?, meta.len()))
+        })
+        .collect();
+    let mut read = READ.lock().unwrap_or_else(|e| e.into_inner());
+    let memo = read.get_or_insert_with(HashMap::new);
+    if let Some((was, found)) = memo.get(dir) {
+        if *was == stamp {
+            return found.clone();
+        }
+    }
+    let found = ENV_FILES.iter().find_map(|name| {
+        let text = std::fs::read_to_string(readable_env_file(dir, name)?).ok()?;
+        parse_env_key(&text).map(|key| (key, *name))
+    });
+    memo.insert(dir.to_path_buf(), (stamp, found.clone()));
+    found
+}
+
+/// A short, stable name for a Linear key — the first twelve hex digits of
+/// its SHA-256: what the RESOLVER's Linear keys and the intake's stamps
+/// are filed under, so the key itself is never logged, drawn or written.
+pub(crate) fn key_tag(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(key.trim().as_bytes())
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn readable_env_file(dir: &Path, name: &str) -> Option<PathBuf> {
@@ -7014,15 +7239,10 @@ pub(crate) mod tests {
                 merged: Vec::new(),
                 list: vec![open_pr(42, "Fix login"), open_pr(41, "Spike")],
                 at: now,
-                due: now + std::time::Duration::from_secs(60),
-                step: std::time::Duration::from_secs(60),
             },
         );
-        // A list "in flight" is not asked for again: opening the view
-        // stays on the loop, with no runtime under it.
-        let _ = app
-            .linear_flights
-            .begin(ProjectId("p1".into()), std::time::Instant::now());
+        // Opening the view asks for nothing itself — the RESOLVER does,
+        // and has no loop under a unit test.
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         app.linear_tx = Some(tx);
         (app, dir, rx)
@@ -8135,22 +8355,29 @@ pub(crate) mod tests {
             query.contains("creator { id displayName email }"),
             "{query}"
         );
-        assert!(query.contains("me: viewer { id displayName }"), "{query}");
+        // The teams are read on their own, once a launch: never with
+        // every list.
+        assert!(!query.contains("teams("), "{query}");
+        assert!(!query.contains("me: viewer"), "{query}");
+        assert_eq!(vars, serde_json::json!({}));
+        let (teams, _) = teams_query("");
+        assert!(teams.contains("me: viewer { id displayName }"), "{teams}");
         assert!(
-            query.contains(
+            teams.contains(
                 "teams(first: 25, filter: { members: { some: { isMe: { eq: true } } } })"
             ),
-            "{query}"
+            "{teams}"
         );
         // Each team's states once, under `teams` — never on every issue.
-        assert_eq!(query.matches(TEAM_STATES).count(), 1, "{query}");
+        assert_eq!(teams.matches(TEAM_STATES).count(), 1, "{teams}");
         assert!(ISSUE_FIELDS.contains("team { id }"), "{ISSUE_FIELDS}");
         assert!(!ISSUE_FIELDS.contains("states"), "{ISSUE_FIELDS}");
-        assert_eq!(vars, serde_json::json!({}));
         let (query, vars) = lists_query("sam@x.co");
         assert!(query.starts_with("query($email: String!)"), "{query}");
         assert!(query.contains("email: { neq: $email }"), "{query}");
         assert!(!query.contains("isMe"), "{query}");
+        assert_eq!(vars, serde_json::json!({"email": "sam@x.co"}));
+        let (query, vars) = teams_query("sam@x.co");
         assert!(
             query.contains("me: users(first: 1, filter: { email: { eq: $email } })"),
             "{query}"
@@ -8481,8 +8708,6 @@ pub(crate) mod tests {
                 merged: Vec::new(),
                 list,
                 at: now,
-                due: now,
-                step: std::time::Duration::from_secs(60),
             },
         );
     }
@@ -8766,17 +8991,19 @@ pub(crate) mod tests {
         let mut app = App::new();
         worktree_on(&mut app, 1, "fix/eng-1-login", false);
         app.linear_copy = Some(orion_core::WorktreeId("w1".into()));
-        let ticket = app
-            .linear_flights
-            .begin(ProjectId("p1".into()), crate::fetch::now())
-            .expect("no list out");
-        land_answer(
+        request_list(&mut app, ProjectId("p1".into()), false);
+        assert!(
+            app.resolver.coming(
+                &crate::sync::QueryKey::LinearView(ProjectId("p1".into())),
+                std::time::Instant::now()
+            ),
+            "asked for, with nothing on screen"
+        );
+        super::land_list(
             &mut app,
-            LinearAnswer::List {
-                ticket,
-                dir: PathBuf::from("/nonexistent"),
-                list: listed(vec![issue("1", "ENG-1", "Login")]),
-            },
+            ProjectId("p1".into()),
+            listed(vec![issue("1", "ENG-1", "Login")]),
+            crate::fetch::now(),
         );
         assert_eq!(app.linear_copy, None);
         assert_eq!(
@@ -9060,11 +9287,11 @@ pub(crate) mod tests {
         assert!(sent[1]["input"].get("stateId").is_none(), "{sent:?}");
     }
 
-    /// The teams ride the lists with their key, name and triage state —
-    /// none for a team that keeps Triage off, whatever states it has.
+    /// The teams come with their key, name and triage state — none for a
+    /// team that keeps Triage off, whatever states it has.
     #[test]
     fn the_teams_say_where_a_new_issue_goes() {
-        let (query, _) = lists_query("");
+        let (query, _) = teams_query("");
         assert!(
             query.contains("id key name triageEnabled members"),
             "{query}"
@@ -9112,8 +9339,6 @@ pub(crate) mod tests {
             list.teams = teams();
         }
         open(&mut app);
-        // The list `open` asked for is done with: a filing asks anew.
-        app.linear_flights.cancel(&project);
         press(&mut app, cmd('n'));
         let form = |app: &App| the_view(app).new_issue.clone();
         assert_eq!(form(&app).map(|f| f.team), Some(0), "ENG-1's team");
@@ -9145,8 +9370,11 @@ pub(crate) mod tests {
         assert_eq!(the_view(&app).tab, LinearTab::Others, "nobody's yet");
         assert_eq!(selected_id(&app).as_deref(), Some("RIP-431"));
         assert!(
-            app.linear_flights.in_flight(&project),
-            "the lists asked again"
+            !app.resolver.coming(
+                &crate::sync::QueryKey::LinearView(project.clone()),
+                std::time::Instant::now()
+            ),
+            "Linear's answer is the issue: no lists asked again"
         );
         while rx.try_recv().is_ok() {}
 
@@ -9223,59 +9451,166 @@ pub(crate) mod tests {
         assert!(!border.contains("⌘R"), "{border}");
     }
 
-    // ---- the prefetch ----
+    // ---- through the RESOLVER ----
+
+    /// One step of the RESOLVER's Linear half at `now`, as the event loop
+    /// runs it: what the screen shows visited, each key that is due
+    /// fetched — Linear answering from the stub — and landed. The keys it
+    /// fetched.
+    fn sync_linear(app: &mut App, now: std::time::Instant) -> Vec<crate::sync::QueryKey> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        one_thread().block_on(async {
+            app.resolver.visit(crate::sync::linear::visible(app), now);
+            let due = app.resolver.due(now);
+            for ticket in &due {
+                crate::sync::linear::spawn(app, ticket.clone(), tx.clone());
+            }
+            for _ in &due {
+                let landed = rx.recv().await.expect("an answer");
+                let crate::sync::spawn::Answer::Linear(answer) = landed.answer else {
+                    panic!("a Linear answer");
+                };
+                app.resolver.land(&landed.ticket, answer.outcome(), now);
+                let key = landed.ticket.key.clone();
+                crate::sync::linear::land(app, key, answer, landed.ticket.at);
+            }
+            due.into_iter().map(|t| t.key).collect()
+        })
+    }
+
+    /// Linear answers a lists query with no issues, and a teams query with
+    /// one team.
+    fn lists_and_teams(_: &str, query: &str) -> Result<serde_json::Value, String> {
+        Ok(if query.contains("teams(first") {
+            serde_json::json!({"data": {"me": {"id": "u1", "displayName": "Ana"},
+                "teams": {"nodes": [{"id": "t1", "key": "ENG", "name": "Eng",
+                    "members": {"nodes": [{"id": "u1", "displayName": "Ana"}]},
+                    "states": {"nodes": [{"id": "s1", "name": "Todo", "type": "unstarted", "position": 1}]}}]}}})
+        } else {
+            serde_json::json!({"data": {"mine": {"nodes": []}, "others": {"nodes": []}}})
+        })
+    }
 
     /// Arriving at a project asks for its lists, once: not again while it
-    /// stays selected. A prefetch Linear refuses says nothing — `⌘L`'s own
-    /// ask, the same refusal, does — and one that lands is written to the
-    /// disk cache on the next beat.
+    /// stays selected, nor on arriving again inside five minutes. A
+    /// refusal of that prefetch says nothing — the open view's ask, past
+    /// the failure's backoff, does.
     #[test]
     fn arriving_at_a_project_prefetches_its_lists_quietly() {
+        use crate::sync::QueryKey;
         let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
         let (mut app, _dir) = app_on(&[(".env", &line)]);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        app.linear_tx = Some(tx);
         let project = ProjectId("p1".into());
+        let lists = QueryKey::LinearView(project.clone());
+        let t0 = std::time::Instant::now();
         with_graphql_stub(
             |_, _| Err("Linear is down".into()),
             || {
-                run_linear(&mut app, &mut rx, prefetch);
+                assert_eq!(sync_linear(&mut app, t0), std::slice::from_ref(&lists));
                 assert!(app.linear_failed.contains(&project), "asked");
                 assert_eq!(app.flash, None, "a prefetch says nothing");
-                prefetch(&mut app);
                 assert!(
-                    !app.linear_flights.in_flight(&project),
+                    sync_linear(&mut app, t0 + std::time::Duration::from_secs(5)).is_empty(),
                     "staying selected asks nothing"
                 );
-                run_linear(&mut app, &mut rx, open);
+                open(&mut app);
+                let later = t0 + std::time::Duration::from_secs(31);
+                assert!(
+                    sync_linear(&mut app, later).contains(&lists),
+                    "the view asks"
+                );
                 assert_eq!(app.flash.as_deref(), Some("Linear is down"));
             },
         );
 
         let (mut app, _dir) = app_on(&[(".env", &line)]);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        app.linear_tx = Some(tx);
-        with_graphql_stub(
-            |_, _| {
-                Ok(serde_json::json!({"data": {"mine": {"nodes": []}, "others": {"nodes": []}}}))
-            },
-            || run_linear(&mut app, &mut rx, prefetch),
-        );
+        with_graphql_stub(lists_and_teams, || sync_linear(&mut app, t0));
         assert!(app.linear.contains_key(&project));
         assert!(app.linear_cache_dirty, "to disk on the next beat");
+        with_graphql_stub(lists_and_teams, || {
+            assert!(
+                sync_linear(&mut app, t0 + std::time::Duration::from_secs(4 * 60)).is_empty(),
+                "fresh for five minutes"
+            );
+        });
+    }
+
+    /// `⌘L` on lists read under a minute ago asks nothing; on older ones it
+    /// asks again. The key's teams are read once a launch, with the view
+    /// open, and put on the lists.
+    #[test]
+    fn the_view_reads_lists_a_minute_old_and_teams_once() {
+        use crate::sync::QueryKey;
+        let line = format!("LINEAR_API_KEY={FAKE_KEY}\n");
+        let (mut app, _dir) = app_on(&[(".env", &line)]);
+        let project = ProjectId("p1".into());
+        let lists = QueryKey::LinearView(project.clone());
+        let teams = QueryKey::LinearTeams(key_tag(FAKE_KEY));
+        let t0 = std::time::Instant::now();
+        with_graphql_stub(lists_and_teams, || {
+            assert_eq!(
+                sync_linear(&mut app, t0),
+                std::slice::from_ref(&lists),
+                "the prefetch"
+            );
+            open(&mut app);
+            let fetched = sync_linear(&mut app, t0 + std::time::Duration::from_secs(30));
+            assert_eq!(
+                fetched,
+                std::slice::from_ref(&teams),
+                "fresh lists stand; the teams are read"
+            );
+            let list = &app.linear[&project];
+            assert_eq!(list.teams.len(), 1, "the teams on the lists");
+            assert_eq!(list.me.as_ref().map(|m| m.name.as_str()), Some("Ana"));
+            close(&mut app);
+            let shut = t0 + std::time::Duration::from_secs(60);
+            assert!(
+                sync_linear(&mut app, shut).is_empty(),
+                "shut: the prefetch stands"
+            );
+            open(&mut app);
+            let later = t0 + std::time::Duration::from_secs(90);
+            assert_eq!(
+                sync_linear(&mut app, later),
+                std::slice::from_ref(&lists),
+                "a minute old: again"
+            );
+            assert_eq!(app.linear[&project].teams.len(), 1, "the teams kept");
+        });
     }
 
     /// A project with no key is never asked about.
     #[test]
     fn a_project_with_no_key_is_never_prefetched() {
-        let (mut app, dir) = app_on(&[]);
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.linear_tx = Some(tx);
+        let (app, dir) = app_on(&[]);
         // orion's own environment can hold a key too.
         if key_source(dir.path()).is_none() {
-            prefetch(&mut app);
-            assert!(!app.linear_flights.in_flight(&ProjectId("p1".into())));
+            assert!(crate::sync::linear::visible(&app).is_empty());
         }
+    }
+
+    /// A key's tag is short, stable and never the key.
+    #[test]
+    fn a_key_is_filed_under_a_tag_that_is_not_the_key() {
+        let tag = key_tag(FAKE_KEY);
+        assert_eq!(tag.len(), 12);
+        assert_eq!(tag, key_tag(&format!(" {FAKE_KEY}\n")), "trimmed");
+        assert!(!FAKE_KEY.contains(&tag));
+        assert_ne!(tag, key_tag("lin_api_other"));
+    }
+
+    /// A rate limit Linear names in its answer is said the one way the
+    /// gate reads as one.
+    #[test]
+    fn linears_rate_limit_is_said_the_one_way() {
+        let json = serde_json::json!({"errors": [{"message": "Rate limit exceeded",
+            "extensions": {"code": "RATELIMITED"}}]});
+        assert_eq!(graphql_error(&json).as_deref(), Some(RATE_LIMITED));
+        assert!(matches!(
+            crate::sync::gate::linear_failure(RATE_LIMITED.into(), std::time::Instant::now()),
+            crate::sync::FetchError::RateLimited { .. }
+        ));
     }
 
     // ---- comments ----
@@ -9353,7 +9688,6 @@ pub(crate) mod tests {
         press(&mut app, plain(KeyCode::Down));
         assert_eq!(resting(&app), None, "read a moment ago");
 
-        app.linear_flights.cancel(&project);
         let ticket = ask_list(&mut app);
         let fresh = vec![
             issue("1", "ENG-1", "Login"),
@@ -9494,27 +9828,19 @@ pub(crate) mod tests {
             .unwrap_or_default()
     }
 
-    /// A list for `demo`, asked at the ticket's time, landing.
+    /// A list for `demo`, asked at `asked`, landing.
     fn land_list(
         app: &mut App,
-        ticket: crate::fetch::Ticket<ProjectId>,
-        dir: &tempfile::TempDir,
+        asked: std::time::Instant,
+        _dir: &tempfile::TempDir,
         issues: Vec<LinearIssue>,
     ) {
-        land_answer(
-            app,
-            LinearAnswer::List {
-                ticket,
-                dir: dir.path().into(),
-                list: listed(issues),
-            },
-        );
+        super::land_list(app, ProjectId("p1".into()), listed(issues), asked);
     }
 
-    fn ask_list(app: &mut App) -> crate::fetch::Ticket<ProjectId> {
-        app.linear_flights
-            .begin(ProjectId("p1".into()), crate::fetch::now())
-            .expect("no list out")
+    /// When a list asked now is asked: what its landing is laid over by.
+    fn ask_list(_app: &mut App) -> std::time::Instant {
+        crate::fetch::now()
     }
 
     /// A list asked before a `⌘S` — or after it, but before Linear took
@@ -9570,7 +9896,7 @@ pub(crate) mod tests {
     }
 
     /// Linear's first answer to `issueUpdate` refuses, every later one
-    /// takes it; a list is the one issue in progress.
+    /// takes it; the issue read again is in progress.
     fn refuse_the_first_move(_: &str, query: &str) -> Result<serde_json::Value, String> {
         static MOVES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         if query.contains("issueUpdate") {
@@ -9579,10 +9905,14 @@ pub(crate) mod tests {
             }
             return Ok(serde_json::json!({"data": {"issueUpdate": {"success": true}}}));
         }
-        Ok(serde_json::json!({"data": {"mine": {"nodes": [
+        assert!(
+            query.contains("i0: issue(id: $i0)"),
+            "one issue, not the lists: {query}"
+        );
+        Ok(serde_json::json!({"data": {"i0":
             {"id": "1", "identifier": "ENG-1", "url": "https://linear.app/x/issue/ENG-1",
              "state": {"name": "In Progress", "type": "started"}}
-        ]}, "others": {"nodes": []}}}))
+        }}))
     }
 
     /// The states each `issueUpdate` sent named, in order.
@@ -9595,7 +9925,7 @@ pub(crate) mod tests {
 
     /// Two quick `⌘S` on one issue go out one after the other, the second
     /// once the first has answered. The first refused leaves the second
-    /// on the row — it is newer — and asks for a fresh list, which the
+    /// on the row — it is newer — and reads the issue again, which the
     /// second outlasts; Linear ends where the row does.
     #[test]
     fn two_quick_ctrl_s_go_out_in_order_past_a_refused_first() {
@@ -9621,20 +9951,24 @@ pub(crate) mod tests {
                 let mut landed = Vec::new();
                 for _ in 0..2 {
                     let answer = rx.recv().await.expect("an answer");
-                    landed.push(matches!(answer, LinearAnswer::List { .. }));
+                    landed.push(matches!(answer, LinearAnswer::Reread { .. }));
                     land_answer(&mut app, answer);
                 }
                 landed.sort();
                 (landed, moves_sent())
             })
         });
-        assert_eq!(landed.0, [false, true], "a fresh list and the second move");
+        assert_eq!(
+            landed.0,
+            [false, true],
+            "the issue read again and the second move"
+        );
         assert_eq!(landed.1, ["s3", "s1"], "in the order they were asked");
         assert_eq!(status_of(&app, "1"), "Todo");
     }
 
     /// A refused `⌘S` with none after it puts back the state Linear has,
-    /// and asks for a fresh list to be sure.
+    /// and reads that one issue again to be sure — not the lists.
     #[test]
     fn a_lone_refused_ctrl_s_puts_back_what_linear_has() {
         let (mut app, _dir, mut rx) = moving();
@@ -9650,12 +9984,20 @@ pub(crate) mod tests {
                     assert_eq!(status_of(&app, "1"), "Done");
                     let answer = rx.recv().await.expect("Linear's answer");
                     land_answer(&mut app, answer);
+                    assert_eq!(status_of(&app, "1"), "In Progress");
+                    assert!(app.linear_edits.moves.is_empty());
+                    let again = rx.recv().await.expect("the issue read again");
+                    assert!(matches!(again, LinearAnswer::Reread { .. }), "{again:?}");
                 });
             },
         );
-        assert_eq!(status_of(&app, "1"), "In Progress");
-        assert!(app.linear_edits.moves.is_empty());
-        assert!(app.linear_flights.in_flight(&ProjectId("p1".into())));
+        assert!(
+            !app.resolver.coming(
+                &crate::sync::QueryKey::LinearView(ProjectId("p1".into())),
+                std::time::Instant::now()
+            ),
+            "no lists asked"
+        );
     }
 
     // ---- ⌘P and ⌘I: the same edit, another property ----
@@ -9707,20 +10049,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// [`staffed`]'s own list landing again, asked at the ticket's time.
-    fn land_staffed(
-        app: &mut App,
-        ticket: crate::fetch::Ticket<ProjectId>,
-        dir: &tempfile::TempDir,
-    ) {
-        land_answer(
-            app,
-            LinearAnswer::List {
-                ticket,
-                dir: dir.path().into(),
-                list: Ok(staff(team_issues())),
-            },
-        );
+    /// [`staffed`]'s own list landing again, asked at `asked`.
+    fn land_staffed(app: &mut App, asked: std::time::Instant, _dir: &tempfile::TempDir) {
+        super::land_list(app, ProjectId("p1".into()), Ok(staff(team_issues())), asked);
     }
 
     /// The cursor on the row at `index`, on the tab that shows it — a
@@ -10161,7 +10492,6 @@ pub(crate) mod tests {
     fn an_attach_shows_at_once_and_outlasts_an_older_list() {
         let (mut app, dir, mut rx) = paired();
         let project = ProjectId("p1".into());
-        app.linear_flights.cancel(&project);
         let before = ask_list(&mut app);
         let issues = vec![issue("1", "ENG-1", "Login")];
         let sent = attach_through(&mut app, &mut rx, |app| {
@@ -10546,8 +10876,11 @@ pub(crate) mod tests {
         );
         assert!(app.flash.is_none(), "{:?}", app.flash.as_deref());
         assert!(
-            app.linear_flights.in_flight(&ProjectId("p1".into())),
-            "the list is read again"
+            !app.resolver.coming(
+                &crate::sync::QueryKey::LinearView(ProjectId("p1".into())),
+                std::time::Instant::now()
+            ),
+            "the started issues are read again, not the lists"
         );
     }
 
@@ -10586,12 +10919,12 @@ pub(crate) mod tests {
     /// A start Linear refuses is said, by issue.
     #[test]
     fn a_refused_start_says_which_issue_and_why() {
-        let (mut app, dir, _rx) = paired();
+        let (mut app, _dir, _rx) = paired();
         land_answer(
             &mut app,
             LinearAnswer::Started {
                 project: ProjectId("p1".into()),
-                dir: dir.path().into(),
+                issues: vec!["1".into()],
                 moved: false,
                 refused: Some(("ENG-1".into(), "Entity not found".into())),
             },
@@ -10751,12 +11084,12 @@ pub(crate) mod tests {
     /// An old pull request Linear would not drop is said, by issue.
     #[test]
     fn a_refused_detach_says_which_issue_and_why() {
-        let (mut app, dir, _rx) = paired();
+        let (mut app, _dir, _rx) = paired();
         land_answer(
             &mut app,
             LinearAnswer::Detached {
                 project: ProjectId("p1".into()),
-                dir: dir.path().into(),
+                issues: vec!["ENG-2".into()],
                 refused: Some(("ENG-2".into(), "Entity not found".into())),
             },
         );

@@ -135,7 +135,7 @@ pub(crate) async fn run<S: AsRef<std::ffi::OsStr>>(
 /// The DAEMON's PATH with the docker CLI's own directory in front: compose
 /// and credential helpers are found beside it, and launchd's PATH names
 /// neither.
-fn path_with(docker: &Path) -> OsString {
+pub(crate) fn path_with(docker: &Path) -> OsString {
     let mut dirs: Vec<PathBuf> = docker.parent().map(Path::to_path_buf).into_iter().collect();
     dirs.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),

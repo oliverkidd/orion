@@ -167,6 +167,9 @@ pub(crate) fn harness_label(kind: AgentKind, custom: Option<&str>) -> String {
 
 /// Open `picker` as the OVERLAY, or FLASH when no harness is enabled.
 pub(crate) fn open_kind_picker(app: &mut App, picker: KindPicker) {
+    // Its rows show what each account has left: read it, when the last
+    // reading is old. A reading that lands while it is up shows next time.
+    crate::sync::services::glance_usage(app);
     let cfg = Config::load();
     let Some(rows) = enabled_harnesses_or_flash(app, &cfg) else {
         return;

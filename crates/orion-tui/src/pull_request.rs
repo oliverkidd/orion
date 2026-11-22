@@ -23,6 +23,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::sync::FetchError;
+
 /// How long a lookup may run before we give up on it. `gh` retries and can
 /// hang on a stalled network; the row is a convenience, not worth a task
 /// that never ends.
@@ -218,8 +220,9 @@ impl Trouble {
 }
 
 /// Run `gh` with `args` (in `dir` when given) under `timeout`, yielding
-/// stdout on success. Every failure — no `gh`, bad exit, timeout — is
-/// `None`, since each is an ordinary "couldn't ask" to every caller.
+/// stdout on success. Every failure — no `gh`, bad exit, timeout, GitHub
+/// paused by a rate limit — is `None`, since each is an ordinary
+/// "couldn't ask" to every caller.
 pub(crate) async fn gh(
     dir: Option<&Path>,
     args: &[&str],
@@ -231,26 +234,19 @@ pub(crate) async fn gh(
 /// [`gh`] with the failure kept: `Err` carries what `gh` printed to stderr
 /// on a bad exit, and nothing at all when it could not be run or timed
 /// out. [`lookup`] reads it — `gh pr view` says "no pull request" and
-/// "no network" with the same exit code and only the message apart — and
-/// [`list`], to tell a query GitHub refused from one that never reached it.
+/// "no network" with the same exit code and only the message apart.
+///
+/// Every `gh` goes through THE GATE (`sync::gate::github`): while GitHub
+/// is paused by a rate limit nothing is spawned, and a failure that reads
+/// as one pauses it.
 pub(crate) async fn run_gh(
     dir: Option<&Path>,
     args: &[&str],
     timeout: std::time::Duration,
 ) -> Result<String, String> {
-    let mut cmd = tokio::process::Command::new("gh");
-    cmd.args(args).stdin(std::process::Stdio::null());
-    if let Some(dir) = dir {
-        cmd.current_dir(dir);
-    }
-    let out = match tokio::time::timeout(timeout, cmd.output()).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(_)) | Err(_) => return Err(String::new()),
-    };
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    crate::sync::gate::github(dir, args, timeout)
+        .await
+        .map_err(FetchError::into_stderr)
 }
 
 /// `v[key]` as a string, `""` when absent or not a string.
@@ -330,6 +326,23 @@ pub struct PullRequest {
 }
 
 impl PullRequest {
+    /// The checkout row an open list's `row` makes for the checkout on its
+    /// branch: what `gh pr view` there would say of it, without asking —
+    /// its number, title, draft flag and health as listed. `activity` is
+    /// what the row already knew of the conversation, which the list does
+    /// not carry.
+    pub fn listed(row: &OpenPr, activity: Vec<String>) -> PullRequest {
+        PullRequest {
+            number: row.number,
+            url: row.url.clone(),
+            title: row.title.clone(),
+            answered_state: STATE_OPEN.to_string(),
+            answered_draft: row.answered_draft,
+            answered: row.answered,
+            activity,
+        }
+    }
+
     /// The mark to store when the user opens this PR: everything orion
     /// currently knows about has been read. Empty when nobody has posted —
     /// which still beats no mark at all, since every real stamp sorts above
@@ -372,7 +385,14 @@ pub(crate) fn classify_miss(stderr: &str) -> Lookup {
 
 /// Ask `gh` for the pull request on `dir`'s current branch.
 pub async fn lookup(dir: &Path) -> Lookup {
-    let out = run_gh(
+    lookup_checked(dir).await.unwrap_or(Lookup::Unavailable)
+}
+
+/// [`lookup`] with the reason it couldn't answer kept — a rate limit above
+/// all, which the RESOLVER pauses GitHub on. `Ok` is an answer
+/// ([`Lookup::Found`] or [`Lookup::Absent`]), never `Unavailable`.
+pub async fn lookup_checked(dir: &Path) -> Result<Lookup, FetchError> {
+    let out = crate::sync::gate::github(
         Some(dir),
         &[
             "pr",
@@ -386,11 +406,15 @@ pub async fn lookup(dir: &Path) -> Lookup {
     match out {
         // Only asked once `gh` has proved it works, so a machine without
         // it never pays for the extra process.
-        Ok(out) => match parse(&out, viewer_login().await) {
+        Ok(out) => Ok(match parse(&out, viewer_login().await) {
             Some(pr) => Lookup::Found(pr),
             None => Lookup::Absent,
+        }),
+        Err(FetchError::Failed(stderr)) => match classify_miss(&stderr) {
+            Lookup::Unavailable => Err(FetchError::Failed(stderr)),
+            answer => Ok(answer),
         },
-        Err(stderr) => classify_miss(&stderr),
+        Err(e) => Err(e),
     }
 }
 
@@ -398,17 +422,42 @@ pub async fn lookup(dir: &Path) -> Lookup {
 /// your own review submissions out of the unread count: `gh` flags comments
 /// with `viewerDidAuthor`, but reviews carry nothing but an author — and
 /// replying to an inline thread on your own PR files a review.
-static VIEWER: tokio::sync::OnceCell<Option<String>> = tokio::sync::OnceCell::const_new();
+///
+/// Only an answer is kept for good. A failure — offline at launch, GitHub
+/// paused by a rate limit — used to be kept too, as "no login", for the
+/// life of the process; now it holds the next ask off for
+/// [`VIEWER_RETRY`] and no longer.
+static VIEWER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// When the last failed ask for [`VIEWER`] was made.
+static VIEWER_FAILED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// How long a failed ask for your login holds the next one off.
+const VIEWER_RETRY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 pub(crate) async fn viewer_login() -> Option<&'static str> {
-    VIEWER
-        .get_or_init(|| async {
-            let out = gh(None, &["api", "user", "--jq", ".login"], TIMEOUT).await?;
-            let login = out.trim().to_string();
-            (!login.is_empty()).then_some(login)
-        })
-        .await
-        .as_deref()
+    if let Some(login) = VIEWER.get() {
+        return Some(login.as_str());
+    }
+    let failed = *VIEWER_FAILED.lock().unwrap_or_else(|e| e.into_inner());
+    if !viewer_may_ask(failed, std::time::Instant::now()) {
+        return None;
+    }
+    let out = gh(None, &["api", "user", "--jq", ".login"], TIMEOUT).await;
+    match out.map(|o| o.trim().to_string()).filter(|l| !l.is_empty()) {
+        Some(login) => Some(VIEWER.get_or_init(|| login).as_str()),
+        None => {
+            *VIEWER_FAILED.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(std::time::Instant::now());
+            None
+        }
+    }
+}
+
+/// Whether your login may be asked for at `now`, the last failed ask at
+/// `failed`.
+fn viewer_may_ask(failed: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    failed.is_none_or(|at| now.saturating_duration_since(at) >= VIEWER_RETRY)
 }
 
 /// Parse `gh pr view --json …` output. Kept separate from the process call
@@ -659,38 +708,62 @@ pub const CLOSED_DAYS: i64 = 30;
 /// first: the `Closed` section is that first page, cut to [`CLOSED_DAYS`].
 pub const CLOSED_PAGE: usize = 50;
 
-/// The one GraphQL query [`list`] runs — `gh pr list`'s own fields, in its
-/// own newest-first order, save the checks, and what the PULL REQUESTS
-/// MODAL's rows say under their titles ([`PrMeta`]). `gh pr list --json
-/// statusCheckRollup` asks for every check context on every pull
-/// request's head commit, and on a busy repo (80 open pull requests, 30
-/// to 60 checks each) GitHub gives up on that with a 504 every time, so
-/// the list never refreshed again (#106). All the row needs is one word
-/// per pull request, and GitHub computes it: the rollup's `state` — and
-/// the `28/29` beside it is GitHub's own tally too (`*CountsByState`),
-/// one number per state, never a context listed. `viewer` names the
-/// signed-in user, whose review requests the modal sorts to the top.
+/// The three GraphQL queries a project's pull requests are asked in, each
+/// behind its own RESOLVER key (`sync::QueryKey`) and so on its own clock.
+/// They used to be one query on every beat, and its cost was what spent
+/// the hour's GitHub budget: GraphQL charges a point per hundred
+/// connection pages it might fill, and every nested connection is paged
+/// once per parent — `labels(first: 10)` under a hundred pull requests is
+/// a hundred pages. Costs below are GitHub's formula at the page sizes
+/// asked (a hundred open rows), rounded.
 ///
-/// `merged` rides along: the pull requests that landed lately, for the
-/// modal's `Merged` section ([`parse_merged`]) — a row's name, author and
-/// `mergedAt`, never its checks, so it adds next to nothing to the ask —
-/// and `closed`, the ones closed without merging, for its `Closed`
-/// section ([`parse_closed`]): the same, with `closedAt`, the base it was
-/// on and whether that base still exists, and the timeline's word on why
-/// it closed (a base deleted, or who closed it).
-const LIST_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!, $merged: Int!, $closed: Int!) { \
-    viewer { login } \
+/// [`OPEN_PRS_QUERY`] (`OpenPrs`, ~2 points): the rows and their status —
+/// what the PROJECT OPEN PRS GROUP, the checkouts' badges and AUTOFIX
+/// read. `gh pr list --json statusCheckRollup` asks for every check
+/// context on every pull request's head commit, and on a busy repo (80
+/// open pull requests, 30 to 60 checks each) GitHub gives up on that with
+/// a 504 every time, so the list never refreshed again (#106). All the
+/// row needs is one word per pull request, and GitHub computes it: the
+/// rollup's `state`. The comment and review-thread counts ride along —
+/// `totalCount` alone pages nothing — since a reviewer (Cubic above all)
+/// moves them and nothing else on the row.
+const OPEN_PRS_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!) { \
     repository(owner: $owner, name: $repo) { \
     pullRequests(states: OPEN, first: $limit, orderBy: {field: CREATED_AT, direction: DESC}) { \
     nodes { number url title isDraft headRefName isCrossRepository \
     headRepositoryOwner { login } mergeable viewerDidAuthor headRefOid \
-    createdAt reviewDecision author { login } comments { totalCount } \
+    createdAt updatedAt reviewDecision author { login } comments { totalCount } \
     reviewThreads { totalCount } \
+    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } }";
+
+/// `PrExtras` (~4 points): what only the PULL REQUESTS MODAL draws of the
+/// open rows ([`PrExtra`]) — labels, whether you are asked to review, and
+/// the `28/29` beside a row's checks, GitHub's own tally
+/// (`*CountsByState`, one number per state, never a context listed).
+/// Three connections paged under each of a hundred rows: the dearest
+/// query of the three, asked only while the modal is up. `viewer` names
+/// the signed-in user, whose review requests the modal sorts to the top.
+const PR_EXTRAS_QUERY: &str = "query($owner: String!, $repo: String!, $limit: Int!) { \
+    viewer { login } \
+    repository(owner: $owner, name: $repo) { \
+    pullRequests(states: OPEN, first: $limit, orderBy: {field: CREATED_AT, direction: DESC}) { \
+    nodes { url headRefOid \
     labels(first: 10) { nodes { name color } } \
     reviewRequests(first: 20) { nodes { requestedReviewer { ... on User { login } } } } \
-    commits(last: 1) { nodes { commit { statusCheckRollup { state \
+    commits(last: 1) { nodes { commit { statusCheckRollup { \
     contexts(first: 1) { checkRunCountsByState { state count } \
-    statusContextCountsByState { state count } } } } } } } } \
+    statusContextCountsByState { state count } } } } } } } } } }";
+
+/// `PrTails` (~2 points): the pull requests that landed lately, for the
+/// modal's `Merged` section ([`parse_merged`]) — a row's name, author and
+/// `mergedAt`, never its checks — and the ones closed without merging,
+/// for its `Closed` section ([`parse_closed`]): the same, with
+/// `closedAt`, the base it was on and whether that base still exists, and
+/// the timeline's word on why it closed (a base deleted, or who closed
+/// it). Rows that never change once they are there, so asked when the
+/// modal opens and at most every ten minutes.
+const PR_TAILS_QUERY: &str = "query($owner: String!, $repo: String!, $merged: Int!, $closed: Int!) { \
+    repository(owner: $owner, name: $repo) { \
     merged: pullRequests(states: MERGED, first: $merged, orderBy: {field: UPDATED_AT, direction: DESC}) { \
     nodes { number url title headRefName isCrossRepository \
     headRepositoryOwner { login } viewerDidAuthor headRefOid \
@@ -760,6 +833,20 @@ impl CheckTally {
     pub fn total(self) -> u32 {
         self.passed + self.failed + self.pending + self.cancelled
     }
+
+    /// The one verdict the tally folds to, as a row draws it
+    /// ([`OpenPr::listed_checks`]).
+    pub fn verdict(self) -> Checks {
+        if self.failed > 0 {
+            Checks::Failing
+        } else if self.pending > 0 {
+            Checks::Pending
+        } else if self.cancelled > 0 {
+            Checks::Cancelled
+        } else {
+            Checks::Passing
+        }
+    }
 }
 
 /// What the PULL REQUESTS MODAL's second line says about a row: who opened
@@ -771,6 +858,11 @@ pub struct PrMeta {
     pub author: String,
     /// `createdAt`, RFC 3339.
     pub created_at: String,
+    /// `updatedAt`, RFC 3339: moves on any talk — a comment, a review, a
+    /// reply in a thread — and a push, which nothing else on the row
+    /// counts all of. What the automations watching a pull request's
+    /// conversation read it again for.
+    pub updated_at: String,
     /// The signed-in user is asked to review it, by name (not by a team).
     pub review_requested: bool,
     pub review: Review,
@@ -887,20 +979,14 @@ impl OpenPr {
     /// `PrStore::observe_list_row`, which decides whether this stands.
     pub(crate) fn listed_checks(&self) -> Option<Checks> {
         let word = self.answered.checks?;
-        Some(match self.meta.checks {
-            Some(tally) if tally.failed > 0 => Checks::Failing,
-            Some(tally) if tally.pending > 0 => Checks::Pending,
-            Some(tally) if tally.cancelled > 0 => Checks::Cancelled,
-            Some(_) => Checks::Passing,
-            None => word,
-        })
+        Some(self.meta.checks.map_or(word, CheckTally::verdict))
     }
 
     /// Whether either verdict the list carries says failing or cancelled —
     /// the rollup's word or the tally — which is what [`recheck_failing`]
     /// reads again: GitHub's rollup counts a cancelled run as a failure,
     /// and a cancelled run a newer one superseded should not linger.
-    fn says_failing(&self) -> bool {
+    pub(crate) fn says_failing(&self) -> bool {
         matches!(
             self.answered.checks,
             Some(Checks::Failing | Checks::Cancelled)
@@ -986,31 +1072,58 @@ impl PrLaunch {
 ///   the rows asking for a reviewer come first.
 /// * **Closed ones fall out of it.** This is the whole mechanism for
 ///   pruning: a pull request that was merged or closed since the last call
-///   simply stops coming back, so re-asking on a beat *is* the periodic
+///   simply stops coming back, so asking again on a visit *is* the
 ///   "should this row still be here?" check. Nothing has to track closures
 ///   separately.
 ///
-/// Asked as [`LIST_QUERY`] through `gh api graphql` rather than `gh pr
-/// list`, whose checks field times out on a busy repo; `gh` still fills
+/// Asked as [`OPEN_PRS_QUERY`] through `gh api graphql` rather than `gh
+/// pr list`, whose checks field times out on a busy repo; `gh` still fills
 /// in `{owner}` and `{repo}` from the checkout, the way `gh pr list`
-/// resolves its repo.
+/// resolves its repo. The rows come back light: no labels, no review
+/// requests, no check tally ([`extras`] has those, for the modal), and no
+/// merged or closed tail ([`tails`]).
 ///
-pub async fn list(dir: &Path) -> Option<ListAnswer> {
+/// `Err` says why there is no list: GitHub refused (a rate limit among
+/// those), `gh` couldn't run, or the answer didn't read as one.
+pub async fn list(dir: &Path) -> Result<ListAnswer, FetchError> {
     let limit = format!("limit={LIST_LIMIT}");
-    let merged = format!("merged={MERGED_PAGE}");
-    let closed = format!("closed={CLOSED_PAGE}");
-    let out = repo_graphql(dir, LIST_QUERY, &[&limit, &merged, &closed], TIMEOUT).await?;
-    let mut rows = parse_list(&out)?;
+    let out = run_repo_graphql(dir, OPEN_PRS_QUERY, &[&limit], TIMEOUT).await?;
+    let mut rows = parse_list(&out)
+        .ok_or_else(|| FetchError::Failed("GitHub's answer didn't read as a list".into()))?;
     let cut = recheck_failing(dir, &mut rows).await;
-    let now = orion_core::clock::now_secs() as i64;
-    let merged = match (parse_merged(&out, now), parse_closed(&out, now)) {
-        (None, None) => None,
-        (merged, closed) => Some(merged.into_iter().chain(closed).flatten().collect()),
-    };
-    Some(ListAnswer { rows, cut, merged })
+    Ok(ListAnswer {
+        rows,
+        cut,
+        merged: None,
+    })
 }
 
-/// What [`list`] got back: the rows, and the merged tail.
+/// Ask for what the PULL REQUESTS MODAL draws of `dir`'s open rows beyond
+/// the light list ([`PR_EXTRAS_QUERY`]), by URL.
+pub async fn extras(dir: &Path) -> Result<Extras, FetchError> {
+    let limit = format!("limit={LIST_LIMIT}");
+    let out = run_repo_graphql(dir, PR_EXTRAS_QUERY, &[&limit], TIMEOUT).await?;
+    parse_extras(&out)
+        .ok_or_else(|| FetchError::Failed("GitHub's answer didn't read as a list".into()))
+}
+
+/// Ask for `dir`'s merged and closed tails ([`PR_TAILS_QUERY`]): the
+/// merged rows, the latest merge first, then the closed ones.
+pub async fn tails(dir: &Path) -> Result<Vec<OpenPr>, FetchError> {
+    let merged = format!("merged={MERGED_PAGE}");
+    let closed = format!("closed={CLOSED_PAGE}");
+    let out = run_repo_graphql(dir, PR_TAILS_QUERY, &[&merged, &closed], TIMEOUT).await?;
+    let now = orion_core::clock::now_secs() as i64;
+    match (parse_merged(&out, now), parse_closed(&out, now)) {
+        (None, None) => Err(FetchError::Failed(
+            "GitHub's answer didn't read as a list".into(),
+        )),
+        (merged, closed) => Ok(merged.into_iter().chain(closed).flatten().collect()),
+    }
+}
+
+/// What [`list`] got back: the rows — and, from an older answer that
+/// carried one, the merged tail.
 ///
 /// `cut` names, by URL, the rows whose recheck found more checks than one
 /// page holds ([`apply_recheck`]): their verdict is GitHub's rollup word
@@ -1024,8 +1137,88 @@ pub struct ListAnswer {
     /// first — the first page of them ([`MERGED_PAGE`]) — then the ones
     /// closed without merging within [`CLOSED_DAYS`], the latest close
     /// first: the tail under the open rows. `None` where the answer did
-    /// not say, and the caller keeps the last ones it had.
+    /// not say — every light list's, the tail being [`tails`]' — and the
+    /// caller keeps the last ones it had.
     pub merged: Option<Vec<OpenPr>>,
+}
+
+/// What the PULL REQUESTS MODAL alone draws of one open row, asked apart
+/// from the light list ([`extras`]): kept on the row's [`PrMeta`] once
+/// in, and across the light lists that follow ([`carry_extras`]).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrExtra {
+    /// The head commit the tally was counted on.
+    pub head_sha: String,
+    pub labels: Vec<PrLabel>,
+    pub review_requested: bool,
+    pub checks: Option<CheckTally>,
+}
+
+/// [`extras`]' answer, by pull request URL.
+pub type Extras = std::collections::HashMap<String, PrExtra>;
+
+/// Parse [`PR_EXTRAS_QUERY`]'s answer; `None` for one with no rows at all.
+pub(crate) fn parse_extras(json: &str) -> Option<Extras> {
+    let answer = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let rows = answer
+        .pointer("/data/repository/pullRequests/nodes")?
+        .as_array()?;
+    let viewer = answer
+        .pointer("/data/viewer/login")
+        .and_then(|l| l.as_str())
+        .unwrap_or_default();
+    Some(
+        rows.iter()
+            .filter_map(|v| {
+                let url = web_url(v)?;
+                let meta = meta(v, viewer);
+                let extra = PrExtra {
+                    head_sha: str_at(v, "headRefOid"),
+                    labels: meta.labels,
+                    review_requested: meta.review_requested,
+                    checks: meta.checks,
+                };
+                Some((url, extra))
+            })
+            .collect(),
+    )
+}
+
+/// Put an [`extras`] answer on the rows it names: their labels, review
+/// request and tally — the tally only where it was counted on the head the
+/// row is at now, a push since having started every check again.
+pub fn apply_extras(rows: &mut [OpenPr], extras: &Extras) {
+    for row in rows.iter_mut() {
+        let Some(extra) = extras.get(&row.url) else {
+            continue;
+        };
+        row.meta.labels = extra.labels.clone();
+        row.meta.review_requested = extra.review_requested;
+        row.meta.checks = (extra.head_sha == row.head_sha)
+            .then_some(extra.checks)
+            .flatten();
+    }
+}
+
+/// A light list's rows take what the last answer's rows had of the
+/// extras ([`PrExtra`]), which the light list does not ask: labels and
+/// review requests as they were, and the tally only while it still tells
+/// the truth — the same head, and the verdict it folds to the one the
+/// light row now says. A tally that no longer agrees is dropped, the row
+/// reading its verdict alone until the next extras land, rather than
+/// showing `26/29` beside a row that has gone green. Run after the rows
+/// are observed, so a carried tally never decides a verdict.
+pub fn carry_extras(rows: &mut [OpenPr], previous: &[OpenPr]) {
+    for row in rows.iter_mut() {
+        let Some(was) = previous.iter().find(|was| was.url == row.url) else {
+            continue;
+        };
+        row.meta.labels = was.meta.labels.clone();
+        row.meta.review_requested = was.meta.review_requested;
+        row.meta.checks = was.meta.checks.filter(|tally| {
+            was.head_sha == row.head_sha && Some(tally.verdict()) == row.answered.checks
+        });
+    }
 }
 
 /// How many failing rows one refresh reads the checks of
@@ -1145,6 +1338,67 @@ fn tally(contexts: &[serde_json::Value]) -> Option<CheckTally> {
     (tally.total() > 0).then_some(tally)
 }
 
+/// `MyPrs` (~2 points): your open pull requests across every repo, in
+/// one search — the light fields [`OPEN_PRS_QUERY`] asks of a project's
+/// rows, and the repo each is in — and, aliased beside it, the ones of
+/// yours merged since a date, for the merges AUTOFIX, the factory and the
+/// knowledge harvest act on. This is what the automations read while
+/// nobody is looking, in place of every project's list: one search page
+/// and the last commit under each of its rows.
+const MY_PRS_QUERY: &str = "query($open: String!, $merged: String!) { \
+    open: search(type: ISSUE, query: $open, first: 100) { nodes { ... on PullRequest { \
+    number url title isDraft headRefName isCrossRepository \
+    headRepositoryOwner { login } mergeable viewerDidAuthor headRefOid \
+    createdAt updatedAt reviewDecision author { login } comments { totalCount } \
+    reviewThreads { totalCount } \
+    commits(last: 1) { nodes { commit { statusCheckRollup { state } } } } } } } \
+    merged: search(type: ISSUE, query: $merged, first: 50) { nodes { ... on PullRequest { \
+    number url title headRefName isCrossRepository headRepositoryOwner { login } \
+    viewerDidAuthor headRefOid createdAt mergedAt author { login } } } } }";
+
+/// What [`my_prs`] found: your open pull requests, and the ones merged
+/// since the date it was asked from — rows as a project's list has them
+/// (a merged one with `meta.merged_at` set). Which project each is in is
+/// the caller's to work out, by its URL.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MyPrsAnswer {
+    pub open: Vec<OpenPr>,
+    pub merged: Vec<OpenPr>,
+}
+
+/// Ask GitHub for your open pull requests everywhere, and the ones merged
+/// on or after `since` (`YYYY-MM-DD`): [`MY_PRS_QUERY`], through THE
+/// GATE.
+pub async fn my_prs(since: &str) -> Result<MyPrsAnswer, FetchError> {
+    let open = "open=is:pr is:open author:@me archived:false".to_string();
+    let merged = format!("merged=is:pr author:@me is:merged merged:>={since}");
+    let query = format!("query={MY_PRS_QUERY}");
+    let args = ["api", "graphql", "-f", &open, "-f", &merged, "-f", &query];
+    let out = crate::sync::gate::github(None, &args, TIMEOUT).await?;
+    parse_my_prs(&out)
+        .ok_or_else(|| FetchError::Failed("GitHub's answer didn't read as a search".into()))
+}
+
+/// Parse [`MY_PRS_QUERY`]'s answer. Every open row is yours, whatever the
+/// node says; one with no URL a browser opens is dropped.
+pub(crate) fn parse_my_prs(json: &str) -> Option<MyPrsAnswer> {
+    let answer = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    let nodes = |path: &str| -> Option<Vec<OpenPr>> {
+        let rows = answer.pointer(path)?.as_array()?;
+        Some(rows.iter().filter_map(|v| row(v, "")).collect())
+    };
+    let mut open = nodes("/data/open/nodes")?;
+    for pr in &mut open {
+        pr.mine = true;
+    }
+    let merged = nodes("/data/merged/nodes")
+        .unwrap_or_default()
+        .into_iter()
+        .filter(OpenPr::is_merged)
+        .collect();
+    Some(MyPrsAnswer { open, merged })
+}
+
 /// One GraphQL `query` about `dir`'s repo through `gh api graphql`, its
 /// `$owner` and `$repo` filled in by `gh` from the checkout and `vars`
 /// (`name=value`) any more it takes. `None` when `gh`
@@ -1158,20 +1412,20 @@ pub(crate) async fn repo_graphql(
     run_repo_graphql(dir, query, vars, timeout).await.ok()
 }
 
-/// [`repo_graphql`] with the failure kept, as [`run_gh`] keeps it.
+/// [`repo_graphql`] with the failure kept, through THE GATE.
 async fn run_repo_graphql(
     dir: &Path,
     query: &str,
     vars: &[&str],
     timeout: std::time::Duration,
-) -> Result<String, String> {
+) -> Result<String, FetchError> {
     let query = format!("query={query}");
     let mut args = vec!["api", "graphql", "-F", "owner={owner}", "-F", "repo={repo}"];
     for var in vars {
         args.extend(["-F", var]);
     }
     args.extend(["-f", &query]);
-    run_gh(Some(dir), &args, timeout).await
+    crate::sync::gate::github(Some(dir), &args, timeout).await
 }
 
 /// The local branch a pull request's checkout is on — [`OpenPr::head`].
@@ -1204,7 +1458,8 @@ fn checkout_branch(v: &serde_json::Value) -> String {
     }
 }
 
-/// Parse [`LIST_QUERY`]'s answer — the rows under
+/// Parse [`OPEN_PRS_QUERY`]'s answer (or [`PR_EXTRAS_QUERY`]'s, whose
+/// rows carry what [`meta`] reads too) — the rows under
 /// `data.repository.pullRequests.nodes`. Kept separate from the process
 /// call so the shape it expects is testable without a GitHub account. A
 /// row whose url could never be opened is dropped rather than failing the
@@ -1221,7 +1476,7 @@ pub(crate) fn parse_list(json: &str) -> Option<Vec<OpenPr>> {
     Some(rows.iter().filter_map(|v| row(v, viewer)).collect())
 }
 
-/// One [`LIST_QUERY`] node as a row; `None` for one that could never be
+/// One list node as a row; `None` for one that could never be
 /// opened — no number, or a url that is not a web link.
 fn row(v: &serde_json::Value, viewer: &str) -> Option<OpenPr> {
     let url = web_url(v)?;
@@ -1238,7 +1493,7 @@ fn row(v: &serde_json::Value, viewer: &str) -> Option<OpenPr> {
     })
 }
 
-/// The merged tail of a [`LIST_QUERY`] answer — the rows under
+/// The merged tail of a [`PR_TAILS_QUERY`] answer — the rows under
 /// `data.repository.merged.nodes` — cut to the ones merged within
 /// [`MERGED_DAYS`] of `now` (unix seconds), the latest merge first. The
 /// query's own order is by last update, which a comment on an old pull
@@ -1261,7 +1516,7 @@ pub(crate) fn parse_merged(json: &str, now: i64) -> Option<Vec<OpenPr>> {
     Some(latest_first(rows))
 }
 
-/// The closed tail of a [`LIST_QUERY`] answer — the rows under
+/// The closed tail of a [`PR_TAILS_QUERY`] answer — the rows under
 /// `data.repository.closed.nodes` — cut to the ones closed without merging
 /// within [`CLOSED_DAYS`] of `now`, the latest close first, each saying why
 /// it closed where the timeline does ([`closed_why`]). `None` for an answer
@@ -1284,7 +1539,7 @@ pub(crate) fn parse_closed(json: &str, now: i64) -> Option<Vec<OpenPr>> {
     Some(latest_first(rows))
 }
 
-/// Why a [`LIST_QUERY`] closed node closed, as its timeline has it: its
+/// Why a [`PR_TAILS_QUERY`] closed node closed, as its timeline has it: its
 /// base deleted (GitHub closes a pull request whose base branch goes) —
 /// or, the timeline silent, a base GitHub no longer has — else who closed
 /// it. Empty when nothing says.
@@ -1326,7 +1581,7 @@ fn latest_first(mut rows: Vec<(i64, OpenPr)>) -> Vec<OpenPr> {
         .collect()
 }
 
-/// A [`LIST_QUERY`] node's [`PrMeta`], `viewer` the signed-in login (empty
+/// A list node's [`PrMeta`], `viewer` the signed-in login (empty
 /// when the answer did not say).
 fn meta(v: &serde_json::Value, viewer: &str) -> PrMeta {
     let nodes = |path: &str| {
@@ -1348,6 +1603,7 @@ fn meta(v: &serde_json::Value, viewer: &str) -> PrMeta {
             .unwrap_or_default()
             .to_string(),
         created_at: str_at(v, "createdAt"),
+        updated_at: str_at(v, "updatedAt"),
         review_requested,
         review: Review::of(&str_at(v, "reviewDecision")),
         comments: v
@@ -1399,7 +1655,7 @@ fn check_tally(contexts: &serde_json::Value) -> Option<CheckTally> {
     (tally.total() > 0).then_some(tally)
 }
 
-/// A [`LIST_QUERY`] answer as `gh api graphql` prints it, around `nodes`
+/// An [`OPEN_PRS_QUERY`] answer as `gh api graphql` prints it, around `nodes`
 /// — a JSON array of rows.
 #[cfg(test)]
 pub(crate) fn list_answer(nodes: &str) -> String {
@@ -1753,45 +2009,195 @@ pub fn rfc3339_secs(stamp: &str) -> Option<i64> {
     Some(days * 86_400 + h * 3600 + min * 60 + s - offset)
 }
 
-/// Ask `gh` for one pull request — its description and conversation, and
-/// what the PULL REQUEST PAGE's tabs list: files, commits, checks,
-/// reviews — in one `gh pr view`. `number` picks the PR, so this works
-/// from any checkout of the repo — the row the cursor is on need not be
-/// checked out anywhere.
+/// Where a pull request lives, from its URL: the host, the repo and the
+/// number — `https://github.com/o/r/pull/42`, or the same on a GitHub
+/// Enterprise host. Enough to ask GitHub about it from anywhere, with no
+/// checkout to run `gh` in: a pull request `MyPrs` found in a repo no
+/// project has is asked about the same way as one on screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrAt {
+    pub host: String,
+    pub owner: String,
+    pub repo: String,
+    pub number: u64,
+}
+
+impl PrAt {
+    /// `url`'s parts; `None` for anything but a pull request's page.
+    pub fn of(url: &str) -> Option<PrAt> {
+        let rest = url.trim().strip_prefix("https://")?;
+        let mut parts = rest.split('/');
+        let (host, owner, repo, pull, number) = (
+            parts.next()?,
+            parts.next()?,
+            parts.next()?,
+            parts.next()?,
+            parts.next()?,
+        );
+        let fine = |p: &str| !p.is_empty() && !p.starts_with('-');
+        (pull == "pull" && fine(host) && fine(owner) && fine(repo)).then_some(())?;
+        Some(PrAt {
+            host: host.to_string(),
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            number: number.parse().ok()?,
+        })
+    }
+}
+
+/// The one GraphQL query a pull request's page is asked in (`PrDetail`):
+/// its description and conversation, and what the PULL REQUEST PAGE's
+/// tabs list — files, commits with their line counts, checks, reviews and
+/// review threads. It was three asks — `gh pr view --json …` (itself a
+/// GraphQL query, and one that pages every commit's authors), a second
+/// for the commits' counts and a third for the threads — three points a
+/// page at the least. As one it is ~1–2: each connection here is paged
+/// once, but for the threads' comments (`comments(first: 100)` under a
+/// hundred threads, a hundred pages), and the commit's author is a field
+/// (`author { name user { login } }`), not the connection `gh` pages.
 ///
-/// `gh pr view` says nothing of how big each commit is, so the Commits
-/// tab's counts come from one GraphQL ask beside it ([`commit_stats`]),
-/// run at the same time and given less time ([`STATS_TIMEOUT`]): a page
-/// whose counts could not be read in time is the page without them. Its
-/// review threads are the same: a GraphQL ask of their own
-/// (`pr_review::github::read`), and a page without them when it misses.
-pub async fn detail(dir: &Path, number: u64) -> Option<PrDetail> {
-    let arg = number.to_string();
-    let args = ["pr", "view", arg.as_str(), "--json", DETAIL_FIELDS];
-    let (view, stats, threads) = tokio::join!(
-        gh(Some(dir), &args, TIMEOUT),
-        commit_stats(dir, number),
-        crate::pr_review::github::read(dir, number, STATS_TIMEOUT)
-    );
-    let mut detail = parse_detail(&view?)?;
-    if let Some(stats) = stats {
+/// The rollup of the head commit's checks is listed whole — the Checks
+/// tab names each — and folded here the way `gh pr checks` folds it
+/// ([`checks`]).
+fn pr_detail_query() -> String {
+    format!(
+        "query($owner: String!, $repo: String!, $number: Int!) {{ \
+         repository(owner: $owner, name: $repo) {{ pullRequest(number: $number) {{ \
+         number url title state isDraft mergeable author {{ login }} \
+         baseRefName headRefName headRefOid additions deletions changedFiles \
+         body createdAt reviewDecision \
+         labels(first: 20) {{ nodes {{ name color }} }} \
+         reviewRequests(first: 20) {{ nodes {{ requestedReviewer {{ \
+         ... on User {{ login }} ... on Team {{ name slug }} }} }} }} \
+         comments(last: 100) {{ nodes {{ author {{ login }} createdAt body viewerDidAuthor }} }} \
+         reviews(last: 100) {{ nodes {{ author {{ login }} submittedAt state body }} }} \
+         files(first: 100) {{ nodes {{ path additions deletions changeType }} }} \
+         commits(last: 100) {{ nodes {{ commit {{ oid messageHeadline authoredDate \
+         committedDate additions deletions changedFilesIfAvailable \
+         author {{ name user {{ login }} }} }} }} }} \
+         head: commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ state \
+         contexts(first: 100) {{ nodes {{ __typename \
+         ... on CheckRun {{ name status conclusion startedAt completedAt detailsUrl \
+         checkSuite {{ workflowRun {{ workflow {{ name }} }} }} }} \
+         ... on StatusContext {{ context state targetUrl createdAt }} }} }} }} }} }} }} \
+         reviewThreads(first: 100) {{ nodes {{ {} }} }} }} }} }}",
+        crate::pr_review::github::thread_fields()
+    )
+}
+
+/// Ask GitHub for pull request `url`'s page ([`pr_detail_query`]), from
+/// anywhere — the URL names the repo — through THE GATE. `Err` says why
+/// there is no page: a URL that names none is [`FetchError::Missing`].
+pub async fn detail(url: &str) -> Result<PrDetail, FetchError> {
+    let Some(at) = PrAt::of(url) else {
+        return Err(FetchError::Missing);
+    };
+    let query = format!("query={}", pr_detail_query());
+    let (owner, repo) = (format!("owner={}", at.owner), format!("repo={}", at.repo));
+    let number = format!("number={}", at.number);
+    let mut args = vec!["api", "graphql"];
+    if at.host != "github.com" {
+        args.extend(["--hostname", at.host.as_str()]);
+    }
+    args.extend(["-f", &owner, "-f", &repo, "-F", &number, "-f", &query]);
+    let out = crate::sync::gate::github(None, &args, TIMEOUT).await?;
+    parse_detail_graphql(&out)
+        .ok_or_else(|| FetchError::Failed("GitHub named no such pull request".into()))
+}
+
+/// [`pr_detail_query`]'s answer as a page: the pull request put in the
+/// shape `gh pr view --json` gives ([`gh_view_of`]) and read as that is,
+/// then the commits' counts and the review threads, which `gh pr view`
+/// never had.
+pub(crate) fn parse_detail_graphql(json: &str) -> Option<PrDetail> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let pr = v.pointer("/data/repository/pullRequest")?;
+    let mut detail = detail_of(&gh_view_of(pr))?;
+    if let Some(stats) = parse_commit_stats(json) {
         apply_commit_stats(&mut detail.commits, &stats);
     }
-    if let Ok(threads) = threads {
-        detail.threads = threads.threads;
-    }
+    detail.threads = arr_at_path(pr, "/reviewThreads/nodes")
+        .iter()
+        .filter_map(crate::pr_review::github::parse_thread)
+        .collect();
     Some(detail)
 }
 
-/// The GraphQL [`commit_stats`] runs: the pull request's newest hundred
-/// commits — the top of the Commits tab — each with its line counts.
-const COMMIT_STATS_QUERY: &str = "query($owner: String!, $repo: String!, $number: Int!) { \
-    repository(owner: $owner, name: $repo) { pullRequest(number: $number) { \
-    commits(last: 100) { nodes { commit { oid additions deletions changedFilesIfAvailable } } } } } }";
+/// `v` at `path` as an array, empty when absent or not one.
+fn arr_at_path<'a>(v: &'a serde_json::Value, path: &str) -> &'a [serde_json::Value] {
+    v.pointer(path)
+        .and_then(|n| n.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
 
-/// How long [`commit_stats`] may hold the page up once `gh pr view` has
-/// answered: the counts are an extra, never the reason a page is late.
-const STATS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+/// A GraphQL pull request node as `gh pr view --json` would print it: the
+/// connections flattened to lists, the commits' author as `gh`'s
+/// `authors`, the reviewers asked as `gh` names them, and the head
+/// commit's rollup as `statusCheckRollup` — each check run with the
+/// `workflowName` `gh` flattens onto it, each status with a `startedAt`.
+fn gh_view_of(pr: &serde_json::Value) -> serde_json::Value {
+    use serde_json::{json, Value};
+    let list = |path: &str| Value::Array(arr_at_path(pr, path).to_vec());
+    let commits: Vec<Value> = arr_at_path(pr, "/commits/nodes")
+        .iter()
+        .filter_map(|n| n.get("commit"))
+        .map(|c| {
+            let author = c.get("author");
+            let login = author
+                .and_then(|a| a.pointer("/user/login"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let name = author
+                .and_then(|a| a.get("name"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            json!({
+                "oid": c.get("oid"),
+                "messageHeadline": c.get("messageHeadline"),
+                "authoredDate": c.get("authoredDate"),
+                "committedDate": c.get("committedDate"),
+                "authors": [{ "login": login, "name": name }],
+            })
+        })
+        .collect();
+    let rollup: Vec<Value> =
+        arr_at_path(pr, "/head/nodes/0/commit/statusCheckRollup/contexts/nodes")
+            .iter()
+            .map(|entry| {
+                let mut entry = entry.clone();
+                if let Some(o) = entry.as_object_mut() {
+                    let workflow = workflow_name(&Value::Object(o.clone()));
+                    if !workflow.is_empty() {
+                        o.insert("workflowName".into(), Value::String(workflow));
+                    }
+                    if !o.contains_key("startedAt") {
+                        if let Some(at) = o.get("createdAt").cloned() {
+                            o.insert("startedAt".into(), at);
+                        }
+                    }
+                }
+                entry
+            })
+            .collect();
+    let requests: Vec<Value> = arr_at_path(pr, "/reviewRequests/nodes")
+        .iter()
+        .filter_map(|r| r.get("requestedReviewer").cloned())
+        .collect();
+    let mut view = pr.clone();
+    if let Some(o) = view.as_object_mut() {
+        o.insert("labels".into(), list("/labels/nodes"));
+        o.insert("comments".into(), list("/comments/nodes"));
+        o.insert("reviews".into(), list("/reviews/nodes"));
+        o.insert("files".into(), list("/files/nodes"));
+        o.insert("reviewRequests".into(), Value::Array(requests));
+        o.insert("commits".into(), Value::Array(commits));
+        o.insert("statusCheckRollup".into(), Value::Array(rollup));
+        o.remove("head");
+        o.remove("reviewThreads");
+    }
+    view
+}
 
 /// What one commit adds and removes, and how many files it touches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1801,18 +2207,7 @@ pub struct CommitStat {
     pub files: Option<u64>,
 }
 
-/// Each commit's [`CommitStat`] by sha, for pull request `number`; None
-/// when `gh` couldn't ask.
-async fn commit_stats(
-    dir: &Path,
-    number: u64,
-) -> Option<std::collections::HashMap<String, CommitStat>> {
-    let number = format!("number={number}");
-    let out = repo_graphql(dir, COMMIT_STATS_QUERY, &[&number], STATS_TIMEOUT).await?;
-    parse_commit_stats(&out)
-}
-
-/// [`COMMIT_STATS_QUERY`]'s answer, by sha.
+/// The commits' line counts in a [`pr_detail_query`] answer, by sha.
 pub(crate) fn parse_commit_stats(
     json: &str,
 ) -> Option<std::collections::HashMap<String, CommitStat>> {
@@ -1851,34 +2246,36 @@ fn apply_commit_stats(
     }
 }
 
-/// The fields [`detail`] asks `gh pr view` for.
-pub(crate) const DETAIL_FIELDS: &str = "number,url,title,state,isDraft,mergeable,\
-     statusCheckRollup,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,\
-     body,comments,reviews,files,commits,reviewDecision,reviewRequests,createdAt,labels";
-
+/// `gh pr view --json …`'s shape of a page — what [`gh_view_of`] makes
+/// of a GraphQL answer — read as a page.
+#[cfg(test)]
 fn parse_detail(json: &str) -> Option<PrDetail> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    detail_of(&v)
+}
+
+fn detail_of(v: &serde_json::Value) -> Option<PrDetail> {
     Some(PrDetail {
         number: v.get("number")?.as_u64()?,
         url: v.get("url")?.as_str()?.to_string(),
-        title: str_at(&v, "title"),
-        answered_state: state_at(&v),
-        answered_draft: bool_at(&v, "isDraft"),
-        answered: answered(&v),
+        title: str_at(v, "title"),
+        answered_state: state_at(v),
+        answered_draft: bool_at(v, "isDraft"),
+        answered: answered(v),
         author: login(v.get("author")),
-        base: str_at(&v, "baseRefName"),
-        head: str_at(&v, "headRefName"),
-        head_sha: str_at(&v, "headRefOid"),
-        additions: u64_at(&v, "additions"),
-        deletions: u64_at(&v, "deletions"),
-        changed_files: u64_at(&v, "changedFiles"),
-        body: str_at(&v, "body"),
-        comments: conversation(&v),
-        files: arr_at(&v, "files").iter().filter_map(file_from).collect(),
-        commits: commits_newest_first(&v),
-        checks: check_list(arr_at(&v, "statusCheckRollup")),
-        review_decision: str_at(&v, "reviewDecision"),
-        review_requests: arr_at(&v, "reviewRequests")
+        base: str_at(v, "baseRefName"),
+        head: str_at(v, "headRefName"),
+        head_sha: str_at(v, "headRefOid"),
+        additions: u64_at(v, "additions"),
+        deletions: u64_at(v, "deletions"),
+        changed_files: u64_at(v, "changedFiles"),
+        body: str_at(v, "body"),
+        comments: conversation(v),
+        files: arr_at(v, "files").iter().filter_map(file_from).collect(),
+        commits: commits_newest_first(v),
+        checks: check_list(arr_at(v, "statusCheckRollup")),
+        review_decision: str_at(v, "reviewDecision"),
+        review_requests: arr_at(v, "reviewRequests")
             .iter()
             .filter_map(|r| {
                 ["login", "name", "slug"]
@@ -1887,8 +2284,8 @@ fn parse_detail(json: &str) -> Option<PrDetail> {
                     .find(|name| !name.is_empty())
             })
             .collect(),
-        created_at: str_at(&v, "createdAt"),
-        labels: arr_at(&v, "labels")
+        created_at: str_at(v, "createdAt"),
+        labels: arr_at(v, "labels")
             .iter()
             .map(|l| PrLabel {
                 name: str_at(l, "name"),
@@ -2093,7 +2490,7 @@ pub(crate) async fn run_piped(
 
 /// The first non-empty line of what a program printed: the one line of a
 /// refusal worth flashing.
-fn first_line(stderr: &str) -> Option<String> {
+pub(crate) fn first_line(stderr: &str) -> Option<String> {
     stderr
         .lines()
         .map(str::trim)
@@ -2720,22 +3117,29 @@ mod tests {
     /// repo and froze the list on its last good answer (#106).
     #[test]
     fn the_list_query_asks_for_the_rollup_state_alone() {
-        assert!(LIST_QUERY.contains("statusCheckRollup { state"));
-        assert!(LIST_QUERY.contains("states: OPEN"));
-        assert!(LIST_QUERY.contains("orderBy: {field: CREATED_AT, direction: DESC}"));
-        // The checks are GitHub's tally, never the contexts themselves.
-        assert!(LIST_QUERY.contains("contexts(first: 1) { checkRunCountsByState"));
-        assert!(!LIST_QUERY.contains("nodes { ... on CheckRun"));
-        // The merged tail rides the same query, most recently touched
-        // first — its first page alone — and asks for no checks at all.
-        let (open, merged) = LIST_QUERY
+        assert!(OPEN_PRS_QUERY.contains("statusCheckRollup { state"));
+        assert!(OPEN_PRS_QUERY.contains("states: OPEN"));
+        assert!(OPEN_PRS_QUERY.contains("orderBy: {field: CREATED_AT, direction: DESC}"));
+        assert!(!OPEN_PRS_QUERY.contains("nodes { ... on CheckRun"));
+        // The light list pages nothing under its rows but their last
+        // commit: no labels, review requests, tally or tails.
+        for dear in ["labels", "reviewRequests", "contexts", "MERGED", "CLOSED"] {
+            assert!(!OPEN_PRS_QUERY.contains(dear), "{dear} is not light");
+        }
+        // The checks' tally is GitHub's, never the contexts themselves —
+        // asked by the modal's extras.
+        assert!(PR_EXTRAS_QUERY.contains("contexts(first: 1) { checkRunCountsByState"));
+        assert!(PR_EXTRAS_QUERY.contains("labels(first: 10)"));
+        assert!(PR_EXTRAS_QUERY.contains("viewer { login }"));
+        // The merged tail is its own query, most recently touched first —
+        // its first page alone — and asks for no checks at all.
+        let (_, merged) = PR_TAILS_QUERY
             .split_once("merged: pullRequests(states: MERGED, first: $merged")
             .expect("the merged tail");
-        assert!(open.contains("statusCheckRollup"));
         assert!(merged.contains("orderBy: {field: UPDATED_AT, direction: DESC}"));
         assert!(merged.contains("mergedAt"));
-        assert!(!merged.contains("statusCheckRollup"));
-        assert!(!merged.contains("pageInfo"));
+        assert!(!PR_TAILS_QUERY.contains("statusCheckRollup"));
+        assert!(!PR_TAILS_QUERY.contains("pageInfo"));
     }
 
     /// The merged tail is the week's merges, the latest first — by
@@ -2825,7 +3229,7 @@ mod tests {
         assert_eq!(parse_closed(&list_answer("[]"), now), None, "never asked");
         // The query asks for the closed tail beside the merged one, no
         // checks on it.
-        let (_, closed_q) = LIST_QUERY
+        let (_, closed_q) = PR_TAILS_QUERY
             .split_once("closed: pullRequests(states: CLOSED, first: $closed")
             .expect("the closed tail");
         assert!(closed_q.contains("closedAt baseRefName baseRef { name }"));
@@ -3351,23 +3755,195 @@ mod tests {
         );
     }
 
-    /// The one call asks for every field the tabs read.
+    /// The one query asks for every field the tabs read.
     #[test]
-    fn the_detail_call_asks_for_every_tab() {
-        let fields: Vec<&str> = DETAIL_FIELDS.split(',').map(str::trim).collect();
+    fn the_detail_query_asks_for_every_tab() {
+        let q = pr_detail_query();
         for field in [
             "body",
-            "comments",
-            "files",
-            "commits",
+            "comments(last: 100)",
+            "files(first: 100)",
+            "commits(last: 100)",
+            "changedFilesIfAvailable",
             "statusCheckRollup",
-            "reviews",
+            "reviews(last: 100)",
             "reviewDecision",
             "reviewRequests",
             "changedFiles",
+            "reviewThreads(first: 100)",
         ] {
-            assert!(fields.contains(&field), "{field} in {fields:?}");
+            assert!(q.contains(field), "{field} in the query");
         }
+        // The commit's author is a field, never `gh`'s paged `authors`.
+        assert!(!q.contains("authors("));
+    }
+
+    /// A GraphQL answer reads as the page `gh pr view` gave: the checks
+    /// folded with their workflow, the reviewers asked by login or team,
+    /// the commits newest first with their counts, and the threads.
+    #[test]
+    fn a_graphql_page_reads_as_gh_pr_view_did() {
+        let answer = r#"{"data":{"repository":{"pullRequest":{
+          "number":7,"url":"https://github.com/o/r/pull/7","title":"Fix","state":"OPEN",
+          "isDraft":false,"mergeable":"CONFLICTING","author":{"login":"sam"},
+          "baseRefName":"main","headRefName":"fix","headRefOid":"bbb","additions":3,
+          "deletions":1,"changedFiles":1,"body":"Why","createdAt":"2026-10-01T00:00:00Z",
+          "reviewDecision":"REVIEW_REQUIRED",
+          "labels":{"nodes":[{"name":"bug","color":"d73a4a"}]},
+          "reviewRequests":{"nodes":[{"requestedReviewer":{"login":"kate"}},
+            {"requestedReviewer":{"name":"Core","slug":"core"}}]},
+          "comments":{"nodes":[{"author":{"login":"kate"},"createdAt":"2026-10-02T00:00:00Z","body":"hm","viewerDidAuthor":false}]},
+          "reviews":{"nodes":[{"author":{"login":"kate"},"submittedAt":"2026-10-03T00:00:00Z","state":"APPROVED","body":""}]},
+          "files":{"nodes":[{"path":"a.rs","additions":3,"deletions":1,"changeType":"MODIFIED"}]},
+          "commits":{"nodes":[
+            {"commit":{"oid":"aaa","messageHeadline":"one","authoredDate":"2026-10-01T00:00:00Z","additions":1,"deletions":0,"changedFilesIfAvailable":1,"author":{"name":"Sam","user":{"login":"sam"}}}},
+            {"commit":{"oid":"bbb","messageHeadline":"two","authoredDate":"2026-10-02T00:00:00Z","additions":2,"deletions":1,"changedFilesIfAvailable":1,"author":{"name":"Bot","user":null}}}]},
+          "head":{"nodes":[{"commit":{"statusCheckRollup":{"state":"FAILURE","contexts":{"nodes":[
+            {"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-02T00:00:00Z","completedAt":"2026-10-02T00:05:00Z","detailsUrl":"https://ci/1","checkSuite":{"workflowRun":{"workflow":{"name":"CI"}}}},
+            {"__typename":"StatusContext","context":"deploy","state":"SUCCESS","targetUrl":"https://d/1","createdAt":"2026-10-02T00:00:00Z"}]}}}}]},
+          "reviewThreads":{"nodes":[{"id":"T1","isResolved":false,"isOutdated":false,"path":"a.rs","line":3,"startLine":null,"originalLine":3,"diffSide":"RIGHT","comments":{"nodes":[]}}]}
+        }}}}"#;
+        let d = parse_detail_graphql(answer).expect("parsed");
+        assert_eq!((d.number, d.head_sha.as_str()), (7, "bbb"));
+        assert_eq!(d.answered.conflicts, Some(true));
+        assert_eq!(d.answered.checks, Some(Checks::Failing));
+        assert_eq!(d.checks[0].workflow, "CI");
+        assert_eq!(d.checks[0].state, CheckState::Failed);
+        assert_eq!(d.checks.len(), 2);
+        assert_eq!(
+            d.review_requests,
+            vec!["kate".to_string(), "Core".to_string()]
+        );
+        assert_eq!(d.commits[0].sha, "bbb", "newest first");
+        assert_eq!(d.commits[0].author, "Bot", "no user: the name");
+        assert_eq!(d.commits[1].author, "sam");
+        assert_eq!(
+            d.commits[0].additions,
+            Some(2),
+            "counts from the same answer"
+        );
+        assert_eq!(d.comments.len(), 2, "a comment and a review");
+        assert_eq!(d.labels[0].name, "bug");
+        assert_eq!(d.files[0].path, "a.rs");
+        assert_eq!(d.threads.len(), 1);
+        assert!(parse_detail_graphql(r#"{"data":{"repository":{"pullRequest":null}}}"#).is_none());
+    }
+
+    /// The modal's extras ride on the rows: put there when they land —
+    /// the tally only for the head it was counted on — and kept across
+    /// the light lists after, the tally only while it still agrees with
+    /// the row's verdict.
+    #[test]
+    fn the_extras_land_on_the_rows_and_are_carried_while_true() {
+        let light = |checks: Checks, sha: &str| OpenPr {
+            number: 1,
+            title: "t".into(),
+            url: "https://github.com/o/r/pull/1".into(),
+            answered_draft: false,
+            answered: Answered {
+                conflicts: Some(false),
+                checks: Some(checks),
+            },
+            head: "b".into(),
+            mine: false,
+            head_sha: sha.into(),
+            meta: PrMeta::default(),
+        };
+        let tally = CheckTally {
+            passed: 3,
+            failed: 0,
+            pending: 2,
+            cancelled: 0,
+        };
+        let extras: Extras = [(
+            light(Checks::Pending, "a").url,
+            PrExtra {
+                head_sha: "a".into(),
+                labels: vec![PrLabel {
+                    name: "bug".into(),
+                    color: "d73a4a".into(),
+                }],
+                review_requested: true,
+                checks: Some(tally),
+            },
+        )]
+        .into_iter()
+        .collect();
+        let mut rows = vec![light(Checks::Pending, "a")];
+        apply_extras(&mut rows, &extras);
+        assert_eq!(rows[0].meta.checks, Some(tally));
+        assert!(rows[0].meta.review_requested);
+        let mut pushed = vec![light(Checks::Pending, "b")];
+        apply_extras(&mut pushed, &extras);
+        assert_eq!(pushed[0].meta.checks, None, "counted on another head");
+        assert_eq!(pushed[0].meta.labels.len(), 1);
+
+        let mut still = vec![light(Checks::Pending, "a")];
+        carry_extras(&mut still, &rows);
+        assert_eq!(still[0].meta.checks, Some(tally), "still running");
+        let mut green = vec![light(Checks::Passing, "a")];
+        carry_extras(&mut green, &rows);
+        assert_eq!(green[0].meta.checks, None, "gone green: the tally lied");
+        assert!(green[0].meta.review_requested, "the rest is kept");
+        assert_eq!(green[0].meta.labels, rows[0].meta.labels);
+    }
+
+    /// A failed ask for your login is tried again after a while, never
+    /// kept as the answer for the rest of the run.
+    #[test]
+    fn a_failed_login_ask_is_retried_after_a_while() {
+        let t0 = std::time::Instant::now();
+        assert!(viewer_may_ask(None, t0));
+        assert!(!viewer_may_ask(
+            Some(t0),
+            t0 + std::time::Duration::from_secs(60)
+        ));
+        assert!(viewer_may_ask(Some(t0), t0 + VIEWER_RETRY));
+    }
+
+    /// Your pull requests come back as list rows, every open one yours;
+    /// the merged alias's rows read as merged.
+    #[test]
+    fn my_pull_requests_read_as_rows() {
+        let answer = r#"{"data":{
+          "open":{"nodes":[
+            {"number":4,"url":"https://github.com/o/a/pull/4","title":"Four","isDraft":false,
+             "headRefName":"four","headRefOid":"s4","mergeable":"MERGEABLE",
+             "comments":{"totalCount":2},"reviewThreads":{"totalCount":1},
+             "commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"PENDING"}}}]}},
+            {}]},
+          "merged":{"nodes":[
+            {"number":3,"url":"https://github.com/o/b/pull/3","title":"Three",
+             "headRefName":"three","mergedAt":"2026-11-20T10:00:00Z"}]}}}"#;
+        let found = parse_my_prs(answer).expect("parsed");
+        assert_eq!(found.open.len(), 1, "a node that is no pull request drops");
+        let four = &found.open[0];
+        assert!(four.mine);
+        assert_eq!(four.answered.checks, Some(Checks::Pending));
+        assert_eq!((four.meta.comments, four.meta.threads), (2, 1));
+        assert_eq!(found.merged.len(), 1);
+        assert!(found.merged[0].is_merged());
+        assert!(parse_my_prs("{}").is_none());
+        assert!(MY_PRS_QUERY.contains("search(type: ISSUE"));
+    }
+
+    #[test]
+    fn a_pull_requests_url_says_where_to_ask() {
+        let at = PrAt::of("https://github.com/o/r/pull/42").expect("a pull request");
+        assert_eq!(
+            (
+                at.host.as_str(),
+                at.owner.as_str(),
+                at.repo.as_str(),
+                at.number
+            ),
+            ("github.com", "o", "r", 42)
+        );
+        let ghe = PrAt::of("https://git.corp.dev/team/app/pull/7").expect("enterprise");
+        assert_eq!(ghe.host, "git.corp.dev");
+        assert!(PrAt::of("https://github.com/o/r/issues/42").is_none());
+        assert!(PrAt::of("http://github.com/o/r/pull/42").is_none());
+        assert!(PrAt::of("https://github.com/-o/r/pull/42").is_none());
     }
 
     /// GitHub's stamps read as unix seconds — `Z`, fractions, offsets —

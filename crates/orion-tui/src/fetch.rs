@@ -302,6 +302,11 @@ impl<K: Eq + Hash + Clone> Flights<K> {
         self.running.len()
     }
 
+    /// Every key a fetch is running for: what a cap per kind counts.
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.running.keys()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.running.is_empty()
     }

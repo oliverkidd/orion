@@ -700,8 +700,6 @@ mod tests {
                 merged: Vec::new(),
                 list: vec![row(3, "https://github.com/o/r/pull/3"), row(7, URL)],
                 at: now,
-                due: now + std::time::Duration::from_secs(60),
-                step: std::time::Duration::from_secs(60),
             },
         );
         let cmd_u = || KeyEvent::new(KeyCode::Char('u'), crossterm::event::KeyModifiers::SUPER);

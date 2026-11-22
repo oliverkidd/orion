@@ -21,6 +21,8 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 /// A JSON object, as the settings files hold one.
 pub type Object = Map<String, Value>;
@@ -50,6 +52,113 @@ pub fn load<T: DeserializeOwned + Default>(config: &Path, local: &Path) -> Loade
         skipped,
         problems,
     }
+}
+
+/// What one settings file looked like when it was read: its modification
+/// time and length, or None for no file. Either moving is a new file.
+pub type FileStamp = Option<(SystemTime, u64)>;
+
+/// `path`'s [`FileStamp`] now.
+pub fn file_stamp(path: &Path) -> FileStamp {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// Settings read from a pair of layers, kept until either file moves: for
+/// the loops that ask every few seconds, where a fresh parse of both files
+/// each time is the cost. A hand edit, a save from Settings, another
+/// orion's save, a layer appearing or going: each moves a stamp, and the
+/// next [`Cache::get`] reads again.
+pub struct Cache<T> {
+    entry: Mutex<Option<CacheEntry<T>>>,
+}
+
+struct CacheEntry<T> {
+    paths: [PathBuf; 2],
+    stamps: [FileStamp; 2],
+    value: Arc<T>,
+}
+
+impl<T> Cache<T> {
+    pub const fn new() -> Self {
+        Self {
+            entry: Mutex::new(None),
+        }
+    }
+
+    /// What `load` read from `config` and `local` last time, while both
+    /// still carry the stamps they had then; else `load` again, kept.
+    pub fn get(&self, config: &Path, local: &Path, load: impl FnOnce() -> T) -> Arc<T> {
+        let stamps = [file_stamp(config), file_stamp(local)];
+        let mut entry = self.entry.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(kept) = entry.as_ref() {
+            if kept.paths[0] == config && kept.paths[1] == local && kept.stamps == stamps {
+                return Arc::clone(&kept.value);
+            }
+        }
+        let value = Arc::new(load());
+        *entry = Some(CacheEntry {
+            paths: [config.to_path_buf(), local.to_path_buf()],
+            stamps,
+            value: Arc::clone(&value),
+        });
+        value
+    }
+}
+
+impl<T> Default for Cache<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A span setting that doesn't read ([`parse_span`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadSpan;
+
+/// A span typed as `1h`, `90m`, `45s` or `2h30m` (units in descending
+/// order, each once), or `off`/`0`/empty for none.
+pub fn parse_span(text: &str) -> Result<Option<Duration>, BadSpan> {
+    let text = text.trim().to_ascii_lowercase();
+    if text.is_empty() || text == "off" || text == "0" {
+        return Ok(None);
+    }
+    let mut total = 0u64;
+    let mut digits = String::new();
+    let mut last_unit = u64::MAX;
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit = match c {
+            'h' => 3600,
+            'm' => 60,
+            's' => 1,
+            _ => return Err(BadSpan),
+        };
+        if digits.is_empty() || unit >= last_unit {
+            return Err(BadSpan);
+        }
+        let n: u64 = digits.parse().map_err(|_| BadSpan)?;
+        total = total.saturating_add(n.saturating_mul(unit));
+        digits.clear();
+        last_unit = unit;
+    }
+    if !digits.is_empty() || total == 0 {
+        return Err(BadSpan);
+    }
+    Ok(Some(Duration::from_secs(total)))
+}
+
+/// The span setting `key` holds as `value` ([`parse_span`]); None for
+/// `off`. A value that doesn't read is `default`, with a warning: a typo
+/// must not quietly switch the setting off, nor make it fire at once.
+pub fn span_or_default(value: &str, default: &str, key: &str) -> Option<Duration> {
+    parse_span(value).unwrap_or_else(|BadSpan| {
+        tracing::warn!(value = %value, "{key} doesn't read; using {default}");
+        parse_span(default).ok().flatten()
+    })
 }
 
 fn read_layer(path: &Path, problems: &mut Vec<String>) -> Object {
@@ -324,6 +433,65 @@ mod tests {
         let loaded = load::<Sample>(&dir.path().join("a.json"), &dir.path().join("b.json"));
         assert_eq!(loaded.value, Sample::default());
         assert!(loaded.problems.is_empty());
+    }
+
+    /// Spans read in descending units, `off` as none, and a typo as the
+    /// default rather than as off or as at once.
+    #[test]
+    fn spans_read_and_a_typo_is_the_default() {
+        let secs = |n: u64| Ok(Some(Duration::from_secs(n)));
+        assert_eq!(parse_span("90m"), secs(5400));
+        assert_eq!(parse_span(" 2h30m "), secs(9000));
+        assert_eq!(parse_span("45s"), secs(45));
+        for none in ["off", "OFF", "", "0"] {
+            assert_eq!(parse_span(none), Ok(None), "{none:?}");
+        }
+        for bad in ["soon", "1d", "m5", "30m1h", "1h1h", "12"] {
+            assert_eq!(parse_span(bad), Err(BadSpan), "{bad}");
+            assert_eq!(
+                span_or_default(bad, "1h", "k"),
+                Some(Duration::from_secs(3600)),
+                "{bad}"
+            );
+        }
+        assert_eq!(span_or_default("off", "1h", "k"), None);
+        assert_eq!(
+            span_or_default("15m", "1h", "k"),
+            Some(Duration::from_secs(900))
+        );
+    }
+
+    /// The cache hands back what it read while neither file has moved,
+    /// and reads again once either has — a save, a hand edit, the local
+    /// layer appearing — or when asked about other files.
+    #[test]
+    fn the_cache_reads_again_only_when_a_file_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let (config, local) = (
+            dir.path().join("config.json"),
+            dir.path().join("config.local.json"),
+        );
+        let before = [file_stamp(&config), file_stamp(&local)];
+        assert_eq!(before, [None, None]);
+        std::fs::write(&config, r#"{"count": 1}"#).unwrap();
+        let cache = Cache::new();
+        let loads = std::cell::Cell::new(0);
+        let get = |config: &Path| {
+            cache.get(config, &local, || {
+                loads.set(loads.get() + 1);
+                load::<Sample>(config, &local).value
+            })
+        };
+        assert_eq!(get(&config).count, 1);
+        assert_eq!(get(&config).count, 1);
+        assert_eq!(loads.get(), 1, "unchanged: read once");
+        std::fs::write(&config, r#"{"count": 22}"#).unwrap();
+        assert_eq!(get(&config).count, 22, "edited: the length moved");
+        std::fs::write(&local, "{}").unwrap();
+        get(&config);
+        assert_eq!(loads.get(), 3, "the local layer counts too");
+        get(&dir.path().join("other.json"));
+        assert_eq!(loads.get(), 4, "another file is another read");
     }
 
     #[test]

@@ -559,7 +559,8 @@ fn blank_pane_if_showing(app: &mut App, placeholder: &AgentId) {
 /// Drop the per-worktree PR bookkeeping keyed by a stand-in id.
 fn forget_worktree(app: &mut App, id: &WorktreeId) {
     app.pull_requests.remove(id);
-    app.pr_recheck.remove(id);
+    app.resolver
+        .forget(&crate::sync::QueryKey::BranchPr(id.clone()));
 }
 
 #[cfg(test)]

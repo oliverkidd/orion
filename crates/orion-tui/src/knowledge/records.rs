@@ -90,17 +90,22 @@ fn files_at(repo: &Path, rev: &str, dir: &str) -> Result<Vec<(String, String)>, 
         .spawn()
         .map_err(|e| format!("failed to run git: {e}"))?;
     let ids: String = blobs.iter().map(|(sha, _)| format!("{sha}\n")).collect();
-    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("git cat-file has no pipes".into());
+    };
     let writer = std::thread::spawn(move || stdin.write_all(ids.as_bytes()));
     let mut out = Vec::new();
-    child
-        .stdout
-        .take()
-        .ok_or("no stdout")?
-        .read_to_end(&mut out)
-        .map_err(|e| e.to_string())?;
+    let read = stdout.read_to_end(&mut out);
     let _ = writer.join();
+    // Reaped whatever the read did: a child left unwaited is a zombie of
+    // the TUI until it quits.
+    if read.is_err() {
+        let _ = child.kill();
+    }
     let _ = child.wait();
+    read.map_err(|e| e.to_string())?;
     // Each answer: `<sha> blob <size>\n<content>\n`.
     let mut files = Vec::new();
     let mut at = 0;

@@ -180,14 +180,8 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// (no network, no `gh`), which leaves the PR as it was this round.
 pub async fn fetch(owner: &str, repo: &str, base: &str) -> Option<Read> {
     let endpoint = format!("repos/{owner}/{repo}/contents/{PATH}?ref={base}");
-    let mut cmd = tokio::process::Command::new("gh");
-    cmd.args([
-        "api",
-        "-H",
-        "Accept: application/vnd.github.raw",
-        endpoint.as_str(),
-    ]);
-    match crate::pull_request::run_piped(cmd, "", TIMEOUT).await {
+    let args = ["api", "-H", "Accept: application/vnd.github.raw", &endpoint];
+    match crate::pull_request::run_gh(None, &args, TIMEOUT).await {
         Ok(text) => Some(parse(&text)),
         Err(why) if super::not_found(&why) => Some(Ok(Contract::default())),
         Err(why) => {

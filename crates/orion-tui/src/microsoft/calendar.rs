@@ -1,8 +1,12 @@
-//! The CALENDAR POLL: the signed-in user's meetings from now to twelve
-//! hours on, read from Graph's `calendarView` every few minutes off the
-//! loop ([`interval`]; the e2e tests turn it off). The footer shows the
-//! next one ([`footer_text`]); meeting takeaways read the list
-//! (`App::microsoft.events`) for online meetings that have ended.
+//! The CALENDAR: the signed-in user's meetings from now to twelve hours
+//! on, read from Graph's `calendarView` off the loop by the RESOLVER
+//! (`QueryKey::Calendar`, `sync::services`) — every [`DEFAULT_INTERVAL`]
+//! while MEETING TAKEAWAYS is on and needs it, and otherwise only as the
+//! footer's next meeting comes on screen or the window takes focus back,
+//! when the last read is that old ([`interval`]; the e2e tests turn it
+//! off). The footer shows the next one ([`footer_text`]); meeting
+//! takeaways read the list (`App::microsoft.events`) for online meetings
+//! that have ended.
 
 use std::time::Duration;
 
@@ -12,13 +16,16 @@ use serde::Deserialize;
 use super::graph;
 use crate::config::MicrosoftSettings;
 
-/// How often the calendar is read.
-pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How often the calendar is read while meeting takeaways need it, and
+/// how old a read the footer takes: a meeting is booked hours ahead, and
+/// one that ends is read for by its own schedule
+/// (`meeting_takeaways::LOOKS_AFTER`).
+pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 /// How far ahead a meeting shows in the footer.
 pub const SOON: chrono::Duration = chrono::Duration::minutes(60);
 
-/// How far ahead the poll reads.
+/// How far ahead a read of the calendar looks.
 const AHEAD: chrono::Duration = chrono::Duration::hours(12);
 
 /// The most of a meeting's subject the footer spends cells on.

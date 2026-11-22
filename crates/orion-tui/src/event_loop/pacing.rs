@@ -34,6 +34,23 @@ const BURST: u32 = 3;
 /// enough to be invisible.
 const MIN_GAP: Duration = Duration::from_millis(2);
 
+/// The longest an IDLE app (`App::idle`) — window in the background, or
+/// the user away — waits between frames: an attached session streaming
+/// output still shows it moving, four times a second rather than sixty,
+/// and the host's renderer is left to sleep in between.
+pub(super) const IDLE_FRAME: Duration = Duration::from_millis(250);
+
+/// The next frame's earliest time `next` (from [`FramePacer::drew`]),
+/// held off to [`IDLE_FRAME`] past `now` while `idle`. Regaining focus
+/// pulls it back to now (the loop's CATCH-UP).
+pub(super) fn idle_cap(next: Instant, now: Instant, idle: bool) -> Instant {
+    if idle {
+        next.max(now + IDLE_FRAME)
+    } else {
+        next
+    }
+}
+
 pub(super) struct FramePacer {
     tokens: u32,
     /// When the token being earned started accruing.
@@ -178,5 +195,18 @@ mod tests {
         let t0 = Instant::now();
         let mut pacer = FramePacer::new(t0);
         assert_eq!(pacer.drew(t0 + ms(30), ms(30)), t0 + ms(60));
+    }
+
+    /// IDLE, frames are at least a quarter second apart, however full
+    /// the bucket; looking again, the pacer's own answer stands.
+    #[test]
+    fn an_idle_app_paints_at_most_four_times_a_second() {
+        let t0 = Instant::now();
+        let mut pacer = FramePacer::new(t0);
+        let next = pacer.drew(t0, ms(1));
+        assert_eq!(idle_cap(next, t0, true), t0 + IDLE_FRAME);
+        assert_eq!(idle_cap(next, t0, false), next);
+        let late = t0 + ms(400);
+        assert_eq!(idle_cap(late, t0, true), late, "never sooner than asked");
     }
 }

@@ -24,6 +24,8 @@ pulldown-cmark = { version = "0.13", default-features = false }
 unicode-width = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 toml = "1"
+# The GIT WATCHER (`git_watch`): FSEvents on macOS.
+notify = { version = "9.0.0", default-features = false, features = ["macos_fsevent"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -552,6 +552,20 @@ fn give_notice(app: &mut App, cfg: &Config, pause: &Pause) {
     if app.automations.account.noticed == Some(pause.until_ms) {
         return;
     }
+    // The next account is chosen on what each has left: read it first,
+    // when the last reading is old, and wait for the reads out to land
+    // (a tick or two) before choosing.
+    crate::sync::services::glance_usage(app);
+    let at = std::time::Instant::now();
+    // With no loop to land them (a unit test), what is known stands.
+    let reading = app.sync_tx.is_some()
+        && choices(cfg)
+            .into_iter()
+            .flatten()
+            .any(|id| app.resolver.coming(&crate::sync::QueryKey::Usage(id), at));
+    if reading {
+        return;
+    }
     let now = Local::now();
     match next_account(app, cfg, &pause.account) {
         Some(next) if app.overlay.is_none() => {
@@ -580,7 +594,8 @@ pub fn tick(app: &mut App, out: &mut Vec<ClientRequest>) {
         .agents
         .iter()
         .any(|a| a.automation.is_some() && a.limit_reached().is_some());
-    let cfg = Config::load();
+    // Every turn of the automations: THE CONFIG CACHE, not a parse.
+    let cfg = Config::cached();
     if limited {
         note_session_limits(app, &cfg);
     }

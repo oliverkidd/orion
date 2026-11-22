@@ -1,48 +1,37 @@
-//! Memory readings for the TUI's metrics modal: one machine-wide `ps` sweep,
-//! then a per-session sum over each PTY child's process subtree (an agent CLI
-//! fans out into node workers, shells, MCP servers — the user cares about the
-//! whole tree, not just the root).
+//! Memory readings for the TUI's metrics modal: one machine-wide process
+//! table (`orion_core::mem::process_table`, read in-process through
+//! libproc on macOS), then a per-session sum over each PTY child's process
+//! subtree (an agent CLI fans out into node workers, shells, MCP servers —
+//! the user cares about the whole tree, not just the root).
 
+use orion_core::mem::ProcEntry;
 use orion_core::{MetricsSnapshot, SessionMetrics, SessionRef};
 use std::collections::{HashMap, HashSet};
 
-/// Take one reading. Blocking (shells out to `ps`); call via spawn_blocking.
+/// Take one reading. Blocking (walks the process table); call via
+/// spawn_blocking.
 pub fn collect(sessions: Vec<(SessionRef, u32, bool)>) -> MetricsSnapshot {
-    let table = std::process::Command::new("ps")
-        .args(["-axo", "pid=,ppid=,rss="])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
-    snapshot_from_table(
-        &table,
+    snapshot_from_rows(
+        &orion_core::mem::process_table().unwrap_or_default(),
         std::process::id(),
         &sessions,
         orion_core::mem::system_total_bytes().unwrap_or(0),
     )
 }
 
-/// Pure core, unit-testable: `table` is `ps -axo pid=,ppid=,rss=` output
-/// (one process per line, rss in KB).
-fn snapshot_from_table(
-    table: &str,
+/// Pure core, unit-testable: `rows` is the process table, one entry per
+/// process.
+fn snapshot_from_rows(
+    rows: &[ProcEntry],
     daemon_pid: u32,
     sessions: &[(SessionRef, u32, bool)],
     system_total_bytes: u64,
 ) -> MetricsSnapshot {
     let mut rss: HashMap<u32, u64> = HashMap::new();
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for line in table.lines() {
-        let mut cols = line.split_whitespace();
-        let (Some(pid), Some(ppid), Some(kb)) = (
-            cols.next().and_then(|s| s.parse::<u32>().ok()),
-            cols.next().and_then(|s| s.parse::<u32>().ok()),
-            cols.next().and_then(|s| s.parse::<u64>().ok()),
-        ) else {
-            continue;
-        };
-        rss.insert(pid, kb * 1024);
-        children.entry(ppid).or_default().push(pid);
+    for row in rows {
+        rss.insert(row.pid, row.rss_bytes);
+        children.entry(row.ppid).or_default().push(row.pid);
     }
 
     let sessions = sessions
@@ -68,7 +57,7 @@ fn snapshot_from_table(
 }
 
 /// Sum RSS over `root` and every descendant. The visited set guards against
-/// pid-reuse cycles in a racy `ps` snapshot; a root that already exited
+/// pid-reuse cycles in a racy process-table snapshot; a root that already exited
 /// (absent from the table) reads as zero.
 fn subtree_rss(
     root: u32,
@@ -100,6 +89,17 @@ mod tests {
 
     fn sref(id: &str) -> SessionRef {
         SessionRef::Agent(AgentId(id.into()))
+    }
+
+    /// The tests read best as a `ps -axo pid=,ppid=,rss=` table (rss in KB).
+    fn snapshot_from_table(
+        table: &str,
+        daemon_pid: u32,
+        sessions: &[(SessionRef, u32, bool)],
+        system_total_bytes: u64,
+    ) -> MetricsSnapshot {
+        let rows = orion_core::mem::parse_ps_rss_table(table);
+        snapshot_from_rows(&rows, daemon_pid, sessions, system_total_bytes)
     }
 
     #[test]
@@ -148,5 +148,14 @@ mod tests {
         let snap = snapshot_from_table(table, 10, &[(sref("a"), 20, false)], 0);
         assert_eq!(snap.sessions[0].rss_bytes, 100 * 1024);
         assert_eq!(snap.daemon_rss_bytes, 0);
+    }
+
+    /// The real table, read in-process: the daemon's own size is in it.
+    #[test]
+    fn a_live_reading_finds_this_process() {
+        let snap = collect(vec![(sref("me"), std::process::id(), false)]);
+        assert!(snap.daemon_rss_bytes > 0);
+        assert!(snap.sessions[0].procs >= 1);
+        assert!(snap.system_total_bytes > 0);
     }
 }

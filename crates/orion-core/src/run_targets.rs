@@ -64,12 +64,15 @@ pub fn detect(dir: &Path, name: &str) -> Vec<Target> {
     if let Some(target) = from_makefile(dir, name) {
         return vec![target];
     }
-    COMPOSE_FILES
-        .iter()
-        .any(|f| dir.join(f).is_file())
+    has_compose_file(dir)
         .then(|| Target::new(name, COMPOSE_UP))
         .into_iter()
         .collect()
+}
+
+/// Whether the checkout at `dir` has a compose file at its root.
+pub fn has_compose_file(dir: &Path) -> bool {
+    COMPOSE_FILES.iter().any(|f| dir.join(f).is_file())
 }
 
 /// Whether the checkout at `dir` has only a compose file to start: its

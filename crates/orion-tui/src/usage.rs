@@ -18,19 +18,21 @@
 //!   cycle is the monthly limit.
 //!
 //! Both endpoints are undocumented, and Anthropic's answers a client that
-//! asks every minute with 429s for good — so nothing here asks often: an
-//! account is read at most every [`POLL`] (the loop's git beat calls
-//! [`request`], which spaces itself), when the modal opens on a reading
-//! older than that, or on `r`, which still waits [`RETRY_GAP`] between
-//! two asks of one account. A failed ask keeps the last reading on screen,
-//! marked with why.
+//! asks every minute with 429s for good — so nothing here asks often, and
+//! nothing asks on a beat. The RESOLVER reads an account (`QueryKey::Usage`,
+//! `sync::services`) as the modal opens, as an agent picker or a launch
+//! box opens, and as the factory is about to choose an account — each
+//! only when the last reading is [`STALE`] old — and on `r`, which still
+//! waits [`RETRY_GAP`] between two asks of one account. A 429 holds every
+//! usage read off for an hour. A failed ask keeps the last reading on
+//! screen, marked with why.
 //!
 //! A token is only ever read — never refreshed. Claude Code's refresh
 //! tokens rotate, so a refresh from here would sign the account out of
 //! Claude Code. An expired token says so, and the next session on that
 //! account renews it.
 //!
-//! Every ask runs on the blocking pool (`view_jobs`) and lands through
+//! Every ask runs on the blocking pool and lands through
 //! [`land`]; the readings — percentages and reset times, never a token,
 //! an email or a cookie — are kept in `usage.json` in the DATA DIR, so the
 //! modal paints from the last run while the next ask is out.
@@ -55,8 +57,13 @@ use crate::claude_accounts::SignIn;
 use crate::config::Config;
 use crate::theme::Theme;
 
-/// How often an account is read unasked.
-pub const POLL: Duration = Duration::from_secs(15 * 60);
+/// How old a reading may be when something about to show it opens, and
+/// still stand (the resolver's policy for `QueryKey::Usage`).
+pub const STALE: Duration = Duration::from_secs(10 * 60);
+
+/// How often the account list is read from the config again on its own:
+/// an account added or signed in elsewhere shows by then.
+pub const RELIST: Duration = Duration::from_secs(15 * 60);
 
 /// The least time between two asks of one account, `r` included.
 pub const RETRY_GAP: Duration = Duration::from_secs(60);
@@ -251,11 +258,11 @@ pub struct Usage {
     pub accounts: Vec<Account>,
     pub readings: BTreeMap<String, Reading>,
     pub problems: BTreeMap<String, Problem>,
-    pub inflight: BTreeSet<String>,
+    /// When each account was last asked by `r`: two asks of one account
+    /// wait [`RETRY_GAP`] apart.
     asked: BTreeMap<String, Instant>,
-    polled: Option<Instant>,
-    /// When `accounts` was last built from config: the beat rebuilds it
-    /// only every [`POLL`], open and `r` every time.
+    /// When `accounts` was last built from config: a glance rebuilds it
+    /// only every [`RELIST`], open and `r` every time.
     listed: Option<Instant>,
     /// Where the readings are kept; None under test.
     cache: Option<PathBuf>,
@@ -277,23 +284,12 @@ impl Usage {
         }
     }
 
-    /// Whether `id` is due an ask: never while one is out, never inside
-    /// [`RETRY_GAP`] of the last, and otherwise when `force` says so or the
-    /// reading is [`POLL`] old.
-    fn due(&self, id: &str, now: i64, force: bool) -> bool {
-        if self.inflight.contains(id) {
-            return false;
-        }
-        if let Some(at) = self.asked.get(id) {
-            if at.elapsed() < RETRY_GAP || (!force && at.elapsed() < POLL) {
-                return false;
-            }
-        }
-        force
-            || self
-                .readings
-                .get(id)
-                .is_none_or(|r| now - r.fetched_at >= POLL.as_secs() as i64)
+    /// Whether `r` may ask `id` again at `now`: not inside [`RETRY_GAP`]
+    /// of its last `r`.
+    fn may_retry(&self, id: &str, now: Instant) -> bool {
+        self.asked
+            .get(id)
+            .is_none_or(|at| now.saturating_duration_since(*at) >= RETRY_GAP)
     }
 
     /// Rebuild the account list, and forget whatever was kept for an
@@ -381,58 +377,46 @@ pub struct Answer {
     pub result: Result<Reading, Problem>,
 }
 
-/// Read the accounts from config again — what open and `r` do at once,
-/// and the beat every [`POLL`].
+/// Read the accounts from config again — what open and `r` do at once.
 fn relist(app: &mut App) {
     let before = app.usage.accounts.clone();
     app.usage.relist(accounts(&Config::load()));
     app.dirty |= app.usage.accounts != before;
 }
 
-/// Ask every account that is due. The beat calls it with `force` false
-/// and it spaces itself: a look at most every [`RETRY_GAP`], the config
-/// read again at most every [`POLL`]. `r` (`force`) reads the config and
-/// asks every account at once, [`RETRY_GAP`] allowing.
-pub fn request(app: &mut App, force: bool) {
+/// Read the accounts from config again when the last read is [`RELIST`]
+/// old: what a glance at the usage does (`sync::services::glance_usage`).
+pub(crate) fn relist_if_old(app: &mut App) {
+    if app.usage.listed.is_none_or(|at| at.elapsed() >= RELIST) {
+        relist(app);
+    }
+}
+
+/// `r`: the accounts read from config again, and every one asked at once
+/// past its reading's age ([`crate::sync::Resolver::refresh`]) — but not
+/// inside [`RETRY_GAP`] of its last `r`, and never while a 429's pause
+/// stands.
+pub fn refresh(app: &mut App) {
     if usage_off() {
         return;
     }
-    if !force && app.usage.polled.is_some_and(|at| at.elapsed() < RETRY_GAP) {
-        return;
+    relist(app);
+    let now = Instant::now();
+    let ids: Vec<String> = app.usage.accounts.iter().map(|a| a.id.clone()).collect();
+    for id in ids {
+        if !app.usage.may_retry(&id, now) {
+            continue;
+        }
+        app.usage.asked.insert(id.clone(), now);
+        app.resolver.refresh(&crate::sync::QueryKey::Usage(id));
     }
-    app.usage.polled = Some(Instant::now());
-    if force || app.usage.listed.is_none_or(|at| at.elapsed() >= POLL) {
-        relist(app);
-    }
-    let Some(jobs) = app.view_jobs.clone() else {
-        return;
-    };
-    let now = orion_core::clock::now_secs() as i64;
-    let due: Vec<Account> = app
-        .usage
-        .accounts
-        .iter()
-        .filter(|a| app.usage.due(&a.id, now, force))
-        .cloned()
-        .collect();
-    for account in due {
-        app.usage.asked.insert(account.id.clone(), Instant::now());
-        app.usage.inflight.insert(account.id.clone());
-        app.dirty = true;
-        jobs.run(move || {
-            Some(crate::view_jobs::Answer::Usage(Answer {
-                result: fetch(&account),
-                id: account.id,
-            }))
-        });
-    }
+    app.dirty = true;
 }
 
 /// An ask came back: keep the reading — or the last one, beside why the
 /// new one failed. A signed-out account's numbers go: they are no one's.
 pub fn land(app: &mut App, answer: Answer) {
     let Answer { id, result } = answer;
-    app.usage.inflight.remove(&id);
     match result {
         Ok(reading) => {
             app.usage.problems.remove(&id);
@@ -468,7 +452,7 @@ pub fn write_cache(path: &Path, readings: &BTreeMap<String, Reading>) {
 }
 
 /// Read `account`'s token and ask its provider. Blocking: the pool's.
-fn fetch(account: &Account) -> Result<Reading, Problem> {
+pub(crate) fn fetch(account: &Account) -> Result<Reading, Problem> {
     let now = orion_core::clock::now_secs() as i64;
     match account.provider {
         Provider::Claude => {
@@ -834,19 +818,18 @@ pub(crate) mod keys {
     pub const ALL: &[Key] = &[REFRESH, SIGN_IN, CLOSE];
 }
 
-/// `⇧U`: the modal on the last readings, the account list read afresh,
-/// and anything [`POLL`] old asked for.
+/// `⇧U`: the modal on the last readings, the account list read afresh —
+/// and, with the modal on screen, anything [`STALE`] old asked for by the
+/// RESOLVER.
 pub(crate) fn open(app: &mut App) {
     app.overlay = Some(Overlay::Usage(UsageView::default()));
     if !usage_off() {
         relist(app);
     }
-    app.usage.polled = None;
-    request(app, false);
 }
 
 /// `ORION_USAGE=off`: ask no provider.
-fn usage_off() -> bool {
+pub(crate) fn usage_off() -> bool {
     orion_core::env::non_empty(orion_core::env::USAGE).as_deref() == Some("off")
 }
 
@@ -870,7 +853,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) {
                 accounts,
             );
         }
-        _ if keys::REFRESH.matches(&key) => request(app, true),
+        _ if keys::REFRESH.matches(&key) => refresh(app),
         _ if keys::SIGN_IN.matches(&key) => sign_in_selected(app),
         _ => {}
     }
@@ -1210,7 +1193,10 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
             }
         };
         let mut name = account.label.clone();
-        if usage.inflight.contains(&account.id) {
+        let reading_now = app
+            .resolver
+            .in_flight(&crate::sync::QueryKey::Usage(account.id.clone()));
+        if reading_now {
             name.push_str(" …");
         }
         let plan = reading.and_then(|r| r.plan.as_deref()).unwrap_or("");
@@ -1267,7 +1253,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App, view: &UsageView, th: Theme) {
                 let text = match problem {
                     Some(p) => p.says(account.provider),
                     None if signed_out => Problem::SignedOut.says(account.provider),
-                    None if usage.inflight.contains(&account.id) => "reading…".into(),
+                    None if reading_now => "reading…".into(),
                     None => "not read yet · r reads it".into(),
                 };
                 let style = if signed_out || stale {
@@ -1570,35 +1556,19 @@ mod tests {
         assert_eq!(emptiest(&[]), None);
     }
 
+    /// `r` asks every account past its reading's age, but not one asked
+    /// by `r` inside [`RETRY_GAP`]; nothing is asked on a beat.
     #[test]
-    fn an_account_is_asked_once_per_poll_and_r_waits_out_the_retry_gap() {
+    fn r_asks_each_account_once_inside_the_retry_gap() {
         let mut usage = Usage::default();
-        let now = 10_000_000;
-        // Never read: due.
-        assert!(usage.due("claude", now, false));
-        // Read a minute ago: not due on the beat, due on `r`.
-        usage.readings.insert(
-            "claude".into(),
-            Reading {
-                plan: None,
-                main: Row::default(),
-                sub: Vec::new(),
-                extra: None,
-                fetched_at: now - 60,
-            },
-        );
-        assert!(!usage.due("claude", now, false));
-        assert!(usage.due("claude", now, true));
-        // Read POLL ago: due.
-        usage.readings.get_mut("claude").unwrap().fetched_at = now - POLL.as_secs() as i64;
-        assert!(usage.due("claude", now, false));
-        // Just asked: nothing, `r` included, until RETRY_GAP is up.
-        usage.asked.insert("claude".into(), Instant::now());
-        assert!(!usage.due("claude", now, true));
-        // One out already: never twice.
-        usage.asked.clear();
-        usage.inflight.insert("claude".into());
-        assert!(!usage.due("claude", now, true));
+        let now = Instant::now();
+        assert!(usage.may_retry("claude", now), "never asked");
+        usage.asked.insert("claude".into(), now);
+        assert!(!usage.may_retry("claude", now + Duration::from_secs(30)));
+        assert!(usage.may_retry("claude", now + RETRY_GAP));
+        let policy = crate::sync::policy::policy(&crate::sync::QueryKey::Usage("claude".into()));
+        assert_eq!(policy.stale_after, STALE);
+        assert_eq!(policy.live_every, None, "no beat");
     }
 
     #[test]
@@ -1628,7 +1598,6 @@ mod tests {
             extra: None,
             fetched_at: 1,
         };
-        app.usage.inflight.insert("claude".into());
         land(
             &mut app,
             Answer {
@@ -1636,7 +1605,6 @@ mod tests {
                 result: Ok(reading.clone()),
             },
         );
-        assert!(app.usage.inflight.is_empty());
         land(
             &mut app,
             Answer {

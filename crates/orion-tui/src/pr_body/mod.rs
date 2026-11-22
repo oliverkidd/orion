@@ -4,28 +4,35 @@
 //! sends the owner a card with its verdict: Merge, Skim, Review or
 //! Blocked.
 //!
-//! - **Watching.** Each GIT POLL, [`due_fetches`] asks for the body of
-//!   every factory PR in the projects' open lists whose row moved (a push,
-//!   its checks), whose facts were just handed over (`orion pr facts
-//!   set`), or that hasn't been read for [`REFRESH`] (Cubic's comments
-//!   move no row).
+//! - **Watching.** Each automations' turn (`chores::Chore::Automations`),
+//!   [`tick`] asks for the body of every
+//!   factory PR in the projects' open lists whose row moved since its body
+//!   was last read (`pr_fixer::signal`: a push, its checks, a comment or
+//!   review — `updatedAt` moves for Cubic's too — kept across launches),
+//!   or whose facts were just handed over (`orion pr facts set`). The
+//!   rows stay current with nobody looking through the automations'
+//!   `MyPrs` read (`sync::github`); the body is read by THE RESOLVER, on
+//!   the demand [`detail_needs`] says and its backoff — never on a clock.
 //! - **Gathering.** Each body that lands passes [`land_detail`]. A factory
 //!   PR with facts — from `<data_dir>/pr-facts/`, else the body's hidden
 //!   block; a PR without facts is never touched — has the rest asked for
 //!   off the loop ([`gather`]): the repo's contract on the base branch, the
 //!   commits' messages, the pictures job's `pictures.json` on
-//!   `pr-screenshots` (its grid downloaded for the card), and, until it is
+//!   `pr-screenshots` (its grid downloaded for the card; kept once taken
+//!   at the PR's head, so it is read once a push), and, until it is
 //!   posted, the approved plan from the builder's transcript. A visible
 //!   PR without pictures is looked at for pictures on their way, and one
 //!   whose flow came after its push has the pictures job run for it, once
 //!   per head ([`dispatch`]). A PR whose [`signature`] hasn't moved since
 //!   its last gather isn't gathered again until its repo's contract is
 //!   due a new read ([`CONTRACT_TTL`]); its commits' messages are read
-//!   once per head.
+//!   once per head. A gather that could not ask for all of it is tried
+//!   again from the body in hand on a doubling backoff ([`GATHER_RETRY`]).
 //! - **Landing** ([`land`]). The verdict ([`verdict::verdict`]), the
 //!   rows with their dots ([`rows::top`]) and the top
 //!   ([`render::render`]); the body is written (`gh pr edit --body-file
-//!   -`) only when its bytes differ. A visible PR whose pictures show no
+//!   -`) only when its bytes differ — and while checks still run, only
+//!   when the verdict moved, not on every check that finishes. A visible PR whose pictures show no
 //!   difference in any frame has its agent sent back, once per head, to
 //!   stage the state its change affects ([`NO_DIFFERENCE`]). The plan
 //!   goes up once as a "Plan as approved" comment. The verdict goes to
@@ -36,9 +43,9 @@
 //!   Merge-tier PR merges without a tap.
 //! - **Merged or closed** anywhere — from the card, the PULL REQUESTS
 //!   MODAL or GitHub — closes the card once ([`finished`]): a body that
-//!   lands no longer open says so, and each GIT POLL looks at what `prs`
-//!   knows of every PR whose card is up, asking again for the page of one
-//!   that has left its project's open list ([`gone_fetches`]).
+//!   lands no longer open says so, and each automations' turn looks at what `prs`
+//!   knows of every PR whose card is up, asking once for the page of one
+//!   that has left its project's open list ([`gone_wants`]).
 //! - **The card's buttons** come back through [`on_action`]: Merge (ready
 //!   first if a draft, then `pr_actions`' merge), Send back… (to the
 //!   branch's agent, [`send_back`]). Open PR is a link button, opened by
@@ -73,8 +80,11 @@ use crate::pull_request::{CheckState, PrDetail, Standing};
 use facts::Facts;
 use verdict::{Kind, Tier, Verdict};
 
-/// How long a factory PR goes unread when nothing on its row moves.
-pub const REFRESH: Duration = Duration::from_secs(5 * 60);
+/// How long a gather that could not ask for all it needs waits before
+/// it is tried again from the body in hand: doubling from this per
+/// failure in a row, to [`GATHER_RETRY_CAP`].
+const GATHER_RETRY: Duration = Duration::from_secs(60);
+const GATHER_RETRY_CAP: Duration = Duration::from_secs(30 * 60);
 /// How long a repo's contract is trusted before it is read again.
 const CONTRACT_TTL: Duration = Duration::from_secs(10 * 60);
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -134,6 +144,13 @@ pub struct State {
     contracts: HashMap<(String, String), (Instant, contract::Read)>,
     /// Each PR's commit messages, by URL, and the head they were read at.
     messages: HashMap<String, (String, Vec<String>)>,
+    /// Each PR's `pictures.json`, by URL, once one was taken at its head:
+    /// final for that head, so not asked again until a push.
+    manifests: HashMap<String, pictures::Manifest>,
+    /// By PR URL: bodies wanted read, and the row signal they were wanted
+    /// at — THE RESOLVER's background demand ([`detail_needs`]) until one
+    /// lands.
+    want: HashMap<String, String>,
     memory: Option<Memory>,
     /// `memory` changed since it was last written ([`State::flush`]).
     unsaved: bool,
@@ -142,13 +159,19 @@ pub struct State {
 /// One factory PR this run has seen.
 #[derive(Debug, Default)]
 struct Tracked {
-    /// Its row as the open list last said it: a change asks again.
-    row: String,
     facts_stamp: Option<SystemTime>,
     /// When its facts file was last looked at, and the stamp it had then.
     facts_seen: Option<(Instant, Option<SystemTime>)>,
-    fetched: Option<Instant>,
+    /// Its page asked for once after it left its list ([`gone_wants`]).
+    gone_asked: bool,
     gathering: bool,
+    /// Gathers in a row that could not ask for all of it, and when the
+    /// next is tried from the body in hand ([`GATHER_RETRY`]).
+    gather_fails: u32,
+    gather_retry: Option<Instant>,
+    /// The verdict's tier the last body written carried: while checks
+    /// run, a body is written again only once the tier moves.
+    written_tier: Option<String>,
     /// What the last gather was for ([`signature`]).
     gathered: Option<u64>,
     /// The body orion last wrote.
@@ -188,6 +211,10 @@ struct Remembered {
     /// The head its agent was last sent back for pictures that show no
     /// difference ([`NO_DIFFERENCE`]): never twice for one head.
     no_difference_sent: Option<String>,
+    /// Its row's signal (`pr_fixer::signal`) when its body was last read:
+    /// a row that has not moved since is not read again, this run or the
+    /// next.
+    row: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -344,39 +371,32 @@ pub fn parse_url(url: &str) -> Option<(String, String, u64)> {
 
 // ---- watching ----
 
-/// The factory PRs whose body is due, each made in flight here: `(url,
-/// number, dir)`, for the loop's `spawn_pr_detail`.
-pub fn due_fetches(app: &mut App) -> Vec<(String, u64, PathBuf)> {
-    let due = due_fetches_unsaved(app);
+/// The beat: each factory PR in the open lists whose row moved since its
+/// body was last read, or whose facts were just handed over, is wanted
+/// read ([`want`]); each whose card is up after it left its list is asked
+/// about once ([`gone_wants`]); and each gather whose backoff is out is
+/// tried again from the body in hand.
+pub fn tick(app: &mut App) {
+    tick_unsaved(app);
     app.pr_body.flush();
-    due
 }
 
-fn due_fetches_unsaved(app: &mut App) -> Vec<(String, u64, PathBuf)> {
+fn tick_unsaved(app: &mut App) {
     let factory = crate::automations::linear_builder::factory_branches(app);
-    let mut rows: Vec<(String, u64, ProjectId, String)> = Vec::new();
+    let mut rows: Vec<(String, String)> = Vec::new();
     for (project, open) in &app.open_prs {
         for pr in &open.list {
             if factory.contains_key(&(project, pr.head.as_str())) {
-                let row = format!("{}|{:?}|{}", pr.head_sha, pr.answered, pr.answered_draft);
-                rows.push((pr.url.clone(), pr.number, project.clone(), row));
+                let row = crate::automations::pr_fixer::signal(app, pr);
+                rows.push((pr.url.clone(), row));
             }
         }
     }
     let now = Instant::now();
     let dir_of_facts = facts_dir();
-    let mut due = gone_fetches(app);
-    for (url, number, project, row) in rows {
-        let Some(dir) = app
-            .tree
-            .projects
-            .iter()
-            .find(|p| p.id == project)
-            .map(|p| p.repo_path.clone())
-        else {
-            continue;
-        };
-        let in_flight = app.pr_detail_inflight.in_flight(&url);
+    gone_wants(app);
+    for (url, row) in rows {
+        let read = app.pr_body.remembered(&url).row.clone();
         let t = app.pr_body.tracked.entry(url.clone()).or_default();
         let stamp = match t.facts_seen {
             Some((at, stamp)) if now.duration_since(at) < FACTS_EVERY => stamp,
@@ -388,27 +408,66 @@ fn due_fetches_unsaved(app: &mut App) -> Vec<(String, u64, PathBuf)> {
                 stamp
             }
         };
-        let stale = t.fetched.is_none_or(|at| now.duration_since(at) >= REFRESH);
-        if !(t.row != row || t.facts_stamp != stamp || stale) || t.gathering || in_flight {
-            continue;
-        }
-        if t.facts_stamp != stamp {
+        let new_facts = t.facts_stamp != stamp;
+        if new_facts {
             // New facts: gather even if nothing else moved.
             t.gathered = None;
+            t.facts_stamp = stamp;
         }
-        t.row = row;
-        t.facts_stamp = stamp;
-        t.fetched = Some(now);
-        due.push((url, number, dir));
+        if new_facts || read.as_deref() != Some(row.as_str()) {
+            want(app, &url, row);
+        }
     }
-    due
+    retry_gathers(app, now);
+}
+
+/// Want `url`'s body read at row `row`: once per row — a want already out
+/// for it stands — and its page invalidated, so THE RESOLVER reads it now.
+fn want(app: &mut App, url: &str, row: String) {
+    if app.pr_body.want.get(url) == Some(&row) {
+        return;
+    }
+    app.pr_body.want.insert(url.to_string(), row);
+    app.resolver
+        .invalidate(&crate::sync::QueryKey::PrDetail(url.to_string()));
+}
+
+/// The bodies the factory wants read, for THE RESOLVER's background
+/// demand (`sync::github::needs`): each once, on change, never on a clock
+/// (`sync::github::ON_CHANGE`).
+pub fn detail_needs(app: &App) -> Vec<(String, Duration)> {
+    app.pr_body
+        .want
+        .keys()
+        .map(|url| (url.clone(), crate::sync::github::ON_CHANGE))
+        .collect()
+}
+
+/// Each gather that could not ask for all of it, its backoff out, tried
+/// again from the body in hand.
+fn retry_gathers(app: &mut App, now: Instant) {
+    let due: Vec<String> = app
+        .pr_body
+        .tracked
+        .iter()
+        .filter(|(_, t)| !t.gathering && t.gather_retry.is_some_and(|at| at <= now))
+        .map(|(url, _)| url.clone())
+        .collect();
+    for url in due {
+        if let Some(t) = app.pr_body.tracked.get_mut(&url) {
+            t.gather_retry = None;
+        }
+        if let Some(detail) = app.pr_detail.get(&url).cloned() {
+            land_detail_unsaved(app, &url, Some(&detail));
+        }
+    }
 }
 
 /// The PRs whose card is still up, each looked at: one `prs` says has
 /// merged or closed has its card closed now ([`finished`]); one that has
-/// left its project's open list has its page asked for again — at most
-/// every [`REFRESH`] — so [`land_detail`] learns which.
-fn gone_fetches(app: &mut App) -> Vec<(String, u64, PathBuf)> {
+/// left its project's open list has its page asked for once, so
+/// [`land_detail`] learns which — `MyPrs` usually has said already.
+fn gone_wants(app: &mut App) {
     let up: Vec<String> = app
         .pr_body
         .memory()
@@ -417,8 +476,6 @@ fn gone_fetches(app: &mut App) -> Vec<(String, u64, PathBuf)> {
         .filter(|(_, r)| r.card.as_ref().is_some_and(|c| !c.closed))
         .map(|(url, _)| url.clone())
         .collect();
-    let now = Instant::now();
-    let mut due = Vec::new();
     for url in up {
         if let Some(standing) = app.prs.status(&url).map(|s| s.standing) {
             if !standing.is_open() {
@@ -429,7 +486,6 @@ fn gone_fetches(app: &mut App) -> Vec<(String, u64, PathBuf)> {
         let Some(detail) = app.pr_detail.get(&url) else {
             continue;
         };
-        let number = detail.number;
         let Some(factory) = factory_of(app, &url, &detail.head) else {
             continue;
         };
@@ -443,17 +499,12 @@ fn gone_fetches(app: &mut App) -> Vec<(String, u64, PathBuf)> {
                     .get(&p.id)
                     .is_none_or(|open| open.list.iter().any(|pr| pr.url == url))
             });
-        if listed || app.pr_detail_inflight.in_flight(&url) {
-            continue;
-        }
         let t = app.pr_body.tracked.entry(url.clone()).or_default();
-        if t.fetched.is_some_and(|at| now.duration_since(at) < REFRESH) {
+        if listed || std::mem::replace(&mut t.gone_asked, true) {
             continue;
         }
-        t.fetched = Some(now);
-        due.push((url, number, factory.dir));
+        want(app, &url, "gone".into());
     }
-    due
 }
 
 /// What a body's gather was for: a change in any of it gathers again.
@@ -496,8 +547,29 @@ fn land_detail_unsaved(app: &mut App, url: &str, detail: Option<&PrDetail>) {
     let Some(detail) = detail else {
         return;
     };
+    // Read: what was wanted of it is had, at the row it has now.
+    if let Some(wanted) = app.pr_body.want.remove(url) {
+        let row = crate::automations::pr_fixer::open_anywhere(app, url)
+            .map_or(wanted, |(_, pr)| {
+                crate::automations::pr_fixer::signal(app, &pr)
+            });
+        let remembered = app.pr_body.remembered(url);
+        if remembered.row.as_ref() != Some(&row) {
+            remembered.row = Some(row);
+            app.pr_body.save();
+        }
+    }
     if detail.answered_state != crate::pull_request::STATE_OPEN {
         finished(app, url, Standing::of(&detail.answered_state, false));
+        return;
+    }
+    if app
+        .pr_body
+        .tracked
+        .get(url)
+        .is_some_and(|t| t.gather_retry.is_some_and(|at| at > Instant::now()))
+    {
+        // A gather that failed waits out its backoff (`retry_gathers`).
         return;
     }
     let Some(factory) = factory_of(app, url, &detail.head) else {
@@ -551,6 +623,12 @@ fn land_detail_unsaved(app: &mut App, url: &str, detail: Option<&PrDetail>) {
         .get(url)
         .filter(|(head, _)| *head == detail.head_sha)
         .map(|(_, messages)| messages.clone());
+    let manifest = app
+        .pr_body
+        .manifests
+        .get(url)
+        .filter(|m| !m.head_sha.is_empty() && m.head_sha.trim() == detail.head_sha.trim())
+        .cloned();
     let job = Job {
         url: url.to_string(),
         owner,
@@ -561,6 +639,7 @@ fn land_detail_unsaved(app: &mut App, url: &str, detail: Option<&PrDetail>) {
         factory,
         contract,
         messages,
+        manifest,
         builder,
         cache: data_dir().map(|d| d.join("pr-body")),
         pictures_dispatched,
@@ -618,6 +697,8 @@ struct Job {
     contract: Option<contract::Read>,
     /// The commit messages read at this head already: not asked again.
     messages: Option<Vec<String>>,
+    /// The pictures taken at this head already: not asked again.
+    manifest: Option<pictures::Manifest>,
     /// The session that built it, while the plan is still to be posted:
     /// its transcript holds the plan.
     builder: Option<orion_core::Agent>,
@@ -703,11 +784,13 @@ async fn gather(job: Job) -> Gathered {
             None => commit_messages(&job.url).await,
         }
     };
-    let (contract, messages, manifest) = tokio::join!(
-        contract_fut,
-        messages_fut,
-        pictures::manifest(&job.owner, &job.repo, job.number)
-    );
+    let manifest_fut = async {
+        match &job.manifest {
+            Some(manifest) => Some(manifest.clone()),
+            None => pictures::manifest(&job.owner, &job.repo, job.number).await,
+        }
+    };
+    let (contract, messages, manifest) = tokio::join!(contract_fut, messages_fut, manifest_fut);
     let mut grid_file = None;
     if let (Some(read), Some(found), Some(cache)) = (&contract, &manifest, &job.cache) {
         let visible = read
@@ -858,6 +941,7 @@ pub fn land(app: &mut App, answer: Answer) {
                 tracing::warn!("pr_body: writing the body of {url}: {why}");
                 if let Some(t) = app.pr_body.tracked.get_mut(&url) {
                     t.written = None;
+                    t.written_tier = None;
                     t.gathered = None;
                 }
             }
@@ -911,12 +995,26 @@ fn land_gathered(app: &mut App, g: Gathered) {
     }
     let (Some(read), Some(messages), Some(manifest)) = (&g.contract, &g.messages, &g.pictures)
     else {
-        // Couldn't ask for all of it: try again on the next look.
+        // Couldn't ask for all of it: tried again from the body in hand
+        // once a doubling backoff is out (`retry_gathers`).
         if let Some(t) = app.pr_body.tracked.get_mut(&url) {
             t.gathered = None;
+            t.gather_fails += 1;
+            let wait =
+                orion_core::backoff::doubling(GATHER_RETRY, GATHER_RETRY_CAP, t.gather_fails);
+            t.gather_retry = Some(Instant::now() + wait);
         }
         return;
     };
+    if let Some(t) = app.pr_body.tracked.get_mut(&url) {
+        t.gather_fails = 0;
+        t.gather_retry = None;
+    }
+    // Pictures taken at this head are final for it: kept, not asked again
+    // until a push.
+    if !manifest.head_sha.is_empty() && manifest.head_sha.trim() == g.job.detail.head_sha.trim() {
+        app.pr_body.manifests.insert(url.clone(), manifest.clone());
+    }
     app.pr_body.messages.insert(
         url.clone(),
         (g.job.detail.head_sha.clone(), messages.clone()),
@@ -961,8 +1059,12 @@ fn land_gathered(app: &mut App, g: Gathered) {
         .flatten();
     let top = top(&g, rules, &cubic, &pics, kind);
     let body = render::render(&detail.body, facts, &v, &top, grid.as_deref());
-    if !render::same(&body, &detail.body) {
+    let running = detail.checks.iter().any(|c| c.state == CheckState::Running);
+    if !render::same(&body, &detail.body) && worth_writing(app, &url, running, v.tier) {
         write_body(app, &url, &body);
+        if let Some(t) = app.pr_body.tracked.get_mut(&url) {
+            t.written_tier = Some(v.tier.id().to_string());
+        }
     }
     if let Some(plan) = &g.plan {
         post_plan(app, &url, plan);
@@ -992,6 +1094,19 @@ fn land_gathered(app: &mut App, g: Gathered) {
             merge(app, &url);
         }
     }
+}
+
+/// Whether a body that differs from the one on GitHub is written now: the
+/// first time, once the checks have settled, and while they still run
+/// only when the verdict's `tier` moved — every check that finishes moves
+/// a dot in the top, and a write per check was an edit per check.
+fn worth_writing(app: &App, url: &str, running: bool, tier: Tier) -> bool {
+    let written = app
+        .pr_body
+        .tracked
+        .get(url)
+        .and_then(|t| t.written_tier.as_deref());
+    !running || written != Some(tier.id())
 }
 
 /// `gh pr edit <url> --body-file -`, off the loop.
@@ -1556,6 +1671,7 @@ mod tests {
                     ..Default::default()
                 },
                 facts: Facts::default(),
+                manifest: None,
                 factory: Factory {
                     dir: PathBuf::new(),
                     project_name: "riplo-os".into(),
@@ -1736,8 +1852,6 @@ mod tests {
                     meta: Default::default(),
                 }],
                 at: now,
-                due: now,
-                step: Duration::from_secs(15),
             },
         );
         app
@@ -2062,7 +2176,32 @@ mod tests {
             crate::pr_store::PrObservation::of_detail(&closed),
             crate::fetch::Asked::At(crate::fetch::now()),
         );
-        assert!(due_fetches(&mut app).is_empty());
+        tick(&mut app);
+        assert!(detail_needs(&app).is_empty(), "nothing to read");
         assert_eq!(posted_card(&app).state, CardState::Closed("Closed".into()));
+    }
+
+    /// While checks run a body is written only when the verdict moves —
+    /// not for every check that finishes; once they settle, whenever it
+    /// differs.
+    #[test]
+    fn a_body_is_rewritten_while_checks_run_only_when_the_verdict_moves() {
+        let mut app = App::new();
+        let url = "https://github.com/o/r/pull/7";
+        assert!(worth_writing(&app, url, true, Tier::Review), "the first");
+        app.pr_body
+            .tracked
+            .entry(url.into())
+            .or_default()
+            .written_tier = Some(Tier::Review.id().to_string());
+        assert!(
+            !worth_writing(&app, url, true, Tier::Review),
+            "a check moved"
+        );
+        assert!(
+            worth_writing(&app, url, true, Tier::Blocked),
+            "the verdict moved"
+        );
+        assert!(worth_writing(&app, url, false, Tier::Review), "settled");
     }
 }

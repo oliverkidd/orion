@@ -541,7 +541,7 @@ pub(crate) fn land(app: &mut App, answer: Answer) {
     app.flash = Some(flash);
     if matches!(outcome, Outcome::Pushed { .. } | Outcome::Published { .. }) {
         // A push can open, move or close the branch's pull request.
-        app.pr_refresh_requested = true;
+        crate::sync::spawn::invalidate_checkout(app, &worktree);
     }
     if !matches!(outcome, Outcome::Failed(_)) {
         let ours: HashSet<WorktreeId> = app

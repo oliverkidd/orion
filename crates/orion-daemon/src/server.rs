@@ -270,8 +270,9 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 ClientRequest::PostFactoryCard { card } => daemon.factory_post(card),
                 ClientRequest::UpdateFactoryCard { key, card } => daemon.factory_update(key, card),
                 ClientRequest::GetMetrics { req_id } => {
-                    // A machine-wide `ps` sweep takes tens of ms; keep it off
-                    // the request loop so Input/Attach frames keep flowing.
+                    // A machine-wide process-table walk takes a few ms; keep
+                    // it off the request loop so Input/Attach frames keep
+                    // flowing.
                     let pids = daemon.session_pids();
                     let out_tx = out_tx.clone();
                     tokio::spawn(async move {

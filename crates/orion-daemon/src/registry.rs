@@ -155,6 +155,11 @@ pub struct Daemon {
     /// with attachments (and its whole worktree) is "in view" and exempt
     /// from idle reaping.
     attach_counts: Mutex<HashMap<SessionRef, usize>>,
+    /// Agents the last client just detached from, owed one more pass of
+    /// the CLAUDE MODEL SYNC (`session_model`): the sweep reads only
+    /// attached sessions' transcripts, and a `/model` typed just before
+    /// leaving must still land.
+    model_sweep_owed: Mutex<HashSet<AgentId>>,
     /// When each live session was last "looked at": spawned, prewarmed,
     /// attached, or covered by the in-view sweep refresh. The idle reaper
     /// kills sessions whose stamp ages past `config::session_idle_timeout`.
@@ -240,6 +245,7 @@ impl Daemon {
             worktree_ops: tokio::sync::Mutex::new(()),
             cli_probes: Mutex::new(HashMap::new()),
             attach_counts: Mutex::new(HashMap::new()),
+            model_sweep_owed: Mutex::new(HashSet::new()),
             session_interest: Mutex::new(HashMap::new()),
             last_cwd: Mutex::new(HashMap::new()),
             transcripts: Mutex::new(HashMap::new()),
@@ -533,6 +539,7 @@ impl Daemon {
     pub fn note_attached(&self, sref: &SessionRef) {
         if let Some(worktree) = self.session_worktree(sref) {
             self.note_used_in(&worktree);
+            self.stacks.note_activity(&worktree);
         }
         *self
             .attach_counts
@@ -548,14 +555,52 @@ impl Daemon {
     /// spawn time.
     pub fn note_detached(&self, sref: &SessionRef) {
         let mut counts = self.attach_counts.lock().unwrap();
+        let mut last_gone = false;
         if let Some(n) = counts.get_mut(sref) {
             *n = n.saturating_sub(1);
             if *n == 0 {
                 counts.remove(sref);
+                last_gone = true;
             }
         }
         drop(counts);
+        if let (true, SessionRef::Agent(id)) = (last_gone, sref) {
+            self.model_sweep_owed.lock().unwrap().insert(id.clone());
+        }
+        if let Some(worktree) = self.session_worktree(sref) {
+            self.stacks.note_activity(&worktree);
+        }
         self.touch_session(sref);
+    }
+
+    /// The agents whose transcripts the CLAUDE MODEL SYNC reads this pass:
+    /// every one a client is attached to, and those just left (owed one
+    /// last read, then dropped).
+    pub(crate) fn model_sweep_targets(&self) -> HashSet<AgentId> {
+        let mut targets: HashSet<AgentId> =
+            std::mem::take(&mut *self.model_sweep_owed.lock().unwrap());
+        targets.extend(
+            self.attach_counts
+                .lock()
+                .unwrap()
+                .keys()
+                .filter_map(|sref| match sref {
+                    SessionRef::Agent(id) => Some(id.clone()),
+                    SessionRef::Terminal(_) => None,
+                }),
+        );
+        targets
+    }
+
+    /// The worktrees holding a session some client is attached to now:
+    /// in use, for the IDLE STACK STOP.
+    pub(crate) fn attached_worktrees(&self) -> HashSet<WorktreeId> {
+        let attached: Vec<SessionRef> =
+            self.attach_counts.lock().unwrap().keys().cloned().collect();
+        attached
+            .iter()
+            .filter_map(|sref| self.session_worktree(sref))
+            .collect()
     }
 
     /// Worktree `id`'s project was just used, which keeps it a SPARE
@@ -574,20 +619,29 @@ impl Daemon {
             .insert(sref.clone(), Instant::now());
     }
 
-    /// Kill idle sessions in worktrees no client is looking at, per
-    /// [`crate::config::SESSION_IDLE_TIMEOUT`] — this bounds what prewarming and
-    /// walked-away-from sessions cost. "In view" = the worktree holding any
-    /// attached session; in-view sessions get their stamps refreshed
-    /// instead, so the full timeout starts only when the user leaves.
-    /// Spared regardless of age: agents that are running or waiting on
-    /// feedback, agents with a backgrounded tool call still running (a job
-    /// detached from their terminal — see `pty::detached_job_under`),
-    /// agents with text typed into their input box and not sent (killing
-    /// the CLI loses it), terminals with a command running, and sessions
-    /// with no row. A reaped session revives on the next attach or prewarm;
-    /// agents resume their conversation.
+    /// Kill idle sessions no client is looking at, per
+    /// [`crate::config::SESSION_IDLE_TIMEOUT`] (an agent's cut to five
+    /// minutes while the Mac runs on its battery: [`crate::config::reap_timeout`])
+    /// — this bounds what prewarming and
+    /// walked-away-from sessions cost. An attached session gets its stamp
+    /// refreshed instead, so the full timeout starts only when the user
+    /// leaves. "In view" = the worktree holding any attached session: its
+    /// terminals are refreshed likewise, but its other agents age from
+    /// their own last look when their turn's end has been read
+    /// ([`in_view_spares`]) — a finished, seen CLI sitting beside the one
+    /// you are in is an idle process like any other. Spared regardless of
+    /// age: agents that are running or waiting on feedback, agents with a
+    /// backgrounded tool call still running (a job detached from their
+    /// terminal — see `pty::detached_job_under`), agents with text typed
+    /// into their input box and not sent (killing the CLI loses it),
+    /// terminals with a command running, and sessions with no row. Each
+    /// spare restarts the clock, so a busy session costs one probe per
+    /// timeout rather than one per sweep. A reaped session revives on the
+    /// next attach or prewarm; agents resume their conversation.
     pub fn reap_idle_sessions(self: &Arc<Self>) {
-        let timeout = crate::config::session_idle_timeout();
+        let configured = crate::config::session_idle_timeout();
+        // On battery an idle agent's CLI goes sooner (`config::reap_timeout`).
+        let on_battery = crate::power::on_battery();
         let sessions: Vec<(SessionRef, Arc<PtySession>)> = self
             .sessions
             .lock()
@@ -607,7 +661,8 @@ impl Daemon {
             let Some(worktree_id) = self.session_worktree(&sref) else {
                 continue;
             };
-            if attached.contains(&sref) || viewed_worktrees.contains(&worktree_id) {
+            let in_view = viewed_worktrees.contains(&worktree_id);
+            if attached.contains(&sref) || (in_view && in_view_spares(&sref, &self.store)) {
                 self.touch_session(&sref);
                 continue;
             }
@@ -616,7 +671,8 @@ impl Daemon {
                 // A missing stamp (session predating the map) starts aging now.
                 now.duration_since(*interest.entry(sref.clone()).or_insert(now))
             };
-            if age < timeout {
+            let agent = matches!(sref, SessionRef::Agent(_));
+            if age < crate::config::reap_timeout(configured, agent, on_battery) {
                 continue;
             }
             let spared = match &sref {
@@ -654,8 +710,14 @@ impl Daemon {
                 // A RUN TERMINAL is the server `r` started: sitting quiet
                 // is what it is for, and only `r` again stops it. A SETUP
                 // TERMINAL's install may be as quiet, and must finish.
+                // Restamped likewise: a shell left running a long job is
+                // probed once per timeout, not every sweep.
                 SessionRef::Terminal(id) => {
-                    self.command_terminal(id).is_some() || shell_has_children(&session)
+                    let busy = self.command_terminal(id).is_some() || shell_has_children(&session);
+                    if busy {
+                        self.touch_session(&sref);
+                    }
+                    busy
                 }
             };
             if spared {
@@ -2373,6 +2435,8 @@ impl Daemon {
             .store
             .get_worktree(worktree_id)?
             .context("worktree not found")?;
+        // A start is the checkout in use: its IDLE STACK STOP waits.
+        self.stacks.note_activity(worktree_id);
         // Held across the check and the spawn, like `ensure_session`: two
         // presses racing must produce one run, not two.
         let gate = self.spawn_gate.lock().unwrap();
@@ -3007,11 +3071,16 @@ impl Daemon {
         Ok(())
     }
 
-    /// Boot every dead, non-archived session under `worktree_id` (agents and
-    /// terminals) so a later Attach replays an already-running screen.
-    /// Already-alive sessions pass through ensure_session untouched; one
-    /// session failing to spawn (missing CLI, deleted checkout) is logged
-    /// and doesn't stop the rest.
+    /// Warm worktree `worktree_id` as the selection rests on it: its most
+    /// recently active agent is booted, if it is not running already, so
+    /// the session you most likely open next replays a booted screen. The
+    /// one you are opening is the Attach's own to boot; every other dead
+    /// session waits for its own attach. Warming them all — a fork, a login
+    /// shell and a CLI apiece, 1.5 s apart — kept several idle CLIs per
+    /// worktree visited, which the reaper then had to clear away. Live
+    /// sessions in the worktree are restamped, as a sign the user is
+    /// looking there. A failed boot (missing CLI, deleted checkout) is
+    /// logged and degrades to the boot on attach.
     pub fn prewarm_worktree_sessions(
         self: &Arc<Self>,
         worktree_id: &WorktreeId,
@@ -3030,10 +3099,8 @@ impl Daemon {
         }
     }
 
-    /// The sweep itself: boot the worktree's dead sessions one at a time,
-    /// [`PREWARM_STAGGER`] apart. Deliberately off the connection's request
-    /// loop — it used to run inline, which stalled that client's Input and
-    /// Attach frames for as long as the whole burst of forks took.
+    /// The prewarm itself, off the connection's request loop — a fork/exec
+    /// must never stall that client's Input and Attach frames.
     async fn run_worktree_prewarm(
         self: &Arc<Self>,
         worktree_id: &WorktreeId,
@@ -3043,43 +3110,48 @@ impl Daemon {
         let Ok((_, _, agents, terminals)) = self.store.load_tree() else {
             return;
         };
-        let srefs: Vec<SessionRef> = agents
+        let here: Vec<&Agent> = agents
             .iter()
-            .filter(|a| &a.worktree_id == worktree_id && !a.archived)
+            .filter(|a| &a.worktree_id == worktree_id)
+            .collect();
+        // The prewarm doubles as a "user is looking here" signal for the
+        // idle reaper and the IDLE STACK STOP.
+        self.stacks.note_activity(worktree_id);
+        for sref in here
+            .iter()
             .map(|a| SessionRef::Agent(a.id.clone()))
             .chain(
                 terminals
                     .iter()
-                    // A RUN or SETUP TERMINAL never boots from a sweep (see
-                    // `ensure_session`).
-                    .filter(|t| &t.worktree_id == worktree_id && t.run_command.is_none())
+                    .filter(|t| &t.worktree_id == worktree_id)
                     .map(|t| SessionRef::Terminal(t.id.clone())),
             )
-            .collect();
-        for sref in srefs {
-            // The prewarm doubles as a "user is looking here" signal for
-            // the idle reaper, for alive sessions as much as fresh spawns.
+            .filter(|sref| self.is_alive(sref))
+        {
             self.touch_session(&sref);
-            // Already warm — most importantly the one the user just
-            // attached to, which Attach spawned a moment ago.
-            if self.is_alive(&sref) {
-                continue;
-            }
-            let daemon = self.clone();
-            let target = sref.clone();
-            // fork/exec blocks; keep it off the async worker threads.
-            let spawned = tokio::task::spawn_blocking(move || {
-                daemon.ensure_session(&target, cols, rows).map(|_| ())
-            })
-            .await;
-            match spawned {
-                Ok(Err(e)) => {
-                    tracing::debug!(session = ?sref, error = %e, "session prewarm failed")
-                }
-                Err(e) => tracing::debug!(session = ?sref, error = %e, "session prewarm panicked"),
-                Ok(Ok(())) => {}
-            }
-            tokio::time::sleep(PREWARM_STAGGER).await;
+        }
+        let Some(sref) = prewarm_pick(&here).map(|id| SessionRef::Agent(id.clone())) else {
+            return;
+        };
+        // Already warm — most importantly the one the user just attached
+        // to, which Attach spawned a moment ago.
+        if self.is_alive(&sref) {
+            return;
+        }
+        // A beat first: the Attach of the session being opened boots its
+        // own CLI, and the two should not fork at once.
+        tokio::time::sleep(PREWARM_STAGGER).await;
+        let daemon = self.clone();
+        let target = sref.clone();
+        // fork/exec blocks; keep it off the async worker threads.
+        let spawned = tokio::task::spawn_blocking(move || {
+            daemon.ensure_session(&target, cols, rows).map(drop)
+        })
+        .await;
+        match spawned {
+            Ok(Err(e)) => tracing::debug!(session = ?sref, error = %e, "session prewarm failed"),
+            Err(e) => tracing::debug!(session = ?sref, error = %e, "session prewarm panicked"),
+            Ok(Ok(())) => {}
         }
     }
 
@@ -4366,6 +4438,38 @@ fn agent_has_detached_job(session: &PtySession) -> bool {
     match session.child_pid {
         Some(pid) => crate::pty::detached_job_under(pid),
         None => true,
+    }
+}
+
+/// The agent the worktree prewarm boots: the unarchived one whose status
+/// changed most recently — the session last worked in, which the
+/// worktree's selection most likely opens next. Ties go to the first row.
+fn prewarm_pick<'a>(agents: &[&'a Agent]) -> Option<&'a AgentId> {
+    agents
+        .iter()
+        .filter(|a| !a.archived)
+        .fold(None::<&Agent>, |best, a| match best {
+            Some(b) if b.status_changed_at >= a.status_changed_at => Some(b),
+            _ => Some(a),
+        })
+        .map(|a| &a.id)
+}
+
+/// Whether `sref`, in a worktree a client is looking at but not itself
+/// attached, is kept warm as the worktree is: a terminal (switching tabs
+/// should find the shell where it was), an agent whose finished turn is
+/// still unread (it is waiting to be looked at), and one in any state but
+/// finished-and-seen or fresh. A seen, finished agent is not: it ages like
+/// any session out of view.
+fn in_view_spares(sref: &SessionRef, store: &crate::store::Store) -> bool {
+    match sref {
+        SessionRef::Terminal(_) => true,
+        SessionRef::Agent(id) => match store.get_agent(id).ok().flatten() {
+            Some(agent) => {
+                agent.unseen || !matches!(agent.status, AgentStatus::Finished | AgentStatus::Fresh)
+            }
+            None => true,
+        },
     }
 }
 

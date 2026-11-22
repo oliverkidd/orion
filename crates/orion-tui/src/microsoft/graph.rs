@@ -57,6 +57,11 @@ pub fn get_json<T: DeserializeOwned>(
 /// Graph's error body, `{"error": {"code": …, "message": …}}`, as its
 /// message.
 fn error_text(status: u16, body: &[u8]) -> String {
+    // Said the one way, so the gate pauses Microsoft on it
+    // (`sync::gate::failure`).
+    if status == 429 {
+        return "Microsoft Graph rate limit (HTTP 429)".into();
+    }
     serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|v| {

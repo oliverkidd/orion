@@ -13,9 +13,12 @@ pub mod hooks;
 pub mod lifecycle;
 pub mod link_shim;
 pub mod listeners;
+#[cfg(target_os = "macos")]
+mod macos;
 pub mod metrics;
 pub mod open_files;
 pub mod phone;
+pub mod power;
 pub mod pr_scope;
 pub mod prompt_history;
 pub mod pty;
@@ -42,6 +45,27 @@ use orion_core::{env, paths};
 /// Floor on any env-tunable loop period: the overrides exist to make tests
 /// fast, and a zero or near-zero tick would just spin the daemon.
 const MIN_TICK_MS: u64 = 50;
+
+/// The WORKTREE SYNC's pace while a client is connected to show what it
+/// finds, and with none or while you are away: then nobody is reading the
+/// rows, and a reconnecting client asks for a pass of its own as it
+/// arrives.
+const WORKTREE_SYNC_WATCHED_MS: u64 = 2_000;
+const WORKTREE_SYNC_UNWATCHED_MS: u64 = 60_000;
+
+/// How long the WORKTREE SYNC sleeps before its next probe: `fast` while
+/// a client is connected and you are at the desk, else `slow`.
+fn worktree_sync_wait(
+    clients: bool,
+    away: bool,
+    fast: std::time::Duration,
+    slow: std::time::Duration,
+) -> std::time::Duration {
+    match clients && !away {
+        true => fast,
+        false => slow,
+    }
+}
 
 /// A loop period from an env override's value: unset or unparseable falls
 /// back to `default_ms`, and nothing goes below [`MIN_TICK_MS`].
@@ -180,8 +204,12 @@ async fn serve() -> Result<()> {
                 }
                 // Claude's own session name (`/rename`) rides no hook, but
                 // every payload says where it is persisted: remember that
-                // for the window-title path and read it now.
-                if transcript.is_some() {
+                // (above) for the window-title path, and read it at a
+                // session's start and at each turn's edges. Not on every
+                // tool event: each read is a sidecar or a 64 KB transcript
+                // tail, and a rename between turns shows up as the PTY's
+                // window title anyway (`Daemon::on_pty_title`).
+                if transcript.is_some() && syncs_title(&event) {
                     daemon.sync_claude_title(&agent_id);
                 }
                 if let Some(cwd) = &cwd {
@@ -238,12 +266,14 @@ async fn serve() -> Result<()> {
 
     // Idle-session reaper: kill PTYs in worktrees no client is looking at
     // once they age past `config::SESSION_IDLE_TIMEOUT` (bounds what prewarmed and
-    // walked-away-from sessions cost). Its own loop so tests can speed the
-    // sweep up without touching the status-machine cadence.
+    // walked-away-from sessions cost). Every minute: against a fifteen-
+    // minute timeout a sweep each 15 s bought nothing but probes. Its own
+    // loop so tests can speed the sweep up without touching the
+    // status-machine cadence.
     {
         let daemon = daemon.clone();
         tokio::spawn(async move {
-            let mut interval = env_interval(env::IDLE_REAP_MS, 15_000);
+            let mut interval = env_interval(env::IDLE_REAP_MS, 60_000);
             loop {
                 tokio::select! {
                     _ = daemon.shutdown.cancelled() => break,
@@ -257,11 +287,24 @@ async fn serve() -> Result<()> {
     // running `git worktree add`, a manual `git checkout` on the root) should
     // show up without a restart. A cheap mtime probe over the git files those
     // operations touch gates the full `git worktree list` reconcile; the
-    // first tick also runs one boot-time sync per project.
+    // first pass also runs one boot-time sync per project. Every 2 s while
+    // a client is connected to see the change, every minute with none or
+    // while you are away — and at once when one connects
+    // ([`worktree_sync_wait`]).
     {
         let daemon = daemon.clone();
         tokio::spawn(async move {
-            let mut interval = env_interval(env::WORKTREE_SYNC_MS, 2_000);
+            let override_ms = std::env::var(env::WORKTREE_SYNC_MS).ok();
+            let fast = std::time::Duration::from_millis(env_period_ms(
+                override_ms.as_deref(),
+                WORKTREE_SYNC_WATCHED_MS,
+            ));
+            // A test's override paces both: it has no client to wait for.
+            let slow = match override_ms {
+                Some(_) => fast,
+                None => std::time::Duration::from_millis(WORKTREE_SYNC_UNWATCHED_MS),
+            };
+            let mut first = true;
             let mut seen: std::collections::HashMap<orion_core::ProjectId, std::time::SystemTime> =
                 std::collections::HashMap::new();
             // Each failing project's last error: said once, again only
@@ -270,10 +313,20 @@ async fn serve() -> Result<()> {
             let mut failing: std::collections::HashMap<orion_core::ProjectId, String> =
                 std::collections::HashMap::new();
             loop {
-                tokio::select! {
-                    _ = daemon.shutdown.cancelled() => break,
-                    _ = interval.tick() => {}
+                if !first {
+                    let wait = worktree_sync_wait(
+                        daemon.stacks.watched(),
+                        daemon.away.is_away(),
+                        fast,
+                        slow,
+                    );
+                    tokio::select! {
+                        _ = daemon.shutdown.cancelled() => break,
+                        _ = tokio::time::sleep(wait) => {}
+                        _ = daemon.stacks.client_arrived() => {}
+                    }
                 }
+                first = false;
                 let Ok((projects, _, _, _)) = daemon.store.load_tree() else {
                     continue;
                 };
@@ -371,7 +424,7 @@ async fn serve() -> Result<()> {
     // (`away`), and the DMs a waiting session sends while you are
     // (`phone`). With no Slack tokens saved, nothing polls.
     tokio::spawn(slack::run(daemon.clone()));
-    tokio::spawn(away::watch(daemon.clone(), away::period()));
+    tokio::spawn(away::watch(daemon.clone(), away::pace()));
     tokio::spawn(phone::watch(daemon.clone()));
 
     // Keep the pidfile and buildstamp from aging out of a /tmp runtime dir
@@ -424,6 +477,17 @@ async fn serve() -> Result<()> {
     Ok(())
 }
 
+/// Whether hook `event` is one the CLAUDE TITLE SYNC reads the persisted
+/// session name on: a session's start and a turn's two ends.
+fn syncs_title(event: &status::HookEvent) -> bool {
+    matches!(
+        event,
+        status::HookEvent::SessionStart { .. }
+            | status::HookEvent::UserPromptSubmit
+            | status::HookEvent::Stop
+    )
+}
+
 /// Latest mtime across the git files a worktree change touches: the
 /// `.git/worktrees` registry (add/remove/prune), each linked checkout's
 /// `HEAD` (branch switch inside it), and the root `.git/HEAD` (branch
@@ -453,7 +517,7 @@ fn worktree_probe_stamp(repo_path: &std::path::Path) -> Option<std::time::System
 /// inside one) probe anything at all: joining `HEAD` onto a *file* reads
 /// nothing, and a stamp that is always `None` compares equal to itself on
 /// every tick, so the sync would never run again after the first.
-fn git_common_dir(repo_path: &std::path::Path) -> Option<std::path::PathBuf> {
+pub(crate) fn git_common_dir(repo_path: &std::path::Path) -> Option<std::path::PathBuf> {
     let dot_git = repo_path.join(".git");
     let git_dir = if std::fs::metadata(&dot_git).ok()?.is_dir() {
         dot_git
@@ -531,6 +595,40 @@ mod period_tests {
             note_sync_failure(&mut failing, &id, Some(&gone)),
             "after a success it is news again"
         );
+    }
+
+    #[test]
+    fn the_worktree_sync_is_quick_only_with_a_client_connected_and_you_there() {
+        let (fast, slow) = (
+            std::time::Duration::from_millis(WORKTREE_SYNC_WATCHED_MS),
+            std::time::Duration::from_millis(WORKTREE_SYNC_UNWATCHED_MS),
+        );
+        assert_eq!(worktree_sync_wait(true, false, fast, slow).as_secs(), 2);
+        assert_eq!(worktree_sync_wait(false, false, fast, slow).as_secs(), 60);
+        assert_eq!(
+            worktree_sync_wait(true, true, fast, slow).as_secs(),
+            60,
+            "away"
+        );
+    }
+
+    #[test]
+    fn the_title_is_read_at_a_sessions_start_and_a_turns_ends_only() {
+        use status::HookEvent;
+        assert!(syncs_title(&HookEvent::SessionStart { source: None }));
+        assert!(syncs_title(&HookEvent::UserPromptSubmit));
+        assert!(syncs_title(&HookEvent::Stop));
+        assert!(!syncs_title(&HookEvent::PostToolUse {
+            tool_name: Some("Edit".into()),
+            subagent_id: None,
+        }));
+        assert!(!syncs_title(&HookEvent::PreToolUse {
+            tool_name: Some("Bash".into()),
+            subagent_id: None,
+        }));
+        assert!(!syncs_title(&HookEvent::Notification {
+            notification_type: None
+        }));
     }
 
     #[test]

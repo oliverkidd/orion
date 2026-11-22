@@ -355,8 +355,13 @@ pub(crate) fn maybe_open(app: &mut App) {
     }
 }
 
-/// Put the sheet up with every item waiting; with none, say so.
+/// Put the sheet up with every item waiting; with none, say so. Opening it
+/// — or asking to — is when what waits is worked out again
+/// (`knowledge::review::want_refresh`), each project's knowledge base
+/// branch looked up afresh (`knowledge::share::forget_bases`).
 pub(crate) fn open(app: &mut App) {
+    crate::knowledge::review::want_refresh();
+    crate::knowledge::share::forget_bases();
     if app.rule_review.count() == 0 {
         app.flash = Some(crate::flash::Flash::note("No rules wait on a review"));
         app.dirty = true;

@@ -85,6 +85,20 @@ pub fn ago_label(delta_ms: i64) -> String {
     }
 }
 
+/// How long until [`ago_label`] for an age of `delta_ms` reads
+/// differently: to its next whole minute under an hour, its next hour
+/// under a day, its next day after. What the loop sleeps for to repaint
+/// an `ago` label as it turns over, and not before.
+pub fn ago_turns_in(delta_ms: i64) -> i64 {
+    let delta = delta_ms.max(0);
+    let unit = match delta / 1000 {
+        s if s < 3600 => 60_000,
+        s if s < 86_400 => 3_600_000,
+        _ => 86_400_000,
+    };
+    unit - delta % unit
+}
+
 /// [`ago_label`] for a column of ages, `delta_secs` ago: `3d`, `21m`,
 /// `now` — the word `ago` left to the column's header.
 pub fn ago_short(delta_secs: i64) -> String {
@@ -266,5 +280,20 @@ mod tests {
             last_used_ms: 0,
         };
         assert_eq!(entry.label(), "a@one /srv");
+    }
+
+    /// A label is repainted as it turns over: `just now` to `1m ago` at
+    /// the minute, `59m ago` to `1h ago` at the hour, and an hour-old one
+    /// only at its next hour.
+    #[test]
+    fn an_ago_label_turns_over_on_its_own_unit() {
+        assert_eq!(ago_turns_in(0), 60_000);
+        assert_eq!(ago_turns_in(59_500), 500);
+        assert_eq!(ago_label(59_500 + 500), "1m ago");
+        assert_eq!(ago_turns_in(61_000), 59_000);
+        assert_eq!(ago_turns_in(3_599_000), 1_000);
+        assert_eq!(ago_label(3_600_000), "1h ago");
+        assert_eq!(ago_turns_in(3_600_000 + 60_000), 3_540_000);
+        assert_eq!(ago_turns_in(-5), 60_000, "a clock set back reads as now");
     }
 }

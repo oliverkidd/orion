@@ -1,9 +1,16 @@
-//! BASE SYNC: every project's base branch kept current without a keypress.
-//! Every five minutes, and at once after
-//! a merge from the PULL REQUESTS MODAL, each project's ROOT WORKTREE
-//! fetches origin — which brings every worktree of the project current
-//! too, since they share its remote-tracking refs — and, when the root is
-//! on the base branch, fast-forwards it onto origin's copy.
+//! BASE SYNC: a project's base branch kept current without a keypress.
+//! As you switch to a project whose last fetch is older than `base_fetch`
+//! (half an hour by default), or as the window takes focus back on one,
+//! and at once after a merge from the PULL REQUESTS MODAL, the project's
+//! ROOT WORKTREE fetches origin — which brings every worktree of the
+//! project current too, since they share its remote-tracking refs — and,
+//! when the root is on the base branch, fast-forwards it onto origin's
+//! copy.
+//!
+//! The fetch is THE RESOLVER's `BaseFetch(project)` (`sync::local`): asked
+//! as the project is on screen, never on a beat of its own and never while
+//! you are AWAY. A project nobody visits is not fetched at all — its
+//! worktrees are cut by the DAEMON, which fetches origin itself first.
 //!
 //! The fast-forward is the PULL's (`git_sync::pull`) with every question
 //! answered "not now" instead of asked: it waits while an agent works in
@@ -12,14 +19,11 @@
 //! branch is only fetched. Nothing here ever says it failed — a laptop
 //! offline for an hour is not news — so a FLASH shows only when the base
 //! moved.
-//!
-//! One project at a time, off the loop (`crate::git_proc`), the most
-//! overdue first; the answer lands on `App::base_sync.tx`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use orion_core::ProjectId;
 
@@ -27,9 +31,36 @@ use crate::app::App;
 use crate::flash::Flash;
 use crate::git_proc::{head_branch, remote_git, run, FETCH_TIMEOUT};
 
-/// How often each project's root fetches origin: every 5 minutes, and
-/// at once after a merge from the PULL REQUESTS MODAL.
-pub const EVERY: Duration = Duration::from_secs(5 * 60);
+/// How old a project's last fetch may be when it is visited before it
+/// is fetched again: the `base_fetch` setting, half an hour unless it says
+/// otherwise; None when it is `off`. Asked by THE RESOLVER's policy on
+/// every turn of the loop, so the setting is looked at again at most every
+/// [`SETTING_TTL`] — not two `stat`s a frame.
+pub fn fresh_for() -> Option<Duration> {
+    #[cfg(test)]
+    {
+        crate::config::Config::cached().base_fetch_after()
+    }
+    #[cfg(not(test))]
+    {
+        use std::sync::Mutex;
+        use std::time::Instant;
+        static KNOWN: Mutex<Option<(Instant, Option<Duration>)>> = Mutex::new(None);
+        let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+        match *known {
+            Some((at, span)) if at.elapsed() < SETTING_TTL => span,
+            _ => {
+                let span = crate::config::Config::cached().base_fetch_after();
+                *known = Some((Instant::now(), span));
+                span
+            }
+        }
+    }
+}
+
+/// How long [`fresh_for`] trusts the setting it read.
+#[cfg_attr(test, allow(dead_code))]
+const SETTING_TTL: Duration = Duration::from_secs(10);
 
 /// How a sync ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,31 +68,14 @@ pub enum Outcome {
     /// Origin fetched; the root stayed where it was — on another branch,
     /// already current, ahead of origin, or busy.
     Fetched,
+    /// Origin fetched, and neither its base nor the root's own branch
+    /// moved there: no checkout's `⇣` can have changed.
+    Current,
     /// Origin fetched and the root, on the base branch, fast-forwarded
     /// `commits` onto `base`.
     Moved { base: String, commits: usize },
     /// No origin to fetch, or git's complaint: logged, never flashed.
     Skipped(String),
-}
-
-/// What the event loop hands back to [`land`].
-#[derive(Debug)]
-pub struct Answer {
-    pub project: ProjectId,
-    pub outcome: Outcome,
-}
-
-/// The syncs' state on `App::base_sync`.
-#[derive(Debug, Default)]
-pub struct Shared {
-    /// Where the off-loop answers go; installed at startup. `None` in the
-    /// unit tests, which never run git from the loop.
-    pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
-    /// The project being synced, if any: one at a time.
-    pub inflight: Option<ProjectId>,
-    /// When each project is next due. A project not in here is due now —
-    /// every project syncs once soon after the TUI starts.
-    pub due: HashMap<ProjectId, Instant>,
 }
 
 // ---- git ----
@@ -73,8 +87,12 @@ pub fn sync(root: &Path, base_setting: &str, may_move: bool, quit: &AtomicBool) 
     if !crate::git_sync::has_origin(root) {
         return Outcome::Skipped("no origin".into());
     }
+    let before = measured(root, base_setting);
     if let Err(e) = remote_git(root, &["fetch", "--quiet", "origin"], FETCH_TIMEOUT, quit) {
         return Outcome::Skipped(e);
+    }
+    if before.is_some() && before == measured(root, base_setting) {
+        return Outcome::Current;
     }
     if !may_move {
         return Outcome::Fetched;
@@ -101,83 +119,77 @@ pub fn sync(root: &Path, base_setting: &str, may_move: bool, quit: &AtomicBool) 
     }
 }
 
+/// What the checkouts' `⇣` are measured against, as origin has it: its
+/// copy of the base (the **Base branch**, else its default) and of the
+/// root's own branch — read from the ref files, no process. None when the
+/// files don't say, which counts as moved.
+fn measured(root: &Path, base_setting: &str) -> Option<[Option<String>; 2]> {
+    use crate::git_refs::{branch_sha, dirs, head_branch};
+    let dirs = dirs(root)?;
+    let base = match base_setting {
+        "" => "origin/HEAD".to_string(),
+        name => format!("origin/{name}"),
+    };
+    let base = branch_sha(&dirs, &base)?;
+    let own = head_branch(&dirs).and_then(|b| branch_sha(&dirs, &format!("origin/{b}")));
+    Some([Some(base), own])
+}
+
 // ---- the loop's side ----
 
-/// Sync `project` on the loop's next beat, past its timer: a merge just
-/// landed, so origin's base has moved.
+/// Sync `project` now, past its freshness: a merge just landed, so
+/// origin's base has moved. A failure's backoff still stands.
 pub(crate) fn request_now(app: &mut App, project: &ProjectId) {
-    app.base_sync.due.insert(project.clone(), Instant::now());
+    let key = crate::sync::QueryKey::BaseFetch(project.clone());
+    app.resolver.invalidate(&key);
+    app.resolver.ask(key, std::time::Instant::now());
 }
 
-/// The root of the most overdue project, with whether it may be moved:
-/// None while a sync runs or nothing is due. A root a PULL, a PUSH or a
-/// branch switch has hold of is passed over this beat.
-fn next_due(app: &App) -> Option<(ProjectId, PathBuf, bool)> {
-    if app.base_sync.inflight.is_some() {
-        return None;
+/// What a sync of `project` needs to start: its root's path, its base
+/// setting, and whether it may be moved — not while anything else is
+/// working in it. Err says why it can't start at all: no root yet, or one
+/// a PULL, a PUSH or a branch switch has hold of.
+pub(crate) fn start(app: &App, project: &ProjectId) -> Result<(PathBuf, String, bool), String> {
+    let root = app
+        .root_worktree(project)
+        .ok_or_else(|| "no root worktree".to_string())?;
+    if app.is_placeholder_worktree(&root) || app.git_sync.inflight.contains_key(&root) {
+        return Err("the root is busy".into());
     }
-    let now = Instant::now();
-    app.tree
-        .projects
+    let path = app
+        .tree
+        .worktrees
         .iter()
-        .filter_map(|p| {
-            // Never synced: due now.
-            let due = app.base_sync.due.get(&p.id).copied().unwrap_or(now);
-            (due <= now).then_some((due, p))
-        })
-        .min_by_key(|(due, _)| *due)
-        .and_then(|(_, p)| {
-            let root = app.root_worktree(&p.id)?;
-            if app.is_placeholder_worktree(&root) || app.git_sync.inflight.contains_key(&root) {
-                return None;
-            }
-            let path = app
-                .tree
-                .worktrees
-                .iter()
-                .find(|w| w.id == root)?
-                .path
-                .clone();
-            let busy = app
-                .tree
-                .agents
-                .iter()
-                .any(|a| a.worktree_id == root && !a.archived && app.spins(a));
-            Some((p.id.clone(), path, !busy))
-        })
+        .find(|w| w.id == root)
+        .map(|w| w.path.clone())
+        .ok_or_else(|| "no root worktree".to_string())?;
+    let busy = app
+        .tree
+        .agents
+        .iter()
+        .any(|a| a.worktree_id == root && !a.archived && app.spins(a));
+    let base = app.tree.base_branch_at(&path);
+    Ok((path, base, !busy))
 }
 
-/// The git-poll beat: start the most overdue project's sync, if any.
-pub(crate) fn tick(app: &mut App) {
-    let Some((project, root, may_move)) = next_due(app) else {
-        return;
-    };
-    app.base_sync.inflight = Some(project.clone());
-    let Some(tx) = app.base_sync.tx.clone() else {
-        return;
-    };
-    let quit = app.git_sync.quit.clone();
-    let base = app.tree.base_branch_at(&root);
-    tokio::task::spawn_blocking(move || {
-        let outcome = sync(&root, &base, may_move, &quit);
-        let _ = tx.send(Answer { project, outcome });
-    });
-}
-
-/// A sync landed: the project is next due a beat from now, its checkouts
-/// are read again so their `⇣` counts catch up, and a base that moved says
-/// so.
-pub(crate) fn land(app: &mut App, answer: Answer) {
-    let Answer { project, outcome } = answer;
-    app.base_sync.inflight = None;
-    app.base_sync
-        .due
-        .insert(project.clone(), Instant::now() + EVERY);
+/// A sync landed: its checkouts are read again so their `⇣` counts catch
+/// up — unless origin brought nothing they are measured against — and a
+/// base that moved says so.
+pub(crate) fn land(app: &mut App, project: ProjectId, outcome: Outcome) {
     match &outcome {
         Outcome::Skipped(why) => {
             tracing::debug!(project = %project.0, "base sync skipped: {why}");
             return;
         }
+        Outcome::Current => return,
+        // The base moved: what the rule review waits on may have reached
+        // it (`knowledge::review::refresh`).
+        Outcome::Moved { commits, .. } if *commits > 0 => {
+            crate::knowledge::review::want_refresh();
+        }
+        _ => {}
+    }
+    match &outcome {
         Outcome::Moved { base, commits } if *commits > 0 => {
             let name = app
                 .tree
@@ -293,6 +305,26 @@ mod tests {
 
     fn quit() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    /// A fetch that brought nothing the checkouts are measured against
+    /// says so, and reads none of them again.
+    #[test]
+    fn a_fetch_that_moved_nothing_is_current() {
+        let r = repos();
+        assert_eq!(sync(&r.root, "", true, &quit()), Outcome::Current);
+        commit(&r.other, "elsewhere");
+        git(&r.other, &["push", "-q", "origin", "main:side"]);
+        assert_eq!(
+            sync(&r.root, "", true, &quit()),
+            Outcome::Current,
+            "another branch moved"
+        );
+        others_merge(&r, 1);
+        assert!(matches!(
+            sync(&r.root, "", true, &quit()),
+            Outcome::Moved { .. }
+        ));
     }
 
     #[test]

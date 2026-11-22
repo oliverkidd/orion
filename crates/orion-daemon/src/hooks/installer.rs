@@ -69,6 +69,22 @@ const HOOK_CURL_TIMEOUT_SECS: u32 = 3;
 /// The tools Claude's `PreToolUse` hook fires for.
 const CLAUDE_PRE_TOOL_MATCHER: &str = "AskUserQuestion|ExitPlanMode|Bash";
 
+/// The tools Claude's `PostToolUse` hook fires for: every one but the
+/// read-only lookups an agent makes dozens of a turn — `Read`, `Grep`,
+/// `Glob`, `LS` and `TodoWrite` — each of which cost a `sh`, a `curl` and
+/// a request into the daemon for nothing it reads. Claude takes a matcher
+/// with anything beyond letters, digits and `|` as a JavaScript regular
+/// expression, so a negative lookahead names what to skip; it is anchored
+/// both ends and ends in `.*` so it reads the same whether Claude tests it
+/// as a search or as a whole-name match. An MCP tool whose name merely
+/// starts with one of these (`mcp__x__Read…`) still matches.
+///
+/// What is given up: a permission prompt on one of those tools (a `Read`
+/// outside the checkout) is answered by its `PostToolUse`, which no longer
+/// comes; the turn's next tool event — or its end — moves the row out of
+/// red instead (see `status`).
+const CLAUDE_POST_TOOL_MATCHER: &str = "^(?!(?:Read|Grep|Glob|LS|TodoWrite)$).*$";
+
 /// (hook event, optional matcher)
 const CLAUDE_EVENTS: &[(&str, Option<&str>)] = &[
     ("UserPromptSubmit", None),
@@ -88,17 +104,18 @@ const CLAUDE_EVENTS: &[(&str, Option<&str>)] = &[
     // away with the `orion run …` that does it (`stack_cmd`), so the stack
     // runs where orion keeps its status.
     ("PreToolUse", Some(CLAUDE_PRE_TOOL_MATCHER)),
-    // Every tool's end, unmatched. Three signals ride it: the answer to an
-    // `AskUserQuestion` (the row leaves red); the approval of a permission
-    // prompt, which fires no hook of its own — the gated tool simply runs,
-    // and its PostToolUse is the first word that the user said yes, for
-    // Edit and WebFetch as much as for Bash (see status.rs); and the
-    // session's position — Claude reports its working directory on every
-    // payload, and EnterWorktree/ExitWorktree (what "do this in a
+    // Every tool's end but the read-only lookups
+    // ([`CLAUDE_POST_TOOL_MATCHER`]). Three signals ride it: the answer to
+    // an `AskUserQuestion` (the row leaves red); the approval of a
+    // permission prompt, which fires no hook of its own — the gated tool
+    // simply runs, and its PostToolUse is the first word that the user
+    // said yes, for Edit and WebFetch as much as for Bash (see status.rs);
+    // and the session's position — Claude reports its working directory on
+    // every payload, and EnterWorktree/ExitWorktree (what "do this in a
     // worktree" actually runs) or a Bash `cd` move it, so the row re-homes
     // seconds after the move instead of at the turn's Stop, which can be
     // many minutes later (see registry::reparent_agent_by_cwd).
-    ("PostToolUse", None),
+    ("PostToolUse", Some(CLAUDE_POST_TOOL_MATCHER)),
     ("SubagentStart", None),
     ("SubagentStop", None),
     // What Claude fires *instead of* Stop when the turn ends on an API
@@ -269,7 +286,7 @@ const EXCLUDE_MARK: &str = "# orion's hook files (orion keeps these here)";
 /// already there (the user's, or an earlier run's) are not repeated, and a
 /// directory git can't place (no `.git`) is left alone.
 pub fn exclude_managed_files(cwd: &Path) -> Result<()> {
-    let Some(common) = git_common_dir(cwd) else {
+    let Some(common) = crate::git_common_dir(cwd) else {
         return Ok(());
     };
     let path = common.join("info").join("exclude");
@@ -298,22 +315,6 @@ pub fn exclude_managed_files(cwd: &Path) -> Result<()> {
     let dir = path.parent().context("exclude path without a parent")?;
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))
-}
-
-/// The clone's shared git dir for checkout `cwd`: `<cwd>/.git` for the
-/// main checkout; for a linked worktree, the dir its `.git` file names,
-/// followed through that dir's `commondir`.
-fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
-    let dot = cwd.join(".git");
-    if dot.is_dir() {
-        return Some(dot);
-    }
-    let text = std::fs::read_to_string(&dot).ok()?;
-    let gitdir = cwd.join(text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim());
-    match std::fs::read_to_string(gitdir.join("commondir")) {
-        Ok(common) => Some(gitdir.join(common.trim())),
-        Err(_) => Some(gitdir),
-    }
 }
 
 /// Merge orion's managed hooks for Claude Code into
@@ -758,12 +759,12 @@ mod tests {
     }
 
     #[test]
-    fn post_tool_use_is_one_unmatched_group_across_reinstalls() {
-        // PostToolUse carries no matcher: a permission prompt's approval is
-        // only ever visible as the gated tool's completion, whatever the
-        // tool, and the AskUserQuestion answer and the cwd probe ride the
-        // same group. A reinstall (every spawn) must leave exactly one —
-        // and must replace the two matched groups an older orion wrote.
+    fn post_tool_use_is_one_group_across_reinstalls() {
+        // PostToolUse is one group, matching every tool but the read-only
+        // lookups: the AskUserQuestion answer, a permission prompt's
+        // approval and the cwd probe all ride it. A reinstall (every spawn)
+        // must leave exactly one — and must replace the unmatched group, and
+        // the two matched ones, older orions wrote.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join(".claude");
         std::fs::create_dir_all(&dir).unwrap();
@@ -776,7 +777,11 @@ mod tests {
             dir.join("settings.local.json"),
             serde_json::to_string(&json!({
                 "hooks": {
-                    "PostToolUse": [old("AskUserQuestion"), old("Bash|EnterWorktree|ExitWorktree")]
+                    "PostToolUse": [
+                        old("AskUserQuestion"),
+                        old("Bash|EnterWorktree|ExitWorktree"),
+                        managed_group("claude", "PostToolUse", None),
+                    ]
                 }
             }))
             .unwrap(),
@@ -787,7 +792,7 @@ mod tests {
         let settings = read_settings(tmp.path());
         let groups = settings["hooks"]["PostToolUse"].as_array().unwrap();
         assert_eq!(groups.len(), 1, "{groups:?}");
-        assert!(groups[0].get("matcher").is_none());
+        assert_eq!(groups[0]["matcher"], json!(CLAUDE_POST_TOOL_MATCHER));
         assert_eq!(groups[0]["_orionManaged"], json!(true));
         assert!(groups[0]["hooks"][0]["command"]
             .as_str()

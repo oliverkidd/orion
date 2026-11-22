@@ -1183,6 +1183,9 @@ pub struct Tally {
     /// One of them only just started needing you, or crashed — inside the
     /// red ONE-SHOT SWEEP's window ([`crate::app::fresh_alarm`]).
     pub alarm: bool,
+    /// One of its unread finishes is still inside its UNREAD SHIMMER
+    /// ([`crate::app::fresh_unread`]).
+    pub fresh_done: bool,
 }
 
 impl Tally {
@@ -1200,6 +1203,7 @@ impl Tally {
             done: self.done + other.done,
             running: self.running + other.running,
             alarm: self.alarm || other.alarm,
+            fresh_done: self.fresh_done || other.fresh_done,
         }
     }
 }
@@ -1223,6 +1227,7 @@ pub fn project_tally(app: &App, project: &ProjectId) -> Tally {
             _ => {}
         }
         tally.alarm |= crate::app::fresh_alarm(a, now);
+        tally.fresh_done |= crate::app::fresh_unread(a, now);
     }
     tally
 }
@@ -1865,8 +1870,6 @@ mod tests {
                     meta: Default::default(),
                 }],
                 at: std::time::Instant::now(),
-                due: std::time::Instant::now(),
-                step: std::time::Duration::from_secs(60),
             },
         );
         let listed = app.open_prs[&ProjectId("p2".into())].list[0].clone();

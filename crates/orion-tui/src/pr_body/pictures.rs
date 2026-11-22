@@ -177,9 +177,7 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// none, None when `gh` couldn't ask.
 pub async fn manifest(owner: &str, repo: &str, number: u64) -> Option<Manifest> {
     let endpoint = format!("repos/{owner}/{repo}/contents/pr-{number}/pictures.json?ref={BRANCH}");
-    let mut cmd = tokio::process::Command::new("gh");
-    cmd.args(["api", endpoint.as_str()]);
-    match crate::pull_request::run_piped(cmd, "", TIMEOUT).await {
+    match crate::pull_request::run_gh(None, &["api", &endpoint], TIMEOUT).await {
         Ok(json) => Some(parse_contents(&json)),
         Err(why) if super::not_found(&why) => Some(Manifest::default()),
         Err(why) => {
@@ -204,6 +202,11 @@ pub fn grid_file(cache: &Path, number: u64, head_sha: &str) -> PathBuf {
 pub async fn download(owner: &str, repo: &str, number: u64, grid: &Grid, to: &Path) -> bool {
     let name = grid.name();
     if name.is_empty() || name.contains("..") {
+        return false;
+    }
+    // Raw bytes, so not through `run_gh`'s text — but held by the same
+    // pause as every other GitHub call.
+    if crate::sync::gate::github_paused_until().is_some() {
         return false;
     }
     let endpoint = format!("repos/{owner}/{repo}/contents/pr-{number}/grids/{name}?ref={BRANCH}");

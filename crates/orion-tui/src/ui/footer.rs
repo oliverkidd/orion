@@ -470,10 +470,10 @@ fn draw_footer_bar(f: &mut Frame, app: &mut App, area: Rect) {
         _ => None,
     };
     let spot_max = (area.width / 3).min(area.width.saturating_sub(right_w + 2));
-    let spot_sweep = app.animations.then(|| app.sweep_phase());
-    let spot = app.spotify.as_ref().and_then(|np| {
-        crate::spotify::readout(np, usize::from(spot_max), th, spotify_hover, spot_sweep)
-    });
+    let spot = app
+        .spotify
+        .as_ref()
+        .and_then(|np| crate::spotify::readout(np, usize::from(spot_max), th, spotify_hover));
     let spot_w = spot.as_ref().map_or(0, |r| r.width);
     let spot_room = if spot.is_some() { spot_w + 2 } else { 0 };
     // Left of those, the next meeting within the hour (`crate::microsoft`),
@@ -637,10 +637,11 @@ pub(crate) fn upgrade_ramp(th: crate::theme::Theme) -> [ratatui::style::Color; 3
     [th.ok, Color::Indexed(114), Color::Indexed(157)]
 }
 
-/// `text` in the upgrade green, sweeping while animations are on.
+/// `text` in the upgrade green, sweeping for its ONE-SHOT SWEEP while
+/// animations are on (`App::update_shimmers`), still after.
 pub(crate) fn upgrade_spans(app: &App, text: &str, base: Style) -> Vec<Span<'static>> {
     let ramp = upgrade_ramp(app.theme);
-    if app.animations {
+    if app.animations && app.update_shimmers() {
         crate::ui::sweep_spans(text, base, ramp, app.sweep_phase())
     } else {
         vec![Span::styled(text.to_string(), base.fg(ramp[0]))]

@@ -289,6 +289,12 @@ pub fn resolve_base(root: &Path, base_setting: &str) -> Option<String> {
 /// cannot say — no base to measure against, or no commit yet.
 pub fn ahead_behind(root: &Path, base_setting: &str) -> Option<(usize, usize)> {
     let base = resolve_base_cached(root, base_setting)?;
+    ahead_behind_of(root, &base)
+}
+
+/// [`ahead_behind`] against a base already resolved: the one `git
+/// rev-list` over both sides.
+pub fn ahead_behind_of(root: &Path, base: &str) -> Option<(usize, usize)> {
     let range = format!("HEAD...{base}");
     let line = git_line(root, &["rev-list", "--left-right", "--count", &range])?;
     let mut counts = line.split_whitespace().map(str::parse::<usize>);

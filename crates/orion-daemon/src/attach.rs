@@ -34,6 +34,9 @@ pub struct PaneSize {
 /// client has been brought up to date.
 struct Bound {
     session: Arc<PtySession>,
+    /// Counts this attachment on the PTY while bound, so its output is
+    /// paced for someone watching (`pty::coalesce_for`).
+    _viewer: crate::pty::Viewer,
     rx: broadcast::Receiver<PtyEvent>,
     /// First byte offset the client has NOT seen; frames ending at or before
     /// it are already covered by a replay.
@@ -102,6 +105,7 @@ pub async fn forward(
     // `None` once the PTY has exited: nothing more comes from it, but the
     // task stays to pick up a replacement.
     let mut live = Some(Bound {
+        _viewer: session.viewer(),
         session,
         rx,
         min_seq,
@@ -136,6 +140,7 @@ pub async fn forward(
                 // from the PTY being replaced must not mark the new one dead.
                 let (rx, min_seq) = bind(&current, &sref, &out_tx, size, None).await;
                 live = Some(Bound {
+                    _viewer: current.viewer(),
                     session: current,
                     rx,
                     min_seq,

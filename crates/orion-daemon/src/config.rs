@@ -1,15 +1,19 @@
 //! User settings, read from `paths::config_path()` with
 //! `paths::config_local_path()` over it (JSON; see `orion_core::settings`).
-//! Loaded fresh at each use so edits apply without restarting the daemon. A
-//! missing file or unknown fields fall back to defaults; a malformed file is
-//! logged and ignored rather than failing the operation that read it, and a
-//! value this build can't read costs only its own key.
+//! Loaded fresh at each use so edits apply without restarting the daemon —
+//! or, on the loops that ask every few seconds, through [`Config::cached`],
+//! which parses again only when either file moved. A missing file
+//! or unknown fields fall back to defaults; a malformed file is logged and
+//! ignored rather than failing the operation that read it, and a value this
+//! build can't read costs only its own key.
 
 use orion_core::compose::WorktreeContainers;
 use orion_core::{AgentKind, LaunchSpec};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -43,6 +47,45 @@ pub struct Config {
     /// AWAY AND PHONE (`away`, the TUI's Connections tab): when you count
     /// as away, and what the phone bridge sends then.
     pub away: orion_core::away::AwaySettings,
+    /// STACKS (`stacks`): what the daemon does about dev stacks left up.
+    pub stacks: StackSettings,
+}
+
+/// `stacks` in the config file.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct StackSettings {
+    /// IDLE STACK STOP: how long a stack may stay up with nothing happening
+    /// in its checkout before the daemon stops it (`stacks::idle_stop`) —
+    /// `"1h"` (the default), `"90m"`, `"45s"`, `"2h30m"`, or `"off"`. Read
+    /// through [`StackSettings::idle_stop_after`].
+    pub idle_stop: String,
+}
+
+impl Default for StackSettings {
+    fn default() -> Self {
+        Self {
+            idle_stop: DEFAULT_IDLE_STOP.into(),
+        }
+    }
+}
+
+/// `stacks.idle_stop` when nothing says otherwise: a dev stack nobody has
+/// touched for an hour is costing battery for nothing (a compose stack
+/// keeps the docker VM busy, a dev server its watchers).
+pub const DEFAULT_IDLE_STOP: &str = "1h";
+
+impl StackSettings {
+    /// How long an idle stack stays up; None when `idle_stop` is `off`. A
+    /// value that doesn't read is the default, with a warning
+    /// ([`orion_core::settings::span_or_default`]).
+    pub fn idle_stop_after(&self) -> Option<Duration> {
+        orion_core::settings::span_or_default(
+            &self.idle_stop,
+            DEFAULT_IDLE_STOP,
+            "stacks.idle_stop",
+        )
+    }
 }
 
 /// One project's entry under `projects`, of which the daemon reads four
@@ -83,6 +126,7 @@ impl Default for Config {
             quick_prompt_kind: AgentKind::Claude.as_str().into(),
             claude_enabled: false,
             away: Default::default(),
+            stacks: Default::default(),
         }
     }
 }
@@ -98,6 +142,27 @@ impl Default for Config {
 /// (agents resume their conversation). Tests shorten it with
 /// [`orion_core::env::IDLE_TIMEOUT_MS`].
 pub const SESSION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How long an idle AGENT may sit before the IDLE REAPER stops its CLI
+/// while the Mac runs on its battery (`power`): an idle CLI's wakeups cost
+/// charge, and a reaped one comes back on the next attach. Never longer
+/// than the timeout on AC.
+pub const BATTERY_AGENT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// The idle span the reaper gives one session: `configured` (the timeout
+/// on AC), cut to [`BATTERY_AGENT_IDLE_TIMEOUT`] for an agent while
+/// `on_battery`. Terminals keep `configured` either way: a shell costs
+/// next to nothing idle.
+pub fn reap_timeout(
+    configured: std::time::Duration,
+    agent: bool,
+    on_battery: bool,
+) -> std::time::Duration {
+    match agent && on_battery {
+        true => configured.min(BATTERY_AGENT_IDLE_TIMEOUT),
+        false => configured,
+    }
+}
 
 /// [`SESSION_IDLE_TIMEOUT`], or the test override when one is set.
 pub fn session_idle_timeout() -> std::time::Duration {
@@ -121,6 +186,20 @@ impl Config {
             tracing::warn!(keys = ?loaded.skipped, "settings this build can't read keep their defaults");
         }
         loaded.value
+    }
+
+    /// The settings as [`Config::load`] reads them, parsed again only when
+    /// `config.json` or `config.local.json` changed on disk
+    /// ([`orion_core::settings::Cache`]). For the loops that
+    /// ask every few seconds — the AWAY reading, the IDLE STACK STOP —
+    /// where a fresh parse of both files each time is the cost.
+    pub fn cached() -> Arc<Config> {
+        static CACHE: orion_core::settings::Cache<Config> = orion_core::settings::Cache::new();
+        CACHE.get(
+            &orion_core::paths::config_path(),
+            &orion_core::paths::config_local_path(),
+            Self::load,
+        )
     }
 
     /// The BASE BRANCH set for the project checked out at `repo_path`, or
@@ -266,6 +345,41 @@ mod tests {
 
     /// `claude_accounts` reads as the TUI writes it: two keys an entry,
     /// `enabled` only when off.
+    #[test]
+    fn an_idle_agent_is_reaped_after_five_minutes_on_battery() {
+        let ac = SESSION_IDLE_TIMEOUT;
+        let five = std::time::Duration::from_secs(300);
+        assert_eq!(reap_timeout(ac, true, false), ac, "on AC: the timeout");
+        assert_eq!(reap_timeout(ac, true, true), five, "an agent on battery");
+        assert_eq!(reap_timeout(ac, false, true), ac, "a terminal keeps it");
+        let short = std::time::Duration::from_secs(2);
+        assert_eq!(reap_timeout(short, true, true), short, "never longer");
+    }
+
+    /// `stacks.idle_stop` reads as a span (`orion_core::settings`), `off`
+    /// as never, and a typo as the default hour.
+    #[test]
+    fn idle_stop_reads_spans_and_off() {
+        let at = |s: &str| StackSettings {
+            idle_stop: s.into(),
+        };
+        assert_eq!(
+            StackSettings::default().idle_stop_after(),
+            Some(Duration::from_secs(3600)),
+            "an hour unless told otherwise"
+        );
+        assert_eq!(at("90m").idle_stop_after(), Some(Duration::from_secs(5400)));
+        assert_eq!(at("off").idle_stop_after(), None);
+        assert_eq!(
+            at("soon").idle_stop_after(),
+            Some(Duration::from_secs(3600))
+        );
+        let cfg: Config =
+            serde_json::from_value(serde_json::json!({ "stacks": { "idle_stop": "off" } }))
+                .unwrap();
+        assert_eq!(cfg.stacks.idle_stop_after(), None);
+    }
+
     #[test]
     fn claude_accounts_read_as_ids_and_dirs() {
         let cfg: Config = serde_json::from_str(

@@ -845,5 +845,5 @@ A program that asked for the mouse itself — Claude Code's fullscreen renderer,
 htop, tmux with its mouse on — gets the left button the way a plain terminal hands it over, and its
 own selection does the copying. A copy it sends as an OSC 52 write is passed on to the terminal you
 are sitting at. orion asks for the mouse (and bracketed paste, focus reports and the kitty keyboard
-flags) again every two seconds, so a host terminal that forgot it — iTerm2's Session ▸ Reset — gets
-it back on its own.
+flags) again as the window takes focus back or is resized, and every 30 s while you look, so a host
+terminal that forgot it — iTerm2's Session ▸ Reset — gets it back on its own.

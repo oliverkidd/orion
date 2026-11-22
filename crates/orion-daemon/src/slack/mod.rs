@@ -85,6 +85,9 @@ pub struct SlackBridge {
     status: Mutex<SlackStatus>,
     session: Mutex<Option<Arc<Session>>>,
     reconnect: tokio::sync::Notify,
+    /// A session was signed in: what the AWAY reading waits on while
+    /// there is none ([`SlackBridge::until_connected`]).
+    signed_in: tokio::sync::Notify,
     seen: Mutex<VecDeque<String>>,
 }
 
@@ -104,6 +107,22 @@ impl SlackBridge {
     /// Signed in, so the phone bridge has somewhere to send.
     pub fn connected(&self) -> bool {
         self.session.lock().unwrap().is_some()
+    }
+
+    /// Resolves once signed in: at once if already, else when a session
+    /// next is.
+    pub async fn until_connected(&self) {
+        loop {
+            let signed_in = self.signed_in.notified();
+            tokio::pin!(signed_in);
+            // Listening before the look, so a sign-in between the two
+            // is not missed.
+            signed_in.as_mut().enable();
+            if self.connected() {
+                return;
+            }
+            signed_in.await;
+        }
     }
 
     /// Read the tokens again and reconnect (`ClientRequest::SlackReconnect`).
@@ -129,7 +148,11 @@ impl Daemon {
     /// Set the bridge's status and session, telling every TUI when the
     /// status changed.
     fn set_slack(&self, status: SlackStatus, session: Option<Arc<Session>>) {
+        let signed_in = session.is_some();
         *self.slack.session.lock().unwrap() = session;
+        if signed_in {
+            self.slack.signed_in.notify_waiters();
+        }
         let changed = {
             let mut current = self.slack.status.lock().unwrap();
             let changed = *current != status;
@@ -416,6 +439,39 @@ mod tests {
             bridge.first_sight(&n.to_string());
         }
         assert!(bridge.first_sight("Ev1"), "forgotten once pushed out");
+    }
+
+    /// The AWAY reading's wait for Slack ends on a sign-in, not before;
+    /// once signed in it doesn't wait at all.
+    #[tokio::test]
+    async fn waiting_for_slack_ends_when_it_signs_in() {
+        let daemon = crate::registry::tests::test_daemon();
+        let waiting = tokio::spawn({
+            let daemon = daemon.clone();
+            async move { daemon.slack.until_connected().await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "nobody signed in");
+        let tokens = Tokens {
+            app: "a".into(),
+            bot: "b".into(),
+            user: "u".into(),
+        };
+        let session = Arc::new(Session {
+            api: Api::new("http://127.0.0.1:9".into(), tokens),
+            me: "U1".into(),
+            bot: "B1".into(),
+            dm: "D1".into(),
+            team: "T".into(),
+        });
+        daemon.set_slack(SlackStatus::default(), Some(session));
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("woke on the sign-in")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), daemon.slack.until_connected())
+            .await
+            .expect("signed in already");
     }
 
     #[test]

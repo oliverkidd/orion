@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 59;
+pub const PROTOCOL_VERSION: u32 = 60;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -896,6 +896,14 @@ pub enum ServerEvent {
         text: Option<String>,
         reason: Option<WaitReason>,
     },
+
+    /// Something the daemon did on its own that every TUI should hear of,
+    /// and that is not a failure — an idle stack it stopped, say. Shown as
+    /// a neutral note, where `Error { req_id: None }` is a red flash.
+    /// Last in the enum, so the variants before it keep their places.
+    Notice {
+        text: String,
+    },
 }
 
 #[cfg(test)]
@@ -936,6 +944,18 @@ mod stack_tests {
         };
         assert_eq!(text.as_deref(), Some("use the old flow"));
         assert!(!by.is_owner);
+    }
+
+    #[test]
+    fn a_notice_round_trips() {
+        let ev = ServerEvent::Notice {
+            text: "stopped idle stack for feat/login".into(),
+        };
+        let back: ServerEvent = rmp_serde::from_slice(&rmp_serde::to_vec(&ev).unwrap()).unwrap();
+        let ServerEvent::Notice { text } = back else {
+            panic!("{back:?}");
+        };
+        assert_eq!(text, "stopped idle stack for feat/login");
     }
 
     #[test]

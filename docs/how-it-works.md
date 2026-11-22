@@ -25,8 +25,9 @@
   when `git status` / `git ls-files` answer — what is typed meanwhile is kept and applied — and a
   file's diff, a search and a preview are read on the blocking pool: the pane keeps what it showed
   for up to 60 ms, which is longer than a read takes, and says `loading…` past that. The DIFF VIEWER
-  opens on the list the changed-files badge's last `git status` found (two seconds old at most; its own
-  `git status` still runs, and the reader keeps their place when it lands), so the first diff is being
+  opens on the list the changed-files badge's last `git status` found (read again whenever THE GIT
+  WATCHER sees the checkout change; its own `git status` still runs, and the reader keeps their place
+  when it lands), so the first diff is being
   read while the list is checked rather than after — on a ten-thousand-file checkout `⌘E` went from
   260 ms of frozen UI to a list in 2 ms and a diff in 60. It reads the row after the cursor ahead and
   keeps what it has read (2 MB at most, gone with the modal), so `↓` paints the next diff on the
@@ -138,14 +139,27 @@
   itself, a `git checkout` you did in another terminal, or a worktree someone removed lands on the
   grid within a couple of seconds without a restart, while an idle repo costs nothing but a few
   `stat` calls (`ORION_WORKTREE_SYNC_MS` overrides the 2 s beat; the e2e tests turn it down to
-  100 ms). This structural sync, and the five-minute fetch of `origin` a SPARE WORKTREE follows its base
-  by (below), are the *only* git polling the DAEMON does — the base sync and the pull request
-  lookups further down are the TUI's own.
+  100 ms). This structural sync, and the fetch of `origin` a SPARE WORKTREE follows its base
+  by (below), are the *only* git polling the DAEMON does — the base sync, the checkouts' reads and
+  the pull request lookups further down are the TUI's own.
+- **A checkout's changes show as they happen — THE GIT WATCHER.** The TUI watches the selected
+  checkout with FSEvents — its files, leaving out `.git`'s objects and logs, `node_modules`,
+  `target` and the other build dirs, and the HEAD, index and refs that say what it is (for a linked
+  worktree, under the main repo's `.git`) — and reads it again half a second after a change: the
+  badge, the band's `*3 +40 −2 ⇡1` and the DIFF VIEWER's list follow an agent's edits with no poll.
+  A read is `git status`, then only what moved: `git rev-list` for `⇡⇣` when HEAD or the base names
+  another commit (read from the ref files, no process), `git diff --numstat` when the status or a
+  changed file did. The selected checkout is read on every selection and, as a safety net, every
+  15 s while you look; every other band as it comes on screen when its last read is a minute old,
+  and once a minute while you look. With the window in the background a change is read at most
+  every 30 s; while you are away, not until you are back.
 - **A checkout keeps step with its remote on `p` and `⇧P` — a PULL and a PUSH.** orion fetches when it
-  cuts a worktree, when the WORKTREE PICKER opens, on `p` or `⇧P`, and through BASE SYNC: every five
-  minutes (and at once after a merge from the PULL REQUESTS MODAL) each project's ROOT WORKTREE
+  cuts a worktree, when the WORKTREE PICKER opens, on `p` or `⇧P`, and through BASE SYNC: as you
+  switch to a project, or come back to the window on it, once its last fetch is half an hour old
+  (`base_fetch`), and at once after a merge from the PULL REQUESTS MODAL, the project's ROOT WORKTREE
   fetches origin, and, when it is on the base branch with nothing in the way, fast-forwards onto it
-  (`base_sync.rs`). A band rule's `⇡⇣` count against whatever the last fetch left. `p` runs `git fetch` and then `git merge --ff-only @{u}` in the band's
+  (`base_sync.rs`). A project you don't visit is not fetched, and nothing is fetched while you are
+  away. A band rule's `⇡⇣` count against whatever the last fetch left. `p` runs `git fetch` and then `git merge --ff-only @{u}` in the band's
   checkout — the TUI's git, run in a session of its own with stdin closed, so an `ssh` passphrase
   prompt fails instead of painting over the screen — rather than `git pull`, so `pull.rebase` /
   `pull.ff` can't change what it does: a branch only ever moves forward onto its upstream, and one that
@@ -168,8 +182,8 @@
   A `StartRun` while it runs is queued on the setup's row (`run.run_queued`, which every client's
   footer says) and starts the run once the setup exits cleanly; a `StopRun` meanwhile calls it off.
   See [Configuration](configuration.md#setup-command).
-- **The next worktree is already there — the SPARE WORKTREE.** For each project used in the last
-  day the DAEMON keeps one checkout ahead of you: cut from the **Base branch**, set up, with `claude`
+- **The next worktree is already there — the SPARE WORKTREE.** For the project used most recently
+  in the last day — one spare in all — the DAEMON keeps one checkout ahead of you: cut from the **Base branch**, set up, with `claude`
   booted in it on the `⌘N` account at that account's default model and effort, sitting at its
   prompt, under the name `orion-spare-<id>` (branch and directory both). It has no rows, the
   worktree sync leaves it out, and so does every branch list. A launch into a new worktree — `⌘⇧N`,
@@ -183,7 +197,8 @@
   down and the task boots a fresh one, as a cold launch would. A new spare is cut behind it. A
   launch on another account, model or effort, in plan mode, onto a branch that exists, or for a pull
   request is cut cold and leaves the spare for the next. When the base moves (`origin`
-  is fetched for it every five minutes) or the **Base branch** setting changes, an untaken spare is
+  is fetched for it every half hour, five minutes after a visit, never while you are away, and a fetch
+  the base sync made in the repo counts) or the **Base branch** setting changes, an untaken spare is
   `git reset --hard` to the new base and its CLI restarted; a taken one is never touched. At boot a
   spare the last DAEMON left fully set up is kept and anything else of one is removed; removing a
   project removes its spare. The footer's memory readout counts the spares. See
@@ -205,7 +220,13 @@
   failure warned of with its output saved to `state/runs/`; a command starts only when you pick
   **Start stack**, `orion run` asks, or boot starts again a run the daemon's end cut off
   (`terminals.run_wanted`). STACK STATUS (`stacks`) works out each checkout's stack — up, starting,
-  stopping or down — every 3 s from the run, `docker ps` and `lsof`, and sends it as `StackStatuses`. The DAEMON reads a run's output for the localhost addresses it prints and sends
+  stopping or down — from the run, `docker ps` and `lsof`, and sends it as `StackStatuses`: docker is
+  followed through one `docker events` stream (`docker ps` on a change, while a stack is starting or
+  stopping, and once a minute), `lsof` runs while a stack is starting or stopping and otherwise every
+  30 s with a client connected, every minute with none — and none of it, but a `docker ps` when a
+  client connects, while no checkout has a run, running containers, ports its runs served or a compose
+  file. A stack up an hour with nothing happening in
+  its checkout is stopped (`stacks.idle_stop`). The DAEMON reads a run's output for the localhost addresses it prints and sends
   their ports on its row (`run.ports`, kept as the lines scroll away, reset by a new start): the run
   line's `:3000` links, the first of them ⌘O's **Open app**. **Restart stack** is `RestartRun`: the
   same stop, marked a restart (`run.restarting`), whose end starts the run again in its row rather
@@ -318,8 +339,9 @@
 - **Phone bridge.** <a id="phone-bridge"></a>While you are away, a session that starts waiting on you
   — a question, a plan, a permission prompt — or crashes goes to your phone at once, as a Slack DM
   from the Orion app's bot; there is never a delay. You are away when the screen is locked (macOS's
-  `IOConsoleLocked`, read with `ioreg` every 5 s), after the set minutes with no keys or mouse
-  (`HIDIdleTime`), or by hand with `⌘⇧A` until your next key in any orion. Being in a meeting is never
+  `IOConsoleLocked`, read from the I/O Registry in-process — every 10 s while away, and at the desk
+  as the idle threshold comes due, at least every 5 s), after the set minutes with no keys or
+  mouse (`HIDIdleTime`), or by hand with `⌘⇧A` until your next key in any orion. Being in a meeting is never
   away. Quiet hours and **Send to your phone while away** (Settings › Connections) hold messages
   back. A session already waiting on a question or a plan when you go away (it asked while you were
   at the desk, or in quiet hours) goes then, or as quiet hours end while you are still away: once
@@ -518,23 +540,22 @@ time, here or on github.com.
 This is the one part of orion the TUI asks for itself rather than the DAEMON: every `gh pr view`,
 open-list query (`gh api graphql`) — is spawned by the client, which is why the lookups stop the moment you
 quit, and why a machine with no `gh` — or one that is unauthenticated, or pointed at a checkout with no
-remote — just shows no rows instead of an error. The selected project is asked about most: its
-selected worktree's pull request and its open list on every tick, one process each, and its other
-checkouts on a sweep that takes one of them per tick — so every band learns whether its branch
-has merged without the cursor ever visiting it (the ROOT WORKTREE is left out; nobody deletes it over a
-merge). Nothing is stacked while a call is in flight — a refresh asked for meanwhile (`⌘R`, a
-merge, a comment) runs as soon as it lands rather than being dropped — and each is abandoned after
-20 s. The other
-projects' open pull requests are swept too, one project per tick on the five-minute
-beat, so a project switched to shows lists minutes old at worst. The selected
-worktree and the open list settle onto a steady 15 s beat; the swept checkouts onto 5 min, since a
-merge reaches them sooner anyway — the moment a pull request drops out of the open list, the checkout on
-its branch is asked again on the next tick, and turns purple seconds after the merge. An empty answer
-backs off by doubling — out to 3 min for a branch that never grows a PR, 10 min for a project with none
-open — so a machine with thirty repos does not cost thirty API calls a beat. Focusing the
-terminal window pulls the next lookup forward, floored at a few seconds; `⌘R` is the one
-gesture that asks straight away: the project's open list, the selected worktree's pull request and
-the one the pane is reading at once, its other checkouts at the sweep's one-per-tick pace.
+remote — just shows no rows instead of an error. Every one of them goes through THE RESOLVER
+(`orion-tui/src/sync/`), the one place that decides when a question is asked: it is read when it
+comes on screen and its last answer is older than its freshness — a project's open list as you
+switch to it, at a minute; a checkout's own pull request, for a branch no open list has, at five
+(never the ROOT WORKTREE or a base branch, which have none) — when the window takes focus back, and
+on `⌘R`. A list on screen for an hour is asked once. Only the thing you are in keeps a beat, while the
+window is focused and you are not away: the PULL REQUESTS MODAL's list every minute, the page a cursor
+rests on every 30 s while its checks run. One fetch per question runs at a time, whoever asks — the
+sidebar and the modal share one — and a refresh asked meanwhile (`⌘R`, a merge, a comment) runs once
+more as soon as it lands rather than being dropped; each is abandoned after 20 s. A failure backs off,
+doubling, and only `⌘R` cuts that short; a rate limit pauses every GitHub question until GitHub says
+it resets, `⌘R` included, and the modal says `GitHub limit, back at 22:11`. A merge seen anywhere
+makes its project's list, its tails and its page stale at once, so the checkout turns purple seconds
+after it. With nobody looking, the only GitHub read is the automations': one search for your own
+open pull requests across every repo while the PR fixer or the factory is on (see
+[What orion fetches, and when](configuration.md#what-orion-fetches-and-when)).
 
 The open list is one GraphQL query per project rather than `gh pr list`, because a row's checks need
 only GitHub's own verdict on them — the pass / fail / pending the pull request page shows — and `gh pr

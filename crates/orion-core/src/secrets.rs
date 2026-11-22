@@ -70,12 +70,17 @@ pub fn set(service: &str, account: &str, value: &str) -> Result<(), String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| "the Keychain could not be reached".to_string())?;
-    {
+    let wrote = {
         use std::io::Write;
         let mut stdin = child.stdin.take().expect("piped stdin");
-        stdin
-            .write_all(line.as_bytes())
-            .map_err(|_| "the Keychain could not be reached".to_string())?;
+        stdin.write_all(line.as_bytes())
+    };
+    // Waited on even when the write failed: an unwaited child is a zombie
+    // of its parent for as long as the parent lives.
+    if wrote.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("the Keychain could not be reached".to_string());
     }
     let out = child
         .wait_with_output()

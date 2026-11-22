@@ -18,11 +18,12 @@ pub const SWEEP_FRAME: std::time::Duration = std::time::Duration::from_millis(10
 
 /// How long a ONE-SHOT SWEEP runs: the sweep a row takes when it changes
 /// into a state that wants you — a session starting to need you or
-/// crashing (red), a checkout's pull request merging (purple) — before it
-/// settles into its still color. Two or three passes of the band: long
-/// enough to catch the eye from another panel, short enough that motion
-/// keeps meaning *news*. The one sweep that does not run out is the UNREAD
-/// SHIMMER: a finish nobody has looked at sweeps until somebody does.
+/// crashing (red), a checkout's pull request merging (purple), a finish
+/// nobody has read yet (the UNREAD SHIMMER), a newer orion published —
+/// before it settles into its still color. Two or three passes of the
+/// band: long enough to catch the eye from another panel, short enough
+/// that motion keeps meaning *news*, and that an app left with a finish
+/// unread repaints nothing once the news is a few seconds old.
 pub const ONE_SHOT_SWEEP: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Frames in one pass of the STACK TRAIL: the light runs into a running
@@ -3124,13 +3125,28 @@ pub fn project_unseen(tree: &Tree, project_id: &ProjectId) -> usize {
 /// is taken either side of it: a skewed pair sweeps a little off-time,
 /// never for an hour.
 pub fn fresh_alarm(agent: &Agent, now: i64) -> bool {
-    let window = ONE_SHOT_SWEEP.as_millis() as i64;
     matches!(
         agent.status,
         AgentStatus::NeedsFeedback | AgentStatus::Terminated
     ) && !agent.archived
-        && agent.status_changed_at > 0
-        && (now - agent.status_changed_at).abs() < window
+        && within_one_shot(agent.status_changed_at, now)
+}
+
+/// Whether the change stamped `at` (epoch ms, 0 = never) is still inside
+/// its ONE-SHOT SWEEP at `now`. Taken either side of the stamp, since the
+/// stamp is the DAEMON's clock and `now` this client's: a skewed pair
+/// sweeps a little off-time, never for an hour.
+pub fn within_one_shot(at: i64, now: i64) -> bool {
+    at > 0 && (now - at).abs() < ONE_SHOT_SWEEP.as_millis() as i64
+}
+
+/// Whether `agent`'s UNREAD SHIMMER still sweeps at `now`: a finish
+/// nobody has read, inside the ONE-SHOT SWEEP that began when it finished.
+/// After that the row holds still in the done color — still unread, its
+/// `●` and its `done` tag say so — so a finish left for later costs no
+/// frames.
+pub fn fresh_unread(agent: &Agent, now: i64) -> bool {
+    unread_finish(agent) && within_one_shot(agent.status_changed_at, now)
 }
 
 /// A finished turn nobody has looked at yet: DONE, NOT SEEN, the state the
@@ -3698,15 +3714,9 @@ pub struct OpenPrs {
     /// the palette and AUTOFIX read `list`. Kept from the last answer that
     /// said, where one did not (`ListAnswer::merged`).
     pub merged: Vec<OpenPr>,
-    /// When this answer landed. Switching projects pulls the next lookup
-    /// forward, but never past this plus [`OPEN_PRS_MIN_AGE`] — otherwise
-    /// bouncing between two projects would spend an API call per keystroke.
+    /// When this answer landed (or the cache was read). When the next one
+    /// is asked is the RESOLVER's (`sync`), not this list's.
     pub at: std::time::Instant,
-    /// When the next lookup is due, and the step that produced that
-    /// deadline: a steady beat once a repo has proved it has pull requests,
-    /// a doubling backoff while it hasn't.
-    pub due: std::time::Instant,
-    pub step: std::time::Duration,
 }
 
 /// What a debounced pull-request detail fetch needs: which PR, and the
@@ -3741,13 +3751,6 @@ pub struct PreviewedPr {
     /// Row text, `#42 title` — what the pane says while the body loads.
     pub label: String,
 }
-
-/// How recently a project's open-PR list may have been fetched and still be
-/// refetched on arrival — at a project, at a sidebar panel, or back at the
-/// terminal window. Walking the project list, or a flurry of focus events,
-/// must not turn into one API call per gesture; a few seconds is enough to
-/// coalesce those while still beating the steady beat by a wide margin.
-pub const OPEN_PRS_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Which status edge a desktop notification is about — what its summary
 /// says, and which sound's setting switches it.
@@ -4069,6 +4072,9 @@ pub struct App {
     /// nameplate. `None` until the update check finds one; a check that
     /// can't ask leaves it as it was.
     pub update_available: Option<String>,
+    /// When this client first heard of `update_available`'s release: what
+    /// times the indicator's ONE-SHOT SWEEP ([`App::update_shimmers`]).
+    pub update_lit_at: Option<std::time::Instant>,
     /// Where an on-demand update check (**Upgrade orion**) sends its
     /// answer; `None` while the checker is off (the e2e tests).
     pub update_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::update_check::Answer>>,
@@ -4478,27 +4484,16 @@ pub struct App {
     /// and the badge is not worth a late frame; the selection guard means a
     /// pending answer shows nothing rather than another checkout's count.
     pub git_changes: Option<(WorktreeId, Option<usize>)>,
-    /// The selected checkout's read running off the loop, at most one at a
-    /// time, so a repaint can't stack `git status` processes. Its ticket
-    /// carries when the read was asked, and a PULL or PUSH while it runs
-    /// marks it owed (`event_loop::reread_checkouts`).
-    pub git_reads: crate::fetch::Flights<WorktreeId>,
     /// The last changed-file count read in each checkout, and when: what
-    /// the LAUNCHER VIEW's cards print beside their branch. Fed by the
-    /// selected checkout's own reads (`git_changes`) and by a sweep that
-    /// spends each poll tick on one other checkout the grid lists, the
-    /// least recently read first. The count is None when git couldn't say.
+    /// the LAUNCHER VIEW's cards print beside their branch. Fed by THE
+    /// RESOLVER's `GitStatus` reads (`sync::local`): the selected
+    /// checkout's, which also set `git_changes`, and each band's. The
+    /// count is None when git couldn't say.
     pub worktree_changes: HashMap<WorktreeId, (Option<usize>, std::time::Instant)>,
-    /// The checkout the sweep is reading right now, at most one; the
-    /// selected checkout's `git_reads` for every other one.
-    pub sweep_reads: crate::fetch::Flights<WorktreeId>,
-    /// When the read behind each checkout's counts (`worktree_changes`,
-    /// `worktree_lines`, `worktree_ahead`) was asked. Two readers feed
-    /// them — the selected checkout's and the sweep — so an answer asked
-    /// before the one already taken is dropped (`fetch` rule 1): a slow
-    /// read from before a PULL never puts its counts back over the read
-    /// after it.
-    pub worktree_read_at: HashMap<WorktreeId, std::time::Instant>,
+    /// THE GIT WATCHER on the selected checkout (`git_watch`).
+    pub git_watch: crate::git_watch::Watching,
+    /// The loop's housekeeping and when each piece is next due (`chores`).
+    pub chores: crate::chores::Chores,
     /// The lines added and removed in each checkout, read beside its
     /// changed-file count: what its band's rule prints after `*3`. Only a
     /// checkout with changed lines has an entry.
@@ -4513,17 +4508,15 @@ pub struct App {
     /// The app `⌘⇧S` last started in each project, by its command: first
     /// in the next pick (`run_targets`).
     pub run_picks: HashMap<orion_core::ProjectId, String>,
-    /// What `gh pr view` last said about each worktree's branch: `Some(pr)`
-    /// when one exists, `None` when the lookup came back empty (no PR, no
-    /// `gh`, no remote). A missing key means "not looked up yet" — briefly,
-    /// for the selected project: its selected checkout is asked on every
-    /// tick, and the others take turns on a sweep, so every row learns its
-    /// merge without being visited. An empty answer is re-asked on a
-    /// backing-off timer (`pr_recheck`), since the PR a session opens
-    /// appears well after the first lookup; a found one keeps being
-    /// re-asked on a beat, for its conversation and its state. At startup
-    /// the found ones come back from the last run's cache (`pr_cache`), so
-    /// the rows are painted before the first lookup answers.
+    /// Each checkout's own pull request: `Some(pr)` when one exists, `None`
+    /// when GitHub says the branch has none. A missing key means "not known
+    /// yet". A branch the project's open list has takes its pull request
+    /// from that list as it lands (`event_loop::derive_checkout_prs`); a
+    /// branch no list has — merged, closed, or never opened — is asked by
+    /// branch (`gh pr view`) when its checkout is selected, through the
+    /// RESOLVER (`sync::QueryKey::BranchPr`). At startup the found ones come
+    /// back from the last run's cache (`pr_cache`), so the rows are painted
+    /// before anything answers.
     pub pull_requests: HashMap<WorktreeId, Option<PullRequest>>,
     /// When this client saw a checkout's pull request turn merged
     /// (`note_merge_landed`) — what times the row's ONE-SHOT SWEEP. Only a
@@ -4543,56 +4536,49 @@ pub struct App {
     /// session has marked since. What's newer than the mark is what the
     /// row's unread badge counts.
     pub pr_seen: HashMap<String, String>,
-    /// Worktrees with a lookup in flight, so a repaint can't stack a second
-    /// `gh` process on the first. Each carries when it was asked, so its
-    /// answer lands in `prs` under that stamp; a branch switch cancels
-    /// the old branch's (`fetch::Flights::cancel`), whose answer is then
-    /// dropped.
-    pub pr_inflight: crate::fetch::Flights<WorktreeId>,
     /// Where every pull request stands — state, draft, conflicts, checks —
     /// from the newest answer that knew (`pr_store`). Every surface that
     /// draws or decides on a pull request's status reads it; the copies
     /// (`pull_requests`, `open_prs`, `pr_detail`) keep only what their own
     /// answer alone says: list order, meta, the body.
     pub prs: crate::pr_store::PrStore,
-    /// When to ask `gh` about a worktree again, and the step that produced
-    /// that deadline: a steady beat once its pull request is known (a quick
-    /// one for the selected checkout, so the unread-comment count keeps up;
-    /// a slow one for the rest, which only have to keep up with a merge), a
-    /// doubling backoff while it isn't. Switching into a worktree drops its
-    /// entry, so arriving somewhere always asks again promptly; so does its
-    /// pull request leaving the project's open list.
-    pub pr_recheck: HashMap<WorktreeId, (std::time::Instant, std::time::Duration)>,
-    /// What `pull_request::list` last said about each project's open pull requests
-    /// — the group at the bottom of the Worktrees panel. A missing key
-    /// means "never asked"; only the selected project is ever asked, so a
-    /// machine with thirty projects still costs one call per refresh.
+    /// What `pull_request::list` last said about each project's open pull
+    /// requests — the group at the bottom of the Worktrees panel. A missing
+    /// key means "never asked"; a project is asked when it is visited
+    /// (`sync::scope`), so a machine with thirty projects costs nothing
+    /// for the ones nobody opens.
     pub open_prs: HashMap<ProjectId, OpenPrs>,
-    /// Projects with a list lookup in flight, so a repaint can't stack a
-    /// second `gh` on the first — and whether one asked for meanwhile
-    /// (`⌘R`, a merge from the modal) is owed when it lands.
-    pub open_prs_inflight: crate::fetch::Flights<ProjectId>,
-    /// Projects whose last list lookup came back with no answer — `gh`
-    /// failed, timed out, or the checkout is gone. The list kept on screen
-    /// is then the last one that worked, so the PULL REQUESTS MODAL says
-    /// `couldn't refresh` rather than pass it off as current; the next
-    /// answer that lands clears it.
-    pub open_prs_failed: std::collections::HashSet<ProjectId>,
+    /// THE RESOLVER: what is asked of GitHub, when, and how it last went
+    /// (`crate::sync`) — the open lists and the branch lookups.
+    pub resolver: crate::sync::Resolver,
+    /// Where the resolver's fetches land; installed at startup. `None` in
+    /// the unit tests, which land answers by hand.
+    pub sync_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::sync::spawn::Landed>>,
+    /// This process holds the machine's `sync.lock`, and so runs the
+    /// automations' background reads (`sync::background`).
+    pub sync_owner: Option<crate::sync::background::Owner>,
     /// Bodies and conversations of the pull requests the cursor has rested
     /// on, keyed by URL. A second API call on top of the list, so it is
     /// fetched only for the row actually being read (and, while the PULL
     /// REQUESTS MODAL is up, for your own pull requests ahead of it), and
-    /// read again once it is older than `event_loop::PR_DETAIL_FRESH` —
+    /// read again once it is older than `event_loop::pr_detail_fresh_for` —
     /// the description holds still, but the checks don't (`pr_detail_at`).
     pub pr_detail: HashMap<String, PrDetail>,
-    /// Pull requests whose detail is in flight, and ones `gh` couldn't
-    /// answer for — the pane says "couldn't reach gh" rather than spinning
-    /// on a request that already came back empty. A page asked to be read
-    /// again while its fetch runs is owed a fresh one when it lands.
-    pub pr_detail_inflight: crate::fetch::Flights<String>,
+    /// Pull requests `gh` couldn't answer for — the pane says "couldn't
+    /// reach gh" rather than spinning on a request that already came back
+    /// empty. Which are being read is THE RESOLVER's (`PrDetail`,
+    /// [`App::pr_detail_in_flight`]).
     pub pr_detail_failed: std::collections::HashSet<String>,
+    /// The pull request page a cursor rests on — the PULL REQUESTS
+    /// MODAL's row, or the one the pane reads — once the rest has
+    /// outlasted the debounce (`pending_pr_detail`): what THE RESOLVER is
+    /// shown of pages (`sync::scope`, `PrDetail`).
+    pub pr_detail_rest: Option<String>,
+    /// What the automations' cross-repo read last found of your pull
+    /// requests (`sync::github::Mine`).
+    pub my_prs: crate::sync::github::Mine,
     /// When `gh` last answered (or refused) each pull request's detail,
-    /// this session. A page older than `event_loop::PR_DETAIL_FRESH` is
+    /// this session. A page older than `event_loop::pr_detail_fresh_for` is
     /// read again the next time a cursor rests on it — its checks run on
     /// their own clock, not the list's — and a refusal that old is asked
     /// again rather than kept. No entry (a body put there by hand, or by
@@ -4602,10 +4588,6 @@ pub struct App {
     /// its lookup is due. Re-armed on every move, so walking a list of a
     /// hundred rows fetches only the ones actually paused on.
     pub pending_pr_detail: Option<(PendingPrDetail, std::time::Instant)>,
-    /// `r` on a worktree or pull-request row asked for the pull requests
-    /// *now*: the event loop runs the two list lookups on its next turn
-    /// instead of waiting for the git tick, then clears this.
-    pub pr_refresh_requested: bool,
     /// Top visible line of the reading pane — the pull request under a
     /// cursor (`App::reading_url`) — and the pane's total
     /// line count as of the last draw (for clamping).
@@ -4652,7 +4634,7 @@ pub struct App {
     /// startup and hydrates from it; the unit tests leave it `None`, so no
     /// test touches the real user's cache. Written whenever
     /// `pr_cache_dirty` says something in it changed — at most once per
-    /// GIT POLL, plus once on quit.
+    /// cache flush (`chores::Chore::Flush`), plus once on quit.
     pub pr_cache: Option<crate::pr_cache::PrCache>,
     pub pr_cache_dirty: bool,
     /// AUTOFIX: the ledger, the watched pull requests and the queued asks
@@ -4685,8 +4667,13 @@ pub struct App {
     /// LINEAR VIEW rows, the lists in flight (one per project, a ⌘R
     /// asked meanwhile owed), failed asks, and the answer channel.
     pub linear: std::collections::HashMap<ProjectId, crate::linear::LinearList>,
-    pub linear_flights: crate::fetch::Flights<ProjectId>,
     pub linear_failed: std::collections::HashSet<ProjectId>,
+    /// Each Linear key's teams, members and states, read once a launch
+    /// (`QueryKey::LinearTeams`), by the key's tag.
+    pub linear_teams: HashMap<String, crate::linear::Teams>,
+    /// Which Linear key each project reads, worked out at most every few
+    /// seconds for the RESOLVER (`sync::linear::Keys`).
+    pub linear_keys: crate::sync::linear::Keys,
     pub linear_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::linear::LinearAnswer>>,
     /// What orion did to issues that a list asked before it may not know
     /// of yet — `⌘S` moves and attached pull requests — laid over every
@@ -4701,8 +4688,6 @@ pub struct App {
     /// The reads of the issues' comments, as the LINEAR VIEW's cursor
     /// rests on each.
     pub linear_comments: crate::linear::CommentReads,
-    /// Each project's lists asked as it is selected.
-    pub linear_prefetch: crate::linear::Prefetch,
     /// The on-disk copy of the lists (`linear_cache`), when this app keeps
     /// one — the main loop's does, a unit test's never — and whether a
     /// list landed since it was last written.
@@ -4739,7 +4724,7 @@ pub struct App {
     /// The changed files the badge's last `git status` listed, and the
     /// checkout they are in (`event_loop::keep_changed_files`): what `g`
     /// opens the DIFF VIEWER on while its own `git status` runs. One
-    /// checkout's worth, capped, replaced by every poll.
+    /// checkout's worth, capped, replaced by every read.
     pub changed_files: Option<(WorktreeId, Vec<crate::git_diff::DiffFile>)>,
     /// Rows deleted here ahead of the DAEMON's answer
     /// (`event_loop::optimistic`), each with its latest version: an upsert
@@ -4760,9 +4745,6 @@ pub struct App {
     pub open_repo: crate::open_repo::Shared,
     /// CLONE FROM GITHUB's `gh` listing and clones (`crate::clone_repo`).
     pub clone_repo: crate::clone_repo::Shared,
-    /// BASE SYNC: each project's root fetched, and fast-forwarded on its
-    /// base branch, on the **Fetch base branch** beat (`crate::base_sync`).
-    pub base_sync: crate::base_sync::Shared,
     /// Latest daemon metrics reading (daemon + per-session process trees),
     /// for the footer's memory/session readout. Refreshed on a slow poll.
     pub last_metrics: Option<orion_core::MetricsSnapshot>,
@@ -4828,6 +4810,7 @@ impl App {
             upgrade: false,
             flash: None,
             update_available: None,
+            update_lit_at: None,
             update_tx: None,
             spotify: None,
             spotify_in_flight: 0,
@@ -4922,10 +4905,9 @@ impl App {
             accounts_polled: None,
             usage: crate::usage::Usage::default(),
             git_changes: None,
-            git_reads: Default::default(),
             worktree_changes: HashMap::new(),
-            sweep_reads: Default::default(),
-            worktree_read_at: HashMap::new(),
+            git_watch: Default::default(),
+            chores: Default::default(),
             worktree_lines: HashMap::new(),
             worktree_ahead: HashMap::new(),
             stack_status: HashMap::new(),
@@ -4934,18 +4916,17 @@ impl App {
             merge_landed: HashMap::new(),
             attention_walk: None,
             pr_seen: HashMap::new(),
-            pr_inflight: Default::default(),
             prs: Default::default(),
-            pr_recheck: HashMap::new(),
             open_prs: HashMap::new(),
-            open_prs_inflight: Default::default(),
-            open_prs_failed: std::collections::HashSet::new(),
+            resolver: Default::default(),
+            sync_tx: None,
+            sync_owner: None,
             pr_detail: HashMap::new(),
-            pr_detail_inflight: Default::default(),
             pr_detail_failed: std::collections::HashSet::new(),
+            pr_detail_rest: None,
+            my_prs: Default::default(),
             pr_detail_at: HashMap::new(),
             pending_pr_detail: None,
-            pr_refresh_requested: false,
             pr_preview_scroll: 0,
             pr_preview_lines: 0,
             pr_tabs: Default::default(),
@@ -4969,14 +4950,14 @@ impl App {
             pr_detail_unsaved: std::collections::HashSet::new(),
             conflicts: crate::conflicts::Known::default(),
             linear: HashMap::new(),
-            linear_flights: crate::fetch::Flights::default(),
             linear_failed: std::collections::HashSet::new(),
+            linear_teams: HashMap::new(),
+            linear_keys: Default::default(),
             linear_tx: None,
             linear_edits: crate::linear::LocalEdits::default(),
             linear_links: crate::linear::LinkStore::default(),
             linear_copy: None,
             linear_comments: Default::default(),
-            linear_prefetch: Default::default(),
             linear_cache: None,
             linear_cache_dirty: false,
             todos: HashMap::new(),
@@ -4992,7 +4973,6 @@ impl App {
             clean_worktrees: Default::default(),
             open_repo: Default::default(),
             clone_repo: Default::default(),
-            base_sync: Default::default(),
             last_metrics: None,
             client_rss_bytes: 0,
             splash_epoch: std::time::Instant::now(),
@@ -5287,20 +5267,35 @@ impl App {
         self.animations && self.welcome_on_screen && self.editor.is_none()
     }
 
+    /// IDLE: nobody is looking — the terminal window is in the background,
+    /// or the user is AWAY. Everything purely visual or "keep it live"
+    /// stops while it holds (the status animation, the Spotify readout, the
+    /// footer's memory reading, the host's mode re-ask, the `ago` labels'
+    /// repaint, THE RESOLVER's live beats — the checkouts' git reads among
+    /// them — and the accounts' names), THE GIT WATCHER's changes wait,
+    /// and the attached session repaints at most four times a second;
+    /// regaining focus runs one catch-up pass of each.
+    pub fn idle(&self) -> bool {
+        !self.window_focused || self.away
+    }
+
     /// Something on screen moves, so the clock should be ticking: a
-    /// running session's WORKING SPINNER, a finish nobody has read (the
-    /// UNREAD SHIMMER, on its row and its project's tab, until it is read),
-    /// or a ONE-SHOT SWEEP still inside its window — a session that just
-    /// started needing you or crashed, a checkout whose pull request was
-    /// just seen to merge. Any agent in one of those states surfaces
-    /// somewhere — its own row, a tab, the jump list — unless the panels
-    /// are hidden (collapsed, editor modal, splash) or animations are
-    /// switched off. A merged checkout only shows while its project is
-    /// selected, so only those keep the clock running; a FLASH saying what
-    /// it waits on turns the footer's spinner, and a Spotify track playing
-    /// sweeps the footer's readout. The one-shots run out on the
-    /// clock, so an idle app with everything read repaints nothing.
+    /// running session's WORKING SPINNER, or a ONE-SHOT SWEEP still inside
+    /// its window — a session that just started needing you or crashed, a
+    /// finish nobody has read (the UNREAD SHIMMER), a checkout whose pull
+    /// request was just seen to merge, a newer orion just found. Any agent
+    /// in one of those states surfaces somewhere — its own row, a tab, the
+    /// jump list — unless the panels are hidden (collapsed, editor modal,
+    /// splash) or animations are switched off. A merged checkout only shows
+    /// while its project is selected, so only those keep the clock running;
+    /// a FLASH saying what it waits on turns the footer's spinner. The
+    /// one-shots run out on the clock, so an app at rest repaints nothing —
+    /// and an IDLE one repaints nothing at all, holding its last frame
+    /// until somebody is looking again.
     pub fn status_anim_active(&self) -> bool {
+        if self.idle() {
+            return false;
+        }
         // A CONFLICT RESOLVER at work has a log to show as it grows, spinner
         // or no spinner.
         if self.editor.is_none()
@@ -5335,8 +5330,7 @@ impl App {
                 .flash
                 .as_ref()
                 .is_some_and(|f| f.kind == crate::flash::FlashKind::Working)
-                || self.update_available.is_some()
-                || self.spotify.as_ref().is_some_and(|np| np.playing)
+                || self.update_shimmers()
                 // A WEEK IN REVIEW's `Show` lines sweep while it is read.
                 || matches!(&self.overlay, Some(Overlay::WeekReview(v)) if v.shimmers()))
     }
@@ -5351,11 +5345,11 @@ impl App {
 
     /// Whether an unread finish shimmers anywhere: on the grid's own rows
     /// and on an open PROJECT TAB (the lit one is always open), in the
-    /// jump list while it is up, and on every row of the old panels. One
-    /// in a project whose tab is closed shows nowhere, and keeps no clock
-    /// running.
+    /// jump list while it is up, and on every row of the old panels — for
+    /// its ONE-SHOT SWEEP ([`fresh_unread`]). One in a project whose tab is
+    /// closed shows nowhere, and keeps no clock running.
     fn shows_unread(&self, agent: &Agent) -> bool {
-        unread_finish(agent)
+        fresh_unread(agent, now_ms())
             && (!self.launcher_active()
                 || matches!(self.overlay, Some(Overlay::Palette(_)))
                 || self.tree.worktrees.iter().any(|w| {
@@ -5404,6 +5398,28 @@ impl App {
             .retain(|_, at| at.elapsed() < ONE_SHOT_SWEEP);
         self.merge_landed
             .insert(worktree, std::time::Instant::now());
+    }
+
+    /// A newer orion was just found: `version` is the footer's `⇡ v…`
+    /// from here on, and a version this client had not heard of yet starts
+    /// its green ONE-SHOT SWEEP. The same version heard again on a later
+    /// check leaves the stamp alone, so the indicator moves once per
+    /// release, not once per check.
+    pub fn note_update_available(&mut self, version: String) {
+        if self.update_available.as_deref() != Some(version.as_str()) {
+            self.update_lit_at = Some(std::time::Instant::now());
+        }
+        self.update_available = Some(version);
+    }
+
+    /// Whether the footer's `⇡ v…` still sweeps: inside the ONE-SHOT
+    /// SWEEP since its release was first heard of. After that it holds
+    /// still in its green, bold, still a button.
+    pub fn update_shimmers(&self) -> bool {
+        self.update_available.is_some()
+            && self
+                .update_lit_at
+                .is_some_and(|at| at.elapsed() < ONE_SHOT_SWEEP)
     }
 
     /// Whether the checkout's merge was seen to land within the last
@@ -6483,34 +6499,6 @@ impl App {
         Some(at.saturating_duration_since(std::time::Instant::now()))
     }
 
-    /// Whether `gh` should be asked about this worktree now: not while an
-    /// answer is in flight, and not before the timer the last answer armed.
-    /// A found PR no longer retires the worktree — the PR doesn't change,
-    /// but its conversation does, and the unread badge is only as fresh as
-    /// the last poll.
-    pub fn pr_lookup_due(&self, worktree: &WorktreeId) -> bool {
-        if self.pr_inflight.in_flight(worktree) {
-            return false;
-        }
-        match self.pr_recheck.get(worktree) {
-            Some((due, _)) => std::time::Instant::now() >= *due,
-            None => true,
-        }
-    }
-
-    /// Whether the open list should be asked for this project now: not while
-    /// an answer is in flight, and not before the timer the last answer
-    /// armed. A project orion has never asked about is always due.
-    pub fn open_prs_lookup_due(&self, project: &ProjectId) -> bool {
-        if self.open_prs_inflight.in_flight(project) {
-            return false;
-        }
-        match self.open_prs.get(project) {
-            Some(open) => std::time::Instant::now() >= open.due,
-            None => true,
-        }
-    }
-
     /// Furthest the pull-request preview may scroll: its last line pinned
     /// to the bottom of the pane. Zero while the preview fits, so a wheel
     /// flick on a short PR does nothing instead of scrolling it off screen.
@@ -6525,15 +6513,8 @@ impl App {
         Some(at.saturating_duration_since(std::time::Instant::now()))
     }
 
-    /// The PULL REQUESTS MODAL's prefetch (`pr_modal::Prefetch`): when it
-    /// next has a page to ask for. None when it has none, or enough are
-    /// already in flight — a landing re-runs the loop, which asks again.
-    pub fn pr_prefetch_delay(&self) -> Option<std::time::Duration> {
-        crate::pr_modal::prefetch_delay(self)
-    }
-
     /// Whether `url`'s page was read from `gh` within
-    /// `event_loop::PR_DETAIL_FRESH` and nothing has said it is behind
+    /// `event_loop::pr_detail_fresh_for` and nothing has said it is behind
     /// since — what a cursor resting on it shows without asking again.
     pub fn pr_detail_fresh(&self, url: &str) -> bool {
         self.pr_detail.contains_key(url)
@@ -6545,7 +6526,7 @@ impl App {
     /// not while one is in flight, nor while a fresh one is here
     /// ([`Self::pr_detail_fresh`]) or `gh` refused it moments ago.
     pub fn pr_detail_owed(&self, url: &str) -> bool {
-        if self.pr_detail_inflight.in_flight(&url.to_string()) {
+        if self.pr_detail_in_flight(url) {
             return false;
         }
         if self.pr_detail_failed.contains(url) {
@@ -6554,21 +6535,29 @@ impl App {
         !self.pr_detail_fresh(url)
     }
 
-    /// Whether `url`'s page has never been read from `gh` this session —
-    /// missing, or only the cache's copy — and isn't being read now: what
-    /// the modal's background prefetch fills in, ignoring age.
-    pub fn pr_detail_unread(&self, url: &str) -> bool {
-        !self.pr_detail_inflight.in_flight(&url.to_string())
-            && !self.pr_detail_failed.contains(url)
-            && (!self.pr_detail.contains_key(url) || self.pr_detail_stale.contains(url))
+    /// Something changed pull request `url` — a comment posted, a review
+    /// sent, its state flipped: the page in hand is behind. It reads as
+    /// behind (`pr_detail_stale`), and THE RESOLVER reads it again — now
+    /// when a cursor rests on it, else on the next rest; a read already
+    /// running owes a fresh one.
+    pub fn pr_detail_behind(&mut self, url: &str) {
+        self.pr_detail_stale.insert(url.to_string());
+        self.resolver
+            .invalidate(&crate::sync::QueryKey::PrDetail(url.to_string()));
     }
 
-    /// `gh`'s last word on `url` came within `PR_DETAIL_FRESH`, or there
+    /// Whether `url`'s page is being read (THE RESOLVER's `PrDetail`).
+    pub fn pr_detail_in_flight(&self, url: &str) -> bool {
+        self.resolver
+            .in_flight(&crate::sync::QueryKey::PrDetail(url.to_string()))
+    }
+
+    /// `gh`'s last word on `url` came within `pr_detail_fresh_for`, or there
     /// is no record of when it came.
     fn pr_detail_recent(&self, url: &str) -> bool {
         self.pr_detail_at
             .get(url)
-            .is_none_or(|at| at.elapsed() < crate::event_loop::PR_DETAIL_FRESH)
+            .is_none_or(|at| at.elapsed() < crate::event_loop::pr_detail_fresh_for())
     }
 
     /// Every pull request still on some row, by URL: each project's open

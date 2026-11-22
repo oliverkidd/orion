@@ -18,6 +18,7 @@ use orion_core::AgentKind;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Values the settings overlay cycles through for `done_sound` (what rings
 /// when a turn nobody watched reaches FINISHED) and `feedback_sound` (what
@@ -1148,6 +1149,11 @@ pub struct Config {
     /// status-text sweep and the splash's motion). Off trades them for
     /// fewer repaints on constrained machines.
     pub animations: bool,
+    /// BASE SYNC's freshness: how old a project's last `git fetch` of
+    /// origin may be when you switch to it before it is fetched again —
+    /// `"30m"` (the default), `"15m"`, `"2h"`, or `"off"` for never. Read
+    /// through [`Config::base_fetch_after`]. Hand-edited: no Settings row.
+    pub base_fetch: String,
     /// SPOTIFY IN FOOTER: the footer's readout of what the Spotify desktop
     /// app is playing, `♪ Midnight City · M83  ⏮  ⏸ ⏭`, its glyphs buttons
     /// (`crate::spotify`). macOS only, asked over AppleScript; on by
@@ -1475,6 +1481,7 @@ impl Default for Config {
             feedback_sound: "Sosumi".into(),
             theme: "default".into(),
             animations: true,
+            base_fetch: DEFAULT_BASE_FETCH.into(),
             spotify: true,
             hide_draft_prs: false,
             diff_tree_view: true,
@@ -1676,6 +1683,28 @@ impl Config {
         #[cfg(not(test))]
         crate::claude_catalogue::sync_config(&cfg.claude_models);
         cfg
+    }
+
+    /// The settings as [`load`](Self::load) reads them, read again only
+    /// when either file changed (THE CONFIG CACHE). For the hot paths —
+    /// every checkout read, the automations' turn, the knowledge beat —
+    /// which used to parse both files and their JSON each time they ran,
+    /// a few hundred times a minute between them. A hand edit, a save
+    /// from Settings, another orion's save: each moves a file's stamp and
+    /// the next call reads it. Read-only: a caller that edits and saves
+    /// still loads its own copy.
+    pub fn cached() -> std::sync::Arc<Self> {
+        // A test's config lives in a thread-local path override; a cache
+        // shared across test threads would hand one test another's file.
+        #[cfg(test)]
+        {
+            std::sync::Arc::new(Self::load())
+        }
+        #[cfg(not(test))]
+        {
+            static CACHE: orion_core::settings::Cache<Config> = orion_core::settings::Cache::new();
+            CACHE.get(&settings_path(), &local_settings_path(), Self::load)
+        }
     }
 
     /// Patch this config's known keys into the settings files, preserving
@@ -3057,10 +3086,24 @@ fn resolve_sound(configured: &str, remote: bool) -> Option<Sound> {
     }
 }
 
-/// The **Base branch** of the project at `repo`, read fresh from the
-/// file: empty for origin's default branch, and with no project to say.
+/// `base_fetch` when nothing says otherwise: a project's origin is
+/// fetched again on a visit once its last fetch is half an hour old.
+pub const DEFAULT_BASE_FETCH: &str = "30m";
+
+impl Config {
+    /// How old a project's last BASE SYNC may be when it is visited before
+    /// it is fetched again; None when `base_fetch` is `off`. A value that
+    /// doesn't read is the default, with a warning
+    /// ([`orion_core::settings::span_or_default`]).
+    pub fn base_fetch_after(&self) -> Option<Duration> {
+        orion_core::settings::span_or_default(&self.base_fetch, DEFAULT_BASE_FETCH, "base_fetch")
+    }
+}
+
+/// The **Base branch** of the project at `repo`, as the file says now
+/// (THE CONFIG CACHE): empty for origin's default branch, and with no project to say.
 pub fn base_branch_of(repo: Option<&Path>) -> String {
-    repo.map(|repo| Config::load().project(repo).base_branch)
+    repo.map(|repo| Config::cached().project(repo).base_branch)
         .unwrap_or_default()
 }
 
@@ -3501,6 +3544,22 @@ mod tests {
             .iter()
             .position(|(row_id, row_field)| row_id == id && *row_field == field)
             .map(|i| (tab, cfg.agent_rows_from() + i))
+    }
+
+    /// `base_fetch` reads as a span, `off` as never, and a typo as the
+    /// default rather than as off.
+    #[test]
+    fn base_fetch_reads_as_a_span() {
+        let with = |v: &str| Config {
+            base_fetch: v.into(),
+            ..Config::default()
+        };
+        let mins = |n: u64| Some(Duration::from_secs(n * 60));
+        assert_eq!(Config::default().base_fetch_after(), mins(30));
+        assert_eq!(with("15m").base_fetch_after(), mins(15));
+        assert_eq!(with("2h").base_fetch_after(), mins(120));
+        assert_eq!(with("off").base_fetch_after(), None);
+        assert_eq!(with("soon").base_fetch_after(), mins(30));
     }
 
     /// The compatibility rule in docs/configuration.md, against the file

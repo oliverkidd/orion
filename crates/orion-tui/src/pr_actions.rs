@@ -2187,7 +2187,7 @@ fn land_done(
             if form_for(app, ticket).is_some() {
                 close_form(app);
             }
-            crate::pr_modal::request_list(app, project);
+            crate::pr_modal::invalidate_list(app, project);
             app.flash = Some(crate::flash::Flash::done(said));
         }
         Err(why) => refused(app, ticket, why, what),
@@ -2198,12 +2198,11 @@ fn land_done(
 /// are read again, so the page and the row's badge follow. A body already
 /// being read was asked before the change, so it owes a fresh read.
 fn read_again(app: &mut App, project: &ProjectId, url: String) {
-    app.pr_detail_inflight.want_fresh(&url);
-    app.pr_detail_stale.insert(url);
+    app.pr_detail_behind(&url);
     if crate::pr_modal::is_up(app) {
         crate::pr_modal::schedule_detail(app);
     }
-    crate::pr_modal::request_list(app, project);
+    crate::pr_modal::invalidate_list(app, project);
 }
 
 /// `gh pr ready` answered: the footer says which way pull request `number`
@@ -2254,7 +2253,7 @@ fn land_created(app: &mut App, project: &ProjectId, ticket: u64, url: String) {
             view.focus = crate::pr_modal::PrFocus::List;
         }
     }
-    crate::pr_modal::request_list(app, project);
+    crate::pr_modal::invalidate_list(app, project);
     app.flash = Some(crate::flash::Flash::done(if url.is_empty() {
         "opened the pull request".into()
     } else {

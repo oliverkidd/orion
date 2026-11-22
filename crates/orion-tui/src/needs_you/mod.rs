@@ -11,9 +11,11 @@
 //! keeps for it between frames: the store, what the last polls heard,
 //! and why each session waits.
 //!
-//! The POLL ([`poll`]) asks Linear for your notifications and live
-//! tickets and `gh` for the reviews asked of you on a slow beat
-//! ([`interval`]), and as the board opens when the last ask is a while ago. `ORION_NEEDS_YOU_POLL_SECS=0`
+//! Linear's notifications and your live tickets are read by the RESOLVER
+//! (`QueryKey::LinearInbox`, one per key) as the board opens, when the
+//! last read is a minute old — nothing reads them with the board shut.
+//! So are the reviews asked of you (`QueryKey::ReviewRequests`, one
+//! `gh search prs`), on the same rule. `ORION_NEEDS_YOU_POLL_SECS=0`
 //! turns it off, as the e2e tests and the screenshots do; a section whose
 //! row is off in Settings › Connections › GITHUB AND LINEAR asks nothing.
 
@@ -28,23 +30,19 @@ pub mod reviews;
 pub mod slack;
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use orion_core::{AgentId, ProjectId};
 
 use crate::app::App;
 use model::{Card, CardSource, Store};
 
-/// The poll's beat: the reviews search runs every five minutes.
-pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(5 * 60);
-
-/// Opening the board asks again when the last ask is older than this.
-const STALE: Duration = Duration::from_secs(60);
-
-/// The poll's cadence: `ORION_NEEDS_YOU_POLL_SECS` when set, `None` when
-/// it is `0` (off); else [`DEFAULT_INTERVAL`].
-pub fn interval() -> Option<Duration> {
-    orion_core::env::secs_override(orion_core::env::NEEDS_YOU_POLL_SECS, DEFAULT_INTERVAL)
+/// Whether the board asks GitHub and Linear at all: not when
+/// `ORION_NEEDS_YOU_POLL_SECS` is `0`, as the e2e tests and the
+/// screenshots set it. What it asks, and when, is THE RESOLVER's.
+pub fn asks() -> bool {
+    orion_core::env::secs_override(orion_core::env::NEEDS_YOU_POLL_SECS, Duration::from_secs(1))
+        .is_some()
 }
 
 /// What a poll lands on the loop.
@@ -82,11 +80,9 @@ pub struct State {
     pub reasons: HashMap<AgentId, orion_core::WaitReason>,
     /// Settings › Connections › GITHUB AND LINEAR, as last read.
     pub inbox: crate::config::InboxSettings,
-    /// When the poll last asked.
-    pub asked: Option<Instant>,
     /// The SLACK section: the messages heard, and Settings' rules.
     pub slack: slack::Slack,
-    /// Where the poll's answers, and the Slack asks', go.
+    /// Where the reads' answers, and the Slack asks', go.
     pub tx: Option<tokio::sync::mpsc::UnboundedSender<Answer>>,
     /// The REPLY PANEL's drafts left with `Esc`, by card.
     pub reply_drafts: HashMap<model::CardKey, String>,
@@ -185,40 +181,7 @@ pub fn load(app: &mut App) {
     slack::loaded(app);
 }
 
-/// One beat of the poll: ask Linear under every distinct project key,
-/// and `gh` for the reviews — each only while its row is on.
-pub fn poll(app: &mut App) {
-    let Some(tx) = app.needs_you.tx.clone() else {
-        return;
-    };
-    app.needs_you.asked = Some(Instant::now());
-    let inbox = app.needs_you.inbox.clone();
-    if inbox.linear_mentions {
-        for (key, projects) in crate::linear::keys_by_project(app) {
-            // Kept under the first project with the key.
-            let (tx, project) = (tx.clone(), projects[0].clone());
-            tokio::spawn(async move {
-                let heard = linear::fetch(key).await.ok();
-                let _ = tx.send(Answer::Linear { project, heard });
-            });
-        }
-    }
-    if inbox.code_reviews {
-        tokio::spawn(async move {
-            let _ = tx.send(Answer::Reviews(reviews::search().await));
-        });
-    }
-}
-
-/// The board opened: ask again when the last ask is stale.
-pub fn opened(app: &mut App) {
-    let stale = app.needs_you.asked.is_none_or(|at| at.elapsed() >= STALE);
-    if stale && interval().is_some() {
-        poll(app);
-    }
-}
-
-/// A poll's answer lands: kept, and the board brought up to date.
+/// An answer lands: kept, and the board brought up to date.
 pub fn land(app: &mut App, answer: Answer) {
     match answer {
         Answer::Linear { project, heard } => {

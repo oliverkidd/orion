@@ -1,5 +1,6 @@
 pub mod automation;
 pub mod away;
+pub mod backoff;
 pub mod claude_account;
 pub mod clock;
 pub mod codec;

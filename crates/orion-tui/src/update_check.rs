@@ -10,17 +10,20 @@
 //! `install.sh` and `orion upgrade` already require.
 //!
 //! The indicator is a nudge, not a clock: a check runs at start and then on
-//! a slow beat, off the event loop, and every failure — no network, no
-//! curl, a redirect that is not a release tag — is "no news", not an error
-//! worth a flash. Nothing here installs anything; `orion upgrade` does.
+//! a slow beat ([`Beat`]), off the event loop, and every failure — no
+//! network, no curl, a redirect that is not a release tag — is "no news",
+//! not an error worth a flash. Nothing here installs anything; `orion
+//! upgrade` does.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// GitHub's "latest release" page for this repo.
 pub const LATEST_URL: &str = "https://github.com/oliverkidd/orion/releases/latest";
 
 /// How often the check re-runs once the TUI is up; the first runs at start.
-pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Releases land a few times a day at most, and **Upgrade orion** asks
+/// afresh whenever it is opened, so a slower beat only delays the nudge.
+pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// How long the probe may take before it is given up on.
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -30,6 +33,40 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 /// GitHub has published), else [`DEFAULT_INTERVAL`].
 pub fn interval() -> Option<Duration> {
     orion_core::env::secs_override(orion_core::env::UPDATE_CHECK_SECS, DEFAULT_INTERVAL)
+}
+
+/// The slow beat: when the next background check runs. The first is due
+/// at once; each one run puts the next an interval on.
+#[derive(Debug, Clone)]
+pub struct Beat {
+    next: Instant,
+    every: Duration,
+}
+
+impl Beat {
+    /// A beat whose first check is due at `now`.
+    pub fn starting(now: Instant, every: Duration) -> Self {
+        Beat { next: now, every }
+    }
+
+    /// When the next check should run, or None while none should be
+    /// armed:
+    ///
+    /// - once a newer release is `known` — a release never un-publishes, so
+    ///   asking again could only light what is already lit (a release newer
+    ///   still is found by **Upgrade orion**'s own ask, or the next launch);
+    /// - while `idle` (unfocused, or away) — nobody sees the indicator, and
+    ///   a check a sleeping laptop wakes for is a network request for no
+    ///   one. The deadline is kept, not moved: the first turn somebody looks
+    ///   again finds it past and runs the check then.
+    pub fn deadline(&self, known: bool, idle: bool) -> Option<Instant> {
+        (!known && !idle).then_some(self.next)
+    }
+
+    /// A check just ran at `now`: the next is an interval on.
+    pub fn ran(&mut self, now: Instant) {
+        self.next = now + self.every;
+    }
 }
 
 /// What one check found.
@@ -149,6 +186,39 @@ pub fn restarts_daemon(published: &str, running: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HOUR: Duration = Duration::from_secs(60 * 60);
+
+    #[test]
+    fn the_beat_checks_at_launch_then_every_six_hours() {
+        let start = Instant::now();
+        let mut beat = Beat::starting(start, DEFAULT_INTERVAL);
+        assert_eq!(beat.deadline(false, false), Some(start), "at launch");
+        beat.ran(start);
+        assert_eq!(beat.deadline(false, false), Some(start + 6 * HOUR));
+    }
+
+    #[test]
+    fn a_known_release_ends_the_beat() {
+        let start = Instant::now();
+        let beat = Beat::starting(start, DEFAULT_INTERVAL);
+        assert_eq!(beat.deadline(true, false), None);
+        assert_eq!(beat.deadline(true, true), None);
+    }
+
+    /// Idle holds a due check rather than skipping it: back from away, the
+    /// deadline is the one that passed, so the check runs on that turn.
+    #[test]
+    fn an_idle_beat_waits_for_somebody_to_look() {
+        let start = Instant::now();
+        let mut beat = Beat::starting(start, DEFAULT_INTERVAL);
+        beat.ran(start);
+        assert_eq!(beat.deadline(false, true), None, "away: not armed");
+        let back = beat.deadline(false, false).unwrap();
+        assert_eq!(back, start + 6 * HOUR, "the passed deadline, due at once");
+        beat.ran(start + 9 * HOUR);
+        assert_eq!(beat.deadline(false, false), Some(start + 15 * HOUR));
+    }
 
     #[test]
     fn the_redirect_names_the_tag() {

@@ -612,7 +612,7 @@ pub fn freshness(app: &crate::app::App, url: &str) -> Option<&'static str> {
     if !from_cache || !app.pr_detail.contains_key(url) {
         return None;
     }
-    Some(if app.pr_detail_inflight.in_flight(&url.to_string()) {
+    Some(if app.pr_detail_in_flight(url) {
         "updating…"
     } else {
         "cached"

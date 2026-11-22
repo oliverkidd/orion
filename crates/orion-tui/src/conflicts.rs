@@ -3109,8 +3109,6 @@ fn main() {
                     row(7, "feature", url.clone()),
                 ],
                 at: now,
-                due: now + std::time::Duration::from_secs(60),
-                step: std::time::Duration::from_secs(60),
             },
         );
         app.overlay = Some(Overlay::PullRequests(
@@ -3270,9 +3268,10 @@ fn main() {
         assert_eq!(view.tabs.tab, crate::pr_preview::PrTab::Checks);
         assert_eq!(view.selected_url.as_deref(), Some(url.as_str()));
         assert_eq!(view.selected, 1, "the cursor on #7's row");
-        assert_eq!(
-            app.pending_pr_detail.as_ref().map(|(p, _)| p.url.as_str()),
-            Some(url.as_str()),
+        assert!(
+            crate::sync::spawn::step(&mut app)
+                .iter()
+                .any(|t| t.key == crate::sync::QueryKey::PrDetail(url.clone())),
             "its page asked for fresh, read moments ago or not"
         );
         assert!(of_page(&app, &url).is_none(), "the marks are gone");

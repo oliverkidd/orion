@@ -11,7 +11,11 @@ serde_json = { workspace = true }
 ulid = { workspace = true }
 directories = { workspace = true }
 rmp-serde = { workspace = true }
+tracing = { workspace = true }
 tokio = { version = "1", features = ["io-util"] }
+# In-process process and machine probes (`mem`): libproc and sysctl,
+# where a spawned `ps` or `sysctl` cost a process launch each time.
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "rt", "macros"] }

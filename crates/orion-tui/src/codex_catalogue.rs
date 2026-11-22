@@ -6,11 +6,11 @@
 //! the catalogue bundled with the binary otherwise. The models it lists
 //! (`"visibility": "list"`), in its `priority` order, are the MODEL rows;
 //! hidden ones (internal, review-only) are left out. It is cached in the
-//! DATA DIR for a day ([`crate::model_cache`]). Until a listing has
+//! DATA DIR for a day ([`crate::model_cache`]); a listing that fails is
+//! not asked again for six hours. Until a listing has
 //! landed — no `codex` installed, or a CLI too old for the command — the
 //! descriptor's own list stands.
 
-use std::process::{Command, Stdio};
 use std::sync::{OnceLock, RwLock};
 
 use crate::config::DEFAULT_CHOICE;
@@ -82,18 +82,14 @@ pub fn parse_catalog(json: &str) -> Vec<String> {
 }
 
 /// Run `codex debug models` and parse it; None when the CLI is missing,
-/// fails, or lists nothing.
+/// fails, runs past [`crate::model_cache::LIST_TIMEOUT`], or lists
+/// nothing.
 fn fetch_ids() -> Option<Vec<String>> {
-    let output = Command::new(orion_core::AgentKind::Codex.cli_program())
-        .args(["debug", "models"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let ids = parse_catalog(&String::from_utf8_lossy(&output.stdout));
+    let out = crate::model_cache::listing(
+        orion_core::AgentKind::Codex.cli_program(),
+        &["debug", "models"],
+    )?;
+    let ids = parse_catalog(&out);
     (!ids.is_empty()).then_some(ids)
 }
 
