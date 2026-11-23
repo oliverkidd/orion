@@ -193,10 +193,17 @@ fn without_subagent_checkouts(mut entries: Vec<WorktreeEntry>) -> Vec<WorktreeEn
 /// The repo's SPARE WORKTREES: its linked checkouts on a branch named
 /// [`orion_core::SPARE_PREFIX`]…, in `git worktree list` order.
 pub async fn list_spare_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
-    let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
-    let mut entries = parse_worktree_list(&out);
+    let mut entries = list_all_worktrees(repo).await?;
     entries.retain(|e| orion_core::is_spare_branch(&e.branch));
     Ok(entries)
+}
+
+/// Every checkout git lists for the repo whose directory is still there,
+/// whatever its branch — a spare a launch took keeps its `orion-spare-…`
+/// directory under its new branch, so only this tells it from a stray.
+pub async fn list_all_worktrees(repo: &Path) -> Result<Vec<WorktreeEntry>> {
+    let out = git(repo, &["worktree", "list", "--porcelain"]).await?;
+    Ok(parse_worktree_list(&out))
 }
 
 /// The commit `rev` names, in full; None when it names none.

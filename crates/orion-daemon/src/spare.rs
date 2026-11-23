@@ -1353,7 +1353,12 @@ impl Daemon {
                     self.discard_spare(repo, &entry.path, &entry.branch).await;
                 }
             }
-            self.discard_stray_spares(repo, &found).await;
+            let recorded: Vec<&Path> = worktrees
+                .iter()
+                .filter(|w| w.project_id == project.id)
+                .map(|w| w.path.as_path())
+                .collect();
+            self.discard_stray_spares(repo, &recorded).await;
             if let (Some(entry), Some(launch)) = (kept, &launch) {
                 self.keep_spare(project, entry, command, launch.clone(), config)
                     .await;
@@ -1362,9 +1367,11 @@ impl Daemon {
     }
 
     /// Spare branches no checkout holds — a removal cut short — and spare
-    /// directories in the WORKTREE DIR that git does not list as one of
-    /// `listed`.
-    async fn discard_stray_spares(&self, repo: &Path, listed: &[git::WorktreeEntry]) {
+    /// directories in the WORKTREE DIR that are neither a checkout git
+    /// lists nor a worktree row in `recorded`. A spare a launch took
+    /// keeps its `orion-spare-…` directory under the branch it was given,
+    /// so the name alone never marks one a stray.
+    async fn discard_stray_spares(&self, repo: &Path, recorded: &[&Path]) {
         for (branch, checked_out) in git::spare_branches(repo).await.unwrap_or_default() {
             if !checked_out {
                 if let Err(e) = git::delete_branch(repo, &branch).await {
@@ -1376,6 +1383,10 @@ impl Daemon {
         let Some(dir) = git::worktree_dir(repo, "x").parent().map(Path::to_path_buf) else {
             return;
         };
+        // Without git's word on what it holds, nothing here is a stray.
+        let Ok(listed) = git::list_all_worktrees(repo).await else {
+            return;
+        };
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return;
         };
@@ -1385,7 +1396,13 @@ impl Daemon {
                 .file_name()
                 .to_str()
                 .is_some_and(orion_core::is_spare_branch);
-            if named && path.is_dir() && !listed.iter().any(|e| same_dir(&e.path, &path)) {
+            let held = listed.iter().any(|e| same_dir(&e.path, &path))
+                || recorded.iter().any(|r| same_dir(r, &path));
+            if named && path.is_dir() && !held {
+                if holds_work(&path).await {
+                    tracing::warn!(dir = %path.display(), "kept a stray spare directory: it holds uncommitted changes");
+                    continue;
+                }
                 tracing::info!(dir = %path.display(), "removing a stray spare directory");
                 if let Err(e) = tokio::fs::remove_dir_all(&path).await {
                     tracing::warn!(dir = %path.display(), error = %e, "stray spare directory not removed");
@@ -1490,6 +1507,16 @@ impl Daemon {
 }
 
 /// Whether `a` and `b` are one directory, however each is spelled.
+/// Whether `dir` is a checkout of its own that git can still read, with
+/// uncommitted changes in it — work no sweep may take, whatever else
+/// marks it a stray. A removal cut short leaves one git cannot read.
+async fn holds_work(dir: &Path) -> bool {
+    let own = git::repo_toplevel(dir)
+        .await
+        .is_ok_and(|top| same_dir(&top, dir));
+    own && git::changed_files(dir).await.is_ok_and(|n| n > 0)
+}
+
 fn same_dir(a: &Path, b: &Path) -> bool {
     use crate::registry::canonical_or_raw;
     canonical_or_raw(a) == canonical_or_raw(b)
@@ -2394,6 +2421,26 @@ mod tests {
         std::fs::create_dir_all(stray_dir.join("node_modules")).unwrap();
         let theirs = git::worktree_dir(&repo, "orion-sparse-notours");
         std::fs::create_dir_all(&theirs).unwrap();
+        // A spare a launch took: its directory keeps the spare's name, its
+        // branch is the one the launch gave it.
+        let taken = git::worktree_dir(&repo, "orion-spare-taken0");
+        git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "eager-raven-paddles",
+                taken.to_str().unwrap(),
+            ],
+        );
+        // A checkout git no longer lists, but which still reads as one of
+        // its own with work in it, is never swept.
+        let unlisted = git::worktree_dir(&repo, "orion-spare-unlisted0");
+        std::fs::create_dir_all(&unlisted).unwrap();
+        git_in(&unlisted, &["init", "-q"]);
+        std::fs::write(unlisted.join("draft.txt"), "unsaved work").unwrap();
 
         let next = restarted(&daemon, &project);
         next.spares.note_used(&project.id);
@@ -2405,6 +2452,14 @@ mod tests {
         assert!(!spare.path.exists(), "its checkout went");
         assert!(!stray_dir.exists(), "the stray directory went");
         assert!(theirs.exists(), "a directory not named a spare's stays");
+        assert!(
+            taken.join(".git").exists(),
+            "a spare a launch took is a user's checkout, and stays"
+        );
+        assert!(
+            unlisted.join("draft.txt").exists(),
+            "a stray holding uncommitted work stays"
+        );
         let left = branches(&repo);
         assert!(
             !left.contains("orion-spare-"),
@@ -2415,7 +2470,7 @@ mod tests {
                 .lines()
                 .filter(|l| l.starts_with("worktree "))
                 .count()
-                == 1
+                == 2
         );
 
         // A set-up spare of a project nobody uses any more goes too.
