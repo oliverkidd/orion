@@ -9,8 +9,9 @@ use crate::keymap::{Action, ACTIONS};
 
 /// Actions the COMMAND PALETTE leaves out: the walk and the press keys —
 /// they mean nothing without the key held under a cursor — the tab slots
-/// (one row per digit is noise), the locked pane's own hatch, and the
-/// palette itself.
+/// (one row per digit is noise), the locked pane's own hatch and preset
+/// chord, the presets launcher — presets are picked with `⌘U` where text
+/// is typed — and the palette itself.
 fn listed(action: Action) -> bool {
     !matches!(
         action,
@@ -21,6 +22,8 @@ fn listed(action: Action) -> bool {
             | Action::Activate
             | Action::SelectProjectTab(_)
             | Action::UnlockTerminal
+            | Action::InsertPreset
+            | Action::AgentPresets
             | Action::CommandPalette
     )
 }

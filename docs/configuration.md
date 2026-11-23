@@ -373,10 +373,12 @@ A system preset always has text: empty, it shows orion's built-in text greyed an
 be renamed or deleted. On it `Enter` edits and `^R` puts orion's text back. On one of yours, under
 **Yours**, `Enter` edits, `^N` makes a new one and `^D` deletes it.
 
-Presets are picked, never managed, elsewhere: `⌘U` / `^X` in the QUICK PROMPT — the box `Enter` opens on
-a Linear issue or a todo — **Agent presets** in the palette, `⌘U` over an agent's locked pane, which
-pastes the text in at the caret, and `⌘U` in Settings › Factory, which picks the preset an
-automation is told by in place of its system preset.
+Presets are picked elsewhere: `⌘U` / `^X` in the QUICK PROMPT — the box `Enter` opens on a Linear
+issue or a todo — `⌘U` over an agent's locked pane, which pastes the text in at the caret, and `⌘U`
+in Settings › Factory, which picks the preset an automation is told by in place of its system
+preset. Each of those pickers edits too: `⌘E` (`^E`) opens the preset editor on the row under the
+cursor, over the picker, and `Esc` or `Enter` (save) lands back on it with the box or pane still
+behind it. Presets are made and deleted only here.
 
 ## Setup command
 
@@ -468,7 +470,9 @@ directory are `orion-spare-<id>`; the grid, worktree sync and the worktree picke
 A new-worktree launch (`⌘⇧N`, **+ new worktree**, a Linear launch) on that account, model and
 effort, in edit mode, takes it: the branch is renamed to the launch's (the directory keeps its
 name), the worktree appears, the task is typed in as the first turn, and a new spare is cut behind
-it. Any other launch cuts a worktree as usual.
+it. When `claude` doesn't report the task submitted within a few seconds, Enter is pressed again,
+and if that doesn't take either, `claude` is restarted with the task as its first prompt, so a task
+never sits unsent in the input box. Any other launch cuts a worktree as usual.
 
 The DAEMON fetches origin for a spare every 30 minutes, or 5 minutes after the last fetch once
 you have been in the project, and never while you are away; when the base moves, an untaken spare

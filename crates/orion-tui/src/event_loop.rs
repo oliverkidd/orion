@@ -648,8 +648,16 @@ async fn main_loop(
                     if matches!(event, Event::Resize(..)) {
                         on_host_resize(terminal)?;
                     }
-                    if matches!(event, Event::Resize(..) | Event::FocusGained) {
-                        modes_owed = true;
+                    // A resize has re-asked the modes already
+                    // (`on_host_resize`); focus coming back owes them too.
+                    // A focus report while focused is the host's echo of
+                    // our own re-ask: no news, nothing to resolve.
+                    if matches!(event, Event::FocusGained) {
+                        if focus_comes_back(&app) {
+                            modes_owed = true;
+                        } else {
+                            resolving = false;
+                        }
                     }
                     let probe = perf
                         .as_ref()
@@ -1066,6 +1074,20 @@ fn moves_automations(event: &ServerEvent) -> bool {
             | ServerEvent::EntityRemoved { .. }
             | ServerEvent::StatusChanged { .. }
     )
+}
+
+/// Whether a `FocusGained` is the window taking focus BACK — the moment
+/// a host is most likely to have reset itself, and a visit — rather than
+/// a report while it is focused already. Read before the event is
+/// handled.
+///
+/// Ghostty (and iTerm2) answer every `?1004h` with the window's focus
+/// state, so treating that report as a return re-asked the modes, which
+/// brought another report back: the two looped for as long as the window
+/// was focused, each report a visit that read the selected checkout
+/// again.
+fn focus_comes_back(app: &App) -> bool {
+    !app.window_focused
 }
 
 /// Whether a DAEMON event only paints — a pane's output, its scrollback,
@@ -3112,10 +3134,15 @@ fn dispatch_input(app: &mut App, event: Event, out: &mut Vec<ClientRequest>) {
         }
         Event::Resize(_, _) => app.dirty = true,
         // The terminal window took focus again — most often back from a
-        // browser tab where a pull request was just merged or closed.
+        // browser tab where a pull request was just merged or closed. A
+        // report while it is focused already is the host answering a mode
+        // re-ask (`focus_comes_back`): nobody came back, nothing to look at.
         Event::FocusGained => {
+            let back = focus_comes_back(app);
             app.window_focused = true;
-            app.resolver.focus_gained(std::time::Instant::now());
+            if back {
+                app.resolver.focus_gained(std::time::Instant::now());
+            }
         }
         // …and left it: from here until it is back, a session that stops
         // to ask gets a desktop notification, since the pane can't be seen.
@@ -24965,6 +24992,47 @@ mod tests {
         assert!(!rule(&terminal).contains("*5"), "{}", rule(&terminal));
     }
 
+    /// The selected checkout's reads THE RESOLVER started this turn.
+    fn local_reads_now(app: &mut App) -> usize {
+        let now = std::time::Instant::now();
+        let started = crate::sync::spawn::step(app);
+        let mut n = 0;
+        for ticket in started {
+            if matches!(ticket.key, crate::sync::QueryKey::GitStatus(_)) {
+                n += 1;
+            }
+            app.resolver.land(&ticket, Ok(()), now);
+        }
+        n
+    }
+
+    /// Ghostty answers every `?1004h` with the window's focus state, so
+    /// the re-ask a focus report owes (`focus_comes_back`) brings another
+    /// focus report back. While the window is focused that report is no
+    /// news: it neither re-asks the modes — which would loop with the host
+    /// for as long as the window is focused — nor looks at the screen
+    /// again, which read the selected checkout once a report.
+    #[test]
+    fn a_focus_report_while_focused_is_no_news() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        assert!(app.window_focused);
+        assert_eq!(local_reads_now(&mut app), 1, "the selection's read");
+        let mut out = Vec::new();
+        let mut reads = 0;
+        for _ in 0..8 {
+            assert!(!focus_comes_back(&app), "no re-ask");
+            handle_terminal_event(&mut app, Event::FocusGained, &mut out);
+            reads += local_reads_now(&mut app);
+        }
+        assert_eq!(reads, 0, "a host's echo reads nothing");
+
+        handle_terminal_event(&mut app, Event::FocusLost, &mut out);
+        assert!(focus_comes_back(&app), "back: re-ask");
+        handle_terminal_event(&mut app, Event::FocusGained, &mut out);
+        assert!(app.window_focused);
+    }
+
     /// THE GIT WATCHER follows the selection once it rests: walking past
     /// a checkout starts nothing, and one whose watch can't start is left
     /// to the safety net until it is selected anew.
@@ -24982,9 +25050,52 @@ mod tests {
         assert_eq!(due(&app), Some(t0 + FOLLOW_REST), "not pushed back");
         on_deadline(&mut app, t0 + FOLLOW_REST);
         assert!(app.git_watch.current.is_none());
-        assert_eq!(app.git_watch.failed, Some(WorktreeId("w1".into())));
+        assert_eq!(
+            app.git_watch.failed,
+            Some((WorktreeId("w1".into()), "/tmp/demo".into()))
+        );
         follow(&mut app, t0 + FOLLOW_REST * 2);
         assert_eq!(due(&app), None, "not tried again");
+    }
+
+    /// A stand-in checkout the DAEMON's Ack made real before the upsert
+    /// that names its path — a launch that took the SPARE WORKTREE — has
+    /// no path to watch: it is followed only once the path is filled in,
+    /// and a watch that failed at one path is tried again at the next.
+    #[test]
+    fn the_git_watcher_waits_for_a_checkouts_path() {
+        use crate::git_watch::{due, follow, on_deadline, FOLLOW_REST};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.git_watch.tx = Some(tx);
+        app.tree.worktrees[0].path = std::path::PathBuf::new();
+        let t0 = std::time::Instant::now();
+        follow(&mut app, t0);
+        assert_eq!(due(&app), None, "no path, no watch");
+        on_deadline(&mut app, t0 + FOLLOW_REST);
+        assert!(app.git_watch.failed.is_none(), "nothing tried");
+
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("not-yet");
+        app.tree.worktrees[0].path = gone.clone();
+        follow(&mut app, t0);
+        on_deadline(&mut app, t0 + FOLLOW_REST);
+        assert_eq!(
+            app.git_watch.failed.as_ref().map(|(_, p)| p),
+            Some(&gone),
+            "failed there"
+        );
+        follow(&mut app, t0 + FOLLOW_REST);
+        assert_eq!(due(&app), None, "not tried again at the same path");
+
+        app.tree.worktrees[0].path = dir.path().to_path_buf();
+        let t1 = t0 + FOLLOW_REST * 2;
+        follow(&mut app, t1);
+        assert_eq!(due(&app), Some(t1 + FOLLOW_REST), "a new path: tried");
+        on_deadline(&mut app, t1 + FOLLOW_REST);
+        assert!(app.git_watch.current.is_some(), "watching it");
+        assert!(app.git_watch.failed.is_none());
     }
 
     /// What the grid shows of local git: the selected checkout as the

@@ -306,6 +306,10 @@ impl Daemon {
         if matches!(event, HookEvent::SessionStart { .. }) {
             self.spares.note_boot(agent_id);
         }
+        // …and an adopted one's first turn is in once its prompt is.
+        if matches!(event, HookEvent::UserPromptSubmit) {
+            self.spares.note_submit(agent_id);
+        }
         let handled = {
             let mut machines = self.status_machines.lock().unwrap();
             let machine = match machines.entry(agent_id.clone()) {

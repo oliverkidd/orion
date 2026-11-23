@@ -27,7 +27,9 @@
 //! One fetch per key runs at a time, whoever asks ([`crate::fetch::Flights`]);
 //! a refresh during one is owed exactly one more. A provider has only a
 //! few running at once ([`Provider::max_in_flight`]); the rest wait for
-//! one to land. A failure backs off on
+//! one to land. Under every policy lies THE FLOOR ([`Provider::min_reask`]):
+//! no visit, focus or retry fetches a key again sooner than that after its
+//! last answer landed — only a refresh or a change does. A failure backs off on
 //! its policy's doubling backoff, which visits and focus never shorten. A
 //! rate limit pauses the whole [`Provider`] until it resets ([`gate`]),
 //! `⌘R` included.
@@ -89,6 +91,12 @@ struct Entry {
     wanted: bool,
     /// Why the last fetch failed, until one succeeds.
     error: Option<String>,
+    /// When the last fetch landed, answered or not: what THE FLOOR
+    /// ([`Provider::min_reask`]) counts from.
+    landed: Option<Instant>,
+    /// An explicit refresh asked for the next fetch: it goes under THE
+    /// FLOOR. Spent as that fetch starts.
+    forced: bool,
 }
 
 /// What a screen can say about a key ([`Resolver::status`]): `updated 4m
@@ -192,10 +200,13 @@ impl Resolver {
     /// Want `key` when its answer is older than `how` allows, or stale.
     fn consider(&mut self, key: &QueryKey, how: Seen, now: Instant) {
         let p = policy(key);
+        // Never fresher than THE FLOOR: an answer that landed within it
+        // stands for any visit, whatever the policy says.
         let stale_after = match how {
             Seen::Shown => p.stale_after,
             Seen::Focused => p.focused_stale_after,
-        };
+        }
+        .max(key.provider().min_reask());
         let entry = self.entries.entry(key.clone()).or_default();
         let fresh = !entry.stale
             && entry
@@ -229,6 +240,7 @@ impl Resolver {
         let demanded = self.demanded(key);
         let entry = self.entries.entry(key.clone()).or_default();
         entry.retry_at = None;
+        entry.forced = true;
         if demanded {
             entry.wanted = true;
         } else {
@@ -426,9 +438,16 @@ impl Resolver {
             let every = self.period(key)?;
             asked.map_or(now, |asked| asked + every)
         };
+        // THE FLOOR: nothing but a refresh or a change goes sooner than
+        // this after the last answer landed.
+        let floor = entry
+            .filter(|e| !e.forced && !e.stale)
+            .and_then(|e| e.landed)
+            .map(|landed| landed + key.provider().min_reask());
         let held = [
             entry.and_then(|e| e.retry_at),
             self.paused_until(key.provider(), now),
+            floor,
         ]
         .into_iter()
         .flatten()
@@ -454,7 +473,9 @@ impl Resolver {
             let Some(ticket) = self.flights.begin(key.clone(), now) else {
                 continue;
             };
-            self.entries.entry(key).or_default().asked = Some(now);
+            let entry = self.entries.entry(key).or_default();
+            entry.asked = Some(now);
+            entry.forced = false;
             tickets.push(ticket);
         }
         tickets
@@ -492,6 +513,7 @@ impl Resolver {
         let p = policy(key);
         let mut paused = None;
         let entry = self.entries.entry(key.clone()).or_default();
+        entry.landed = Some(now);
         match answer {
             Ok(()) => {
                 entry.ok = Some(now);
@@ -1037,5 +1059,50 @@ mod tests {
         r.retain(|k| k != &branch("w1"));
         assert_eq!(r.status(&branch("w1"), t0).updated_at, None);
         assert_eq!(r.status(&branch("w2"), t0).updated_at, Some(t0));
+    }
+
+    /// THE FLOOR: however often something comes back to a key — a visit
+    /// every turn, focus coming back on every report, a retry — it is
+    /// fetched at most once per its provider's `min_reask` after the last
+    /// answer landed. A refresh and a change go under it.
+    #[test]
+    fn nothing_but_a_refresh_or_a_change_fetches_under_the_floor() {
+        let t0 = Instant::now();
+        let mut r = live();
+        let git = QueryKey::GitStatus(WorktreeId("w".into()));
+        let floor = Provider::Local.min_reask();
+        let mut reads = 0;
+        let ms = Duration::from_millis;
+        // Every 100 ms the key leaves the screen, comes back as the thing
+        // the user is in, and focus comes back: a turn-by-turn storm.
+        for turn in 0..40u32 {
+            let now = t0 + ms(100) * turn;
+            r.visit(vec![], now);
+            r.visit(vec![(git.clone(), Seen::Focused)], now);
+            r.focus_gained(now);
+            for ticket in r.due(now) {
+                reads += 1;
+                r.land(&ticket, Ok(()), now);
+            }
+        }
+        let span = ms(100) * 39;
+        let expected = 1 + (span.as_millis() / floor.as_millis()) as usize;
+        assert_eq!(reads, expected, "once at the start, then once per floor");
+        let now = t0 + ms(4000);
+        r.focus_gained(now);
+        let read = r.due(now);
+        assert_eq!(keys(&read), vec![git.clone()], "past the floor: read");
+        r.land(&read[0], Ok(()), now);
+        let next = now + ms(100);
+        assert!(next < now + floor);
+        r.focus_gained(next);
+        assert!(r.due(next).is_empty(), "under the floor");
+        r.refresh(&git);
+        let refreshed = r.due(next);
+        assert_eq!(keys(&refreshed), vec![git.clone()], "a refresh goes now");
+        r.land(&refreshed[0], Ok(()), next);
+        let later = next + ms(100);
+        r.invalidate(&git);
+        assert_eq!(keys(&r.due(later)), vec![git], "and so does a change");
     }
 }

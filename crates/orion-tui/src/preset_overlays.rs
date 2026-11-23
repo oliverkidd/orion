@@ -382,6 +382,10 @@ pub struct AgentPresetEditor {
     /// Whole modal rect, written back during draw so a click outside can
     /// back out like Esc.
     pub area: Rect,
+    /// The PICKER the form was opened from (`⌘E` on its row), when it was:
+    /// Esc and a save land back on that list, the box or pane behind it
+    /// still waiting, rather than on Settings → Presets.
+    pub back: Option<Box<AgentPresetsView>>,
 }
 
 impl AgentPresetEditor {
@@ -405,6 +409,7 @@ impl AgentPresetEditor {
             area: Rect::default(),
             filter: String::new(),
             error: None,
+            back: None,
         }
     }
 
@@ -435,6 +440,7 @@ impl AgentPresetEditor {
             area: Rect::default(),
             filter: String::new(),
             error: None,
+            back: None,
         }
     }
 
@@ -842,8 +848,57 @@ pub(crate) fn save_agent_preset_editor(app: &mut App, mut editor: AgentPresetEdi
         }
     };
     crate::presets_tab::save(app, &presets);
+    if let Some(back) = editor.back {
+        let name = presets[index].name.clone();
+        return reopen_picker(app, *back, &name);
+    }
     let at = crate::presets_tab::Screen::of(presets).row_of(index);
     crate::presets_tab::reopen(app, at.unwrap_or(0));
+}
+
+/// `⌘E` on the PICKER: the PRESET EDITOR on the row under the cursor, over
+/// the list rather than Settings, so a preset is fixed where it is picked.
+/// The form edits the stored preset — the list's copy carries orion's text
+/// on a SYSTEM PRESET left on it — and comes back to this list.
+fn edit_selected(app: &mut App) {
+    let Some(Overlay::AgentPresets(view)) = &app.overlay else {
+        return;
+    };
+    let Some(name) = view.presets.get(view.selected).map(|p| p.name.clone()) else {
+        return;
+    };
+    let stored = crate::agent_presets::load_seeded();
+    let Some(index) = stored.iter().position(|p| p.name == name) else {
+        return;
+    };
+    let row = crate::presets_tab::Screen::of(stored.clone())
+        .row_of(index)
+        .unwrap_or(0);
+    let mut editor = AgentPresetEditor::from_preset(row, index, &stored[index]);
+    editor.back = Some(Box::new(view.clone()));
+    app.overlay = Some(Overlay::AgentPresetEditor(editor));
+}
+
+/// The PICKER `view` back up after its editor closed, read afresh from the
+/// store as it was opened — the automation's pick over every preset, the
+/// others over the stored list — the cursor on `name` and the filter
+/// cleared, since the name may have changed under it.
+fn reopen_picker(app: &mut App, mut view: AgentPresetsView, name: &str) {
+    let presets = match view.for_automation {
+        Some(_) => crate::agent_presets::load_seeded(),
+        None => crate::agent_presets::load(),
+    };
+    view.presets = presets
+        .into_iter()
+        .map(AgentPreset::with_builtin_text)
+        .collect();
+    view.filter.clear();
+    view.selected = view
+        .presets
+        .iter()
+        .position(|p| p.name == name)
+        .unwrap_or(0);
+    app.overlay = Some(Overlay::AgentPresets(view));
 }
 
 /// The list's Enter: ask for the optional task the preset's text will
@@ -967,8 +1022,9 @@ fn preset_on_box(
 }
 
 /// Keys in the AGENT PRESETS PICKER. Letters type ahead over the names,
-/// ↑/↓ move and Enter picks, as in every filtered overlay; nothing else
-/// — the presets are managed in Settings → Presets.
+/// ↑/↓ move and Enter picks, as in every filtered overlay, and `⌘E` edits
+/// the row under the cursor in place; making and deleting presets is
+/// Settings → Presets'.
 pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     let Some(Overlay::AgentPresets(view)) = &mut app.overlay else {
         return;
@@ -998,6 +1054,7 @@ pub(crate) fn handle_list_key(app: &mut App, key: KeyEvent, out: &mut Vec<Client
         KeyCode::Down => view.step(1),
         KeyCode::Up => view.step(-1),
         KeyCode::Char('u') if ctrl => view.filter.clear(),
+        _ if keys::EDIT.matches(&key) => edit_selected(app),
         _ if keys::LAUNCH.matches(&key) => activate_selected(app, out),
         // Type-ahead: Backspace widens; a letter narrows the rows to the
         // names it fuzzy matches, the cursor on the best. A letter no name
@@ -1123,11 +1180,15 @@ pub(crate) fn handle_editor_key(app: &mut App, key: KeyEvent) {
         // Esc first clears a choice row's type-ahead, then backs out.
         _ if crate::nav::closes(&key) && !editor.filter.is_empty() => editor.filter.clear(),
         _ if keys::RESTORE.matches(&key) => editor.restore_text(),
-        // Back to the Settings → Presets row it came from, unsaved.
-        _ if crate::nav::closes(&key) => {
-            let at = editor.settings_row;
-            crate::presets_tab::reopen(app, at);
-        }
+        // Back where it came from, unsaved: the picker it was opened over,
+        // or the Settings → Presets row.
+        _ if crate::nav::closes(&key) => match editor.back.take() {
+            Some(back) => app.overlay = Some(Overlay::AgentPresets(*back)),
+            None => {
+                let at = editor.settings_row;
+                crate::presets_tab::reopen(app, at);
+            }
+        },
         // ↓/↑ inside the text box walk its lines first, as in
         // Claude Code's prompt; past the last (or first) line — and on
         // every other row — they step fields, as Tab does. Leaving a
@@ -1239,8 +1300,10 @@ pub(crate) mod keys {
     pub const SAVE: Key = Key::new(&["enter"], "save");
     /// A SYSTEM PRESET's: orion's text into the box.
     pub const RESTORE: Key = Key::new(&["ctrl+r"], "orion's text");
+    /// The picker's way into the PRESET EDITOR on the row under the cursor.
+    pub const EDIT: Key = Key::new(&["cmd+e", "ctrl+e"], "edit");
     #[cfg(test)]
-    pub const ALL: &[Key] = &[LAUNCH, WORKTREE, FIELD, CHOOSE, SAVE, RESTORE];
+    pub const ALL: &[Key] = &[LAUNCH, WORKTREE, FIELD, CHOOSE, SAVE, RESTORE, EDIT];
 }
 
 /// The keys on the list's frame, by mode: Enter's verb, the NEW WORKTREE
@@ -1270,6 +1333,9 @@ pub(crate) fn list_hints(view: &AgentPresetsView) -> Vec<crate::hints::Hint> {
     if view.has_worktree_row() {
         hints.push(keys::WORKTREE.hint());
     }
+    if !view.presets.is_empty() {
+        hints.push(keys::EDIT.hint().kept());
+    }
     hints.push(crate::hints::Hint::new("Esc", esc));
     hints
 }
@@ -1291,7 +1357,11 @@ pub(crate) fn editor_hints(editor: &AgentPresetEditor) -> Vec<crate::hints::Hint
         });
     }
     hints.push(keys::SAVE.hint().kept());
-    hints.push(crate::hints::Hint::new("Esc", "back to Settings"));
+    let esc = match editor.back {
+        Some(_) => "back to the presets",
+        None => "back to Settings",
+    };
+    hints.push(crate::hints::Hint::new("Esc", esc));
     hints
 }
 
@@ -1997,12 +2067,12 @@ mod tests {
     use super::*;
     use orion_core::WorktreeId;
 
-    /// The PICKER only picks: in every mode, ⌘N / ⌘I / ⌘W and their
-    /// `^` twins — the manage chords it used to answer to — do nothing,
-    /// and its frame names none of them; orion's presets carry the
+    /// The PICKER never makes or deletes: in every mode, ⌘N / ⌘I / ⌘W and
+    /// their `^` twins — the manage chords it used to answer to — do
+    /// nothing, and its frame names neither; orion's presets carry the
     /// `orion` tag Settings → Presets gives them.
     #[test]
-    fn the_picker_only_picks() {
+    fn the_picker_never_makes_or_deletes() {
         let presets = vec![
             crate::agent_presets::SystemPreset::PrAutofix.default_preset(),
             AgentPreset {
@@ -2045,8 +2115,7 @@ mod tests {
                     crate::hints::assert_hints_from(&list_hints(&view), keys::ALL);
                     for (selected, chord) in [0, 1].into_iter().flat_map(|row| {
                         [
-                            "cmd+n", "ctrl+n", "cmd+i", "ctrl+e", "cmd+w", "ctrl+w", "ctrl+a",
-                            "ctrl+d",
+                            "cmd+n", "ctrl+n", "cmd+i", "cmd+w", "ctrl+w", "ctrl+a", "ctrl+d",
                         ]
                         .map(|chord| (row, chord))
                     }) {
@@ -2078,9 +2147,98 @@ mod tests {
                     .collect();
                 let autofix = text.lines().find(|l| l.contains("PR autofix")).unwrap();
                 assert!(autofix.contains(crate::presets_tab::ORION_TAG), "{text}");
-                for verb in ["new", "edit", "delete"] {
+                for verb in ["new", "delete"] {
                     assert!(!text.contains(&format!(" {verb} ·")), "{verb}:\n{text}");
                 }
+            })
+        });
+    }
+
+    /// `⌘E` on the PICKER opens the PRESET EDITOR on the row under the
+    /// cursor, over the list: Esc puts the same list back, the box it was
+    /// picking for still behind it, and a save writes the preset and lands
+    /// on the list read afresh, the cursor on the preset. A system preset
+    /// on orion's text opens on the stored entry — its box empty — not the
+    /// list's copy with orion's text filled in.
+    #[test]
+    fn the_picker_edits_the_row_in_place_and_comes_back() {
+        let presets = vec![
+            crate::agent_presets::SystemPreset::PrAutofix.default_preset(),
+            AgentPreset {
+                name: "mine".into(),
+                system: None,
+                text: "old {task}".into(),
+                ..crate::agent_presets::SystemPreset::PrAutofix.default_preset()
+            },
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        crate::agent_presets::with_presets_path(dir.path().join("presets.json"), || {
+            pinned("{}", || {
+                crate::agent_presets::save(&presets).unwrap();
+                let mut app = App::new();
+                let w = WorktreeId("w".into());
+                let launch = crate::quick_prompt::QuickLaunch::from_config(
+                    QuickTarget::Worktree(w.clone()),
+                    &crate::config::Config::load(),
+                );
+                let back = crate::quick_prompt::QuickReturn {
+                    from_box: true,
+                    ..crate::quick_prompt::QuickReturn::fresh(launch)
+                };
+                let mut view = AgentPresetsView::new(w, crate::agent_presets::load());
+                view.quick = Some(back);
+                let press = |app: &mut App, chord: &str| {
+                    let key = crate::keymap::KeyChord::parse(chord).unwrap();
+                    let key = KeyEvent::new(key.code, key.mods);
+                    match &app.overlay {
+                        Some(Overlay::AgentPresets(_)) => {
+                            handle_list_key(app, key, &mut Vec::new())
+                        }
+                        Some(Overlay::AgentPresetEditor(_)) => handle_editor_key(app, key),
+                        _ => panic!("{chord} with neither up"),
+                    }
+                };
+
+                // orion's preset: the stored entry, and Esc puts the list back.
+                app.overlay = Some(Overlay::AgentPresets(view.clone()));
+                press(&mut app, "cmd+e");
+                let Some(Overlay::AgentPresetEditor(editor)) = &app.overlay else {
+                    panic!("⌘E opens the editor");
+                };
+                assert_eq!(editor.system, Some(SystemPreset::PrAutofix));
+                assert!(
+                    editor.text.as_str().is_empty(),
+                    "orion's text stays orion's"
+                );
+                assert!(editor_hints(editor)
+                    .iter()
+                    .any(|h| h.does == "back to the presets"));
+                press(&mut app, "esc");
+                assert!(
+                    matches!(&app.overlay, Some(Overlay::AgentPresets(v))
+                        if v.selected == 0 && v.box_behind().is_some()),
+                    "Esc is the same list again"
+                );
+
+                // The user's: `^E` too, and a save comes back on it.
+                view.selected = 1;
+                app.overlay = Some(Overlay::AgentPresets(view));
+                press(&mut app, "ctrl+e");
+                let Some(Overlay::AgentPresetEditor(editor)) = app.overlay.take() else {
+                    panic!("^E opens the editor");
+                };
+                assert_eq!(editor.editing, Some(1));
+                let mut editor = editor;
+                editor.text = TextInput::multiline_with_text("new {task}");
+                save_agent_preset_editor(&mut app, editor);
+                let stored = crate::agent_presets::load();
+                assert_eq!(stored[1].text, "new {task}");
+                let Some(Overlay::AgentPresets(list)) = &app.overlay else {
+                    panic!("a save lands on the list");
+                };
+                assert_eq!(list.selected, 1);
+                assert_eq!(list.presets[1].text, "new {task}");
+                assert!(list.box_behind().is_some(), "the box still waits");
             })
         });
     }

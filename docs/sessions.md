@@ -99,10 +99,11 @@ outlive a restart of orion; what Slack said while orion was closed is not caught
 ## AGENT PRESETS
 
 If you keep starting the same kind of session with the same framing, save it as an **agent preset**,
-in **Settings → Presets** (below). Wherever a launch is, a picker lists them — **Agent presets**
-(the command palette), `⌘U` (`^X`) in the quick prompt, `⌘U` over an agent's locked pane — and it only picks: making, changing and deleting presets is Settings'
-alone, so no picker offers it. From the palette the launch lands in the checkout under the cursor —
-its last row says which, and `Tab` flips it to a fresh worktree. Over the quick prompt the box's header says where instead, and its `⌘.` picks, so that row and its `Tab` are not drawn there. Type to find one by name: letters
+in **Settings → Presets** (below). Wherever text is typed, a picker lists them — `⌘U` (`^X`) in the
+quick prompt, `⌘U` over an agent's locked pane. It picks, and `⌘E` (`^E`) edits the preset under the
+cursor in place: the editor opens over the picker, and `Esc` or a save comes back to it with your
+box still behind. Making and deleting presets is Settings' alone. The box's header says where the
+launch lands, and its `⌘.` picks. Type to find one by name: letters
 narrow the list to the fuzzy matches, `↑`/`↓` move, `Backspace` widens and `Esc` clears — as in the
 model and effort submenus. The editor is a small form — name, **Runs on**, model, effort, **Task**
 (`ask` or `skip`) and one **Text** box: what the preset sends, with `{task}` where your task goes.

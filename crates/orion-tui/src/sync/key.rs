@@ -107,6 +107,23 @@ impl Provider {
         }
     }
 
+    /// THE FLOOR: the least time between one of the provider's answers
+    /// landing for a key and its next fetch — a visit, a touch, focus
+    /// coming back, a beat, a background need, an ask or a failure's
+    /// retry, whatever any policy says. Only an explicit refresh (`⌘R`,
+    /// `Shift+R`) and a change something saw (`Resolver::invalidate`) go
+    /// under it, so a bug that *wants* a key every turn of the loop costs
+    /// one fetch per floor, not a process a turn; one that invalidates it
+    /// every turn is not held.
+    pub fn min_reask(self) -> std::time::Duration {
+        match self {
+            Provider::Local => std::time::Duration::from_secs(2),
+            Provider::GitHub | Provider::Linear | Provider::Microsoft | Provider::Usage => {
+                std::time::Duration::from_secs(5)
+            }
+        }
+    }
+
     /// The provider's name as a person would say it: `GitHub limit, back
     /// at 22:11`.
     pub fn name(self) -> &'static str {

@@ -24,7 +24,9 @@
 //! shows as the worktree's setup row, and the CLI is held for the
 //! `CreateAgent` that follows ([`Daemon::take_held_cli`]), which adopts it
 //! and types the task in as its first turn once the CLI is at its prompt
-//! ([`Daemon::send_first_turn`]). A new spare is cut behind it. Any other
+//! ([`Daemon::send_first_turn`]) — and sees it go in: a task the CLI
+//! doesn't report submitted gets its Enter again, then a cold boot on the
+//! task. A new spare is cut behind it. Any other
 //! launch is cut cold, as before.
 //!
 //! [`Daemon::tend_spares`], on its own tick, keeps the book: it picks the
@@ -98,6 +100,21 @@ const SETTLE: Duration = Duration::from_millis(500);
 const SETTLE_CAP: Duration = Duration::from_secs(5);
 /// How often a first turn waiting on its CLI looks again.
 const SETTLE_POLL: Duration = Duration::from_millis(50);
+/// How long a first turn's text, typed in, must sit drawn — the screen
+/// still — before its Enter is pressed, so the CLI has taken the paste in
+/// before it is asked to submit it…
+const TYPED_SETTLE: Duration = Duration::from_millis(300);
+/// …and past this, the Enter goes in all the same.
+const TYPED_SETTLE_CAP: Duration = Duration::from_secs(3);
+/// How long after its Enter a first turn has to show up as the CLI's
+/// `UserPromptSubmit` before the Enter is pressed again, and, that failing
+/// too, before the CLI is put down and booted on the task cold. A long-idle
+/// claude once took the paste and dropped its Enter: the task sat unsent in
+/// its input box under a row that said `running`.
+#[cfg(not(test))]
+const SUBMIT_WAIT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const SUBMIT_WAIT: Duration = Duration::from_millis(400);
 /// A taken spare's CLI whose `CreateAgent` has not come this long after the
 /// take is killed: the client that took it went away.
 const HELD_LIMIT: Duration = Duration::from_secs(2 * 60);
@@ -255,10 +272,12 @@ pub(crate) struct Adopted {
     pub(crate) boot: Arc<Boot>,
 }
 
-/// One spare CLI's boot: when it was spawned and when it said it was up.
+/// One spare CLI's boot: when it was spawned, when it said it was up, and
+/// whether a prompt has been submitted to it since.
 pub(crate) struct Boot {
     spawned_at: Instant,
     hook_at: Mutex<Option<Instant>>,
+    submitted: Mutex<bool>,
 }
 
 impl Boot {
@@ -266,12 +285,18 @@ impl Boot {
         Arc::new(Self {
             spawned_at: Instant::now(),
             hook_at: Mutex::new(None),
+            submitted: Mutex::new(false),
         })
     }
 
     /// When the CLI fired its `SessionStart`, if it has.
     fn hook_at(&self) -> Option<Instant> {
         *self.hook_at.lock().unwrap()
+    }
+
+    /// The CLI has fired a `UserPromptSubmit`: its first turn is in.
+    fn submitted(&self) -> bool {
+        *self.submitted.lock().unwrap()
     }
 
     /// Never fired its `SessionStart`, and is past waiting for it.
@@ -391,6 +416,14 @@ impl SpareBook {
                 .lock()
                 .unwrap()
                 .get_or_insert_with(Instant::now);
+        }
+    }
+
+    /// A `UserPromptSubmit` from agent `id`: an adopted spare CLI's says
+    /// its first turn went in.
+    pub(crate) fn note_submit(&self, id: &AgentId) {
+        if let Some(boot) = self.book.lock().unwrap().boots.get(id) {
+            *boot.submitted.lock().unwrap() = true;
         }
     }
 
@@ -614,10 +647,15 @@ impl Daemon {
     }
 
     /// Type `task` into adopted CLI `id` as its first turn once it is at its
-    /// prompt. One that never gets there is put down, and booted again with
-    /// `task` as its first prompt, as a cold launch would be; one that died
-    /// is booted that way too ([`Daemon::send_turn`]). No task: the CLI's
-    /// own input is the first prompt, and nothing waits on its boot.
+    /// prompt, and see it go in. One that never gets there is put down, and
+    /// booted again with `task` as its first prompt, as a cold launch would
+    /// be; one that died is booted that way too ([`Daemon::send_turn`]).
+    /// Typed in, the task must come back as the CLI's `UserPromptSubmit`
+    /// inside [`SUBMIT_WAIT`]: when it doesn't, the Enter is pressed again,
+    /// and when that doesn't take either, the CLI is put down and booted on
+    /// the task cold — the task is never left sitting unsent in an input
+    /// box. No task: the CLI's own input is the first prompt, and nothing
+    /// waits on its boot.
     pub(crate) fn send_first_turn(
         self: &Arc<Self>,
         id: AgentId,
@@ -630,21 +668,111 @@ impl Daemon {
         };
         let daemon = self.clone();
         tokio::spawn(async move {
+            let sref = SessionRef::Agent(id.clone());
             if !daemon.settled(&id, &boot).await {
                 tracing::info!(agent = %id, "the spare's CLI never reached its prompt; booting it on the task");
-                daemon.kill_session(&SessionRef::Agent(id.clone()));
+                daemon.kill_session(&sref);
             }
-            daemon.spares.forget_boot(&id);
-            let sent = tokio::task::spawn_blocking(move || {
-                daemon.send_turn(&id, &text, DEFAULT_COLS, DEFAULT_ROWS)
-            })
-            .await;
-            match sent {
-                Ok(Err(e)) => tracing::warn!(error = %e, "the first turn didn't go in"),
-                Err(e) => tracing::warn!(error = %e, "the first turn panicked"),
-                Ok(Ok(())) => {}
+            let typed = match daemon.session(&sref) {
+                Some(session) => session.write_input(&crate::registry::typed_bytes(&text)),
+                // Gone: the turn's own boot carries it as the first prompt.
+                None => {
+                    daemon.spares.forget_boot(&id);
+                    daemon.boot_on_task(id, text).await;
+                    return;
+                }
+            };
+            if let Err(e) = typed {
+                tracing::warn!(agent = %id, error = %e, "the first turn couldn't be typed; booting it on the task");
+                daemon.reboot_on_task(id, text).await;
+                return;
             }
+            daemon.typed_settled(&sref).await;
+            for attempt in 0..2 {
+                let Some(session) = daemon.session(&sref) else {
+                    break;
+                };
+                if let Err(e) = session.write_input(b"\r") {
+                    tracing::warn!(agent = %id, error = %e, "the first turn's Enter didn't go in");
+                }
+                if daemon.submitted_within(&boot, &sref, SUBMIT_WAIT).await {
+                    daemon.spares.forget_boot(&id);
+                    return;
+                }
+                if attempt == 0 {
+                    tracing::warn!(agent = %id, "the first turn sat unsent; pressing Enter again");
+                }
+            }
+            if daemon.session(&sref).is_some() {
+                tracing::warn!(agent = %id, "the first turn never went in; booting the CLI on the task");
+            }
+            daemon.reboot_on_task(id, text).await;
         });
+    }
+
+    /// Put adopted CLI `id` down and boot it again with `text` as its first
+    /// prompt, the way a cold launch hands it over. The row is seeded as a
+    /// launch again, so the new CLI's startup progress-clear cannot read as
+    /// the turn ending.
+    async fn reboot_on_task(self: &Arc<Self>, id: AgentId, text: String) {
+        self.spares.forget_boot(&id);
+        self.kill_session(&SessionRef::Agent(id.clone()));
+        self.status_machines
+            .lock()
+            .unwrap()
+            .insert(id.clone(), crate::status::AgentStatusMachine::launching());
+        self.boot_on_task(id, text).await;
+    }
+
+    /// [`Daemon::send_turn`] of `text` to `id`, off the async workers: with
+    /// no live CLI, it boots one with `text` as its first prompt.
+    async fn boot_on_task(self: &Arc<Self>, id: AgentId, text: String) {
+        let daemon = self.clone();
+        let sent = tokio::task::spawn_blocking(move || {
+            daemon.send_turn(&id, &text, DEFAULT_COLS, DEFAULT_ROWS)
+        })
+        .await;
+        match sent {
+            Ok(Err(e)) => tracing::warn!(error = %e, "the first turn didn't go in"),
+            Err(e) => tracing::warn!(error = %e, "the first turn panicked"),
+            Ok(Ok(())) => {}
+        }
+    }
+
+    /// Wait for the screen of `sref` to sit still for [`TYPED_SETTLE`] — the
+    /// text just typed into it drawn — or [`TYPED_SETTLE_CAP`] at most.
+    async fn typed_settled(&self, sref: &SessionRef) {
+        let started = Instant::now();
+        let mut seen = None;
+        let mut still_since = Instant::now();
+        while started.elapsed() < TYPED_SETTLE_CAP {
+            let Some(session) = self.session(sref) else {
+                return;
+            };
+            let end = session.ring.lock().unwrap().end_seq();
+            if seen != Some(end) {
+                seen = Some(end);
+                still_since = Instant::now();
+            } else if still_since.elapsed() >= TYPED_SETTLE {
+                return;
+            }
+            tokio::time::sleep(SETTLE_POLL).await;
+        }
+    }
+
+    /// Whether `boot`'s CLI says a prompt went in within `wait`. False at
+    /// once when its session is gone.
+    async fn submitted_within(&self, boot: &Boot, sref: &SessionRef, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        loop {
+            if boot.submitted() {
+                return true;
+            }
+            if Instant::now() >= deadline || self.session(sref).is_none() {
+                return false;
+            }
+            tokio::time::sleep(SETTLE_POLL).await;
+        }
     }
 
     /// Wait for CLI `id` to be at its prompt: its `SessionStart` in and its
@@ -1954,7 +2082,7 @@ mod tests {
         assert_eq!(row.status, AgentStatus::Running, "working from the create");
         daemon.apply_hook_event(&cli, HookEvent::SessionStart { source: None }, None);
         let session = daemon
-            .session(&SessionRef::Agent(cli))
+            .session(&SessionRef::Agent(cli.clone()))
             .expect("still the one CLI");
         until("the first turn", || {
             String::from_utf8_lossy(&session.snapshot(None).1)
@@ -1963,6 +2091,60 @@ mod tests {
                 >= 2
         })
         .await;
+        // The CLI says the prompt went in: it is left to work on it.
+        daemon.apply_hook_event(&cli, HookEvent::UserPromptSubmit, None);
+        tokio::time::sleep(SUBMIT_WAIT * 3).await;
+        let still = daemon
+            .session(&SessionRef::Agent(cli))
+            .expect("still running");
+        assert!(
+            Arc::ptr_eq(&session, &still),
+            "a submitted turn is not redone"
+        );
+        daemon.kill_all();
+    }
+
+    /// A first turn the CLI never says it submitted — the Enter dropped, the
+    /// task left sitting in its input box — gets its Enter again, and then
+    /// the CLI is put down and booted on the task cold, its row still
+    /// `running`: the task is never left unsent.
+    #[tokio::test]
+    async fn a_first_turn_that_never_goes_in_is_booted_cold() {
+        let (daemon, _tmp, project, cfg, _cmd) = with_spare(serde_json::json!({})).await;
+        let (_, cli) = daemon.spare_of(&project.id).unwrap();
+        let cli = cli.expect("a booted CLI");
+        let launch = cfg.spare_launch().unwrap();
+        let id = created_worktree(
+            daemon
+                .create_launch_worktree_with(&project.id, "feat", &launch, &cfg)
+                .await
+                .unwrap(),
+        );
+        daemon
+            .create_agent(create_spec(&id, &launch, Some("the task")))
+            .await
+            .unwrap();
+        daemon.apply_hook_event(&cli, HookEvent::SessionStart { source: None }, None);
+        let sref = SessionRef::Agent(cli.clone());
+        let adopted = daemon.session(&sref).expect("the adopted CLI");
+        until("the task typed and submitted", || {
+            String::from_utf8_lossy(&adopted.snapshot(None).1)
+                .matches("the task")
+                .count()
+                >= 2
+        })
+        .await;
+        until("the cold boot", || {
+            daemon
+                .session(&sref)
+                .is_some_and(|now| !Arc::ptr_eq(&now, &adopted))
+        })
+        .await;
+        assert_eq!(
+            daemon.store.get_agent(&cli).unwrap().unwrap().status,
+            AgentStatus::Running,
+            "working on the task it was booted with"
+        );
         daemon.kill_all();
     }
 

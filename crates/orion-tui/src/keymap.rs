@@ -848,7 +848,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         action: Action::InsertPreset,
         id: "insert_preset",
         label: "Insert preset",
-        hint: "In an agent's locked pane: pick a saved preset and its text goes in at the caret, unsent",
+        hint: "In an agent's locked pane: pick a saved preset and its text goes in at the caret, unsent, or edit the one under the cursor",
         group: "TERMINAL",
         scope: Scope::Terminal,
         defaults: &["cmd+u"],

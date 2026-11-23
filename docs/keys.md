@@ -145,7 +145,7 @@ cursor. `↑`/`↓` walk the lines, every band listing all of its entries.
 | `⌘1`–`⌘9` | that PROJECT TAB, counting from the left; rebindable per slot as `project_tab_1` … `project_tab_9` |
 | right-click | a row's, a band's or a project tab's context menu; a row in a checkout that works on a Linear issue (linked to it, or named in its branch) has **Open Linear issue** there, opening the Linear issues modal on it |
 
-The actions with no key of their own — **New agent — choose harness** (the NEW AGENT PICKER), **Agent presets**,
+The actions with no key of their own — **New agent — choose harness** (the NEW AGENT PICKER),
 **Duplicate session**, **Comment on pull request**, **Delete all sessions**, **SSH hosts** (the hosts
 `orion ssh` has reached; picking one restarts orion there), **Restart stack**, **Stop all stacks**,
 **Clean unused worktrees**, **Copy linked Linear issues**, **Run setup**, **Run week in review now**,
@@ -164,7 +164,7 @@ in the COMMAND PALETTE and, where they apply to a row, its right-click menu. Bin
 | `Esc` | leave the pane, back to the row it reads |
 | `⇧Esc` | the agent's Esc: a bare Esc down the PTY |
 | `^Q`, `^]`, `^⇧H` | also leave the pane; `^Q` is the HARDWIRED UNLOCK, which no rebind can take away |
-| `⌘U` | over an agent: pick one of your saved AGENT PRESETS and its text is pasted at the caret, unsent, the pane still locked. Text that ends at its `{task}` (or names none) ends on a blank line for the task, text that starts there starts on one so it follows a task already typed, and text with words either side lands whole with the caret after it. Only the text travels, not the preset's harness or model. A long preset shows as the harness shows any long paste — Claude Code's `[Pasted text #1 +4 lines]` — and is sent in full. The list only picks: presets are made in Settings → Presets. Over a shell, `⌘U` is the pull requests modal as anywhere else |
+| `⌘U` | over an agent: pick one of your saved AGENT PRESETS and its text is pasted at the caret, unsent, the pane still locked. Text that ends at its `{task}` (or names none) ends on a blank line for the task, text that starts there starts on one so it follows a task already typed, and text with words either side lands whole with the caret after it. Only the text travels, not the preset's harness or model. A long preset shows as the harness shows any long paste — Claude Code's `[Pasted text #1 +4 lines]` — and is sent in full. `⌘E` (`^E`) edits the preset under the cursor in place and comes back to the list; presets are made in Settings → Presets. Over a shell, `⌘U` is the pull requests modal as anywhere else |
 | any ⌘ chord orion binds | leave the pane and run it — `⌘K`, `⌘P`, `⌘E`, `⌘J`, `⌘⇧J`, `⌘⇧P` … |
 | `⌘F` | full-screen the session, or bring it back down; never forwarded to the agent. `Esc` and `^Q` also bring a full-screen session back down |
 | mouse wheel | a child that asked for the mouse (Claude Code's alt-screen UI, `vim` with `mouse=a`, `htop`) gets the notch as a real wheel report; an alternate-screen app that wants no mouse (`less`, plain `vim`) gets `↑`/`↓`; anything else scrolls orion's own scrollback, and the header counts how far back you are as `scroll N` |
@@ -688,7 +688,7 @@ sends is the dim line along the bottom of the frame.
 | `^V` | paste the image on the clipboard (a ⌃⇧⌘4 screenshot, a copied image): it is kept in the DATA DIR's `attachments/` and its path goes in at the caret — [Dropping a screenshot on a prompt box](sessions.md#dropping-a-screenshot-on-a-prompt-box). `⌘V` is still Ghostty's text paste |
 | `Tab` | pick a different harness for this one launch (`→` drills into its model and effort), each account's row saying what is left on it (`41% · 2h`); with nothing on but your Claude accounts, the next account, in place |
 | `⇧Tab` | step the mode — edit, plan, ask — among the ones the harness has, as in Claude Code and Cursor; for this box only |
-| `⌘U` (`^X`) | pick one of your saved AGENT PRESETS and write its text round the caret — the caret where its `{task}` is. A preset that follows the box keeps the box's account, taking only the model and effort it pins; one that pins a harness launches on that |
+| `⌘U` (`^X`) | pick one of your saved AGENT PRESETS and write its text round the caret — the caret where its `{task}` is. A preset that follows the box keeps the box's account, taking only the model and effort it pins; one that pins a harness launches on that. In the list, `⌘E` (`^E`) edits the preset under the cursor and comes back to it, the box still behind |
 | `⌘P` (`^P`) | the PROJECT PICKER, over the box: aim it at any project on the machine, the text kept. A launch into another project runs in the background, and the footer names where it went |
 | `⌘.` | the WORKTREE PICKER: **+ new worktree** first, then every checkout of the project, then every branch with no checkout yet (`⎇`) — local ones, then origin's — narrowed as you type; picking one launches in a new worktree on that branch |
 | `⌘/` | the harness's model list |

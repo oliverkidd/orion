@@ -222,9 +222,10 @@ pub struct Watching {
     pub tx: Option<UnboundedSender<WorktreeId>>,
     /// The selected checkout's watch.
     pub current: Option<Watch>,
-    /// The checkout whose watch couldn't start, so it isn't tried again
-    /// every turn — only once it is selected anew.
-    pub failed: Option<WorktreeId>,
+    /// The checkout whose watch couldn't start, and at which path, so it
+    /// isn't tried again every turn — only once it is selected anew, or
+    /// its row names another path (a stand-in's empty one filled in).
+    pub failed: Option<(WorktreeId, PathBuf)>,
     /// The checkouts a change was seen in, waiting out the debounce (or,
     /// while AWAY, for you to be back), and when they are read.
     pub changed: std::collections::BTreeSet<WorktreeId>,
@@ -311,17 +312,29 @@ pub fn follow(app: &mut App, now: std::time::Instant) {
         .filter(|w| !app.is_placeholder_worktree(&w.id))
         .map(|w| (w.id.clone(), w.path.clone()));
     let wanted_id = wanted.as_ref().map(|(id, _)| id);
+    // Selected anew: a checkout whose watch failed before is tried again.
+    if app.git_watch.failed.as_ref().map(|(f, _)| f) != wanted_id {
+        app.git_watch.failed = None;
+    }
     if app.git_watch.current.as_ref().map(|w| &w.worktree) == wanted_id {
         app.git_watch.following = None;
         return;
     }
     app.git_watch.current = None;
-    let Some((id, path)) = wanted else {
+    // A row with no path yet — a stand-in the DAEMON's Ack made real
+    // ahead of the upsert that names its checkout — has nothing to watch:
+    // it is followed once the upsert fills the path in.
+    let Some((id, path)) = wanted.filter(|(_, path)| !path.as_os_str().is_empty()) else {
         app.git_watch.following = None;
         return;
     };
-    let already = app.git_watch.following.as_ref().map(|(f, _, _)| f) == Some(&id);
-    if !already && app.git_watch.failed.as_ref() != Some(&id) {
+    let failed = matches!(&app.git_watch.failed, Some((f, p)) if *f == id && *p == path);
+    let already = app
+        .git_watch
+        .following
+        .as_ref()
+        .is_some_and(|(f, p, _)| f == &id && p == &path);
+    if !already && !failed {
         app.git_watch.following = Some((id, path, now + FOLLOW_REST));
     }
 }
@@ -352,8 +365,8 @@ fn start_due(app: &mut App, now: std::time::Instant) {
                     || "on visits".to_string(),
                     |d| format!("every {} s", d.as_secs()),
                 );
-            tracing::warn!(worktree = %id.0, "can't watch the checkout, reading it {every} instead: {why}");
-            app.git_watch.failed = Some(id);
+            tracing::warn!(worktree = %id.0, path = %path.display(), "can't watch the checkout, reading it {every} instead: {why}");
+            app.git_watch.failed = Some((id, path));
         }
     }
 }

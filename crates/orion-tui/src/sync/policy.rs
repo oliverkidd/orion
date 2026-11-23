@@ -112,8 +112,9 @@ pub fn policy(key: &QueryKey) -> Policy {
         // failed one counts as a look.
         Transcript(_) => shown(mins(2)),
         // A checkout's read. The selected one is read every time it is
-        // selected and whenever the GIT WATCHER says it changed; while
-        // somebody looks, a backstop beat reads it every 5 min under the
+        // selected (no sooner than THE FLOOR, `Provider::min_reask`, after
+        // the last read) and whenever the GIT WATCHER says it changed;
+        // while somebody looks, a backstop beat reads it every 5 min under the
         // watcher, and every 15 s where the watcher failed to start. A
         // band is read as it comes on screen when its last read is a
         // minute old, and again when an agent's turn in it ends
