@@ -64,6 +64,10 @@ struct State {
     signals: Signals,
     by_hand: bool,
     away: bool,
+    /// How many times you have left the desk, and the last of those the
+    /// phone re-sent what still waits for ([`AwayWatch::take_departure`]).
+    left: u64,
+    resent_for: u64,
 }
 
 /// Whether you are away, on the daemon.
@@ -76,6 +80,15 @@ impl AwayWatch {
     /// You count as away now.
     pub fn is_away(&self) -> bool {
         self.state.lock().unwrap().away
+    }
+
+    /// Whether you are away on a departure the phone has not yet re-sent
+    /// its open messages for; true once per departure.
+    pub fn take_departure(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let fresh = state.away && state.left != state.resent_for;
+        state.resent_for = state.left;
+        fresh
     }
 
     /// The state as `ServerEvent::AwayChanged`.
@@ -98,6 +111,9 @@ impl AwayWatch {
         let before = *state;
         change(&mut state);
         state.away = settings.is_away(state.signals, state.by_hand);
+        if state.away && !before.away {
+            state.left += 1;
+        }
         let changed = (before.away, before.by_hand) != (state.away, state.by_hand);
         if changed && before.away != state.away {
             tracing::info!(away = state.away, by_hand = state.by_hand, "away changed");
@@ -283,5 +299,21 @@ mod tests {
         );
         watch.update(&settings, |s| s.by_hand = false);
         assert!(!watch.is_away());
+    }
+
+    /// Each time you leave the desk counts once, however often it is
+    /// asked about, and never while you are at it.
+    #[test]
+    fn each_departure_is_taken_once() {
+        let watch = AwayWatch::default();
+        let settings = AwaySettings::default();
+        assert!(!watch.take_departure(), "at the desk");
+        watch.update(&settings, |s| s.by_hand = true);
+        assert!(watch.take_departure());
+        assert!(!watch.take_departure(), "the same departure");
+        watch.update(&settings, |s| s.by_hand = false);
+        assert!(!watch.take_departure(), "back");
+        watch.update(&settings, |s| s.by_hand = true);
+        assert!(watch.take_departure(), "gone again");
     }
 }

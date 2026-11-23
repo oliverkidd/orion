@@ -5897,7 +5897,9 @@ async fn a_lost_answer_and_a_newer_question_reach_the_phone() {
 
 /// THE PHONE BRIDGE catching up, against a fake Slack. A session that
 /// asks while you are at the desk posts nothing; going away by hand posts
-/// it, and coming back and going away again posts it no second time.
+/// it once however often the away reading looks; coming back and going
+/// away again with it still unanswered posts it again at the foot, the old
+/// copy `Re-sent below`.
 #[tokio::test]
 async fn a_session_already_waiting_reaches_the_phone_as_you_go_away() {
     use orion_core::AgentStatus;
@@ -5981,10 +5983,27 @@ async fn a_session_already_waiting_reaches_the_phone_as_you_go_away() {
         "{blocks:#?}"
     );
 
-    write_frame(&mut c, &set_away(false)).await.unwrap();
+    let (first_ts, _) = slack.cards()[0].clone();
+    // Still away: a second look posts nothing more.
     write_frame(&mut c, &set_away(true)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(1000)).await;
     assert_eq!(slack.cards().len(), 1, "{:#?}", slack.chats());
+
+    write_frame(&mut c, &set_away(false)).await.unwrap();
+    write_frame(&mut c, &set_away(true)).await.unwrap();
+    slack
+        .wait_for("the waiting session's message again", |_| {
+            slack.cards().len() == 2
+        })
+        .await;
+    assert_eq!(slack.updates(&first_ts), ["Re-sent below"]);
+    let (_, again) = slack.cards()[1].clone();
+    assert!(
+        block_texts(&again["blocks"])
+            .iter()
+            .any(|t| t.contains("Which color do you like?")),
+        "{again:#?}"
+    );
 
     write_frame(&mut c, &ClientRequest::Shutdown).await.unwrap();
     wait_for_exit(&mut daemon);

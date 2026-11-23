@@ -302,7 +302,7 @@ async fn listen(daemon: &Arc<Daemon>, session: &Arc<Session>) -> Result<socket::
             _ = daemon.slack.reconnect.notified() => {}
         }
     };
-    socket::session(&url, stop, |envelope| {
+    socket::session(&url, socket::Liveness::default(), stop, |envelope| {
         // A modal's submit is checked before its ack, which is the
         // modal's reply: a refused one shows its errors and goes no
         // further.

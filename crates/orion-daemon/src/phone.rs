@@ -10,8 +10,12 @@
 //! - **Already waiting**: a session that turned red while you were at
 //!   the desk, or in quiet hours, goes as soon as you are away outside
 //!   them (`Daemon::phone_flush`, on every away reading and on ⌘⇧A) —
-//!   once per wait: a message still open about it, or one posted since it
-//!   turned red, covers it. Crashes are not caught up on.
+//!   once per spell away: a message still open about it, or one posted
+//!   since it turned red, covers it. Crashes are not caught up on.
+//! - **Away again**: a message still open when you leave the desk once
+//!   more was posted on an earlier spell away, scrolled up out of sight
+//!   since; it goes again at the foot of the DM as you go, the old copy
+//!   `↓ Re-sent below`, just as a plain DM does it.
 //! - **The message** (design 5.4): a context line `● Agent · web · 10:42`,
 //!   the session's name, its whole last response (never summarised, in
 //!   3000-character sections), then what it waits on and its buttons:
@@ -1133,7 +1137,9 @@ impl Daemon {
     /// Every session already waiting on a question or a plan that no
     /// message is about yet, to the phone now that you are away outside
     /// quiet hours: it turned red while you were at the desk, or in quiet
-    /// hours, and no status change is coming to send it. Each wait once.
+    /// hours, and no status change is coming to send it. Each wait once a
+    /// spell away: on the first look after you leave the desk, the
+    /// messages still open from an earlier spell go again first.
     pub(crate) async fn phone_flush(self: &Arc<Self>) {
         if !self.away.is_away() {
             return;
@@ -1142,6 +1148,18 @@ impl Daemon {
             return;
         };
         let _one_at_a_time = POSTING.lock().await;
+        // Gone again: what still waits from an earlier spell away goes
+        // again where the phone shows it. A departure into quiet hours is
+        // left to their end.
+        let quiet = crate::config::Config::cached()
+            .away
+            .is_quiet(crate::away::local_minute());
+        if !quiet && self.away.take_departure() {
+            let resent = self.resend_open(&session).await;
+            if resent > 0 {
+                tracing::info!(resent, "away again: open phone messages re-sent");
+            }
+        }
         let waiting = match self.store.unsent_waiting_agents() {
             Ok(waiting) => waiting,
             Err(e) => {
@@ -1213,6 +1231,11 @@ impl Daemon {
     /// second open message closes without a copy.
     async fn phone_resend(self: &Arc<Self>, session: &Arc<Session>) -> usize {
         let _one_at_a_time = POSTING.lock().await;
+        self.resend_open(session).await
+    }
+
+    /// [`Daemon::phone_resend`]'s work, under a [`POSTING`] lock the caller holds.
+    async fn resend_open(self: &Arc<Self>, session: &Arc<Session>) -> usize {
         let open = self
             .store
             .open_phone_messages_in(&session.dm)
