@@ -8,11 +8,21 @@
 //! | the selected project (the PROJECT OPEN PRS GROUP, its checkouts' badges) | `OpenPrs(project)` | shown |
 //! | the PULL REQUESTS MODAL | `OpenPrs`, `PrExtras` (its project) | focused |
 //! | the PULL REQUESTS MODAL's `Merged` / `Closed` sections | `PrTails(its project)` | shown |
+//! | the PULL REQUESTS MODAL's `Yours` rows | `PrDetail(url)` each | ahead |
 //! | the page a cursor rests on (modal or pane) | `PrDetail(url)` | focused while its checks run, else shown |
 //! | the selected checkout, on a branch no open list has | `BranchPr(checkout)` | shown |
 //! | the NEEDS YOU board's CODE REVIEWS | `ReviewRequests` | shown |
 //! | the selected checkout's badge; every other band's rule (`sync::local`) | `GitStatus(checkout)` | focused; shown |
 //! | the selected project (`sync::local`) | `BaseFetch(project)` | shown |
+//!
+//! The modal's `Yours` pages are read AHEAD of the cursor
+//! ([`Seen::Ahead`]): the rows you spend the most time on have their
+//! pages in hand when the cursor lands, so the page never says less than
+//! the row beside it. Each is one key in THE RESOLVER like the cursor's
+//! own — read when older than a minute, never twice at once — so opening
+//! and closing the modal in quick succession reads each once, and a row
+//! the list's beat moves reads its page again now (`event_loop::
+//! stale_details_behind`). Nobody else's page is read ahead.
 //!
 //! What is asked because of the selection — the selected project's and
 //! checkout's keys, here and in `sync::linear` and `sync::local` — waits
@@ -39,6 +49,7 @@ pub fn visible(app: &App) -> Vec<(QueryKey, Seen)> {
         seen.push((QueryKey::OpenPrs(view.project.clone()), Seen::Focused));
         seen.push((QueryKey::PrExtras(view.project.clone()), Seen::Focused));
         seen.push((QueryKey::PrTails(view.project.clone()), Seen::Shown));
+        seen.extend(yours_ahead(app, &view.project));
     }
     if let Some(url) = &app.pr_detail_rest {
         seen.push((QueryKey::PrDetail(url.clone()), page_seen(app, url)));
@@ -58,6 +69,20 @@ pub fn visible(app: &App) -> Vec<(QueryKey, Seen)> {
     seen.extend(super::services::visible(app));
     seen.extend(super::local::visible(app));
     seen
+}
+
+/// The pages of your own open pull requests in `project`'s list, read
+/// ahead of the PULL REQUESTS MODAL's cursor.
+fn yours_ahead<'a>(
+    app: &'a App,
+    project: &orion_core::ProjectId,
+) -> impl Iterator<Item = (QueryKey, Seen)> + 'a {
+    app.open_prs
+        .get(project)
+        .into_iter()
+        .flat_map(|open| &open.list)
+        .filter(|pr| pr.section() == crate::pull_request::PrSection::Yours)
+        .map(|pr| (QueryKey::PrDetail(pr.url.clone()), Seen::Ahead))
 }
 
 /// The selected project, once the selection has rested on it.

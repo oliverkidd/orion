@@ -83,8 +83,12 @@
 //! pane's debounce, into the same `App::pr_detail`, so a pull request read
 //! in one is read in the other. A page is read again on a rest once it is
 //! older than `event_loop::pr_detail_fresh_for`, every half minute while its
-//! checks run and the cursor stays (`sync::scope`), and when its row moves
-//! — never ahead of the cursor: a page nobody rests on costs nothing.
+//! checks run and the cursor stays (`sync::scope`), and when its row moves.
+//! Your own pull requests' pages are read ahead of the cursor while the
+//! modal is up (`sync::Seen::Ahead`) — each once a minute at most, however
+//! often the modal opens — so the `Yours` rows you spend your time on
+//! land on a page already read, and say the same thing on both sides;
+//! anyone else's page is read only when a cursor rests on it.
 //! From the list its tabs are walked with `⇧←`/`⇧→` and a listing's rows
 //! with `⇧↑`/`⇧↓`, without moving the keys.
 
@@ -4717,11 +4721,11 @@ mod tests {
         assert!(app.pr_detail_owed(&url(42)));
     }
 
-    /// Opening the modal reads the cursor's page alone, once it rests —
-    /// none ahead of it, yours or anyone's: a page nobody rests on costs
-    /// nothing.
+    /// Opening the modal reads the pages of your own pull requests ahead
+    /// of the cursor — nobody else's — through THE RESOLVER, so closing
+    /// and opening it again within the minute reads none of them again.
     #[test]
-    fn opening_reads_no_page_ahead_of_the_cursor() {
+    fn opening_reads_your_pages_ahead_and_a_quick_reopen_reads_none_again() {
         let (mut app, _) = app_with(
             vec![
                 mine(50, "Mine, unread"),
@@ -4730,12 +4734,29 @@ mod tests {
             ],
             true,
         );
+        let pages = |app: &mut App| {
+            let mut read = Vec::new();
+            loop {
+                let tickets = crate::sync::spawn::step_remote(app);
+                if tickets.is_empty() {
+                    break;
+                }
+                for ticket in tickets {
+                    if let crate::sync::QueryKey::PrDetail(url) = &ticket.key {
+                        read.push(url.clone());
+                    }
+                    app.resolver
+                        .land(&ticket, Ok(()), std::time::Instant::now());
+                }
+            }
+            read.sort();
+            read
+        };
         open(&mut app);
         assert_eq!(pending_url(&app), Some(url(50).as_str()), "on its rest");
-        let pages: Vec<_> = crate::sync::spawn::step_remote(&mut app)
-            .into_iter()
-            .filter(|t| matches!(t.key, crate::sync::QueryKey::PrDetail(_)))
-            .collect();
-        assert!(pages.is_empty(), "nothing before the rest");
+        assert_eq!(pages(&mut app), vec![url(49), url(50)], "yours, not theirs");
+        close(&mut app);
+        open(&mut app);
+        assert!(pages(&mut app).is_empty(), "read moments ago");
     }
 }

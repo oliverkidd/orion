@@ -61,6 +61,13 @@ use policy::policy;
 /// How a key is on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Seen {
+    /// Read ahead of the cursor: the pages of your own pull requests while
+    /// the PULL REQUESTS MODAL is up, so the one the cursor lands on is
+    /// already read. Wanted when stale as a drawn key is, but fetched after
+    /// everything drawn — the cursor's page goes first — and never on a
+    /// beat. Becoming [`Shown`](Self::Shown) (the cursor resting on it) is
+    /// a visit of its own.
+    Ahead,
     /// Drawn: the sidebar's group, a checkout's badge.
     Shown,
     /// The thing the user is in: the open PULL REQUESTS MODAL, the page a
@@ -203,7 +210,7 @@ impl Resolver {
         // Never fresher than THE FLOOR: an answer that landed within it
         // stands for any visit, whatever the policy says.
         let stale_after = match how {
-            Seen::Shown => p.stale_after,
+            Seen::Ahead | Seen::Shown => p.stale_after,
             Seen::Focused => p.focused_stale_after,
         }
         .max(key.provider().min_reask());
@@ -369,15 +376,21 @@ impl Resolver {
     }
 
     /// Every key something asks for, best first: what the user is in,
-    /// what is drawn, a one-off look, then what the automations need — so
-    /// when a provider's cap holds some back, it is the background's.
+    /// what is drawn, what is read ahead of the cursor, a one-off look,
+    /// then what the automations need — so when a provider's cap holds
+    /// some back, it is the background's.
     fn demanded_keys(&self) -> Vec<QueryKey> {
+        let rank = |how: &Seen| match how {
+            Seen::Focused => 0,
+            Seen::Shown => 1,
+            Seen::Ahead => 2,
+        };
         let mut ranked: Vec<(u8, &QueryKey)> = self
             .visible
             .iter()
-            .map(|(key, how)| (u8::from(*how == Seen::Shown), key))
-            .chain(self.once.iter().map(|key| (2, key)))
-            .chain(self.background.keys().map(|key| (3, key)))
+            .map(|(key, how)| (rank(how), key))
+            .chain(self.once.iter().map(|key| (3, key)))
+            .chain(self.background.keys().map(|key| (4, key)))
             .collect();
         ranked.sort();
         let mut seen = BTreeSet::new();
@@ -414,7 +427,7 @@ impl Resolver {
         let live = match self.visible.get(key).filter(|_| self.live) {
             Some(Seen::Focused) if self.watched.contains(key) => policy(key).watched_every,
             Some(Seen::Focused) => policy(key).live_every,
-            Some(Seen::Shown) | None => None,
+            Some(Seen::Ahead | Seen::Shown) | None => None,
         };
         let background = self.background.get(key).copied();
         match (live, background) {
@@ -699,6 +712,42 @@ mod tests {
         r.visit(vec![(list("p"), Seen::Shown)], t0 + secs(30));
         r.visit(vec![(list("p"), Seen::Focused)], t0 + secs(40));
         assert_eq!(keys(&r.due(t0 + secs(40))), vec![list("p")]);
+    }
+
+    /// A page read ahead of the cursor is fetched when stale, after what
+    /// is drawn, and never on a beat; the cursor coming to rest on it is a
+    /// visit of its own, so a page that aged while it waited ahead is read
+    /// again the moment it is the one being read.
+    #[test]
+    fn a_page_read_ahead_goes_last_and_resting_on_it_is_a_visit() {
+        let t0 = Instant::now();
+        let mut r = live();
+        let page = |n: u8| QueryKey::PrDetail(format!("u{n}"));
+        let mut seen: Vec<(QueryKey, Seen)> = (0..6).map(|n| (page(n), Seen::Ahead)).collect();
+        seen.push((page(5), Seen::Shown));
+        r.visit(seen.clone(), t0);
+        let first = r.due(t0);
+        assert_eq!(first[0].key, page(5), "the cursor's page first");
+        assert_eq!(first.len(), Provider::GitHub.max_in_flight());
+        for ticket in &first {
+            r.land(ticket, Ok(()), t0);
+        }
+        let rest = r.due(t0);
+        assert_eq!(rest.len(), 2, "the rest once places free");
+        for ticket in &rest {
+            r.land(ticket, Ok(()), t0);
+        }
+        r.visit(seen, t0 + secs(30));
+        assert!(r.due(t0 + secs(30)).is_empty(), "no beat, all fresh");
+        assert_eq!(r.next_wake(t0 + secs(30)), None);
+        // An hour on, still ahead: nothing. Rested on: read again.
+        let ahead: Vec<(QueryKey, Seen)> = (0..6).map(|n| (page(n), Seen::Ahead)).collect();
+        r.visit(ahead.clone(), t0 + secs(3600));
+        assert!(r.due(t0 + secs(3600)).is_empty(), "ahead stays put");
+        let mut rested = ahead;
+        rested.push((page(2), Seen::Shown));
+        r.visit(rested, t0 + secs(3601));
+        assert_eq!(keys(&r.due(t0 + secs(3601))), vec![page(2)]);
     }
 
     #[test]
