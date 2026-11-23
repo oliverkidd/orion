@@ -1,0 +1,32 @@
+crates/orion-daemon/src/slack/mod.rs
+  s_7fa472d224c58c::t_c311d243910cf0 305
+crates/orion-daemon/src/phone.rs
+  s_7fa472d224c58c::t_5af93239991455 13-18,1151-1153,1155-1162,1234-1238
+  s_7fa472d224c58c::t_021537b0665061 1140-1142
+  s_7fa472d224c58c::t_c97fa200ce75b1 1154
+crates/orion/tests/e2e_pty.rs
+  s_7fa472d224c58c::t_021537b0665061 5900-5902,5986-5987,5992-6006
+  s_7fa472d224c58c::t_1ad6b83afe1a09 6007
+crates/orion-daemon/src/slack/socket.rs
+  s_7fa472d224c58c::t_c311d243910cf0 9-12,14-17,23-43,66-67,70,77,80,82-85,91-102,104-105,111-112,150-202
+  s_7fa472d224c58c::t_c97fa200ce75b1 13
+  s_7fa472d224c58c::t_2d638361e49050 203
+crates/orion-daemon/src/away.rs
+  s_7fa472d224c58c::t_5af93239991455 67-70,85-93,114-116,303-318
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "46394e7e826c2532c382767b870c2072da2e745e",
+  "prompts": {},
+  "sessions": {
+    "s_7fa472d224c58c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a19197db-201e-4aef-8972-c5c9f1051bf4",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
