@@ -1,0 +1,32 @@
+crates/orion-daemon/src/spare.rs
+  s_c481323b9ea18e::t_e11488fc6b6ac2 1402-1405
+  s_c481323b9ea18e::t_c3fc4ed69cb667 2429-2436
+  s_c481323b9ea18e::t_a484f82d086d53 2455-2458,2473
+  s_c481323b9ea18e::t_25e4ff16da616a 2438-2443
+  s_c481323b9ea18e::t_682ffdd806254a 1372-1374
+  s_c481323b9ea18e::t_fa1692077e894b 2459-2462
+  s_c481323b9ea18e::t_e3aba8d92d681e 1356-1361
+  s_c481323b9ea18e::t_1ffa042cd6f63c 1370-1371
+  s_c481323b9ea18e::t_992f67f996f7be 2424-2428,2437
+  s_c481323b9ea18e::t_ede2fecc82cfd0 1386-1389,1399-1401
+  s_c481323b9ea18e::t_9d1572ba1b5654 1510-1519
+crates/orion-daemon/src/git.rs
+  s_c481323b9ea18e::t_f795eaa3a0b0aa 201-208
+  s_c481323b9ea18e::t_1ffa042cd6f63c 196
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b8e40dc22292e1f59f617a4f2d18a77fedac64e9",
+  "prompts": {},
+  "sessions": {
+    "s_c481323b9ea18e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6797b13b-a869-4e01-a7e0-c7aa7dd7aa2a",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
