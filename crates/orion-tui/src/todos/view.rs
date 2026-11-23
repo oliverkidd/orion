@@ -28,9 +28,7 @@
 //! is left (`TodoView::held`), and are gone from the list after that. `⇧↑`/`⇧↓` select a run of items, and what acts on an
 //! item acts on them all — tick, `⌘P` priority, `⌥↑`/`⌥↓` move (a place
 //! through the list as drawn, into a nested group and out of it), `⌥→`
-//! group them — one item alone made a group of its name, as `⌥→` at the
-//! end of a new item's field does too — `⌥←` take them out of their
-//! group, `⌘⌫` delete, `Enter` one agent at them all, and `⌘X`/`⌘C`
+//! group them, `⌥←` take them out of their group, `⌘⌫` delete, `Enter` one agent at them all, and `⌘X`/`⌘C`
 //! cut or copy them: the clipboard has their text, and pasted back into
 //! the modal — any project's — they land after the cursor as they were,
 //! their priority and all (`TodoClip`).
@@ -41,8 +39,14 @@
 //! and filter — and comes back so while the modal is up;
 //! what was half done on it (a field, a menu, a delete asked, a
 //! selection) is let go. Every change is saved at once (`store::save`). A
-//! row is edited where it stands: typing on it adds to its end, `⌫` opens
-//! it with the last character gone, and `⌘⌫` deletes it. `⌘N` opens a new
+//! row is edited where it stands: typing on it adds to its end, `⌘E` (or
+//! `F2`) opens it as it is, and `⌘⌫` deletes it. `⌥→`/`⌥←` take a row a
+//! level in or out — section, group, point — and only it and what it
+//! holds change level (`level`); `⌘G` makes a point a group and back
+//! (`toggle`). In a field, `Tab`/`⇧Tab` and `⌘G` do the same without
+//! leaving the text, and `Enter` (or `⇧Tab`) on an empty new point steps
+//! out a level — in a section, to a new section right after it. `⌘Z`
+//! takes back the last change, a key's worth at a time. `⌘N` opens a new
 //! item right under the cursor's, `⌘⇧N` a new group — in a section, one
 //! nested there right under the cursor's row — the field for its first
 //! item open in it once it is named. `⌘F` opens the filter, which keeps the
@@ -277,6 +281,9 @@ pub struct TodoView {
     pub project_row: Rect,
     /// The other tabs as they were left.
     pub parked: HashMap<Tab, TodoView>,
+    /// The list as it was before each of the last changes, newest last:
+    /// what `⌘Z` puts back.
+    pub undo: Vec<TodoFile>,
 }
 
 impl TodoView {
@@ -303,6 +310,7 @@ impl TodoView {
             project_hits: Vec::new(),
             project_row: Rect::default(),
             parked: HashMap::new(),
+            undo: Vec::new(),
         }
     }
 
@@ -359,11 +367,20 @@ pub(crate) mod keys {
     /// group and out of it (a group goes past one), then into the next
     /// group; a section goes past the one beside it.
     pub const MOVE: Key = Key::new(&["alt+up", "alt+down"], "move").show(2);
-    /// `⌥→` the items into a new group of their own — one item made that
-    /// group, named for it — `⌥←` them out of theirs.
-    /// Ghostty sends ⌥←/⌥→ as `⌥B`/`⌥F` (its word-jump default), so those
-    /// are the same keys.
-    pub const GROUP: Key = Key::new(&["alt+right", "alt+left", "alt+f", "alt+b"], "group").show(2);
+    /// A level in (`⌥→`) or out (`⌥←`) — section, group, point — only
+    /// the row and what it holds changing level: a point into the group
+    /// right above it, or out of its group; a nested group out to a
+    /// section of its own, right after the one it was in; a section into
+    /// the one above as a group (an empty one as a point). A run of items
+    /// `⌥→` into a new group of their own. Ghostty sends ⌥←/⌥→ as
+    /// `⌥B`/`⌥F` (its word-jump default), so those are the same keys.
+    pub const GROUP: Key = Key::new(&["alt+right", "alt+left", "alt+f", "alt+b"], "in/out").show(2);
+    /// A point a group, named for it — in a group, one right after it,
+    /// the points under it going along — or a nested group a point again,
+    /// what was in it loose under it. On a row or in its field.
+    pub const TO_GROUP: Key = Key::new(&["cmd+g", "ctrl+g"], "point ⇄ group");
+    /// The last change to the list taken back, a key's worth at a time.
+    pub const UNDO: Key = Key::new(&["cmd+z", "ctrl+z"], "undo");
     /// A run of items selected, from where it started to the cursor.
     pub const SELECT: Key = Key::new(&["shift+up", "shift+down"], "select").show(2);
     /// A new item right under the cursor's, at its priority — or at the
@@ -374,10 +391,10 @@ pub(crate) mod keys {
     /// arrives only where the KITTY PROTOCOL does: `^N` and `^⇧N` are one
     /// byte in a legacy terminal.
     pub const NEW_GROUP: Key = Key::new(&["cmd+shift+n", "ctrl+shift+n"], "new group");
-    /// The row under the cursor opened where it stands, its last
-    /// character gone; any other character typed on it is added to its
+    /// The row under the cursor opened where it stands, the caret at its
+    /// end and nothing changed; a character typed on it is added to its
     /// end.
-    pub const EDIT: Key = Key::new(&["backspace"], "edit");
+    pub const EDIT: Key = Key::new(&["cmd+e", "ctrl+e", "f2"], "edit");
     /// Linear's priorities in a pick: `P`, as Linear has it. On a nested
     /// group's header, the group's — every item in it reset to it.
     pub const PRIORITY: Key = Key::new(&["cmd+p", "ctrl+p"], "priority");
@@ -394,9 +411,10 @@ pub(crate) mod keys {
     pub const SAVE: Key = Key::new(&["enter"], "save");
     /// The field's other way out: saved, and the cursor a row on.
     pub const SAVE_MOVE: Key = Key::new(&["up", "down"], "save & move").show(2);
-    /// A new item's field, the caret at the end of what was typed: it in
-    /// as a group of that name rather than an item — `⌥→` as on its row.
-    pub const SAVE_GROUP: Key = Key::new(&["alt+right", "alt+f"], "make a group");
+    /// The field's row a level in or out, as `⌥→`/`⌥←` on it, the text
+    /// and caret kept — on an empty new point's, `⇧Tab` (or `Enter`)
+    /// makes it a new section right after the one it was in.
+    pub const FIELD_LEVEL: Key = Key::new(&["tab", "shift+tab"], "in/out");
     pub const CONFIRM: Key = Key::new(&["enter", "cmd+backspace", "ctrl+w"], "delete");
     /// The LINEAR VIEW's `Enter`: the QUICK PROMPT for an agent on the
     /// item (its `⌘U` picks an AGENT PRESET) — and on an item whose
@@ -412,9 +430,35 @@ pub(crate) mod keys {
     pub const INTO_DONE: Key = super::super::done::keys::INTO;
     #[cfg(test)]
     pub const ALL: &[Key] = &[
-        DONE, TABS, PROJECT, JUMP, MOVE, GROUP, SELECT, NEW, NEW_GROUP, EDIT, PRIORITY, DELETE,
-        CUT, COPY, FILTER, SAVE, SAVE_MOVE, SAVE_GROUP, CONFIRM, AGENT, PICK, CHOOSE, LEVEL,
-        INTO_DONE, WHERE, BUILD, OPEN_BUILT,
+        DONE,
+        TABS,
+        PROJECT,
+        JUMP,
+        MOVE,
+        GROUP,
+        TO_GROUP,
+        UNDO,
+        SELECT,
+        NEW,
+        NEW_GROUP,
+        EDIT,
+        PRIORITY,
+        DELETE,
+        CUT,
+        COPY,
+        FILTER,
+        SAVE,
+        SAVE_MOVE,
+        FIELD_LEVEL,
+        CONFIRM,
+        AGENT,
+        PICK,
+        CHOOSE,
+        LEVEL,
+        INTO_DONE,
+        WHERE,
+        BUILD,
+        OPEN_BUILT,
     ];
 }
 
@@ -430,8 +474,8 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
     use crate::hints::Hint;
     if let Some((kind, _)) = &view.input {
         let mut hints = vec![keys::SAVE.hint().kept(), keys::SAVE_MOVE.hint()];
-        if matches!(kind, InputKind::Item { .. }) {
-            hints.push(keys::SAVE_GROUP.hint());
+        if !matches!(kind, InputKind::Group { .. }) {
+            hints.extend([keys::FIELD_LEVEL.hint(), keys::TO_GROUP.hint()]);
         }
         hints.push(Hint::new("Esc", "revert"));
         return hints;
@@ -496,12 +540,14 @@ pub(crate) fn hints(view: &TodoView) -> Vec<crate::hints::Hint> {
         keys::SELECT.hint(),
         keys::MOVE.hint(),
         keys::GROUP.hint(),
+        keys::TO_GROUP.hint(),
+        keys::UNDO.hint(),
         keys::CUT.hint(),
         keys::COPY.hint(),
         keys::JUMP.hint(),
     ]);
     hints.push(project_hint());
-    hints.extend([keys::NEW_GROUP.hint(), Hint::new("Esc", "close")]);
+    hints.push(Hint::new("Esc", "close"));
     hints
 }
 
@@ -745,10 +791,22 @@ struct Walk<'a> {
 impl Walk<'_> {
     /// The top-level groups as drawn, then the field for a new one.
     fn top(&self, out: &mut Vec<Entry>) {
+        let field = match self.input {
+            Some(InputKind::Group {
+                parent: None,
+                after,
+            }) => Some(after),
+            _ => None,
+        };
+        let mut placed = false;
         for group in self.file.top_groups(self.held) {
             self.group(group, 0, false, out);
+            if field == Some(Some(Child::Group(group))) {
+                placed = true;
+                out.push(Entry::Input { depth: 0 });
+            }
         }
-        if matches!(self.input, Some(InputKind::Group { parent: None, .. })) {
+        if field.is_some() && !placed {
             out.push(Entry::Input { depth: 0 });
         }
     }
@@ -1088,6 +1146,52 @@ fn tidy(text: &str) -> &str {
 }
 
 pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
+    let Some(dir) = view(app).map(|v| v.dir.clone()) else {
+        return;
+    };
+    let typing = view(app).is_some_and(|v| v.input.is_some() || v.filtering || v.pick.is_some());
+    if keys::UNDO.matches(&key) && !typing && view(app).is_some_and(|v| !v.done.focused) {
+        undo(app);
+        return;
+    }
+    let before = app.todos.get(&dir).cloned();
+    handle_key_inner(app, key, out);
+    // A key's worth of change, kept to take back.
+    let after = app.todos.get(&dir);
+    if let (Some(before), Some(after)) = (before, after) {
+        if &before != after {
+            if let Some(view) = view_mut(app).filter(|v| v.dir == dir) {
+                view.undo.push(before);
+                if view.undo.len() > UNDO_DEPTH {
+                    view.undo.remove(0);
+                }
+            }
+        }
+    }
+}
+
+/// How many changes `⌘Z` can take back, a tab.
+const UNDO_DEPTH: usize = 50;
+
+/// `⌘Z`: the list as it was before the last key that changed it.
+fn undo(app: &mut App) {
+    app.dirty = true;
+    let Some(view) = view_mut(app) else {
+        return;
+    };
+    let Some(file) = view.undo.pop() else {
+        note(app, "nothing to undo");
+        return;
+    };
+    let dir = view.dir.clone();
+    view.anchor = None;
+    view.confirm_delete = None;
+    store::save(&file);
+    app.todos.insert(dir, file);
+    note(app, "undone");
+}
+
+fn handle_key_inner(app: &mut App, key: KeyEvent, out: &mut Vec<ClientRequest>) {
     app.dirty = true;
     if view(app).is_some_and(|v| v.done.focused) {
         super::done::handle_key(app, key);
@@ -1128,6 +1232,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         keys::SELECT,
         keys::MOVE,
         keys::GROUP,
+        keys::TO_GROUP,
         keys::PRIORITY,
         keys::AGENT,
         keys::DELETE,
@@ -1150,6 +1255,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if keys::GROUP.matches(&key) && !filtering => {
             group_chosen(app, matches!(key.code, KeyCode::Right | KeyCode::Char('f')))
         }
+        _ if keys::TO_GROUP.matches(&key) && !filtering => toggle_row(app),
         _ if keys::INTO_DONE.matches(&key) => super::done::focus(app),
         // Plain `←`/`→` move the filter's caret while it is up; `⇧←`/`⇧→`
         // walk the tabs either way.
@@ -1201,6 +1307,13 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent, out: &mut Vec<ClientReque
         _ if on_idea && keys::OPEN_BUILT.matches(&key) => open_built(app),
         _ if keys::DONE.matches(&key) => done(app),
         _ if keys::EDIT.matches(&key) => start_edit(app, None),
+        // ⌫ no longer opens a row: ⌘E does, nothing lost.
+        KeyCode::Backspace => {
+            app.flash = Some(crate::flash::Flash::note(format!(
+                "{} edits the row — nothing deleted",
+                keys::EDIT.label()
+            )))
+        }
         KeyCode::Char(c) if crate::key_combo::is_text_key(&KeyChord::from_event(&key)) => {
             start_edit(app, Some(&c.to_string()))
         }
@@ -1300,47 +1413,46 @@ fn nested_header(app: &App) -> Option<u64> {
     list(app)?.parent_of(group).map(|_| group)
 }
 
-/// `⌥→`: the chosen items — open, in one top-level group — into a new
-/// group there, its name's field open on it; one item alone made that
-/// group, named for it, its first item's field open in it. `⌥←`: items in
-/// a nested group out of it, right under it — the group flattened when
-/// that is all of it. A group's header stays at its level.
+/// `⌥→`/`⌥←`: the cursor's row — or one item chosen — a level in or out
+/// ([`level`]). A run of items: `⌥→` into a new group there, its name's
+/// field open on it; `⌥←` out of their nested group, right under it.
 fn group_chosen(app: &mut App, into: bool) {
-    let note = |app: &mut App, text: &str| {
-        app.flash = Some(crate::flash::Flash::note(text.to_string()));
-    };
     let Some(view) = view(app) else {
         return;
     };
     if !view.query.trim().is_empty() {
         return;
     }
-    let header = match current(app) {
-        Some(Entry::Header { group, .. }) => Some(group),
-        _ => None,
-    };
+    if let Some(Entry::Header { group, .. }) = current(app) {
+        if let Some(t) = level(app, Target::Group(group), into) {
+            land_on_target(app, t);
+        }
+        return;
+    }
     let ids = chosen(app);
+    if ids.len() == 1 {
+        if let Some(t) = level(app, Target::Item(ids[0]), into) {
+            land_on_target(app, t);
+        }
+        return;
+    }
     let Some(file) = list(app) else {
         return;
     };
     let shared = file.shared_group(&ids);
     let nested = |group: u64| file.parent_of(group).is_some();
-    match (into, header) {
-        (_, Some(_)) => note(app, "a group stays at its level — ⌥↑/⌥↓ move it"),
-        (_, None) if ids.is_empty() => {}
-        (_, None) if shared.is_none() => note(app, "pick open items in one group"),
-        (false, None) if !shared.is_some_and(nested) => {
-            note(app, "these are already at the top level")
-        }
-        (false, None) => {
+    match into {
+        _ if ids.is_empty() => {}
+        _ if shared.is_none() => note(app, "pick open items in one group"),
+        false if !shared.is_some_and(nested) => note(app, "these are already at the top level"),
+        false => {
             edit(app, |file| file.outdent(&ids));
             land_on_item(app, ids[0]);
         }
-        (true, None) if shared.is_some_and(nested) => {
+        true if shared.is_some_and(nested) => {
             note(app, "groups go one deep — these are already in one")
         }
-        (true, None) if ids.len() == 1 => item_to_group(app, ids[0]),
-        (true, None) => {
+        true => {
             let made = edit(app, |file| file.group_items(&ids)).flatten();
             if let Some(view) = view_mut(app) {
                 view.anchor = None;
@@ -1354,26 +1466,127 @@ fn group_chosen(app: &mut App, into: bool) {
     }
 }
 
-/// `⌥→` on one item: it made a nested group, named for it
-/// ([`TodoFile::item_to_group`]), the field for the group's first item
-/// open in it.
-fn item_to_group(app: &mut App, item: u64) {
-    let made = edit(app, |file| file.item_to_group(item)).flatten();
-    if let Some(view) = view_mut(app) {
-        view.anchor = None;
+/// A line along the modal's foot, for a key that did nothing.
+fn note(app: &mut App, text: &str) {
+    app.flash = Some(crate::flash::Flash::note(text.to_string()));
+}
+
+/// The cursor onto `t`'s row.
+fn land_on_target(app: &mut App, t: Target) {
+    match t {
+        Target::Item(id) => land_on_item(app, id),
+        Target::Group(id) => land_on_group(app, Some(id)),
     }
-    let Some(group) = made else {
-        return;
-    };
-    land_on_group(app, Some(group));
-    open_input(
-        app,
-        InputKind::Item {
-            group: Some(group),
-            after: None,
+}
+
+/// `t` a level in (`into`) or out — section, group, point — only it and
+/// what it holds changing level: what it is now, or None (said why) when
+/// it cannot go.
+fn level(app: &mut App, t: Target, into: bool) -> Option<Target> {
+    let file = list(app)?;
+    let why = match t {
+        Target::Item(id) => {
+            let group = file.item(id)?.group;
+            match (file.parent_of(group).is_some(), into) {
+                (true, true) => "points go one group deep — ⌘G makes this one a group",
+                (true, false) => {
+                    edit(app, |file| file.outdent(&[id]));
+                    return Some(t);
+                }
+                (false, true) => {
+                    let joined = edit(app, |file| {
+                        let sub = file.join_group_above(id)?;
+                        file.reveal(sub);
+                        Some(sub)
+                    })
+                    .flatten();
+                    if joined.is_some() {
+                        return Some(t);
+                    }
+                    "no group right above to go into — ⌘G makes this point a group"
+                }
+                (false, false) => {
+                    "a point stays in its section — ⌘G makes it a group, then ⌥← a section"
+                }
+            }
+        }
+        Target::Group(id) => match (file.parent_of(id).is_some(), into) {
+            (true, true) => "groups go one deep — ⌘G turns this one into a point",
+            (true, false) => {
+                edit(app, |file| file.group_to_section(id));
+                return Some(t);
+            }
+            (false, false) => "already a section",
+            (false, true) if file.has_subgroups(id) => {
+                "this section holds groups, and groups go one deep — take them out first"
+            }
+            (false, true) => {
+                let made = edit(app, |file| {
+                    let made = file.section_to_group(id)?;
+                    if let Child::Group(g) = made {
+                        file.reveal(g);
+                    }
+                    Some(made)
+                })
+                .flatten();
+                match made {
+                    Some(Child::Group(g)) => return Some(Target::Group(g)),
+                    Some(Child::Item(i)) => return Some(Target::Item(i)),
+                    None => "no section above to go into",
+                }
+            }
         },
-        "",
-    );
+    };
+    note(app, why);
+    None
+}
+
+/// `t` a point made a group, or a nested group made a point: what it is
+/// now, or None (said why).
+fn toggle(app: &mut App, t: Target) -> Option<Target> {
+    let file = list(app)?;
+    match t {
+        Target::Item(id) => {
+            let nested = file.parent_of(file.item(id)?.group).is_some();
+            let made = edit(app, |file| {
+                if nested {
+                    file.split_group_at(id)
+                } else {
+                    file.item_to_group(id)
+                }
+            })
+            .flatten();
+            if made.is_none() {
+                note(app, "pick an open point");
+            }
+            made.map(Target::Group)
+        }
+        Target::Group(id) if file.parent_of(id).is_some() => {
+            edit(app, |file| file.group_to_item(id))
+                .flatten()
+                .map(Target::Item)
+        }
+        Target::Group(_) => {
+            note(
+                app,
+                "a section stays a section — ⌥→ folds it into the one above",
+            );
+            None
+        }
+    }
+}
+
+/// `⌘G` on the cursor's row.
+fn toggle_row(app: &mut App) {
+    let t = match current(app) {
+        Some(Entry::Header { group, .. }) => Target::Group(group),
+        Some(Entry::Item { id, .. }) => Target::Item(id),
+        _ => return,
+    };
+    unselect(app);
+    if let Some(t) = toggle(app, t) {
+        land_on_target(app, t);
+    }
 }
 
 /// `⌘X`/`⌘C`: the chosen items onto the clipboard — their text, a line
@@ -1513,16 +1726,9 @@ fn input_key(app: &mut App, key: KeyEvent) {
         return;
     };
     let kind = *kind;
-    // `⌥→` at the end of a new item's text: the item a group instead —
-    // anywhere else in the text, a word on.
-    let new_item = match kind {
-        InputKind::Item { group, after } => Some((group, after)),
-        _ => None,
-    };
-    let to_group = new_item.is_some()
-        && keys::SAVE_GROUP.matches(&key)
-        && input.caret_byte() == input.as_str().len()
-        && !input.trim().is_empty();
+    let empty = input.trim().is_empty();
+    let level_key = keys::FIELD_LEVEL.matches(&key);
+    let toggle_key = keys::TO_GROUP.matches(&key);
     match key.code {
         _ if crate::nav::closes(&key) => {
             view.input = None;
@@ -1542,16 +1748,26 @@ fn input_key(app: &mut App, key: KeyEvent) {
                 _ => {}
             }
         }
-        _ if to_group => {
-            let (group, after) = new_item.unwrap_or_default();
-            let made = save_item(app, group, after);
-            if let Some(view) = view_mut(app) {
-                view.input = None;
+        // An empty new point's way out a level: `⇧Tab`, or `Enter`.
+        _ if empty
+            && matches!(kind, InputKind::Item { .. })
+            && (level_key && key.code == KeyCode::BackTab || keys::SAVE.matches(&key)) =>
+        {
+            step_out_field(app, kind)
+        }
+        _ if (level_key || toggle_key) && !matches!(kind, InputKind::Group { .. }) => {
+            if empty {
+                note(app, "type it first");
+                return;
             }
-            if let Some(item) = made {
-                land_on_item(app, item);
-                group_chosen(app, true);
-            }
+            let into = key.code == KeyCode::Tab;
+            reshape_field(app, kind, |app, t| {
+                if toggle_key {
+                    toggle(app, t)
+                } else {
+                    level(app, t, into)
+                }
+            });
         }
         _ if keys::SAVE.matches(&key) => save_field(app, kind),
         // Saved as Enter would, then a row on — the next field a new item
@@ -1570,6 +1786,94 @@ fn input_key(app: &mut App, key: KeyEvent) {
         _ => {
             input.handle_key(&key);
         }
+    }
+}
+
+/// An empty new point's field a level out: in a nested group, the end of
+/// the section around it; in a section, a new section's, right after it.
+/// A new section's left empty shuts.
+fn step_out_field(app: &mut App, kind: InputKind) {
+    let InputKind::Item { group, .. } = kind else {
+        return;
+    };
+    let Some(file) = list(app) else {
+        return;
+    };
+    let next = match group.filter(|g| file.group(*g).is_some()) {
+        Some(g) => match file.parent_of(g) {
+            Some(parent) => InputKind::Item {
+                group: Some(parent),
+                after: None,
+            },
+            None => InputKind::Group {
+                parent: None,
+                after: Some(Child::Group(g)),
+            },
+        },
+        None => InputKind::Group {
+            parent: None,
+            after: None,
+        },
+    };
+    open_input(app, next, "");
+}
+
+/// The field's row put in as typed, `op` run on it, and the field open
+/// on what it became — text and caret kept — so `Tab`, `⇧Tab` and `⌘G`
+/// reshape the row without leaving it.
+fn reshape_field(
+    app: &mut App,
+    kind: InputKind,
+    op: impl FnOnce(&mut App, Target) -> Option<Target>,
+) {
+    let Some((_, input)) = view(app).and_then(|v| v.input.clone()) else {
+        return;
+    };
+    let text = input.trim().to_string();
+    let caret = input.caret_byte();
+    let target = match kind {
+        InputKind::Item { group, after } => {
+            let made = add_item(app, group, after, &text);
+            match made {
+                Some(id) => Target::Item(id),
+                None => return,
+            }
+        }
+        InputKind::Rename(t) => {
+            edit(app, |file| match t {
+                Target::Item(id) => {
+                    if let Some(i) = file.item_mut(id) {
+                        i.text = text.clone();
+                    }
+                }
+                Target::Group(id) => {
+                    if let Some(g) = file.group_mut(id) {
+                        g.name = text.clone();
+                    }
+                }
+            });
+            t
+        }
+        InputKind::Group { .. } => return,
+    };
+    if let Some(view) = view_mut(app) {
+        view.input = None;
+    }
+    let now = op(app, target).unwrap_or(target);
+    land_on_target(app, now);
+    let Some(file) = list(app) else {
+        return;
+    };
+    let shown = match now {
+        Target::Item(id) => file.item(id).map(|i| i.text.clone()),
+        Target::Group(id) => file.group(id).map(|g| g.name.clone()),
+    };
+    let Some(shown) = shown else {
+        return;
+    };
+    open_input(app, InputKind::Rename(now), &shown);
+    if let Some((_, input)) = view_mut(app).and_then(|v| v.input.as_mut()) {
+        input.set_caret_byte(caret.min(shown.len()));
     }
 }
 
@@ -1594,16 +1898,6 @@ fn save_field(app: &mut App, kind: InputKind) {
     if !text.is_empty() {
         commit(app, kind, &text);
     }
-}
-
-/// [`save_field`] for a new item's field: the item it made.
-fn save_item(app: &mut App, group: Option<u64>, after: Option<u64>) -> Option<u64> {
-    let (_, input) = view_mut(app)?.input.take()?;
-    let text = input.trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
-    add_item(app, group, after, &text)
 }
 
 /// A new item from the field — after `after` while it is still there,
@@ -1730,8 +2024,8 @@ fn start_group(app: &mut App) {
 }
 
 /// Typing on a row: the row opened where it stands, `append` added to its
-/// end — or, for `⌫` (`None`), its last character gone. On `+ new item`
-/// it is a new item, in the group above.
+/// end — or, for `⌘E` (`None`), as it is, the caret at its end. On
+/// `+ new item` it is a new item, in the group above.
 fn start_edit(app: &mut App, append: Option<&str>) {
     let Some(entry) = current(app) else {
         return;
@@ -1761,11 +2055,8 @@ fn start_edit(app: &mut App, append: Option<&str>) {
     let Some((_, input)) = view_mut(app).and_then(|v| v.input.as_mut()) else {
         return;
     };
-    match append {
-        Some(text) => input.insert_str(text),
-        None => {
-            input.handle_key(&KeyEvent::from(KeyCode::Backspace));
-        }
+    if let Some(text) = append {
+        input.insert_str(text);
     }
 }
 

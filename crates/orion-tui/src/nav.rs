@@ -179,6 +179,13 @@ mod tests {
     /// Anything else that does is a modal walking its own way: read the
     /// move from this module instead.
     const OWN_KEYS: &[(&str, &str, &str)] = &[
+        // A todo's field: the row a level in or out, as an outliner's
+        // Tab does — the panels' Tab is the list's, not the field's.
+        (
+            "view.rs",
+            "FIELD_LEVEL",
+            "a todo's field: the row a level in or out, as in an outliner",
+        ),
         // The QUICK PROMPT is a text box: Tab and ⇧Tab are Claude Code's
         // own (the harness, the mode), as in the CLIs it launches.
         (

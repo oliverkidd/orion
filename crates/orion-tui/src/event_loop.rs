@@ -39836,34 +39836,41 @@ mod tests {
             press(&mut app, KeyCode::Left, KeyModifiers::ALT, &mut out);
             assert_eq!(shape(&app), ["a", "[later]", "b"]);
 
-            // On the group's header, ⌥← — as Ghostty sends it, `⌥B` — and
-            // ⌥→ leave it where it is, and the footer says so.
+            // ⌥← on the group's header — as Ghostty sends it, `⌥B` — makes
+            // it a section of its own, right after Emails, with only its
+            // own points; b stays in Emails.
             press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Char('b'), KeyModifiers::ALT, &mut out);
-            assert_eq!(shape(&app), ["a", "[later]", "b"]);
+            assert_eq!(shape(&app), ["a", "b"]);
+            let tops: Vec<String> = todo_file(&app)
+                .subgroups(None)
+                .map(|g| g.name.clone())
+                .collect();
+            assert_eq!(tops, ["Emails", "later"]);
+            assert_eq!(todo_texts_in(&app, "later"), ["c"]);
+            // ⌥← again: already a section, and the footer says so.
+            press(&mut app, KeyCode::Left, KeyModifiers::ALT, &mut out);
             assert!(app.flash.is_some());
+            // ⌥→ folds it back into Emails, at its end, as a group.
             press(&mut app, KeyCode::Right, KeyModifiers::ALT, &mut out);
-            assert_eq!(shape(&app), ["a", "[later]", "b"]);
+            assert_eq!(shape(&app), ["a", "b", "[later]"]);
+            // ⌘Z takes that back.
+            press(&mut app, KeyCode::Char('z'), KeyModifiers::SUPER, &mut out);
+            assert_eq!(shape(&app), ["a", "b"]);
         });
     }
 
-    /// `⌥→` on one item makes it a nested group of that name — and, typed
-    /// into a new item's field, so does `⌥→` at the end of the text — the
-    /// field for its first item open in it at once; `⌘⇧N` in a section
-    /// makes a group nested there, right under the cursor's row.
+    /// `⌘G` turns a point into a group and back, on its row or in its
+    /// field; `⌥→` puts a point into the group right above it; `⌥←` never
+    /// makes a section of a point; an empty new point's `Enter` opens a
+    /// new section right after the one it was in.
     #[test]
     fn todo_groups_are_made_where_the_cursor_is() {
-        use crate::todos::view::Entry;
+        use crate::todos::view::InputKind;
         crate::todos::with_now(todo_clock(6), || {
             let mut out = Vec::new();
-            let mut app = todos_with(
-                "- UI
-    - a
-    - Later
-    - b
-",
-            );
+            let mut app = todos_with("- UI\n    - a\n    - Later\n    - b\n- Web\n    - w\n");
             let ui = todo_file(&app).groups[0].id;
             let shape = |app: &App| -> Vec<String> {
                 let file = todo_file(app);
@@ -39879,51 +39886,62 @@ mod tests {
             };
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Right, KeyModifiers::ALT, &mut out);
+            // A point stays in its section.
+            press(&mut app, KeyCode::Left, KeyModifiers::ALT, &mut out);
+            assert_eq!(shape(&app), ["a", "Later", "b"]);
+            assert!(app.flash.is_some());
+            press(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER, &mut out);
             assert_eq!(shape(&app), ["a", "[Later]", "b"]);
-            assert!(matches!(
-                todo_view(&app).input,
-                Some((crate::todos::view::InputKind::Item { group: Some(g), .. }, _))
-                    if todo_file(&app).group(g).is_some_and(|g| g.name == "Later")
-            ));
-            assert!(buffer_text(&draw_todos(&mut app)).contains("make a group"));
-            type_text(&mut app, "x", &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            assert_eq!(todo_texts_in(&app, "Later"), ["x"]);
+            assert!(todo_view(&app).input.is_none());
 
-            // On b: ⌘⇧N nests a new group right under it.
+            // b, right under it: ⌥→ into it.
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(
-                &mut app,
-                KeyCode::Char('n'),
-                KeyModifiers::SUPER | KeyModifiers::SHIFT,
-                &mut out,
-            );
-            type_text(&mut app, "Soon", &mut out);
-            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
-            assert_eq!(shape(&app), ["a", "[Later]", "b", "[Soon]"]);
-            assert!(todo_view(&app).input.is_some(), "its first item's field");
-            // Esc with nothing in it: back on its header.
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
-            let soon = todo_file(&app)
-                .groups
-                .iter()
-                .find(|g| g.name == "Soon")
-                .unwrap()
-                .id;
-            assert!(
-                matches!(todo_view(&app).cursor, Some(Entry::Header { group, .. }) if group == soon)
-            );
+            press(&mut app, KeyCode::Right, KeyModifiers::ALT, &mut out);
+            assert_eq!(shape(&app), ["a", "[Later]"]);
+            assert_eq!(todo_texts_in(&app, "Later"), ["b"]);
 
-            // On a's row, a new item typed and ⌥→ at its end: a group.
+            // ⌘G on the header: a point again, b loose under it.
+            press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER, &mut out);
+            assert_eq!(shape(&app), ["a", "Later", "b"]);
+
+            // On a, a new point typed and ⌘G in its field: a group, its
+            // name still being typed.
             press(&mut app, KeyCode::Home, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
             press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
             type_text(&mut app, "Next", &mut out);
-            press(&mut app, KeyCode::Char('f'), KeyModifiers::ALT, &mut out);
-            assert_eq!(shape(&app), ["a", "[Next]", "[Later]", "b", "[Soon]"]);
-            assert!(todo_view(&app).input.is_some());
+            press(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER, &mut out);
+            assert_eq!(shape(&app), ["a", "[Next]", "Later", "b"]);
+            assert!(matches!(
+                todo_view(&app).input,
+                Some((InputKind::Rename(crate::todos::view::Target::Group(_)), _))
+            ));
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+
+            // ⌘E edits b with nothing lost.
+            press(&mut app, KeyCode::End, KeyModifiers::NONE, &mut out);
+            while !matches!(todo_view(&app).cursor, Some(crate::todos::view::Entry::Item { id, .. })
+                if todo_file(&app).item(id).is_some_and(|i| i.text == "b"))
+            {
+                press(&mut app, KeyCode::Up, KeyModifiers::NONE, &mut out);
+            }
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::SUPER, &mut out);
+            type_text(&mut app, "2", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            assert_eq!(shape(&app), ["a", "[Next]", "Later", "b2"]);
+
+            // From b2, a new point left empty and Enter: a new section,
+            // right after UI and before Web.
+            press(&mut app, KeyCode::Char('n'), KeyModifiers::SUPER, &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            type_text(&mut app, "Soon", &mut out);
+            press(&mut app, KeyCode::Enter, KeyModifiers::NONE, &mut out);
+            let tops: Vec<String> = todo_file(&app)
+                .subgroups(None)
+                .map(|g| g.name.clone())
+                .collect();
+            assert_eq!(tops, ["UI", "Soon", "Web"]);
         });
     }
 
@@ -39950,8 +39968,7 @@ mod tests {
 
             // run plan a group in Emails, walked down through UI to its end.
             press(&mut app, KeyCode::Down, KeyModifiers::NONE, &mut out);
-            press(&mut app, KeyCode::Right, KeyModifiers::ALT, &mut out);
-            press(&mut app, KeyCode::Esc, KeyModifiers::NONE, &mut out);
+            press(&mut app, KeyCode::Char('g'), KeyModifiers::SUPER, &mut out);
             for _ in 0..4 {
                 press(&mut app, KeyCode::Down, KeyModifiers::ALT, &mut out);
             }
@@ -40379,8 +40396,7 @@ mod tests {
         });
     }
 
-    /// A row is edited where it stands: `⌫` opens it with its last
-    /// character gone, a character typed on it is added to its end — on a
+    /// A row is edited where it stands: `⌘E` opens it as it is, a character typed on it is added to its end — on a
     /// header, to the group's name — and `↓` saves it and moves on. Typed
     /// on `+ new item`, it starts one. Nothing typed filters.
     #[test]
@@ -40393,11 +40409,13 @@ mod tests {
             };
             key(&mut app, KeyCode::Down, &mut out);
             key(&mut app, KeyCode::Backspace, &mut out);
+            assert!(todo_view(&app).input.is_none(), "⌫ opens nothing");
+            press(&mut app, KeyCode::Char('e'), KeyModifiers::SUPER, &mut out);
             assert_eq!(
                 todo_view(&app).input.as_ref().map(|(_, i)| i.as_str()),
-                Some("run pla")
+                Some("run plan")
             );
-            for c in "ns".chars() {
+            for c in "s".chars() {
                 key(&mut app, KeyCode::Char(c), &mut out);
             }
             key(&mut app, KeyCode::Down, &mut out);

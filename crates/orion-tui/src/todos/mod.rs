@@ -900,6 +900,147 @@ impl TodoFile {
         Some(new)
     }
 
+    /// `⌥→` on one open item of a top-level group right under a nested
+    /// group: into that group, at its end — nothing moves on screen. The
+    /// group it went into; None when there is no group right above it.
+    pub fn join_group_above(&mut self, item: u64) -> Option<u64> {
+        let group = self.shared_group(&[item])?;
+        if self.parent_of(group).is_some() {
+            return None;
+        }
+        let kids = self.open_children(group);
+        let at = kids.iter().position(|c| *c == Child::Item(item))?;
+        let Child::Group(sub) = *kids.get(at.checked_sub(1)?)? else {
+            return None;
+        };
+        self.put(Child::Item(item), sub, At::End);
+        Some(sub)
+    }
+
+    /// `⌥←` on a nested group's header: it a top-level group of its own,
+    /// its items with it, standing right after the one it was in — what
+    /// else was in that one stays there. False when it is not nested.
+    pub fn group_to_section(&mut self, group: u64) -> bool {
+        let Some(parent) = self.parent_of(group) else {
+            return false;
+        };
+        let left: Vec<Child> = self
+            .open_children(parent)
+            .into_iter()
+            .filter(|c| *c != Child::Group(group))
+            .collect();
+        if let Some(g) = self.group_mut(group) {
+            g.parent = None;
+            g.before = None;
+            g.priority = 0;
+        }
+        self.arrange(&left);
+        self.stand_beside(group, parent, true);
+        true
+    }
+
+    /// The open top-level group right before `group`, if any.
+    fn top_group_before(&self, group: u64) -> Option<u64> {
+        let tops = self.open_top_groups();
+        let here = tops.iter().position(|g| *g == group)?;
+        tops.get(here.checked_sub(1)?).copied()
+    }
+
+    /// `⌥→` on a top-level group's header: into the one above it, at its
+    /// end — a nested group with its items in it, or, holding nothing, an
+    /// item named for it. None when there is no group above, or it holds
+    /// groups of its own (groups nest one deep). The nested group, or the
+    /// item, it became.
+    pub fn section_to_group(&mut self, group: u64) -> Option<Child> {
+        if self.parent_of(group).is_some() || self.subgroups(Some(group)).next().is_some() {
+            return None;
+        }
+        let above = self.top_group_before(group)?;
+        if self.size(group) == 0 {
+            let name = self.group(group)?.name.clone();
+            let item = self.add_item(above, &name, today());
+            self.groups.retain(|g| g.id != group);
+            return Some(Child::Item(item));
+        }
+        let from = self.groups.iter().position(|g| g.id == group)?;
+        let mut moved = self.groups.remove(from);
+        moved.parent = Some(above);
+        moved.before = None;
+        moved.collapsed = false;
+        self.groups.push(moved);
+        let mut seq: Vec<Child> = self
+            .open_children(above)
+            .into_iter()
+            .filter(|c| *c != Child::Group(group))
+            .collect();
+        seq.push(Child::Group(group));
+        self.arrange(&seq);
+        Some(Child::Group(group))
+    }
+
+    /// Whether `group` holds groups of its own.
+    pub fn has_subgroups(&self, group: u64) -> bool {
+        self.subgroups(Some(group)).next().is_some()
+    }
+
+    /// `⌘G` on a nested group's header: it an item again, named for it,
+    /// where it stood, what was in it loose right under it. The item.
+    pub fn group_to_item(&mut self, group: u64) -> Option<u64> {
+        let parent = self.parent_of(group)?;
+        let me = self.group(group)?.clone();
+        let inner = self.open_children(group);
+        let mut seq = self.open_children(parent);
+        let item = self.add_item(parent, &me.name, today());
+        if let Some(i) = self.item_mut(item) {
+            i.priority = me.priority;
+        }
+        let mut with = vec![Child::Item(item)];
+        with.extend(inner);
+        match seq.iter().position(|c| *c == Child::Group(group)) {
+            Some(at) => {
+                seq.splice(at..=at, with);
+            }
+            None => seq.extend(with),
+        }
+        for i in self.items.iter_mut().filter(|i| i.group == group) {
+            i.group = parent;
+        }
+        self.groups.retain(|g| g.id != group);
+        self.arrange(&seq);
+        Some(item)
+    }
+
+    /// `⌘G` on an item in a nested group: a new nested group named for
+    /// it, right after the one it was in, the open items under it going
+    /// with it. The group.
+    pub fn split_group_at(&mut self, item: u64) -> Option<u64> {
+        let group = self.shared_group(&[item])?;
+        let parent = self.parent_of(group)?;
+        let me = self.item(item)?.clone();
+        let kids = self.open_children(group);
+        let at = kids.iter().position(|c| *c == Child::Item(item))?;
+        let below: Vec<u64> = kids[at + 1..]
+            .iter()
+            .filter_map(|c| match c {
+                Child::Item(id) => Some(*id),
+                Child::Group(_) => None,
+            })
+            .collect();
+        let new = self.add_group_after(Some(parent), &me.text, Some(Child::Group(group)));
+        if let Some(g) = self.group_mut(new) {
+            g.priority = me.priority;
+        }
+        for id in &below {
+            if let Some(i) = self.item_mut(*id) {
+                i.group = new;
+            }
+        }
+        let inner: Vec<Child> = below.iter().map(|id| Child::Item(*id)).collect();
+        self.arrange(&inner);
+        self.delete_item(item);
+        Some(new)
+    }
+
     /// `item` at Linear's `level` — and, open and now out of order with
     /// the items either side of it, moved to the end of the run of items
     /// at its level, so a list kept in priority order stays so.
@@ -997,8 +1138,11 @@ impl TodoFile {
         after: Option<Child>,
     ) -> u64 {
         let id = self.add_group(parent, name);
-        if let (Some(parent), Some(after)) = (parent, after) {
-            self.put(Child::Group(id), parent, At::After(after));
+        match (parent, after) {
+            (Some(parent), Some(after)) => self.put(Child::Group(id), parent, At::After(after)),
+            // A top-level one right after the top-level group named.
+            (None, Some(Child::Group(other))) => self.stand_beside(id, other, true),
+            _ => {}
         }
         id
     }
@@ -1137,6 +1281,65 @@ mod tests {
 
     fn at(d: u32, h: u32) -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 10, d, h, 0, 0).unwrap()
+    }
+
+    /// What a group holds, as text: items by name, groups in brackets.
+    fn shape(file: &TodoFile, group: u64) -> Vec<String> {
+        file.open_children(group)
+            .into_iter()
+            .map(|c| match c {
+                Child::Item(id) => file.item(id).unwrap().text.clone(),
+                Child::Group(id) => format!("[{}]", file.group(id).unwrap().name),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn levels_change_only_the_row_and_what_it_holds() {
+        let mut file = TodoFile::new(Path::new("/tmp/x"));
+        let mcp = file.add_group(None, "MCP");
+        let web = file.add_group(None, "Web");
+        let story = file.add_group(Some(mcp), "story");
+        file.add_item(story, "s1", day(1));
+        let s2 = file.add_item(story, "s2", day(1));
+        file.add_item(story, "s3", day(1));
+        file.add_item(mcp, "after", day(1));
+        file.add_item(web, "w", day(1));
+        assert_eq!(shape(&file, mcp), ["after", "[story]"]);
+
+        // ⌘G on s2: a group right after story, s3 going with it.
+        let g = file.split_group_at(s2).unwrap();
+        assert_eq!(shape(&file, story), ["s1"]);
+        assert_eq!(shape(&file, g), ["s3"]);
+        assert_eq!(file.parent_of(g), Some(mcp));
+
+        // story a section: right after MCP, only its own points; the rest
+        // stay in MCP.
+        assert!(file.group_to_section(story));
+        let tops: Vec<u64> = file.subgroups(None).map(|g| g.id).collect();
+        assert_eq!(tops, [mcp, story, web]);
+        assert_eq!(shape(&file, story), ["s1"]);
+        assert!(shape(&file, mcp).contains(&"[s2]".to_string()));
+
+        // Back in: a group at the end of MCP.
+        assert_eq!(file.section_to_group(story), Some(Child::Group(story)));
+        assert_eq!(
+            shape(&file, mcp).last().map(String::as_str),
+            Some("[story]")
+        );
+        // A section holding groups won't go in; an empty one goes as a point.
+        assert_eq!(file.section_to_group(web).map(|_| ()), Some(()));
+        assert!(file.section_to_group(mcp).is_none());
+        let empty = file.add_group(None, "Empty");
+        assert!(matches!(file.section_to_group(empty), Some(Child::Item(_))));
+        assert!(file.group(empty).is_none());
+
+        // A group back to a point, its points loose under it.
+        let item = file.group_to_item(g).unwrap();
+        let shown = shape(&file, mcp);
+        let at = shown.iter().position(|t| t == "s2").unwrap();
+        assert_eq!(shown[at + 1], "s3");
+        assert_eq!(file.item(item).unwrap().group, mcp);
     }
 
     fn texts(items: &[&Item]) -> Vec<String> {

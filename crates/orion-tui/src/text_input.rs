@@ -380,6 +380,17 @@ impl TextInput {
         self.cursor
     }
 
+    /// The caret put at byte `at` — the nearest char boundary at or
+    /// before it, no further than the end.
+    pub fn set_caret_byte(&mut self, at: usize) {
+        let mut at = at.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        self.cursor = at;
+        self.goal = None;
+    }
+
     /// Replace the text from byte `start` up to the caret with `with`, the
     /// caret landing after it — a completion written over the word it
     /// completes. A `start` past the caret, or off a char boundary,
