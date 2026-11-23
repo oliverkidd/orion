@@ -1,0 +1,25 @@
+crates/orion-tui/src/automations/pr_fixer/router.rs
+  s_e967ae9446b517::t_0491f3e8115b45 993-1000
+  s_e967ae9446b517::t_09ce85429933a7 970-971,973,975-992,1001-1033
+  s_e967ae9446b517::t_f8d5f74d24c5f0 260-263,265,270-271,276-277,279-281,284-288,290-292,294-296,303-324
+  s_e967ae9446b517::t_74fe2eec29c95b 278,293,300-302
+  s_e967ae9446b517::t_47834f3ffa7377 325
+crates/orion-tui/src/automations/pr_fixer.rs
+  s_e967ae9446b517::t_c08a069cc945d8 3403,4560
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "63301656a0ef25bd6998c347b2fb34ed708bdb5e",
+  "prompts": {},
+  "sessions": {
+    "s_e967ae9446b517": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a086ebe6-2122-490e-99df-d2602c2483aa",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
