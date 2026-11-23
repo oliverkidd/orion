@@ -257,27 +257,70 @@ pub fn busy(status: AgentStatus) -> bool {
 
 /// [`context_used`] on a transcript's `tail`: the newest assistant
 /// message's `usage`, as (input + cache read + cache creation) / the
-/// window of `model`.
+/// window of the model that answered it. That message's own model id
+/// (`claude-opus-5-5`) decides over the session's `model`, often an alias
+/// (`opus`); a `[1m]` on the session's model still counts. A window the
+/// usage has already passed was never that window: it is a million.
 pub fn context_in(tail: &str, model: Option<&str>) -> Option<f64> {
-    let usage = tail
+    let line = tail
         .lines()
         .rev()
         .filter_map(own_line)
         .filter(|line| line_type(line) == Some("assistant"))
-        .find_map(|line| line.pointer("/message/usage").cloned())?;
+        .find(|line| line.pointer("/message/usage").is_some())?;
+    let usage = line.pointer("/message/usage")?;
     let tokens = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
     let used = tokens("input_tokens")
         + tokens("cache_read_input_tokens")
         + tokens("cache_creation_input_tokens");
-    Some(used as f64 / window(model) as f64)
+    let served = line.pointer("/message/model").and_then(Value::as_str);
+    let mut size = window(served.or(model));
+    if model.is_some_and(says_1m) || used > size {
+        size = WINDOW_1M;
+    }
+    Some(used as f64 / size as f64)
 }
 
-/// A model's window: a million tokens when its id says `[1m]`.
+/// A model's window: [`WINDOW`] for the Claude models from before the
+/// million-token default — every Claude 3, Haiku 4.5, and Opus and
+/// Sonnet up to 4.5 — unless the id says `[1m]`; a million for the rest,
+/// and for an alias (`opus`, `sonnet`, `default`), which names a current
+/// model. No model at all: [`WINDOW`], the safe side.
 pub fn window(model: Option<&str>) -> u64 {
-    match model.is_some_and(|m| m.to_ascii_lowercase().contains("[1m]")) {
-        true => WINDOW_1M,
-        false => WINDOW,
+    let Some(id) = model.map(str::to_ascii_lowercase) else {
+        return WINDOW;
+    };
+    if says_1m(&id) || !before_1m_default(&id) {
+        WINDOW_1M
+    } else {
+        WINDOW
     }
+}
+
+/// Whether model `id` asks for the million-token window: `opus[1m]`.
+fn says_1m(id: &str) -> bool {
+    id.to_ascii_lowercase().contains("[1m]")
+}
+
+/// Whether model `id` (lower case) is a Claude model from before the
+/// million-token default: `claude-3…`, `claude-haiku-4…`, or Opus or
+/// Sonnet 4 up to 4.5 (`claude-opus-4`, `-4-1`, `-4-5`, `-4-20250514`).
+fn before_1m_default(id: &str) -> bool {
+    if id.contains("claude-3") || id.contains("haiku-4") {
+        return true;
+    }
+    ["opus-4", "sonnet-4"].iter().any(|family| {
+        id.match_indices(family).any(|(at, _)| {
+            let rest = &id[at + family.len()..];
+            let minor: String = match rest.strip_prefix('-') {
+                Some(after) => after.chars().take_while(char::is_ascii_digit).collect(),
+                None if rest.starts_with(|c: char| c.is_ascii_digit()) => return false,
+                None => return true,
+            };
+            // A date (`-20250514`) is 4.0's snapshot; a minor up to 5 is 4.x.
+            minor.is_empty() || minor.len() == 8 || minor.parse::<u32>().is_ok_and(|m| m <= 5)
+        })
+    })
 }
 
 /// The last `n` things the session said — its newest assistant messages
@@ -924,10 +967,70 @@ mod tests {
             "{\"type\":\"user\"}".into(),
         ]
         .join("\n");
-        assert_eq!(context_in(&tail, Some("opus")), Some(0.8));
+        assert_eq!(context_in(&tail, Some("claude-sonnet-4-5")), Some(0.8));
+        assert_eq!(context_in(&tail, Some("claude-sonnet-4-5[1m]")), Some(0.16));
         assert_eq!(context_in(&tail, Some("opus[1m]")), Some(0.16));
+        assert_eq!(context_in(&tail, None), Some(0.8));
         assert_eq!(context_in("{\"type\":\"user\"}", None), None);
-        assert_eq!(window(Some("claude-opus-4-5[1M]")), WINDOW_1M);
+    }
+
+    /// The model that answered decides the window, over the session's
+    /// alias: an `opus` session served by Opus 5.5 at 191k tokens has a
+    /// fifth of its million used, not 96% of 200k. Usage past 200k means
+    /// a million, whatever the ids say.
+    #[test]
+    fn the_answering_model_sets_the_window() {
+        let served = |model: &str, used: u64| {
+            serde_json::json!({
+                "type": "assistant",
+                "message": {"id": "a", "model": model, "usage": {"input_tokens": used}}
+            })
+            .to_string()
+        };
+        let at = |tail: String, model: Option<&str>| {
+            context_in(&tail, model).map(|used| (used * 100.0).round() / 100.0)
+        };
+        assert_eq!(
+            at(served("claude-opus-5-5", 191_000), Some("opus")),
+            Some(0.19)
+        );
+        assert_eq!(
+            at(served("claude-haiku-4-5-20251001", 150_000), Some("haiku")),
+            Some(0.75)
+        );
+        assert_eq!(at(served("claude-sonnet-4-5", 700_000), None), Some(0.7));
+    }
+
+    #[test]
+    fn only_the_models_before_the_million_default_have_200k() {
+        for id in [
+            "claude-3-7-sonnet-20250219",
+            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-20250514",
+            "claude-sonnet-4-5",
+            "claude-opus-4-1",
+            "claude-opus-4-5-20251101",
+            "claude-opus-4",
+        ] {
+            assert_eq!(window(Some(id)), WINDOW, "{id}");
+        }
+        for id in [
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-opus-4-6",
+            "claude-opus-4-8",
+            "claude-sonnet-4-6",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-2",
+            "claude-opus-4-5[1M]",
+            "opus",
+            "sonnet",
+            "default",
+        ] {
+            assert_eq!(window(Some(id)), WINDOW_1M, "{id}");
+        }
         assert_eq!(window(None), WINDOW);
     }
 

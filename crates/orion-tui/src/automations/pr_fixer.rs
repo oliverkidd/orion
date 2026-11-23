@@ -3400,7 +3400,7 @@ mod tests {
             "RIPLO-1",
             AgentStatus::Finished,
             &["First.", "Pushed the fix for the flag.", "Draft PR is up."],
-            160_000,
+            800_000,
         );
         listed(&mut app);
         let mut page = detail(false, vec![check("unit", "CI", CheckState::Failed)]);
@@ -4557,7 +4557,7 @@ mod tests {
             "RIPLO-1",
             AgentStatus::Running,
             &["Working."],
-            160_000,
+            800_000,
         );
         listed(&mut app);
         let page = detail(false, vec![check("unit", "CI", CheckState::Failed)]);
