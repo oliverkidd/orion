@@ -464,6 +464,29 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE terminals ADD COLUMN run_wanted INTEGER;
     ALTER TABLE worktrees ADD COLUMN known_ports TEXT;
     ",
+    // 41: SLACK INBOX — every Slack message event the bridge heard or
+    // caught up on from history (`slack::catch_up`), as the event's JSON,
+    // so a TUI that wasn't listening gets them (`ClientRequest::
+    // SlackBacklog`). `ts_num` is `ts` as a number, to order and compare.
+    // `slack_listened` is when the socket was last known open: the gap
+    // since is what a catch-up reads from history.
+    "
+    CREATE TABLE slack_inbox (
+      channel      TEXT NOT NULL,
+      ts           TEXT NOT NULL,
+      ts_num       REAL NOT NULL,
+      user         TEXT,
+      thread_ts    TEXT,
+      event        TEXT NOT NULL,
+      received_at  INTEGER NOT NULL,
+      PRIMARY KEY (channel, ts)
+    );
+    CREATE INDEX slack_inbox_ts ON slack_inbox(ts_num);
+    CREATE TABLE slack_listened (
+      id     INTEGER PRIMARY KEY CHECK (id = 1),
+      at_ms  INTEGER NOT NULL
+    );
+    ",
 ];
 
 fn phone_kind_str(kind: orion_core::away::PhoneKind) -> &'static str {
@@ -510,6 +533,14 @@ pub struct SkipLookup {
 /// following rather than every one ever read.
 const PR_SEEN_KEEP_MS: i64 = 180 * 24 * 60 * 60 * 1000;
 
+/// How long a Slack message is kept in the inbox ([`Store::prune_slack_inbox`]):
+/// long enough for a TUI closed over a long weekend to catch up, and for
+/// the catch-up to know the conversations and threads that were live.
+pub const SLACK_INBOX_KEEP_MS: i64 = 14 * orion_core::clock::DAY_MS;
+
+/// The most messages one backlog sends a TUI.
+pub const SLACK_BACKLOG_MAX: usize = 2000;
+
 /// How long a factory message nothing has posted or edited is kept
 /// ([`Store::prune_factory_messages`]): as long as the TUI keeps a card
 /// that is done with.
@@ -538,6 +569,9 @@ impl Store {
         }
         if let Err(err) = store.prune_factory_messages(now_ms() - FACTORY_MESSAGES_KEEP_MS) {
             tracing::warn!("factory messages not pruned: {err:#}");
+        }
+        if let Err(err) = store.prune_slack_inbox(now_ms() - SLACK_INBOX_KEEP_MS) {
+            tracing::warn!("slack inbox not pruned: {err:#}");
         }
         Ok(store)
     }
@@ -1319,6 +1353,23 @@ impl Store {
             .map(|mut found| found.pop())
     }
 
+    /// How the phone message `ts` in `channel` was closed (`phone`,
+    /// `orion`, `moved`, `resent`), None while open; None too when there
+    /// is no such message.
+    pub fn phone_message_answered(&self, channel: &str, ts: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT answered FROM phone_messages WHERE channel = ?1 AND ts = ?2",
+                params![channel, ts],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// Every phone message in `channel` still waiting for an answer, the
     /// oldest first.
     pub fn open_phone_messages_in(&self, channel: &str) -> Result<Vec<crate::phone::PhoneMessage>> {
@@ -1345,7 +1396,9 @@ impl Store {
     /// not archived, with no message of theirs still open and none posted
     /// since they turned red — one closed "answered in Orion" while still
     /// red doesn't count: the session opened a newer dialog at the desk.
-    /// Oldest wait first.
+    /// Nor does one closed as moved on or re-sent below: its replacement
+    /// covers the wait once it is up, and when posting that failed the
+    /// wait is still unsent. Oldest wait first.
     pub fn unsent_waiting_agents(&self) -> Result<Vec<Agent>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
@@ -1355,8 +1408,9 @@ impl Store {
                   SELECT 1 FROM phone_messages p
                    WHERE p.agent_id = a.id
                      AND (p.answered IS NULL
-                          OR (p.posted_at >= a.status_changed_at AND p.answered != 'orion')))
-              ORDER BY status_changed_at, id"
+                          OR (p.posted_at >= a.status_changed_at AND p.answered = '{phone}')))
+              ORDER BY status_changed_at, id",
+            phone = crate::phone::ANSWERED_BY_PHONE
         ))?;
         let rows = stmt.query_map([], row_to_agent)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1400,6 +1454,114 @@ impl Store {
             ))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // ---- slack inbox ----
+
+    /// Keep the message event `event` (one with a `channel` and a `ts`):
+    /// whether it was new.
+    pub fn insert_slack_message(&self, event: &serde_json::Value) -> Result<bool> {
+        let (Some(channel), Some(ts)) = (event["channel"].as_str(), event["ts"].as_str()) else {
+            return Ok(false);
+        };
+        let ts_num: f64 = ts.parse().unwrap_or(0.0);
+        Ok(self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO slack_inbox
+               (channel, ts, ts_num, user, thread_ts, event, received_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                channel,
+                ts,
+                ts_num,
+                event["user"].as_str(),
+                event["thread_ts"].as_str(),
+                event.to_string(),
+                now_ms(),
+            ],
+        )? > 0)
+    }
+
+    /// The kept message events newer than Slack `ts` `since` (all, when
+    /// None), oldest first, at most [`SLACK_BACKLOG_MAX`].
+    pub fn slack_messages_since(&self, since: Option<&str>) -> Result<Vec<serde_json::Value>> {
+        let since: f64 = since.and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT event FROM (
+               SELECT event, ts_num FROM slack_inbox WHERE ts_num > ?1
+                ORDER BY ts_num DESC LIMIT ?2)
+             ORDER BY ts_num",
+        )?;
+        let rows = stmt.query_map(params![since, SLACK_BACKLOG_MAX as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
+        Ok(rows
+            .filter_map(|r| r.ok())
+            .filter_map(|e| serde_json::from_str(&e).ok())
+            .collect())
+    }
+
+    /// The conversations a message was kept from since Slack `ts` `since`,
+    /// with their `channel_type`, the most recently active first.
+    pub fn slack_channels_since(&self, since: f64) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT channel, json_extract(event, '$.channel_type'), max(ts_num) AS last
+               FROM slack_inbox WHERE ts_num > ?1
+              GROUP BY channel ORDER BY last DESC",
+        )?;
+        let rows = stmt.query_map(params![since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The threads `user` posted in since Slack `ts` `since`, as
+    /// `(channel, thread ts)`, the most recently active first.
+    pub fn slack_threads_of(&self, user: &str, since: f64) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT channel, thread_ts, max(ts_num) AS last FROM slack_inbox
+              WHERE user = ?1 AND thread_ts IS NOT NULL AND ts_num > ?2
+              GROUP BY channel, thread_ts ORDER BY last DESC",
+        )?;
+        let rows = stmt.query_map(params![user, since], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Forget the kept messages said before `before` (epoch ms).
+    pub fn prune_slack_inbox(&self, before: i64) -> Result<usize> {
+        Ok(self.conn.lock().unwrap().execute(
+            "DELETE FROM slack_inbox WHERE ts_num < ?1",
+            params![before as f64 / 1000.0],
+        )?)
+    }
+
+    /// Note that the Slack socket is open now (epoch ms `at`).
+    pub fn set_slack_listened(&self, at: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO slack_listened (id, at_ms) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET at_ms = ?1",
+            params![at],
+        )?;
+        Ok(())
+    }
+
+    /// When the Slack socket was last known open (epoch ms), if ever.
+    pub fn slack_listened(&self) -> Result<Option<i64>> {
+        Ok(self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT at_ms FROM slack_listened WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .optional()?)
     }
 
     // ---- factory messages ----
@@ -1452,6 +1614,34 @@ impl Store {
             params![card.key, serde_json::to_string(card)?, now_ms()],
         )?;
         Ok(())
+    }
+
+    /// Forget the message recorded under `key`: it is gone from Slack (a
+    /// reinstalled app's old DM), so nothing can edit or press it.
+    pub fn forget_factory_message(&self, key: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM factory_messages WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
+    /// Whether a card is held under `key` and it is fresh news
+    /// (`FactoryCard::fresh`).
+    pub fn held_factory_card_is_fresh(&self, key: &str) -> Result<bool> {
+        let card: Option<String> = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT card FROM factory_held WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(card
+            .and_then(|c| serde_json::from_str::<orion_core::FactoryCard>(&c).ok())
+            .is_some_and(|c| c.fresh))
     }
 
     /// Forget the card held under `key`: whether there was one.
@@ -1884,7 +2074,7 @@ mod tests {
         store.insert_phone_message(&message).unwrap();
         assert!(unsent(&store).is_empty(), "an open message covers it");
         store
-            .set_phone_answered("D1", "1.0001", Some("phone"))
+            .set_phone_answered("D1", "1.0001", Some(crate::phone::ANSWERED_BY_PHONE))
             .unwrap();
         assert!(
             unsent(&store).is_empty(),
@@ -1898,8 +2088,22 @@ mod tests {
             std::slice::from_ref(&agent.id),
             "closed in orion while still red: a newer dialog"
         );
+        for superseded in ["moved", "resent"] {
+            store
+                .set_phone_answered("D1", "1.0001", Some(superseded))
+                .unwrap();
+            assert_eq!(
+                unsent(&store),
+                std::slice::from_ref(&agent.id),
+                "{superseded} with no copy below (its post failed): still unsent"
+            );
+            assert_eq!(
+                store.phone_message_answered("D1", "1.0001").unwrap(),
+                Some(superseded.to_string())
+            );
+        }
         store
-            .set_phone_answered("D1", "1.0001", Some("phone"))
+            .set_phone_answered("D1", "1.0001", Some(crate::phone::ANSWERED_BY_PHONE))
             .unwrap();
 
         tick();
@@ -2127,6 +2331,7 @@ mod tests {
     fn held_factory_cards_are_taken_once() {
         let store = Store::open_in_memory().unwrap();
         let card = |key: &str, text: &str| orion_core::FactoryCard {
+            fresh: false,
             key: key.into(),
             to: orion_core::CardRecipient::Owner,
             text: text.into(),
@@ -2568,6 +2773,8 @@ mod tests {
             "phone_messages",
             "pr_seen",
             "projects",
+            "slack_inbox",
+            "slack_listened",
             "terminals",
             "ui_state",
             "worktrees",
@@ -3507,5 +3714,70 @@ mod tests {
         assert!(!store
             .push_prompt(&AgentId("ghost".into()), &entry(1))
             .unwrap());
+    }
+
+    /// The Slack inbox keeps each message once, hands a backlog back
+    /// oldest first from where it is asked, and knows the conversations
+    /// and your threads a catch-up reads.
+    #[test]
+    fn the_slack_inbox_keeps_each_message_once_and_replays_in_order() {
+        let store = Store::open_in_memory().unwrap();
+        let event = |channel: &str, ts: &str, user: &str, thread: Option<&str>| {
+            let mut e = serde_json::json!({"type": "message", "channel": channel,
+                "channel_type": "im", "user": user, "text": "hi", "ts": ts});
+            if let Some(thread) = thread {
+                e["thread_ts"] = thread.into();
+            }
+            e
+        };
+        assert!(store
+            .insert_slack_message(&event("D1", "100.000002", "U2", None))
+            .unwrap());
+        assert!(
+            !store
+                .insert_slack_message(&event("D1", "100.000002", "U2", None))
+                .unwrap(),
+            "once"
+        );
+        assert!(store
+            .insert_slack_message(&event("C1", "90.000001", "U1", Some("80.0")))
+            .unwrap());
+        assert!(store
+            .insert_slack_message(&event("D1", "110.000000", "U2", None))
+            .unwrap());
+        assert!(!store
+            .insert_slack_message(&serde_json::json!({"type": "message"}))
+            .unwrap());
+
+        let ts = |events: Vec<serde_json::Value>| -> Vec<String> {
+            events
+                .iter()
+                .map(|e| e["ts"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            ts(store.slack_messages_since(None).unwrap()),
+            ["90.000001", "100.000002", "110.000000"]
+        );
+        assert_eq!(
+            ts(store.slack_messages_since(Some("95.0")).unwrap()),
+            ["100.000002", "110.000000"]
+        );
+        assert_eq!(
+            store.slack_channels_since(0.0).unwrap(),
+            vec![
+                ("D1".to_string(), "im".to_string()),
+                ("C1".into(), "im".into())
+            ]
+        );
+        assert_eq!(
+            store.slack_threads_of("U1", 0.0).unwrap(),
+            vec![("C1".to_string(), "80.0".to_string())]
+        );
+        assert!(store.slack_listened().unwrap().is_none());
+        store.set_slack_listened(5).unwrap();
+        store.set_slack_listened(7).unwrap();
+        assert_eq!(store.slack_listened().unwrap(), Some(7));
+        assert_eq!(store.prune_slack_inbox(now_ms() + 1).unwrap(), 3);
     }
 }

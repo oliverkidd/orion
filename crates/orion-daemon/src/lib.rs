@@ -426,6 +426,12 @@ async fn serve() -> Result<()> {
     tokio::spawn(slack::run(daemon.clone()));
     tokio::spawn(away::watch(daemon.clone(), away::pace()));
     tokio::spawn(phone::watch(daemon.clone()));
+    // A restart swept red rows to disconnected and resumed them before the
+    // bridge could hear it: their messages close once Slack signs in.
+    tokio::spawn({
+        let daemon = daemon.clone();
+        async move { daemon.phone_close_stale_once_signed_in().await }
+    });
 
     // Keep the pidfile and buildstamp from aging out of a /tmp runtime dir
     // (see `PidfileLock::refresh`).

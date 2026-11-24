@@ -240,7 +240,7 @@ fn send(app: &mut App, card: Card, flash: bool) {
     }
     let time = chrono::Local::now().format("%H:%M").to_string();
     let request = ClientRequest::PostFactoryCard {
-        card: wire(&card, &blocks(&card, &time)),
+        card: wire(&card, &blocks(&card, &time), fresh),
     };
     app.outbox.push(request);
     let posted = Posted {
@@ -467,24 +467,10 @@ const RETRY_FOR_MS: i64 = orion_core::clock::DAY_MS;
 /// Whether `p` is a post the network stopped that is still being sent
 /// again ([`reconcile`]): not up yet, but on its way.
 pub(crate) fn awaiting_retry(p: &Posted, now_ms: i64) -> bool {
-    matches!(&p.state, CardState::Failed(why) if network_failure(why))
+    // Passing trouble — Slack not signed in yet, the network, a rate
+    // limit, Slack itself — not a refusal.
+    matches!(&p.state, CardState::Failed(why) if why.is_transient())
         && now_ms.saturating_sub(p.at_ms) < RETRY_FOR_MS
-}
-
-/// Whether a failed post is the network's doing — no DNS, no connection,
-/// a timeout — and worth sending again.
-fn network_failure(reason: &FactoryCardFailure) -> bool {
-    let FactoryCardFailure::Other(why) = reason else {
-        return false;
-    };
-    [
-        "Could not resolve host",
-        "curl: (6)",
-        "curl: (7)",
-        "curl: (28)",
-    ]
-    .iter()
-    .any(|sign| why.contains(sign))
 }
 
 /// What a card on a plan answered in orion says as it closes.
@@ -619,7 +605,7 @@ pub(crate) fn close(app: &mut App, key: &str, note: &str) {
     let mut blocks = blocks(&posted.card, &posted_time(posted.at_ms));
     blocks.retain(|b| b["type"] != "actions");
     blocks.push(context(&format!("✓ {}", escape(note))));
-    let card = wire(&posted.card, &blocks);
+    let card = wire(&posted.card, &blocks, false);
     app.outbox.push(ClientRequest::UpdateFactoryCard {
         key: key.to_string(),
         card,
@@ -771,8 +757,9 @@ pub(crate) struct Press<'a> {
 
 /// The request's card: the wire recipient, the notification line, the
 /// blocks and the picture.
-fn wire(card: &Card, blocks: &[Value]) -> FactoryCard {
+fn wire(card: &Card, blocks: &[Value], fresh: bool) -> FactoryCard {
     FactoryCard {
+        fresh,
         key: card.key.clone(),
         to: match &card.to {
             Recipient::Owner => CardRecipient::Owner,

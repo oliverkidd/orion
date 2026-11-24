@@ -12,6 +12,9 @@ pub fn base_url() -> String {
     orion_core::http::slack_api_url()
 }
 
+/// The error a call Slack answered 429 to reads as.
+pub const RATELIMITED: &str = "ratelimited";
+
 /// Which of the three tokens a call goes out with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum As {
@@ -226,7 +229,7 @@ fn reply(method: &str, status: u16, body: &[u8]) -> Result<Value, String> {
     match parsed {
         Some(v) if v["ok"].as_bool() == Some(true) => Ok(v),
         Some(v) if v["error"].is_string() => Err(v["error"].as_str().unwrap_or_default().into()),
-        _ if status == 429 => Err("ratelimited".into()),
+        _ if status == 429 => Err(RATELIMITED.into()),
         _ => Err(format!("{method} answered HTTP {status}")),
     }
 }

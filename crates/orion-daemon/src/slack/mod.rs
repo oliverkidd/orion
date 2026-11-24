@@ -12,12 +12,17 @@
 //!   whenever it drops. Its button presses and DM replies answer waiting
 //!   sessions (`phone`); a press on a factory card goes back to the TUIs
 //!   as `ServerEvent::FactoryAction` (`factory`); every message event is
-//!   forwarded to the TUIs as `ServerEvent::SlackMessage`, unfiltered.
+//!   forwarded to the TUIs as `ServerEvent::SlackMessage`, unfiltered —
+//!   and kept, with what a sign-in after a gap reads back from history,
+//!   for a TUI that wasn't listening (`catch_up`).
 //!
 //! No tokens is no connection and no polling: the bridge waits for the
-//! Connections tab's `SlackReconnect`.
+//! Connections tab's `SlackReconnect`. Tokens that were read once and
+//! then read as none (the Keychain refusing for a moment) are read again
+//! every 30 s.
 
 pub mod api;
+pub mod catch_up;
 pub mod socket;
 
 use std::collections::VecDeque;
@@ -165,11 +170,18 @@ impl Daemon {
     }
 }
 
+/// How soon tokens that were there and now read as none are read again.
+const TOKENS_AGAIN: Duration = Duration::from_secs(30);
+
 /// The bridge's loop, for the daemon's life: sign in with the saved
 /// tokens, hold the socket open, and start again on a drop (with backoff)
 /// or on `SlackReconnect`.
 pub async fn run(daemon: Arc<Daemon>) {
     let mut backoff = FIRST_BACKOFF;
+    // Tokens were read once: a later read that finds none is more likely
+    // the Keychain refusing for a moment (asleep, locked) than tokens
+    // deleted — looked at again soon, not only on a reconnect by hand.
+    let mut had_tokens = false;
     loop {
         if daemon.shutdown.is_cancelled() {
             return;
@@ -180,11 +192,16 @@ pub async fn run(daemon: Arc<Daemon>) {
             .flatten();
         let Some(tokens) = tokens else {
             daemon.set_slack(SlackStatus::default(), None);
-            if !wait(&daemon, None).await {
+            let again = had_tokens.then_some(TOKENS_AGAIN);
+            if had_tokens {
+                tracing::warn!("slack tokens not read from the Keychain: trying again shortly");
+            }
+            if !wait(&daemon, again).await {
                 return;
             }
             continue;
         };
+        had_tokens = true;
         let api = Api::new(api::base_url(), tokens);
         let started = tokio::time::Instant::now();
         let ended = match sign_in(api).await {
@@ -200,7 +217,13 @@ pub async fn run(daemon: Arc<Daemon>) {
                     },
                     Some(session.clone()),
                 );
-                listen(&daemon, &session).await
+                // What was said while nobody listened, read back; then the
+                // socket stamped open for as long as it is.
+                catch_up::after_gap(&daemon, &session);
+                tokio::select! {
+                    ended = listen(&daemon, &session) => ended,
+                    _ = catch_up::heartbeat(&daemon) => unreachable!("the heartbeat never ends"),
+                }
             }
             // Not signed in: nothing to post with either.
             Err(problem) => {
@@ -336,9 +359,10 @@ async fn handle(daemon: &Arc<Daemon>, session: &Arc<Session>, envelope: socket::
             if event["type"].as_str() != Some("message") {
                 return;
             }
-            if let Some(forward) = inbox_event(event) {
-                daemon.broadcast(forward);
-            }
+            // Kept for a TUI that isn't listening (`SlackBacklog`); one
+            // already kept — the same message seen by the bot's token and
+            // yours — goes out once.
+            keep_and_forward(daemon, event);
             if let Some(route) = crate::phone::route_message(event, session) {
                 // The same message can come once per token that sees it.
                 let key = format!("{}:{}", session.dm, event["ts"].as_str().unwrap_or(""));
@@ -372,6 +396,27 @@ async fn handle(daemon: &Arc<Daemon>, session: &Arc<Session>, envelope: socket::
         }
         _ => {}
     }
+}
+
+/// Keep message `event` in the inbox and tell the TUIs — once: one
+/// already kept (heard by the bot's token and yours, or caught up on
+/// twice) goes nowhere. One the store failed to keep still goes. Whether
+/// it went.
+pub fn keep_and_forward(daemon: &Daemon, event: &Value) -> bool {
+    let Some(forward) = inbox_event(event) else {
+        return false;
+    };
+    let new = daemon
+        .store
+        .insert_slack_message(event)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "slack message not kept");
+            true
+        });
+    if new {
+        daemon.broadcast(forward);
+    }
+    new
 }
 
 /// A message event as the TUIs hear it: every one with a conversation and

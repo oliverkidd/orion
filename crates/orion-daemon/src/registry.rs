@@ -1862,7 +1862,17 @@ impl Daemon {
             HookEvent::Notification { notification_type } => {
                 notification_type.as_deref() == Some("idle_prompt")
             }
-            HookEvent::Progress { busy } => !busy,
+            // A clear while still red is a dialog being drawn, not the
+            // turn ending (see `status`): the machine says which it was.
+            HookEvent::Progress { busy } => {
+                !busy
+                    && self
+                        .status_machines
+                        .lock()
+                        .unwrap()
+                        .get(id)
+                        .is_none_or(|m| m.status() != AgentStatus::NeedsFeedback)
+            }
             _ => false,
         };
         if !turn_over {
@@ -7020,7 +7030,7 @@ pub(crate) mod tests {
         assert!(daemon.store.get_agent(&id).unwrap().is_none());
     }
 
-    fn seed_projects(daemon: &Daemon, names: &[&str]) {
+    pub(crate) fn seed_projects(daemon: &Daemon, names: &[&str]) {
         for (i, name) in names.iter().enumerate() {
             daemon
                 .store
@@ -7054,7 +7064,7 @@ pub(crate) mod tests {
             .unwrap();
     }
 
-    fn seed_agent(daemon: &Daemon, id: &str, worktree: &str, session_id: Option<&str>) {
+    pub(crate) fn seed_agent(daemon: &Daemon, id: &str, worktree: &str, session_id: Option<&str>) {
         daemon
             .store
             .insert_agent(&Agent {
@@ -8541,6 +8551,57 @@ pub(crate) mod tests {
         );
         assert_eq!(
             red_changes(&mut rx),
+            [(AgentStatus::NeedsFeedback, Some(question.clone()))]
+        );
+        assert_eq!(daemon.wait_reason(&id), Some(question));
+    }
+
+    /// The reported bug, end to end: Claude Code 2.1.331 clears its
+    /// progress bar as it draws a question, and its `permission_prompt`
+    /// notification follows 6 s later. The row stays red the whole time,
+    /// over the question — never green, and never red again without it
+    /// (which posted the phone a second message an answer couldn't reach
+    /// the dialog from).
+    #[test]
+    fn a_question_drawn_with_the_bar_clear_stays_red_over_it() {
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["p"]);
+        seed_worktree(&daemon, "p", "root", "/orion-test/p", true);
+        seed_agent(&daemon, "a1", "root", None);
+        let id = AgentId("a1".into());
+        let question = WaitReason::from_tool(
+            orion_core::ASK_USER_QUESTION_TOOL,
+            Some(&serde_json::json!({"questions": [{"question": "Which?",
+                "options": [{"label": "A"}, {"label": "B"}]}]})),
+        );
+        daemon.apply_hook_event(&id, HookEvent::UserPromptSubmit, Some("s1".into()));
+        daemon.apply_hook_event(&id, HookEvent::Progress { busy: true }, None);
+        let mut rx = daemon.events.subscribe();
+        daemon.apply_hook_event_with(
+            &id,
+            HookEvent::PreToolUse {
+                tool_name: Some(orion_core::ASK_USER_QUESTION_TOOL.into()),
+                subagent_id: None,
+            },
+            Some("s1".into()),
+            Some(question.clone()),
+        );
+        daemon.apply_hook_event(&id, HookEvent::Progress { busy: false }, None);
+        daemon.apply_hook_event(
+            &id,
+            HookEvent::Notification {
+                notification_type: Some("permission_prompt".into()),
+            },
+            Some("s1".into()),
+        );
+        let mut changes = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::StatusChanged { status, reason, .. } = event {
+                changes.push((status, reason));
+            }
+        }
+        assert_eq!(
+            changes,
             [(AgentStatus::NeedsFeedback, Some(question.clone()))]
         );
         assert_eq!(daemon.wait_reason(&id), Some(question));

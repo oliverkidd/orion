@@ -12709,6 +12709,8 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
             // A Linear link from before links were kept per project is
             // the project's whose checkout is on its branch, once.
             app.linear_links.adopt(&app.tree.worktrees);
+            // What Slack said while this TUI wasn't listening.
+            out.push(crate::needs_you::slack::backlog(app));
             let session_restored = ui_state
                 .as_deref()
                 .is_some_and(|json| restore_ui_state(app, json));

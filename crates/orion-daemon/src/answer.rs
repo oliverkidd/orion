@@ -302,11 +302,16 @@ impl Daemon {
     /// its next turn, in words.
     pub async fn answer(self: &Arc<Self>, id: &AgentId, answer: Answer) -> Result<()> {
         let agent = self.store.get_agent(id)?.context("agent not found")?;
-        let open_dialog = (agent.status == AgentStatus::NeedsFeedback)
-            .then(|| self.wait_reasons.lock().unwrap().get(id).cloned())
-            .flatten();
+        // The hook's reason, else the dialog the transcript ends on: a row
+        // red with its reason lost (a restart, a notification that turned
+        // it red again) still has the dialog on screen, and words typed as
+        // a turn into it would vanish.
+        let open_dialog = match agent.status {
+            AgentStatus::NeedsFeedback => self.wait_reason_off_thread(id).await,
+            _ => None,
+        };
         let session = self.session(&SessionRef::Agent(id.clone()));
-        if let (Some(session), Some(reason)) = (session, &open_dialog) {
+        if let (Some(session), Some(reason)) = (&session, &open_dialog) {
             if let Some(keys) = dialog_keys(reason, &answer)? {
                 tracing::info!(agent = %id, ?answer, "answering the open dialog");
                 for (n, key) in keys.iter().enumerate() {
@@ -318,9 +323,25 @@ impl Daemon {
                 return Ok(());
             }
         }
-        let reason = match open_dialog {
-            Some(reason) => Some(reason),
-            None => self.wait_reason(id),
+        // Live and red over a dialog nothing says the shape of (a
+        // permission prompt whose hook was lost): words typed into it land
+        // in one of its rows and go nowhere — a several-question answer
+        // filled the first question's text row whole. Esc closes it first,
+        // so the answer goes in as the next turn, as it says.
+        // A row red over a usage limit sits at its input box: no dialog.
+        if let (Some(session), None, AgentStatus::NeedsFeedback, None) =
+            (&session, &open_dialog, agent.status, agent.limit_reached())
+        {
+            tracing::info!(agent = %id, "an unknown dialog closed for an answer in words");
+            session.write_input(ESC)?;
+            tokio::time::sleep(KEY_GAP).await;
+        }
+        // Red, the transcript was read just above; otherwise (not running
+        // since a restart) its dialog is what the words answer.
+        let reason = match (open_dialog, agent.status) {
+            (Some(reason), _) => Some(reason),
+            (None, AgentStatus::NeedsFeedback) => None,
+            (None, _) => self.wait_reason_off_thread(id).await,
         };
         let text = turn_text(reason.as_ref(), &answer);
         self.send_turn(id, &text, DEFAULT_COLS, DEFAULT_ROWS)
@@ -340,6 +361,14 @@ impl Daemon {
     /// gave, or — the daemon having restarted since — the dialog its
     /// transcript ends on, while the row still says it waits (red, or cut
     /// off mid-wait by the restart).
+    pub async fn wait_reason_off_thread(self: &Arc<Self>, id: &AgentId) -> Option<WaitReason> {
+        let (daemon, id) = (self.clone(), id.clone());
+        tokio::task::spawn_blocking(move || daemon.wait_reason(&id))
+            .await
+            .ok()
+            .flatten()
+    }
+
     pub fn wait_reason(&self, id: &AgentId) -> Option<WaitReason> {
         if let Some(reason) = self.wait_reasons.lock().unwrap().get(id) {
             return Some(reason.clone());

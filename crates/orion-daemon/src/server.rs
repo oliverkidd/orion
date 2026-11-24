@@ -267,6 +267,33 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                 }
                 ClientRequest::SetAway { on } => daemon.set_away_by_hand(on),
                 ClientRequest::SlackReconnect => daemon.slack.reconnect(),
+                ClientRequest::SlackBacklog { since } => {
+                    let (daemon, out_tx) = (daemon.clone(), out_tx.clone());
+                    tokio::spawn(async move {
+                        let kept = {
+                            let daemon = daemon.clone();
+                            tokio::task::spawn_blocking(move || {
+                                daemon.store.slack_messages_since(since.as_deref())
+                            })
+                            .await
+                        };
+                        let kept = match kept {
+                            Ok(Ok(kept)) => kept,
+                            Ok(Err(e)) => {
+                                tracing::warn!(error = %e, "slack backlog not read");
+                                return;
+                            }
+                            Err(_) => return,
+                        };
+                        for event in kept {
+                            if let Some(event) = crate::slack::inbox_event(&event) {
+                                if out_tx.send(event).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    });
+                }
                 ClientRequest::PostFactoryCard { card } => daemon.factory_post(card),
                 ClientRequest::UpdateFactoryCard { key, card } => daemon.factory_update(key, card),
                 ClientRequest::GetMetrics { req_id } => {

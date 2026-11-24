@@ -208,8 +208,9 @@ pub enum PtyEvent {
     KittyFlags {
         flags: u8,
     },
-    /// The child's OSC 9;4 progress state flipped. For agent CLIs this is a
-    /// busy/idle edge the status machine trusts — notably it is the *only*
+    /// The child's OSC 9;4 progress state flipped, or it cleared a bar
+    /// already clear (see `pty::progress`). For agent CLIs this is a
+    /// busy/idle signal the status machine trusts — notably it is the *only*
     /// end-of-turn signal after the user cancels, which fires no hook.
     Progress {
         busy: bool,

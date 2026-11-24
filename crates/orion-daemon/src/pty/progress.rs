@@ -21,9 +21,19 @@
 //! | turn ends (Stop fires)       | `ESC ] 9;4;0; BEL` |
 //! | turn cancelled with escape   | `ESC ] 9;4;0; BEL`, ~0.4s, no hook |
 //!
-//! The permission-prompt row is the important one: the window title flips to
-//! the idle glyph while the prompt waits, but the progress state does not, so
-//! this signal cannot green out an agent that genuinely needs feedback.
+//! Claude Code 2.1.331 changed the dialog rows (captured the same way, with
+//! an `AskUserQuestion` and a Bash permission prompt):
+//!
+//! | moment                       | sequence         |
+//! |------------------------------|------------------|
+//! | dialog drawn                 | `ESC ] 9;4;0; BEL`, while it waits |
+//! | dialog dismissed with escape | `ESC ] 9;4;0; BEL` *again*, no hook |
+//!
+//! So a clear no longer proves the turn is over: the status machine reads
+//! the first clear while red over a dialog as its drawing, and the next as
+//! its dismissal. That second clear changes no state, which is why a clear
+//! with the bar already clear is passed on too — every other repeat is
+//! ignored there.
 //!
 //! States follow the ConEmu/Windows-Terminal convention: 0 removes the
 //! progress bar, 1/2/3/4 are normal/error/indeterminate/paused. Anything
@@ -42,6 +52,8 @@ pub struct ProgressScanner {
     osc: OscFramer,
     /// Last state the child advertised; `None` until it advertises one.
     busy: Option<bool>,
+    /// The chunk being fed cleared a bar that was already clear.
+    cleared_again: bool,
 }
 
 impl Default for ProgressScanner {
@@ -55,6 +67,7 @@ impl ProgressScanner {
         Self {
             osc: OscFramer::new(MAX_OSC, prefix_possible),
             busy: None,
+            cleared_again: false,
         }
     }
 
@@ -65,7 +78,9 @@ impl ProgressScanner {
 
     /// Scan a chunk of child output. Sequences split across chunks are fine —
     /// the state machine persists between calls. Returns `Some(busy)` only
-    /// when the state *changed*, so callers see edges, not a fire-hose.
+    /// when the state *changed*, so callers see edges, not a fire-hose —
+    /// save one: a clear of a bar already clear reports `Some(false)`, as
+    /// that is how Esc on a dialog shows (see the module doc).
     ///
     /// A chunk that flips the state and back reports only where it ended up.
     /// That is the right answer — the intermediate state is already stale by
@@ -73,6 +88,7 @@ impl ProgressScanner {
     /// a whole turn never lands in one chunk anyway.
     pub fn feed(&mut self, data: &[u8]) -> Option<bool> {
         let before = self.busy;
+        self.cleared_again = false;
         for &b in data {
             if let Some(payload) = self.osc.step(b) {
                 self.dispatch(payload);
@@ -80,6 +96,7 @@ impl ProgressScanner {
         }
         match self.busy {
             after if after != before => after,
+            Some(false) if self.cleared_again => Some(false),
             _ => None,
         }
     }
@@ -95,6 +112,9 @@ impl ProgressScanner {
             return;
         }
         let busy = state.iter().any(|&b| b != b'0');
+        if !busy && self.busy == Some(false) {
+            self.cleared_again = true;
+        }
         self.busy = Some(busy);
     }
 }
@@ -116,18 +136,27 @@ mod tests {
     }
 
     #[test]
-    fn reports_only_edges() {
+    fn reports_edges_and_repeated_clears() {
         // The real Claude Code turn: idle at startup, busy on submit, idle
-        // again when the turn ends. Repeats of a state report nothing.
+        // again when the turn ends. A repeated busy reports nothing; a
+        // repeated clear (Esc on a dialog drawn with the bar clear) does.
         assert_eq!(
             scan(&[
                 b"\x1b]9;4;0;\x07",
-                b"\x1b]9;4;0;\x07",
                 b"\x1b]9;4;3;\x07",
                 b"\x1b]9;4;3;\x07",
                 b"\x1b]9;4;0;\x07",
+                b"\x1b]9;4;0;\x07",
+                b"plain output",
             ]),
-            vec![Some(false), None, Some(true), None, Some(false)]
+            vec![
+                Some(false),
+                Some(true),
+                None,
+                Some(false),
+                Some(false),
+                None
+            ]
         );
     }
 

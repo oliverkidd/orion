@@ -24,6 +24,9 @@
 //!   (OSC 9;4, see `pty::progress`). It is the only signal that survives a
 //!   user cancel — no hook fires at all there, and Claude suppresses
 //!   `idle_prompt` precisely because the user just touched the keyboard.
+//!   Claude Code clears the bar as it draws a dialog, too (2.1.331): the
+//!   first clear while red over one is that drawing and leaves it red;
+//!   only a later clear — Esc, a refusal — is the dialog going away.
 //! - Approving a permission prompt fires no hook of its own: the next news
 //!   is the gated tool's `PostToolUse` (or the following call's
 //!   `PreToolUse`). So a tool event from the same origin as the open
@@ -307,6 +310,16 @@ pub struct AgentStatusMachine {
     /// rather than a dialog: the stopped turn's echoes leave it red, and
     /// leaving red clears the limit the row records.
     limited: bool,
+    /// While `needs_feedback` over a dialog: the CLI has cleared its
+    /// progress bar since the dialog opened. Claude Code (verified on
+    /// 2.1.331) clears it as it *draws* a question, plan or permission
+    /// prompt, so that first clear is the dialog going up, not the turn
+    /// ending; a later one (Esc, a refusal) is the dialog going away.
+    dialog_drawn: bool,
+    /// The last progress state the CLI advertised was idle. A clear with
+    /// the bar already clear (`pty::progress` passes those on) is news
+    /// only for a drawn dialog: it is how Esc on one shows.
+    progress_idle: bool,
 }
 
 impl AgentStatusMachine {
@@ -326,6 +339,8 @@ impl AgentStatusMachine {
             launch_idle_pending: false,
             relocating: false,
             limited: false,
+            dialog_drawn: false,
+            progress_idle: false,
         }
     }
 
@@ -551,13 +566,17 @@ impl AgentStatusMachine {
                 self.note_subagent_alive(now);
             }
             HookEvent::Progress { busy } => {
+                let again = !busy && self.progress_idle;
+                self.progress_idle = !busy;
                 if busy {
+                    // Back at work: a dialog still red after this is drawn
+                    // anew, and its clear is its drawing again.
+                    self.dialog_drawn = false;
                     // A turn started. Normally `UserPromptSubmit` already
                     // said so; this also catches turns orion never saw a
                     // prompt for (a resumed session, a scheduled wake-up).
                     // Deliberately narrow: it must not talk over a pending
-                    // permission prompt (which holds progress at *busy*
-                    // anyway, so no edge arrives) or revive a dead agent.
+                    // dialog or revive a dead agent.
                     if matches!(self.status, AgentStatus::Fresh | AgentStatus::Finished) {
                         self.stop_held = false;
                         self.drain_idle_since = None;
@@ -575,6 +594,21 @@ impl AgentStatusMachine {
                 } else if self.limited {
                     // The clear of the turn the usage limit stopped: that
                     // end is the limit's, already on the row.
+                } else if self.status == AgentStatus::NeedsFeedback && self.waiting_on.is_some() {
+                    // Red over a dialog. Claude clears its bar as it draws
+                    // one, so the first clear is the dialog going up — the
+                    // turn waits on you, it has not ended. Ending it there
+                    // flashed the row green and, 6 s later, Claude's
+                    // deferred `permission_prompt` turned it red again with
+                    // the dialog's reason lost: the phone got a second
+                    // message that could not answer the question. A later
+                    // clear is the dialog going away unanswered (Esc).
+                    if std::mem::replace(&mut self.dialog_drawn, true) {
+                        self.end_turn(now, &mut effects);
+                    }
+                } else if again {
+                    // The bar was already clear: nothing has ended that
+                    // had not already.
                 } else if matches!(
                     self.status,
                     AgentStatus::Running | AgentStatus::NeedsFeedback
@@ -615,6 +649,7 @@ impl AgentStatusMachine {
         if was_waiting && self.status != AgentStatus::NeedsFeedback {
             self.waiting_on = None;
             self.question_open = false;
+            self.dialog_drawn = false;
             self.feedback_left_at = Some(now);
         }
         // A limit is only ever the reason a row is red: whatever took it
@@ -898,7 +933,10 @@ mod tests {
             assert_eq!(m.status(), AgentStatus::Running);
             // The daemon respawned nothing after all (a silent resume, a
             // failed spawn): with the hold off, the same end finishes it.
+            // (A clear is news only off a busy bar, so the bar goes busy
+            // in between, as a CLI's does.)
             m.set_relocating(false);
+            progress(&mut m, true, now + Duration::from_secs(10));
             let fx = m.handle(end.clone(), Some("s1"), now + Duration::from_secs(11));
             assert_eq!(status_of(&fx), Some(AgentStatus::Finished), "{end:?}");
         }
@@ -1315,6 +1353,8 @@ mod tests {
             Some("s1"),
             now,
         );
+        // Drawn (Claude Code 2.1.331 clears the bar as it draws a prompt).
+        progress(&mut m, false, now + Duration::from_millis(300));
         let rejected = now + Duration::from_secs(6);
         let fx = progress(&mut m, false, rejected);
         assert_eq!(status_of(&fx), Some(AgentStatus::Finished));
@@ -1776,18 +1816,101 @@ mod tests {
 
     #[test]
     fn progress_idle_clears_a_rejected_permission_prompt() {
-        // Escaping out of a permission prompt: same story, from red.
+        // Escaping out of a permission prompt: same story, from red. The
+        // prompt's own clear as it is drawn comes first (Claude Code
+        // 2.1.331); Esc clears the bar again.
         let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
         let now = t0();
         m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        progress(&mut m, true, now);
         m.handle(
             HookEvent::PermissionRequest { subagent_id: None },
             Some("s1"),
             now,
         );
         assert_eq!(m.status(), AgentStatus::NeedsFeedback);
+        let fx = progress(&mut m, false, now + Duration::from_millis(300));
+        assert!(fx.is_empty(), "the prompt being drawn: {fx:?}");
         let fx = progress(&mut m, false, now + Duration::from_secs(5));
         assert_eq!(status_of(&fx), Some(AgentStatus::Finished));
+    }
+
+    /// The reported bug: Claude Code 2.1.331 clears its progress bar as it
+    /// draws a dialog. Read as the turn ending, the row went green, lost
+    /// the dialog's reason, and went red again 6 s later on the deferred
+    /// `permission_prompt` notification — the phone got a second message,
+    /// without the question, that an answer could not get into.
+    #[test]
+    fn a_dialogs_own_progress_clear_keeps_it_red() {
+        let dialogs = [
+            tool("AskUserQuestion", None, false),
+            tool(orion_core::EXIT_PLAN_MODE_TOOL, None, false),
+            HookEvent::PermissionRequest { subagent_id: None },
+        ];
+        for dialog in dialogs {
+            let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
+            let now = t0();
+            m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+            progress(&mut m, true, now);
+            let fx = m.handle(dialog.clone(), Some("s1"), now);
+            assert_eq!(status_of(&fx), Some(AgentStatus::NeedsFeedback));
+            let fx = progress(&mut m, false, now + Duration::from_millis(400));
+            assert!(fx.is_empty(), "{dialog:?} drawn: {fx:?}");
+            let fx = prompt_notification(&mut m, now + Duration::from_secs(6));
+            assert!(fx.is_empty(), "{dialog:?} notification: {fx:?}");
+            assert_eq!(m.status(), AgentStatus::NeedsFeedback);
+            // Answered: Claude goes back to work, and the turn's own end
+            // finishes it as ever.
+            let answered = now + Duration::from_secs(60);
+            let fx = match &dialog {
+                HookEvent::PreToolUse { tool_name, .. } => m.handle(
+                    tool(tool_name.as_deref().unwrap(), None, true),
+                    Some("s1"),
+                    answered,
+                ),
+                _ => m.handle(tool("Bash", None, true), Some("s1"), answered),
+            };
+            assert_eq!(status_of(&fx), Some(AgentStatus::Running), "{dialog:?}");
+            progress(&mut m, true, answered);
+            let fx = progress(&mut m, false, answered + Duration::from_secs(5));
+            assert_eq!(status_of(&fx), Some(AgentStatus::Finished), "{dialog:?}");
+        }
+    }
+
+    #[test]
+    fn a_repeated_clear_outside_a_dialog_ends_nothing() {
+        // Only a drawn dialog's dismissal shows as a clear of a bar
+        // already clear; anywhere else it is no news.
+        let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
+        let now = t0();
+        m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        progress(&mut m, true, now);
+        let fx = progress(&mut m, false, now + Duration::from_secs(1));
+        assert_eq!(status_of(&fx), Some(AgentStatus::Finished));
+        m.handle(
+            HookEvent::UserPromptSubmit,
+            Some("s1"),
+            now + Duration::from_secs(2),
+        );
+        let fx = progress(&mut m, false, now + Duration::from_secs(3));
+        assert!(fx.is_empty(), "{fx:?}");
+        assert_eq!(m.status(), AgentStatus::Running);
+    }
+
+    #[test]
+    fn a_dialog_drawn_again_after_work_is_still_waiting() {
+        // A plan steered from red: Claude works (busy), then draws the
+        // revised plan (clear) — that clear is a drawing too.
+        let mut m = AgentStatusMachine::new(AgentStatus::Fresh, None);
+        let now = t0();
+        m.handle(HookEvent::UserPromptSubmit, Some("s1"), now);
+        progress(&mut m, true, now);
+        m.handle(tool("AskUserQuestion", None, false), Some("s1"), now);
+        progress(&mut m, false, now);
+        progress(&mut m, true, now + Duration::from_secs(1));
+        let fx = progress(&mut m, false, now + Duration::from_secs(2));
+        assert!(fx.is_empty(), "{fx:?}");
+        assert_eq!(m.status(), AgentStatus::NeedsFeedback);
     }
 
     #[test]

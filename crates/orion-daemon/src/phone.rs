@@ -45,7 +45,13 @@
 //!   again, at the foot of the DM where you are looking — each old copy
 //!   updated to `↓ Re-sent below`, its buttons gone, and a fresh one
 //!   posted about what its session waits on now, oldest first. With
-//!   nothing waiting it says so.
+//!   nothing waiting it says so; words in it say they reached no session
+//!   ([`DM_WORDS_NOT_SENT`]). A reply in a re-sent copy's thread, or a
+//!   modal opened on it, answers the copy that replaced it.
+//! - **Failed posts**: a wait whose message failed to post — or whose
+//!   replacement did, after its old one closed as moved on or re-sent —
+//!   is still unsent, and the away flush tries it again every
+//!   [`FLUSH_RETRY`].
 //! - **After an answer**: the message is updated in place, its buttons
 //!   swapped for `✓ Sent: <what went in> · working again`. One that did
 //!   not go in gets `✗ Not sent: …` in its thread. One typed into a
@@ -57,11 +63,14 @@
 //!   steered plan going on to ask a question) says red again with the new
 //!   reason (`Daemon::apply_hook_event_with`). Its open message about the
 //!   old one is updated to [`MOVED_ON`], its buttons gone, and a new one
-//!   is posted below. A message already up about the same dialog is never
+//!   is posted below — or, away with nothing posted now (quiet hours),
+//!   [`SUPERSEDED`], and the flush sends the newer one once it may. A message already up about the same dialog is never
 //!   posted twice.
 //! - **Answered at the desk**: a session that leaves the state its message
 //!   was about any other way has the message updated to say "Answered in
-//!   Orion", its buttons gone.
+//!   Orion", its buttons gone. One that left it unheard — a restart, a
+//!   status change while Slack was down — is closed so once Slack signs
+//!   in and on every away reading, and a reply on it answers nothing.
 //!
 //! Which message is which session's — and the `WaitReason` it was posted
 //! about, so a modal can be built after a restart — lives in the store
@@ -97,6 +106,13 @@ pub const WORKING_AGAIN: &str = "working again";
 pub const ANSWERED_IN_ORION: &str = "Answered in Orion";
 /// What a message gains when its session opens a newer dialog.
 pub const MOVED_ON: &str = "Moved on: a newer question is below";
+/// What the store marks a message answered from the phone by — the one
+/// close that covers its wait (`Store::unsent_waiting_agents`).
+pub const ANSWERED_BY_PHONE: &str = "phone";
+/// What a message says when its session moved on to a newer dialog while
+/// you were away but nothing goes below it now — quiet hours, or a kind
+/// `away.phone` leaves out. The flush sends the newer one once it may.
+pub const SUPERSEDED: &str = "Moved on: it waits on something newer now";
 /// What a message gains when a plain DM posts it again.
 pub const RESENT_BELOW: &str = "Re-sent below";
 /// What a message answered from the phone gains when the session still
@@ -113,9 +129,17 @@ pub const ALREADY_ANSWERED: &str = "This one was already answered";
 static POSTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Waits the away flush tried to post and Slack refused — `(agent,
-/// status_changed_at)` — so it tries each once, like a status change
-/// does, instead of every away reading.
-static FLUSH_FAILED: std::sync::Mutex<Vec<(AgentId, i64)>> = std::sync::Mutex::new(Vec::new());
+/// status_changed_at)`, and when — so it tries each again only after
+/// [`FLUSH_RETRY`], not on every away reading. Once used to be all: a post
+/// that failed in the blip after a wake was never tried again.
+static FLUSH_FAILED: std::sync::Mutex<Vec<(AgentId, i64, std::time::Instant)>> =
+    std::sync::Mutex::new(Vec::new());
+/// How long the flush leaves a wait it failed to post before trying again.
+const FLUSH_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
+/// What a plain DM with words in it says after posting what waits again:
+/// words there reach no session.
+pub const DM_WORDS_NOT_SENT: &str =
+    "Those words didn't go to a session: reply in a message's thread to answer it.";
 /// What a modal question with neither a pick nor words shows.
 const NOTHING_PICKED: &str = "Pick one, or write your own below";
 /// The line under a question's buttons.
@@ -420,6 +444,9 @@ enum Close {
     AnsweredInOrion,
     /// Its session opened a newer dialog, posted below.
     MovedOn,
+    /// Its session opened a newer dialog while you were away, not posted
+    /// (yet): quiet hours, or a kind the phone doesn't send.
+    Superseded,
     /// A plain DM posted it again below.
     Resent,
 }
@@ -430,6 +457,7 @@ impl Close {
         match self {
             Close::AnsweredInOrion => format!("✓ {ANSWERED_IN_ORION}"),
             Close::MovedOn => format!("↓ {MOVED_ON}"),
+            Close::Superseded => format!("↷ {SUPERSEDED}"),
             Close::Resent => format!("↓ {RESENT_BELOW}"),
         }
     }
@@ -439,6 +467,7 @@ impl Close {
         match self {
             Close::AnsweredInOrion => ANSWERED_IN_ORION,
             Close::MovedOn => MOVED_ON,
+            Close::Superseded => SUPERSEDED,
             Close::Resent => RESENT_BELOW,
         }
     }
@@ -447,7 +476,7 @@ impl Close {
     fn by(self) -> &'static str {
         match self {
             Close::AnsweredInOrion => "orion",
-            Close::MovedOn => "moved",
+            Close::MovedOn | Close::Superseded => "moved",
             Close::Resent => "resent",
         }
     }
@@ -490,7 +519,7 @@ pub fn sent_line(summary: &str) -> String {
     format!("✓ Sent: {summary} · {WORKING_AGAIN}")
 }
 
-fn closed(blocks: &[Value], foot: String) -> Vec<Value> {
+pub(crate) fn closed(blocks: &[Value], foot: String) -> Vec<Value> {
     let mut out: Vec<Value> = blocks
         .iter()
         .filter(|b| b["type"] != "actions" && b["block_id"] != BLOCK_REPLY_HERE)
@@ -975,7 +1004,9 @@ async fn slack<T: Send + 'static>(
 /// Whether a status change into `status` over `reason` closes open
 /// `message`, and why: its session left the state it was about (answered
 /// at the desk), or is red over a different dialog now — moved on, when
-/// a message about that one is going out (`sends`). None leaves it up:
+/// a message about that one is going out (`sends`); superseded when you
+/// are `away` and none is (quiet hours) — it was not answered in orion.
+/// None leaves it up:
 /// it is about this very wait. A red with no reason known (the daemon
 /// restarted) is taken to be the same wait.
 fn closes(
@@ -983,6 +1014,7 @@ fn closes(
     status: AgentStatus,
     reason: Option<&WaitReason>,
     sends: bool,
+    away: bool,
 ) -> Option<Close> {
     if status_of(message.kind) != status {
         return Some(Close::AnsweredInOrion);
@@ -990,10 +1022,11 @@ fn closes(
     let newer = status == AgentStatus::NeedsFeedback
         && reason.is_some()
         && message.reason.as_ref() != reason;
-    match (newer, sends) {
-        (false, _) => None,
-        (true, true) => Some(Close::MovedOn),
-        (true, false) => Some(Close::AnsweredInOrion),
+    match (newer, sends, away) {
+        (false, _, _) => None,
+        (true, true, _) => Some(Close::MovedOn),
+        (true, false, true) => Some(Close::Superseded),
+        (true, false, false) => Some(Close::AnsweredInOrion),
     }
 }
 
@@ -1030,6 +1063,13 @@ impl Daemon {
         let Some(session) = self.slack.session() else {
             return;
         };
+        // Red with no reason (Claude's deferred notification, a restart):
+        // the dialog the transcript ends on, so the message has its
+        // question's buttons and an answer is typed into that dialog.
+        let reason = match (status, reason) {
+            (AgentStatus::NeedsFeedback, None) => self.wait_reason_off_thread(agent).await,
+            (_, reason) => reason,
+        };
         let _one_at_a_time = POSTING.lock().await;
         let kind = kind_of(status, reason.as_ref());
         // A plan with nothing to build has the No-change card instead, and
@@ -1038,8 +1078,9 @@ impl Daemon {
             && !factory_verdict(reason.as_ref())
             && !(kind == Some(PhoneKind::Crash) && self.builds_tickets(agent));
         let mut already_up = false;
+        let away = self.away.is_away();
         for message in self.store.open_phone_messages(agent).unwrap_or_default() {
-            match closes(&message, status, reason.as_ref(), sends) {
+            match closes(&message, status, reason.as_ref(), sends, away) {
                 Some(close) => self.close_message(&session, message, close).await,
                 None => already_up = true,
             }
@@ -1110,8 +1151,12 @@ impl Daemon {
         let (api, dm) = (session.api.clone(), session.dm.clone());
         let Some(ts) = slack("chat.postMessage", move || {
             let ts = api.post(&dm, &built.text, Some(&built.blocks), None)?;
+            // The message is up: one of its overflow sections failing
+            // must not leave it unrecorded, its buttons answering nothing.
             for more in &built.overflow {
-                api.post(&dm, more, None, Some(&ts))?;
+                if let Err(e) = api.post(&dm, more, None, Some(&ts)) {
+                    tracing::warn!(error = %e, "a phone message's overflow not posted");
+                }
             }
             Ok(ts)
         })
@@ -1154,6 +1199,7 @@ impl Daemon {
         let quiet = crate::config::Config::cached()
             .away
             .is_quiet(crate::away::local_minute());
+        self.close_stale(&session).await;
         if !quiet && self.away.take_departure() {
             let resent = self.resend_open(&session).await;
             if resent > 0 {
@@ -1167,15 +1213,17 @@ impl Daemon {
                 return;
             }
         };
-        let tried = {
-            // A wait that is over is forgotten.
+        let tried: Vec<(AgentId, i64)> = {
+            // A wait that is over is forgotten, and one tried long enough
+            // ago is tried again.
             let mut failed = FLUSH_FAILED.lock().unwrap();
-            failed.retain(|(id, at)| {
-                waiting
-                    .iter()
-                    .any(|a| &a.id == id && a.status_changed_at == *at)
+            failed.retain(|(id, at, when)| {
+                when.elapsed() < FLUSH_RETRY
+                    && waiting
+                        .iter()
+                        .any(|a| &a.id == id && a.status_changed_at == *at)
             });
-            failed.clone()
+            failed.iter().map(|(id, at, _)| (id.clone(), *at)).collect()
         };
         let mut sent = 0;
         for agent in waiting {
@@ -1183,14 +1231,7 @@ impl Daemon {
             if tried.contains(&wait) {
                 continue;
             }
-            let reason = {
-                let daemon = self.clone();
-                let id = agent.id.clone();
-                tokio::task::spawn_blocking(move || daemon.wait_reason(&id))
-                    .await
-                    .ok()
-                    .flatten()
-            };
+            let reason = self.wait_reason_off_thread(&agent.id).await;
             let Some(kind) = kind_of(AgentStatus::NeedsFeedback, reason.as_ref()) else {
                 continue;
             };
@@ -1199,11 +1240,92 @@ impl Daemon {
             }
             match self.phone_post(&session, &agent.id, kind, reason).await {
                 true => sent += 1,
-                false => FLUSH_FAILED.lock().unwrap().push(wait),
+                false => {
+                    FLUSH_FAILED
+                        .lock()
+                        .unwrap()
+                        .push((wait.0, wait.1, std::time::Instant::now()))
+                }
             }
         }
         if sent > 0 {
             tracing::info!(sent, "away: sessions already waiting to the phone");
+        }
+    }
+
+    /// Close every open message whose session has moved on
+    /// ([`Daemon::moved_on`]): its buttons would act on whatever it is
+    /// doing now. A
+    /// status change while Slack was down, or one before the bridge was
+    /// listening (a restart sweeps red rows to disconnected and resumes
+    /// them, broadcasting nothing it could hear), left them up. The
+    /// caller holds [`POSTING`].
+    async fn close_stale(&self, session: &Arc<Session>) {
+        for message in self
+            .store
+            .open_phone_messages_in(&session.dm)
+            .unwrap_or_default()
+        {
+            if self.moved_on(&message) {
+                self.close_message(session, message, Close::AnsweredInOrion)
+                    .await;
+            }
+        }
+    }
+
+    /// Whether `message`'s session no longer waits as it was about: gone,
+    /// or in another state than the message's — save disconnected (not
+    /// running since a restart), which an answer boots with the answer as
+    /// its next turn.
+    fn moved_on(&self, message: &PhoneMessage) -> bool {
+        match self.store.get_agent(&message.agent).ok().flatten() {
+            Some(agent) => {
+                agent.status != status_of(message.kind) && agent.status != AgentStatus::Disconnected
+            }
+            None => true,
+        }
+    }
+
+    /// Once Slack first signs in, the messages a restart left up over
+    /// sessions that moved on are closed ([`Daemon::close_stale`]).
+    pub(crate) async fn phone_close_stale_once_signed_in(self: &Arc<Self>) {
+        self.slack.until_connected().await;
+        let Some(session) = self.slack.session() else {
+            return;
+        };
+        let _one_at_a_time = POSTING.lock().await;
+        self.close_stale(&session).await;
+    }
+
+    /// The message a reply on `message` is for: itself, or — closed as
+    /// re-sent below, its session still waiting just so — the copy that
+    /// replaced it. A thread you already had open, or a modal opened on
+    /// the old copy, answers the wait instead of "already answered".
+    fn reply_target(&self, message: PhoneMessage, open: bool) -> (PhoneMessage, bool) {
+        if open
+            || self
+                .store
+                .phone_message_answered(&message.channel, &message.ts)
+                .ok()
+                .flatten()
+                .as_deref()
+                != Some(Close::Resent.by())
+        {
+            return (message, open);
+        }
+        let newer = self
+            .store
+            .open_phone_messages(&message.agent)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| m.kind == message.kind && m.channel == message.channel)
+            .max_by(|a, b| {
+                let ts = |m: &PhoneMessage| m.ts.parse::<f64>().unwrap_or(0.0);
+                ts(a).total_cmp(&ts(b))
+            });
+        match newer {
+            Some(newer) => (newer, true),
+            None => (message, false),
         }
     }
 
@@ -1259,13 +1381,7 @@ impl Daemon {
             }
             let reason = match status {
                 AgentStatus::NeedsFeedback => {
-                    let daemon = self.clone();
-                    let id = agent.clone();
-                    tokio::task::spawn_blocking(move || daemon.wait_reason(&id))
-                        .await
-                        .ok()
-                        .flatten()
-                        .or(fallback)
+                    self.wait_reason_off_thread(&agent).await.or(fallback)
                 }
                 _ => fallback,
             };
@@ -1349,10 +1465,10 @@ impl Daemon {
         let Target::Message(ts) = &route.target else {
             return None;
         };
-        let open = matches!(
-            self.store.phone_message(&session.dm, ts),
-            Ok(Some((_, true)))
-        );
+        let open = match self.store.phone_message(&session.dm, ts) {
+            Ok(Some((message, open))) => self.reply_target(message, open).1,
+            _ => false,
+        };
         submission_errors(&payload["view"], &route.reply, open)
     }
 
@@ -1379,9 +1495,9 @@ impl Daemon {
         message: PhoneMessage,
         backlog: bool,
     ) {
-        let _ = self
-            .store
-            .set_phone_answered(&message.channel, &message.ts, Some("phone"));
+        let _ =
+            self.store
+                .set_phone_answered(&message.channel, &message.ts, Some(ANSWERED_BY_PHONE));
         tracing::info!(agent = %message.agent, "not for orion, from the phone");
         let blocks: Vec<Value> = serde_json::from_str(&message.blocks).unwrap_or_default();
         let blocks = not_for_factory(&blocks, backlog);
@@ -1419,12 +1535,22 @@ impl Daemon {
         let Target::Message(ts) = &route.target else {
             if self.phone_resend(session).await == 0 {
                 say(NOTHING_WAITING.into(), None).await;
+            } else if matches!(route.reply, Reply::Words(_)) {
+                say(DM_WORDS_NOT_SENT.into(), None).await;
             }
             return;
         };
         let Some((message, open)) = self.phone_message_soon(&session.dm, ts).await else {
+            tracing::warn!(%ts, "a phone reply on a message orion has no record of");
+            say(
+                "orion has no record of that message: answer the newest one, or at your desk."
+                    .into(),
+                Some(ts.clone()),
+            )
+            .await;
             return;
         };
+        let (message, open) = self.reply_target(message, open);
         let reason = message.reason.clone().or_else(|| {
             self.wait_reasons
                 .lock()
@@ -1444,6 +1570,15 @@ impl Daemon {
             say(format!("{ALREADY_ANSWERED}."), thread).await;
             return;
         }
+        // Its session moved on without the message hearing (a restart, a
+        // status change while Slack was down): an answer now would land
+        // in whatever it is doing instead.
+        if self.moved_on(&message) {
+            self.close_message(session, message, Close::AnsweredInOrion)
+                .await;
+            say(format!("{ALREADY_ANSWERED}."), thread).await;
+            return;
+        }
         if let Reply::NotForFactory { backlog } = route.reply {
             self.phone_not_for_factory(session, message, backlog).await;
             return;
@@ -1453,9 +1588,9 @@ impl Daemon {
         };
         // Marked first: the status change the answer causes must not
         // read as an answer at the desk.
-        let _ = self
-            .store
-            .set_phone_answered(&message.channel, &message.ts, Some("phone"));
+        let _ =
+            self.store
+                .set_phone_answered(&message.channel, &message.ts, Some(ANSWERED_BY_PHONE));
         tracing::info!(agent = %message.agent, ?answer, "answered from the phone");
         let said = summary(reason.as_ref(), &answer);
         let before = self.waiting(&message.agent).await;
@@ -1817,31 +1952,43 @@ mod tests {
         };
         let red = AgentStatus::NeedsFeedback;
         assert_eq!(
-            closes(&on_plan, AgentStatus::Running, None, true),
+            closes(&on_plan, AgentStatus::Running, None, true, true),
             Some(Close::AnsweredInOrion)
         );
         assert_eq!(
-            closes(&on_plan, red, Some(&asked), true),
+            closes(&on_plan, red, Some(&asked), true, true),
             Some(Close::MovedOn)
         );
         assert_eq!(
-            closes(&on_plan, red, Some(&asked), false),
+            closes(&on_plan, red, Some(&asked), false, false),
             Some(Close::AnsweredInOrion),
             "nothing is posted below it at the desk"
         );
         assert_eq!(
-            closes(&on_plan, red, Some(&plan), true),
+            closes(&on_plan, red, Some(&asked), false, true),
+            Some(Close::Superseded),
+            "away in quiet hours: not answered in orion, and nothing below yet"
+        );
+        assert_eq!(
+            closes(&on_plan, red, Some(&plan), true, true),
             None,
             "the same plan"
         );
-        assert_eq!(closes(&on_plan, red, None, true), None, "no reason known");
+        assert_eq!(
+            closes(&on_plan, red, None, true, true),
+            None,
+            "no reason known"
+        );
         let crash = PhoneMessage {
             kind: PhoneKind::Crash,
             ..message(None)
         };
-        assert_eq!(closes(&crash, AgentStatus::Terminated, None, true), None);
         assert_eq!(
-            closes(&crash, AgentStatus::Running, None, true),
+            closes(&crash, AgentStatus::Terminated, None, true, true),
+            None
+        );
+        assert_eq!(
+            closes(&crash, AgentStatus::Running, None, true, true),
             Some(Close::AnsweredInOrion)
         );
     }
@@ -2138,5 +2285,54 @@ mod tests {
             trigger: "T".into(),
         };
         assert_eq!(answer_for(PhoneKind::Plan, modal), None);
+    }
+
+    /// A reply in the thread of a copy re-sent below goes to the copy that
+    /// replaced it while the session still waits; a message whose session
+    /// moved on (a restart resumed it working) answers nothing — save a
+    /// disconnected one, which an answer boots.
+    #[test]
+    fn a_reply_on_a_resent_copy_reaches_its_wait_and_a_moved_on_one_nothing() {
+        use crate::registry::tests::{seed_agent, seed_projects, seed_worktree, test_daemon};
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["p"]);
+        seed_worktree(&daemon, "p", "root", "/orion-test/p", true);
+        seed_agent(&daemon, "a1", "root", None);
+        let id = AgentId("a1".into());
+        daemon
+            .store
+            .set_agent_status(&id, AgentStatus::NeedsFeedback)
+            .unwrap();
+        let at = |ts: &str| PhoneMessage {
+            ts: ts.into(),
+            agent: id.clone(),
+            ..message(Some(question()))
+        };
+        let (old, new) = (at("100.1"), at("200.1"));
+        daemon.store.insert_phone_message(&old).unwrap();
+        daemon.store.insert_phone_message(&new).unwrap();
+        daemon
+            .store
+            .set_phone_answered(&old.channel, &old.ts, Some(Close::Resent.by()))
+            .unwrap();
+        let (target, open) = daemon.reply_target(old.clone(), false);
+        assert_eq!((target.ts.as_str(), open), ("200.1", true));
+
+        // Answered (not re-sent): refused as before.
+        daemon
+            .store
+            .set_phone_answered(&old.channel, &old.ts, Some(ANSWERED_BY_PHONE))
+            .unwrap();
+        assert!(!daemon.reply_target(old.clone(), false).1);
+
+        assert!(!daemon.moved_on(&new), "still waiting");
+        for (status, moved) in [
+            (AgentStatus::Disconnected, false),
+            (AgentStatus::Running, true),
+            (AgentStatus::Finished, true),
+        ] {
+            daemon.store.set_agent_status(&id, status).unwrap();
+            assert_eq!(daemon.moved_on(&new), moved, "{status:?}");
+        }
     }
 }

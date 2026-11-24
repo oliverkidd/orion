@@ -14,15 +14,22 @@
 //! - **One message per key**: where each card went is kept in the store
 //!   (`factory_messages`), by the TUI's key. A second post under a key
 //!   edits that message in place (`chat.update`) — unless it shows just
-//!   that already; `UpdateFactoryCard` only ever edits. A message gone
-//!   from Slack is posted afresh. A card nothing has touched in
+//!   that already, or the card is `fresh` (new to the TUI, or back after
+//!   it was closed): that is news, so it is posted at the foot of the DM,
+//!   where it notifies, and the old one loses any buttons it had
+//!   ([`POSTED_AGAIN`]). `UpdateFactoryCard` only ever edits; one whose
+//!   message is gone from Slack forgets it. A post whose message is gone
+//!   is posted afresh. A card for Slack while Slack is still signing in
+//!   (a daemon start, a wake) waits [`SIGN_IN_WAIT`] for it rather than
+//!   failing. A card nothing has touched in
 //!   [`crate::store::FACTORY_MESSAGES_KEEP_MS`] is forgotten as the
 //!   daemon starts.
 //! - **Pictures**: a card's `image` is uploaded into its thread
 //!   (`files.getUploadURLExternal`, the bytes, then
 //!   `files.completeUploadExternal`; `files:write`) — again only when it
 //!   is not the one uploaded last. One that can't be says so in the
-//!   thread; the card itself stands.
+//!   thread, once — again only when the network stopped it; the card
+//!   itself stands.
 //! - **Buttons**: `action_id` `orion_factory_<n>` (one tap) or
 //!   `orion_factory_type_<n>` (words first: the same text modal as the
 //!   phone's `Type an answer…`), `value` `<key>|<action>`. A link button
@@ -41,9 +48,11 @@
 //!   every card it posts in orion — a badge on its session, a line in the
 //!   footer, Needs you — and its buttons work there. As you go away,
 //!   every card still held goes to Slack, once ([`Daemon::factory_flush`],
-//!   on each away poll and on ⌘⇧A); one answered in orion first was
+//!   on each away poll and on ⌘⇧A) — one the network or a sign-in stops
+//!   is held again for the next; one answered in orion first was
 //!   dropped by its `UpdateFactoryCard` and never goes. A card already on
-//!   Slack is edited there whoever is at the desk, and a card to someone
+//!   Slack is edited there whoever is at the desk (a fresh one is held
+//!   like any new card), and a card to someone
 //!   else (the thin-ticket DM) never waits ([`post_route`]).
 //! - **Scopes**: a bot installed before the factory lacks
 //!   `users:read.email` and `files:write`. Phone messages never need
@@ -78,6 +87,12 @@ const GONE: [&str; 3] = [
 /// the first one's message, and the TUI's rewrite after a press must land
 /// after the press's own `✓`.
 static SENDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// What an old card says once a fresh one under its key went below it.
+const POSTED_AGAIN: &str = "↓ Posted again below";
+
+/// How long a card for Slack waits on a sign-in under way before it fails.
+const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// A posted factory card, as the store keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -321,11 +336,31 @@ impl Daemon {
         });
     }
 
-    async fn factory_send(self: &Arc<Self>, card: FactoryCard, may_post: bool) {
-        let _one_at_a_time = SENDING.lock().await;
+    async fn factory_send(self: &Arc<Self>, mut card: FactoryCard, may_post: bool) {
         let key = card.key.clone();
+        // A post under a key whose fresh card is still held is that same
+        // news, rewritten before it went out (the TUI sends it not fresh,
+        // its card being up there): it stays fresh, so it is held in turn
+        // or posted at the foot — never edited into the old message.
+        if may_post && self.store.held_factory_card_is_fresh(&key).unwrap_or(false) {
+            card.fresh = true;
+        }
+        // An edit of the message already up under the key.
+        let on_slack =
+            !(may_post && card.fresh) && self.store.factory_message(&key).ok().flatten().is_some();
+        // Slack not signed in yet — the daemon just started, the Mac just
+        // woke — is a few seconds' wait, not a failure, for a card that
+        // can only go there: one to someone else, or an edit of one up.
+        // Closes sent then used to fail outright, their buttons left live.
+        // A card that would be held at the desk doesn't wait.
+        let needs_slack = matches!(card.to, CardRecipient::Email(_)) || on_slack;
+        if needs_slack && !self.slack.connected() {
+            let _ = tokio::time::timeout(SIGN_IN_WAIT, self.slack.until_connected()).await;
+        }
+        let _one_at_a_time = SENDING.lock().await;
         if may_post {
-            let on_slack = self.store.factory_message(&key).ok().flatten().is_some();
+            // A fresh card is news, not an edit of the one up: at the desk
+            // it waits like any new card, whatever is on Slack under its key.
             if post_route(&card.to, self.factory_to_slack(), on_slack) == PostRoute::Hold {
                 if let Err(e) = self.store.hold_factory_card(&card) {
                     tracing::warn!(error = %e, %key, "factory card not held");
@@ -374,7 +409,10 @@ impl Daemon {
             let key = card.key.clone();
             match self.factory_send_or_fail(card.clone(), true).await {
                 Ok(()) => {}
-                Err(FactoryCardFailure::NotConnected) => {
+                // Slack signing in again after a wake, the network not back
+                // yet, a rate limit: held again for the next look, not lost.
+                Err(reason) if reason.is_transient() => {
+                    tracing::info!(%key, ?reason, "held factory card held again");
                     let _ = self.store.hold_factory_card(&card);
                 }
                 Err(reason) => {
@@ -397,7 +435,18 @@ impl Daemon {
             .ok_or(FactoryCardFailure::NotConnected)?;
         let blocks: Vec<Value> = card.blocks.as_array().cloned().unwrap_or_default();
         let shown = Value::from(blocks.clone()).to_string();
-        let posted = self.store.factory_message(&card.key).ok().flatten();
+        let posted = match self.store.factory_message(&card.key).ok().flatten() {
+            // New news under an old key: the message up there stays as it
+            // was, its buttons gone if it still had any, and this one goes
+            // at the foot of the DM, where it notifies. Edited in place, a
+            // verdict on a pull request sent back days ago changed a
+            // message far up the DM and nobody heard.
+            Some(old) if may_post && card.fresh => {
+                self.factory_retire(&session, old).await;
+                None
+            }
+            posted => posted,
+        };
         let updated = match posted {
             // Already showing just this: nothing to edit.
             Some(message) if message.text == card.text && message.blocks == shown => Some(message),
@@ -416,6 +465,13 @@ impl Daemon {
                     }
                     // Gone from Slack: post it afresh.
                     Err(e) if may_post && GONE.contains(&e.as_str()) => None,
+                    // Gone, and only an edit (a close): nothing left to
+                    // edit, so forget it rather than fail on it each time.
+                    Err(e) if GONE.contains(&e.as_str()) => {
+                        tracing::info!(key = %card.key, error = %e, "factory card gone from Slack");
+                        let _ = self.store.forget_factory_message(&card.key);
+                        return Ok(());
+                    }
                     Err(e) => return Err(failure(&e, "chat:write")),
                 }
             }
@@ -430,6 +486,9 @@ impl Daemon {
             None => self.factory_post_new(&session, &card, &blocks).await?,
         };
         if let Some(image) = card.image.filter(|i| message.image.as_ref() != Some(i)) {
+            // Tried once per picture unless the network stopped it: a
+            // refusal (no files:write) noted in the thread on every edit
+            // since was the same note again and again.
             if self.factory_upload(&session, &message, &image).await {
                 message.image = Some(image);
             }
@@ -438,6 +497,18 @@ impl Daemon {
             tracing::warn!(error = %e, key = %message.key, "factory card not recorded");
         }
         Ok(())
+    }
+
+    /// `old`, about to be followed by a fresh post under its key: any
+    /// buttons it still shows go, saying where its news went.
+    async fn factory_retire(&self, session: &Arc<Session>, old: FactoryMessage) {
+        let blocks: Vec<Value> = serde_json::from_str(&old.blocks).unwrap_or_default();
+        if !blocks.iter().any(|b| b["type"] == "actions") {
+            return;
+        }
+        let blocks = crate::phone::closed(&blocks, POSTED_AGAIN.to_string());
+        let (api, text) = (session.api.clone(), old.text.clone());
+        let _ = blocking(move || api.update(&old.channel, &old.ts, &text, &blocks)).await;
     }
 
     /// Post `card` afresh to whoever it is for.
@@ -482,7 +553,8 @@ impl Daemon {
     }
 
     /// Upload `image` into `message`'s thread. One that can't be says so
-    /// there; false then.
+    /// there. Whether it is done with: uploaded, or refused for good —
+    /// false only when the network or Slack stopped it, to try again.
     async fn factory_upload(
         &self,
         session: &Arc<Session>,
@@ -503,6 +575,7 @@ impl Daemon {
         let Err(e) = uploaded else {
             return true;
         };
+        let again = orion_core::transient_slack_error(&e);
         let why = match e.as_str() {
             "missing_scope" => {
                 if !SAID_SCOPE.swap(true, Ordering::Relaxed) {
@@ -518,7 +591,7 @@ impl Daemon {
         let (api, m) = (session.api.clone(), message.clone());
         let note = format!("The picture wasn't uploaded: {why}");
         let _ = blocking(move || api.post(&m.channel, &note, None, Some(&m.ts))).await;
-        false
+        !again
     }
 
     /// A press on a factory card (or its modal's submit): the modal
@@ -659,6 +732,7 @@ mod tests {
     async fn a_card_held_then_closed_in_orion_never_reaches_slack() {
         let daemon = crate::registry::tests::test_daemon();
         let card = FactoryCard {
+            fresh: false,
             key: "issue:R-1:stalled".into(),
             to: CardRecipient::Owner,
             text: "R-1".into(),
@@ -673,6 +747,52 @@ mod tests {
         daemon.factory_send(card.clone(), false).await;
         assert!(!daemon.store.any_held_factory_cards().unwrap(), "dropped");
         assert!(events.try_recv().is_err());
+    }
+
+    /// A pull request's verdict re-posted after its card was closed is
+    /// news: at the desk it is held like a new card, not edited into the
+    /// old message on Slack (which nobody would hear about). The same post
+    /// not fresh — the card still up — edits there as before.
+    #[tokio::test]
+    async fn a_fresh_card_under_an_old_key_is_held_at_the_desk() {
+        let daemon = crate::registry::tests::test_daemon();
+        let key = "pr:https://x/7:verdict";
+        daemon
+            .store
+            .upsert_factory_message(&FactoryMessage {
+                key: key.into(),
+                channel: "D1".into(),
+                ts: "1.1".into(),
+                recipient: "U1".into(),
+                text: "#7".into(),
+                blocks: "[]".into(),
+                image: None,
+            })
+            .unwrap();
+        let card = FactoryCard {
+            fresh: true,
+            key: key.into(),
+            to: CardRecipient::Owner,
+            text: "#7 again".into(),
+            blocks: json!([]),
+            image: None,
+        };
+        daemon.factory_send(card.clone(), true).await;
+        assert!(daemon.store.any_held_factory_cards().unwrap(), "held");
+        // Rewritten while held (the TUI sends it not fresh, its card up):
+        // still the fresh news, held — not edited into the old message.
+        let rewritten = FactoryCard {
+            fresh: false,
+            text: "#7 again, rewritten".into(),
+            ..card.clone()
+        };
+        daemon.factory_send(rewritten, true).await;
+        assert!(daemon.store.held_factory_card_is_fresh(key).unwrap());
+        assert_eq!(
+            post_route(&card.to, false, true),
+            PostRoute::Slack,
+            "not fresh: edited where it is"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 60;
+pub const PROTOCOL_VERSION: u32 = 61;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -460,6 +460,16 @@ pub enum ClientRequest {
     /// new `SlackStatus`.
     SlackReconnect,
 
+    /// Fire-and-forget: send this client, as `SlackMessage` events, every
+    /// Slack message the daemon kept (`slack_inbox`) newer than `since` (a
+    /// Slack `ts`; None: all it keeps), oldest first — what arrived while
+    /// this client wasn't listening, and what the daemon caught up on from
+    /// Slack's history after a gap in its own socket (the Mac asleep). A
+    /// client sends it as it subscribes, and skips what it has seen.
+    SlackBacklog {
+        since: Option<String>,
+    },
+
     /// Fire-and-forget: post a FACTORY CARD — a Slack message from orion's
     /// bot that no session's wait owns (a pull request's verdict, a thin
     /// ticket's question to its reporter, the daily rules). The daemon
@@ -591,7 +601,8 @@ pub mod slack_caps {
 pub struct FactoryCard {
     /// The TUI's stable id for it, such as `pr:<url>:verdict` or
     /// `issue:<id>:thin`: a second post under the same key edits the
-    /// message in place, and the key leads every button value
+    /// message in place (a `fresh` one posts anew), and the key leads
+    /// every button value
     /// (`<key>|<action>`).
     pub key: String,
     /// Whose DM it goes to.
@@ -603,6 +614,13 @@ pub struct FactoryCard {
     /// A picture uploaded into the message's thread — a PR's before and
     /// after grid.
     pub image: Option<PathBuf>,
+    /// New news under the key, not an edit of what is up: the card is new
+    /// to the TUI, or back after it was closed or acted on. A message
+    /// already on Slack under its key — closed, far up the DM — is left
+    /// as it is and this one posted at the foot, where it notifies; an
+    /// edit in place notifies nobody. Held at the desk like any new card.
+    #[serde(default)]
+    pub fresh: bool,
 }
 
 /// Who a factory card is for.
@@ -638,6 +656,45 @@ pub enum FactoryCardFailure {
     MissingScope(String),
     /// Anything else Slack refused, as one line.
     Other(String),
+}
+
+impl FactoryCardFailure {
+    /// Whether the post may well go through if sent again later: Slack
+    /// not signed in yet (a daemon start, a wake from sleep), or a
+    /// network, rate-limit or Slack-side failure ([`transient_slack_error`]).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            FactoryCardFailure::NotConnected => true,
+            FactoryCardFailure::Other(why) => transient_slack_error(why),
+            FactoryCardFailure::NotOnSlack | FactoryCardFailure::MissingScope(_) => false,
+        }
+    }
+}
+
+/// Whether a Slack call's error (as `slack::api` words it) is the
+/// network's or Slack's passing trouble rather than a refusal: no DNS, no
+/// connection, a timeout or reset (curl's 6, 7, 28, 35, 52, 55, 56), a rate
+/// limit, a 5xx, or Slack's own `internal_error`-style codes.
+pub fn transient_slack_error(why: &str) -> bool {
+    const SIGNS: [&str; 16] = [
+        "Could not resolve host",
+        "curl: (6)",
+        "curl: (7)",
+        "curl: (28)",
+        "curl: (35)",
+        "curl: (52)",
+        "curl: (55)",
+        "curl: (56)",
+        "ratelimited",
+        "answered HTTP 5",
+        "internal_error",
+        "fatal_error",
+        "service_unavailable",
+        "request_timeout",
+        "timed out",
+        "Connection reset",
+    ];
+    SIGNS.iter().any(|sign| why.contains(sign))
 }
 
 /// What a new session launches as — its harness (a Claude account is
@@ -908,6 +965,7 @@ pub enum ServerEvent {
 
 #[cfg(test)]
 mod stack_tests {
+
     use super::*;
 
     /// A factory card's blocks are JSON inside a msgpack frame: they come
@@ -915,6 +973,7 @@ mod stack_tests {
     #[test]
     fn factory_frames_round_trip() {
         let card = FactoryCard {
+            fresh: false,
             key: "pr:https://github.com/o/r/pull/7:verdict".into(),
             to: CardRecipient::Email("ann@example.com".into()),
             text: "Fix the login loop".into(),
@@ -974,5 +1033,35 @@ mod stack_tests {
             panic!("{back:?}");
         };
         assert_eq!(statuses[0].1.ports(), [3000]);
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn passing_slack_trouble_is_worth_another_try_and_a_refusal_is_not() {
+        for why in [
+            "curl: (6) Could not resolve host: slack.com",
+            "curl: (56) Recv failure: Connection reset by peer",
+            "ratelimited",
+            "chat.postMessage answered HTTP 503",
+            "internal_error",
+        ] {
+            assert!(
+                FactoryCardFailure::Other(why.into()).is_transient(),
+                "{why}"
+            );
+        }
+        assert!(FactoryCardFailure::NotConnected.is_transient());
+        for failure in [
+            FactoryCardFailure::Other("invalid_blocks".into()),
+            FactoryCardFailure::Other("cant_update_message".into()),
+            FactoryCardFailure::MissingScope("files:write".into()),
+            FactoryCardFailure::NotOnSlack,
+        ] {
+            assert!(!failure.is_transient(), "{failure:?}");
+        }
     }
 }

@@ -38,6 +38,14 @@ pub const KEEP_EVENTS: usize = 200;
 const KEEP_WAITING: usize = 200;
 /// How many threads you've posted in are remembered.
 const KEEP_THREADS: usize = 500;
+/// How many messages taken in are remembered by id ([`Kept::seen`]).
+const KEEP_SEEN: usize = 1000;
+/// How far before the newest message seen a backlog starts: the daemon's
+/// catch-up can keep a message older than one already heard live.
+const BACKLOG_OVERLAP_SECS: u64 = 12 * 60 * 60;
+/// A message older than this when it arrives (a backlog's, a catch-up's)
+/// makes its card but rings no banner.
+const BANNER_FRESH_SECS: i64 = 10 * 60;
 
 /// The subtypes that are someone saying something; every other
 /// (`message_changed`, `channel_join`, `bot_message`, …) is not.
@@ -169,9 +177,28 @@ pub struct Kept {
     pub users: BTreeMap<String, String>,
     /// Channel names (no `#`) by channel id.
     pub channels: BTreeMap<String, String>,
+    /// `(channel, ts)` of the last [`KEEP_SEEN`] messages that made a
+    /// card, the newest last: a backlog the daemon replays
+    /// (`SlackBacklog`) skips them, so a card hidden with `⌘D` stays
+    /// hidden.
+    pub seen: Vec<(String, String)>,
 }
 
 impl Kept {
+    fn has_seen(&self, channel: &str, ts: &str) -> bool {
+        self.seen.iter().any(|(c, t)| c == channel && t == ts)
+    }
+
+    fn remember_seen(&mut self, channel: &str, ts: &str) {
+        if self.has_seen(channel, ts) {
+            return;
+        }
+        self.seen.push((channel.to_string(), ts.to_string()));
+        if self.seen.len() > KEEP_SEEN {
+            self.seen.remove(0);
+        }
+    }
+
     fn in_thread(&self, channel: &str, thread: &str) -> bool {
         self.threads
             .iter()
@@ -586,6 +613,24 @@ pub fn loaded(app: &mut App) {
     app.needs_you.slack.base = app.needs_you.store.slack.clone();
 }
 
+/// What to ask the daemon for as this TUI subscribes: the messages it
+/// kept or caught up on since a little before the newest one seen here
+/// ([`BACKLOG_OVERLAP_SECS`]) — what arrived while orion was closed, or
+/// while Slack's socket was down — or all it keeps, with none seen yet.
+pub fn backlog(app: &App) -> orion_core::ClientRequest {
+    let newest = app
+        .needs_you
+        .store
+        .slack
+        .seen
+        .iter()
+        .map(|(_, ts)| ts_key(ts).0)
+        .max();
+    orion_core::ClientRequest::SlackBacklog {
+        since: newest.map(|secs| format!("{}.000000", secs.saturating_sub(BACKLOG_OVERLAP_SECS))),
+    }
+}
+
 /// A name for `user` from a message event's own `user_profile`, which
 /// Slack sometimes sends with it.
 fn profile_name(event_json: &str) -> Option<String> {
@@ -601,7 +646,8 @@ pub fn heard(app: &mut App, m: Message, event_json: &str) {
         .slack
         .events
         .iter()
-        .any(|e| e.channel == m.channel && e.ts == m.ts);
+        .any(|e| e.channel == m.channel && e.ts == m.ts)
+        || app.needs_you.store.slack.has_seen(&m.channel, &m.ts);
     if heard_before {
         return;
     }
@@ -619,6 +665,13 @@ pub fn heard(app: &mut App, m: Message, event_json: &str) {
         }
     }
     let why = apply(&mut next, &m, &who);
+    // Only a message that made a card is remembered: replayed, one that
+    // made none makes none again, and remembering every message would
+    // save the store on each one.
+    if why.is_some() {
+        next.remember_seen(&m.channel, &m.ts);
+        app.needs_you.slack.base.remember_seen(&m.channel, &m.ts);
+    }
     let want_channel = !m.direct()
         && !next.channels.contains_key(&m.channel)
         && (why.is_some() || !who.settings.channels.is_empty());
@@ -627,11 +680,13 @@ pub fn heard(app: &mut App, m: Message, event_json: &str) {
             .waiting
             .iter()
             .find(|w| w.channel == m.channel && w.ts == m.ts);
-        let banner = match who.settings.banner {
-            BannerWhen::Every => true,
-            BannerWhen::DmsAndMentions => matches!(why, Why::Direct | Why::Mention),
-            BannerWhen::Never => false,
-        };
+        let fresh = (Utc::now() - time_of(&m.ts)).num_seconds() < BANNER_FRESH_SECS;
+        let banner = fresh
+            && match who.settings.banner {
+                BannerWhen::Every => true,
+                BannerWhen::DmsAndMentions => matches!(why, Why::Direct | Why::Mention),
+                BannerWhen::Never => false,
+            };
         if let (true, Some(w)) = (banner, w) {
             app.needs_you.slack.banners.push(w.clone());
         }
@@ -790,6 +845,12 @@ mod tests {
         }
     }
 
+    /// A Slack `ts` `n` seconds into the last minute: a message fresh
+    /// enough to ring its banner.
+    fn recent(n: i64) -> String {
+        format!("{}.000000", Utc::now().timestamp() - 60 + n)
+    }
+
     fn reply(m: Message, thread: &str) -> Message {
         Message {
             thread_ts: Some(thread.into()),
@@ -823,13 +884,14 @@ mod tests {
     fn a_real_message_event_becomes_a_card() {
         let mut app = App::new();
         app.slack_status.user_id = Some(ME.into());
+        let ts = recent(5);
         let event = serde_json::json!({
             "type": "message",
             "channel": "C024BE91L",
             "user": "U2147483697",
             "text": "<@U0ME> Live long and prospect.\nSecond line",
-            "ts": "1355517523.000005",
-            "event_ts": "1355517523.000005",
+            "ts": ts,
+            "event_ts": ts,
             "channel_type": "channel"
         });
         let (m, json) = Message::of(forwarded(&event)).unwrap();
@@ -850,13 +912,13 @@ mod tests {
         assert_eq!(card.section, Section::Slack);
         assert_eq!(card.title, "Spock: @someone Live long and prospect.");
         assert_eq!(card.sub, "#bridge · mentions you");
-        assert_eq!(card.since, time_of("1355517523.000005"));
+        assert_eq!(card.since, time_of(&ts));
         assert_eq!(
             card.target,
             CardTarget::SlackMessage {
                 channel: "C024BE91L".into(),
-                root: Some("1355517523.000005".into()),
-                ts: "1355517523.000005".into(),
+                root: Some(ts.clone()),
+                ts: ts.clone(),
             }
         );
         // Its banner is due at once: no ask is out for the name.
@@ -985,7 +1047,8 @@ mod tests {
     fn a_message_heard_twice_is_one_card_and_one_banner() {
         let mut app = App::new();
         app.slack_status.user_id = Some(ME.into());
-        let m = msg("D1", "im", "U1", "hi", "1.000001");
+        let (first, second) = (recent(1), recent(2));
+        let m = msg("D1", "im", "U1", "hi", &first);
         heard(&mut app, m.clone(), "{}");
         heard(&mut app, m, "{}");
         assert_eq!(app.needs_you.store.slack.waiting.len(), 1);
@@ -993,7 +1056,7 @@ mod tests {
         // A later message in the same DM moves the one card on.
         heard(
             &mut app,
-            msg("D1", "im", "U1", "still there?", "2.000000"),
+            msg("D1", "im", "U1", "still there?", &second),
             "{}",
         );
         let kept = &app.needs_you.store.slack;
@@ -1001,7 +1064,7 @@ mod tests {
         assert_eq!(kept.waiting[0].text, "still there?");
         // The same message again, as a store kept since a restart has it.
         let mut kept = kept.clone();
-        let again = msg("D1", "im", "U1", "still there?", "2.000000");
+        let again = msg("D1", "im", "U1", "still there?", &second);
         assert_eq!(apply(&mut kept, &again, &who()), None);
     }
 
@@ -1011,11 +1074,15 @@ mod tests {
         app.slack_status.user_id = Some(ME.into());
         app.needs_you.slack.settings.banner = BannerWhen::DmsAndMentions;
         let json = r#"{"user_profile":{"display_name":"","real_name":"Ada Lovelace"}}"#;
-        heard(&mut app, msg("D1", "im", "U1", "hi &amp; bye", "1.0"), json);
+        heard(
+            &mut app,
+            msg("D1", "im", "U1", "hi &amp; bye", &recent(1)),
+            json,
+        );
         app.needs_you.slack.settings.keywords.push("deploy".into());
         heard(
             &mut app,
-            msg("C1", "channel", "U2", "deploy done", "2.0"),
+            msg("C1", "channel", "U2", "deploy done", &recent(2)),
             "{}",
         );
         let cards = super::super::cards(&app);
@@ -1061,5 +1128,49 @@ mod tests {
         );
         assert_eq!(first_line("\n  \n second\nthird", &users), "second");
         assert_eq!(form_escape("1.0 a&b"), "1.0%20a%26b");
+    }
+
+    /// What the daemon replays as this TUI subscribes (`SlackBacklog`):
+    /// a message taken in before a restart is skipped — a card hidden
+    /// with ⌘D stays hidden — and an old one makes its card without a
+    /// banner.
+    #[test]
+    fn a_backlog_skips_what_was_seen_and_rings_no_banner_for_old_news() {
+        let mut app = App::new();
+        app.slack_status.user_id = Some(ME.into());
+        let seen = recent(1);
+        heard(&mut app, msg("D1", "im", "U1", "hi", &seen), "{}");
+        assert_eq!(due_banners(&mut app).len(), 1);
+        app.needs_you.store.slack.waiting.clear();
+        // A restart: the messages in memory go; the store's seen stay.
+        app.needs_you.slack.events.clear();
+        heard(&mut app, msg("D1", "im", "U1", "hi", &seen), "{}");
+        assert!(
+            app.needs_you.store.slack.waiting.is_empty(),
+            "seen: skipped"
+        );
+        heard(
+            &mut app,
+            msg("D2", "im", "U1", "overnight", "1000.000000"),
+            "{}",
+        );
+        assert_eq!(app.needs_you.store.slack.waiting.len(), 1, "a card");
+        assert!(due_banners(&mut app).is_empty(), "but no banner");
+
+        let orion_core::ClientRequest::SlackBacklog { since } = backlog(&app) else {
+            panic!()
+        };
+        let newest: u64 = seen.split('.').next().unwrap().parse().unwrap();
+        assert_eq!(
+            since,
+            Some(format!("{}.000000", newest - BACKLOG_OVERLAP_SECS))
+        );
+        assert!(
+            matches!(
+                backlog(&App::new()),
+                orion_core::ClientRequest::SlackBacklog { since: None }
+            ),
+            "nothing seen: everything kept"
+        );
     }
 }
