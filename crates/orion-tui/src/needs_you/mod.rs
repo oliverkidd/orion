@@ -53,6 +53,9 @@ pub enum Answer {
     Linear {
         project: ProjectId,
         heard: Option<linear::Heard>,
+        /// When it was asked: what orion's own Linear edits are laid over
+        /// it by (`linear::LocalEdits::put_over`).
+        asked: std::time::Instant,
     },
     /// The open pull requests asking for your review.
     Reviews(Option<Vec<reviews::Found>>),
@@ -73,6 +76,8 @@ pub struct State {
     /// Your live Linear tickets, and the state of each notified one, kept
     /// as `linear` is.
     pub linear_tickets: HashMap<ProjectId, linear::Tickets>,
+    /// When each project's `linear` and `linear_tickets` were asked.
+    pub linear_asked: HashMap<ProjectId, std::time::Instant>,
     /// What the last reviews search found.
     pub reviews: Vec<reviews::Found>,
     /// Why each session waits, as the daemon last said
@@ -184,14 +189,22 @@ pub fn load(app: &mut App) {
 /// An answer lands: kept, and the board brought up to date.
 pub fn land(app: &mut App, answer: Answer) {
     match answer {
-        Answer::Linear { project, heard } => {
+        Answer::Linear {
+            project,
+            heard,
+            asked,
+        } => {
             if let Some(heard) = heard {
                 app.needs_you.linear.insert(project.clone(), heard.notes);
+                app.needs_you.linear_asked.insert(project.clone(), asked);
                 app.needs_you.linear_tickets.insert(project, heard.tickets);
             }
         }
         Answer::Reviews(found) => {
             if let Some(found) = found {
+                if reviews::settle_flags(app, &found) {
+                    app.pr_cache_dirty = true;
+                }
                 app.needs_you.reviews = found;
             }
         }

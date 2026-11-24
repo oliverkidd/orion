@@ -1767,11 +1767,18 @@ fn status_spans(pr: &OpenPr, status: &PrStatus, marks: bool, th: Theme) -> Vec<S
     let word = status.word();
     let look = crate::pr_row::look(status.standing, trouble, th);
     let tint = |c| if status.is_draft() { th.faint } else { c };
-    let checks = pr.meta.checks.map(|_| match status.health.checks {
-        Checks::Failing => ("✗", tint(th.err)),
-        Checks::Pending => ("◐", tint(th.warn)),
-        Checks::Cancelled => ("⊘", tint(th.dim)),
-        _ => ("✓", tint(th.ok)),
+    // The mark says what `prs` knows — the verdict the badge and the page
+    // read — never whether the modal's extras left a tally on the row: a
+    // tally is dropped the moment a list's verdict moves past it, and
+    // gating on it blanked the mark on exactly the rows whose checks had
+    // just changed.
+    let checks = (status.checks_known && status.health.checks != Checks::Absent).then(|| {
+        match status.health.checks {
+            Checks::Failing => ("✗", tint(th.err)),
+            Checks::Pending => ("◐", tint(th.warn)),
+            Checks::Cancelled => ("⊘", tint(th.dim)),
+            _ => ("✓", tint(th.ok)),
+        }
     });
     let review = match pr.meta.review {
         Review::Approved => Some(("✓", tint(th.ok))),
@@ -4134,6 +4141,33 @@ mod tests {
             },
             ..pr(number, title, false)
         }
+    }
+
+    /// A row's checks mark is what `prs` says, whether or not the modal's
+    /// extras left a tally on it: a list that saw the checks go green drops
+    /// the tally it no longer agrees with, and the mark must not go blank
+    /// beside a page saying they passed. A row nothing has read the checks
+    /// of has no mark.
+    #[test]
+    fn a_rows_checks_mark_is_the_verdict_with_or_without_a_tally() {
+        let mut green = rich(42, "My fix", "me", true);
+        green.meta.checks = None;
+        green.answered.checks = Some(Checks::Passing);
+        let mut unread = rich(41, "Unread", "me", true);
+        unread.meta.checks = None;
+        unread.answered.checks = None;
+        let (mut app, _) = app_with(vec![green, unread], true);
+        open(&mut app);
+        let shot = screen(&mut app, 240, 40);
+        let row = |needle: &str| {
+            shot.lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert!(row("#42  My fix").contains("✓ ✓ ready"), "{shot}");
+        assert!(row("#41  Unread").contains("  ✓ ready"), "{shot}");
+        assert!(!row("#41  Unread").contains("✓ ✓"), "{shot}");
     }
 
     /// The list gathers into sections — yours, the ones waiting on your

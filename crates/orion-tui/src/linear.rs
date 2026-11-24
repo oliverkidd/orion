@@ -1015,6 +1015,18 @@ impl AttachRun {
 pub struct LocalEdits {
     moves: HashMap<(String, Prop), Move>,
     attached: HashMap<String, Vec<AttachedPr>>,
+    /// Issues read on their own since a list was asked — read again after
+    /// a change ([`land_reread`]) or just filed (`created`): put over every
+    /// list asked before they were read, so one already on its way when
+    /// they landed can't put an older row back, or drop a new one.
+    read: HashMap<ProjectId, Vec<ReadRow>>,
+    /// When the list on screen for each project was asked: an issue read
+    /// on its own before then is older than the row it would replace.
+    list_asked: HashMap<ProjectId, std::time::Instant>,
+    /// Edits the lists have learned and forgotten, kept a while longer for
+    /// NEEDS YOU's own copy of your tickets ([`put_over`](Self::put_over)),
+    /// whose read asked before Linear took one may land after that.
+    settled: Vec<Settled>,
     /// Numbers every edit, so an answer knows whether a newer one has
     /// been asked for since.
     next_seq: u64,
@@ -1041,6 +1053,37 @@ struct Move {
     landed: Option<std::time::Instant>,
 }
 
+/// Put `issue`, read on its own, in `row`'s place: the comments `row`
+/// had read stay when `issue` brought none (a list never reads them).
+fn replace_row(row: &mut LinearIssue, mut issue: LinearIssue) {
+    if issue.comments.is_empty() {
+        issue.comments = std::mem::take(&mut row.comments);
+    }
+    *row = issue;
+}
+
+/// An edit Linear took and the lists have learned since: `change` on
+/// issue `issue_id`, taken at `landed`.
+#[derive(Debug, Clone)]
+struct Settled {
+    issue_id: String,
+    change: Change,
+    landed: std::time::Instant,
+}
+
+/// How long a [`Settled`] edit is kept: well past any read that could
+/// have been asked before it (`TIMEOUT`s are seconds).
+const SETTLED_KEEP: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// An issue read on its own, when it was asked, and whether it was just
+/// filed — a row no list asked before it has.
+#[derive(Debug, Clone)]
+struct ReadRow {
+    at: std::time::Instant,
+    issue: LinearIssue,
+    created: bool,
+}
+
 /// A pull request attached to an issue from here, and when Linear took it.
 #[derive(Debug, Clone)]
 struct AttachedPr {
@@ -1050,6 +1093,118 @@ struct AttachedPr {
 }
 
 impl LocalEdits {
+    /// What [`lay_over`](Self::lay_over) puts on an issue, for a copy of
+    /// it read apart from the lists — NEEDS YOU's tickets — asked at
+    /// `asked` (`None`: when is not known, so every edit still kept): each
+    /// edit Linear had not taken by then, whichever project's view made it
+    /// (an issue's id is Linear's own), and nothing forgotten — the lists
+    /// still need them.
+    pub(crate) fn put_over(
+        &self,
+        asked: Option<std::time::Instant>,
+        issue: &mut LinearIssue,
+        me: Option<&str>,
+    ) {
+        let id = issue.id.clone();
+        for change in self.unknown_to(asked, &id) {
+            change.put_on(issue, me);
+        }
+    }
+
+    /// The state the last edit Linear had not taken by `asked` moved
+    /// issue `issue_id` to, if one did ([`put_over`](Self::put_over)).
+    pub(crate) fn status_over(
+        &self,
+        asked: Option<std::time::Instant>,
+        issue_id: &str,
+    ) -> Option<LinearState> {
+        self.unknown_to(asked, issue_id)
+            .filter_map(|change| match change {
+                Change::Status(state) => Some(state.clone()),
+                _ => None,
+            })
+            .last()
+    }
+
+    /// The edits to issue `issue_id` an answer asked at `asked` may not
+    /// know of yet: the ones the lists have since learned
+    /// ([`Settled`]) first, then the ones still kept, newest last.
+    fn unknown_to<'a>(
+        &'a self,
+        asked: Option<std::time::Instant>,
+        issue_id: &'a str,
+    ) -> impl Iterator<Item = &'a Change> + 'a {
+        let unknown = move |landed: Option<std::time::Instant>| {
+            !landed.is_some_and(|landed| asked.is_some_and(|asked| asked > landed))
+        };
+        let settled = self
+            .settled
+            .iter()
+            .filter(move |s| s.issue_id == issue_id && unknown(Some(s.landed)))
+            .filter(|s| s.landed.elapsed() < SETTLED_KEEP)
+            .map(|s| &s.change);
+        let kept = self
+            .moves
+            .iter()
+            .filter(move |((id, _), _)| id == issue_id)
+            .map(|(_, mv)| mv)
+            .filter(move |mv| unknown(mv.landed))
+            .map(|mv| &mv.want);
+        settled.chain(kept)
+    }
+
+    /// `issue`, read on its own at `at` (`created`: just filed), stands
+    /// over the lists asked before then ([`put_read`](Self::put_read)).
+    fn note_read(
+        &mut self,
+        project: &ProjectId,
+        at: std::time::Instant,
+        issue: LinearIssue,
+        created: bool,
+    ) {
+        let rows = self.read.entry(project.clone()).or_default();
+        rows.retain(|r| r.issue.id != issue.id || r.at > at);
+        if !rows.iter().any(|r| r.issue.id == issue.id) {
+            rows.push(ReadRow { at, issue, created });
+        }
+    }
+
+    /// Whether `project`'s list on screen was asked after `at`: an issue
+    /// read then is older than its row.
+    fn list_newer(&self, project: &ProjectId, at: std::time::Instant) -> bool {
+        self.list_asked
+            .get(project)
+            .is_some_and(|asked| *asked > at)
+    }
+
+    /// `project`'s list asked at `asked` landed: each issue read on its own
+    /// after that put over its row — its comments kept — and one just
+    /// filed put first when the list hasn't it; the rest forgotten, this
+    /// list and every one after knowing them.
+    fn put_read(
+        &mut self,
+        project: &ProjectId,
+        asked: std::time::Instant,
+        list: &mut Vec<LinearIssue>,
+    ) {
+        let at = self.list_asked.entry(project.clone()).or_insert(asked);
+        *at = (*at).max(asked);
+        let Some(rows) = self.read.get_mut(project) else {
+            return;
+        };
+        rows.retain(|r| r.at > asked);
+        for r in rows.iter() {
+            match list.iter_mut().find(|i| i.id == r.issue.id) {
+                Some(row) => replace_row(row, r.issue.clone()),
+                None if r.created => list.insert(0, r.issue.clone()),
+                None => {}
+            }
+        }
+        if rows.is_empty() {
+            self.read.remove(project);
+        }
+    }
+
     /// Lay what orion did over `project`'s list asked at `asked`: each
     /// edit or attach Linear had not taken by then put back on its issue,
     /// the rest forgotten — this list and every one after knows them.
@@ -1061,11 +1216,19 @@ impl LocalEdits {
         list: &mut [LinearIssue],
         me: Option<&str>,
     ) {
-        self.moves.retain(|(issue_id, _), mv| {
+        let settled = &mut self.settled;
+        settled.retain(|s| s.landed.elapsed() < SETTLED_KEEP);
+        self.moves.retain(|(issue_id, prop), mv| {
             if &mv.project != project {
                 return true;
             }
-            if mv.landed.is_some_and(|landed| asked > landed) {
+            if let Some(landed) = mv.landed.filter(|landed| asked > *landed) {
+                settled.retain(|s| &s.issue_id != issue_id || s.change.prop() != *prop);
+                settled.push(Settled {
+                    issue_id: issue_id.clone(),
+                    change: mv.want.clone(),
+                    landed,
+                });
                 return false;
             }
             if let Some(issue) = list.iter_mut().find(|i| &i.id == issue_id) {
@@ -2106,18 +2269,22 @@ fn land_reread(
     }
     app.linear_edits
         .lay_over(&project, asked, &mut issues, me.as_deref());
+    // A list asked after these were read already has them, newer.
+    if app.linear_edits.list_newer(&project, asked) {
+        return;
+    }
+    for issue in &issues {
+        app.linear_edits
+            .note_read(&project, asked, issue.clone(), false);
+    }
     let Some(list) = app.linear.get_mut(&project) else {
         return;
     };
     let old = list.list.clone();
-    for mut issue in issues {
-        let Some(row) = list.list.iter_mut().find(|i| i.id == issue.id) else {
-            continue;
-        };
-        if issue.comments.is_empty() {
-            issue.comments = std::mem::take(&mut row.comments);
+    for issue in issues {
+        if let Some(row) = list.list.iter_mut().find(|i| i.id == issue.id) {
+            replace_row(row, issue);
         }
-        *row = issue;
     }
     app.linear_cache_dirty = true;
     follow_cursor(app, &project, &old);
@@ -2360,6 +2527,8 @@ pub(crate) fn land_list(
             let me = fetched.me_id().map(str::to_string);
             app.linear_edits
                 .lay_over(&project, asked, &mut fetched.list, me.as_deref());
+            app.linear_edits
+                .put_read(&project, asked, &mut fetched.list);
             app.linear_failed.remove(&project);
             app.linear.insert(project.clone(), fetched);
             app.linear_cache_dirty = true;
@@ -2477,7 +2646,7 @@ pub(crate) fn land_answer(app: &mut App, answer: LinearAnswer) {
 }
 
 /// The configured user's id, as `project`'s list has it.
-fn me_id(app: &App, project: &ProjectId) -> Option<String> {
+pub(crate) fn me_id(app: &App, project: &ProjectId) -> Option<String> {
     app.linear.get(project)?.me_id().map(str::to_string)
 }
 
@@ -3748,7 +3917,10 @@ fn land_created(
                 view.selected = 0;
             }
             // Linear's answer is the issue as it now stands: no list to
-            // read again for it.
+            // read again for it — and a list already on its way, asked
+            // before it was filed, keeps it.
+            app.linear_edits
+                .note_read(&project, crate::fetch::now(), issue.clone(), true);
             if let Some(list) = app.linear.get_mut(&project) {
                 list.list.insert(0, issue);
             }
@@ -9841,6 +10013,141 @@ pub(crate) mod tests {
     /// When a list asked now is asked: what its landing is laid over by.
     fn ask_list(_app: &mut App) -> std::time::Instant {
         crate::fetch::now()
+    }
+
+    /// An issue read again on its own, or just filed, is newer than a list
+    /// asked before it: that list landing after it keeps the read row (and
+    /// the new one), while a read asked before the list on screen is older
+    /// than its row and changes nothing.
+    #[test]
+    fn an_issue_read_on_its_own_outlasts_an_older_list() {
+        let (mut app, dir, _rx) = moving();
+        let project = ProjectId("p1".into());
+        let t0 = ask_list(&mut app);
+        land_list(
+            &mut app,
+            t0,
+            &dir,
+            vec![
+                in_state("1", "ENG-1", "In Progress"),
+                in_state("2", "ENG-2", "In Progress"),
+            ],
+        );
+        let slow = ask_list(&mut app);
+        let read = crate::fetch::now();
+        land_reread(
+            &mut app,
+            project.clone(),
+            read,
+            Ok(vec![in_state("2", "ENG-2", "Done")]),
+        );
+        let filed = Box::new(in_state("3", "ENG-3", "Todo"));
+        land_created(
+            &mut app,
+            project.clone(),
+            LinearTeam {
+                id: "t".into(),
+                key: "ENG".into(),
+                name: "Eng".into(),
+                triage_state: None,
+            },
+            "x".into(),
+            Ok(filed),
+        );
+        assert_eq!(status_of(&app, "2"), "Done");
+        let stale = vec![
+            in_state("1", "ENG-1", "In Progress"),
+            in_state("2", "ENG-2", "In Progress"),
+        ];
+        land_list(&mut app, slow, &dir, stale);
+        assert_eq!(status_of(&app, "2"), "Done", "the list was asked before");
+        assert_eq!(status_of(&app, "3"), "Todo", "the new issue stays");
+
+        let newer = ask_list(&mut app);
+        land_list(
+            &mut app,
+            newer,
+            &dir,
+            vec![
+                in_state("2", "ENG-2", "Todo"),
+                in_state("3", "ENG-3", "Todo"),
+            ],
+        );
+        assert_eq!(status_of(&app, "2"), "Todo", "asked after: Linear's word");
+        land_reread(
+            &mut app,
+            project,
+            read,
+            Ok(vec![in_state("2", "ENG-2", "Done")]),
+        );
+        assert_eq!(status_of(&app, "2"), "Todo", "a read older than the list");
+    }
+
+    /// NEEDS YOU keeps its own copy of your tickets. A `⌘S` to Done in the
+    /// LINEAR VIEW takes the ticket's card off the board at once, and an
+    /// inbox read asked before Linear took the move doesn't bring it back;
+    /// one asked after is the truth again.
+    #[test]
+    fn a_ctrl_s_moves_the_needs_you_card_too() {
+        use crate::needs_you::model::CardSource;
+        let (mut app, dir, mut rx) = moving();
+        let project = ProjectId("p1".into());
+        let inbox = |app: &mut App, asked| {
+            let mut mine = in_state("2", "ENG-2", "In Progress");
+            mine.title = "Fix login".into();
+            crate::needs_you::land(
+                app,
+                crate::needs_you::Answer::Linear {
+                    project: project.clone(),
+                    heard: Some(crate::needs_you::linear::Heard {
+                        notes: Vec::new(),
+                        tickets: crate::needs_you::linear::Tickets {
+                            mine: vec![mine],
+                            states: Default::default(),
+                        },
+                    }),
+                    asked,
+                },
+            );
+        };
+        let cards = |app: &App| crate::needs_you::linear::Inbox.cards(app).len();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        with_graphql_stub(
+            |_, _| Ok(serde_json::json!({"data": {"issueUpdate": {"success": true}}})),
+            || {
+                rt.block_on(async {
+                    inbox(&mut app, crate::fetch::now());
+                    assert_eq!(cards(&app), 1, "in progress: a card");
+                    let before = crate::fetch::now();
+                    move_to(&mut app, 1, "Done");
+                    assert_eq!(cards(&app), 0, "done here: no card, at once");
+                    let answer = rx.recv().await.expect("Linear's answer");
+                    land_answer(&mut app, answer);
+                    inbox(&mut app, before);
+                    assert_eq!(cards(&app), 0, "an inbox asked before Linear took it");
+                    // A list asked since has learned the move and forgotten
+                    // it; a slow inbox asked before still can't undo it.
+                    let after = ask_list(&mut app);
+                    land_list(
+                        &mut app,
+                        after,
+                        &dir,
+                        vec![
+                            in_state("1", "ENG-1", "In Progress"),
+                            in_state("2", "ENG-2", "Done"),
+                        ],
+                    );
+                    assert!(app.linear_edits.moves.is_empty());
+                    inbox(&mut app, before);
+                    assert_eq!(cards(&app), 0, "after the lists forgot the move too");
+                    inbox(&mut app, crate::fetch::now());
+                    assert_eq!(cards(&app), 1, "asked after: Linear's word again");
+                });
+            },
+        );
     }
 
     /// A list asked before a `⌘S` — or after it, but before Linear took

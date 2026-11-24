@@ -249,10 +249,20 @@ fn project_cards(app: &App, project: &ProjectId, notes: &[Note], tickets: &Ticke
     // A ticket the bug fixer or feature builder picked up is theirs to act
     // on, not yours: its assignment and its card as one of yours.
     let picked_up = |issue: &str| crate::automations::linear_builder::picked_up(app, issue);
+    // What you changed from the LINEAR VIEW since this was asked — a move
+    // to Done, a hand-off — stands over it, as it does over the view's
+    // own lists: the two copies of a ticket never disagree.
+    let asked = app.needs_you.linear_asked.get(project).copied();
+    let edits = &app.linear_edits;
+    let me = crate::linear::me_id(app, project);
+    let moved_state = |issue: &str| edits.status_over(asked, issue);
     // Each ticket's newest news.
     let mut newest: BTreeMap<&str, &Note> = BTreeMap::new();
     for note in notes {
         if note.kind == "issueAssignedToYou" && picked_up(&note.issue_id) {
+            continue;
+        }
+        if moved_state(&note.issue_id).is_some_and(|state| !live(&state.kind)) {
             continue;
         }
         let kept = newest.entry(&note.issue_id).or_insert(note);
@@ -261,10 +271,14 @@ fn project_cards(app: &App, project: &ProjectId, notes: &[Note], tickets: &Ticke
         }
     }
     let mut cards = Vec::new();
-    for issue in &tickets.mine {
-        if picked_up(&issue.id) || !live(&issue.status_type) {
+    for heard in &tickets.mine {
+        let mut issue = heard.clone();
+        edits.put_over(asked, &mut issue, me.as_deref());
+        let handed_off = issue.assignee_id != heard.assignee_id && !issue.mine;
+        if picked_up(&issue.id) || !live(&issue.status_type) || handed_off {
             continue;
         }
+        let issue = &issue;
         let note = newest.remove(issue.id.as_str());
         // Hidden by ⌘D until the ticket changes, or new news comes.
         let updated = DateTime::parse_from_rfc3339(&issue.updated_at)
@@ -290,7 +304,14 @@ fn project_cards(app: &App, project: &ProjectId, notes: &[Note], tickets: &Ticke
     }
     for note in newest.into_values() {
         let title = format!("{} {}", note.identifier, note.title);
-        let state = tickets.states.get(&note.issue_id);
+        let moved = moved_state(&note.issue_id).map(|state| IssueState {
+            kind: state.kind.clone(),
+            name: state.name.clone(),
+            color: state.color.clone(),
+        });
+        let state = moved
+            .as_ref()
+            .or_else(|| tickets.states.get(&note.issue_id));
         cards.push(card(
             app,
             project,

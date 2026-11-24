@@ -1345,9 +1345,16 @@ fn tally(contexts: &[serde_json::Value]) -> Option<CheckTally> {
 /// knowledge harvest act on. This is what the automations read while
 /// nobody is looking, in place of every project's list: one search page
 /// and the last commit under each of its rows.
+///
+/// A search answers from GitHub's search index, which trails the pull
+/// requests themselves: one opened a moment ago is not in it yet, and one
+/// merged or closed a moment ago is still under `is:open`. The fields on
+/// each node are read live, so each open node says its own `state` (and
+/// when it merged or closed), and [`parse_my_prs`] sorts it by that rather
+/// than by the query it came back under.
 const MY_PRS_QUERY: &str = "query($open: String!, $merged: String!) { \
     open: search(type: ISSUE, query: $open, first: 100) { nodes { ... on PullRequest { \
-    number url title isDraft headRefName isCrossRepository \
+    number url title state mergedAt closedAt isDraft headRefName isCrossRepository \
     headRepositoryOwner { login } mergeable viewerDidAuthor headRefOid \
     createdAt updatedAt reviewDecision author { login } comments { totalCount } \
     reviewThreads { totalCount } \
@@ -1356,14 +1363,17 @@ const MY_PRS_QUERY: &str = "query($open: String!, $merged: String!) { \
     number url title headRefName isCrossRepository headRepositoryOwner { login } \
     viewerDidAuthor headRefOid createdAt mergedAt author { login } } } } }";
 
-/// What [`my_prs`] found: your open pull requests, and the ones merged
-/// since the date it was asked from — rows as a project's list has them
-/// (a merged one with `meta.merged_at` set). Which project each is in is
-/// the caller's to work out, by its URL.
+/// What [`my_prs`] found: your open pull requests, the ones merged since
+/// the date it was asked from, and the ones the index still called open
+/// that had closed without merging — rows as a project's list has them (a
+/// merged one with `meta.merged_at` set, a closed one with
+/// `meta.closed_at`). Which project each is in is the caller's to work
+/// out, by its URL.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MyPrsAnswer {
     pub open: Vec<OpenPr>,
     pub merged: Vec<OpenPr>,
+    pub closed: Vec<OpenPr>,
 }
 
 /// Ask GitHub for your open pull requests everywhere, and the ones merged
@@ -1380,23 +1390,49 @@ pub async fn my_prs(since: &str) -> Result<MyPrsAnswer, FetchError> {
 }
 
 /// Parse [`MY_PRS_QUERY`]'s answer. Every open row is yours, whatever the
-/// node says; one with no URL a browser opens is dropped.
+/// node says; one with no URL a browser opens is dropped. An `is:open`
+/// node whose own `state` says it has merged or closed — the index behind
+/// the pull request — goes with the merged or the closed rows instead.
 pub(crate) fn parse_my_prs(json: &str) -> Option<MyPrsAnswer> {
     let answer = serde_json::from_str::<serde_json::Value>(json).ok()?;
-    let nodes = |path: &str| -> Option<Vec<OpenPr>> {
+    let nodes = |path: &str| -> Option<Vec<(String, OpenPr)>> {
         let rows = answer.pointer(path)?.as_array()?;
-        Some(rows.iter().filter_map(|v| row(v, "")).collect())
+        Some(
+            rows.iter()
+                .filter_map(|v| Some((str_at(v, "state"), row(v, "")?)))
+                .collect(),
+        )
     };
-    let mut open = nodes("/data/open/nodes")?;
-    for pr in &mut open {
-        pr.mine = true;
-    }
-    let merged = nodes("/data/merged/nodes")
+    let mut merged: Vec<OpenPr> = nodes("/data/merged/nodes")
         .unwrap_or_default()
         .into_iter()
+        .map(|(_, pr)| pr)
         .filter(OpenPr::is_merged)
         .collect();
-    Some(MyPrsAnswer { open, merged })
+    let (mut open, mut closed) = (Vec::new(), Vec::new());
+    for (state, mut pr) in nodes("/data/open/nodes")? {
+        pr.mine = true;
+        match state.as_str() {
+            STATE_MERGED if pr.is_merged() => {
+                if !merged.iter().any(|m| m.url == pr.url) {
+                    merged.push(pr);
+                }
+            }
+            STATE_CLOSED if pr.is_closed() => closed.push(pr),
+            _ => {
+                // Open: a reopened pull request keeps the `closedAt` of
+                // its last close, which would read it as a closed row.
+                pr.meta.merged_at.clear();
+                pr.meta.closed_at.clear();
+                open.push(pr);
+            }
+        }
+    }
+    Some(MyPrsAnswer {
+        open,
+        merged,
+        closed,
+    })
 }
 
 /// One GraphQL `query` about `dir`'s repo through `gh api graphql`, its

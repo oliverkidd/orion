@@ -276,13 +276,17 @@ impl PrStore {
     /// One row of a list asked at `asked`, as [`observe`](Self::observe)
     /// takes it. A row the failing-checks recheck could not read in full
     /// (`cut`, `pull_request::ListAnswer::cut`) carries GitHub's rollup
-    /// word unfolded: it says nothing of the checks while a verdict is
-    /// known — that one stands — and is the verdict while none is, so a
-    /// busy failing pull request seen for the first time still goes red.
+    /// word unfolded: it says nothing of the checks while a verdict for
+    /// the same head commit is known — that one stands — and is the
+    /// verdict while none is, so a busy failing pull request seen for the
+    /// first time, or failing on a commit just pushed, still goes red.
     pub fn observe_list_row(&mut self, pr: &OpenPr, cut: bool, asked: Asked) -> bool {
         let mut seen = PrObservation::of_list_row(pr);
         if cut {
-            let known = self.facts.get(&pr.url).is_some_and(|f| f.checks.is_known());
+            let known = self.facts.get(&pr.url).is_some_and(|f| {
+                f.checks.is_known()
+                    && (pr.head_sha.is_empty() || f.head_sha.get() == Some(&pr.head_sha))
+            });
             seen.checks = if known { None } else { pr.answered.checks };
         }
         self.observe(&pr.url, seen, asked)

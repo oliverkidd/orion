@@ -343,30 +343,38 @@ fn land_extras(app: &mut App, project: &ProjectId, extras: &Extras) {
 /// `MyPrs` landed, asked at `asked`. Each row is observed into `prs` — a
 /// verdict GitHub's rollup calls failing only where nothing better is
 /// known, as a list's unchecked row is (`PrStore::observe_list_row`) — and
-/// each merge too. Then every project with a pull request of yours has its
-/// rows of yours replaced by these (`event_loop::adopt_my_rows`): a new
-/// one added, one that left dropped, the rest of the list as it was —
-/// which runs AUTOFIX and the factory over them, as a list landing does.
-/// A merge seen here makes that project's list, tail and the pull
-/// request's page stale. An answer that says what the last one did
-/// writes and paints nothing of its own.
+/// each merge and close too. Then every project with a pull request of
+/// yours has its rows of yours replaced by these (`event_loop::
+/// adopt_my_rows`): a new one added, one merged or closed dropped, the
+/// rest of the list as it was — which runs AUTOFIX and the factory over
+/// them, as a list landing does. A merge or close seen here makes that
+/// project's list, tail and the pull request's page stale. An answer that
+/// says what the last one did writes and paints nothing of its own.
 pub fn land_my_prs(
     app: &mut App,
     found: MyPrsAnswer,
     asked: crate::fetch::Asked,
     out: &mut Vec<ClientRequest>,
 ) {
-    let merged_now: Vec<(String, Option<ProjectId>)> = found
+    // Settled since `prs` last heard: merged (the alias's rows, and any
+    // the index still called open), or closed without merging.
+    let settled_now: Vec<(String, Option<ProjectId>)> = found
         .merged
         .iter()
+        .chain(&found.closed)
         .filter(|pr| {
+            let standing = if pr.is_merged() {
+                crate::pull_request::Standing::Merged
+            } else {
+                crate::pull_request::Standing::Closed
+            };
             app.prs
                 .status(&pr.url)
-                .is_none_or(|s| s.standing != crate::pull_request::Standing::Merged)
+                .is_none_or(|s| s.standing != standing)
         })
         .map(|pr| (pr.url.clone(), project_of(app, &pr.url)))
         .collect();
-    let changed = !merged_now.is_empty() || app.my_prs.open != found.open;
+    let changed = !settled_now.is_empty() || app.my_prs.open != found.open;
     let before: Vec<(orion_core::WorktreeId, bool)> = app
         .tree
         .projects
@@ -376,7 +384,7 @@ pub fn land_my_prs(
     for row in &found.open {
         app.prs.observe_list_row(row, row.says_failing(), asked);
     }
-    for row in &found.merged {
+    for row in found.merged.iter().chain(&found.closed) {
         let seen = crate::pr_store::PrObservation::of_tail_row(row);
         app.prs.observe(&row.url, seen, asked);
     }
@@ -400,7 +408,7 @@ pub fn land_my_prs(
         let mine = by_project.remove(&project).unwrap_or_default();
         crate::event_loop::adopt_my_rows(app, project, mine, complete, out);
     }
-    for (url, project) in merged_now {
+    for (url, project) in settled_now {
         app.resolver.invalidate(&QueryKey::PrDetail(url));
         if let Some(project) = project {
             app.resolver.invalidate(&QueryKey::OpenPrs(project.clone()));
@@ -470,6 +478,7 @@ mod tests {
         let found = MyPrsAnswer {
             open: vec![row(1, true, "a2")],
             merged: vec![merged],
+            ..Default::default()
         };
         let mut out = Vec::new();
         land_my_prs(
@@ -492,6 +501,172 @@ mod tests {
         app.resolver
             .visit(vec![(tails.clone(), super::super::Seen::Shown)], now);
         assert!(app.resolver.due(now).iter().any(|t| t.key == tails));
+    }
+
+    /// A project with rows 1 (yours), 2 (yours) and 3 (theirs), each
+    /// observed into `prs` as a list landing would, and its list's key
+    /// seen a moment ago.
+    fn listed(app: &mut App, p: &ProjectId) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        let rows = vec![row(1, true, "a"), row(2, true, "b"), row(3, false, "c")];
+        for r in &rows {
+            app.prs
+                .observe_list_row(r, false, crate::fetch::Asked::At(now));
+        }
+        app.open_prs.insert(
+            p.clone(),
+            crate::app::OpenPrs {
+                list: rows,
+                merged: Vec::new(),
+                at: now,
+            },
+        );
+        app.resolver.seed(&QueryKey::OpenPrs(p.clone()), now);
+        now
+    }
+
+    /// The search index trails GitHub: a pull request of yours it has not
+    /// caught up to is no merge or close. Its row stays, and the project's
+    /// own list is made stale to say whether it is still open.
+    #[test]
+    fn a_row_the_search_has_not_indexed_stays_and_its_list_is_asked() {
+        let mut app = App::new();
+        let p = ProjectId("p".into());
+        let now = listed(&mut app, &p);
+        let found = MyPrsAnswer {
+            open: vec![row(1, true, "a")],
+            ..Default::default()
+        };
+        land_my_prs(
+            &mut app,
+            found,
+            crate::fetch::Asked::At(crate::fetch::now()),
+            &mut Vec::new(),
+        );
+        let numbers: Vec<u64> = app.open_prs[&p].list.iter().map(|pr| pr.number).collect();
+        assert_eq!(
+            numbers,
+            vec![1, 2, 3],
+            "#2 is not in the index yet; it stays"
+        );
+        assert!(app.prs.status_or_open(&row(2, true, "").url).is_open());
+        let list = QueryKey::OpenPrs(p.clone());
+        app.resolver
+            .visit(vec![(list.clone(), super::super::Seen::Shown)], now);
+        assert!(
+            app.resolver.due(now).iter().any(|t| t.key == list),
+            "the project's own list says whether #2 is still open"
+        );
+    }
+
+    /// A pull request the index still files under `is:open` says its own
+    /// state live: merged, it leaves as a merge does; closed, it leaves as
+    /// closed — never brought back open by a search that is behind.
+    #[test]
+    fn a_settled_row_the_index_still_calls_open_leaves() {
+        let mut app = App::new();
+        let p = ProjectId("p".into());
+        listed(&mut app, &p);
+        let answer = r#"{"data":{
+          "open":{"nodes":[
+            {"number":1,"url":"https://github.com/o/r/pull/1","title":"PR 1","state":"OPEN",
+             "closedAt":"2026-11-01T10:00:00Z","headRefName":"b1","headRefOid":"a"},
+            {"number":2,"url":"https://github.com/o/r/pull/2","title":"PR 2","state":"MERGED",
+             "mergedAt":"2026-11-24T10:00:00Z","closedAt":"2026-11-24T10:00:00Z",
+             "headRefName":"b2","headRefOid":"b"}]},
+          "merged":{"nodes":[]}}}"#;
+        let found = crate::pull_request::parse_my_prs(answer).expect("parsed");
+        assert_eq!(found.open.len(), 1);
+        assert!(
+            !found.open[0].is_closed(),
+            "reopened: its old close is no close"
+        );
+        assert_eq!(found.merged.len(), 1, "merged, whatever the index says");
+        land_my_prs(
+            &mut app,
+            found,
+            crate::fetch::Asked::At(crate::fetch::now()),
+            &mut Vec::new(),
+        );
+        let numbers: Vec<u64> = app.open_prs[&p].list.iter().map(|pr| pr.number).collect();
+        assert_eq!(numbers, vec![1, 3]);
+        assert_eq!(
+            app.prs.status_or_open(&row(2, true, "").url).standing,
+            crate::pull_request::Standing::Merged
+        );
+
+        let closed = r#"{"data":{
+          "open":{"nodes":[
+            {"number":1,"url":"https://github.com/o/r/pull/1","title":"PR 1","state":"CLOSED",
+             "closedAt":"2026-11-24T11:00:00Z","headRefName":"b1","headRefOid":"a"}]},
+          "merged":{"nodes":[]}}}"#;
+        let found = crate::pull_request::parse_my_prs(closed).expect("parsed");
+        assert!(found.open.is_empty());
+        assert_eq!(found.closed.len(), 1);
+        land_my_prs(
+            &mut app,
+            found,
+            crate::fetch::Asked::At(crate::fetch::now()),
+            &mut Vec::new(),
+        );
+        let numbers: Vec<u64> = app.open_prs[&p].list.iter().map(|pr| pr.number).collect();
+        assert_eq!(numbers, vec![3]);
+        assert_eq!(
+            app.prs.status_or_open(&row(1, true, "").url).standing,
+            crate::pull_request::Standing::Closed
+        );
+    }
+
+    /// The search reads GitHub's rollup word and never folds it again as
+    /// the list does: a run a re-run superseded still counts as failed.
+    /// On the head the list last read, the list's verdict stands — in
+    /// `prs` and on the row — so the row does not flip red and back each
+    /// beat, and its page is not read again for it.
+    #[test]
+    fn a_search_failing_on_a_superseded_run_does_not_flip_the_row() {
+        use crate::pull_request::Checks;
+        let mut app = App::new();
+        let p = ProjectId("p".into());
+        let now = listed(&mut app, &p);
+        let url = row(1, true, "").url;
+        app.pr_detail.insert(url.clone(), Default::default());
+        let mut was = row(1, true, "a");
+        was.answered.checks = Some(Checks::Passing);
+        app.prs
+            .observe_list_row(&was, false, crate::fetch::Asked::At(now));
+        app.open_prs.get_mut(&p).unwrap().list[0] = was;
+        let mut red = row(1, true, "a");
+        red.answered.checks = Some(Checks::Failing);
+        let found = MyPrsAnswer {
+            open: vec![red.clone(), row(2, true, "b")],
+            ..Default::default()
+        };
+        land_my_prs(
+            &mut app,
+            found,
+            crate::fetch::Asked::At(crate::fetch::now()),
+            &mut Vec::new(),
+        );
+        assert_eq!(app.prs.status_or_open(&url).health.checks, Checks::Passing);
+        assert_eq!(
+            app.open_prs[&p].list[0].answered.checks,
+            Some(Checks::Passing)
+        );
+        assert!(!app.pr_detail_stale.contains(&url), "nothing moved");
+
+        // Pushed since: a failing word on a new head is news.
+        red.head_sha = "a2".into();
+        let found = MyPrsAnswer {
+            open: vec![red, row(2, true, "b")],
+            ..Default::default()
+        };
+        land_my_prs(
+            &mut app,
+            found,
+            crate::fetch::Asked::At(crate::fetch::now()),
+            &mut Vec::new(),
+        );
+        assert_eq!(app.prs.status_or_open(&url).health.checks, Checks::Failing);
     }
 
     /// The automations' read runs only while one that acts on your pull

@@ -1428,6 +1428,19 @@ fn land_branch_pr(
             .invalidate(&crate::sync::QueryKey::BranchPr(worktree));
         return;
     }
+    // "No pull request" for a branch its project's open list has one on
+    // is a lookup asked before the pull request was opened, landing after
+    // the list that saw it: the list's row stands (`derive_checkout_prs`).
+    let listed = app
+        .tree
+        .worktrees
+        .iter()
+        .find(|w| w.id == worktree)
+        .and_then(|w| app.open_prs.get(&w.project_id))
+        .is_some_and(|open| open.list.iter().any(|pr| pr.head == branch));
+    if listed && matches!(answer, Lookup::Absent) {
+        return;
+    }
     let url = match &answer {
         Lookup::Found(pr) => Some(pr.url.clone()),
         Lookup::Absent | Lookup::Unavailable => None,
@@ -1689,11 +1702,22 @@ pub(crate) fn land_pr_tails(
 /// `MyPrs` said which of `project`'s open pull requests are yours
 /// (`mine`, already observed into `prs`): they replace the project's rows
 /// of yours — a row kept where it was, with what the modal's extras put
-/// on it, one new appended, and, when the answer was `complete` (it held
-/// every pull request of yours), one of yours it no longer has dropped as
-/// merged or closed. The rest of the list — other people's rows — is
-/// left as the last list said it. A project with no list yet gets one of
-/// your rows alone, until its own first visit asks for the rest.
+/// on it, one new appended, and one `prs` now says merged or closed
+/// dropped. The rest of the list — other people's rows — is left as the
+/// last list said it. A project with no list yet gets one of your rows
+/// alone, until its own first visit asks for the rest.
+///
+/// A row of yours the search did not bring back stays: the search index
+/// trails GitHub (a pull request opened a minute ago is not in it yet),
+/// so its silence is no answer. When the answer was `complete` (it held
+/// every pull request of yours), the project's own list is made stale
+/// instead, and says whether the row is still open.
+///
+/// The search does not read a failing rollup again as the list does
+/// (`pull_request::recheck_failing`), so a row it calls failing on the
+/// head the last row had keeps that row's verdict: GitHub's word counts
+/// runs a re-run superseded, and taking it would flip the row red and
+/// back on every beat, re-reading its page each time.
 ///
 /// What follows is what a list landing runs: the checkouts on those
 /// branches take their rows, a checkout whose pull request left is asked
@@ -1713,16 +1737,23 @@ pub(crate) fn adopt_my_rows(
         .map(|o| o.list.clone())
         .unwrap_or_default();
     let mut list = previous.clone();
-    let left: Vec<String> = match complete {
-        true => previous
+    let unlisted = complete
+        && previous
             .iter()
-            .filter(|pr| pr.mine && !mine.iter().any(|m| m.url == pr.url))
-            .map(|pr| pr.url.clone())
-            .collect(),
-        false => Vec::new(),
-    };
-    list.retain(|pr| !left.contains(&pr.url));
+            .any(|pr| pr.mine && !mine.iter().any(|m| m.url == pr.url));
+    if unlisted {
+        app.resolver
+            .invalidate(&crate::sync::QueryKey::OpenPrs(project.clone()));
+    }
     let mut fresh = mine;
+    for row in fresh.iter_mut().filter(|row| row.says_failing()) {
+        let was = previous
+            .iter()
+            .find(|was| was.url == row.url && was.head_sha == row.head_sha);
+        if let Some(was) = was {
+            row.answered.checks = was.answered.checks;
+        }
+    }
     crate::pull_request::carry_extras(&mut fresh, &previous);
     for row in fresh {
         match list.iter_mut().find(|pr| pr.url == row.url) {
@@ -1730,7 +1761,12 @@ pub(crate) fn adopt_my_rows(
             None => list.push(row),
         }
     }
-    list.retain(|row| app.prs.status_or_open(&row.url).is_open());
+    let left: Vec<String> = list
+        .iter()
+        .filter(|row| !app.prs.status_or_open(&row.url).is_open())
+        .map(|row| row.url.clone())
+        .collect();
+    list.retain(|row| !left.contains(&row.url));
     crate::pull_request::drafts_last(&mut list, &app.prs);
     if list == previous {
         return;
@@ -18598,6 +18634,38 @@ mod tests {
             fetched_now(&mut app).is_empty(),
             "already wearing the merge"
         );
+    }
+
+    /// A branch lookup asked before the pull request was opened says
+    /// "none"; landing after the list that has the pull request on that
+    /// branch, it is behind and leaves the checkout's row as the list put
+    /// it.
+    #[test]
+    fn a_lookup_saying_none_does_not_undo_a_listed_pull_request() {
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let pid = app.selected_project().expect("a project").id.clone();
+        let w2 = add_worktree(&mut app, "w2", "/tmp/demo-w2");
+        let mut seven = a_pr(7, "Attach links", false);
+        seven.head = "w2".into();
+        note_open_prs_answer(&mut app, pid, Some(vec![seven]), &mut Vec::new());
+        let row = |app: &App| {
+            app.pull_requests
+                .get(&w2)
+                .cloned()
+                .flatten()
+                .map(|pr| pr.number)
+        };
+        assert_eq!(row(&app), Some(7));
+        land_branch_pr(
+            &mut app,
+            w2.clone(),
+            "w2",
+            Lookup::Absent,
+            crate::fetch::Asked::At(crate::fetch::now()),
+            &mut Vec::new(),
+        );
+        assert_eq!(row(&app), Some(7), "the list saw it");
     }
 
     /// Esc on the NEW AGENT PICKER sends nothing: opening it warmed

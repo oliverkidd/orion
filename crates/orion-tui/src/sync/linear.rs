@@ -321,7 +321,14 @@ pub fn land(app: &mut App, key: QueryKey, answer: Answer, asked: Instant) {
         },
         (QueryKey::LinearInbox(_), Answer::Inbox { project, heard }) => {
             let heard = heard.ok();
-            crate::needs_you::land(app, crate::needs_you::Answer::Linear { project, heard });
+            crate::needs_you::land(
+                app,
+                crate::needs_you::Answer::Linear {
+                    project,
+                    heard,
+                    asked,
+                },
+            );
         }
         (
             QueryKey::LinearIntake(tag),

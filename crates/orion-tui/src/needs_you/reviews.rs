@@ -42,6 +42,32 @@ pub struct Author {
 }
 
 /// `gh search prs`'s answer; anything else is no answer.
+/// How many pull requests [`search`] asks for: an answer with fewer
+/// holds every review asked of you.
+pub const LIMIT: usize = 50;
+
+/// A search that held every review asked of you landed: a list row the
+/// modal's extras last flagged as asking for your review and the search
+/// no longer has has had its review — the flag was carried from an
+/// extras answer older than this one (`pull_request::carry_extras`), and
+/// would keep the card and the modal's `Review requested` section until
+/// the modal was next opened. True when a row changed.
+pub fn settle_flags(app: &mut App, found: &[Found]) -> bool {
+    if found.len() >= LIMIT {
+        return false;
+    }
+    let mut changed = false;
+    for open in app.open_prs.values_mut() {
+        for pr in open.list.iter_mut().filter(|pr| pr.meta.review_requested) {
+            if !found.iter().any(|f| f.url == pr.url) {
+                pr.meta.review_requested = false;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 pub fn parse(stdout: &str) -> Option<Vec<Found>> {
     serde_json::from_str(stdout).ok()
 }
@@ -58,7 +84,7 @@ pub async fn search() -> Result<Vec<Found>, crate::sync::FetchError> {
             "--review-requested=@me",
             "--state=open",
             "--limit",
-            "50",
+            &LIMIT.to_string(),
             "--json",
             SEARCH_FIELDS,
         ],
@@ -117,7 +143,7 @@ impl CardSource for Reviews {
                 cards.push(card(
                     Some(project.id.clone()),
                     &pr.url,
-                    pr.label(),
+                    app.prs.label(pr.number, &pr.url, &pr.title),
                     &project.name,
                     &pr.meta.author,
                     since,
@@ -125,6 +151,11 @@ impl CardSource for Reviews {
             }
         }
         for found in &app.needs_you.reviews {
+            // The search answers from GitHub's index, which trails a merge
+            // or close: what `prs` knows of the pull request stands.
+            if app.prs.status(&found.url).is_some_and(|s| !s.is_open()) {
+                continue;
+            }
             if cards.iter().any(
                 |c| matches!(&c.target, CardTarget::PullRequest { url, .. } if url == &found.url),
             ) {
@@ -133,7 +164,7 @@ impl CardSource for Reviews {
             cards.push(card(
                 None,
                 &found.url,
-                crate::pull_request::numbered_label(found.number, &found.title),
+                app.prs.label(found.number, &found.url, &found.title),
                 &found.repository.name_with_owner,
                 &found.author.login,
                 found.created_at,
@@ -159,5 +190,84 @@ mod tests {
         assert_eq!(found[0].repository.name_with_owner, "RiploData/riplo-os");
         assert_eq!(found[0].author.login, "sam");
         assert_eq!(parse("not json"), None);
+    }
+
+    fn found(n: u64) -> Found {
+        Found {
+            url: format!("https://github.com/o/r/pull/{n}"),
+            number: n,
+            title: format!("Old title {n}"),
+            repository: Repository {
+                name_with_owner: "o/r".into(),
+            },
+            author: Author {
+                login: "sam".into(),
+            },
+            created_at: DateTime::<Utc>::default(),
+        }
+    }
+
+    /// The search trails GitHub: a pull request `prs` knows has merged
+    /// is no review waiting, and a known title is the newest one.
+    #[test]
+    fn a_search_row_behind_what_prs_knows_gives_way() {
+        use crate::fetch::Asked;
+        use crate::pr_store::PrObservation;
+        let mut app = App::new();
+        let (merged, renamed) = (found(1), found(2));
+        app.prs.observe(
+            &merged.url,
+            PrObservation {
+                state: Some(crate::pull_request::STATE_MERGED.into()),
+                ..Default::default()
+            },
+            Asked::At(crate::fetch::now()),
+        );
+        app.prs.observe(
+            &renamed.url,
+            PrObservation {
+                title: Some("New title".into()),
+                ..Default::default()
+            },
+            Asked::At(crate::fetch::now()),
+        );
+        app.needs_you.reviews = vec![merged, renamed];
+        let cards = Reviews.cards(&app);
+        assert_eq!(cards.len(), 1, "the merged one is gone");
+        assert_eq!(cards[0].title, "#2 New title");
+    }
+
+    /// A review flag the modal's extras left on a row goes once a search
+    /// that holds every review asked of you no longer has it — the review
+    /// was given — and stays while the search was cut short.
+    #[test]
+    fn a_complete_search_clears_a_carried_review_flag() {
+        let mut app = App::new();
+        let p = orion_core::ProjectId("p".into());
+        let mut row = crate::pull_request::OpenPr {
+            number: 3,
+            title: "t".into(),
+            url: found(3).url,
+            answered_draft: false,
+            answered: Default::default(),
+            head: "b".into(),
+            mine: false,
+            head_sha: "s".into(),
+            meta: Default::default(),
+        };
+        row.meta.review_requested = true;
+        app.open_prs.insert(
+            p.clone(),
+            crate::app::OpenPrs {
+                list: vec![row],
+                merged: Vec::new(),
+                at: std::time::Instant::now(),
+            },
+        );
+        let many: Vec<Found> = (100..100 + LIMIT as u64).map(found).collect();
+        assert!(!settle_flags(&mut app, &many), "cut short: no answer");
+        assert!(app.open_prs[&p].list[0].meta.review_requested);
+        assert!(settle_flags(&mut app, &[found(9)]));
+        assert!(!app.open_prs[&p].list[0].meta.review_requested);
     }
 }
