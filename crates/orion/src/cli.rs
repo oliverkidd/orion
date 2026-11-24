@@ -120,12 +120,13 @@ pub(crate) enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Move this session into a worktree of its project.
+    /// Move this session into a worktree of its project, or of another one.
     ///
     /// Run from inside a orion agent session; agents run it when you ask them
     /// to work in a worktree. Creates the git worktree when the branch has
     /// none, re-homes the session onto it at once, and restarts the session
-    /// resumed inside the new checkout as soon as the current turn ends.
+    /// resumed inside the new checkout as soon as the current turn ends —
+    /// the conversation comes along, `--project` or not.
     #[command(after_help = WORKTREE_EXAMPLES)]
     Worktree {
         /// Branch name; several words are joined with hyphens, none at all
@@ -139,6 +140,11 @@ pub(crate) enum Command {
         /// a SHA or a branch origin lacks is used as named.
         #[arg(long, value_name = "REF")]
         base: Option<String>,
+        /// Take the worktree of this orion project instead — another repo —
+        /// by its name as orion shows it, its folder's, or the start of
+        /// either (`web` for `web-app`).
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<String>,
     },
     /// Start another agent session beside this one.
     ///
@@ -167,6 +173,11 @@ pub(crate) enum Command {
         /// project's Base branch, else origin's default branch).
         #[arg(long, value_name = "REF", requires = "worktree")]
         base: Option<String>,
+        /// Start the session in this orion project instead — another repo —
+        /// matched as `orion worktree --project` matches: in its --worktree,
+        /// else its main checkout.
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<String>,
     },
     /// Show files to the user inside this orion.
     ///
@@ -368,13 +379,16 @@ Examples:
   orion worktree fix login redirect  the same; the words are slugified
   orion worktree                     invent a random branch name
   orion worktree hotfix --base v0.21.0
-                                      branch from a named start point";
+                                      branch from a named start point
+  orion worktree billing --project web-app
+                                      carry this session into another project's worktree";
 
 const SPAWN_EXAMPLES: &str = "\
 Examples:
   orion spawn \"port the tests to the new fixture\"
   orion spawn --kind codex \"review the diff on this branch\"
-  orion spawn --worktree fix-font-names \"stop matching font names by substring\"";
+  orion spawn --worktree fix-font-names \"stop matching font names by substring\"
+  orion spawn --project web-app --worktree billing \"add the billing page\"";
 
 const OPEN_EXAMPLES: &str = "\
 Examples:

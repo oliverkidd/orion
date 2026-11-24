@@ -36,6 +36,8 @@ First write a short brief: who it is for, what it is, what you will build it fro
 
 Once it is approved, build a working prototype. If it is a web tool and you can publish it as a claude.ai artifact, do, and note the link. Finish by saying how to try it.
 
+When the user wants the prototype taken into one of their projects, move this session there with `orion worktree <branch> --project <project>`; it keeps this conversation.
+
 {task}";
 
 /// The target an idea tied to no project has, as its row spells it.

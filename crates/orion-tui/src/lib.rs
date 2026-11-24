@@ -270,10 +270,11 @@ pub fn run_rename(title: String, mode: RenameMode) -> Result<()> {
     runtime()?.block_on(ipc::rename_current_agent(&title, mode))
 }
 
-/// `orion worktree [name] [--base <ref>]` — move the current agent session
-/// into a worktree of its project (see `ipc::enter_worktree_for_current_agent`).
-pub fn run_worktree(name: String, base: Option<String>) -> Result<()> {
-    runtime()?.block_on(ipc::enter_worktree_for_current_agent(&name, base))
+/// `orion worktree [name] [--base <ref>] [--project <name>]` — move the
+/// current agent session into a worktree of its project, or of the one
+/// `--project` names (see `ipc::enter_worktree_for_current_agent`).
+pub fn run_worktree(name: String, base: Option<String>, project: Option<String>) -> Result<()> {
+    runtime()?.block_on(ipc::enter_worktree_for_current_agent(&name, base, project))
 }
 
 /// `orion autofix stand-down <reason>` — an autofix session leaving its
@@ -315,18 +316,20 @@ pub fn open_link(
     )
 }
 
-/// `orion spawn "<task>" [--kind <kind>] [--worktree <name> [--base <ref>]]`
-/// — start a new agent session beside the current one, or in another
-/// worktree of its project (see `ipc::spawn_sibling_for_current_agent`).
-/// `kind` is the CLI's `--kind`, already parsed where the flag is.
+/// `orion spawn "<task>" [--kind <kind>] [--worktree <name> [--base <ref>]]
+/// [--project <name>]` — start a new agent session beside the current one,
+/// in another worktree of its project, or in another project (see
+/// `ipc::spawn_sibling_for_current_agent`). `kind` is the CLI's `--kind`,
+/// already parsed where the flag is.
 pub fn run_spawn(
     task: String,
     kind: Option<orion_core::AgentKind>,
     worktree: Option<String>,
     base: Option<String>,
+    project: Option<String>,
 ) -> Result<()> {
     runtime()?.block_on(ipc::spawn_sibling_for_current_agent(
-        &task, kind, worktree, base,
+        &task, kind, worktree, base, project,
     ))
 }
 

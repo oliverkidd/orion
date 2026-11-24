@@ -548,6 +548,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     starting_prompt,
                     worktree,
                     base,
+                    project,
                 } => {
                     // Logged by mode only — never the prompt text.
                     let result = daemon
@@ -557,6 +558,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                             &starting_prompt,
                             worktree.as_deref(),
                             base.as_deref(),
+                            project.as_deref(),
                         )
                         .await;
                     match &result {
@@ -601,8 +603,12 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     id,
                     branch,
                     base,
+                    project,
                 } => {
-                    let ev = match daemon.enter_worktree(&id, &branch, base.as_deref()).await {
+                    let ev = match daemon
+                        .enter_worktree(&id, &branch, base.as_deref(), project.as_deref())
+                        .await
+                    {
                         Ok((worktree, outcome)) => ServerEvent::WorktreeEntered {
                             req_id,
                             worktree,

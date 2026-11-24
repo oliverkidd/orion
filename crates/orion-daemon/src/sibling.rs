@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use orion_core::{AgentId, AgentKind, EntityId, WorktreeId};
+use orion_core::{AgentId, AgentKind, EntityId, ProjectId, WorktreeId};
 
 use crate::registry::{CreateAgentSpec, Daemon};
 
@@ -32,7 +32,9 @@ the sessions list on its own. When the user wants that agent or session to work 
 worktree, on its own branch or in its own checkout (\"kick off an agent in a new worktree to …\"), \
 add `--worktree <name>` (the branch name the user gave, or a short kebab-case name for the task; \
 `--base <ref>` picks the start point): orion creates the worktree, or takes the existing one on \
-that branch, and starts the session there. Use this instead of the Agent tool with `isolation: \
+that branch, and starts the session there. For another orion project (a different repo), add \
+`--project <name>`: the session starts in that project — in its `--worktree` when one is named, \
+else in its main checkout. Use this instead of the Agent tool with `isolation: \
 \"worktree\"` for that request; subagents that stay in this checkout are fine as they are. This \
 session is unaffected: carry on with whatever else the user asked, and if starting the session was \
 the whole request, tell the user in one line that it is running. If the command fails, report the \
@@ -107,8 +109,10 @@ impl Daemon {
     /// boot a new agent beside it with `starting_prompt` as its first
     /// prompt — in the caller's worktree, or in the worktree of the
     /// caller's project on branch `worktree` (created from `base` when it
-    /// has none). Returns the new row's id; the upsert reaches every client
-    /// through the ordinary create path.
+    /// has none). `project` (`--project`) aims either at another project:
+    /// its worktree on that branch, or with no branch its main checkout.
+    /// Returns the new row's id; the upsert reaches every client through
+    /// the ordinary create path.
     pub async fn spawn_sibling_agent(
         self: &Arc<Self>,
         id: &AgentId,
@@ -116,23 +120,38 @@ impl Daemon {
         starting_prompt: &str,
         worktree: Option<&str>,
         base: Option<&str>,
+        project: Option<&str>,
     ) -> Result<EntityId> {
         // Checked before any worktree is made: a refused spawn leaves no
         // checkout behind.
         let mut spec = self.sibling_spec(id, kind, starting_prompt, None)?;
         crate::registry::validate_starting_prompt(starting_prompt)?;
-        if let Some(branch) = worktree {
-            let caller = self.store.get_agent(id)?.context("agent not found")?;
-            let current = self
-                .store
-                .get_worktree(&caller.worktree_id)?
-                .context("worktree not found")?;
-            let target = self
-                .worktree_for_branch(&current.project_id, branch, base)
-                .await?;
-            spec = self.sibling_spec(id, kind, starting_prompt, Some(target.id))?;
+        let caller = self.store.get_agent(id)?.context("agent not found")?;
+        let current = self
+            .store
+            .get_worktree(&caller.worktree_id)?
+            .context("worktree not found")?;
+        let project = self.project_named(&current.project_id, project)?;
+        let target = match worktree {
+            Some(branch) => Some(self.worktree_for_branch(&project, branch, base).await?.id),
+            None if project != current.project_id => Some(self.main_worktree_of(&project)?),
+            None => None,
+        };
+        if target.is_some() {
+            spec = self.sibling_spec(id, kind, starting_prompt, target)?;
         }
         self.create_agent(spec).await
+    }
+
+    /// `project`'s main checkout: where `orion spawn --project` starts a
+    /// session that names no worktree.
+    fn main_worktree_of(&self, project: &ProjectId) -> Result<WorktreeId> {
+        let (_, worktrees, _, _) = self.store.load_tree()?;
+        worktrees
+            .into_iter()
+            .find(|w| &w.project_id == project && w.is_main)
+            .map(|w| w.id)
+            .context("that project has no main checkout — name one with --worktree")
     }
 }
 
@@ -295,6 +314,30 @@ mod tests {
         assert!(err.to_string().contains("archived"));
     }
 
+    /// `orion spawn --project` with no `--worktree` lands in the other
+    /// project's main checkout; a project with none is refused.
+    #[test]
+    fn another_projects_main_checkout_is_its_is_main_row() {
+        let daemon = daemon();
+        daemon
+            .store
+            .insert_project(&Project {
+                id: ProjectId("q".into()),
+                name: "q".into(),
+                repo_path: "/orion-test/q".into(),
+                sort_order: 1,
+            })
+            .unwrap();
+        assert!(daemon.main_worktree_of(&ProjectId("q".into())).is_err());
+        assert_eq!(
+            daemon
+                .main_worktree_of(&ProjectId("p".into()))
+                .unwrap()
+                .to_string(),
+            "root"
+        );
+    }
+
     /// The prompt itself is `create_agent`'s to validate (blank, NUL, too
     /// long), so a bad one fails there, before any worktree lookup.
     #[tokio::test]
@@ -305,7 +348,7 @@ mod tests {
             .insert_agent(&agent("agent-1", "feat", AgentKind::Claude, None))
             .unwrap();
         let err = daemon
-            .spawn_sibling_agent(&AgentId("agent-1".into()), None, " \n ", None, None)
+            .spawn_sibling_agent(&AgentId("agent-1".into()), None, " \n ", None, None, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("is empty"), "{err}");

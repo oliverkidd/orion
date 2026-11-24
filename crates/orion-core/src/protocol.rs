@@ -258,11 +258,17 @@ pub enum ClientRequest {
     /// it at once, and relocate the live session into it when its current
     /// turn ends — killed and respawned resumed there, with a prompt that
     /// tells the CLI where it now is. Replies with `WorktreeEntered`.
+    ///
+    /// `project` (`orion worktree --project <name>`) takes the worktree of
+    /// that project instead — another repo — matched by the daemon's
+    /// `project_named`.
     EnterWorktree {
         req_id: u64,
         id: AgentId,
         branch: String,
         base: Option<String>,
+        #[serde(default)]
+        project: Option<String>,
     },
     /// `orion spawn "<task>"`, run by the agent from inside its own
     /// session: start a new AGENT beside it — same WORKTREE, and the same
@@ -275,6 +281,8 @@ pub enum ClientRequest {
     /// `worktree` (`orion spawn --worktree <name>`) starts it in the
     /// worktree on that branch of the caller's project instead, created
     /// from `base` when the branch has none, the way `EnterWorktree` does.
+    /// `project` (`--project <name>`) aims at another project: its
+    /// worktree on that branch, or its main checkout when none is named.
     SpawnSiblingAgent {
         req_id: u64,
         id: AgentId,
@@ -284,6 +292,8 @@ pub enum ClientRequest {
         worktree: Option<String>,
         #[serde(default)]
         base: Option<String>,
+        #[serde(default)]
+        project: Option<String>,
     },
     /// `orion open <file>…`, run by the agent from inside its own session:
     /// show these files to the user in every attached TUI's FILE TABS —

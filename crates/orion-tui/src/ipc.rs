@@ -450,12 +450,14 @@ pub async fn delete_worktree(id: &orion_core::WorktreeId) -> Result<()> {
 ///
 /// `worktree` (`--worktree <name>`) starts it in that worktree of this
 /// project instead — slugified like `orion worktree`'s name, and created
-/// from `base` when the branch has none.
+/// from `base` when the branch has none. `project` (`--project <name>`)
+/// aims at another project: that worktree of it, or its main checkout.
 pub async fn spawn_sibling_for_current_agent(
     task: &str,
     kind: Option<AgentKind>,
     worktree: Option<String>,
     base: Option<String>,
+    project: Option<String>,
 ) -> Result<()> {
     let agent_id = current_agent_id("spawn")?;
     let task = task.trim();
@@ -485,14 +487,19 @@ pub async fn spawn_sibling_for_current_agent(
             starting_prompt: task.to_string(),
             worktree: worktree.clone(),
             base,
+            project: project.clone(),
         },
     )
     .await?;
     await_ack(&mut conn, req_id).await?;
     let harness = kind.map(|k| format!("{} ", k.as_str())).unwrap_or_default();
-    let place = match &worktree {
-        Some(branch) => format!("in the worktree \"{branch}\""),
-        None => "in this worktree".to_string(),
+    let place = match (&worktree, &project) {
+        (Some(branch), Some(project)) => {
+            format!("in the worktree \"{branch}\" of the project \"{project}\"")
+        }
+        (Some(branch), None) => format!("in the worktree \"{branch}\""),
+        (None, Some(project)) => format!("in the main checkout of the project \"{project}\""),
+        (None, None) => "in this worktree".to_string(),
     };
     println!(
         "started a new {harness}session {place}; it is working on that task now and shows in \
@@ -646,9 +653,10 @@ fn status_line(status: &orion_core::stack::StackStatus) -> String {
     }
 }
 
-/// CLI: `orion worktree [name] [--base <ref>]` from inside an agent
-/// session — take (or create) the named worktree of this session's project
-/// and have the daemon move the session into it. A blank name is invented
+/// CLI: `orion worktree [name] [--base <ref>] [--project <name>]` from
+/// inside an agent session — take (or create) the named worktree of this
+/// session's project, or of the project `--project` names, and have the
+/// daemon move the session into it, conversation and all. A blank name is invented
 /// the way the TUI's new-worktree prompt invents one, and spaces slugify to
 /// hyphens the same way. Never spawns a daemon: no daemon means no session
 /// to move.
@@ -658,7 +666,11 @@ fn status_line(status: &orion_core::stack::StackStatus) -> String {
 /// very process once the turn ends, and the answer has to be finished by
 /// then. A daemon-side failure is a nonzero exit — the model reports it and
 /// stays put.
-pub async fn enter_worktree_for_current_agent(name: &str, base: Option<String>) -> Result<()> {
+pub async fn enter_worktree_for_current_agent(
+    name: &str,
+    base: Option<String>,
+    project: Option<String>,
+) -> Result<()> {
     let agent_id = current_agent_id("worktree")?;
     let branch = match crate::branch_name::slugify(name) {
         slug if slug.is_empty() => crate::branch_name::random_name(&[]),
@@ -677,6 +689,7 @@ pub async fn enter_worktree_for_current_agent(name: &str, base: Option<String>) 
             id: AgentId(agent_id),
             branch,
             base,
+            project,
         },
     )
     .await?;

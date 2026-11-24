@@ -1758,6 +1758,63 @@ impl Daemon {
         Ok(())
     }
 
+    /// The project `orion worktree --project` / `orion spawn --project`
+    /// names, or `own` (the caller's) when it names none. A name matches a
+    /// project's name or its folder's, ignoring case; failing that, the one
+    /// project whose name or folder starts with it (`web` for
+    /// `web-app`), or whose repo is at that path. No match, or several,
+    /// is refused with every project's name, so the model that ran the
+    /// command can pick one and run it again.
+    pub(crate) fn project_named(&self, own: &ProjectId, name: Option<&str>) -> Result<ProjectId> {
+        let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) else {
+            return Ok(own.clone());
+        };
+        let (projects, _, _, _) = self.store.load_tree()?;
+        let wanted = name.to_lowercase();
+        let labels = |p: &Project| {
+            [
+                p.name.to_lowercase(),
+                Project::folder_name(&p.repo_path).to_lowercase(),
+            ]
+        };
+        let names = |list: &[&Project]| {
+            list.iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let path = Path::new(name);
+        let pick = |matches: Vec<&Project>| -> Option<Result<ProjectId>> {
+            match matches.as_slice() {
+                [] => None,
+                [one] => Some(Ok(one.id.clone())),
+                many => Some(Err(anyhow::anyhow!(
+                    "\"{name}\" matches more than one project ({}) — run it again with \
+                     `--project` set to one of those",
+                    names(many)
+                ))),
+            }
+        };
+        let exact = projects
+            .iter()
+            .filter(|p| labels(p).contains(&wanted) || (path.is_absolute() && p.repo_path == path))
+            .collect();
+        if let Some(found) = pick(exact) {
+            return found;
+        }
+        let prefix = projects
+            .iter()
+            .filter(|p| labels(p).iter().any(|l| l.starts_with(&wanted)))
+            .collect();
+        if let Some(found) = pick(prefix) {
+            return found;
+        }
+        bail!(
+            "no orion project is called \"{name}\" — the projects are: {}",
+            names(&projects.iter().collect::<Vec<_>>())
+        )
+    }
+
     /// The project's worktree on `branch`, created from `base` when it has
     /// none — what `orion worktree` moves into and `orion spawn --worktree`
     /// starts a session in.
@@ -1789,15 +1846,19 @@ impl Daemon {
 
     /// `orion worktree <branch>`, run by the agent inside its own session.
     /// The row moves under `branch`'s worktree of the same project now —
-    /// created when the project has no checkout for that branch yet — and
-    /// a live PTY follows once its turn ends (`complete_pending_move`),
-    /// because the CLI running this command *is* that PTY's foreground
-    /// tool call: killing it here would cut the turn off mid-answer.
+    /// or of the project `project` names (`--project`), so a session can
+    /// carry its conversation into another repo — created when the project
+    /// has no checkout for that branch yet, and a live PTY follows once its
+    /// turn ends (`complete_pending_move`), because the CLI running this
+    /// command *is* that PTY's foreground tool call: killing it here would
+    /// cut the turn off mid-answer. The respawn resumes the same session id
+    /// in the new checkout: Claude and codex find a session wherever it began.
     pub async fn enter_worktree(
         self: &Arc<Self>,
         id: &AgentId,
         branch: &str,
         base: Option<&str>,
+        project: Option<&str>,
     ) -> Result<(Worktree, EnterOutcome)> {
         let branch = branch.trim();
         if branch.is_empty() {
@@ -1811,9 +1872,8 @@ impl Daemon {
             .store
             .get_worktree(&agent.worktree_id)?
             .context("worktree not found")?;
-        let target = self
-            .worktree_for_branch(&current.project_id, branch, base)
-            .await?;
+        let project = self.project_named(&current.project_id, project)?;
+        let target = self.worktree_for_branch(&project, branch, base).await?;
         if target.id == current.id {
             return Ok((target, EnterOutcome::AlreadyThere));
         }
@@ -4101,7 +4161,13 @@ the start point). orion creates the worktree, associates this session with it, a
 session into it once your current turn ends. So when the command succeeds, end your turn at once: \
 tell the user in one line that the session is moving into the worktree, and make no further tool \
 calls or edits — you will be resumed inside the worktree with a prompt to carry on there. If the \
-command fails, report the error and carry on in the current checkout.\n\nStay on the branch this \
+command fails, report the error and carry on in the current checkout.\n\nThe worktree can be in another \
+orion project too — a different repo. When the user wants this work carried into another project \
+(\"move this into the api project\", \"carry on in the web repo\"), add `--project <name>`: orion takes \
+or creates that branch's worktree in that project and moves this session there, this conversation \
+included, exactly as above. Do not refuse or ask the user to open a session there themselves \
+because the target is another repo. An unknown name fails with the list of projects; run it again \
+with the one the user meant.\n\nStay on the branch this \
 checkout is on: do not run `git switch`, `git checkout -b` or anything else that changes it. orion \
 tracks this checkout, and the ticket, pull request and automation attached to it, by that branch. \
 When work belongs on a branch of its own (a separate pull request, say), run `orion worktree <name> \
@@ -7110,7 +7176,10 @@ pub(crate) mod tests {
         let a1 = AgentId("a1".into());
         let mut rx = daemon.events.subscribe();
 
-        let (target, outcome) = daemon.enter_worktree(&a1, "feat", None).await.unwrap();
+        let (target, outcome) = daemon
+            .enter_worktree(&a1, "feat", None, None)
+            .await
+            .unwrap();
         assert_eq!(target.id.to_string(), "feat");
         // No PTY runs here, so nothing waits on a turn end.
         assert_eq!(outcome, EnterOutcome::NextLaunch);
@@ -7124,13 +7193,76 @@ pub(crate) mod tests {
         }
 
         // Already there: a settled answer, no broadcast.
-        let (again, outcome) = daemon.enter_worktree(&a1, "feat", None).await.unwrap();
+        let (again, outcome) = daemon
+            .enter_worktree(&a1, "feat", None, None)
+            .await
+            .unwrap();
         assert_eq!(again.id, target.id);
         assert_eq!(outcome, EnterOutcome::AlreadyThere);
         assert!(rx.try_recv().is_err(), "no broadcast for a no-op enter");
 
         // Blank names are refused before anything is touched.
-        assert!(daemon.enter_worktree(&a1, "  ", None).await.is_err());
+        assert!(daemon.enter_worktree(&a1, "  ", None, None).await.is_err());
+    }
+
+    /// `--project` names a project by its name, its folder's or the
+    /// unambiguous start of either; anything else is refused with the
+    /// projects to pick from.
+    #[test]
+    fn project_named_matches_name_folder_or_a_unique_prefix() {
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["tools", "web-app", "web-site"]);
+        daemon
+            .store
+            .rename_project(&ProjectId("web-site".into()), "Website")
+            .unwrap();
+        let own = ProjectId("tools".into());
+        let named = |name| daemon.project_named(&own, name).map(|p| p.to_string());
+
+        assert_eq!(named(None).unwrap(), "tools");
+        assert_eq!(named(Some("  ")).unwrap(), "tools");
+        assert_eq!(named(Some("Web-App")).unwrap(), "web-app");
+        assert_eq!(named(Some("website")).unwrap(), "web-site", "by name");
+        assert_eq!(named(Some("web-site")).unwrap(), "web-site", "by folder");
+        assert_eq!(named(Some("/tmp/web-app")).unwrap(), "web-app", "by path");
+        assert_eq!(named(Some("too")).unwrap(), "tools", "by prefix");
+
+        let ambiguous = named(Some("web")).unwrap_err().to_string();
+        assert!(ambiguous.contains("web-app, Website"), "{ambiguous}");
+        let unknown = named(Some("nope")).unwrap_err().to_string();
+        assert!(unknown.contains("tools, web-app, Website"), "{unknown}");
+    }
+
+    /// `orion worktree --project` carries the session into another
+    /// project's worktree: the row moves there, its session id kept, so
+    /// the respawn resumes the same conversation in the other repo.
+    #[tokio::test]
+    async fn enter_worktree_moves_the_row_into_another_projects_worktree() {
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["tools", "web-app"]);
+        seed_worktree(&daemon, "tools", "tools-root", "/tmp/tools", true);
+        seed_worktree(&daemon, "web-app", "web-root", "/tmp/web-app", true);
+        seed_worktree(&daemon, "web-app", "billing", "/tmp/billing", false);
+        seed_agent(&daemon, "a1", "tools-root", Some("s1"));
+        let a1 = AgentId("a1".into());
+
+        let (target, outcome) = daemon
+            .enter_worktree(&a1, "billing", None, Some("web"))
+            .await
+            .unwrap();
+        assert_eq!(target.project_id.to_string(), "web-app");
+        assert_eq!(target.id.to_string(), "billing");
+        assert_eq!(outcome, EnterOutcome::NextLaunch);
+        assert_eq!(agent_worktree(&daemon, "a1"), "billing");
+        let row = daemon.store.get_agent(&a1).unwrap().unwrap();
+        assert_eq!(row.session_id.as_deref(), Some("s1"), "same conversation");
+
+        // An unknown project moves nothing.
+        assert!(daemon
+            .enter_worktree(&a1, "x", None, Some("nope"))
+            .await
+            .is_err());
+        assert_eq!(agent_worktree(&daemon, "a1"), "billing");
     }
 
     /// Between `orion worktree` and the turn's Stop the row already sits
@@ -7231,7 +7363,10 @@ pub(crate) mod tests {
 
         // The turn runs `orion worktree feat`: the row moves now, the PTY
         // waits for the turn's end.
-        let (_, outcome) = daemon.enter_worktree(&id, "feat", None).await.unwrap();
+        let (_, outcome) = daemon
+            .enter_worktree(&id, "feat", None, None)
+            .await
+            .unwrap();
         assert_eq!(outcome, EnterOutcome::Relocating);
         let first = daemon.session(&sref).expect("still the first PTY");
         let mut rx = daemon.events.subscribe();
@@ -7326,7 +7461,10 @@ pub(crate) mod tests {
         let a1 = AgentId("a1".into());
         let mut rx = daemon.events.subscribe();
 
-        let (target, _) = daemon.enter_worktree(&a1, "feat", None).await.unwrap();
+        let (target, _) = daemon
+            .enter_worktree(&a1, "feat", None, None)
+            .await
+            .unwrap();
         assert_eq!(target.branch, "feat");
         assert_eq!(
             target.path,
@@ -7371,7 +7509,7 @@ pub(crate) mod tests {
         let a1 = AgentId("a1".into());
 
         let err = daemon
-            .spawn_sibling_agent(&a1, None, "  ", Some("feat"), None)
+            .spawn_sibling_agent(&a1, None, "  ", Some("feat"), None, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("is empty"), "{err}");
