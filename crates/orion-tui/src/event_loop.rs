@@ -348,9 +348,9 @@ async fn main_loop(
     }
     let mut update_beat = update_interval
         .map(|every| crate::update_check::Beat::starting(std::time::Instant::now(), every));
-    // The BUILD-CACHE SWEEP (`build_cache`): Cargo output no checkout has
-    // used in two weeks, deleted off the loop a few minutes after start —
-    // so every upgrade's reopen runs one — and then once a day.
+    // The BUILD-CACHE SWEEP (`build_cache`): every Cargo build a newer one
+    // of the same crate has replaced, deleted off the loop a few minutes
+    // after start — so every upgrade's reopen runs one — and then once a day.
     let build_sweep_interval = crate::build_cache::interval();
     let mut next_build_sweep = tokio::time::Instant::now() + crate::build_cache::FIRST_DELAY;
     // What Spotify is playing, asked of the app over AppleScript off the
