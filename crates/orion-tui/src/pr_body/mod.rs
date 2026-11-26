@@ -23,7 +23,9 @@
 //!   posted, the approved plan from the builder's transcript. A visible
 //!   PR without pictures is looked at for pictures on their way, and one
 //!   whose flow came after its push has the pictures job run for it, once
-//!   per head ([`dispatch`]). A PR whose [`signature`] hasn't moved since
+//!   per head ([`dispatch`]); a flow its agent left in the checkout but
+//!   never sent, orion sends by the contract's `pictures_upload` first
+//!   ([`flow`]). A PR whose [`signature`] hasn't moved since
 //!   its last gather isn't gathered again until its repo's contract is
 //!   due a new read ([`CONTRACT_TTL`]); its commits' messages are read
 //!   once per head. A gather that could not ask for all of it is tried
@@ -60,6 +62,7 @@ pub mod contract;
 pub mod cubic;
 pub mod dispatch;
 pub mod facts;
+pub mod flow;
 pub mod pictures;
 pub mod render;
 pub mod rows;
@@ -208,6 +211,10 @@ struct Remembered {
     /// ([`dispatch::Ran`]): a flow uploaded again at the same head is run
     /// once more, the same flow never twice.
     pictures_ran: Option<dispatch::Ran>,
+    /// The flow orion last sent from the PR's checkout itself, and the
+    /// head it was for ([`flow::net`]): never the same flow twice for one
+    /// head.
+    flow_sent: Option<flow::Sent>,
     /// The head its agent was last sent back for pictures that show no
     /// difference ([`NO_DIFFERENCE`]): never twice for one head.
     no_difference_sent: Option<String>,
@@ -357,6 +364,24 @@ fn factory_of(app: &App, url: &str, head: &str) -> Option<Factory> {
         },
         session: entry.session.clone(),
     })
+}
+
+/// The checkout of `branch` in `factory`'s project on this machine.
+fn checkout_of(app: &App, factory: &Factory, branch: &str) -> Option<PathBuf> {
+    if branch.trim().is_empty() {
+        return None;
+    }
+    let project = app
+        .tree
+        .projects
+        .iter()
+        .find(|p| p.repo_path == factory.dir)?;
+    app.tree
+        .worktrees
+        .iter()
+        .find(|w| w.project_id == project.id && w.branch == branch)
+        .map(|w| w.path.clone())
+        .filter(|p| p.is_dir())
 }
 
 /// `https://github.com/<owner>/<repo>/pull/<n>`'s three parts.
@@ -617,6 +642,8 @@ fn land_detail_unsaved(app: &mut App, url: &str, detail: Option<&PrDetail>) {
         .cloned();
     let pictures_dispatched = app.pr_body.remembered(url).pictures_dispatched.clone();
     let pictures_ran = app.pr_body.remembered(url).pictures_ran.clone();
+    let flow_sent = app.pr_body.remembered(url).flow_sent.clone();
+    let checkout = checkout_of(app, &factory, &detail.head);
     let messages = app
         .pr_body
         .messages
@@ -644,6 +671,8 @@ fn land_detail_unsaved(app: &mut App, url: &str, detail: Option<&PrDetail>) {
         cache: data_dir().map(|d| d.join("pr-body")),
         pictures_dispatched,
         pictures_ran,
+        checkout,
+        flow_sent,
     };
     tokio::spawn(async move {
         let gathered = gather(job).await;
@@ -708,6 +737,11 @@ struct Job {
     pictures_dispatched: Option<String>,
     /// The head and flow it is known to have run for.
     pictures_ran: Option<dispatch::Ran>,
+    /// The checkout of its branch on this machine, while it has one: where
+    /// its agent leaves the pictures flow ([`flow::net`]).
+    checkout: Option<PathBuf>,
+    /// The flow orion last sent from that checkout itself.
+    flow_sent: Option<flow::Sent>,
 }
 
 /// Everything the verdict needs. A None is "couldn't ask": nothing is
@@ -725,6 +759,8 @@ pub struct Gathered {
     /// What was found of pictures on their way, for a visible PR without
     /// them at its head; None when not looked at.
     look: Option<dispatch::Look>,
+    /// The flow orion sent from the checkout just now ([`flow::net`]).
+    flow_sent: Option<flow::Sent>,
     /// How long the build took, from its run record
     /// ([`rows::build_ms`]).
     build_ms: Option<i64>,
@@ -791,6 +827,7 @@ async fn gather(job: Job) -> Gathered {
         }
     };
     let (contract, messages, manifest) = tokio::join!(contract_fut, messages_fut, manifest_fut);
+    let mut flow_sent = None;
     let mut grid_file = None;
     if let (Some(read), Some(found), Some(cache)) = (&contract, &manifest, &job.cache) {
         let visible = read
@@ -825,7 +862,37 @@ async fn gather(job: Job) -> Gathered {
                 };
                 let repo = format!("{}/{}", job.owner, job.repo);
                 let workflow = rules.pictures_workflow.as_deref();
-                Some(dispatch::look(&gh, &repo, &job.detail, workflow, may_run, ran.as_ref()).await)
+                let mut look =
+                    dispatch::look(&gh, &repo, &job.detail, workflow, may_run, ran.as_ref()).await;
+                if let Some(checkout) = &job.checkout {
+                    let tried = flow::net(
+                        rules,
+                        checkout,
+                        &job.detail.head,
+                        job.number,
+                        &job.detail.head_sha,
+                        look.flow_sha.as_deref(),
+                        job.flow_sent.as_ref(),
+                    )
+                    .await;
+                    if let Some((sent, worked)) = tried {
+                        if worked {
+                            // Up now: the job is run for it as for any
+                            // flow sent after the push.
+                            look = dispatch::look(
+                                &gh,
+                                &repo,
+                                &job.detail,
+                                workflow,
+                                may_run,
+                                ran.as_ref(),
+                            )
+                            .await;
+                        }
+                        flow_sent = Some(sent);
+                    }
+                }
+                Some(look)
             } else {
                 None
             }
@@ -869,6 +936,7 @@ async fn gather(job: Job) -> Gathered {
         grid_file,
         plan,
         look,
+        flow_sent,
         build_ms,
     }
 }
@@ -963,6 +1031,10 @@ fn land_gathered(app: &mut App, g: Gathered) {
     let url = g.job.url.clone();
     if let Some(t) = app.pr_body.tracked.get_mut(&url) {
         t.gathering = false;
+    }
+    if let Some(sent) = &g.flow_sent {
+        app.pr_body.remembered(&url).flow_sent = Some(sent.clone());
+        app.pr_body.save();
     }
     if let Some(look) = &g.look {
         let head = g.job.detail.head_sha.trim().to_string();
@@ -1686,6 +1758,8 @@ mod tests {
                 cache: None,
                 pictures_dispatched: None,
                 pictures_ran: None,
+                checkout: None,
+                flow_sent: None,
             },
             fresh_contract: false,
             contract: None,
@@ -1694,6 +1768,7 @@ mod tests {
             grid_file: None,
             plan: None,
             look: None,
+            flow_sent: None,
             build_ms: None,
         }
     }

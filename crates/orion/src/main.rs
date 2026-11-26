@@ -74,6 +74,7 @@ fn main() -> Result<()> {
             PrFactsCommand::Init => orion_tui::PrFactsOp::Init,
             PrFactsCommand::Set { file, pr } => orion_tui::PrFactsOp::Set { file, pr },
         }),
+        Some(Command::Pr(PrCommand::Pictures { pr })) => orion_tui::run_pr_pictures(pr),
         Some(Command::Knowledge(KnowledgeCommand::For { paths, project })) => {
             orion_tui::knowledge::cli_for(paths, project)
         }

@@ -159,6 +159,12 @@ pub fn run_pr_facts(op: PrFactsOp) -> Result<()> {
     pr_body::cli::run(op)
 }
 
+/// `orion pr pictures [--pr <PR>]`: send this checkout's pictures flow by
+/// the repo's contract (see [`pr_body::flow`]).
+pub fn run_pr_pictures(pr: Option<String>) -> Result<()> {
+    runtime()?.block_on(pr_body::flow::cli(pr))
+}
+
 pub use automations::linear_builder::skip::Known as FactoryKnown;
 
 /// `orion factory skip <ticket or session> [--backlog]`: **Not for orion**

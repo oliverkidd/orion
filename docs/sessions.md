@@ -937,7 +937,10 @@ request. They work the same way; each has its own labels and its own preset (**B
   the worktree is cut from has them; see [Knowledge](how-it-works.md#knowledge)), the areas and
   topics to note rules on, and "Phase a large task, or propose a multi-agent workflow." Its last
   step, after `orion pr facts set`, is `orion knowledge note`: the lasting rules it learned, which
-  orion records when the pull request merges instead of reading the whole of it again. As a ⌘L launch does,
+  orion records when the pull request merges instead of reading the whole of it again. A change
+  users can see sends its pictures flow with `orion pr pictures`, which runs the upload the repo
+  names in `.orion/pr-contract.toml` (`pictures_flow`, `pictures_upload`); a flow left in the
+  worktree but never sent, orion sends itself, once per push. As a ⌘L launch does,
   it moves the tickets to In Progress and attaches the draft pull request to them when it opens.
   `ORION_AUTOMATION` is set in the session.
 - **Your approval.** Every plan waits for you like any other: in Needs you, and on your phone when
