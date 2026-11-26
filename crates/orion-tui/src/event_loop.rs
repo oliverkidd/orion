@@ -5793,6 +5793,12 @@ fn land_view_answer(app: &mut App, answer: crate::view_jobs::Answer) {
         Answer::FixerContext { agent, used, said } => {
             crate::automations::pr_fixer::router::land_context(app, agent, used, said)
         }
+        Answer::CheckoutLook { url, busy } => {
+            crate::automations::pr_fixer::checkout::land(app, url, busy)
+        }
+        Answer::RepoFlow { project, flow } => {
+            crate::automations::pr_fixer::flow::land(app, project, flow)
+        }
         Answer::Slow { ticket } => match &mut app.overlay {
             Some(Overlay::Diff(view)) => crate::git_diff::diff_slow(view, ticket),
             Some(Overlay::Tree(view)) => view.preview_slow(ticket),
@@ -13113,6 +13119,9 @@ pub(crate) fn handle_server_event(app: &mut App, event: ServerEvent, out: &mut V
         }
         ServerEvent::StackStatuses { statuses } => {
             crate::stacks::listed(app, statuses);
+        }
+        ServerEvent::Visits { visits } => {
+            app.visits = visits;
         }
         ServerEvent::AwayChanged { away, by_hand } => {
             crate::phone::away_changed(app, away, by_hand);

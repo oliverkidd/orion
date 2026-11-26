@@ -128,9 +128,70 @@ pub struct HookEnv {
 pub struct HookServerState {
     token: String,
     tx: mpsc::Sender<HookDelivery>,
+    /// Where a session wrote outside its own checkout ([`Touch`]), for the
+    /// daemon's visit book (`Daemon::note_touch`).
+    touches: mpsc::Sender<Touch>,
     /// Read-only peek at agent rows: drives the auto-title injection
     /// decision without a round-trip through the daemon's drain loop.
     store: Arc<Store>,
+}
+
+/// A session wrote somewhere: a Bash line that runs a git write
+/// (`orion_core::touched_paths::writes_git`), with the paths it names and
+/// the session's cwd, or a file edit's path. The daemon matches them
+/// against every project's checkouts and keeps the ones that aren't the
+/// session's own (`ServerEvent::Visits`). Kept apart from
+/// [`HookDelivery`]: it says nothing the status machines read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Touch {
+    pub agent_id: AgentId,
+    pub session_id: Option<String>,
+    pub paths: Vec<std::path::PathBuf>,
+}
+
+/// The tools whose `PostToolUse` names a file the session just wrote, in
+/// `tool_input.file_path` (`notebook_path` for a notebook).
+const EDIT_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
+
+/// What `payload` says the session wrote, for the visit book: a Bash
+/// line's paths and cwd when the line writes git, an edit tool's file.
+/// None for anything else, and for a subagent's traffic only when it
+/// names nothing. Claude-dialect payloads only.
+fn touch_of(agent_id: &AgentId, event: &HookEvent, payload: &HookPayload) -> Option<Touch> {
+    let input = payload.tool_input.as_ref()?;
+    let paths = match event {
+        HookEvent::PreToolUse {
+            tool_name: Some(tool),
+            ..
+        } if tool == "Bash" => {
+            let command = input.get("command")?.as_str()?;
+            if !orion_core::touched_paths::writes_git(command) {
+                return None;
+            }
+            let home = orion_core::env::home_dir().unwrap_or_default();
+            let mut paths = orion_core::touched_paths::from_command(command, &home);
+            if let Some(cwd) = payload.cwd() {
+                paths.push(std::path::PathBuf::from(cwd));
+            }
+            paths
+        }
+        HookEvent::PostToolUse {
+            tool_name: Some(tool),
+            ..
+        } if EDIT_TOOLS.contains(&tool.as_str()) => {
+            let file = input
+                .get("file_path")
+                .or_else(|| input.get("notebook_path"))?
+                .as_str()?;
+            vec![std::path::PathBuf::from(file)]
+        }
+        _ => return None,
+    };
+    (!paths.is_empty()).then(|| Touch {
+        agent_id: agent_id.clone(),
+        session_id: payload.session_id(),
+        paths,
+    })
 }
 
 /// One accepted hook POST, decoded for the daemon's drain loop.
@@ -357,15 +418,17 @@ fn pre_tool_deny(reason: &str) -> String {
 /// bearer token) and the receiving end of the event pipe.
 pub async fn start_hook_server(
     store: Arc<Store>,
-) -> anyhow::Result<(HookEnv, mpsc::Receiver<HookDelivery>)> {
+) -> anyhow::Result<(HookEnv, mpsc::Receiver<HookDelivery>, mpsc::Receiver<Touch>)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let token = generate_token();
     let (tx, rx) = mpsc::channel(256);
+    let (touches, touch_rx) = mpsc::channel(256);
 
     let state = Arc::new(HookServerState {
         token: token.clone(),
         tx,
+        touches,
         store,
     });
     // Claude and Codex UserPromptSubmit hooks pipe this server's response
@@ -389,7 +452,7 @@ pub async fn start_hook_server(
         }
     });
 
-    Ok((HookEnv { port, token }, rx))
+    Ok((HookEnv { port, token }, rx, touch_rx))
 }
 
 fn generate_token() -> String {
@@ -497,6 +560,14 @@ async fn receive_hook(
     };
     let agent_id = AgentId(query.agent_id.clone());
     tracing::debug!(agent = %agent_id, event = ?event, "hook received");
+    // A write — a Bash line's git write, a file edit — goes to the visit
+    // book, whichever checkout it lands in. Never waited on: a full
+    // channel drops it rather than hold up the session's tool call.
+    if cli.dialect() == HookDialect::Injectable {
+        if let Some(touch) = touch_of(&agent_id, &event, &payload) {
+            let _ = state.touches.try_send(touch);
+        }
+    }
     // A Bash call is only asked about for its line: it says nothing the
     // status machine reads, which never heard a Bash `PreToolUse` before.
     if let HookEvent::PreToolUse {
@@ -591,6 +662,63 @@ async fn receive_hook(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_git_write_or_a_file_edit_is_a_touch_and_a_read_is_not() {
+        use std::path::PathBuf;
+        let agent = AgentId("a1".into());
+        let payload = |tool: &str, input: serde_json::Value| HookPayload {
+            tool_name: Some(tool.into()),
+            tool_input: Some(input),
+            cwd: Some("/home/me/app".into()),
+            session_id: Some("s1".into()),
+            ..Default::default()
+        };
+        let pre = |tool: &str| HookEvent::PreToolUse {
+            tool_name: Some(tool.into()),
+            subagent_id: None,
+        };
+        let post = |tool: &str| HookEvent::PostToolUse {
+            tool_name: Some(tool.into()),
+            subagent_id: None,
+        };
+
+        let line = "cd /w/other-feat && git commit -q -m x";
+        let touch = touch_of(
+            &agent,
+            &pre("Bash"),
+            &payload("Bash", serde_json::json!({"command": line})),
+        );
+        assert_eq!(
+            touch.map(|t| t.paths),
+            Some(vec![
+                PathBuf::from("/w/other-feat"),
+                PathBuf::from("/home/me/app")
+            ])
+        );
+        let read = "cd /w/other-feat && git log -3";
+        assert!(touch_of(
+            &agent,
+            &pre("Bash"),
+            &payload("Bash", serde_json::json!({"command": read}))
+        )
+        .is_none());
+
+        let edit = payload(
+            "Edit",
+            serde_json::json!({"file_path": "/w/other-feat/a.ts"}),
+        );
+        assert_eq!(
+            touch_of(&agent, &post("Edit"), &edit).map(|t| (t.paths, t.session_id)),
+            Some((vec![PathBuf::from("/w/other-feat/a.ts")], Some("s1".into())))
+        );
+        assert!(touch_of(
+            &agent,
+            &post("Read"),
+            &payload("Read", serde_json::json!({"file_path": "/w/x"}))
+        )
+        .is_none());
+    }
     use orion_core::{Agent, AgentKind, AgentStatus, Project, ProjectId, Worktree, WorktreeId};
 
     /// Minimal raw HTTP/1.1 POST (Connection: close), so the real response
@@ -680,7 +808,7 @@ mod tests {
     #[tokio::test]
     async fn claude_prompt_reply_pushes_the_row_name_as_session_title() {
         let store = seeded_store();
-        let (env, mut rx) = start_hook_server(store.clone()).await.unwrap();
+        let (env, mut rx, _touches) = start_hook_server(store.clone()).await.unwrap();
         let payload = r#"{"session_id":"s1","transcript_path":"/t/p/s1.jsonl"}"#;
 
         let (status, body) = http_post(
@@ -762,7 +890,7 @@ mod tests {
     #[tokio::test]
     async fn user_prompt_submit_injects_title_instruction_only_while_pending() {
         let store = seeded_store();
-        let (env, mut rx) = start_hook_server(store.clone()).await.unwrap();
+        let (env, mut rx, _touches) = start_hook_server(store.clone()).await.unwrap();
         let payload = r#"{"session_id":"s1"}"#;
 
         // Untitled session: the instruction rides the response body (and the
@@ -853,7 +981,7 @@ mod tests {
     #[tokio::test]
     async fn bash_tool_use_carries_cwd_but_subagent_traffic_does_not() {
         let store = seeded_store();
-        let (env, mut rx) = start_hook_server(store).await.unwrap();
+        let (env, mut rx, _touches) = start_hook_server(store).await.unwrap();
 
         // The mid-turn position signal: a Bash call that just `cd`ed into a
         // fresh worktree, long before the turn's Stop.
@@ -898,7 +1026,7 @@ mod tests {
     #[tokio::test]
     async fn a_stack_command_is_turned_toward_orion_run() {
         let store = seeded_store();
-        let (env, mut rx) = start_hook_server(store).await.unwrap();
+        let (env, mut rx, _touches) = start_hook_server(store).await.unwrap();
         let bash = |command: &str| {
             serde_json::json!({
                 "session_id": "s1",
@@ -951,7 +1079,7 @@ mod tests {
     #[tokio::test]
     async fn user_prompt_submit_carries_the_condensed_prompt() {
         let store = seeded_store();
-        let (env, mut rx) = start_hook_server(store).await.unwrap();
+        let (env, mut rx, _touches) = start_hook_server(store).await.unwrap();
         let post = |event: &'static str, body: &'static str| {
             let port = env.port;
             let token = env.token.clone();
@@ -1034,7 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn grok_route_delivers_the_session_and_injects_nothing() {
         let store = seeded_store();
-        let (env, mut rx) = start_hook_server(store).await.unwrap();
+        let (env, mut rx, _touches) = start_hook_server(store).await.unwrap();
         for (event, want) in [
             ("UserPromptSubmit", HookEvent::UserPromptSubmit),
             ("Stop", HookEvent::Stop),

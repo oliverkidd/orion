@@ -30,6 +30,12 @@
 //! [limits.feature]
 //! lines = 5000
 //! files = 70
+//!
+//! # How the repo's pull requests move. `ready = "when-clean"`: agents
+//! # open drafts, and orion marks one ready once its checks passed and
+//! # Cubic left nothing open at P0 or P1 (the PR fixer's `flow`).
+//! [flow]
+//! ready = "when-clean"
 //! ```
 //!
 //! Paths are globs from the repo's root: `*` stays within a directory,
@@ -74,6 +80,24 @@ impl Default for Limits {
     }
 }
 
+/// When a draft is marked ready.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Ready {
+    /// By hand: orion leaves drafts as they are.
+    #[default]
+    Manual,
+    /// By orion, once the draft is clean.
+    WhenClean,
+}
+
+/// How the repo's pull requests move: the contract's `[flow]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Flow {
+    pub ready: Ready,
+}
+
 /// A repo's contract.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -95,6 +119,7 @@ pub struct Contract {
     /// and orion sends nothing itself.
     pub pictures_upload: Option<String>,
     pub limits: Limits,
+    pub flow: Flow,
 }
 
 impl Default for Contract {
@@ -115,6 +140,7 @@ impl Default for Contract {
             pictures_flow: None,
             pictures_upload: None,
             limits: Limits::default(),
+            flow: Flow::default(),
         }
     }
 }
@@ -249,6 +275,18 @@ pub async fn fetch(owner: &str, repo: &str, base: &str) -> Option<Read> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_flow_table_parses_and_defaults_to_manual() {
+        let c = parse("[flow]\nready = \"when-clean\"\n").unwrap();
+        assert_eq!(c.flow.ready, Ready::WhenClean);
+        assert_eq!(parse("").unwrap().flow.ready, Ready::Manual);
+        assert!(parse("[flow]\nready = \"soon\"\n").is_err());
+        assert!(
+            parse("[flow]\nmerge = \"queue\"\n").is_err(),
+            "unknown keys are refused"
+        );
+    }
 
     #[test]
     fn a_full_contract_parses() {

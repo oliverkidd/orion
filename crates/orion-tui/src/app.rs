@@ -4096,6 +4096,10 @@ pub struct App {
     /// startup and when the settings overlay applies a change; off here
     /// until startup applies it.
     pub spotify_enabled: bool,
+    /// The sessions at work in checkouts that aren't their own, as the
+    /// daemon's visit book last said (`ServerEvent::Visits`): what the PR
+    /// FIXER counts beside the sessions a branch's checkouts hold.
+    pub visits: Vec<orion_core::AgentVisit>,
     /// AWAY, as the daemon last said (`ServerEvent::AwayChanged`).
     pub away: bool,
     /// AWAY BY HAND (⌘⇧A) is on: the next key sends `SetAway { on: false }`.
@@ -4817,6 +4821,7 @@ impl App {
             spotify_seq: 0,
             spotify_denied: false,
             spotify_enabled: false,
+            visits: Vec::new(),
             away: false,
             away_by_hand: false,
             slack_status: Default::default(),

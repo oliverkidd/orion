@@ -169,6 +169,12 @@ pub struct Daemon {
     /// orion hasn't adopted yet leaves its cwd here, so the worktree sync
     /// can finish the re-home once the row exists.
     last_cwd: Mutex<HashMap<AgentId, PathBuf>>,
+    /// THE VISIT BOOK: when each session last wrote in a checkout that
+    /// isn't its own (`orion_core::touched_paths`), epoch ms. Memory only,
+    /// each entry dropped [`orion_core::touched_paths::VISIT_TTL_MS`] after
+    /// it was written; every client hears the whole book
+    /// (`ServerEvent::Visits`) when it changes ([`Daemon::note_touch`]).
+    visits: Mutex<HashMap<(AgentId, WorktreeId), i64>>,
     /// Where each Claude agent's transcript (and beside it, the session
     /// title `/rename` persists) lives, from its hook payloads. Read by
     /// the CLAUDE TITLE SYNC (`session_title.rs`) when the PTY's window
@@ -248,6 +254,7 @@ impl Daemon {
             model_sweep_owed: Mutex::new(HashSet::new()),
             session_interest: Mutex::new(HashMap::new()),
             last_cwd: Mutex::new(HashMap::new()),
+            visits: Mutex::new(HashMap::new()),
             transcripts: Mutex::new(HashMap::new()),
             wait_reasons: Mutex::new(HashMap::new()),
             pending_moves: Mutex::new(HashMap::new()),
@@ -477,6 +484,96 @@ impl Daemon {
 
     pub fn broadcast(&self, ev: ServerEvent) {
         let _ = self.events.send(ev);
+    }
+
+    /// The visit book, whole, as every client hears it.
+    pub fn visits_current(&self) -> ServerEvent {
+        let mut visits: Vec<orion_core::AgentVisit> = self
+            .visits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|((agent, worktree), at)| orion_core::AgentVisit {
+                agent: agent.clone(),
+                worktree: worktree.clone(),
+                at: *at,
+            })
+            .collect();
+        visits.sort_by(|a, b| (&a.agent.0, &a.worktree.0).cmp(&(&b.agent.0, &b.worktree.0)));
+        ServerEvent::Visits { visits }
+    }
+
+    /// A session wrote ([`crate::hooks::Touch`]): each path that lies in
+    /// one of orion's checkouts — any project's — other than the session's
+    /// own goes in the visit book at now. Every client hears the book when
+    /// a visit is new or moves by more than [`VISIT_RESTAMP_MS`], or an old
+    /// one lapses — not on every edit.
+    pub fn note_touch(&self, touch: &crate::hooks::Touch) {
+        if let Err(e) = self.try_note_touch(touch, orion_core::clock::now_ms()) {
+            tracing::warn!(agent = %touch.agent_id, error = %e, "visit note failed");
+        }
+    }
+
+    fn try_note_touch(&self, touch: &crate::hooks::Touch, now: i64) -> Result<()> {
+        let Some(agent) = self.store.get_agent(&touch.agent_id)? else {
+            return Ok(());
+        };
+        if agent.archived {
+            return Ok(());
+        }
+        // The status machines' foreign-session rule: a payload from another
+        // CLI session than the row's says nothing about this row.
+        if let (Some(mine), Some(theirs)) =
+            (agent.session_id.as_deref(), touch.session_id.as_deref())
+        {
+            if mine != theirs {
+                return Ok(());
+            }
+        }
+        let paths: Vec<PathBuf> = touch.paths.iter().map(|p| canonical_file(p)).collect();
+        // The common case, an edit in its own checkout, costs one row.
+        if let Some(own) = self.store.get_worktree(&agent.worktree_id)? {
+            let own = canonical_or_raw(&own.path);
+            if paths.iter().all(|p| p.starts_with(&own)) {
+                return Ok(());
+            }
+        }
+        let (_, worktrees, _, _) = self.store.load_tree()?;
+        let checkouts: Vec<(WorktreeId, PathBuf)> = worktrees
+            .into_iter()
+            .map(|w| (w.id, canonical_or_raw(&w.path)))
+            .collect();
+        let hit: HashSet<WorktreeId> = paths
+            .iter()
+            .filter_map(|path| {
+                checkouts
+                    .iter()
+                    .filter(|(_, root)| path.starts_with(root))
+                    .max_by_key(|(_, root)| root.components().count())
+                    .map(|(id, _)| id.clone())
+            })
+            .filter(|id| id != &agent.worktree_id)
+            .collect();
+        let changed = {
+            let mut book = self.visits.lock().unwrap();
+            let before = book.len();
+            book.retain(|_, at| now - *at < orion_core::touched_paths::VISIT_TTL_MS);
+            let mut changed = book.len() != before;
+            for id in hit {
+                let key = (agent.id.clone(), id);
+                let moved = book.get(&key).is_none_or(|at| now - *at > VISIT_RESTAMP_MS);
+                if moved {
+                    tracing::info!(agent = %agent.id, worktree = %key.1, "session wrote in another checkout");
+                    book.insert(key, now);
+                    changed = true;
+                }
+            }
+            changed
+        };
+        if changed {
+            self.broadcast(self.visits_current());
+        }
+        Ok(())
     }
 
     pub fn session(&self, sref: &SessionRef) -> Option<Arc<PtySession>> {
@@ -4504,6 +4601,22 @@ pub(crate) fn sanitize_title(raw: &str) -> String {
     title
 }
 
+/// How far a visit's stamp moves before every client hears it again.
+const VISIT_RESTAMP_MS: i64 = 60_000;
+
+/// A file's path for containment tests: canonical when it exists, else its
+/// parent's canonical form with the name on (a file a `Write` is about to
+/// create), else as given.
+fn canonical_file(path: &Path) -> PathBuf {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return p;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => canonical_or_raw(parent).join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// Canonicalize for path containment tests, falling back to the raw path
 /// when it doesn't resolve (deleted checkout, not-yet-created dir). macOS
 /// symlinks (`/tmp` → `/private/tmp`) otherwise break `starts_with`.
@@ -7643,6 +7756,68 @@ pub(crate) mod tests {
         let long = "word ".repeat(30);
         assert!(sanitize_title(&long).chars().count() <= 60);
         assert!(!sanitize_title(&long).ends_with(' '));
+    }
+
+    #[test]
+    fn a_write_in_another_projects_checkout_goes_in_the_visit_book_once() {
+        let daemon = test_daemon();
+        seed_projects(&daemon, &["p", "q"]);
+        seed_worktree(&daemon, "p", "root", "/orion-test/p", true);
+        seed_worktree(&daemon, "q", "q-root", "/orion-test/q", true);
+        seed_worktree(&daemon, "q", "q-feat", "/orion-test/q-feat", false);
+        seed_agent(&daemon, "a1", "root", None);
+        let mut rx = daemon.events.subscribe();
+        let touch = |paths: &[&str]| crate::hooks::Touch {
+            agent_id: AgentId("a1".into()),
+            session_id: None,
+            paths: paths.iter().map(PathBuf::from).collect(),
+        };
+        let visits = |daemon: &Daemon| match daemon.visits_current() {
+            ServerEvent::Visits { visits } => visits
+                .into_iter()
+                .map(|v| (v.agent.0, v.worktree.0, v.at))
+                .collect::<Vec<_>>(),
+            other => panic!("{other:?}"),
+        };
+
+        // Its own checkout, and paths in no checkout: nothing.
+        daemon
+            .try_note_touch(&touch(&["/orion-test/p/src/a.rs", "/tmp/x"]), 1_000)
+            .unwrap();
+        assert!(visits(&daemon).is_empty());
+        assert!(rx.try_recv().is_err());
+
+        // A git write in the other project's feature checkout.
+        daemon
+            .try_note_touch(&touch(&["/orion-test/q-feat", "/orion-test/p"]), 2_000)
+            .unwrap();
+        assert_eq!(visits(&daemon), vec![("a1".into(), "q-feat".into(), 2_000)]);
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::Visits { .. })));
+
+        // Again a moment later: kept, nobody told again.
+        daemon
+            .try_note_touch(&touch(&["/orion-test/q-feat/x.ts"]), 3_000)
+            .unwrap();
+        assert_eq!(visits(&daemon)[0].2, 2_000);
+        assert!(rx.try_recv().is_err());
+
+        // Long after, the old visit lapses and the new write restamps it.
+        let later = 2_000 + orion_core::touched_paths::VISIT_TTL_MS + 1;
+        daemon
+            .try_note_touch(&touch(&["/orion-test/q-feat/x.ts"]), later)
+            .unwrap();
+        assert_eq!(visits(&daemon)[0].2, later);
+        assert!(matches!(rx.try_recv(), Ok(ServerEvent::Visits { .. })));
+
+        // Another CLI session's payload says nothing about this row.
+        daemon
+            .store
+            .set_agent_session_id(&AgentId("a1".into()), Some("s1"))
+            .unwrap();
+        let mut foreign = touch(&["/orion-test/q"]);
+        foreign.session_id = Some("other".into());
+        daemon.try_note_touch(&foreign, later + 1).unwrap();
+        assert_eq!(visits(&daemon).len(), 1);
     }
 
     #[test]

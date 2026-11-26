@@ -131,6 +131,7 @@ async fn handle_client(daemon: Arc<Daemon>, stream: UnixStream) -> Result<()> {
                     let _ = out_tx.send(daemon.stacks.current()).await;
                     let _ = out_tx.send(daemon.away.current()).await;
                     let _ = out_tx.send(daemon.slack.current()).await;
+                    let _ = out_tx.send(daemon.visits_current()).await;
                     let notes = std::mem::take(&mut *daemon.boot_notes.lock().unwrap());
                     for message in notes {
                         let _ = out_tx

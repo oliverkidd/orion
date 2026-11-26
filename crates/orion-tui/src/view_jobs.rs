@@ -136,6 +136,15 @@ pub enum Answer {
         used: Option<f64>,
         said: Vec<String>,
     },
+    /// Whether a pull request's checkout is in use, for the PR fixer
+    /// before a fresh fixer goes in (`automations::pr_fixer::checkout`).
+    CheckoutLook { url: String, busy: Option<String> },
+    /// A project's PR flow, off the contract on its base branch
+    /// (`automations::pr_fixer::flow`).
+    RepoFlow {
+        project: orion_core::ProjectId,
+        flow: crate::pr_body::contract::Flow,
+    },
 }
 
 /// A view's way onto the blocking pool and back. Cheap to clone — the

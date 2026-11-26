@@ -59,10 +59,22 @@
 //!   writes on GitHub — review comments with their file and line, and
 //!   conversation comments — goes to the branch's agent through the same
 //!   router, verbatim, once each ([`relay_comments`]).
-//! * **Cubic's findings.** Each of your pull requests that is green is
-//!   read again when its row moves — a review thread, a comment, turning
-//!   green ([`poll`]). The Cubic threads on it that nobody has answered and that
-//!   were never sent go to the branch's agent through the same router —
+//! * **Visitors and the checkout look.** A session started in another
+//!   project that writes in the PR's checkout (`cd …/feature && git
+//!   commit`) is on the branch for [`works_on`], from the daemon's visit
+//!   book (`App::visits`): it is the branch's agent, told where the
+//!   checkout is ([`visiting`]). Before a fresh fixer goes in, the checkout
+//!   itself is looked at ([`checkout`]): someone orion can't see at work
+//!   there holds it back.
+//! * **The repo's flow.** A repo whose PR contract says `[flow] ready =
+//!   "when-clean"` has its drafts fixed like ready pull requests, and each
+//!   marked ready once clean ([`flow`]).
+//! * **Cubic's findings.** Each of your open pull requests not in trouble
+//!   — its checks still running count — is read again when its row moves
+//!   ([`poll`]), so Cubic's findings go the moment they post and their
+//!   push cancels the run in progress. A broken one has them sent with the
+//!   breakage, in one turn ([`bundle_cubic`]). The Cubic threads on it that
+//!   nobody has answered and that were never sent go to the branch's agent through the same router —
 //!   the session that built it, which knows what was left out on purpose
 //!   — to fix what is right as a new commit on top (so Cubic reviews the
 //!   fix) and say why on the thread of each one it leaves
@@ -117,6 +129,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+pub(crate) mod checkout;
+pub(crate) mod flow;
 pub(crate) mod router;
 use router::Work;
 
@@ -339,6 +353,10 @@ pub struct Record {
     /// list, and not on the next launch.
     #[serde(default)]
     pub read: Option<String>,
+    /// The head commit the fixer last marked it ready at
+    /// ([`flow::mark_ready`]): not asked again on that commit.
+    #[serde(default)]
+    pub readied: Option<String>,
 }
 
 /// A watched pull request: in trouble, its body read when its row moves.
@@ -425,6 +443,15 @@ pub struct State {
     /// limit, or the owner in the session — and when to try again
     /// ([`retry_cubic`]).
     pub cubic_retry: HashMap<String, Instant>,
+    /// By PR URL: whether its checkout was in use when last looked at,
+    /// before a fresh fixer goes in ([`checkout`]).
+    pub checkouts: HashMap<String, checkout::Look>,
+    /// By PR URL: checkout looks out on the blocking pool, and since when.
+    pub looking: HashMap<String, Instant>,
+    /// By project: its PR flow as last read ([`flow`]).
+    pub flows: HashMap<ProjectId, flow::Known>,
+    /// By project: flow reads out on the blocking pool, and since when.
+    pub flow_reads: HashMap<ProjectId, Instant>,
 }
 
 /// A pull request whose body is read for its talk: a factory one for the
@@ -479,6 +506,7 @@ impl State {
         self.watching.remove(url);
         self.held.remove(url);
         self.conflicted.remove(url);
+        self.checkouts.remove(url);
         if !self.polls.contains_key(url) {
             self.want.remove(url);
         }
@@ -503,6 +531,8 @@ impl State {
 /// attempts are left as they are. A draft is dropped — a factory draft
 /// aside, watched for its failing checks alone ([`fixer_view`]).
 pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
+    flow::refresh(app, project);
+    let fixes_drafts = flow::fixes_drafts(app, project);
     // orion's own knowledge pull request is orion's to rebuild and merge
     // (`knowledge::share`); a fixer pushing to its branch would race it.
     for pr in list
@@ -511,7 +541,7 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
     {
         let factory = is_factory(app, project, &pr.head);
         let status = fixer_view(app.prs.status_or_open(&pr.url), factory);
-        let cubic = cubic_wanted(app, &status, factory);
+        let cubic = cubic_wanted(app, &status, factory || fixes_drafts);
         match factory || cubic {
             true => poll(app, project, pr, factory, cubic),
             false => {
@@ -533,11 +563,18 @@ pub fn note_list(app: &mut App, project: &ProjectId, list: &[OpenPr]) {
             app.autofix
                 .queued
                 .retain(|q| !(q.work.is_fix() && q.work.pr().url == pr.url));
+            if status.is_draft() && fixes_drafts {
+                if let Some(detail) = app.pr_detail.get(&pr.url).cloned() {
+                    flow::mark_ready(app, project, pr, &detail);
+                }
+            }
             continue;
         }
-        // A draft isn't asking for anything yet: no unasked fixer. `⌘G`
-        // still opens the form for it, and marking it ready brings it back.
-        if status.is_draft() && !factory {
+        // A draft isn't asking for anything yet: no unasked fixer — unless
+        // the repo's flow has orion mark drafts ready, when a draft is
+        // where the fixing happens. `⌘G` still opens the form for it, and
+        // marking it ready brings it back.
+        if status.is_draft() && !factory && !fixes_drafts {
             app.autofix.forget(&pr.url);
             continue;
         }
@@ -766,14 +803,49 @@ fn poll(app: &mut App, project: &ProjectId, pr: &OpenPr, factory: bool, cubic: b
 }
 
 /// Whether one of your pull requests, standing at `status` (seen through
-/// [`fixer_view`]), has Cubic's findings sent: the PR fixer on, open and
-/// green — a breakage is fixed first, and Cubic's findings then go in one
-/// round — and not a plain draft. (Going green unparks it.)
-fn cubic_wanted(app: &App, status: &PrStatus, factory: bool) -> bool {
+/// [`fixer_view`]), has Cubic's findings sent the moment they post: the PR
+/// fixer on, open, not a plain draft, and not in trouble — its checks
+/// still running count, so the fix is pushed before CI finishes and the
+/// run it cancels is not paid for twice. A pull request in trouble has
+/// them sent with its breakage instead ([`bundle_cubic`]).
+/// `drafts`: a factory pull request, or one in a repo whose flow fixes
+/// drafts ([`flow::fixes_drafts`]).
+fn cubic_wanted(app: &App, status: &PrStatus, drafts: bool) -> bool {
     app.automations.is_on(Automation::PrFixer)
         && status.is_open()
-        && status.is_green()
-        && (factory || !status.is_draft())
+        && (drafts || !status.is_draft())
+        && fixer_trouble(status).is_none()
+}
+
+/// A breakage about to go: Cubic's findings on it that nobody answered
+/// and that were never sent go in the same turn ([`AutofixForm::cubic`]),
+/// so one push answers both — while rounds remain ([`CUBIC_ROUNDS`]).
+fn bundle_cubic(app: &mut App, url: &str, detail: &PrDetail, form: &mut AutofixForm) {
+    let (new, rounds) = unsent_cubic(app, url, detail);
+    if new.is_empty() || rounds >= CUBIC_ROUNDS {
+        return;
+    }
+    let round = rounds + 1;
+    form.cubic = router::cubic_turn(&form.pr, &new, round, CUBIC_ROUNDS);
+    let ids: Vec<String> = new.iter().map(|t| t.id.clone()).collect();
+    let record = app.autofix.record(url);
+    record.cubic_sent.extend(ids);
+    record.cubic_rounds = round;
+}
+
+/// Cubic's threads on `detail` that nobody answered and that were never
+/// sent, and how many rounds have gone to `url` so far.
+fn unsent_cubic<'a>(
+    app: &App,
+    url: &str,
+    detail: &'a PrDetail,
+) -> (Vec<&'a crate::pr_review::github::ReviewThread>, u8) {
+    let record = app.autofix.ledger.get(url);
+    let sent = record.map_or(&[][..], |r| r.cubic_sent.as_slice());
+    let new = crate::pr_body::cubic::unanswered(&detail.threads)
+        .filter(|t| !sent.contains(&t.id))
+        .collect();
+    (new, record.map_or(0, |r| r.cubic_rounds))
 }
 
 /// A factory pull request's body landed: the owner's comments on it that
@@ -835,18 +907,11 @@ fn relay_cubic(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<Client
         return;
     };
     let status = fixer_view(app.prs.status_or_open(url), factory);
-    if !cubic_wanted(app, &status, factory) {
+    let drafts = factory || flow::fixes_drafts(app, &project);
+    if !cubic_wanted(app, &status, drafts) {
         return;
     }
-    let (new, rounds) = {
-        let record = app.autofix.ledger.get(url);
-        let sent = record.map_or(&[][..], |r| r.cubic_sent.as_slice());
-        let new: Vec<&crate::pr_review::github::ReviewThread> =
-            crate::pr_body::cubic::unanswered(&detail.threads)
-                .filter(|t| !sent.contains(&t.id))
-                .collect();
-        (new, record.map_or(0, |r| r.cubic_rounds))
-    };
+    let (new, rounds) = unsent_cubic(app, url, detail);
     if new.is_empty() {
         return;
     }
@@ -1060,9 +1125,18 @@ pub fn land_detail(
             app.autofix.record(url).read = Some(read);
         }
     }
+    let before = (out.len(), app.autofix.queued.len());
     relay_comments(app, url, detail, out);
     relay_cubic(app, url, detail, out);
+    let relayed = before != (out.len(), app.autofix.queued.len());
     decide(app, url, detail, out);
+    // Clean, with nothing just sent its way: a draft in a `when-clean`
+    // repo goes ready.
+    if !relayed {
+        if let Some((project, pr)) = open_anywhere(app, url) {
+            flow::mark_ready(app, &project, &pr, detail);
+        }
+    }
 }
 
 /// A watched pull request's body in hand — just landed, or looked at again
@@ -1084,7 +1158,7 @@ fn decide(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<ClientReque
         .is_some_and(|pr| is_factory(app, &watch.project, &pr.head));
     let status = app.prs.status_or_open(url);
     // Turned draft since the list: left alone, as the list would leave it.
-    if status.is_draft() && !factory {
+    if status.is_draft() && !factory && !flow::fixes_drafts(app, &watch.project) {
         app.autofix.forget(url);
         return;
     }
@@ -1141,6 +1215,33 @@ fn decide(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<ClientReque
         return;
     }
     let fresh = matches!(to, router::Route::Fresh { .. });
+    // A fresh fixer goes into the PR's checkout: not while someone orion
+    // can't see is at work there ([`checkout`]).
+    if fresh {
+        let paths: Vec<PathBuf> = app
+            .tree
+            .worktrees
+            .iter()
+            .filter(|w| w.project_id == watch.project && w.branch == pr.head)
+            .map(|w| w.path.clone())
+            .collect();
+        match checkout::verdict(app, url, &paths) {
+            // Asked: decided again once the look lands.
+            None => return,
+            Some(Some(why)) => {
+                if app.autofix.held.insert(url.to_string()) {
+                    app.flash = Some(Flash::note(format!(
+                        "PR fixer held #{}: its checkout is in use ({why})",
+                        pr.number
+                    )));
+                    app.dirty = true;
+                }
+                app.autofix.relook_later(url);
+                return;
+            }
+            Some(None) => {}
+        }
+    }
     // The branch's other live sessions, each with the conversation the
     // agent reads before it touches anything — or, for one whose
     // conversation can't be found, nothing sent yet.
@@ -1194,6 +1295,7 @@ fn decide(app: &mut App, url: &str, detail: &PrDetail, out: &mut Vec<ClientReque
     }
     if record.attempts < AUTO_ATTEMPTS {
         form.peers = peers;
+        bundle_cubic(app, url, detail, &mut form);
         send(app, form, out);
     } else {
         give_up(app, &form, record.attempts);
@@ -1485,6 +1587,43 @@ pub(crate) fn on_branch(
         .any(|w| w.id == agent.worktree_id && &w.project_id == project && w.branch == branch)
 }
 
+/// Whether `agent` works on `branch` in `project`: one of the project's
+/// checkouts of the branch is its own ([`on_branch`]), or it wrote in one
+/// lately ([`visiting`]) — a session started in another project that
+/// `cd`s into the checkout to commit, which orion would otherwise not
+/// count as on the branch at all.
+pub(crate) fn works_on(
+    app: &App,
+    agent: &orion_core::Agent,
+    project: &ProjectId,
+    branch: &str,
+) -> bool {
+    on_branch(app, agent, project, branch) || visiting(app, agent, project, branch).is_some()
+}
+
+/// The checkout of `branch` in `project` that `agent` — not one of its
+/// own — wrote in within [`orion_core::touched_paths::VISIT_TTL_MS`], as
+/// the daemon's visit book has it (`App::visits`).
+pub(crate) fn visiting<'a>(
+    app: &'a App,
+    agent: &orion_core::Agent,
+    project: &ProjectId,
+    branch: &str,
+) -> Option<&'a orion_core::Worktree> {
+    let now = orion_core::clock::now_ms();
+    app.visits
+        .iter()
+        .filter(|v| v.agent == agent.id && now - v.at < orion_core::touched_paths::VISIT_TTL_MS)
+        .find_map(|v| {
+            app.tree.worktrees.iter().find(|w| {
+                w.id == v.worktree
+                    && w.id != agent.worktree_id
+                    && &w.project_id == project
+                    && w.branch == branch
+            })
+        })
+}
+
 /// An `autofix-<n>` for `pr` is already starting, at work or waiting on
 /// the user: there is never a second one on a pull request.
 fn fixer_on_it(app: &App, project: &ProjectId, pr: &OpenPr) -> bool {
@@ -1535,7 +1674,7 @@ fn live_on_branch<'a>(
                     agent.status,
                     AgentStatus::Running | AgentStatus::NeedsFeedback
                 )
-                && on_branch(app, agent, project, &pr.head)
+                && works_on(app, agent, project, &pr.head)
         })
         .collect()
 }
@@ -1579,7 +1718,7 @@ fn source_agent<'a>(
         .agents
         .iter()
         .filter(|a| {
-            !a.archived && !a.name.starts_with("autofix-") && on_branch(app, a, project, &pr.head)
+            !a.archived && !a.name.starts_with("autofix-") && works_on(app, a, project, &pr.head)
         })
         .max_by_key(|a| crate::app::last_interaction_ms(a))
 }
@@ -2042,6 +2181,9 @@ pub struct AutofixForm {
     /// The plan as approved, off the pull request's comments: a fresh
     /// fixer's handover ([`router::handover`]).
     pub plan: Option<String>,
+    /// Cubic's findings sent with the breakage, as the agent reads them
+    /// ([`bundle_cubic`]); empty for none.
+    pub cubic: String,
 }
 
 /// Another session live on the pull request's branch when the agent is
@@ -2106,6 +2248,7 @@ impl AutofixForm {
             rows: Vec::new(),
             peers: Vec::new(),
             plan: router::plan_comment(detail),
+            cubic: String::new(),
         }
     }
 
@@ -2264,13 +2407,17 @@ pub fn dispatch(app: &mut App, form: AutofixForm, out: &mut Vec<ClientRequest>) 
 
 /// What a breakage's turn is pointed at: [`task`] for `form`.
 fn task_of(form: &AutofixForm) -> String {
-    task(
+    let task = task(
         &form.pr,
         &form.refs,
         &form.diagnosis,
         &form.picks,
         form.note.as_str(),
-    )
+    );
+    match form.cubic.as_str() {
+        "" => task,
+        cubic => format!("{task}\n\nIn the same push:\n\n{cubic}"),
+    }
 }
 
 /// Launch a fresh fixer for `work`: a PR SESSION named `autofix-<n>`, on
@@ -2301,16 +2448,7 @@ fn launch_fresh(
     let (preamble, task) = match work {
         Work::Fix(form) => (
             stand_down_preamble(&form.peers, &form.pr),
-            prompt(
-                &form.pr,
-                &form.refs,
-                &form.diagnosis,
-                &form.picks,
-                form.note.as_str(),
-                &preset,
-                rule,
-                extra,
-            ),
+            super::compose_with(&preset, &task_of(form), rule, extra),
         ),
         Work::Words { text, .. } => (
             String::new(),
@@ -3295,6 +3433,156 @@ mod tests {
         assert!(app.autofix.watching.is_empty());
     }
 
+    /// Turn the session `id` into one started in another project that
+    /// wrote in the PR's checkout `ago_ms` ago: its own checkout is
+    /// elsewhere, the daemon's visit book has it at work on the branch.
+    fn make_visitor(app: &mut App, id: &orion_core::AgentId, ago_ms: i64) {
+        let other = orion_core::WorktreeId("blue-sky".into());
+        app.tree.projects.push(orion_core::Project {
+            id: ProjectId("q".into()),
+            name: "blue-sky".into(),
+            repo_path: "/tmp/blue-sky".into(),
+            sort_order: 1,
+        });
+        app.tree.worktrees.push(orion_core::Worktree {
+            id: other.clone(),
+            project_id: ProjectId("q".into()),
+            path: "/tmp/blue-sky".into(),
+            branch: "master".into(),
+            is_main: true,
+            sort_order: 0,
+        });
+        app.tree
+            .agents
+            .iter_mut()
+            .find(|a| &a.id == id)
+            .unwrap()
+            .worktree_id = other;
+        app.visits = vec![orion_core::AgentVisit {
+            agent: id.clone(),
+            worktree: orion_core::WorktreeId("feat-wt".into()),
+            at: orion_core::clock::now_ms() - ago_ms,
+        }];
+    }
+
+    /// The module-platform collision: the session that built the branch
+    /// lives in another project and works in the PR's checkout with `cd`.
+    /// Seen through the visit book, it is the branch's agent — idle, it
+    /// gets the breakage as a turn told where the checkout is; busy, the
+    /// breakage waits for it. Never a fresh fixer beside it.
+    #[test]
+    fn a_session_from_another_project_at_work_on_the_branch_is_its_agent() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = app_with(vec![broken(false, true)], true);
+        let (id, places) = claude_on_branch(
+            &mut app,
+            &home,
+            "GTM Autopilot",
+            AgentStatus::Finished,
+            &["Committed phase 6."],
+            100_000,
+        );
+        make_visitor(&mut app, &id, 60_000);
+        listed(&mut app);
+        let page = detail(false, vec![check("unit", "CI", CheckState::Failed)]);
+        let out = crate::paths_util::with_places(places.clone(), || landed(&mut app, &page));
+        let (to, text) = sent_turn(&out).expect("a turn");
+        assert_eq!(to, id);
+        assert!(
+            text.contains("checked out at `/tmp/repo-worktrees/feat`"),
+            "{text}"
+        );
+        assert!(sent_prompt(&out).is_none(), "no fixer beside it");
+
+        let home = tempfile::tempdir().unwrap();
+        let mut app = app_with(vec![broken(false, true)], true);
+        let (id, places) = claude_on_branch(
+            &mut app,
+            &home,
+            "GTM Autopilot",
+            AgentStatus::Running,
+            &["Merging dev."],
+            10_000,
+        );
+        make_visitor(&mut app, &id, 60_000);
+        listed(&mut app);
+        let out = crate::paths_util::with_places(places, || landed(&mut app, &page));
+        assert_eq!(launches(&out), 0, "{out:?}");
+        assert_eq!(app.autofix.queued.len(), 1, "waits for it");
+    }
+
+    /// Someone orion can't see committing in the PR's checkout a moment
+    /// ago: no fresh fixer goes in beside them; the breakage waits, still
+    /// watched, and the flash says why once.
+    #[test]
+    fn a_checkout_in_use_holds_a_fresh_fixer() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        };
+        git(&["init", "-q", "-b", "feat"]);
+        std::fs::write(repo.path().join("a.txt"), "one").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "wip"]);
+
+        let mut app = app_with(vec![broken(false, true)], true);
+        app.tree.worktrees.push(orion_core::Worktree {
+            id: orion_core::WorktreeId("feat-wt".into()),
+            project_id: ProjectId("p".into()),
+            path: repo.path().to_path_buf(),
+            branch: pr().head,
+            is_main: false,
+            sort_order: 0,
+        });
+        listed(&mut app);
+        let page = detail(false, vec![check("unit", "CI", CheckState::Failed)]);
+        let out = landed(&mut app, &page);
+        assert_eq!(launches(&out), 0, "{out:?}");
+        assert!(
+            app.autofix.watching.contains_key(&pr().url),
+            "still watched"
+        );
+        assert!(
+            app.flash
+                .as_deref()
+                .is_some_and(|f| f.contains("checkout is in use (a git commit")),
+            "{:?}",
+            app.flash
+        );
+    }
+
+    /// A visit past the visit book's two hours says nothing: with no other
+    /// session on the branch, a fresh fixer goes.
+    #[test]
+    fn an_old_visit_does_not_hold_the_branch() {
+        let home = tempfile::tempdir().unwrap();
+        let mut app = app_with(vec![broken(false, true)], true);
+        let (id, places) = claude_on_branch(
+            &mut app,
+            &home,
+            "GTM Autopilot",
+            AgentStatus::Finished,
+            &["Done yesterday."],
+            100_000,
+        );
+        make_visitor(&mut app, &id, orion_core::touched_paths::VISIT_TTL_MS + 1);
+        listed(&mut app);
+        let page = detail(false, vec![check("unit", "CI", CheckState::Failed)]);
+        let out = crate::paths_util::with_places(places, || landed(&mut app, &page));
+        assert!(sent_turn(&out).is_none(), "{out:?}");
+        assert!(sent_prompt(&out).is_some(), "a fresh fixer");
+    }
+
     /// The router's third branch: a busy branch agent — mid-turn, or
     /// waiting on the owner — has the breakage held for it, and gets it on
     /// the beat once it is idle. Held, it is not watched again.
@@ -4035,11 +4323,153 @@ mod tests {
         );
     }
 
-    /// Cubic waits while the pull request is not green — the breakage is
-    /// fixed first — and is not sent with the PR fixer off. Once the
-    /// rounds have run out, the owner is told and nothing goes.
+    /// A project whose PR contract says `[flow] ready = "when-clean"`.
+    fn when_clean(app: &mut App) {
+        app.autofix.flows.insert(
+            ProjectId("p".into()),
+            flow::Known {
+                at: Instant::now(),
+                flow: crate::pr_body::contract::Flow {
+                    ready: crate::pr_body::contract::Ready::WhenClean,
+                },
+            },
+        );
+    }
+
+    /// A green draft's body: every check passed at its head.
+    fn green_draft_page(threads: Vec<crate::pr_review::github::ReviewThread>) -> PrDetail {
+        PrDetail {
+            answered_draft: true,
+            answered: Answered {
+                conflicts: Some(false),
+                checks: Some(Checks::Passing),
+            },
+            threads,
+            ..detail(false, vec![check("unit", "CI", CheckState::Passed)])
+        }
+    }
+
+    /// In a `when-clean` repo a draft is where the fixing happens: its
+    /// failing checks are sent unasked, as a ready pull request's are.
     #[test]
-    fn cubic_waits_for_green_and_stops_after_its_rounds() {
+    fn a_when_clean_repos_failing_draft_is_fixed() {
+        let mut app = app_with(vec![draft(false, true)], true);
+        listed(&mut app);
+        assert!(
+            app.autofix.watching.is_empty(),
+            "a plain repo leaves drafts be"
+        );
+
+        let mut app = app_with(vec![draft(false, true)], true);
+        when_clean(&mut app);
+        listed(&mut app);
+        assert!(app.autofix.watching.contains_key(&pr().url));
+        let page = PrDetail {
+            answered_draft: true,
+            ..detail(false, vec![check("unit", "CI", CheckState::Failed)])
+        };
+        let out = landed(&mut app, &page);
+        assert!(sent_prompt(&out).is_some(), "{out:?}");
+    }
+
+    /// A clean draft in a `when-clean` repo is marked ready once per head:
+    /// not with a P1 from Cubic open, not while a session works on its
+    /// branch, and never in a repo whose flow leaves drafts to the owner.
+    #[test]
+    fn a_clean_draft_is_marked_ready_once() {
+        let green = OpenPr {
+            answered_draft: true,
+            answered: Answered {
+                conflicts: Some(false),
+                checks: Some(Checks::Passing),
+            },
+            ..pr()
+        };
+        let readied = |app: &App| {
+            app.autofix
+                .ledger
+                .get(&pr().url)
+                .and_then(|r| r.readied.clone())
+        };
+
+        let mut app = app_with(vec![green.clone()], true);
+        listed(&mut app);
+        landed(&mut app, &green_draft_page(Vec::new()));
+        assert_eq!(readied(&app), None, "manual flow");
+
+        let p1 = cubic_thread("PRRT_p1", 3, "**P1** the lock is never released");
+        let mut answered = p1.clone();
+        answered
+            .comments
+            .push(crate::pr_review::github::ThreadComment {
+                author: "oliverkidd".into(),
+                body: "Released in drop().".into(),
+                mine: true,
+                ..p1.comments[0].clone()
+            });
+        let mut app = app_with(vec![green.clone()], true);
+        when_clean(&mut app);
+        listed(&mut app);
+        let out = landed(&mut app, &green_draft_page(vec![answered.clone()]));
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(readied(&app).as_deref(), Some("abc123"));
+        assert!(app
+            .flash
+            .as_deref()
+            .is_some_and(|f| f.contains("marked #7 ready")));
+        app.flash = None;
+        landed(&mut app, &green_draft_page(vec![answered.clone()]));
+        assert!(app.flash.is_none(), "once per head");
+
+        let mut app = app_with(vec![green.clone()], true);
+        when_clean(&mut app);
+        listed(&mut app);
+        landed(&mut app, &green_draft_page(vec![p1]));
+        assert_eq!(readied(&app), None, "a P1 open");
+
+        let mut app = app_with(vec![green], true);
+        when_clean(&mut app);
+        session_on_branch(&mut app, "builder", AgentStatus::Running);
+        listed(&mut app);
+        landed(&mut app, &green_draft_page(vec![answered]));
+        assert_eq!(readied(&app), None, "someone is at work on it");
+    }
+
+    /// Cubic's findings go the moment they post, while CI still runs, so
+    /// their fix is pushed before the run finishes. On a broken pull
+    /// request they ride with the breakage, in one turn and one push. Not
+    /// sent with the PR fixer off; once the rounds have run out, the owner
+    /// is told and nothing goes.
+    #[test]
+    fn cubic_goes_while_checks_run_and_stops_after_its_rounds() {
+        let home = tempfile::tempdir().unwrap();
+        let running = OpenPr {
+            answered: Answered {
+                conflicts: Some(false),
+                checks: Some(Checks::Pending),
+            },
+            ..pr()
+        };
+        let mut app = app_with(vec![running], true);
+        let (id, places) = claude_on_branch(
+            &mut app,
+            &home,
+            "builder",
+            AgentStatus::Finished,
+            &["Pushed."],
+            10_000,
+        );
+        listed(&mut app);
+        assert_eq!(app.autofix.want.len(), 1, "read while CI runs");
+        let page = PrDetail {
+            threads: vec![cubic_thread("PRRT_a", 3, "**P1** leak")],
+            ..detail(false, vec![check("e2e", "", CheckState::Running)])
+        };
+        let out = crate::paths_util::with_places(places, || landed(&mut app, &page));
+        let (to, text) = sent_turn(&out).expect("sent before CI is done");
+        assert_eq!(to, id);
+        assert!(text.contains("PRRT_a"), "{text}");
+
         let page = PrDetail {
             threads: vec![cubic_thread("PRRT_a", 3, "**P1** leak")],
             ..detail(false, vec![check("unit", "", CheckState::Failed)])
@@ -4047,13 +4477,15 @@ mod tests {
         let mut app = app_with(vec![broken(false, true)], true);
         session_on_branch(&mut app, "builder", AgentStatus::Finished);
         listed(&mut app);
-        landed(&mut app, &page);
-        assert!(
-            app.autofix
-                .ledger
-                .get(&pr().url)
-                .is_none_or(|r| r.cubic_sent.is_empty()),
-            "red: the checks first"
+        let out = landed(&mut app, &page);
+        let prompt = sent_prompt(&out).expect("the breakage goes");
+        assert!(prompt.contains("- Failing checks:"), "{prompt}");
+        assert!(prompt.contains("In the same push:"), "{prompt}");
+        assert!(prompt.contains("thread `PRRT_a`"), "{prompt}");
+        let record = &app.autofix.ledger[&pr().url];
+        assert_eq!(
+            (record.cubic_sent.clone(), record.cubic_rounds),
+            (vec!["PRRT_a".to_string()], 1)
         );
 
         let green = PrDetail {
@@ -4487,11 +4919,18 @@ mod tests {
         assert!(landed(&mut app, &page).is_empty(), "no second send");
         assert_eq!(app.autofix.waiting.len(), 1);
 
-        match rx.recv().await {
-            Some(crate::view_jobs::Answer::Conflicts(answer)) => {
-                crate::conflicts::land(&mut app, answer)
+        loop {
+            match rx.recv().await {
+                Some(crate::view_jobs::Answer::Conflicts(answer)) => {
+                    crate::conflicts::land(&mut app, answer);
+                    break;
+                }
+                // The project's PR flow, read beside it.
+                Some(crate::view_jobs::Answer::RepoFlow { project, flow }) => {
+                    flow::land(&mut app, project, flow)
+                }
+                other => panic!("the repo's answer, not {other:?}"),
             }
-            other => panic!("the repo's answer, not {other:?}"),
         }
         let dir = tempfile::tempdir().unwrap();
         crate::agent_presets::with_presets_path(dir.path().join("agent_presets.json"), || {

@@ -243,7 +243,7 @@ pub fn branch_agent<'a>(
     app.tree
         .agents
         .iter()
-        .filter(|a| !a.archived && super::on_branch(app, a, project, branch))
+        .filter(|a| !a.archived && super::works_on(app, a, project, branch))
         .max_by_key(|a| crate::app::last_interaction_ms(a))
 }
 
@@ -605,7 +605,16 @@ fn deliver_with(
             queue(app, None, work, Some(note));
         }
         Route::Turn(id) => {
-            let text = turn_text(&work);
+            let text = match visited_checkout(app, &id, &project, &pr.head) {
+                Some(path) => format!(
+                    "This is pull request #{n}'s branch `{head}`, checked out at `{path}`, not this session's own checkout: work and commit there (`cd {path}` first in each command, or `git -C {path}`).\n\n{turn}",
+                    n = pr.number,
+                    head = pr.head,
+                    path = path.display(),
+                    turn = turn_text(&work),
+                ),
+                None => turn_text(&work),
+            };
             if crate::event_loop::send_turn(app, &id, text, false, out) {
                 let name = agent_label(app, &id);
                 sent(app, &work, &name, false);
@@ -746,6 +755,22 @@ pub fn deliver_queued(app: &mut App, out: &mut Vec<ClientRequest>) {
             deliver_with(app, q.work, &mut cfg, out);
         }
     }
+}
+
+/// Where `agent` works on `branch` when that checkout isn't its own: the
+/// one it wrote in lately ([`super::visiting`]). None for a session whose
+/// own checkout is on the branch.
+fn visited_checkout(
+    app: &App,
+    agent: &AgentId,
+    project: &ProjectId,
+    branch: &str,
+) -> Option<std::path::PathBuf> {
+    let row = app.tree.agents.iter().find(|a| &a.id == agent)?;
+    if super::on_branch(app, row, project, branch) {
+        return None;
+    }
+    super::visiting(app, row, project, branch).map(|w| w.path.clone())
 }
 
 /// What the ledger, the flash and the run record keep of work sent to

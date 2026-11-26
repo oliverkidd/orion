@@ -838,13 +838,30 @@ or waiting on you, the fix waits and goes the moment it is idle; when it is full
 there is no session, a fresh `autofix-<n>` starts, on the agent, account, model and effort of the
 session that did the work on its branch — your default agent with none — told the **PR autofix**
 preset's text with what broke, the last two things the old session said and the plan as approved.
-An `autofix-<n>` already on the branch keeps it. It watches the pull request until it is green, and
+An `autofix-<n>` already on the branch keeps it.
+
+A session counts as the branch's even when it was started somewhere else: one in another project
+that works in the pull request's checkout with `cd` (a blue-sky prototype committing into the repo
+it graduates to) is seen from what it writes there — a git commit, merge or push, or a file edit —
+for two hours after its last write. It gets the fix as a turn, told where the checkout is, and no
+`autofix-<n>` starts beside it. Before a fresh `autofix-<n>` goes into a checkout, orion also looks
+at the checkout itself: a commit, merge or rebase there in the last 10 minutes, or an uncommitted
+edit made in that time, means someone orion can't see is at work (a terminal, another machine), and
+the fix waits until the checkout has been quiet for 10 minutes, saying why once.
+
+It watches the pull request until it is green, and
 stops after 3 tries in a row that don't turn it green, saying so. An `autofix-<n>` whose pull request
 has gone green, its turn done, is archived. On by default (it was **Auto-fix my PRs** in Settings →
 General through 2.x, and a config that turned that off keeps it off). `⌘G` on a pull request sends
 one by hand whatever it says.
 
-Drafts are left alone until they are marked ready. `⌘G` still sends one by hand. The exception is a
+Drafts are left alone until they are marked ready, unless the repo's PR contract has orion mark
+drafts ready itself (`[flow] ready = "when-clean"` in `.orion/pr-contract.toml`, read from the base
+branch as last fetched). There your drafts are fixed like ready pull requests — failing checks,
+conflicts, Cubic's findings — and once a draft is clean (every check passed on its head, it merges,
+Cubic left nothing open at P0 or P1, no session at work on its branch) orion marks it ready, once per
+head commit. Marking it ready is what starts a repo's expensive checks, so they run on clean code
+once. `⌘G` still sends one by hand. The exception is a
 **factory draft**, the draft the bug fixer or feature builder opened (its branch is in their ledger):
 its failing checks are fixed at once and again until green, while its conflicts wait until it is
 marked ready, after which it is watched like any ready pull request. On a factory pull request, the
@@ -853,13 +870,16 @@ agent and another 3 tries, Park to leave it alone until it goes green), and what
 GitHub — review comments with their file and line, and conversation comments — goes to the branch's
 agent the same way, verbatim, to be done in that pull request.
 
-Once one of your pull requests is green, the PR fixer also sends Cubic's findings on it, the same way
-and to the same agent: the session that built the branch, which knows what was left out on purpose.
+The PR fixer also sends Cubic's findings the moment Cubic posts them, while the pull request's
+other checks are still running, the same way and to the same agent: the session that built the
+branch, which knows what was left out on purpose. Its push cancels the run in progress, so the fix
+costs one CI run, not two.
 Each unresolved Cubic thread nobody has replied to goes once. The agent fixes the findings it
 agrees with in a new commit on top, so Cubic reviews the fix, and resolves their threads. For each
 one it leaves, it replies on the thread with why and lists it under `Cubic dismissals:` in a PR
-comment. A finding someone has already answered on its thread is never sent. Red pull requests get
-their checks fixed first, and their findings go once they are green. A new review thread on the
+comment. A finding someone has already answered on its thread is never sent. On a pull request whose
+checks failed, the findings go with the failing checks, in one turn and one push. A new review
+thread on the
 pull request has it read at once. After 3 rounds, what Cubic finds is yours, and orion says so. It
 doesn't send a turn into a session you are using.
 

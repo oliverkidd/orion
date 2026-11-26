@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// Bump on any breaking change to these enums. The daemon refuses mismatched
 /// clients; the client then offers a kill-and-restart of the old daemon.
-pub const PROTOCOL_VERSION: u32 = 61;
+pub const PROTOCOL_VERSION: u32 = 62;
 
 /// What the reader of a frame its build can't decode is told to do. The
 /// frames are positional msgpack, so a peer built from different protocol
@@ -720,6 +720,18 @@ pub struct LaunchSpec {
     pub mode: crate::harness::AgentMode,
 }
 
+/// A session at work in a checkout that isn't its own: it wrote there
+/// (a git commit, merge, push … or a file edit) at `at`, epoch ms. The
+/// DAEMON keeps these from the sessions' hooks for
+/// [`crate::touched_paths::VISIT_TTL_MS`] after the last write
+/// (`ServerEvent::Visits`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentVisit {
+    pub agent: AgentId,
+    pub worktree: WorktreeId,
+    pub at: i64,
+}
+
 /// How much of a pull request's conversation the user had already seen the
 /// last time they opened it. `marker` is the newest thing anyone else had
 /// posted at that moment, as GitHub's RFC 3339 stamp — those sort
@@ -905,6 +917,13 @@ pub enum ServerEvent {
     AwayChanged {
         away: bool,
         by_hand: bool,
+    },
+
+    /// Every session's recent work in checkouts that aren't its own
+    /// ([`AgentVisit`]), whole, whenever it changes and right after
+    /// `Snapshot`.
+    Visits {
+        visits: Vec<AgentVisit>,
     },
 
     /// How the Slack connection stands, when it changes and right after

@@ -23,6 +23,7 @@ pub mod settings;
 pub mod shell;
 pub mod stack;
 pub mod stack_cmd;
+pub mod touched_paths;
 
 pub use entities::*;
 pub use harness::*;

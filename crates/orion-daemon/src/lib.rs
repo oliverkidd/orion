@@ -149,7 +149,7 @@ async fn serve() -> Result<()> {
     // Hook receiver: loopback HTTP endpoint the claude hook one-liners hit.
     // It shares the store to answer UserPromptSubmit hooks with the
     // auto-title instruction while a session is still untitled.
-    let (hook_env, mut hook_rx) = hooks::start_hook_server(store.clone()).await?;
+    let (hook_env, mut hook_rx, mut touch_rx) = hooks::start_hook_server(store.clone()).await?;
     tracing::info!(port = hook_env.port, "hook receiver listening");
 
     let daemon = registry::Daemon::new(store, hook_env);
@@ -160,6 +160,24 @@ async fn serve() -> Result<()> {
     if let Some(note) = relocation_note {
         tracing::info!("{note}");
         daemon.boot_notes.lock().unwrap().push(note);
+    }
+
+    // Writes outside a session's own checkout, into the visit book.
+    {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            loop {
+                let touch = tokio::select! {
+                    biased;
+                    _ = daemon.shutdown.cancelled() => break,
+                    touch = touch_rx.recv() => touch,
+                };
+                let Some(touch) = touch else { break };
+                let daemon = daemon.clone();
+                // Store reads and path canonicalizing: off the runtime.
+                let _ = tokio::task::spawn_blocking(move || daemon.note_touch(&touch)).await;
+            }
+        });
     }
 
     // Drain hook events into the status machines; a payload that reports a
