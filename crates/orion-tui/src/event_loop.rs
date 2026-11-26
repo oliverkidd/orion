@@ -14679,6 +14679,46 @@ mod tests {
         assert_eq!(terminal.backend().cursor_position(), want);
     }
 
+    /// A prompt box over the pane takes the keys, so the host cursor
+    /// parks on the box's caret — where macOS dictation and an input
+    /// method draw what is being said or composed — not on the pane's.
+    #[test]
+    fn a_prompt_box_takes_the_host_cursor_over_the_pane() {
+        use crate::app::{AttachedTerm, Focus, Overlay, PromptDialog, PromptKind};
+        use ratatui::layout::Position;
+        let mut app = App::new();
+        seed_tree(&mut app);
+        let mut term = AttachedTerm::new(SessionRef::Agent(AgentId("a1".into())), 40, 10);
+        term.parser.process(b"$ ");
+        app.term = Some(term);
+        app.focus = Focus::Terminal;
+        app.term_locked = true;
+        app.overlay = Some(Overlay::Prompt(PromptDialog::new(
+            "Follow up",
+            "prompt",
+            "fix the login".to_string(),
+            PromptKind::FollowUp {
+                id: AgentId("a1".into()),
+            },
+        )));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        draw_frame(&mut terminal, &mut app).unwrap();
+        let cell = app.host_cursor.expect("the box's caret named a cell");
+        assert_ne!(
+            cell,
+            Position::new(app.term_area.x + 2, app.term_area.y),
+            "not the pane's cursor"
+        );
+        assert_eq!(terminal.backend().cursor_position(), cell);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer[cell].bg, app.theme.accent,
+            "the caret's block is there"
+        );
+        let before = Position::new(cell.x - 1, cell.y);
+        assert_eq!(buffer[before].symbol(), "n", "just past `login`");
+    }
+
     pub(super) fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         let buffer = terminal.backend().buffer();
         let mut out = String::new();

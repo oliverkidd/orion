@@ -170,6 +170,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.rows_memo.arm();
     draw_screen(f, app);
     app.rows_memo.disarm();
+    // A field drawn with its caret is where the keys go, so the host's
+    // hidden cursor parks on that caret rather than a pane's — macOS
+    // dictation and an input method draw their live text at it. The
+    // editor modal keeps it: every key goes there while it is up.
+    if app.editor.is_none() {
+        if let Some(cell) = crate::text_input::caret_cell() {
+            app.host_cursor = Some(cell);
+        }
+    }
     // The MERGE CONFETTI goes over everything, modals and all.
     if let Some(confetti) = &app.confetti {
         let area = f.area();
@@ -4823,6 +4832,7 @@ pub(crate) fn multiline_input_lines(
     let caret = input.cursor_chars();
     let selection = input.selection_chars();
     let ranges = input.rows(width.max(1));
+    crate::text_input::caret_drawn(input);
 
     let plain = Style::default().fg(th.text);
     let block = Style::default().fg(th.on_accent).bg(cursor);
@@ -4918,6 +4928,7 @@ fn line_spans(
     let caret = input.cursor_chars();
     let selection = input.selection_chars();
     let budget = budget.max(1);
+    crate::text_input::caret_drawn(input);
     let total = input.line_cells();
     let end = (start + budget).min(total);
 
@@ -4980,6 +4991,8 @@ pub(crate) fn search_line(
 ) -> Line<'static> {
     if input.is_empty() {
         crate::text_input::place_line(input, area, 0);
+        // No caret over the placeholder, but typing lands here all the same.
+        crate::text_input::caret_drawn(input);
         return Line::from(Span::styled(
             placeholder.to_string(),
             Style::default().fg(th.dim),

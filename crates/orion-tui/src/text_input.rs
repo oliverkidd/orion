@@ -120,6 +120,10 @@ thread_local! {
     /// is in, so rather than every one of them writing its rect back, each
     /// renderer records it here under the field's [`FieldId`].
     static PLACED: RefCell<Placements> = RefCell::default();
+
+    /// The field the frame last drew a caret in — where typing goes — as
+    /// it was drawn ([`caret_drawn`]), for [`caret_cell`].
+    static CARET: RefCell<Option<TextInput>> = const { RefCell::new(None) };
 }
 
 /// A frame is starting: what was drawn becomes the last frame's, and each
@@ -131,6 +135,26 @@ pub fn new_frame() {
         std::mem::swap(&mut p.last, &mut p.drawn);
         p.drawn.clear();
     });
+    CARET.with(|c| c.borrow_mut().take());
+}
+
+/// `input` was drawn with its caret: it is where the keys go. The last
+/// field drawn so wins — a picker over a box draws after the box.
+pub fn caret_drawn(input: &TextInput) {
+    CARET.with(|c| *c.borrow_mut() = Some(input.clone()));
+}
+
+/// The screen cell of the caret the frame drew last, once its field has
+/// recorded where it landed ([`place_line`], [`place_rows`]): where the
+/// host's hidden cursor is parked, since macOS dictation and an input
+/// method draw their live text at that cell (`App::host_cursor`). None
+/// when no field drew a caret, or it is scrolled out of its box.
+pub fn caret_cell() -> Option<Position> {
+    CARET.with(|c| {
+        let c = c.borrow();
+        let input = c.as_ref()?;
+        input.caret_at(input.placed()?)
+    })
 }
 
 fn place(input: &TextInput, area: Rect, shape: Shape) {
@@ -655,6 +679,30 @@ impl TextInput {
     /// Where the field was drawn in the frame on screen, if it was.
     fn placed(&self) -> Option<Placed> {
         PLACED.with(|p| p.borrow().drawn.get(&self.id).copied())
+    }
+
+    /// The cell the caret sits in with the field drawn as `placed` — the
+    /// inverse of [`point`](Self::point). A caret past a full row's end
+    /// clamps onto its last cell; one in a row scrolled out of the box, or
+    /// left of a one-line window, has none.
+    fn caret_at(&self, placed: Placed) -> Option<Position> {
+        let area = placed.area;
+        if area.width == 0 || area.height == 0 {
+            return None;
+        }
+        let caret = self.cursor_chars();
+        let (row, col) = match placed.shape {
+            Shape::Line { first } => (0, caret.checked_sub(first)?),
+            Shape::Rows { top } => {
+                let rows = self.rows(area.width.into());
+                let row = self.caret_row(&rows);
+                let start = rows.get(row).map_or(0, |r| r.0);
+                (row.checked_sub(top.into())?, caret.saturating_sub(start))
+            }
+        };
+        let y = u16::try_from(row).ok().filter(|&r| r < area.height)?;
+        let x = cells(col).min(area.width - 1);
+        Some(Position::new(area.x + x, area.y + y))
     }
 
     /// Is `at` — a cell on screen — in the field as last drawn?
@@ -2027,6 +2075,36 @@ mod tests {
         click(&mut top, 0, 1);
         assert_eq!(top.cursor_chars(), 10);
         assert_eq!(row_of(&top), 1, "a soft break's caret starts the next row");
+    }
+
+    /// The caret's cell is where a click on it would have put it: the
+    /// host cursor parks there so dictation types into the box.
+    #[test]
+    fn the_caret_cell_is_where_the_caret_is_drawn() {
+        let mut input = placed(FOX, 10, 3);
+        caret_drawn(&input);
+        assert_eq!(
+            caret_cell(),
+            Some(Position::new(8, 2)),
+            "after the last row's `dog`"
+        );
+        for (column, row) in [(2, 0), (0, 1), (4, 2)] {
+            click(&mut input, column, row);
+            caret_drawn(&input);
+            assert_eq!(caret_cell(), Some(Position::new(column, row)));
+        }
+        // Scrolled out of the box: no cell, rather than the box's edge.
+        input.cursor_to_start();
+        caret_drawn(&input);
+        assert_eq!(caret_cell(), None);
+        // A one-line field counts from the char its window starts at:
+        // `0123456789abcdef` six wide shows `…bcde` and the caret's cell.
+        let line = placed_line("0123456789abcdef", 6);
+        caret_drawn(&line);
+        assert_eq!(caret_cell(), Some(Position::new(2 + 5, 5)));
+        // A new frame forgets it until a field draws its caret again.
+        new_frame();
+        assert_eq!(caret_cell(), None);
     }
 
     /// A one-line field's click counts from the char its window starts
