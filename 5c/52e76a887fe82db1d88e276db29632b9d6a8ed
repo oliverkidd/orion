@@ -1,0 +1,55 @@
+crates/orion-daemon/src/hooks/mod.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 131-133,139-196,421,426,431,455,563-570,665-721,811,893,984,1029,1082,1165
+crates/orion-daemon/src/lib.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 152,165-180
+  s_611bec15e7556a::t_473d108bb92bb4 181-182
+crates/orion-tui/src/automations/pr_fixer/checkout.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 1-261
+crates/orion-tui/src/automations/pr_fixer.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 62-77,132-133,356-359,446-454,509,534-535,544,566-570,573-577,806-813,816-823,825-828,831,833,910-911,1128,1131,1133-1139,1161,1218-1244,1298,1590-1626,1677,1721,2184-2186,2251,2410,2416-2420,2451,3436-3585,4326-4442,4444-4472,4480-4488,4922-4932
+  s_611bec15e7556a::t_7666ca08b61361 824,829-830,832,834-848,914
+crates/orion-daemon/src/server.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 134
+crates/orion-core/src/touched_paths.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 1-209
+crates/orion-tui/src/pr_body/contract.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 33-38,83-100,122,143,279-289
+  s_611bec15e7556a::t_d6572f68343601 290
+crates/orion-tui/src/automations/pr_fixer/flow.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 1-215
+crates/orion-tui/src/app.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 4099-4102,4824
+crates/orion-tui/src/automations/pr_fixer/router.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 246,608-617,760-773
+  s_611bec15e7556a::t_0af2b5cda03409 774-775
+crates/orion-tui/src/view_jobs.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 139-147
+docs/sessions.md
+  s_611bec15e7556a::t_5eac31bcb8b2a9 841-852,858-864,873-876,880-882
+crates/orion-daemon/src/registry.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 172-177,257,489-578,4604-4619,7761-7821
+  s_611bec15e7556a::t_3e5b8204e9d3bd 7822
+crates/orion-core/src/protocol.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 12,723-734,922-926
+  s_611bec15e7556a::t_8033ac40c41264 927-928
+crates/orion-core/src/lib.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 26
+crates/orion-tui/src/event_loop.rs
+  s_611bec15e7556a::t_5eac31bcb8b2a9 5796-5801,13123-13125
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5c52e76a887fe82db1d88e276db29632b9d6a8ed",
+  "prompts": {},
+  "sessions": {
+    "s_611bec15e7556a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c183f229-46e4-4e16-93f9-6a66635c413b",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
