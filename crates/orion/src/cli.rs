@@ -440,7 +440,26 @@ pub(crate) enum PrCommand {
     /// works the verdict out from them and from GitHub.
     #[command(subcommand, after_help = PR_FACTS_EXAMPLES)]
     Facts(PrFactsCommand),
+    /// Send this checkout's pictures flow to the repo's pictures job.
+    ///
+    /// Runs the command the repo names as `pictures_upload` in
+    /// `.orion/pr-contract.toml` on the PR's base branch, from the
+    /// checkout's root, with `{pr}` and `{flow}` (its `pictures_flow`, for
+    /// this branch) filled in. orion runs the job for a flow sent after the
+    /// push, and sends a flow an agent left in its checkout itself.
+    #[command(after_help = PR_PICTURES_EXAMPLES)]
+    Pictures {
+        /// The pull request, by URL or number (default: the current
+        /// branch's).
+        #[arg(long, value_name = "PR")]
+        pr: Option<String>,
+    },
 }
+
+const PR_PICTURES_EXAMPLES: &str = "\
+Examples:
+  orion pr pictures            send the flow for this branch's PR
+  orion pr pictures --pr 2246  the same for PR #2246";
 
 const PR_FACTS_EXAMPLES: &str = "\
 Examples:

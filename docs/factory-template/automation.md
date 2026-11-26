@@ -50,6 +50,7 @@ Every other call — `[copy]`, `[ux]` and the rest — takes the Recommended opt
 ## 7. Pictures
 
 - A change users can see needs before-and-after pictures. Push and let the repo's pictures job in CI take them; don't take them by hand unless the repo says how.
+- If the job needs a flow from you, write it where the repo's docs say, then send it with `orion pr pictures`: it runs the upload `.orion/pr-contract.toml` names (`pictures_flow`, `pictures_upload`), and orion runs the job for it.
 - Pictures only count when they show the change. Set up the state it affects in the flow (data, open menus, hover): if every frame shows no visible difference, orion sends the PR back to you.
 
 ## 8. Facts

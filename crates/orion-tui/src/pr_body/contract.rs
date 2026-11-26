@@ -15,6 +15,13 @@
 //! # The workflow that takes the pictures, by file name. Without it orion
 //! # looks for the one active workflow named for keyframes or pictures.
 //! pictures_workflow = "pr-keyframes.yml"
+//! # Where the PR's agent leaves its pictures flow in its checkout
+//! # ({branch}: the branch, `/` written as `-`), and the command that sends
+//! # it to the pictures job ({pr}: the PR's number; {flow}: that path),
+//! # run from the checkout's root by `orion pr pictures` — and by orion
+//! # itself for a flow left in the checkout but never sent (`super::flow`).
+//! pictures_flow = ".pr-keyframes/{branch}.keyframes.ts"
+//! pictures_upload = "npm run pr-pictures -- flow --upload --pr {pr} --file {flow}"
 //!
 //! [limits.bug]
 //! lines = 3000
@@ -78,6 +85,15 @@ pub struct Contract {
     /// orion runs again for a PR whose flow came after its push
     /// (`super::dispatch`). None: found by its name.
     pub pictures_workflow: Option<String>,
+    /// Where the PR's agent leaves its pictures flow in its checkout,
+    /// with `{branch}` for the branch (`/` as `-`). None: orion never
+    /// looks for one.
+    pub pictures_flow: Option<String>,
+    /// The command that sends the flow to the pictures job, run from the
+    /// checkout's root with `{pr}` and `{flow}` filled in
+    /// ([`Contract::upload_command`]). None: `orion pr pictures` refuses,
+    /// and orion sends nothing itself.
+    pub pictures_upload: Option<String>,
     pub limits: Limits,
 }
 
@@ -96,9 +112,48 @@ impl Default for Contract {
             .map(String::from)
             .to_vec(),
             pictures_workflow: None,
+            pictures_flow: None,
+            pictures_upload: None,
             limits: Limits::default(),
         }
     }
+}
+
+impl Contract {
+    /// Where the flow for `branch` sits in its checkout, from the root:
+    /// `pictures_flow` with `{branch}` filled in, `/` written as `-`.
+    pub fn flow_path(&self, branch: &str) -> Option<String> {
+        let template = self.pictures_flow.as_deref().map(str::trim)?;
+        (!template.is_empty() && !branch.trim().is_empty())
+            .then(|| template.replace("{branch}", &branch.trim().replace('/', "-")))
+    }
+
+    /// The command that sends PR `pr`'s flow, at `flow` from the
+    /// checkout's root: `pictures_upload` with `{pr}` and `{flow}` filled
+    /// in, the path quoted for the shell. Err says why there is none.
+    pub fn upload_command(&self, pr: u64, flow: Option<&str>) -> Result<String, String> {
+        let template = self
+            .pictures_upload
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| format!("{PATH} names no pictures_upload"))?;
+        let command = template.replace("{pr}", &pr.to_string());
+        if !command.contains("{flow}") {
+            return Ok(command);
+        }
+        match flow {
+            Some(flow) => Ok(command.replace("{flow}", &shell_quote(flow))),
+            None => Err(format!(
+                "{PATH}'s pictures_upload says {{flow}} but it names no pictures_flow"
+            )),
+        }
+    }
+}
+
+/// `s` as one word for `sh`.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// What reading the contract gave: the contract (the default one when
@@ -303,6 +358,41 @@ files = 5
             parse("pictures_workflow = 3").is_err(),
             "a file name, not a number"
         );
+    }
+
+    #[test]
+    fn the_flow_and_its_upload_are_filled_in_from_the_branch_and_pr() {
+        let c = parse(
+            r#"
+pictures_flow = ".pr-keyframes/{branch}.keyframes.ts"
+pictures_upload = "npm run pr-pictures -- flow --upload --pr {pr} --file {flow}"
+"#,
+        )
+        .unwrap();
+        let flow = c.flow_path("riplo/1348-live-preview").unwrap();
+        assert_eq!(flow, ".pr-keyframes/riplo-1348-live-preview.keyframes.ts");
+        assert_eq!(
+            c.upload_command(2246, Some(&flow)).unwrap(),
+            "npm run pr-pictures -- flow --upload --pr 2246 \
+             --file '.pr-keyframes/riplo-1348-live-preview.keyframes.ts'"
+        );
+        assert_eq!(c.flow_path(""), None, "no branch, no flow");
+        // A quote in the path stays inside its word.
+        assert_eq!(
+            c.upload_command(1, Some("a'b")).unwrap(),
+            r#"npm run pr-pictures -- flow --upload --pr 1 --file 'a'\''b'"#
+        );
+    }
+
+    #[test]
+    fn an_upload_needs_its_command_and_a_flow_when_it_names_one() {
+        let none = Contract::default();
+        assert_eq!(none.flow_path("b"), None);
+        assert!(none.upload_command(1, Some("f")).is_err());
+        let c = parse(r#"pictures_upload = "x --flow {flow}""#).unwrap();
+        assert!(c.upload_command(1, None).is_err());
+        let c = parse(r#"pictures_upload = "x --pr {pr}""#).unwrap();
+        assert_eq!(c.upload_command(7, None).unwrap(), "x --pr 7");
     }
 
     #[test]
