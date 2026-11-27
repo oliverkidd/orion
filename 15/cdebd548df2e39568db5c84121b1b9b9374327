@@ -1,0 +1,75 @@
+crates/orion-tui/listen/Info.plist
+  s_b5d7b0e6da9e72::t_d4ecb64ce3f29b 1-14
+docs/keys.md
+  s_b5d7b0e6da9e72::t_32f8abaa17ad41 784
+crates/orion-tui/build.rs
+  s_b5d7b0e6da9e72::t_32f8abaa17ad41 62-70,77-80
+  s_b5d7b0e6da9e72::t_e5d730fe3c3d6d 35-61,71-76,81-88
+crates/orion-tui/src/event_loop/dictation_input.rs
+  s_b5d7b0e6da9e72::t_e84760cf0c1ba8 1-19,23-36,38-39,45-46,51-53,59-63,69-80,87,90-93,103-104,107-111,113-120,128-163,165-168,170-175,177-248,250-291
+  s_b5d7b0e6da9e72::t_2cd5c0c932049f 47-50,105-106,112,121-123,125-127,164,176
+  s_b5d7b0e6da9e72::t_32f8abaa17ad41 20-22,54-58,64-68,249
+  s_b5d7b0e6da9e72::t_264bd7036d15ed 42,169
+  s_b5d7b0e6da9e72::t_7dd68576579d77 40-41,43-44
+  s_b5d7b0e6da9e72::t_e1e022f0a19175 37,94-102
+  s_b5d7b0e6da9e72::t_66f15a86646697 81-86,88-89,124
+scripts/shot/scenes/dictation-file.keys
+  s_b5d7b0e6da9e72::t_01d78341940a1a 1-5
+crates/orion-tui/src/ui.rs
+  s_b5d7b0e6da9e72::t_a59e88d1483877 182-184
+crates/orion-tui/src/dictation.rs
+  s_b5d7b0e6da9e72::t_264bd7036d15ed 44-48,545
+  s_b5d7b0e6da9e72::t_7dd68576579d77 49-61
+  s_b5d7b0e6da9e72::t_32f8abaa17ad41 120-125,127-140,231-232,425-437,473-474,647-651,658-662,712-717,746-753,811-814
+  s_b5d7b0e6da9e72::t_31141df8d7a9fe 409
+  s_b5d7b0e6da9e72::t_af2cdfc3349e0f 1-43,62-119,126,141-230,233-337,343-408,410-424,438-470,472,475-544,546-646,652-657,663-711,718-745,754-810,815-822
+  s_b5d7b0e6da9e72::t_927b5c306dbc2d 338-342
+  s_b5d7b0e6da9e72::t_a59e88d1483877 471
+crates/orion-tui/src/keymap.rs
+  s_b5d7b0e6da9e72::t_413b6d27926550 251-255,1077-1084
+  s_b5d7b0e6da9e72::t_ddcd3841275d71 1085
+crates/orion-tui/src/app.rs
+  s_b5d7b0e6da9e72::t_a59e88d1483877 4070-4088,4835-4842
+crates/orion-tui/src/event_loop.rs
+  s_b5d7b0e6da9e72::t_e1e022f0a19175 3129,4126-4128
+  s_b5d7b0e6da9e72::t_4b3166fceef49b 14754-14776,14781-14798,14803,14806-14813
+  s_b5d7b0e6da9e72::t_2cd5c0c932049f 33,417-420,450-451,702-711,3127-3128,8887-8891,11649-11652
+  s_b5d7b0e6da9e72::t_32f8abaa17ad41 14777-14780,14799-14802
+  s_b5d7b0e6da9e72::t_a399ef5807a614 14804-14805
+crates/orion-tui/listen/orion-listen.swift
+  s_b5d7b0e6da9e72::t_3a5fbf09cfbbfe 1-49,73,76,80-184,186,188-209,211-282,293-310,312-327,329-336,338-375,377-387,389-395,397-401,403-406
+  s_b5d7b0e6da9e72::t_4357ab2d26eb77 50-72,74-75,77-79,185,187,210,283-292,311,328,337,376,388,396,402
+scripts/shot/scenes/dictation-file.setup.sh
+  s_b5d7b0e6da9e72::t_927b5c306dbc2d 1-4
+README.md
+  s_b5d7b0e6da9e72::t_32f8abaa17ad41 52
+scripts/shot/scenes/dictation-chip.keys
+  s_b5d7b0e6da9e72::t_927b5c306dbc2d 3
+  s_b5d7b0e6da9e72::t_712bae5c843e19 1-2
+crates/orion-tui/src/config.rs
+  s_b5d7b0e6da9e72::t_edd41835ea880e 380-381,651-656,1171-1177,1501-1502,2810,2982-2983
+  s_b5d7b0e6da9e72::t_66f15a86646697 5311,5339
+  s_b5d7b0e6da9e72::t_55df0b65f5fb7a 2984
+docs/configuration.md
+  s_b5d7b0e6da9e72::t_32f8abaa17ad41 46-47
+crates/orion-tui/src/lib.rs
+  s_b5d7b0e6da9e72::t_a59e88d1483877 24
+crates/orion-tui/src/text_input.rs
+  s_b5d7b0e6da9e72::t_4315acb59cdfff 153-172,176-183
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "15cdebd548df2e39568db5c84121b1b9b9374327",
+  "prompts": {},
+  "sessions": {
+    "s_b5d7b0e6da9e72": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ce3c202d-92c3-47d9-a9a2-08bd9c0c7731",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Oliver Kidd <oliver.kidd@hotmail.co.uk>"
+    }
+  }
+}
