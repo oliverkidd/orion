@@ -377,6 +377,8 @@ pub struct SettingsTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingKind {
     FollowNewSession,
+    /// DICTATION's mic on every box, and `⌘D` (`crate::dictation`).
+    Dictation,
     OutsideEditor,
     DoneSound,
     FeedbackSound,
@@ -645,6 +647,12 @@ pub const GENERAL_SETTINGS: &[SettingSpec] = &[
         label: "Spotify in footer",
         hint: "Show what Spotify is playing, with ⏮  ⏸ ⏭ buttons (macOS)",
         group: "Look",
+    },
+    SettingSpec {
+        kind: SettingKind::Dictation,
+        label: "Dictation",
+        hint: "A mic on every text box, and {dictate} to talk into it — on this Mac, nothing sent anywhere (words it should expect: `dictation_words` in config.json)",
+        group: "Dictation",
     },
 ];
 
@@ -1160,6 +1168,13 @@ pub struct Config {
     /// default, and nothing shows while Spotify is closed. Off, the poll
     /// stops too.
     pub spotify: bool,
+    /// DICTATION (`crate::dictation`): the mic on every text box and `⌘D`.
+    /// On by default; a Mac without the helper or the OS for it shows no
+    /// mic either way.
+    pub dictation: bool,
+    /// Words DICTATION should expect — project names, jargon, people — as
+    /// the speech engine's contextual strings. Hand-edited: no Settings row.
+    pub dictation_words: Vec<String>,
     /// Leave draft pull requests out of the PROJECT OPEN PRS GROUP and the
     /// `/` PALETTE's pull-request rows, so browsing what's open shows only
     /// the rows asking for a reviewer. A view filter, not a fetch filter:
@@ -1483,6 +1498,8 @@ impl Default for Config {
             animations: true,
             base_fetch: DEFAULT_BASE_FETCH.into(),
             spotify: true,
+            dictation: true,
+            dictation_words: Vec::new(),
             hide_draft_prs: false,
             diff_tree_view: true,
             pr_merge_method: None,
@@ -2790,6 +2807,7 @@ impl Config {
             SettingKind::Theme => self.theme.clone(),
             SettingKind::Animations => on_off(self.animations).into(),
             SettingKind::Spotify => on_off(self.spotify).into(),
+            SettingKind::Dictation => on_off(self.dictation).into(),
             // A CLAUDE ACCOUNT — the default one too — reads as the name
             // it goes by, with its email.
             SettingKind::QuickPromptKind => match self.quick_prompt_harness() {
@@ -2960,6 +2978,9 @@ impl Config {
             }
             SettingKind::Spotify => {
                 self.spotify = !self.spotify;
+            }
+            SettingKind::Dictation => {
+                self.dictation = !self.dictation;
             }
             SettingKind::QuickPromptKind => {
                 self.quick_prompt_kind =
@@ -5287,7 +5308,7 @@ mod tests {
     /// Settings is seven tabs, and General holds what is left of orion's
     /// own switches under three groups.
     #[test]
-    fn settings_is_seven_tabs_and_general_has_three_groups() {
+    fn settings_is_seven_tabs_and_general_has_four_groups() {
         let titles: Vec<&str> = SETTINGS_TABS.iter().map(|t| t.title).collect();
         assert_eq!(
             titles,
@@ -5315,6 +5336,7 @@ mod tests {
                 ("Look", "Theme"),
                 ("Look", "Animations"),
                 ("Look", "Spotify in footer"),
+                ("Dictation", "Dictation"),
             ]
         );
         let project: Vec<&str> = PROJECT_SETTINGS.iter().map(|s| s.label).collect();

@@ -4067,6 +4067,25 @@ pub struct App {
     pub restart: bool,
     /// The FOOTER's one line in place of its key hints, until the next key.
     pub flash: Option<crate::flash::Flash>,
+    /// DICTATION under way (`crate::dictation`), from its press to its
+    /// paste.
+    pub dictation: Option<crate::dictation::Dictation>,
+    /// Where the frame drew the MIC CHIP, for a click on it.
+    pub dictation_chip: Option<Rect>,
+    /// Settings › General › Dictation (`Config::dictation`).
+    pub dictation_enabled: bool,
+    /// `Config::dictation_words`, handed to each dictation.
+    pub dictation_words: Vec<String>,
+    /// The engine this Mac runs, once known: the OS's guess
+    /// (`dictation::engine`), then what a dictation reported.
+    pub dictation_engine: Option<crate::dictation::Engine>,
+    /// The microphone was refused: the chip says so, and `⌘D` opens its
+    /// page of System Settings — until a dictation gets through.
+    pub dictation_blocked: bool,
+    /// The helper's lines on their way to the loop.
+    pub dictation_tx: Option<tokio::sync::mpsc::UnboundedSender<(u64, crate::dictation::Heard)>>,
+    /// The id the next dictation takes.
+    pub dictation_next: u64,
     /// The newest release published on GitHub (`0.22.0`) when it is newer
     /// than this build — the footer's `⇡ v0.22.0` beside the version
     /// nameplate. `None` until the update check finds one; a check that
@@ -4813,6 +4832,14 @@ impl App {
             splash_upgrade_asked: false,
             upgrade: false,
             flash: None,
+            dictation: None,
+            dictation_chip: None,
+            dictation_enabled: true,
+            dictation_words: Vec::new(),
+            dictation_engine: crate::dictation::engine(),
+            dictation_blocked: false,
+            dictation_tx: None,
+            dictation_next: 1,
             update_available: None,
             update_lit_at: None,
             update_tx: None,

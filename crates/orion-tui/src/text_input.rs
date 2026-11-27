@@ -150,10 +150,37 @@ pub fn caret_drawn(input: &TextInput) {
 /// method draw their live text at that cell (`App::host_cursor`). None
 /// when no field drew a caret, or it is scrolled out of its box.
 pub fn caret_cell() -> Option<Position> {
+    caret_field().map(|field| field.cell)
+}
+
+/// The field the frame drew its caret in, as DICTATION needs it: which it
+/// is, the caret's cell, the cells its text sits in, and what precedes
+/// the caret — the ghost of what is being said draws from that cell, and
+/// what is pasted at the end gets a space before it when it runs on from
+/// a word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaretField {
+    /// Stable for the field's life, across the clones frames draw.
+    pub id: u64,
+    pub cell: Position,
+    pub area: Rect,
+    pub multiline: bool,
+    pub char_before: Option<char>,
+}
+
+/// [`CaretField`] for the caret the frame drew last ([`caret_cell`]).
+pub fn caret_field() -> Option<CaretField> {
     CARET.with(|c| {
         let c = c.borrow();
         let input = c.as_ref()?;
-        input.caret_at(input.placed()?)
+        let placed = input.placed()?;
+        Some(CaretField {
+            id: input.id.0,
+            cell: input.caret_at(placed)?,
+            area: placed.area,
+            multiline: matches!(placed.shape, Shape::Rows { .. }),
+            char_before: input.char_before_insert(),
+        })
     })
 }
 

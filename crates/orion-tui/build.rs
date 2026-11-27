@@ -32,6 +32,60 @@ fn main() {
     let releases = releases(&current);
     let out = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     std::fs::write(out.join("releases.rs"), render(&releases)).expect("OUT_DIR is writable");
+    std::fs::write(out.join("orion-listen"), listen_helper(&out)).expect("OUT_DIR is writable");
+}
+
+/// DICTATION's helper (`listen/orion-listen.swift`, `src/dictation.rs`),
+/// compiled for the Mac being built for and baked into orion. Off a Mac,
+/// or with no Swift toolchain, it is empty, and orion offers no
+/// dictation: never a failed build.
+fn listen_helper(out: &std::path::Path) -> Vec<u8> {
+    println!("cargo:rerun-if-changed=listen/orion-listen.swift");
+    println!("cargo:rerun-if-changed=listen/Info.plist");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return Vec::new();
+    }
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86_64") => "x86_64",
+        _ => return Vec::new(),
+    };
+    let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("cargo sets it")).join("listen");
+    let bin = out.join("orion-listen.bin");
+    let built = Command::new("swiftc")
+        .args(["-O", "-swift-version", "5", "-target"])
+        .arg(format!("{arch}-apple-macos13.0"))
+        .arg(dir.join("orion-listen.swift"))
+        .arg("-o")
+        .arg(&bin)
+        // The usage strings macOS shows when it asks for the microphone.
+        .args([
+            "-Xlinker",
+            "-sectcreate",
+            "-Xlinker",
+            "__TEXT",
+            "-Xlinker",
+            "__info_plist",
+            "-Xlinker",
+        ])
+        .arg(dir.join("Info.plist"))
+        .output();
+    match built {
+        Ok(o) if o.status.success() => std::fs::read(&bin).unwrap_or_default(),
+        Ok(o) => {
+            let why = String::from_utf8_lossy(&o.stderr);
+            let first = why
+                .lines()
+                .find(|l| l.contains("error"))
+                .unwrap_or("swiftc failed");
+            println!("cargo:warning=dictation left out: {first}");
+            Vec::new()
+        }
+        Err(e) => {
+            println!("cargo:warning=dictation left out: no swiftc ({e})");
+            Vec::new()
+        }
+    }
 }
 
 struct Release {

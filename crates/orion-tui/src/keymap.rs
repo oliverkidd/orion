@@ -248,6 +248,11 @@ pub enum Action {
     /// before (`crate::automations::view`); each is set up in Settings ›
     /// Factory.
     Automations,
+    /// `⌘D`: DICTATION — say what goes in the text box with the caret, or
+    /// in the agent's prompt in a locked pane (`crate::dictation`). Tap to
+    /// start and again to stop; held, it listens until let go. Read ahead
+    /// of every overlay and the pane (`event_loop::dictation_input`).
+    Dictate,
 }
 
 /// One rebindable row: what it does, where it's live, and what it starts as.
@@ -1068,6 +1073,15 @@ pub const ACTIONS: &[ActionSpec] = &[
         group: "GENERAL",
         scope: Scope::Global,
         defaults: &["cmd+j"],
+    },
+    ActionSpec {
+        action: Action::Dictate,
+        id: "dictate",
+        label: "Dictate",
+        hint: "Say what goes in the box with the caret, on this Mac: tap to start and stop, hold to talk until you let go (Enter keeps it, Esc throws it away)",
+        group: "GENERAL",
+        scope: Scope::Global,
+        defaults: &["cmd+d"],
     },
 ];
 

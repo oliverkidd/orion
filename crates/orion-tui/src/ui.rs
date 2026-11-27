@@ -179,6 +179,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             app.host_cursor = Some(cell);
         }
     }
+    // DICTATION over all of it: the MIC CHIP, and while it listens the
+    // box's crimson frame and what is heard.
+    crate::dictation::draw(f, app);
     // The MERGE CONFETTI goes over everything, modals and all.
     if let Some(confetti) = &app.confetti {
         let area = f.area();

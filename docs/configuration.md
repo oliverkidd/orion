@@ -43,6 +43,8 @@ The DAEMON reads `harnesses`, `claude_accounts`, `quick_prompt_kind`,
 | `theme` | `"default"` | Look → **Theme** | The accent: `default`, `ocean`, `forest`, `rose`, `amber`, `lavender`, `coral`, `slate`, `sand`, `mono`. Status colours are the same in every theme. |
 | `animations` | `true` | Look → **Animations** | The unread shimmer, the one-shot sweep, the working spinner and the splash's motion. Off means fewer repaints. |
 | `spotify` | `true` | Look → **Spotify in footer** | What Spotify is playing, with ⏮ ⏸ ⏭ buttons, in the footer. macOS only; the first ask raises macOS's Automation prompt. Off stops the polling. |
+| `dictation` | `true` | Dictation → **Dictation** | The mic on every text box and `⌘D` to talk into it ([keys](keys.md#typed-fields)). On-device on macOS 13 and later; the first use asks macOS for the microphone. |
+| `dictation_words` | `[]` | — | Words dictation should expect — project names, jargon, people (`["orion", "worktree", "Claude Code"]`). Hand-edited. |
 
 Sounds are played with `afplay` and fall back to the terminal bell over ssh. Desktop
 notifications are posted by Orion.app itself (its name and icon, a click brings the window back);

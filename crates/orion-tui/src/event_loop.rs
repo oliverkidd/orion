@@ -30,6 +30,7 @@ use std::time::Duration;
 
 mod activate;
 pub(crate) mod alerts;
+mod dictation_input;
 mod focus_walk;
 mod host_terminal;
 mod launcher;
@@ -413,6 +414,10 @@ async fn main_loop(
     // spawns (EditorEvent generations keep them apart).
     let (editor_tx, mut editor_rx) = tokio::sync::mpsc::unbounded_channel::<EditorEvent>();
     app.editor_tx = Some(editor_tx);
+    // DICTATION's helper lines (`dictation_input::heard`).
+    let (dictation_tx, mut dictation_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(u64, crate::dictation::Heard)>();
+    app.dictation_tx = Some(dictation_tx);
     // CLAUDE ACCOUNTS: who each is signed in as, read off the loop
     // (`claude_accounts::request_refresh`); a name that changed lands here.
     let (accounts_tx, mut accounts_rx) =
@@ -442,6 +447,8 @@ async fn main_loop(
         let focus_before = app.focus;
         let preview_before = app.reading_url();
         // When the KEY COMBO DISPLAY's last press comes down (its arm below).
+        let dictation_settle = dictation_input::settle_deadline(&app)
+            .map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std);
         let key_combo_deadline = app
             .key_combo
             .as_ref()
@@ -692,6 +699,16 @@ async fn main_loop(
                 }
                 None => connection_lost(&mut app, &mut out),
             },
+            // DICTATION: a line from the helper listening.
+            ev = dictation_rx.recv() => {
+                if let Some((id, heard)) = ev {
+                    dictation_input::heard(&mut app, id, heard, &mut out);
+                }
+            }
+            // A finished dictation waited long enough for its last words.
+            _ = tokio::time::sleep_until(dictation_settle), if dictation_input::settle_deadline(&app).is_some() => {
+                dictation_input::settle_timed_out(&mut app, &mut out);
+            }
             ev = editor_rx.recv() => {
                 resolving = false;
                 // Never None: app.editor_tx keeps a sender alive.
@@ -3107,6 +3124,9 @@ fn dispatch_input(app: &mut App, event: Event, out: &mut Vec<ClientRequest>) {
     match event {
         // The RELEASE WATCH reads every key first: a held unarchive key's
         // repeats end here, one unarchive per press (release_watch.rs).
+        // DICTATION reads every key before anything else: `⌘D` in any box
+        // or pane, and Enter and Esc while it listens (dictation_input.rs).
+        Event::Key(key) if dictation_input::intercept(app, &key) => {}
         Event::Key(key)
             if release_watch::take(&mut app.release_watch, &key, std::time::Instant::now()) => {}
         Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -4103,6 +4123,9 @@ fn dispatch_action(
         Action::WeekReview => crate::automations::week_review::run_now(app),
         Action::ReviewRules => crate::rule_review::open(app),
         Action::Automations => crate::automations::view::open(app),
+        // Reached only when dictation can't run (dictation_input.rs takes
+        // the key first when it can): say why.
+        Action::Dictate => dictation_input::unavailable(app),
         Action::PullWorktree => {
             if let Some(id) = crate::git_sync::target(app) {
                 crate::git_sync::request(app, id, crate::git_sync::Op::Pull);
@@ -8861,6 +8884,11 @@ fn apply_config(app: &mut App, cfg: &crate::config::Config) {
     app.pr_body.settings = cfg.factory.clone();
     // Turned off, the readout goes at once; the poll stops with it.
     app.spotify_enabled = cfg.spotify;
+    app.dictation_enabled = cfg.dictation;
+    app.dictation_words = cfg.dictation_words.clone();
+    if !cfg.dictation {
+        app.dictation = None;
+    }
     if !cfg.spotify && app.spotify.take().is_some() {
         app.dirty = true;
     }
@@ -11618,6 +11646,10 @@ fn pane_account(app: &App) -> Option<String> {
 fn handle_mouse(app: &mut App, mouse: MouseEvent, out: &mut Vec<ClientRequest>) {
     let mouse_pos = ratatui::layout::Position::new(mouse.column, mouse.row);
     update_pointer(app, &mouse);
+    // The MIC CHIP on a box's frame is `⌘D` (dictation_input.rs).
+    if dictation_input::click(app, &mouse) {
+        return;
+    }
     // The editor modal takes the mouse for the editor (`editor_mouse`),
     // and a MARKDOWN PAGE for its scrolling; nothing under either hears it.
     if app.editor.is_some() {
@@ -14717,6 +14749,66 @@ mod tests {
         );
         let before = Position::new(cell.x - 1, cell.y);
         assert_eq!(buffer[before].symbol(), "n", "just past `login`");
+    }
+
+    /// DICTATION over a box: the MIC CHIP on its top edge at rest; while
+    /// it listens the frame in crimson, REC and the meter in the chip,
+    /// its keys on the bottom edge, and what is heard at the caret —
+    /// settled words, then the live guess — with nothing typed into the
+    /// field itself.
+    #[test]
+    fn dictation_draws_on_the_box_with_the_caret() {
+        use crate::app::{Overlay, PromptDialog, PromptKind};
+        use crate::dictation::{Dictation, Engine, Heard, Target};
+        let mut app = App::new();
+        seed_tree(&mut app);
+        app.dictation_engine = Some(Engine::Analyzer);
+        app.overlay = Some(Overlay::Prompt(PromptDialog::new(
+            "Follow up",
+            "prompt",
+            "Looks good.".to_string(),
+            PromptKind::FollowUp {
+                id: AgentId("a1".into()),
+            },
+        )));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        draw_frame(&mut terminal, &mut app).unwrap();
+        let screen = buffer_text(&terminal);
+        assert!(
+            screen.contains("⌘D 󰍬 ─╮"),
+            "the chip at rest, by the corner:\n{screen}"
+        );
+        let chip = app.dictation_chip.expect("the chip is clickable");
+
+        let field = crate::text_input::caret_field().expect("the box has the caret");
+        let mut d = Dictation::new(1, Target::Field(field.id), std::time::Instant::now());
+        d.hear(&Heard::Listening);
+        d.hear(&Heard::Level { v: 0.9 });
+        d.hear(&Heard::Text {
+            settled: "Before you push, ".into(),
+            live: "add a test".into(),
+        });
+        app.dictation = Some(d);
+        draw_frame(&mut terminal, &mut app).unwrap();
+        let screen = buffer_text(&terminal);
+        assert!(
+            screen.contains("Looks good. Before you push, add a test"),
+            "the ghost runs on from the text, a space between:\n{screen}"
+        );
+        assert!(screen.contains("● REC 0:00 ▁▁▁▁▁▆"), "{screen}");
+        assert!(
+            screen.contains("⌘D or Enter done · Esc throw away"),
+            "{screen}"
+        );
+        let buffer = terminal.backend().buffer();
+        let corner = &buffer[(chip.right() + 1, chip.y)];
+        assert_eq!(corner.symbol(), "╮", "the box's corner, past the chip");
+        assert_eq!(corner.fg, app.theme.err, "the frame turns crimson");
+        let Some(Overlay::Prompt(p)) = &app.overlay else {
+            panic!("the box stays")
+        };
+        assert_eq!(p.input, "Looks good.", "nothing typed into the field yet");
+        assert!(chip.width > 0);
     }
 
     pub(super) fn buffer_text(terminal: &Terminal<TestBackend>) -> String {

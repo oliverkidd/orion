@@ -49,6 +49,7 @@ The first launch walks you through setup: Claude Code (one key installs it if it
 | `↑` `↓` · `Enter` · `Esc` | Walk the grid · step into a session · back out |
 | `⌘K` | Needs you; type to jump to any project, worktree or session |
 | `⌘J` | Automations |
+| `⌘D` | Dictate into the box you're typing in, on your Mac |
 | `⌘E` · `⌘P` · `⌘⇧F` | Diff · find file · search |
 | `⌘L` | Linear issues |
 | `⌘,` | Settings |
